@@ -1,0 +1,275 @@
+rule	expect	source	tool	path	snippet	note
+bash-glob-silenced	fire	tool	bash	-	grep -rl 'x' crates/*/Cargo.toml 2>/dev/null	glob path with stderr silenced
+bash-glob-silenced	quiet	tool	bash	-	grep -rl 'x' crates/foo/Cargo.toml 2>/dev/null	concrete path, stderr hidden
+bash-glob-silenced	quiet	tool	bash	-	grep -rl 'x' crates/*/Cargo.toml	glob but stderr visible
+bash-pipe-exit	fire	tool	bash	-	./scripts/lane-status.sh 2>&1 | tail -16; echo "EXIT=$?"	rc read after the pipe
+bash-pipe-exit	quiet	tool	bash	-	./scripts/lane-status.sh >/tmp/x 2>&1; echo "rc=$?"	rc read with no pipe
+bash-pipe-exit	quiet	tool	bash	-	grep -c foo bar | tail -1	piped, rc never read
+kit-close-needs-evidence	fire	tool	bash	-	br close x	session regression: no reason; the JSON closing quote ends the command
+kit-close-needs-evidence	fire	tool	bash	-	br close bd-42 && git push	baseline: no reason, then another command
+kit-close-needs-evidence	fire	tool	bash	-	br close kit-x; br list	no reason, then ;
+kit-close-needs-evidence	fire	tool	bash	-	bd close x	bd spelling, no reason
+kit-close-needs-evidence	fire	tool	bash	-	br close kit-r --actor sample-worker 2>&1 | head -c 200	id ending in -r must not read as the -r flag; actor present without reason
+kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "cargo test -> 41 passed; commit a1b2c3d"	session regression: evidence reason; quiet on every prefix (old lookahead fired on the prefix br close)
+kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "fixed: cargo test -p parser -> 41 passed; commit a1b2c3d"	session regression: evidence reason with a ; inside the quotes
+kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "done"	has a reason: this rule is quiet, kit-close-reason-no-evidence owns it
+kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason="done"	has a reason in = form
+kit-close-needs-evidence	quiet	tool	bash	-	br list --status open	br without close
+kit-close-needs-evidence	quiet	tool	bash	-	br close --help 2>&1 | head -n 40	corpus false positive: help is not a close
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "done"	session regression: bare word reason
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason="done"	session regression: = form
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "resolved, tests pass"	session regression: claims a pass, names no command
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason done	unquoted bare word
+kit-close-reason-no-evidence	fire	tool	bash	-	bd close x -r "implemented"	-r short flag
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "fixed: cargo test -p parser -> 41 passed; commit a1b2c3d"	session regression: starts with fixed but carries command, count and SHA
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "cargo test -> 41 passed; commit a1b2c3d"	session regression: evidence reason; quiet on every prefix
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "ledger row R51 records the refusal"	ledger row is evidence
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x	no reason at all: kit-close-needs-evidence owns it
+kit-gate-must-name-the-plant	fire	tool	bash	-	sh starter-kit/scripts/check-claim-discipline.sh claims.tsv	runs the zip checker
+kit-gate-must-name-the-plant	fire	tool	bash	-	sh starter-kit/scripts/init.sh	runs the zip init
+kit-gate-must-name-the-plant	fire	tool	bash	-	cd /tmp/proj && bash ../starter-kit/scripts/init.sh	init after cd, relative path
+kit-gate-must-name-the-plant	fire	tool	bash	-	./starter-kit/scripts/check-claim-discipline.sh claims.tsv	direct exec
+kit-gate-must-name-the-plant	quiet	tool	bash	-	cat starter-kit/scripts/init.sh	reads the script, does not run it
+kit-gate-must-name-the-plant	quiet	tool	bash	-	sh checkers/check-claim-discipline.sh --selftest	the fixed checker run from the kit checkout
+kit-gate-must-name-the-plant	quiet	tool	bash	-	grep -n IFS starter-kit/scripts/check-claim-discipline.sh	greps the script
+kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","closed_at":"2026-09-22T00:00:00Z"}	baseline: closed, no close_reason
+kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","close_reason":"done"}	baseline: short close_reason
+kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"kit-a0","status":"open"}\n{"id":"kit-a1","status": "closed"}\n	write, second line closed without reason
+kit-jsonl-close	quiet	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","close_reason":"check-readiness.sh -> READY 12/12; commit 9f3e1aa"}	baseline: substantive reason; quiet on every prefix
+kit-jsonl-close	quiet	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","close_reason":"ran \"cargo test -p parser\" -> 41 passed; commit a1b2c3d"}	substantive reason containing escaped quotes
+kit-jsonl-close	quiet	tool	edit	notes/issues.jsonl	{"id":"kit-a1","status":"closed","closed_at":"2026-09-22T00:00:00Z"}	same line outside .beads/
+kit-no-verify	fire	tool	bash	-	git commit --no-verify -m x	long flag
+kit-no-verify	fire	tool	bash	-	git commit -m "wip" --no-verify	baseline: flag after a quoted message
+kit-no-verify	fire	tool	bash	-	git commit -n -m x	short flag
+kit-no-verify	fire	tool	bash	-	git commit -nm x	clustered short flag
+kit-no-verify	fire	tool	bash	-	git push --no-verify	push bypass
+kit-no-verify	fire	tool	bash	-	git push origin main --no-verify	baseline: push bypass after refs
+kit-no-verify	fire	tool	bash	-	git config core.hooksPath /dev/null	re-points the hook dir
+kit-no-verify	fire	tool	bash	-	git -c core.hooksPath=/dev/null commit -m x	one-shot re-point
+kit-no-verify	fire	tool	bash	-	git config --unset core.hooksPath	unsets the kit hook dir
+kit-no-verify	quiet	tool	bash	-	git config --get core.hooksPath	omp-kit-findings #6: read, not write
+kit-no-verify	quiet	tool	bash	-	git config core.hooksPath	bare key is a read: differs from the /dev/null fire row by the value
+kit-no-verify	quiet	tool	bash	-	git config --global core.hooksPath 2>&1; echo "---"	corpus false positive: a read whose stderr redirect looked like a value
+kit-no-verify	quiet	tool	bash	-	git -C repo commit -m "handle -n and --no-verify in the parser"	flags named inside the message, with a -C prefix
+kit-no-verify	quiet	tool	bash	-	git config --list | grep hooksPath	read via --list
+kit-no-verify	quiet	tool	bash	-	git commit -m "document the -n flag"	omp-kit-findings #7: -n inside the message
+kit-no-verify	quiet	tool	bash	-	git commit -m "feat: add parser"	baseline: plain commit
+kit-no-verify	quiet	tool	bash	-	git commit --amend -m "fix typo"	baseline: --amend has an n
+kit-no-verify	quiet	tool	bash	-	git push -n origin main	baseline: push -n is dry-run
+kit-no-verify	quiet	tool	bash	-	git status -sb	control: no bypass
+kit-no-verify	quiet	tool	bash	-	rg -n 'git commit -n|--no-verify|core.hooksPath' .omp/extensions/kit-guard/	search mention: an rg pattern names the flag
+kit-no-verify	fire	tool	bash	-	rg -n x .omp/ && git commit -n -m x	a search before && does not shield the commit
+kit-no-verify	quiet	tool	bash	-	grep -c 'git config core.hooksPath /dev/null' .omp/extensions/kit-guard/kit-guard.test.ts	search mention: a grep pattern names the re-point
+kit-no-verify	fire	tool	bash	-	grep -c x f; git config core.hooksPath /dev/null	a search before ; does not shield the re-point
+kit-no-verify	quiet	tool	bash	-	git grep -n 'git push --no-verify'	a git grep pattern names the push bypass
+kit-no-verify	fire	tool	bash	-	bash -c 'git commit -n -m x'	a shell -c string runs the bypass
+kit-no-verify	fire	tool	bash	-	echo use rg, it's fast > /tmp/m.txt && git add x && git commit --no-verify -F /tmp/m.txt	corpus bypass, flattened: an apostrophe after rg must not shield a later && commit
+kit-no-verify	quiet	tool	bash	-	git commit -q -m x	G0 control: normal commit still runs the hook
+kit-no-verify	fire	tool	bash	-	git commit -q --no-verify -m x	G1 measured long flag bypass
+kit-no-verify	fire	tool	bash	-	git commit -q '--no-verify' -m x	G2 measured single-quoted flag bypass; NE-4 retry evidence
+kit-no-verify	quiet	tool	bash	-	git commit -q '--verify' -m x	G2 pair: quoted verification is not bypass
+kit-no-verify	fire	tool	bash	-	git commit -q "--no-verify" -m x	G3 measured double-quoted flag; wire contains escaped quotes
+kit-no-verify	quiet	tool	bash	-	git commit -q "--verify" -m x	G3 pair: double-quoted verification
+kit-no-verify	fire	tool	bash	-	git commit -q -m x '-n'	G4 measured quoted short flag
+kit-no-verify	quiet	tool	bash	-	git commit -q -m '-n'	G4 pair: flag text is the message argument
+kit-no-verify	fire	tool	bash	-	git commit -q --no-veri -m x	G5 measured unique long-option abbreviation
+kit-no-verify	quiet	tool	bash	-	git commit -q --no-verifiable -m x	G5 pair: not a Git option abbreviation
+kit-no-verify	fire	tool	bash	-	git -c core.hookspath=/dev/null commit -q -m x	G6 measured case-insensitive config key
+kit-no-verify	quiet	tool	bash	-	git -c core.editor=true commit -q -m x	G6 pair: unrelated override
+kit-no-verify	fire	tool	bash	-	git -c "core.hooksPath=/dev/null" commit -q -m x	G7 measured quoted config assignment
+kit-no-verify	quiet	tool	bash	-	git -c "core.editor=true" commit -q -m x	G7 pair: unrelated quoted override
+kit-no-verify	fire	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -q -m x	G8 measured environment hook override
+kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.editor GIT_CONFIG_VALUE_0=true git commit -q -m x	G8 pair: unrelated environment override
+kit-no-verify	fire	tool	bash	-	git config core.hookspath /dev/null && git commit -q -m x	G9 measured lowercase persistent config mutation
+kit-no-verify	quiet	tool	bash	-	git config --get core.hookspath && git commit -q -m x	G9 pair: lowercase config read
+kit-no-verify	fire	tool	bash	-	grep -q x "$(git commit -q --no-verify -m x)" /dev/null; true	G10 measured executable substitution in double quotes
+kit-no-verify	quiet	tool	bash	-	grep -q x '$(git commit -q --no-verify -m x)' /dev/null; true	G10 pair: single quotes make substitution literal
+kit-no-verify	fire	tool	bash	-	grep -q x "`git commit -q --no-verify -m x`" /dev/null; true	G11 measured executable backticks in double quotes
+kit-no-verify	quiet	tool	bash	-	grep -q x '`git commit -q --no-verify -m x`' /dev/null; true	G11 pair: single-quoted backticks are literal
+kit-no-verify	fire	tool	bash	-	git commit "-an" -m x	double-quoted clustered short flags
+kit-no-verify	fire	tool	bash	-	git commit --no-verify; echo done	shell separator ends the unquoted option
+kit-no-verify	fire	tool	bash	-	git push '--no-verif' origin main	push also accepts a unique abbreviated long flag
+kit-no-verify	fire	tool	bash	-	git commit --no-verif -m x	long-option abbreviation through the penultimate character
+kit-no-verify	fire	tool	bash	-	echo "$(git commit --no-verify)"	command-substitution closer ends the option
+kit-no-verify	fire	tool	bash	-	git commit --no-verify\nprintf done	JSON-escaped newline ends the option
+kit-no-verify	quiet	tool	bash	-	git commit --no-verify-extra -m x	option suffix is not a bypass flag
+kit-no-verify	quiet	tool	bash	-	git commit '--no-verify'notes -m x	quote concatenation does not end the argument
+kit-no-verify	quiet	tool	bash	-	git commit "--no-verify"notes -m x	double-quote concatenation does not end the argument
+kit-no-verify	quiet	tool	bash	-	git commit -- --no-verify	pathspec after option terminator
+kit-no-verify	quiet	tool	bash	-	git commit -m "--no-verify"	double-quoted message equal to a bypass flag
+kit-no-verify	quiet	tool	bash	-	git commit --message '--no-veri'	long message option consumes abbreviated flag text
+kit-no-verify	quiet	tool	bash	-	git commit -m "document '--no-verify' and '-n' flags"	quoted flag text nested inside a message
+kit-no-verify	quiet	tool	bash	-	git commit -m "document \"--no-verify\" and \"-n\""	JSON and shell quote escapes inside a message
+kit-no-verify	quiet	tool	bash	-	git commit -m 'document "--no-verify" and "-n"'	double-quoted flag text inside a single-quoted message
+kit-no-verify	quiet	tool	bash	-	cat <<'DOC'\nDo not use 'git commit --no-verify' or 'git push --no-verify'.\nDOC	NE-4 harmless heredoc prose must stay quiet
+kit-no-verify	quiet	tool	bash	-	rg -n "git commit '--no-verify'|git commit '-n'" .	double-quoted literal search with quoted flags
+kit-no-verify	quiet	tool	bash	-	rg -n 'git commit "--no-verify"|git commit "-n"' .	single-quoted literal search with quoted flags
+kit-no-verify	quiet	tool	bash	-	rg -n "\$(git commit --no-verify)" .	escaped dollar makes the double-quoted substitution literal
+kit-no-verify	quiet	tool	bash	-	rg -n "\`git commit --no-verify\`" .	escaped backticks are literal inside double quotes
+kit-no-verify	fire	tool	bash	-	git '-c' 'CoRe.HoOkSpAtH=/dev/null' commit -m x	quoted -c token and case-insensitive key
+kit-no-verify	fire	tool	bash	-	git "-ccore.hookspath=/dev/null" commit -m x	attached quoted -c assignment
+kit-no-verify	fire	tool	bash	-	git config "CORE.HOOKSPATH" "/dev/null"	quoted case-insensitive config key and value
+kit-no-verify	fire	tool	bash	-	git 'config' '--unset-all' 'Core.HooksPath'	quoted config and mutation tokens
+kit-no-verify	quiet	tool	bash	-	git config "CORE.HOOKSPATH"	quoted bare key remains a config read
+kit-no-verify	quiet	tool	bash	-	git config "--get" "CORE.HOOKSPATH"	quoted read option remains quiet
+kit-no-verify	quiet	tool	bash	-	git config "core.hookspath" 2>&1	quoted bare-key read plus stderr redirect
+kit-no-verify	quiet	tool	bash	-	git config core.hookspathBackup /dev/null	config key suffix is not hooksPath
+kit-no-verify	fire	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='CORE.HOOKSPATH' GIT_CONFIG_VALUE_0=/dev/null git commit -m x	quoted environment hook key
+kit-no-verify	fire	tool	bash	-	GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'" git commit -m x	Git legacy environment config overrides
+kit-no-verify	quiet	tool	bash	-	rg -n 'GIT_CONFIG_KEY_0=core.hooksPath' .	environment hook key in an inert search
+kit-no-verify	quiet	tool	bash	-	git config --get-all core.hooksPath	read action with a protected key
+kit-no-verify	quiet	tool	bash	-	git config --get-regexp core.hooksPath	read-regexp action remains quiet
+kit-no-verify	quiet	tool	bash	-	git config -l core.hooksPath	read-list short option remains quiet
+kit-no-verify	quiet	tool	bash	-	git config get core.hooksPath	modern read subcommand
+kit-no-verify	quiet	tool	bash	-	git config list	modern list subcommand
+kit-no-verify	fire	tool	bash	-	git config set core.hooksPath /dev/null	modern write subcommand
+kit-no-verify	fire	tool	bash	-	git config unset core.hooksPath	modern unset subcommand
+kit-no-verify	fire	tool	bash	-	git config --file /tmp/--get-config core.hooksPath /dev/null	read-option substring in filename is not a read action
+kit-no-verify	fire	tool	bash	-	git config --file '--list' core.hooksPath /dev/null	option value equal to read flag does not select read mode
+kit-no-verify	fire	tool	bash	-	git config core.hooksPath /tmp/--get-hooks	read-option substring in hook value is not a read action
+kit-no-verify	fire	tool	bash	-	git config --get core.editor; git config core.hooksPath /dev/null	read in a prior segment cannot shield a write
+kit-no-verify	quiet	tool	bash	-	git config core.hooksPath </dev/null	input redirection is not a config value
+kit-no-verify	quiet	tool	bash	-	git config core.hooksPath >hooks.txt	output redirection is not a config value
+kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x	zero config count does not activate environment overrides
+kit-no-verify	quiet	tool	bash	-	git commit -m "git -c core.hooksPath=/dev/null"	config-override spelling inside a message is not a global option
+kit-no-verify	quiet	tool	bash	-	git commit -m "git commit '--no-verify'"	nested command spelling remains message text
+kit-no-verify	fire	tool	bash	-	git commit -m "$(git commit --no-verify)"	message command substitution still executes
+kit-no-verify	quiet	tool	bash	-	python3 - <<'PY'\ntext = 'Bypass visibly with `git commit --no-verify`'\nprint(text)\nPY	corpus 64719/64721/64724/64953: backtick-delimited prose in quoted Python heredoc
+kit-no-verify	quiet	tool	bash	-	cat <<'DOC'\nDo not use `git commit --no-verify`.\nDOC	quoted documentation heredoc keeps backticks literal
+kit-no-verify	fire	tool	bash	-	grep -q x "`git commit --no-verify`" /dev/null	executable backtick closes immediately after bypass flag
+kit-no-verify	fire	tool	bash	-	echo `git commit --no-verify`	unquoted shell backticks close immediately after flag
+kit-no-verify	fire	tool	bash	-	result=`git commit --no-verify`	backtick command substitution in an assignment
+kit-no-verify	quiet	tool	bash	-	grep -q x '`git commit --no-verify`' /dev/null	single-quoted immediate-backtick pair stays literal
+kit-no-verify	fire	tool	bash	-	printf x\ngrep -q x "`git commit --no-verify`" /dev/null	newline-start search still executes its backtick substitution
+kit-relative-path-not-cwd	fire	tool	bash	-	sh starter-kit/scripts/check-readiness.sh notes/packet.md	runs the zip readiness checker
+kit-relative-path-not-cwd	fire	tool	bash	-	cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md	the measured cwd bug shape
+kit-relative-path-not-cwd	quiet	tool	bash	-	sh checkers/check-readiness.sh notes/packet.md	fixed checker run from the kit checkout
+kit-relative-path-not-cwd	quiet	tool	bash	-	sed -n 1,40p starter-kit/scripts/check-readiness.sh	reads the script
+kit-relative-path-not-cwd	quiet	tool	bash	-	cat docs/planning/packet.md	old condition fired on any packet path
+kit-settings-mutation	fire	tool	bash	-	omp config set ttsr.enabled false	P3 spec: live on 18.3.0, no dialog
+kit-settings-mutation	fire	tool	bash	-	omp --profile sample-lab config set disabledProviders '["agents"]'	removes the ~/.agents/rules source; --profile before config
+kit-settings-mutation	fire	tool	bash	-	omp config reset ttsr.repeatGap	reset counts as a mutation
+kit-settings-mutation	fire	tool	bash	-	cd /tmp && omp --profile claude config unset ttsr.disabledRules	after && and a cd
+kit-settings-mutation	fire	tool	bash	-	omp config set extensions '[]'	unloads kit-guard-optin and the bridges
+kit-settings-mutation	fire	tool	bash	-	HOME=/opt/omp-live-home omp config set ttsr.enabled false	a non-temporary HOME is not an isolated throwaway
+kit-settings-mutation	fire	tool	bash	-	env -u OMP_PROFILE PI_CODING_AGENT_DIR=/tmp/omp-ext-test/agent omp config set extensions '["/a/one.ts"]'	was quiet: an inherited PI_PROFILE wins and omp ignores the agent-dir override, so this writes the live profile (dirs.ts:435-443; omp config path, 2026-09-24)
+kit-settings-mutation	fire	tool	bash	-	PI_CODING_AGENT_DIR=/tmp/omp-probe/agent omp config set ttsr.enabled false	the old exemption; in any profile pane omp config path resolves to the live profile
+kit-settings-mutation	fire	tool	bash	-	env -u OMP_PROFILE -u PI_PROFILE HOME=/tmp/omp-home omp config set ttsr.enabled false	profile stripped, the inherited PI_CODING_AGENT_DIR still wins: live profile (measured); differs from the HOME quiet row only by env -u
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env -u PI_PROFILE -u OMP_PROFILE omp config set ttsr.disabledRules '[]'	same defect with the unset after HOME
+kit-settings-mutation	quiet	tool	bash	-	omp config get ttsr.enabled	read, not write
+kit-settings-mutation	quiet	tool	bash	-	omp config set theme.dark titanium	unprotected key
+kit-settings-mutation	quiet	tool	bash	-	omp config set modelRoles '{"smol":"ollama/qwen3.8:27b-mlx"}'	model roles are not rule-pack switches
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home omp config set ttsr.enabled false	O0 measured sanctioned isolated-HOME control
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home omp --profile claude config set ttsr.enabled false	an explicit profile under a temp HOME resolves inside the temp HOME (measured)
+kit-settings-mutation	quiet	tool	bash	-	cd /tmp && HOME=/private/tmp/omp-home omp config set disabledProviders '["agents"]'	temp HOME in its own segment after &&
+kit-settings-mutation	quiet	tool	bash	-	sh scripts/apply-policy.sh --dry-run --include-default	the sanctioned path
+kit-settings-mutation	quiet	tool	bash	-	rg -n 'omp config set ttsr' scripts/	a search pattern names the command
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env -u HOME omp config set ttsr.enabled false	O1 measured HOME unset after temporary assignment
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home env omp config get ttsr.enabled	O1 pair: read remains harmless
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env HOME=/opt/omp-live-home omp config set ttsr.enabled false	O2: env overwrites temporary HOME with a non-temp HOME
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home env HOME=/opt/omp-live-home omp config get ttsr.enabled	O2 pair: same HOME override with a read
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home HOME=/opt/omp-live-home omp config set ttsr.enabled false	O3: second assignment selects non-temp HOME
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home HOME=/opt/omp-live-home omp config get ttsr.enabled	O3 pair: double assignment with a read
+kit-settings-mutation	fire	tool	bash	-	omp config set 'ttsr.enabled' false	O4 measured single-quoted protected key
+kit-settings-mutation	quiet	tool	bash	-	omp config get 'ttsr.enabled'	O4 pair: quoted key read
+kit-settings-mutation	fire	tool	bash	-	omp config set "ttsr.enabled" false	O5 measured double-quoted protected key
+kit-settings-mutation	quiet	tool	bash	-	omp config get "ttsr.enabled"	O5 pair: double-quoted key read
+kit-settings-mutation	fire	tool	bash	-	rg -q x "$(omp config set ttsr.enabled false)" /dev/null; true	O6 measured executable substitution in a search
+kit-settings-mutation	quiet	tool	bash	-	rg -q x '$(omp config set ttsr.enabled false)' /dev/null; true	O6 pair: single-quoted literal substitution
+kit-settings-mutation	fire	tool	bash	-	rg -q x "`omp config set 'disabledExtensions' '[]'`" /dev/null; true	backticks execute despite a surrounding double-quoted search
+kit-settings-mutation	quiet	tool	bash	-	rg -n "omp config set 'ttsr.enabled' false" .	quoted key in an inert double-quoted search
+kit-settings-mutation	quiet	tool	bash	-	rg -n 'omp config set "ttsr.enabled" false' .	quoted key in an inert single-quoted search
+kit-settings-mutation	quiet	tool	bash	-	rg -n "\$(omp config set ttsr.enabled false)" .	escaped dollar leaves a literal search
+kit-settings-mutation	quiet	tool	bash	-	rg -n "\`omp config set ttsr.enabled false\`" .	escaped backticks leave a literal search
+kit-settings-mutation	quiet	tool	bash	-	omp config set ttsrNotes false	protected root must end at a key boundary even while streaming
+kit-settings-mutation	quiet	tool	bash	-	omp config set 'extensionsBackup' '[]'	quoted unrelated root stays quiet through every prefix
+kit-settings-mutation	fire	tool	bash	-	omp config reset "discovery.agents"	quoted discovery key reset
+kit-settings-mutation	fire	tool	bash	-	omp config unset 'enabledProviders'	quoted provider root unset
+kit-settings-mutation	quiet	tool	bash	-	HOME=/tmp/omp-home omp config set "ttsr.enabled" false	sanctioned isolated HOME also works with quoted protected keys
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home; omp config set ttsr.enabled false	standalone assignment is not the sanctioned command-local exemption
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env --unset=HOME omp config set ttsr.enabled false	long env unset cannot retain the exemption
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env -i omp config set ttsr.enabled false	clearing the environment also clears temporary HOME
+kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home omp config get ttsr.enabled; omp config set ttsr.enabled false	exemption must not leak to a later command
+kit-solo-review-not-review	fire	tool	write	samples/packet.md	## 11. Independent review\n<!-- CHECK: REVIEW -->\nIndependent review: not performed. An untracked planning draft informed this working copy.\n	attestation in a packet
+kit-solo-review-not-review	fire	tool	edit	samples/packet.md	Independent\nreview: not performed. Residual risk accepted.	hard-wrapped
+kit-solo-review-not-review	fire	tool	edit	notes/packet.md	**Independent review:** not performed.	bold label
+kit-solo-review-not-review	quiet	tool	write	samples/packet.md	## 11. Independent review\n<!-- CHECK: REVIEW -->\nReviewer: X read this file against the cited files on 2026-09-23.\n	a named reviewer, not the attestation
+kit-solo-review-not-review	quiet	tool	edit	notes/report.md	Independent review: not performed.	attestation outside a packet.md
+kit-structure-not-truth	fire	text	-	-	READY: all 12 checks pass on the packet.	checker line restated as truth
+kit-structure-not-truth	fire	text	-	-	The packet is ready for execution.	readiness claim
+kit-structure-not-truth	fire	text	-	-	Readiness is structure-green.	structure-green claim
+kit-structure-not-truth	fire	text	-	-	Execution sign-off is done.	sign-off stated as done
+kit-structure-not-truth	fire	text	-	-	We have execution sign-off from the checker.	sign-off stated as held
+kit-structure-not-truth	quiet	text	-	-	Run check-readiness.sh against the packet next.	bare mention of check-readiness
+kit-structure-not-truth	quiet	text	-	-	The packet is not ready: execution sign-off is still pending.	negated readiness, pending sign-off
+kit-test-skip	fire	tool	edit	src/lib.rs	#[test]\n#[ignore]\nfn parses() {}	baseline: rust ignore
+kit-test-skip	fire	tool	write	web/app.test.ts	it.skip("renders", () => {})	baseline: jest skip
+kit-test-skip	fire	tool	write	tests/test_x.py	@pytest.mark.skip(reason="flaky")	baseline: pytest skip
+kit-test-skip	fire	tool	write	tests/test_x.py	@pytest.mark.skipif(sys.platform == "win32", reason="posix only")	skipif: the old \b fired on its streamed prefix, so the full payload must fire too
+kit-test-skip	fire	tool	edit	pkg/x_test.go	t.Skip("needs creds")	go skip
+kit-test-skip	fire	tool	edit	t.ts	it.skip('x')	regression
+kit-test-skip	quiet	tool	write	web/app.test.ts	it("renders", () => {})	baseline: same test, no skip
+kit-test-skip	quiet	tool	edit	src/lib.rs	#[test]\nfn parses() {}	same rust test, no ignore
+kit-test-skip	quiet	tool	write	tests/test_x.py	@pytest.mark.parametrize("n", [1, 2])	a pytest marker that is not a skip
+kit-test-skip	fire	tool	edit	web/app.test.ts	  it.skip("renders", () => {	one-line edit leaves the call unclosed; an ast-grep call pattern misses it, the regex does not
+kit-test-skip	fire	tool	edit	src/lib.rs	#[ignore]	single-line insertion above an existing test
+kit-test-skip	fire	tool	edit	pkg/x_test.go	func TestX(t *testing.T) {\n\tt.Skip("needs creds")\n}	go skip inside a test function (an ast-grep t.X(...) pattern parses as a Go type conversion and misses it)
+kit-unverified-done	fire	text	-	-	I updated the parser, so all tests should now pass.	baseline
+kit-unverified-done	fire	text	-	-	The bug is now fixed.	baseline
+kit-unverified-done	fire	text	-	-	This should fix the flaky timeout.	baseline
+kit-unverified-done	fire	text	-	-	the tests should now pass	regression, no trailing punctuation
+kit-unverified-done	fire	text	-	-	All tests passed.	the old pass\b fired on the streamed prefix, so the full payload must fire too
+kit-unverified-done	fire	text	-	-	The migration is now completed.	the old complete\b fired on the streamed prefix
+kit-unverified-done	quiet	text	-	-	Ran cargo test -p parser: 41 passed, 0 failed.	baseline: command plus counts
+kit-unverified-done	quiet	text	-	-	the receipt is at cead414	regression
+kit-unverified-done	quiet	text	-	-	UNVERIFIED: cargo test -p parser has not been run.	honest UNVERIFIED
+kit-weasel-retry	fire	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** later	baseline: weasel at end of the digest
+kit-weasel-retry	fire	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** TBD once we know more	baseline
+kit-weasel-retry	fire	tool	write	docs/evidence/NEGATIVE_EVIDENCE.md	## R52\n- **Retry predicate:**\n- **Evidence:** bench.log\n	empty predicate, row continues
+kit-weasel-retry	fire	tool	edit	NEGATIVE_EVIDENCE.md	retry predicate: later	regression
+kit-weasel-retry	quiet	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** when the A/A null on worker X is under 2% for 3 runs	baseline: testable predicate; quiet on every prefix
+kit-weasel-retry	quiet	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** native build p95 under 2 ms on worker X for 3 runs	predicate starting with na
+kit-weasel-retry	quiet	tool	edit	NEGATIVE_EVIDENCE.md	retry predicate: a new receipt lands	regression
+kit-weasel-retry	quiet	tool	edit	src/notes.md	- **Retry predicate:** later	baseline: not the ledger
+rs-unsafe-added-router	fire	tool	edit	/tmp/probe.rs	unsafe fn f() {}	regression: .rs edit adds unsafe
+rs-unsafe-added-router	fire	tool	write	/tmp/lib.rs	let x = unsafe { 1 };	regression: .rs write adds unsafe
+rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	fn main() {}	regression: .rs without unsafe
+rs-unsafe-added-router	quiet	tool	write	/tmp/lib.md	let x = unsafe { 1 };	same content, .md path
+rs-unsafe-added-router	quiet	tool	bash	-	rg -n unsafe src/lib.rs	bash is out of scope
+ttsr-embedded-inline-flag	fire	tool	write	/tmp/probe.md	condition: 'foo|(?i)bar'	regression: embedded flag
+ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: '(?i)leading_is_legal'	regression: leading flag is legal
+ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: 'grep[^|;&]*2>/dev/null'	regression: ordinary condition
+ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	the docs say (?i) is invalid here	regression: prose
+zz-canary-scope-probe	fire	tool	bash	-	echo zzzz_systemwide_canary_9c42	the canary token
+zz-canary-scope-probe	quiet	tool	bash	-	echo zzzz_systemwide_canary_9c43	near token
+kit-close-needs-evidence	fire	tool	bash	-	br close x --reason	E4 reason flag without a value
+kit-close-needs-evidence	fire	tool	bash	-	br close x --reason ""	E4 empty reason
+kit-close-needs-evidence	quiet	tool	bash	-	br close x '--reason' 'cargo test -> 41 passed'	E4 quoted option is still a reason
+kit-close-needs-evidence	quiet	tool	bash	-	br close x "--help"	E4 quoted help cannot close
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "passed"	E5 bare passed has no count or command
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "done 20260925"	E5 calendar digits are not a cited commit
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "ledger updated"	E5 ledger mention names no row
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "done ->"	E5 arrow without output is not evidence
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "41 passed"	E5 numeric pass count
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "commit abc1234"	E5 explicitly cited commit
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "ledger row R51 records refusal"	E5 concrete ledger row
+kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"x","status":"closed","close_reason":"finished everything successfully"}	E6 length alone is not evidence
+kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"x","close_reason":"all work is complete and done","status":"closed"}	E6 reason before status is also checked
+kit-jsonl-close	quiet	tool	write	.beads/issues.jsonl	{"id":"x","status":"closed","close_reason":"commit abc1234"}	E6 real cited commit can be shorter than 20 characters
+kit-jsonl-close	quiet	tool	write	.beads/issues.jsonl	{"id":"x","close_reason":"cargo test -> 41 passed","status":"closed"}	E6 evidence before status
+kit-jsonl-close	quiet	tool	write	.beads/issues.jsonl	{"id":"x","status":"open","close_reason":"unfinished"}	E6 open bead does not need closing evidence
+kit-jsonl-close	quiet	tool	write	.beads/issues.jsonl	{"id":"x","status":"closed","close_reason":"examined {placeholder} then commit abc1234"}	E6 brace inside unfinished reason cannot terminate the JSON object
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason passed	E5 unquoted bare passed has no count or command
+kit-close-reason-no-evidence	fire	tool	bash	-	br close x '--reason' done	E5 quoted reason option with unevidenced bare value
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "9e1440b [test] ran the acceptance command"	E5 bare hexadecimal commit citations remain valid
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason abc1234	E5 unquoted SHA is still a citation
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "commit 2723463"	E5 explicit label disambiguates all-digit SHA
+kit-jsonl-close	quiet	tool	write	.beads/issues.jsonl	{"id":"x","status":"closed","close_reason":"9e1440b [test]"}	E6 bare hexadecimal commit citations remain valid
+kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"x","status":"closed","close_reason":"done 20260925"}	E6 numeric date alone is not a SHA citation
+kit-close-needs-evidence	quiet	tool	bash	-	python3 -c 'print(("br close", "git push"))'	E4 quoted command-name data is not a close
+kit-close-needs-evidence	fire	tool	bash	-	br close	E4 command without arguments still needs a reason
+kit-close-needs-evidence	quiet	tool	bash	-	br close --actor "pane=2;agent=worker" x --reason "commit abc1234"	E4 semicolon inside actor value is not a command terminator
+kit-close-needs-evidence	fire	tool	bash	-	br close x '--reason'	E4 quoted reason flag still requires a value
+kit-close-reason-no-evidence	quiet	tool	bash	-	br close x -r "commit abc1234; git ls-tree -r HEAD"	E5 reason contents cannot be reinterpreted as another reason option
+kit-close-reason-no-evidence	fire	tool	bash	-	br close --actor "pane=2;agent=worker" x --reason "passed"	E5 quoted actor does not exempt a reason with no evidence
+kit-close-reason-no-evidence	quiet	tool	bash	-	cat <<'EOF'\nRead the evidence, then br close --reason with the proof.\nEOF	E5 unquoted-reason prose is not an executable close

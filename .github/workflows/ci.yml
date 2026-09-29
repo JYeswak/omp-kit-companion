@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Candidate release version; no public release or latest is created
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ladder:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Lint shell and workflow
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install stock omp 18.4.0 for original ladder
+        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.0
+      - name: Check manifest and rule behavior
+        run: sh scripts/ladder.sh
+      - name: Check versioned installer against native archive
+        if: runner.os == 'Linux'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: sh tests/cli/installer.test.sh
+
+  build-candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [darwin-arm64-none, darwin-x64-none, linux-arm64-gnu, linux-x64-gnu]
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Compile one provisional target and record its immutable archive hash
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/candidate/$TARGET"
+          sh scripts/package-release.sh --version "$CANDIDATE_VERSION" --platform "$TARGET" \
+            --out "$RUNNER_TEMP/candidate/$TARGET" > "$RUNNER_TEMP/candidate/$TARGET/asset.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-${{ matrix.platform }}
+          path: ${{ runner.temp }}/candidate/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  native-certification:
+    needs: build-candidates
+    # One failing target is excluded; the aggregate still requires a nonempty native-certified set.
+    continue-on-error: true
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64-none, runner: macos-15 }
+          - { platform: darwin-x64-none, runner: macos-15-intel }
+          - { platform: linux-arm64-gnu, runner: ubuntu-24.04-arm }
+          - { platform: linux-x64-gnu, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install pinned stock OMP for native behavior
+        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: candidate-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native/${{ matrix.platform }}
+      - name: Certify the downloaded archive, never the source runner
+        env:
+          TARGET: ${{ matrix.platform }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/native-candidate.py native --version "$CANDIDATE_VERSION" \
+            --platform "$TARGET" --source-sha "$SOURCE_SHA" \
+            --asset "$RUNNER_TEMP/native/$TARGET/asset.json" \
+            --archive-dir "$RUNNER_TEMP/native/$TARGET" \
+            --out "$RUNNER_TEMP/native-receipt/receipt.json"
+      - name: Preserve only detached bounded proof, including refusal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-receipt-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-receipt/receipt.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  candidate-index:
+    needs: [build-candidates, native-certification]
+    if: ${{ always() && needs.build-candidates.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: candidate-*
+          path: ${{ runner.temp }}/candidates
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: native-receipt-*
+          path: ${{ runner.temp }}/receipts
+      - name: Exclude uncertified targets and require at least one real native result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/native-candidate.py candidate --version "$CANDIDATE_VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/candidates" \
+            --receipts "$RUNNER_TEMP/receipts" --out "$RUNNER_TEMP/candidate-index"
+      - name: Retain private provisional index, never publish or update latest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unpublished-candidate-index
+          path: ${{ runner.temp }}/candidate-index/
+          if-no-files-found: error
+          retention-days: 7

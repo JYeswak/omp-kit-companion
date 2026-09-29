@@ -1,0 +1,14 @@
+# omp-kit profile recipe v1; checked against OMP 18.4.2 settings schema.
+# Explicit opt-in only: manually retained text may still contain private information.
+# No automatic retention or recall; no LLM or embedding model is required.
+# Rendering never activates Mnemopi. In OMP 18.4.2, backend initialization still
+# invokes provider-key resolution with these settings; credential lookup and
+# activation side effects remain UNVERIFIED until isolated runtime testing.
+memory:
+  backend: mnemopi
+mnemopi:
+  scoping: per-project
+  autoRetain: false
+  autoRecall: false
+  noEmbeddings: true
+  llmMode: none

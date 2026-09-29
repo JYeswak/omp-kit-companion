@@ -1,0 +1,173 @@
+import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { auditMemoryAtRest } from "../../src/memory-audit.ts";
+
+// Pinned upstream OMP + pi-mnemopi 18.4.2: schema.ts SHA256
+// 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0;
+// banks.ts SHA256 8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2.
+// Fixtures call the actual installed initBeam, not a hand-written imitation.
+// Runtime-selected installation: a static import would bind the contributor's
+// source tree instead of the supported OMP package under inspection.
+const installed = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp") ?? "";
+let initBeam: ((db: Database) => void) | undefined;
+if (installed) {
+	try {
+		const agent = dirname(dirname(realpathSync(installed)));
+		const metadata = JSON.parse(readFileSync(join(agent, "package.json"), "utf8"));
+		if (metadata.version === "18.4.2") ({ initBeam } = await import(join(agent, "../pi-mnemopi/src/core/beam/schema.ts")));
+	} catch { /* Stock OMP is unavailable on this test host; positive proof runs on supported native hosts. */ }
+}
+const supportedTest = initBeam ? test : test.skip;
+const secret = "Bearer syntheticbearerlettersonlyforevertoken";
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+function fixture() {
+	const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(scratch, { recursive: true });
+	const root = mkdtempSync(join(scratch, "p29-audit-")); roots.push(root);
+	const home = join(root, "home"), project = join(root, "project"), storeRoot = join(home, ".omp", "agent", "memories", "mnemopi");
+	mkdirSync(storeRoot, { recursive: true }); mkdirSync(project);
+	const args = { consent: "AUDIT_PRIVATE_MEMORY" as const, home, project, storeRoot, ompPath: installed };
+	const dbFile = (name = "default") => name === "default" ? join(storeRoot, "mnemopi.db") : join(storeRoot, "banks", name, "mnemopi.db");
+	const bank = (name = "default", working: string[] = [], episodic: string[] = []) => {
+		const path = dbFile(name);
+		mkdirSync(join(path, ".."), { recursive: true });
+		const db = new Database(path);
+		try {
+			if (!initBeam) throw new Error("Pinned stock OMP 18.4.2 schema unavailable");
+			initBeam(db);
+			for (const [index, content] of working.entries()) db.run("INSERT INTO working_memory (id, content) VALUES (?, ?)", [`w-${index}`, content]);
+			for (const [index, content] of episodic.entries()) db.run("INSERT INTO episodic_memory (id, content) VALUES (?, ?)", [`e-${index}`, content]);
+		} finally { db.close(); }
+		return path;
+	};
+	return { root, home, project, storeRoot, args, bank, dbFile };
+}
+function snapshot(path: string): string[] {
+	return readdirSync(path).sort().flatMap(name => {
+		const child = join(path, name), s = lstatSync(child), prefix = `${name}:${s.mode & 0o777}:`;
+		return s.isDirectory() ? [prefix + "dir", ...snapshot(child).map(row => `${name}/${row}`)] :
+			[prefix + (s.isSymbolicLink() ? "link" : readFileSync(child).toString("hex"))];
+	});
+}
+
+supportedTest("consent is an explicit literal; refusing it never reads or writes stores", async () => {
+	const f = fixture(); f.bank("default", [secret]);
+	const before = snapshot(f.root);
+	const result = await auditMemoryAtRest({ ...f.args, consent: undefined });
+	expect(result.status).toBe("UNVERIFIED");
+	expect(result.reason).toBe("CONSENT_REQUIRED");
+	expect(snapshot(f.root)).toEqual(before);
+});
+
+supportedTest("enumerates every supported bank; catches alphabetic bearer and both memory stores without leaking rows", async () => {
+	const f = fixture();
+	const pem = ["-----BEGIN ", "PRIVATE KEY-----\n", "syntheticprivatekeymaterialnotvalid", "\n-----END PRIVATE KEY-----"].join("");
+	f.bank("default", ["public note", secret], [pem]);
+	f.bank("project_A", [["password", "=", "syntheticlettersforpasswordvalue"].join("")], ["postgres://syntheticuser:syntheticpassword@invalid.example/test"]);
+	const before = snapshot(f.root);
+	const result = await auditMemoryAtRest({ ...f.args, expectedBanks: ["default", "project_A"] });
+	expect(result.status).toBe("MATCHES");
+	expect(result.coverage).toEqual({ banks_discovered: 2, banks_scanned: 2, stores_discovered: 2, stores_scanned: 2,
+		working_rows: 3, episodic_rows: 2, total_rows: 5, fields: ["working_memory.content", "episodic_memory.content"] });
+	expect(result.categories).toEqual({ bearer_token: 1, private_key: 1, password_assignment: 1, credential_url: 1, provider_token: 0 });
+	expect(result.redactor?.coverage).toBe("SYNTHETIC_ONLY");
+	const text = JSON.stringify(result);
+	for (const sensitive of [secret, pem, "syntheticlettersforpasswordvalue", "syntheticpassword", f.root, f.storeRoot]) expect(text).not.toContain(sensitive);
+	expect(snapshot(f.root)).toEqual(before);
+});
+
+supportedTest("negative false-negative canary fails an otherwise clean audit", async () => {
+	const f = fixture(); f.bank("default", ["a harmless note"]);
+	expect((await auditMemoryAtRest(f.args)).status).toBe("NO_MATCHES_IN_COVERED_CLASSES");
+	// Historical redactor misses the no-digit bearer class. Omitting that detector
+	// must change MATCHES to a false clean verdict, so this test is causal.
+	const db = new Database(f.dbFile());
+	try { db.run("INSERT INTO working_memory (id, content) VALUES (?, ?)", ["negative", secret]); } finally { db.close(); }
+	const detected = await auditMemoryAtRest(f.args);
+	expect(detected.status).toBe("MATCHES");
+	expect(detected.categories.bearer_token).toBe(1);
+	expect(detected.coverage?.total_rows).toBe(2);
+});
+
+supportedTest("incomplete banks, WAL, symlinks and unknown tables refuse a clean verdict", async () => {
+	const absent = fixture(); absent.bank();
+	expect((await auditMemoryAtRest({ ...absent.args, expectedBanks: ["default", "omitted"] })).status).toBe("UNVERIFIED");
+	const wal = fixture(); wal.bank(); writeFileSync(`${wal.dbFile()}-wal`, "pending");
+	expect((await auditMemoryAtRest(wal.args)).reason).toBe("UNSAFE_STORE");
+	const linked = fixture(); linked.bank(); mkdirSync(join(linked.storeRoot, "banks")); symlinkSync(linked.dbFile(), join(linked.storeRoot, "banks", "linked"));
+	expect((await auditMemoryAtRest(linked.args)).status).toBe("UNVERIFIED");
+	const opaque = fixture(); opaque.bank();
+	const db = new Database(opaque.dbFile()); try { db.run("CREATE TABLE private_unknown (content TEXT)"); } finally { db.close(); }
+	expect((await auditMemoryAtRest(opaque.args)).reason).toBe("UNSUPPORTED_SCHEMA");
+});
+
+supportedTest("a symlink in an ancestor of the selected store root cannot turn a clean audit into clearance", async () => {
+	const f = fixture(); f.bank("default", ["harmless synthetic row"]);
+	const alias = join(f.root, "linked-parent");
+	symlinkSync(f.root, alias);
+	const result = await auditMemoryAtRest({ ...f.args,
+		home: join(alias, "home"),
+		storeRoot: join(alias, "home", ".omp", "agent", "memories", "mnemopi"),
+	});
+	expect(result.status).toBe("UNVERIFIED");
+	expect(result.reason).toBe("UNSAFE_STORE");
+});
+
+supportedTest("unreadable stores and unsupported OMP source/version cannot be certified", async () => {
+	const f = fixture(); f.bank(); chmodSync(f.dbFile(), 0o000);
+	expect((await auditMemoryAtRest(f.args)).status).toBe("UNVERIFIED");
+	const other = fixture(); other.bank();
+	const result = await auditMemoryAtRest({ ...other.args, ompPath: join(other.root, "not-omp") });
+	expect(result.status).toBe("UNVERIFIED");
+	expect(result.reason).toBe("UNSUPPORTED_SOURCE");
+});
+
+supportedTest("compiled private audit requires separate consent and exposes only covered counts without mutating the selected HOME", () => {
+	const f = fixture();
+	f.bank("default", [secret], ["ordinary episodic note"]);
+	f.bank("project_A", [["password", "=", "syntheticlettersforpasswordvalue"].join("")]);
+	const release = join(f.root, "release");
+	mkdirSync(join(release, "bin"), { recursive: true });
+	const binary = join(release, "bin", "omp-kit");
+	const entry = resolve(import.meta.dir, "../../src/cli.ts");
+	const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", entry, "--outfile", binary], {
+		cwd: f.root, env: { ...process.env, TMPDIR: f.root }, stdout: "pipe", stderr: "pipe",
+	});
+	expect(build.exitCode).toBe(0);
+	const before = snapshot(f.root);
+	const invoke = (args: string[]) => {
+		const result = Bun.spawnSync([binary, "memory", "audit", "--store-root", f.storeRoot, ...args, "--json"], {
+			cwd: f.project, env: { ...process.env, HOME: f.home, TMPDIR: f.root,
+				XDG_CACHE_HOME: join(f.root, "xdg-cache"), XDG_STATE_HOME: join(f.root, "xdg-state") },
+			stdout: "pipe", stderr: "pipe",
+		});
+		return { code: result.exitCode, text: result.stdout.toString() + result.stderr.toString(),
+			envelope: JSON.parse(result.stdout.toString()) };
+	};
+	const refused = invoke([]);
+	expect(refused.code).toBe(2);
+	expect(refused.envelope.errors[0].code).toBe("CONSENT_REQUIRED");
+	expect(snapshot(f.root)).toEqual(before);
+	const covered = invoke(["--yes"]);
+	expect(covered.code).toBe(1);
+	expect(covered.envelope.data.audit.status).toBe("MATCHES");
+	expect(covered.envelope.data.audit.coverage).toEqual({ banks_discovered: 2, banks_scanned: 2,
+		stores_discovered: 2, stores_scanned: 2, working_rows: 2, episodic_rows: 1, total_rows: 3,
+		fields: ["working_memory.content", "episodic_memory.content"] });
+	expect(covered.envelope.data.audit.categories.bearer_token).toBe(1);
+	for (const sensitive of [secret, "syntheticlettersforpasswordvalue", f.root, f.storeRoot])
+		expect(covered.text).not.toContain(sensitive);
+	expect(snapshot(f.root)).toEqual(before);
+	writeFileSync(`${f.dbFile()}-wal`, "synthetic pending WAL bytes");
+	const beforeWal = snapshot(f.root);
+	const activeWal = invoke(["--yes"]);
+	expect(activeWal.code).toBe(3);
+	expect(activeWal.envelope.data.audit.status).toBe("UNVERIFIED");
+	expect(activeWal.envelope.data.audit.reason).toBe("UNSAFE_STORE");
+	expect(activeWal.text).not.toContain(f.root);
+	expect(snapshot(f.root)).toEqual(beforeWal);
+});

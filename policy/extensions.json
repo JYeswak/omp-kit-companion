@@ -1,0 +1,4 @@
+{
+  "extensions": ["kit-guard-optin.ts"],
+  "skipProfiles": []
+}

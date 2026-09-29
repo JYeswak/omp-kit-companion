@@ -1,0 +1,9 @@
+rule	reason	evidence
+ft-md-doctrine	retired after historical 0/25 bind rate against preregistered 20% bar	private R64 sample (not distributed; historical observation)
+ft-rs-doctrine	retired after historical 0/25 bind rate against preregistered 20% bar	private R64 sample (not distributed; historical observation)
+ft-sh-doctrine	retired after historical 1/25 bind rate against preregistered 20% bar	private R64 sample (not distributed; historical observation)
+ft-py-doctrine	UNMEASURED bind rate; retired with its pack because the file-type trigger mechanism was refuted	private R64 analysis (not distributed)
+ft-json-doctrine	UNMEASURED bind rate; retired with its pack for the same mechanism reason	private R64 analysis (not distributed)
+absence-from-one-probe	operator-disabled in the three profiles and project configuration inspected; not a universal usage claim	private profile configuration snapshot (not distributed)
+bash-callsite-grep-exclusion	global copy retired as duplicate; project-local rule remained live in the inspected project	private project/profile configuration snapshot (not distributed)
+bash-structural-def-search	global copy retired as duplicate; project-local rule remained live in the inspected project	private project/profile configuration snapshot (not distributed)

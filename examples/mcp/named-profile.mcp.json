@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "local-example": {
+      "type": "stdio",
+      "command": "YOUR_EXISTING_MCP_EXECUTABLE",
+      "args": []
+    }
+  }
+}

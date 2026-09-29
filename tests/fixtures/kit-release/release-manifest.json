@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "version": "1.2.3",
+  "source_tag": "v1.2.3",
+  "files": [
+    { "path": "bin/omp-kit", "sha256": "a5f3689f40257e12e7480d6865a0088c9660ced229ed97cd5dabdf4120de0d85" }
+  ]
+}

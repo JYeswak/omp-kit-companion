@@ -1,0 +1,5 @@
+# omp-kit profile recipe v1; checked against OMP 18.4.2 settings schema.
+# Copy into a NEW, operator-owned named profile only. Do not merge into an existing profile.
+# Rendering this file does not install it or verify the effective OMP profile.
+memory:
+  backend: off

@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "repeatMode": "after-gap",
+  "repeatGap": 0,
+  "contextMode": "keep",
+  "disabledRules": []
+}

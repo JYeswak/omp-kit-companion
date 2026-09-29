@@ -1,0 +1,9 @@
+# omp-kit profile recipe v1; checked against OMP 18.4.2 settings schema.
+# No model is selected here. Choose only provider/model identifiers actually available to YOU.
+# After checking OMP's model catalog in your own profile, add entries manually:
+#   modelRoles:
+#     default: <user-chosen-provider>/<user-chosen-chat-model>
+#     task: <user-chosen-provider>/<user-chosen-chat-model>
+# A missing role, disabled provider or unavailable model remains NOT VERIFIED.
+# Do not assume a subscription, enable a backend, add a fallback, or run a model call from this template.
+modelRoles: {}

@@ -1,0 +1,993 @@
+#!/usr/bin/env bun
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
+import { audit, undo, why } from "./audit.ts";
+import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
+import { applyPolicyPlan, planPolicy } from "./apply-policy.ts";
+import { applyRulePlan, planRules } from "./apply-rules.ts";
+import { applyRepairPlan, planDeepDoctor, planRepair } from "./repair.ts";
+import { diagnose, health, type Finding } from "./diagnostics.ts";
+import { inspectLspReadiness, planLspSetup, type LspReadinessInput } from "./lsp-readiness.ts";
+import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
+import { auditMemoryAtRest } from "./memory-audit.ts";
+import { inspectMemoryReadiness } from "./memory-readiness.ts";
+import { applyKitUpdate, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
+import type { PendingInspection } from "./mutations.ts";
+import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
+import { inspectProjectTrust } from "./project-trust.ts";
+import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
+import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
+import { runFullTest } from "./full-test-runner.ts";
+import { runFastTest } from "./test-runner.ts";
+
+const SCHEMA_VERSION = "1";
+const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
+const EXIT_CODES = { success: 0, finding: 1, usage_or_blocked: 2, unavailable: 3, retryable: 4 } as const;
+
+export type CliResult = PresentationResult;
+export type ParsedCommand = { command: Command; parent?: Command; flags: ReadonlyMap<string, string | true>; argument?: string; json: boolean; robot: boolean };
+export type CommandHandler = (request: ParsedCommand) => CliResult | Promise<CliResult>;
+const handlers = new Map<string, CommandHandler>();
+
+/** Register a real handler by grammar path (e.g. "apply rules"); absent handlers remain unavailable. */
+export function registerCommandHandler(path: string, handler: CommandHandler): void {
+	const parts = path.split(" ");
+	const parent = findCommand(parts[0] ?? "");
+	const command = parts.length === 2 ? findCommand(parts[1] ?? "", parent?.subcommands) : parent;
+	if (parts.length > 2 || !command || (parts.length === 2 && !parent?.subcommands)) throw new Error(`unknown grammar command: ${path}`);
+	if ((command.runnable && path !== "status") || handlers.has(path)) throw new Error(`command already registered: ${path}`);
+	handlers.set(path, handler);
+}
+
+function isRunnable(command: Command, path: string): boolean {
+	if (command.subcommands) return command.subcommands.some((child) => isRunnable(child, `${path} ${child.name}`));
+	return command.runnable || handlers.has(path);
+}
+
+function availableCommands(commands: readonly Command[] = COMMANDS, prefix = ""): Command[] {
+	return commands.filter((command) => isRunnable(command, `${prefix}${command.name}`)).map((command) => ({
+		...command,
+		runnable: true,
+		flags: command.flags.filter((flag) => flag.available !== false),
+		...(command.subcommands ? { subcommands: availableCommands(command.subcommands, `${prefix}${command.name} `) } : {}),
+	}));
+}
+
+function printableFlags(flags: readonly Flag[]): string {
+	return flags.map((flag) => `  ${flag.name}${flag.aliases?.length ? ` (${flag.aliases.join(", ")})` : ""}${flag.value ? ` ${flag.value}` : ""}  ${flag.description}${flag.available === false ? " (not yet available)" : ""}`).join("\n");
+}
+
+function help(command?: Command, parent?: Command): string {
+	if (command) {
+		const children = command.subcommands?.map((child) => `  ${child.usage} — ${child.description}${isRunnable(child, `${command.name} ${child.name}`) ? "" : " (not yet available)"}`).join("\n");
+		return [`Usage: omp-kit ${command.usage}`, command.description,
+			isRunnable(command, `${parent ? `${parent.name} ` : ""}${command.name}`) ? "" : "Handler not yet available; no action will be taken.",
+			children ? `Subcommands:\n${children}` : "", `Flags:\n${printableFlags(commandFlags(command))}`,
+			`Example: ${command.example}`].filter(Boolean).join("\n\n");
+	}
+	const scoped = COMMANDS.flatMap((command) => [
+		...(command.flags.length ? [`  ${command.name}: ${command.flags.map((flag) => flag.name).join(" ")}`] : []),
+		...(command.subcommands?.filter((child) => child.flags.length).map((child) => `  ${command.name} ${child.name}: ${child.flags.map((flag) => flag.name).join(" ")}`) ?? []),
+	]);
+	return ["Usage: omp-kit [GLOBAL FLAGS] [COMMAND] [FLAGS]", "Bare invocation inspects kit and OMP presence; it never applies rules or modifies profiles.",
+		"Commands:", ...COMMANDS.map((item) => `  ${item.usage} — ${item.description}${isRunnable(item, item.name) ? "" : " (not yet available)"}`),
+		`Global flags:\n${printableFlags(GLOBAL_FLAGS)}`, "Scoped flags:", ...scoped,
+		"Use omp-kit help TOPIC for flag details. Unavailable handlers refuse without mutation."].join("\n");
+}
+
+function nearest(value: string, choices: readonly string[]): string | undefined {
+	let best: string | undefined;
+	let distance = 3;
+	for (const candidate of choices) {
+		const row = Array.from({ length: candidate.length + 1 }, (_, index) => index);
+		for (let i = 1; i <= value.length; i++) {
+			let prior = row[0] ?? 0;
+			row[0] = i;
+			for (let j = 1; j <= candidate.length; j++) {
+				const previous = row[j] ?? 0;
+				row[j] = Math.min((row[j] ?? 0) + 1, (row[j - 1] ?? 0) + 1, prior + (value[i - 1] === candidate[j - 1] ? 0 : 1));
+				prior = previous;
+			}
+		}
+		const score = row[candidate.length] ?? 3;
+		if (score < distance) { distance = score; best = candidate; }
+		else if (score === distance) best = undefined; // ambiguous suggestions never authorize execution
+	}
+	return best;
+}
+
+function refusal(code: string, message: string, remediation: string): CliResult {
+	return { code: 2, data: { overall: "NOT_RUN" }, errors: [{ code, message, remediation }], verification: "NOT_RUN" };
+}
+
+type ParseResult = { request: ParsedCommand } | { failure: CliResult; json: boolean };
+function parse(args: readonly string[]): ParseResult {
+	const json = args.includes("--json") || args.includes("--robot");
+	const positional: string[] = [];
+	const flags = new Map<string, string | true>();
+	let command: Command | undefined;
+	let parent: Command | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i] ?? "";
+		if (!token.startsWith("-")) {
+			positional.push(token);
+			if (positional.length === 1) command = findCommand(token);
+			if (positional.length === 2 && command?.subcommands) { parent = command; command = findCommand(token, command.subcommands); }
+			continue;
+		}
+		const [rawName, attached] = token.split("=", 2);
+		const known = [...GLOBAL_FLAGS, ...COMMANDS.flatMap((item) => item.flags), ...COMMANDS.flatMap((item) => item.subcommands?.flatMap((child) => child.flags) ?? [])];
+		const flag = known.find((candidate) => candidate.name === rawName || candidate.aliases?.includes(rawName ?? ""));
+		const name = flag?.name ?? rawName;
+		if (!flag) {
+			const hint = nearest(rawName ?? token, known.flatMap((entry) => [entry.name, ...(entry.aliases ?? [])]));
+			return { failure: refusal("UNKNOWN_FLAG", `Unknown flag: ${name}`, hint ? `Use ${hint} exactly; run omp-kit --help for grammar.` : "Run omp-kit --help for valid flags."), json };
+		}
+		if (flag.value) {
+			const value = attached ?? args[++i];
+			if (!value || value.startsWith("--")) return { failure: refusal("MISSING_VALUE", `${name} needs ${flag.value}`, `Use ${name} ${flag.value}.`), json };
+			flags.set(name ?? "", value);
+		} else {
+			if (attached !== undefined) return { failure: refusal("UNEXPECTED_VALUE", `${name} does not take a value`, `Use ${name} without a value.`), json };
+			flags.set(name ?? "", true);
+		}
+	}
+	if (flags.has("--info") && positional.length === 0) return { request: { command: { name: "--info", usage: "--info", description: "Executable identity", flags: [], example: "omp-kit --info", runnable: true }, flags, json, robot: flags.has("--robot") } };
+	if (flags.has("--info")) return { failure: refusal("INVALID_FLAG", "--info is a standalone global request", "Run omp-kit --info."), json };
+	if (!positional.length) command = findCommand(flags.has("--help") ? "help" : "status");
+	if (!command) {
+		const candidates = parent?.subcommands ?? COMMANDS;
+		const bad = positional[parent ? 1 : 0] ?? "";
+		const hint = nearest(bad, candidates.map((item) => item.name));
+		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
+	}
+	const allowedFlags = [...GLOBAL_FLAGS, ...(parent ? [...parent.flags, ...command.flags] : command.flags)].map((item) => item.name);
+	for (const flag of flags.keys()) if (!allowedFlags.includes(flag)) return { failure: refusal("INVALID_FLAG", `${flag} is not valid for ${command.name}`, `Run omp-kit help ${parent ? `${parent.name} ` : ""}${command.name}.`), json };
+	const consumed = parent ? 2 : (positional.length ? 1 : 0);
+	const rest = positional.slice(consumed);
+	if (command.subcommands && !command.subcommandOptional && !parent && !flags.has("--help")) return { failure: refusal("MISSING_SUBCOMMAND", `${command.name} needs a subcommand`, `Run omp-kit help ${command.name}.`), json };
+	if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
+	if (command.argument && !rest.length && command.name !== "help" && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
+	const scope = flags.get("--scope");
+	if (typeof scope === "string") {
+		const grammar = (parent ? [...parent.flags, ...command.flags] : command.flags).find((flag) => flag.name === "--scope")?.value;
+		if (grammar?.includes("|") && !grammar.split("|").includes(scope)) {
+			return { failure: refusal("INVALID_VALUE", `Unknown scope: ${scope}`, `Use --scope ${grammar}.`), json };
+		}
+	}
+	if (flags.has("--plan") && flags.has("--apply")) return { failure: refusal("CONFLICTING_FLAGS", "--plan and --apply cannot be combined", `Choose one mode for ${command.name}.`), json };
+	if (flags.has("--deep") && !flags.has("--yes")) return { failure: refusal("CONSENT_REQUIRED", "doctor --deep requires explicit --yes", "Review the guarded deep probe, then supply --yes."), json };
+	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, json, robot: flags.has("--robot") } };
+}
+
+function kitIdentity() {
+	const source = Bun.main.endsWith(".ts");
+	let root: string | undefined;
+	let status = "UNVERIFIED";
+	try {
+		root = source ? resolve(dirname(Bun.main), "..") : releaseRoot(process.execPath);
+		if (!source) status = "RELEASE_ROOT_RESOLVED";
+	} catch { /* No release identity follows from an unrecognized launcher. */ }
+	let version = "unreleased";
+	let sourceTag: string | null = null;
+	if (root && !source) {
+		try {
+			const metadata: unknown = JSON.parse(readFileSync(join(root, "release-manifest.json"), "utf8"));
+			if (metadata && typeof metadata === "object" &&
+				"version" in metadata && typeof metadata.version === "string" &&
+				"source_tag" in metadata && typeof metadata.source_tag === "string") {
+				version = metadata.version;
+				sourceTag = metadata.source_tag;
+			}
+		} catch { /* A missing manifest is not a verified version. */ }
+	}
+	return { version, release: { identity: status, source_tag: sourceTag, root: root ?? null, executable: process.execPath, entrypoint: Bun.main }, data_paths: { state: process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "", ".local", "state"), data: process.env.XDG_DATA_HOME ?? join(process.env.HOME ?? "", ".local", "share") }, platform: { os: process.platform, arch: process.arch } };
+}
+
+function ompIdentity(): Record<string, unknown> {
+	try {
+		const identity = resolveOmpIdentity(process.env);
+		let version: string | null = null;
+		try {
+			const metadata: unknown = JSON.parse(readFileSync(join(identity.packageRoot, "package.json"), "utf8"));
+			if (metadata && typeof metadata === "object" && "version" in metadata && typeof metadata.version === "string") version = metadata.version;
+		} catch { /* Source identity is resolved; reported version remains unknown. */ }
+		return { status: "PRESENT", location: identity.launcher, source: identity.source, native_root: identity.nativeRoot, version, version_proof: version ? "PACKAGE_METADATA" : "UNVERIFIED" };
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { status: reason.includes("executable not found on PATH") ? "UNAVAILABLE" : "UNVERIFIED", location: null, version: null, reason };
+	}
+}
+
+function schema(version: string): Record<string, unknown> {
+	const commandData = Object.fromEntries([
+		...COMMANDS.flatMap((command) => [
+			[command.name, command.dataSchema ?? REFUSAL_DATA_SCHEMA],
+			...(command.subcommands?.map((child) => [`${command.name} ${child.name}`, child.dataSchema ?? REFUSAL_DATA_SCHEMA]) ?? []),
+		]),
+		["--info", GLOBAL_FLAGS.find((flag) => flag.name === "--info")?.dataSchema ?? REFUSAL_DATA_SCHEMA],
+	]);
+	return { schema_version: SCHEMA_VERSION, tool_version: version,
+		commands: COMMANDS, global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES,
+		command_data: commandData, usage_error_data: REFUSAL_DATA_SCHEMA,
+		envelope: { type: "object", required: ["ok", "tool_version", "data", "meta", "warnings", "commands", "errors"], properties: {
+			ok: { type: "boolean" }, tool_version: { type: "string" }, data: { anyOf: Object.values(commandData) },
+			meta: { type: "object", required: ["schema_version", "verification"], properties: { schema_version: { type: "string" }, verification: { enum: ["PERFORMED", "NOT_RUN", "UNVERIFIED"] } } },
+			warnings: { type: "array", items: { type: "string" } }, commands: { type: "array", items: { type: "string" } },
+			errors: { type: "array", items: { type: "object", required: ["code", "message", "remediation"], properties: {
+				code: { type: "string" }, message: { type: "string" }, remediation: { type: "string" },
+			} } },
+		} },
+	};
+}
+
+function completion(shell: string): string {
+	const flagWords = (flags: readonly Flag[]) => flags.flatMap((flag) => [
+		flag.name,
+		...(flag.value?.includes("|") ? flag.value.split("|") : []),
+	]).join(" ");
+	const verbs = COMMANDS.map((command) => command.name).join(" ");
+	const globals = GLOBAL_FLAGS.flatMap((flag) => [flag.name, ...(flag.aliases ?? [])]).join(" ");
+	const bashCases = COMMANDS.map((command) => {
+		const subcommands = command.subcommands?.map((child) => child.name).join(" ");
+		const flags = flagWords(command.flags);
+		const children = command.subcommands?.map((child) => `${command.name}:${child.name}) words='${globals} ${flagWords(child.flags)}';;`).join(" ") ?? "";
+		return `${command.name}:) words='${globals} ${flags}${subcommands ? ` ${subcommands}` : ""}';; ${children}`;
+	}).join(" ");
+	if (shell === "bash") return `# omp-kit documented grammar (unavailable handlers still refuse)
+_omp_kit() {
+  local words='${verbs} ${globals}' command='' subcommand='' i
+  for ((i=1; i<COMP_CWORD; i++)); do
+    case "\${COMP_WORDS[i]}" in
+      ${COMMANDS.map((command) => command.name).join("|")}) command="\${COMP_WORDS[i]}";;
+      ${COMMANDS.flatMap((command) => command.subcommands?.map((child) => child.name) ?? []).join("|")}) subcommand="\${COMP_WORDS[i]}";;
+    esac
+  done
+  case "$command:$subcommand" in ${bashCases} esac
+  if [[ -z "$command" ]]; then words='${verbs} ${globals}'; fi
+  COMPREPLY=( $(compgen -W "$words" -- "\${COMP_WORDS[COMP_CWORD]}") )
+}
+complete -F _omp_kit omp-kit
+`;
+	if (shell === "zsh") {
+		const branches = COMMANDS.map((command) => {
+			const childWords = command.subcommands?.map((child) => child.name).join(" ") ?? "";
+			const flags = flagWords(command.flags);
+			const children = command.subcommands?.map((child) => `${child.name}) choices=(${globals} ${flagWords(child.flags)});;`).join(" ");
+			return `${command.name}) choices=(${childWords} ${flags} ${globals});${children ? ` case "\${words[3]}" in ${children} esac;` : ""};`;
+		}).join(" ");
+		return `#compdef omp-kit
+# Documented grammar; dispatch refuses unavailable handlers
+_omp_kit() {
+  local -a choices
+  choices=(${verbs} ${globals})
+  case "\${words[2]}" in ${branches} esac
+  _describe 'omp-kit command or flag' choices
+}
+compdef _omp_kit omp-kit
+`;
+	}
+	const scoped = COMMANDS.flatMap((command) => [
+		...command.flags.map((flag) => `complete -c omp-kit -n '__fish_seen_subcommand_from ${command.name}' -l ${flag.name.slice(2)}${flag.value ? ` -r${flag.value.includes("|") ? ` -a '${flag.value.split("|").join(" ")}'` : ""}` : ""}`),
+		...(command.subcommands?.flatMap((child) => [
+			`complete -c omp-kit -f -n '__fish_seen_subcommand_from ${command.name}' -a '${child.name}'`,
+			...child.flags.map((flag) => `complete -c omp-kit -n '__fish_seen_subcommand_from ${child.name}' -l ${flag.name.slice(2)}${flag.value ? ` -r${flag.value.includes("|") ? ` -a '${flag.value.split("|").join(" ")}'` : ""}` : ""}`),
+		]) ?? []),
+	]).join("\n");
+	return `# omp-kit documented grammar; dispatch refuses unavailable handlers
+${COMMANDS.map((command) => `complete -c omp-kit -f -n '__fish_use_subcommand' -a '${command.name}'`).join("\n")}
+${GLOBAL_FLAGS.flatMap((flag) => [`complete -c omp-kit -l ${flag.name.slice(2)}`, ...(flag.aliases?.map((alias) => `complete -c omp-kit -s ${alias.slice(1)}`) ?? [])]).join("\n")}
+${scoped}
+`;
+}
+
+const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
+	kit: ["kit", "manifest"],
+	omp: ["omp"],
+	rules: ["installed_rules", "retired_rules", "unknown_rules", "project_rules"],
+	profile: ["effective_profile"],
+};
+
+async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
+	if (request.command.name === "doctor" && request.flags.has("--deep")) {
+		const report = await planDeepDoctor({ root: kitIdentity().release.root ?? "",
+			home: process.env.HOME ?? "", stateRoot: receiptStateRoot() ?? "",
+			scope: String(request.flags.get("--scope") ?? "effective_profile"), confirmed: request.flags.has("--yes") });
+		return { code: 2, data: { overall: "UNVERIFIED", deep_probe: report }, errors: [{
+			code: report.refusal.code, message: report.refusal.reason,
+			remediation: "Use read-only omp-kit doctor --json; no migratory probe was run or backup created.",
+		}], verification: "UNVERIFIED" };
+	}
+	const kit = kitIdentity();
+	const root = kit.release.root;
+	const home = process.env.HOME;
+	if (!root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no profile or rule data was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	let ompPath: string | undefined;
+	try {
+		const identity = resolveOmpIdentity(process.env);
+		for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+			const candidate = resolve(directory || ".", "omp");
+			try {
+				if (realpathSync(candidate) === identity.launcher) { ompPath = candidate; break; }
+			} catch { /* The next PATH entry may contain the validated launcher. */ }
+		}
+	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
+	const allFindings = await diagnose({ root, home, project: process.cwd(), ...(ompPath ? { ompPath } : {}) });
+	const ompFinding = allFindings.find((item) => item.component === "omp");
+	const ompEvidence = ompFinding?.evidence;
+	const availability = ompEvidence?.availability;
+	const omp = {
+		status: availability === "PRESENT" || availability === "UNAVAILABLE" ? availability : "UNVERIFIED",
+		location: typeof ompEvidence?.location === "string" ? ompEvidence.location : null,
+		version: typeof ompEvidence?.version === "string" ? ompEvidence.version : null,
+		version_proof: typeof ompEvidence?.version_proof === "string" ? ompEvidence.version_proof : "UNVERIFIED",
+		reason: ompFinding?.reason ?? "OMP identity was not inspected",
+	};
+	let findings = allFindings;
+	if (request.command.name === "doctor") {
+		const scope = request.flags.get("--scope");
+		if (typeof scope === "string") {
+			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
+			const scoped = allFindings.filter((item) => selected.includes(item.component));
+			findings = scoped.length ? scoped : [{
+				component: scope,
+				status: "UNVERIFIED",
+				reason: `Read-only ${scope} inspection is not yet implemented; no profile or configuration probe was run`,
+				recommended_action: "Review the existing OMP configuration manually without running a migratory probe.",
+			}];
+		} else {
+			findings = [...allFindings, ...["policy", "extensions", "router"].filter((component) => !allFindings.some((item) => item.component === component)).map((component): Finding => ({
+				component, status: "UNVERIFIED",
+				reason: `Read-only ${component} inspection is not yet implemented; no profile or configuration probe was run`,
+				recommended_action: "Review the existing OMP configuration manually without running a migratory probe.",
+			}))].sort((left, right) => left.component.localeCompare(right.component));
+		}
+	}
+	const byComponent = (component: string) => findings.find((item) => item.component === component)?.status ?? "NOT_RUN";
+	const data = {
+		overall: health(findings), kit, omp, findings,
+		evidence: { effective_profile: byComponent("effective_profile"), installed_rules: byComponent("installed_rules"), matcher: byComponent("matcher") },
+		recommended_actions: [...new Set(findings.filter((item) => item.status !== "OK").map((item) => item.recommended_action))],
+	};
+	if (availability === "UNAVAILABLE") return { code: 3, data, errors: [{
+		code: "OMP_UNAVAILABLE", message: omp.reason, remediation: ompFinding?.recommended_action ?? "Install OMP and put it on PATH.",
+	}], verification: "UNVERIFIED" };
+	const failedRequired = findings.find((item) => (item.component === "kit" || item.component === "manifest") && item.status === "FAIL");
+	if (failedRequired) return { code: 1, data, errors: [{
+		code: "REQUIRED_FINDING_FAILED", message: failedRequired.reason, remediation: failedRequired.recommended_action,
+	}], verification: "UNVERIFIED" };
+	const strict = request.command.name === "health";
+	return {
+		code: strict && data.overall !== "OK" ? 1 : 0,
+		data,
+		commands: strict ? ["omp-kit doctor --json"] : ["omp-kit capabilities --json", "omp-kit doctor --json"],
+		verification: data.overall === "OK" ? "PERFORMED" : "UNVERIFIED",
+	};
+}
+
+function lspReadiness(request: ParsedCommand): CliResult {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no LSP configuration was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	const selected = request.flags.get("--project");
+	let project: string;
+	try {
+		project = realpathSync(typeof selected === "string" ? resolve(process.cwd(), selected) : process.cwd());
+		if (!isAbsolute(project) || !statSync(project).isDirectory()) throw new Error("not an absolute directory");
+	} catch {
+		return refusal("INVALID_PROJECT", "Selected LSP project is not an accessible absolute directory", "Provide an existing project directory with --project PATH.");
+	}
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT" || typeof omp.location !== "string") {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: typeof omp.reason === "string" ? omp.reason : "Validated OMP launcher is unavailable",
+			remediation: "Install a supported OMP package and put its launcher on PATH; no LSP server was started.",
+		}], verification: "UNVERIFIED" };
+	}
+	const file = request.flags.get("--file");
+	const input: LspReadinessInput = { home, project, ompPath: omp.location,
+		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}),
+		...(typeof file === "string" ? { file } : {}) };
+	if (request.parent?.name === "lsp") {
+		const plan = planLspSetup(input);
+		return { code: 0, data: { overall: plan.report.status, report: plan.report, instructions: plan.instructions },
+			commands: ["omp-kit doctor --scope lsp --json"], verification: "UNVERIFIED" };
+	}
+	const report = inspectLspReadiness(input);
+	const actions = [...new Set(report.servers.map((server) => server.recommended_action))];
+	if (!actions.length) actions.push("Review the installed OMP LSP defaults and project configuration; server runtime was not probed.");
+	const findings: Finding[] = [{
+		component: "lsp", status: report.status,
+		reason: report.opaque_layers.length ? "Some LSP configuration layers are unreadable or unsupported"
+			: report.servers.some((server) => server.eligible) ? "Configured server eligibility is possible; runtime was not probed"
+				: "No configured server is eligible for the selected session cwd and file; runtime was not probed",
+		recommended_action: actions[0]!,
+	}];
+	return { code: 0, data: { overall: report.status, kit, omp, findings,
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: actions, report }, commands: ["omp-kit lsp setup --plan --json"], verification: "UNVERIFIED" };
+}
+
+function projectTrustInventory(request: ParsedCommand): CliResult {
+	const kit = kitIdentity();
+	if (!kit.release.root || !process.env.HOME || !isAbsolute(process.env.HOME)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no project configuration was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT") {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "Validated OMP package metadata is unavailable",
+			remediation: "Install a supported OMP package and put its launcher on PATH; no project code was run.",
+		}], verification: "UNVERIFIED" };
+	}
+	const selected = request.flags.get("--project");
+	// Deliberately do not realpath: the inspector must see and reject a symlinked selected root.
+	const project = typeof selected === "string" ? resolve(process.cwd(), selected) : process.cwd();
+	const finding = inspectProjectTrust({ project,
+		...(omp.version_proof === "PACKAGE_METADATA" && typeof omp.version === "string" ? { ompVersion: omp.version } : {}) });
+	// A checkout can itself be the kit root or contain the installed OMP launcher. Hide all
+	// identity paths on this scoped route, including XDG paths, rather than leaking project.
+	const safeKit = { version: kit.version, release: { identity: kit.release.identity, root: null, executable: null, entrypoint: null },
+		data_paths: {}, platform: kit.platform };
+	const safeOmp = { status: omp.status, location: null, version: omp.version, version_proof: omp.version_proof };
+	return { code: 0, data: { overall: finding.status, kit: safeKit, omp: safeOmp,
+		findings: [finding], evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
+}
+
+async function memoryInventory(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no memory rows were read.",
+		}], verification: "UNVERIFIED" };
+	}
+	const xdgStateHome = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	if (!isAbsolute(xdgStateHome)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "XDG_STATE_HOME must be absolute for a reliable memory store inventory",
+			remediation: "Use an absolute XDG_STATE_HOME or leave it unset to inspect the HOME state root.",
+		}], verification: "UNVERIFIED" };
+	}
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT" || typeof omp.location !== "string") {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "Validated OMP package is unavailable for memory inspection",
+			remediation: "Install a supported OMP package and put its launcher on PATH; no backend was started.",
+		}], verification: "UNVERIFIED" };
+	}
+	const requested = request.flags.get("--profile");
+	const selected = typeof requested === "string" ? requested : "default";
+	if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(selected) || selected.endsWith(".")) {
+		return refusal("INVALID_PROFILE", "Selected profile name is not a safe OMP profile name", "Use a simple existing OMP profile name without path separators.");
+	}
+	const report = await inspectMemoryReadiness({ home, project: process.cwd(), profile: selected, ompPath: omp.location, xdgStateHome });
+	const profileObservation = { selected, source: typeof requested === "string" ? "NAMED_ON_DISK" : "DEFAULT_ON_DISK", effective_active_profile: "UNVERIFIED" };
+	const finding: Finding = { component: "memory", status: report.status, reason: report.reason,
+		recommended_action: report.recommended_action, evidence: { ...report, profile_observation: profileObservation } };
+	return { code: 0, data: { overall: report.status, kit, omp, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [report.recommended_action] }, verification: "UNVERIFIED" };
+}
+
+function mcpInventory(request: ParsedCommand): CliResult {
+	const selected = request.flags.get("--profile");
+	if (typeof selected !== "string" || selected === "default" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(selected) || selected.endsWith(".")) {
+		return refusal("PROFILE_REQUIRED", "MCP inventory requires an explicitly selected existing named profile", "Use omp-kit doctor --scope mcp --profile NAME, never the default profile.");
+	}
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no MCP config was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT" || typeof omp.location !== "string") {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "Validated OMP package is unavailable for MCP inspection",
+			remediation: "Install a supported OMP package and put its launcher on PATH; no MCP server was started.",
+		}], verification: "UNVERIFIED" };
+	}
+	try {
+		if (!statSync(join(home, ".omp", "profiles", selected, "agent")).isDirectory()) throw new Error("not a directory");
+	} catch {
+		return refusal("PROFILE_UNAVAILABLE", "Selected named MCP profile does not exist as a directory", "Select an existing named OMP profile; this command never creates one.");
+	}
+	const report = inspectMcpReadiness({ home, profile: selected, project: process.cwd(), ompPath: omp.location,
+		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}) });
+	const finding: Finding = { component: "mcp", status: report.status, reason: report.reason,
+		recommended_action: report.recommended_action, evidence: { ...report } };
+	// Configured MCP commands can live under the checkout; suppress all absolute identity paths.
+	const safeKit = { version: kit.version, release: { identity: kit.release.identity, root: null, executable: null, entrypoint: null },
+		data_paths: {}, platform: kit.platform };
+	const safeOmp = { status: omp.status, location: null, version: omp.version, version_proof: omp.version_proof };
+	return { code: 0, data: { overall: report.status, kit: safeKit, omp: safeOmp, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [report.recommended_action] }, verification: "UNVERIFIED" };
+}
+
+async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
+	if (!request.flags.has("--yes"))
+		return refusal("CONSENT_REQUIRED", "Private memory audit needs separate explicit consent; no store was inspected",
+			"Review the selected store root and covered fields, then pass memory audit --store-root PATH --yes.");
+	const storeRoot = request.flags.get("--store-root");
+	if (typeof storeRoot !== "string" || !isAbsolute(storeRoot) || resolve(storeRoot) !== storeRoot)
+		return refusal("INVALID_STORE_ROOT", "Private memory audit requires a canonical absolute store root",
+			"Pass the absolute directory containing mnemopi.db and all named banks; no store was inspected.");
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home)) return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+		code: "HOME_UNAVAILABLE", message: "An absolute HOME is required to bound the private audit",
+		remediation: "Set an absolute HOME before inspecting a selected store.",
+	}], verification: "UNVERIFIED" };
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT" || typeof omp.location !== "string")
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "A pinned supported OMP installation is required for the private audit",
+			remediation: "Install a supported OMP package; unknown versions cannot yield a clean audit.",
+		}], verification: "UNVERIFIED" };
+	const report = await auditMemoryAtRest({ consent: "AUDIT_PRIVATE_MEMORY", home, project: process.cwd(),
+		storeRoot, ompPath: omp.location });
+	// Never return source identity paths, scanned rows, snippets, or hashes.
+	const audit = { status: report.status, reason: report.reason, version: report.version,
+		coverage: report.coverage, categories: report.categories };
+	const overall = report.status === "MATCHES" ? "FAIL" : report.status === "UNVERIFIED" ? "UNVERIFIED" : "OK";
+	return { code: report.status === "MATCHES" ? 1 : report.status === "UNVERIFIED" ? 3 : 0,
+		data: { overall, audit }, verification: "UNVERIFIED" };
+}
+
+function receiptStateRoot(): string | null {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home) || resolve(home) !== home) return null;
+	const xdg = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	return isAbsolute(xdg) && resolve(xdg) === xdg ? join(xdg, "omp-kit") : null;
+}
+
+function receiptCommand(request: ParsedCommand): CliResult {
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; no receipt was changed.");
+	try {
+		if (request.command.name === "audit")
+			return { code: 0, data: { overall: "UNVERIFIED", receipts: audit(stateRoot) }, verification: "UNVERIFIED" };
+		if (!request.argument) return refusal("MISSING_ARGUMENT", "A receipt ID is required", "Pass a receipt ID reported by audit.");
+		if (request.command.name === "why")
+			return { code: 0, data: { overall: "UNVERIFIED", receipt: why(stateRoot, request.argument) }, verification: "UNVERIFIED" };
+		const recorded = why(stateRoot, request.argument);
+		if (recorded.kind === "update") {
+			if (recorded.scope === "omp")
+				return refusal("OMP_UNDO_UNAVAILABLE", "The upstream OMP updater has no verified inverse",
+					"Inspect the update receipt and follow OMP's own documented recovery instructions; do not claim a kit rollback reversed OMP.");
+			const root = kitIdentity().release.root;
+			if (!root) return refusal("KIT_UNDO_UNAVAILABLE", "An installed kit release is needed for guarded kit rollback",
+				"Run the selected installed kit executable with the same private state root.");
+			const restored = undoKitUpdate({ prefix: dirname(dirname(root)), stateRoot, receiptId: request.argument });
+			return { code: restored.updatePending ? 1 : 0,
+				data: { overall: "UNVERIFIED", status: restored.status, receipt_id: restored.receiptId,
+					active_version: restored.activeVersion, pending_recovery: restored.updatePending,
+					omp_rollback: "NOT_PERFORMED" },
+				...(restored.updatePending ? { errors: [{
+					code: "PENDING_RECOVERY", message: "Kit symlink restored, but the failed update receipt remains pending",
+					remediation: "Inspect audit and both component postimages; a failed test was not converted to successful update proof.",
+				}] } : {}), verification: "UNVERIFIED" };
+		}
+		const result = undo(stateRoot, request.argument, { confirmed: true });
+		return { code: 0, data: { overall: "UNVERIFIED", status: result.status, id: request.argument,
+			receipt_id: result.id, files: result.files }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "PENDING_RECOVERY" || code === "MUTATION_FAILED")
+			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "PARTIAL_UNDO", message: "Receipt or inverse mutation requires recovery before another action",
+				remediation: "Inspect audit and current postimages; no automatic rollback or receipt deletion occurred.",
+			}], verification: "UNVERIFIED" };
+		const safe = ["BACKUP_CORRUPT", "FRESH_PLAN", "ALREADY_UNDONE", "STATE_UNSAFE", "UNSAFE_PATH",
+			"LOCK_BUSY", "INVALID_PLAN", "KIT_RECEIPT_INVALID", "POSTIMAGE_CHANGED", "PRIOR_RELEASE_CHANGED"];
+		return refusal(safe.includes(code) ? code : "RECEIPT_UNAVAILABLE",
+			"Receipt cannot be verified or undone without changing unverified state",
+			"Inspect the private receipt and current postimages; do not force replacement.");
+	}
+}
+
+registerCommandHandler("audit", receiptCommand);
+registerCommandHandler("why", receiptCommand);
+registerCommandHandler("undo", receiptCommand);
+
+function rulesCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME;
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run the compiled kit release with an absolute HOME; no rule or ownership record was changed.",
+		}], verification: "UNVERIFIED" };
+	const xdgState = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
+		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
+	try {
+		const plan = planRules({ root, home, stateRoot: join(xdgState, "omp-kit") });
+		const entries = plan.entries.map(({ name, action, owned }) => ({ name, action, owned }));
+		const data = { overall: plan.blocked ? "FAIL" : "UNVERIFIED", action: "PLAN",
+			entries, changes: plan.changes, unknown_markdown: plan.unknownMarkdown,
+			receipt_id: null as string | null };
+		if (plan.blocked) return { code: 2, data, errors: [{
+			code: "RULE_COLLISION", message: "An unowned or edited managed rule name blocks changes",
+			remediation: "Inspect the named conflict and replan; identical unowned files remain unowned.",
+		}], verification: "UNVERIFIED" };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		const result = applyRulePlan(plan, { confirmed: true });
+		return { code: 0, data: { ...data, action: result.status, receipt_id: result.id }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "PENDING_RECOVERY" || code === "MUTATION_FAILED")
+			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "PARTIAL_APPLY", message: "Rule apply may have a durable pending receipt",
+				remediation: "Inspect pending receipts and confirm postimages before attempting another apply; no rollback is implied.",
+			}], verification: "UNVERIFIED" };
+		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "RULE_COLLISION", "FRESH_PLAN",
+			"INVALID_PLAN", "RULES_FAILED", "INSUFFICIENT_SPACE", "LOCK_BUSY"];
+		return refusal(safe.includes(code) ? code : "RULE_PLAN_FAILED",
+			"Rule plan or apply refused without claiming a completed change",
+			"Inspect the release manifest and exact rule ownership, then replan.");
+	}
+}
+
+registerCommandHandler("apply rules", rulesCommand);
+
+function extensionCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME;
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run the compiled kit release with an absolute HOME; no extension or profile was changed.",
+		}], verification: "UNVERIFIED" };
+	const xdgState = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
+		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
+	const selected = request.flags.get("--profiles");
+	let profiles: "all" | string[] = "all";
+	if (typeof selected === "string" && selected !== "all") {
+		profiles = selected.split(",");
+		if (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+			new Set(profiles).size !== profiles.length)
+			return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
+				"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
+	}
+	const stateRoot = join(xdgState, "omp-kit");
+	try {
+		const plan = planExtensions({ root, home, stateRoot, project: process.cwd(), profiles,
+			includeDefault: request.flags.has("--include-default") });
+		const steps = plan.steps.map(step => ({ kind: step.kind, ...(step.profile ? { profile: step.profile } : {}) }));
+		const guard = plan.guard;
+		if (!request.flags.has("--apply"))
+			return { code: guard.status === "FAIL" ? 1 : 0,
+				data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: "PLAN", guard,
+					steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+					receipt_id: null }, verification: "UNVERIFIED" };
+		const applied = applyExtensions(plan);
+		return { code: guard.status === "FAIL" ? 1 : 0,
+			data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: applied.receiptId ? "APPLIED" : "NO_CHANGE",
+				guard, steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+				receipt_id: applied.receiptId }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code)) {
+			let pending: PendingInspection[] = [];
+			try { pending = inspectPendingExtensions(stateRoot); } catch { /* Unsafe state cannot be described as recovered. */ }
+			return { code: 1, data: { overall: "UNVERIFIED", pending },
+				errors: [{ code: "PARTIAL_APPLY", message: "Extension apply may have left a durable pending receipt",
+					remediation: "Inspect pending receipts and verify postimages before a new apply; no rollback is implied." }],
+				verification: "UNVERIFIED" };
+		}
+		const safe = ["UNMANAGED_EXTENSION_COLLISION", "MISSING_PROFILE", "UNRECOGNIZED_PROFILE",
+			"UNRECOGNIZED_PROFILE_CONFIG", "INVALID_EXTENSION_POLICY", "MISSING_EXTENSION_INPUT",
+			"UNSAFE_PATH", "UNSAFE_PROJECT", "FRESH_PLAN", "INVALID_PLAN", "STATE_UNSAFE", "LOCK_BUSY"];
+		return refusal(safe.includes(code) ? code : "EXTENSION_PLAN_FAILED",
+			"Extension plan or apply refused without claiming a completed mutation",
+			"Inspect the selected profile, extension destination, and private pending receipts, then replan.");
+	}
+}
+
+registerCommandHandler("apply extensions", extensionCommand);
+
+function policyCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME; no policy was changed.",
+		}], verification: "UNVERIFIED" };
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
+	const selected = request.flags.get("--profiles");
+	let profiles: "all" | string[] = "all";
+	if (typeof selected === "string" && selected !== "all") {
+		profiles = selected.split(",");
+		if (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+			new Set(profiles).size !== profiles.length)
+			return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
+				"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
+	}
+	try {
+		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profiles,
+			includeDefault: request.flags.has("--include-default") });
+		const steps = plan.steps.map(step => ({ profile: step.profile, path: step.path }));
+		const data = { overall: plan.blockedProfiles.length ? "FAIL" : "UNVERIFIED", action: "PLAN",
+			profiles: plan.profiles, steps, blocked_profiles: plan.blockedProfiles,
+			receipt_id: null as string | null };
+		if (plan.blockedProfiles.length) return { code: 2, data, errors: [{
+			code: "DISABLED_RULE_REFUSED", message: "Selected profiles contain disabled names that policy would re-enable",
+			remediation: "Keep disabled names unchanged; generic --yes cannot authorize a re-enable.",
+		}], verification: "UNVERIFIED" };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		const result = applyPolicyPlan(plan, { confirmed: true });
+		return { code: 0, data: { ...data, action: result.status, receipt_id: result.id },
+			verification: "UNVERIFIED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		const code = message.split(":")[0] ?? "";
+		if (code === "PENDING_RECOVERY" || code === "MUTATION_FAILED")
+			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "PARTIAL_APPLY", message: "Policy apply may have left a durable pending receipt",
+				remediation: "Inspect audit and verify exact postimages before another write; no rollback is implied.",
+			}], verification: "UNVERIFIED" };
+		if (code === "GLOBAL_PREFLIGHT_FAILED") {
+			const violations = message.slice("GLOBAL_PREFLIGHT_FAILED: ".length).split(", ")
+				.filter(path => /^\.agents\/rules\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(path));
+			return { code: 2, data: { overall: "FAIL", violations }, errors: [{
+				code, message: "Global managed rules do not match the release manifest or retirement set",
+				remediation: "Inspect the named relative rule paths, restore the expected global inventory, then replan.",
+			}], verification: "UNVERIFIED" };
+		}
+		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "UNSAFE_PROJECT",
+			"MISSING_PROFILE", "UNRECOGNIZED_PROFILE", "UNRECOGNIZED_PROFILE_CONFIG", "UNRECOGNIZED_DISABLED_RULES",
+			"INVALID_POLICY", "INVALID_PROFILE_SELECTION", "DISABLED_RULE_REFUSED", "FRESH_PLAN", "INVALID_PLAN",
+			"INSUFFICIENT_SPACE", "LOCK_BUSY"];
+		return refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
+			"Policy plan or apply refused without claiming a completed change",
+			"Inspect the global manifest, selected profile configs and disabled rules, then replan.");
+	}
+}
+
+registerCommandHandler("apply policy", policyCommand);
+
+async function repairCommand(request: ParsedCommand): Promise<CliResult> {
+	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run the compiled kit release with an absolute HOME; no repair was attempted.",
+		}], verification: "UNVERIFIED" };
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
+	const scope = request.flags.get("--scope");
+	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(),
+		...(typeof scope === "string" ? { scope } : {}) });
+	if (decision.status === "REFUSED") return { code: 2,
+		data: { overall: "UNVERIFIED", scope: decision.scope, action: "REFUSED" },
+		errors: [{ code: decision.refusal.code, message: "No bounded repair is authorized for this state",
+			remediation: decision.refusal.reason }], verification: "UNVERIFIED" };
+	const steps = decision.steps.map(({ action, path, profile }) => ({
+		action, path, ...(profile ? { profile } : {}),
+	}));
+	const data = { overall: "UNVERIFIED", scope: decision.scope, action: "PLAN",
+		changes: decision.changes, steps, receipt_id: null as string | null };
+	if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+	try {
+		const result = applyRepairPlan(decision, { confirmed: true });
+		return { code: 0, data: { ...data, action: result.status, receipt_id: result.receiptId },
+			verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message.split(":")[0] ?? "" : "";
+		if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code))
+			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "PARTIAL_APPLY", message: "Repair may have a durable pending receipt",
+				remediation: "Run omp-kit audit --json and reconcile its postimages before another repair; no rollback is implied.",
+			}], verification: "UNVERIFIED" };
+		const safe = ["FRESH_PLAN", "INVALID_PLAN", "UNSAFE_PATH", "STATE_UNSAFE", "LOCK_BUSY",
+			"RULE_COLLISION", "UNMANAGED_EXTENSION_COLLISION", "DISABLED_RULE_REFUSED"];
+		return refusal(safe.includes(code) ? code : "REPAIR_PLAN_FAILED",
+			"Selected repair refused without claiming completion",
+			"Inspect the named scope and private receipts, then run omp-kit repair --scope NAME --plan --json again.");
+	}
+}
+
+registerCommandHandler("repair", repairCommand);
+
+async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
+	const full = request.flags.has("--full");
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME.",
+		}], verification: "UNVERIFIED" };
+	const project = request.flags.get("--project");
+	if (typeof project === "string" && !isAbsolute(project))
+		return refusal("INVALID_PROJECT", "Project inspection requires an absolute path",
+			"Pass an absolute --project path; project code is never executed.");
+	try {
+		const input = { root: identity.release.root, executablePath: identity.release.executable,
+			home, ...(typeof project === "string" ? { project } : {}) };
+		const report = full ? await runFullTest(input) : await runFastTest(input);
+		return { code: report.exitCode, data: { overall: report.status === "FAIL" ? "FAIL" : "UNVERIFIED",
+			test: report }, verification: "UNVERIFIED" };
+	} catch {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: full ? "FULL_TEST_UNAVAILABLE" : "FAST_TEST_UNAVAILABLE",
+			message: "The selected matcher/live proof could not complete",
+			remediation: "Check the installed release and OMP native matcher; no effective profile was certified.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
+registerCommandHandler("test", fastTestCommand);
+
+
+async function updateCommand(request: ParsedCommand): Promise<CliResult> {
+	const scope = "kit";
+	const applying = request.flags.has("--apply");
+	const home = process.env.HOME, stateRoot = receiptStateRoot(), release = kitIdentity().release.root;
+	if (!home || !isAbsolute(home) || !stateRoot || !release)
+		return refusal("UPDATE_CONTEXT_UNAVAILABLE", "An installed kit and canonical absolute HOME/state root are required",
+			"Install a verified local kit archive, then set a canonical HOME and XDG_STATE_HOME.");
+	const version = request.flags.get("--version"), indexPath = request.flags.get("--index"), archivePath = request.flags.get("--archive");
+	if (typeof version !== "string" || typeof indexPath !== "string" || typeof archivePath !== "string" ||
+		![indexPath, archivePath].every(path => isAbsolute(path) && resolve(path) === path))
+		return refusal("LOCAL_SOURCE_REQUIRED", "Kit update requires an exact version and matching absolute local index/archive paths",
+			"Pass --version X.Y.Z --index ABSOLUTE_INDEX --archive ABSOLUTE_ARCHIVE; no public latest endpoint is assumed.");
+	if ((process.platform !== "darwin" && process.platform !== "linux") || (process.arch !== "arm64" && process.arch !== "x64"))
+		return refusal("UNSUPPORTED_PLATFORM", "No native kit archive target is available for this operating system or architecture",
+			"Use a supported macOS or GNU/Linux arm64/x64 target.");
+	const input: KitUpdateInput = { prefix: dirname(dirname(release)), stateRoot, home, platform: {
+		os: process.platform, arch: process.arch, libc: process.platform === "darwin" ? "none" : "gnu",
+	}, version, sourceTag: `v${version}`, indexPath, archivePath };
+	const plan = await planKitUpdate(input);
+	if (!("current" in plan))
+		return { code: plan.exitCode, data: { overall: "UNVERIFIED", scope, action: "REFUSED", reason: plan.reason },
+			verification: "UNVERIFIED" };
+	if (!applying)
+		return { code: 0, data: { overall: "UNVERIFIED", scope, action: "PLAN",
+			kit: { status: plan.status, start: plan.current.version, target: plan.release.version,
+				source: plan.provenance, asset_sha256: plan.release.asset.sha256 },
+		}, verification: "UNVERIFIED" };
+	try {
+		const outcome = await applyKitUpdate(plan);
+		return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
+			scope, action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
+			provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
+			postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },
+			errors: [{ code, message: "Previous kit/OMP update requires recovery",
+				remediation: "Inspect omp-kit audit and verify both component postimages before another update." }], verification: "UNVERIFIED" };
+		return refusal("KIT_UPDATE_REFUSED", "Kit version, archive, state or lock failed locked revalidation",
+			"Inspect the exact archive and audit receipt; no completed update is claimed.");
+	}
+}
+
+registerCommandHandler("update", updateCommand);
+
+async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
+	const { command, parent, flags } = request;
+	const path = `${parent ? `${parent.name} ` : ""}${command.name}`;
+	if (flags.has("--help")) return { code: 0, data: { text: command.name === "help" ? help() : help(command, parent) }, verification: "PERFORMED" };
+	if (command.name === "--info") {
+		const kit = kitIdentity();
+		return { code: 0, data: { ...kit, omp: ompIdentity(), dependencies: { bun: "embedded when compiled", omp: "optional for help; required for status/test" } }, verification: "UNVERIFIED" };
+	}
+	const handler = handlers.get(path);
+	if (handler) {
+		if (command.mutation && (flags.has("--apply") || command.name === "undo")) {
+			const accepted = await confirmMutation({
+				action: command.name === "undo" ? `${path} ${request.argument ?? ""}`.trim() : path,
+				explicit: true,
+				yes: flags.has("--yes"),
+				json: request.json,
+				robot: request.robot,
+				noColor: flags.has("--no-color"),
+			});
+			if (!accepted) return refusal("CONSENT_REQUIRED", `${path} was not confirmed; no mutation was attempted`, "Review the plan, then pass --yes or type CONFIRM at an interactive terminal.");
+		}
+		return handler(request);
+	}
+	if (command.name === "help") {
+		const words = request.argument?.split(" ") ?? [];
+		const top = words.length ? findCommand(words[0] ?? "") : undefined;
+		const topic = words.length === 2 ? findCommand(words[1] ?? "", top?.subcommands) : top;
+		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
+		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
+	}
+	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
+	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp"].includes(String(flags.get("--scope")))) {
+		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory or mcp", "Use omp-kit doctor --scope memory --profile NAME or doctor --scope mcp --profile NAME.");
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "lsp") return lspReadiness(request);
+	if (command.name === "doctor" && flags.get("--scope") === "project-loading") {
+		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope project-loading --project PATH.");
+		return projectTrustInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "memory") {
+		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "memory scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope memory --profile NAME.");
+		return memoryInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "mcp") {
+		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "MCP scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope mcp --profile NAME.");
+		return mcpInventory(request);
+	}
+	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
+		return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading", "Use omp-kit doctor --scope project-loading --project PATH or doctor --scope lsp --file PATH.");
+	}
+	if (parent?.name === "memory" && command.name === "audit") return privateMemoryAudit(request);
+	if (parent?.name === "lsp" && command.name === "setup") {
+		if (!flags.has("--plan")) return refusal("PLAN_REQUIRED", "lsp setup only supports an explicit read-only --plan", "Run omp-kit lsp setup --plan.");
+		return lspReadiness(request);
+	}
+	if (parent?.name === "examples") {
+		if (command.name === "mcp") return { code: 0, data: { text: mcpExample() }, verification: "UNVERIFIED" };
+		const kind = PROFILE_RECIPE_KINDS.find((entry) => entry === command.name);
+		if (!kind) return refusal("UNKNOWN_RECIPE", "Unknown profile recipe", "Run omp-kit help examples for supported recipes.");
+		const root = kitIdentity().release.root;
+		if (!root) return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "RECIPE_UNAVAILABLE", message: "Kit release root is unavailable",
+			remediation: "Run an installed omp-kit release with bundled versioned examples; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+		try {
+			return { code: 0, data: renderRecipe(kind, root), verification: "UNVERIFIED" };
+		} catch {
+			return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "RECIPE_UNAVAILABLE", message: "The requested versioned profile recipe is unavailable in this kit release",
+				remediation: "Reinstall a complete kit release; no profile was changed or activated.",
+			}], verification: "UNVERIFIED" };
+		}
+	}
+	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
+	if (command.name === "schema") return { code: 0, data: schema(version), verification: "PERFORMED" };
+	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
+	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
+	if (command.name === "examples") return { code: 0, data: { text: COMMANDS.map((item) => `${item.example}${isRunnable(item, item.name) ? "" : " # not yet available"}`).join("\n") }, verification: "PERFORMED" };
+	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
+	return refusal("HANDLER_UNAVAILABLE", `${path} is documented but its safe handler is not installed`, `Run omp-kit capabilities --json to see runnable commands; no ${command.mutation ? "mutation" : "probe"} was attempted.`);
+}
+
+export async function runCli(args: readonly string[] = process.argv.slice(2)): Promise<number> {
+	const parsed = parse(args);
+	const json = "request" in parsed ? parsed.request.json : parsed.json;
+	const version = kitIdentity().version;
+	let result: CliResult;
+	try {
+		result = "request" in parsed ? await dispatch(parsed.request, version) : parsed.failure;
+	} catch {
+		result = { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "HANDLER_FAILED", message: "Command failed without verified completion", remediation: "Inspect local diagnostics; no success or rollback is implied." }], verification: "UNVERIFIED" };
+	}
+	const rendered = renderOutput(result, { toolVersion: version, schemaVersion: SCHEMA_VERSION, json });
+	if (rendered.stdout) process.stdout.write(rendered.stdout);
+	if (rendered.stderr) process.stderr.write(rendered.stderr);
+	return rendered.exitCode;
+}
+
+if (import.meta.main) {
+	runCli().then((code) => { process.exitCode = code; }, (error: unknown) => {
+		const message = error instanceof Error ? error.message : String(error);
+		process.stderr.write(`CLI_FAILURE: ${message}\n`);
+		process.exitCode = 1;
+	});
+}

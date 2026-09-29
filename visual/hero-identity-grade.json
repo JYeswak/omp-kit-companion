@@ -1,0 +1,38 @@
+{
+  "schema_version": "omp_kit_yuzu_hero_grade.v1",
+  "hero": "visual/hero.jpg",
+  "hero_sha256": "fc5ce6ad2f2d1bdd9517e5374706ab02a8a77f79284db73cdbb8b314fe0780ef",
+  "dimensions": { "width": 1672, "height": 941 },
+  "canonical_sha256": "52fb1b09922f9892e53e290279253e07eeb2a6452dc4464c10efbbfe9891f918",
+  "rubric": "yuzu_identity_grader.v1 visible-feature contract and 15% pHash + 15% HSV palette + 70% vision weights",
+  "threshold": 70,
+  "phash_distance": 32,
+  "phash_score": 0.0,
+  "palette_cosine": 0.9328,
+  "palette_score": 95.7,
+  "judges": [
+    {
+      "transport": "Codex ChatGPT OAuth",
+      "model": "gpt-5.6-luna",
+      "graded_at_utc": "2026-09-29T04:42:50.078400Z",
+      "vision_score": 95,
+      "vision_verdict": "pass",
+      "combined_score": 80.9,
+      "identity_pass": true,
+      "observation": "One right-leaning leaf, large glossy eyes, closed smile, cream henley, canvas apron and no readable text; stem appears green rather than distinctly brown."
+    },
+    {
+      "transport": "xAI API (independent provider)",
+      "model": "grok-4.7",
+      "graded_at_utc": "2026-09-29T04:42:52.879882Z",
+      "vision_score": 93,
+      "vision_verdict": "pass",
+      "combined_score": 79.5,
+      "identity_pass": true,
+      "observation": "Textured citrus head, glossy eyes and catchlights, one short stem and right-leaning leaf, cream henley, tan apron, warm CG render, no readable text."
+    }
+  ],
+  "independent_cross_provider_pass": true,
+  "original_gpt4o_mini_executed": false,
+  "note": "The original OpenAI gpt-4o-mini grader cannot run with the existing API key. Both named vision models applied its unchanged visible-feature contract and numeric weights to these exact JPEG pixels. Neither result is represented as a gpt-4o-mini grade."
+}
