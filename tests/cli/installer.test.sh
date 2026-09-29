@@ -123,7 +123,7 @@ python3 - "$WORK/switched-info.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['data']['version']=='1.2.4'
 PY
-python3 - "$WORK/assets" "$WORK/port" <<'PY' &
+python3 - "$WORK/assets" "$WORK/port" > "$WORK/server.log" 2>&1 <<'PY' &
 import functools,http.server,pathlib,sys
 handler=functools.partial(http.server.SimpleHTTPRequestHandler,directory=sys.argv[1])
 service=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
@@ -133,8 +133,12 @@ PY
 server=$!
 tries=0
 until [ -s "$WORK/port" ]; do
+  if ! kill -0 "$server" 2>/dev/null; then
+    cat "$WORK/server.log" >&2
+    printf 'fixture HTTP server exited before readiness\n' >&2; exit 1
+  fi
   tries=$((tries + 1))
-  [ "$tries" -lt 100 ] || { echo 'fixture HTTP server did not start' >&2; exit 1; }
+  [ "$tries" -lt 300 ] || { cat "$WORK/server.log" >&2; printf 'fixture HTTP server did not start within 30 seconds\n' >&2; exit 1; }
   sleep 0.1
 done
 port=$(cat "$WORK/port")
