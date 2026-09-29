@@ -41,7 +41,6 @@ jobs:
       - name: Check manifest and rule behavior
         run: sh scripts/ladder.sh
       - name: Check versioned installer against native archive
-        if: runner.os == 'Linux'
         env:
           TMPDIR: ${{ runner.temp }}
         run: sh tests/cli/installer.test.sh

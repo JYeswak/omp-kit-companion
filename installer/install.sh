@@ -59,11 +59,11 @@ case "$index" in
 esac
 if [ -z "$archive" ]; then
   [ -n "$work" ] || { echo 'installer: --offline ARCHIVE is required with a local index' >&2; exit 2; }
-  filename=$(python3 "$SCRIPT_DIR/install.py" inspect "$index" "$version" "$platform")
+  filename=$(PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/install.py" inspect "$index" "$version" "$platform")
   url=${source_url%/*}/$filename
   work=${work:?}
   archive="$work/$filename"
   curl --fail --location --silent --show-error --proto '=https,http' --proto-redir '=https,http' \
     --connect-timeout 10 --max-time 600 --max-filesize 268435456 --output "$archive" "$url"
 fi
-python3 "$SCRIPT_DIR/install.py" install "$index" "$version" "$platform" "$archive" "$prefix" "$dry_run"
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/install.py" install "$index" "$version" "$platform" "$archive" "$prefix" "$dry_run"

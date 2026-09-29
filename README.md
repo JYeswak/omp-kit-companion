@@ -30,10 +30,10 @@ These commands **do not apply rules or change profiles**. `--json` is output for
 
 ## Installation
 
-Start with an existing [OMP installation](https://github.com/can1357/oh-my-pi), Python 3, `git`, and `curl`. The first [omp-kit release](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.0) is pinned to `v0.1.0`: review its index and the appropriate native archive before installing. These commands clone the tagged source for the installer; the installer fetches only the selected platform archive from the same HTTPS release:
+Start with an existing [OMP installation](https://github.com/can1357/oh-my-pi), Python 3, `git`, and `curl`. The [omp-kit v0.1.1 release](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.1) is pinned below: review its index and the appropriate native archive before installing. These commands clone the tagged source for the installer; the installer fetches only the selected platform archive from the same HTTPS release:
 
 ```sh
-KIT_VERSION=0.1.0
+KIT_VERSION=0.1.1
 KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
 git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git
 cd omp-kit-companion
@@ -81,7 +81,7 @@ Use the receipt ID returned by apply or audit with `"$KIT" why RUN_ID --json`; `
 
 On a fresh HOME, the policy plan refuses until the global managed rules match the release manifest—do not bypass that preflight. An interrupted kit update is partial until rechecked; historical OMP/all receipts remain visible and no automatic OMP rollback is promised.
 
-`omp-kit update` still requires an explicit **newer** version and absolute **local** index and archive paths; it does not fetch an inferred latest release. When another reviewed version is available, download that version's `release-index.json` and matching platform archive from [Releases](https://github.com/JYeswak/omp-kit-companion/releases), verify their provenance, and set `KIT_INDEX_LOCAL` and `KIT_ARCHIVE` to those absolute paths. The current `v0.1.0` release has no newer public version to apply. OMP updates belong to your existing OMP installation method; this kit does not invoke UCA or install a scheduler:
+`omp-kit update` requires an explicit **newer** version and absolute **local** index and archive paths; it does not fetch an inferred latest release. To move an existing `v0.1.0` kit to `v0.1.1`, download `v0.1.1`'s `release-index.json` and matching platform archive from [Releases](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.1), verify their provenance, set `KIT_VERSION=0.1.1`, and set `KIT_INDEX_LOCAL` and `KIT_ARCHIVE` to the absolute downloaded paths. An already-current version reports `CURRENT`; that is a no-op, not proof of an upgrade. OMP updates belong to your existing OMP installation method; this kit does not invoke UCA or install a scheduler:
 
 ```sh
 "$KIT" update --plan --version "$KIT_VERSION" \
@@ -115,7 +115,7 @@ In the source checkout, edit `rules/*.md` alongside fire and nearby quiet cases 
 
 The case gate proves registration, whole-payload matches, and prefix behavior; only the isolated live suite checks blocking. OMP profile inspection can migrate settings, so read-only diagnostics do not call a potentially migratory path on the operator profile and label inaccessible effective settings `UNVERIFIED`. Project-local rules may override installed global rules. No CLI command installs OMP or enables policy, extensions, providers, or a model by implication. The source pack does not authenticate cited SHAs, counts, or audit rows; run acceptance commands yourself.
 
-This public source root has no inherited history from the original private checkout; the original repository stays private. Only native-certified archive targets appear in the versioned release index; check the [tagged release assets](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.0) and exact [hero grade](visual/hero-identity-grade.json), which discloses that the original gpt-4o-mini model could not run and names the independent substitute judge. No kit command proves your effective OMP profile safe. Never publish `reports/`, private receipts, tracker exports, or session logs. Refuted hypotheses and conditions for revisiting them are in [NEGATIVE_EVIDENCE.md](NEGATIVE_EVIDENCE.md).
+This public source root has no inherited history from the original private checkout; the original repository stays private. Only native-certified archive targets appear in the versioned release index; check the [tagged release assets](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.1) and exact [hero grade](visual/hero-identity-grade.json), which discloses that the original gpt-4o-mini model could not run and names the independent substitute judge. No kit command proves your effective OMP profile safe. Never publish `reports/`, private receipts, tracker exports, or session logs. Refuted hypotheses and conditions for revisiting them are in [NEGATIVE_EVIDENCE.md](NEGATIVE_EVIDENCE.md).
 
 Bug reports and proposals: [CONTRIBUTING.md](CONTRIBUTING.md). Sensitive reports: [SECURITY.md](SECURITY.md).
 

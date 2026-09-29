@@ -28,6 +28,11 @@ INSTALL="$ROOT/installer/install.sh"
 HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/prefix" --dry-run > "$WORK/dry.log"
 [ ! -e "$WORK/prefix/bin/omp-kit" ]
 [ ! -e "$WORK/prefix" ]
+python3 -B - "$WORK/home" <<'PY'
+from pathlib import Path
+import sys
+assert not list(Path(sys.argv[1]).iterdir()), "installer dry-run modified fresh HOME"
+PY
 if HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3-01 --prefix "$WORK/prefix" > "$WORK/invalid-version.log" 2>&1; then
   printf 'invalid numeric prerelease accepted\n' >&2; exit 1
 fi
@@ -133,6 +138,23 @@ until [ -s "$WORK/port" ]; do
   sleep 0.1
 done
 port=$(cat "$WORK/port")
+mkdir -m 700 "$WORK/online-home" "$WORK/assets/no-archive"
+cp "$WORK/assets/release-index.json" "$WORK/assets/no-archive/release-index.json"
+if HOME="$WORK/online-home" "$INSTALL" --index "http://127.0.0.1:$port/no-archive/release-index.json" --version 1.2.3 --prefix "$WORK/online-prefix" > "$WORK/failed-download.log" 2>&1; then
+  printf 'missing archive download accepted\n' >&2; exit 1
+fi
+python3 -B - "$WORK/online-home" <<'PY'
+from pathlib import Path
+import sys
+assert not list(Path(sys.argv[1]).iterdir()), "failed archive download modified fresh HOME"
+PY
+HOME="$WORK/online-home" "$INSTALL" --index "http://127.0.0.1:$port/release-index.json" --version 1.2.3 --prefix "$WORK/online-prefix" --dry-run > "$WORK/online-dry.log"
+python3 -B - "$WORK/online-home" <<'PY'
+from pathlib import Path
+import sys
+assert not list(Path(sys.argv[1]).iterdir()), "online dry-run modified fresh HOME"
+PY
+[ ! -e "$WORK/online-prefix" ]
 HOME="$WORK/home" "$INSTALL" --index "http://127.0.0.1:$port/release-index.json" --version 1.2.3 --prefix "$WORK/online-prefix" --no-color > "$WORK/online.log"
 (cd "$WORK" && "$WORK/online-prefix/bin/omp-kit" --info --json > "$WORK/online-info.json")
 python3 - "$WORK/online-info.json" <<'PY'
