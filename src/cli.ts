@@ -8,7 +8,8 @@ import { applyPolicyPlan, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair } from "./repair.ts";
 import { diagnose, health, type Finding } from "./diagnostics.ts";
-import { inspectLspReadiness, planLspSetup, type LspReadinessInput } from "./lsp-readiness.ts";
+import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
+import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
@@ -291,9 +292,9 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.has("--deep")) {
-		const report = await planDeepDoctor({ root: kitIdentity().release.root ?? "",
-			home: process.env.HOME ?? "", stateRoot: receiptStateRoot() ?? "",
-			scope: String(request.flags.get("--scope") ?? "effective_profile"), confirmed: request.flags.has("--yes") });
+		const scope = String(request.flags.get("--scope") ?? "effective_profile");
+		if (scope === "lsp") return deepLspDoctor(request);
+		const report = await planDeepDoctor({ root: kitIdentity().release.root ?? "", home: process.env.HOME ?? "", stateRoot: receiptStateRoot() ?? "", scope, confirmed: request.flags.has("--yes") });
 		return { code: 2, data: { overall: "UNVERIFIED", deep_probe: report }, errors: [{
 			code: report.refusal.code, message: report.refusal.reason,
 			remediation: "Use read-only omp-kit doctor --json; no migratory probe was run or backup created.",
@@ -417,6 +418,42 @@ function lspReadiness(request: ParsedCommand): CliResult {
 	return { code: 0, data: { overall: report.status, kit, omp, findings,
 		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
 		recommended_actions: actions, report }, commands: ["omp-kit lsp setup --plan --json"], verification: "UNVERIFIED" };
+}
+
+async function deepLspDoctor(request: ParsedCommand): Promise<CliResult> {
+	if (!request.flags.has("--yes")) return refusal("DEEP_CONSENT_REQUIRED", "Deep LSP probing requires explicit --yes consent.", "Rerun with --deep --yes only after reviewing the private-fixture probe scope.");
+	const project = request.flags.get("--project");
+	const file = request.flags.get("--file");
+	if (typeof project !== "string" || !isAbsolute(project)) return refusal("INVALID_PROJECT", "Deep LSP probing requires an explicit absolute --project path.", "Provide an existing project directory with --project ABSOLUTE_PATH.");
+	if (typeof file !== "string" || !isAbsolute(file)) return refusal("INVALID_FILE", "Deep LSP probing requires an explicit absolute --file path.", "Provide an in-project source file with --file ABSOLUTE_PATH.");
+	const staticResult = lspReadiness(request);
+	if (staticResult.code !== 0) return staticResult;
+	type StaticLspData = { report?: LspReadinessReport; kit?: Record<string, unknown>; omp?: { location?: unknown; [key: string]: unknown }; findings?: Finding[]; evidence?: Record<string, unknown> };
+	const staticData = staticResult.data as unknown as StaticLspData;
+	if (!staticData.report || !staticData.kit || !staticData.omp || typeof staticData.omp.location !== "string" ||
+		!Array.isArray(staticData.findings) || !staticData.evidence) {
+		return refusal("LSP_INVENTORY_UNAVAILABLE", "Static LSP inventory did not produce a validated OMP identity and report.", "Rerun omp-kit doctor --scope lsp --json; no deep probe was run.");
+	}
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home)) return refusal("INVENTORY_UNAVAILABLE", "An absolute HOME is required to snapshot the selected LSP profile inputs.", "Run the installed kit with an absolute HOME; no deep probe was run.");
+	const probe = await probeLspReadiness({ readiness: staticData.report, home, ompPath: staticData.omp.location,
+		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}) });
+	const passed = probe.status === "PASS";
+	const probeStatus: Finding["status"] = probe.status === "MISSING" || probe.status === "WRONG_MARKER" ? "DEGRADED" : "UNVERIFIED";
+	const findings = staticData.findings.map(finding => finding.component === "lsp" ? {
+		...finding, status: probeStatus,
+		reason: passed ? "OMP's real lsp tool passed its private synthetic TypeScript route; target project runtime remains unverified." : probe.reason,
+		recommended_action: passed ? "The target project's language-server runtime remains unverified; this probe exercised a private fixture." : probe.reason,
+	} : finding);
+	const data = { overall: health(findings), kit: staticData.kit, omp: staticData.omp, findings,
+		evidence: { ...staticData.evidence, lsp_probe: probe.status },
+		recommended_actions: passed ? ["The OMP LSP route passed in a synthetic fixture; target project runtime remains unverified."] : [probe.reason],
+		report: staticData.report, deep_probe: probe };
+	const code = passed ? 0 : probe.status === "MISSING" ? 3 : 2;
+	return { code, data,
+		...(passed ? {} : { errors: [{ code: "LSP_" + probe.status, message: probe.reason,
+			remediation: "Correct the reported preflight or runtime failure and rerun this explicitly consented probe; it does not execute workspace-configured commands." }] }),
+		verification: passed ? "PERFORMED" : "UNVERIFIED" };
 }
 
 function projectTrustInventory(request: ParsedCommand): CliResult {

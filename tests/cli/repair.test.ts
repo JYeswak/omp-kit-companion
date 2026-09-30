@@ -241,8 +241,7 @@ test("compiled named repair plans without consent, applies once, and undoes exac
 	expect(capabilities.code).toBe(0);
 	const repair = capabilities.envelope.data.commands.find((command: { name: string }) => command.name === "repair");
 	expect(repair.usage).toContain("--scope rules|policy|extensions");
-	const doctor = capabilities.envelope.data.commands.find((command: { name: string }) => command.name === "doctor");
-	expect(doctor.flags.some((flag: { name: string }) => flag.name === "--deep")).toBe(false);
+
 	const plan = run(["repair", "--scope", "rules", "--plan"]);
 	expect(plan.code).toBe(0);
 	expect(plan.envelope.data).toMatchObject({ action: "PLAN", scope: "rules", changes: 1, receipt_id: null });

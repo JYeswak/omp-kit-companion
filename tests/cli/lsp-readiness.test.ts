@@ -1,15 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, type LspReadinessReport } from "../../src/lsp-readiness.ts";
+import { probeLspReadiness } from "../../src/lsp-probe.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function fixture() {
-	mkdirSync(scratch, { recursive: true });
-	const root = mkdtempSync(join(scratch, "lsp-readiness-"));
+function fixture(base = scratch) {
+	mkdirSync(base, { recursive: true });
+	const root = mkdtempSync(join(base, "lsp-readiness-"));
 	fixtures.push(root);
 	const home = join(root, "home");
 	const project = join(root, "project");
@@ -149,4 +150,117 @@ test("extensionToLanguage grammar selects a custom server and dotted/undotted fi
 	writeFileSync(join(f.project, ".lsp.json"), JSON.stringify({ servers: { custom: { command: "custom-ls", extensionToLanguage: { xyz: "xyz" } } } }));
 	expect(server(f.inspect(f.project, join(f.project, "model.xyz")), "custom").eligible).toBe(true);
 	expect(basename(server(f.inspect(f.project, join(f.project, "model.xyz")), "custom").resolved_command!)).toBe("custom-ls");
+});
+
+
+
+test("deep LSP preflight distinguishes a missing server and a wrong root marker without launching it", async () => {
+	const missing = fixture();
+	writeFileSync(join(missing.project, "package.json"), "{}");
+	writeFileSync(join(missing.project, "index.ts"), "export const value = 1;\n");
+	missing.binary("node");
+	const missingProbe = await probeLspReadiness({ readiness: missing.inspect(), home: missing.home, ompPath: missing.ompPath, pathEnv: missing.bin });
+	expect(missingProbe.status).toBe("MISSING");
+	expect(existsSync(join(missing.root, "executed"))).toBe(false);
+
+	const wrongMarker = fixture();
+	wrongMarker.binary("node");
+	wrongMarker.binary("typescript-language-server");
+	writeFileSync(join(wrongMarker.project, "index.ts"), "export const value = 1;\n");
+	const markerProbe = await probeLspReadiness({ readiness: wrongMarker.inspect(), home: wrongMarker.home, ompPath: wrongMarker.ompPath, pathEnv: wrongMarker.bin });
+	expect(markerProbe.status).toBe("WRONG_MARKER");
+	expect(existsSync(join(wrongMarker.root, "executed"))).toBe(false);
+});
+
+test("deep LSP never launches a project-configured server command", async () => {
+	const f = fixture();
+	f.binary("node");
+	f.binary("typescript-language-server");
+	writeFileSync(join(f.project, "package.json"), "{}");
+	writeFileSync(join(f.project, "index.ts"), "export const value = 1;\n");
+	writeFileSync(join(f.project, ".lsp.json"), JSON.stringify({ servers: { "typescript-language-server": { command: "typescript-language-server", fileTypes: [".ts"], rootMarkers: ["package.json"] } } }));
+	const before = [tree(f.home), tree(f.project), tree(f.bin)];
+	const report = f.inspect(f.project, join(f.project, "index.ts"));
+	const result = await probeLspReadiness({ readiness: report, home: f.home, ompPath: f.ompPath, pathEnv: f.bin });
+	expect(result.status).toBe("UNVERIFIED");
+
+	expect(existsSync(join(f.root, "executed"))).toBe(false);
+	expect([tree(f.home), tree(f.project), tree(f.bin)]).toEqual(before);
+});
+
+test("deep LSP refuses a server from another checkout without executing it", async () => {
+	const f = fixture();
+	f.binary("typescript-language-server");
+	mkdirSync(join(f.root, ".git"));
+	writeFileSync(join(f.project, "package.json"), "{}");
+	writeFileSync(join(f.project, "index.ts"), "export const value = 1;\n");
+	const before = tree(f.root);
+	const result = await probeLspReadiness({ readiness: f.inspect(), home: f.home, ompPath: f.ompPath, pathEnv: f.bin });
+	expect(result.status).toBe("UNVERIFIED");
+	expect(existsSync(join(f.root, "executed"))).toBe(false);
+	expect(tree(f.root)).toEqual(before);
+});
+
+const installedOmp = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+const nativeLspTest = installedOmp && Bun.which("typescript-language-server") && Bun.which("node") && Bun.which("git") ? test : test.skip;
+nativeLspTest("one alternative root marker permits a real cold request and preserves absent alternatives", async () => {
+	if (!installedOmp) throw new Error("installed OMP required");
+	const f = fixture();
+	writeFileSync(join(f.project, "package.json"), "{}");
+	const file = join(f.project, "index.ts");
+	writeFileSync(file, "export const value = 1;\n");
+	mkdirSync(join(f.project, ".omp"));
+	writeFileSync(join(f.project, ".omp", "lsp.json"), JSON.stringify({ servers: { "typescript-native": { disabled: true } } }));
+	const before = tree(f.root);
+	const input = { home: f.home, project: f.project, file, ompPath: installedOmp, pathEnv: process.env.PATH };
+	const report = await probeLspReadiness({ ...input, readiness: inspectLspReadiness(input), timeoutMs: 30_000 });
+	expect(report.status).toBe("PASS");
+	for (const marker of ["jsconfig.json", "tsconfig.json"]) {
+		expect(report.protected_input_snapshots?.before[join(f.project, marker)]).toEqual({ kind: "absent" });
+		expect(report.protected_input_snapshots?.after[join(f.project, marker)]).toEqual({ kind: "absent" });
+	}
+	const references = report.calls.find(call => call.action === "references")?.result;
+	expect(references).toContain("src/uses.ts:1:10");
+	expect(references).toContain("src/uses.ts:2:28");
+	expect(report.mux_stop_rc).toBe(0);
+	expect(report.checks.lsp_mux_stopped).toBe(true);
+	expect(report.temporary_workspace_removed).toBe(true);
+	expect(tree(f.root)).toEqual(before);
+}, 60_000);
+
+nativeLspTest("a non-Git parent workspace dependency binary is never launched", async () => {
+	if (!installedOmp) throw new Error("installed OMP required");
+	let parent = "/tmp";
+	if (process.platform === "darwin") {
+		const located = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+		expect(located.exitCode).toBe(0);
+		parent = located.stdout.toString().trim();
+	}
+	const f = fixture(realpathSync(parent));
+	for (let directory = f.root;;) {
+		expect(existsSync(join(directory, ".git"))).toBe(false);
+		const ancestor = dirname(directory);
+		if (ancestor === directory) break;
+		directory = ancestor;
+	}
+	const dependencyBin = join(f.root, "node_modules", ".bin");
+	mkdirSync(dependencyBin, { recursive: true });
+	const marker = join(f.root, "workspace-server-started");
+	const executable = join(dependencyBin, "typescript-language-server");
+	writeFileSync(executable, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "started"); process.exit(23);\n`, { mode: 0o700 });
+	writeFileSync(join(f.project, "package.json"), "{}");
+	const file = join(f.project, "index.ts");
+	writeFileSync(file, "export const value = 1;\n");
+	mkdirSync(join(f.project, ".omp"));
+	writeFileSync(join(f.project, ".omp", "lsp.json"), JSON.stringify({ servers: { "typescript-native": { disabled: true } } }));
+	const input = { home: f.home, project: f.project, file, ompPath: installedOmp, pathEnv: dependencyBin + delimiter + process.env.PATH };
+	const readiness = inspectLspReadiness(input);
+	expect(server(readiness, "typescript-language-server").eligible).toBe(true);
+	expect(server(readiness, "typescript-language-server").resolved_command).toBe(executable);
+	const before = tree(f.root);
+	const report = await probeLspReadiness({ ...input, readiness });
+	expect(report.status).toBe("UNVERIFIED");
+	expect(report.omp_rc).toBeNull();
+	expect(existsSync(marker)).toBe(false);
+	expect(tree(f.root)).toEqual(before);
 });

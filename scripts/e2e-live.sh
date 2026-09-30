@@ -66,6 +66,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 mkdir -p "$H/.agents/rules" "$H/.omp/agent" "$H/.config" "$H/.cache" "$H/.local/share" "$H/.local/state" "$H/.bun" "$T/bin" "$T/tmp"
+KIT_PATH=
+if [ "$MODE" = full ]; then
+  if [ -x "$HERE/bin/omp-kit" ]; then
+    KIT_STABLE=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)/bin/omp-kit
+    [ -x "$KIT_STABLE" ] || { KEEP_WORK=1; echo "installed omp-kit stable executable is missing" >&2; exit 2; }
+  else
+    case "$(/usr/bin/uname -s)-$(/usr/bin/uname -m)" in
+      Darwin-arm64) KIT_PLATFORM=darwin-arm64-none ;;
+      Darwin-x86_64) KIT_PLATFORM=darwin-x64-none ;;
+      Linux-aarch64) KIT_PLATFORM=linux-arm64-gnu ;;
+      Linux-x86_64) KIT_PLATFORM=linux-x64-gnu ;;
+      *) KEEP_WORK=1; echo "no native omp-kit candidate for this host" >&2; exit 2 ;;
+    esac
+    KIT_VERSION=0.0.0-live-local
+    KIT_PREFIX="$WORK_ROOT/kit-prefix"
+    KIT_RELEASE="$KIT_PREFIX/releases/v$KIT_VERSION"
+    mkdir -p "$KIT_RELEASE" "$KIT_PREFIX/bin"
+    sh "$HERE/scripts/package-release.sh" --version "$KIT_VERSION" --platform "$KIT_PLATFORM" --out "$WORK_ROOT" || { package_rc=$?; KEEP_WORK=1; echo "live candidate package producer_rc=$package_rc" >&2; exit "$package_rc"; }
+    tar -xf "$WORK_ROOT/omp-kit-v$KIT_VERSION-$KIT_PLATFORM.tar" -C "$KIT_RELEASE" || { tar_rc=$?; KEEP_WORK=1; echo "live candidate extract producer_rc=$tar_rc" >&2; exit "$tar_rc"; }
+    ln -s "../releases/v$KIT_VERSION/bin/omp-kit" "$KIT_PREFIX/bin/omp-kit"
+    KIT_STABLE="$KIT_PREFIX/bin/omp-kit"
+  fi
+  KIT_PATH="$(dirname "$KIT_STABLE"):"
+fi
 cp "$HERE"/rules/*.md "$H/.agents/rules/"
 if [ "$MODE" = plant ]; then
   "$OMP_KIT_BUN" "$LIB" plant "$H/.agents/rules/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
@@ -86,7 +110,7 @@ isolate() {
     XDG_CACHE_HOME="$H/.cache" \
     XDG_DATA_HOME="$H/.local/share" \
     XDG_STATE_HOME="$H/.local/state" \
-    TMPDIR="$T/tmp" BUN_INSTALL="$H/.bun" GIT_CONFIG_NOSYSTEM=1 PATH="$T/bin:$PATH"
+    TMPDIR="$T/tmp" BUN_INSTALL="$H/.bun" GIT_CONFIG_NOSYSTEM=1 PATH="$T/bin:$KIT_PATH$PATH"
 }
 
 echo "omp: $(isolate && "$OMP" --version 2>/dev/null) ($OMP)"

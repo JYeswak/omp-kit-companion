@@ -12,25 +12,110 @@
  *   text        checkDelta, accumulated.
  *
  * Usage:
- *   bun scripts/ttsr-harness.ts --gate [--rules DIR] [--cases FILE]
+ *   bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] [--rule-sha256 EXPECTED_SHA] [--timeout-ms N]
+ *   Bind an external selection with --rule-sha256; without it, output names observed bytes but cannot reject substitution.
+ *   Observation workers use a disposable HOME/XDG/tmp and preserve stderr; invoking Bun's own cache is caller-managed.
+ *   bun scripts/ttsr-harness.ts --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE]
  *   bun scripts/ttsr-harness.ts --selftest
  *   bun scripts/ttsr-harness.ts --cli-crosscheck [--jobs N]
  *   bun scripts/ttsr-harness.ts --corpus [--limit-files N] [--out reports/corpus-fire-rate.tsv]
  * Env: OMP_SRC (omp TypeScript source dir), OMP_BIN (omp executable, default `omp`).
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type LoadedRule, loadRuleFile, loadRules, OMP_SRC, type Rule } from "./rule-class.ts";
+import type { LoadedRule, Rule } from "./rule-class.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // The rule loader and this harness must read the same installed omp package.
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
+// A separate process is required: a pathological synchronous matcher can block JS timers.
+// The worker never calls a model or reads an operator profile; it receives the selected fixture.
+if (process.argv.includes("--observe") && !process.argv.includes("--observe-child")) {
+	const option = (flag: string): string => {
+		const index = process.argv.indexOf(flag);
+		return index < 0 ? "" : process.argv[index + 1] ?? "";
+	};
+	const rule = option("--rule");
+	const caseLine = Number(option("--line"));
+	const rawTimeout = option("--timeout-ms");
+	const timeoutMs = rawTimeout === "" ? 30_000 : Number(rawTimeout);
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+		console.log(JSON.stringify({ status: "UNAVAILABLE", rule, case_line: caseLine, reason: "INVALID_TIMEOUT", evaluator: "UNAVAILABLE" }));
+		process.exit(1);
+	}
+	// Importing OMP initializes its logger. Keep those writes, caches and profiles
+	// inside an owned worker directory, just as the packaged runtime does.
+	const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-kit-observe-"));
+	let exitCode = 1;
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		const env: Record<string, string> = {};
+		for (const key of ["PATH", "LANG", "LC_ALL", "CI", "NO_COLOR", "OMP_SRC"]) {
+			const value = process.env[key];
+			if (value !== undefined) env[key] = value;
+		}
+		for (const [key, directory] of [
+			["HOME", "home"], ["TMPDIR", "tmp"], ["XDG_CONFIG_HOME", "xdg-config"],
+			["XDG_CACHE_HOME", "xdg-cache"], ["XDG_DATA_HOME", "xdg-data"],
+			["XDG_STATE_HOME", "xdg-state"], ["BUN_INSTALL", "bun-install"],
+		] as const) {
+			const directoryPath = path.join(privateRoot, directory);
+			fs.mkdirSync(directoryPath);
+			env[key] = directoryPath;
+		}
+		env.TMP = env.TEMP = path.join(privateRoot, "tmp");
+		env.OMP_BIN = OMP_BIN;
+		env.BUN_BE_BUN = "1";
+		const worker = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2), "--observe-child"], {
+			env, stdout: "pipe", stderr: "pipe",
+		});
+		let timedOut = false;
+		timer = setTimeout(() => { timedOut = true; worker.kill("SIGKILL"); }, timeoutMs);
+		const [code, stdout, stderr] = await Promise.all([
+			worker.exited,
+			new Response(worker.stdout).text(),
+			new Response(worker.stderr).text(),
+		]);
+		if (stderr) process.stderr.write(stderr);
+		if (timedOut) {
+			console.log(JSON.stringify({ status: "UNAVAILABLE", rule, case_line: caseLine, reason: "EVALUATOR_TIMEOUT", evaluator: "UNAVAILABLE" }));
+		} else {
+			if (stdout) process.stdout.write(stdout);
+			if (code !== 0 && !stdout.trim()) {
+				console.log(JSON.stringify({ status: "UNAVAILABLE", rule, case_line: caseLine, reason: "MATCHER_CHILD_FAILED", evaluator: "UNAVAILABLE" }));
+			}
+			exitCode = code ?? 1;
+		}
+	} finally {
+		clearTimeout(timer);
+		fs.rmSync(privateRoot, { recursive: true, force: true });
+	}
+	process.exit(exitCode);
+}
 
-// OMP_SRC is chosen at run time (it follows whichever omp is installed), so these
-// specifiers cannot be static imports.
-const ttsrMod = await import(path.join(OMP_SRC, "export/ttsr.ts"));
-const ruleMod = await import(path.join(OMP_SRC, "capability/rule.ts"));
+let OMP_SRC!: string;
+let loadRuleFile!: (file: string) => LoadedRule;
+let loadRules!: (dir: string) => LoadedRule[];
+let ttsrMod!: Record<string, unknown>;
+let ruleMod!: Record<string, unknown>;
+try {
+	// OMP_SRC and its native modules are selected at runtime. An unavailable matcher cannot
+	// be reported as a quiet rule when the caller requested a structured witness.
+	const loader = await import("./rule-class.ts");
+	({ OMP_SRC, loadRuleFile, loadRules } = loader);
+	ttsrMod = await import(path.join(OMP_SRC, "export/ttsr.ts"));
+	ruleMod = await import(path.join(OMP_SRC, "capability/rule.ts"));
+} catch (error) {
+	if (!process.argv.includes("--observe")) throw error;
+	const value = (flag: string) => {
+		const index = process.argv.indexOf(flag);
+		return index < 0 ? "" : process.argv[index + 1] ?? "";
+	};
+	console.log(JSON.stringify({ status: "UNAVAILABLE", rule: value("--rule"), case_line: Number(value("--line")), reason: "MATCHER_IMPORT_FAILED", evaluator: "UNAVAILABLE", detail: String(error) }));
+	process.exit(1);
+}
 
 type Source = "text" | "thinking" | "tool";
 interface MatchContext {
@@ -227,9 +312,7 @@ async function g2Fires(rule: Rule, c: Case): Promise<boolean> {
 		return hit(m.checkSnapshot(wire, ctx), rule.name);
 	}
 	if (c.source === "tool") return hit(m.checkSnapshot(wire, ctx), rule.name) || hit(await m.checkAstSnapshot(wire, ctx), rule.name);
-	let last = false;
-	for (let i = 0; i < wire.length; i += G2_CHUNK) last = hit(m.checkDelta(wire.slice(i, i + G2_CHUNK), ctx), rule.name);
-	return last;
+	return hit(m.checkSnapshot(wire, ctx), rule.name);
 }
 
 /**
@@ -269,12 +352,23 @@ function ctxLabel(c: Case): string {
 interface GateReport {
 	failures: string[];
 	lines: string[];
-	counts: { rules: number; ttsrRules: number; cases: number; quietPrefixFires: number };
+	counts: { rules: number; ttsrRules: number; cases: number; quietCases: number; quietPrefixFires: number };
+	checks: {
+		registration: { total: number; passed: number };
+		coverage: { total: number; passed: number };
+		payload: { total: number; passed: number };
+		prefix: { total: number; passed: number; quietCases: number; quietPassed: number };
+	};
 }
 
 async function runGate(rulesDir: string, casesFile: string): Promise<GateReport> {
 	const lines: string[] = [];
 	const failures: string[] = [];
+	let registrationPassed = 0;
+	let coveragePassed = 0;
+	let payloadPassed = 0;
+	let prefixPassed = 0;
+	let quietPassed = 0;
 	const rules = loadRules(rulesDir);
 	const byName = new Map(rules.map(r => [r.name, r]));
 	if (rules.length === 0) failures.push(`G1 ${rulesDir}: no rules — an empty scan set is not a pass`);
@@ -283,6 +377,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	for (const lr of rules) {
 		const r = g1(lr);
 		lines.push(`${r.ok ? "PASS" : "FAIL"} G1 ${lr.name} [${lr.cls}] ${r.detail}`);
+		if (r.ok) registrationPassed++;
 		if (!r.ok) failures.push(`G1 ${lr.name}: ${r.detail}`);
 	}
 
@@ -301,6 +396,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		const nf = mine.filter(c => c.expect === "fire").length;
 		const nq = mine.filter(c => c.expect === "quiet").length;
 		const ok = nf > 0 && nq > 0;
+		if (ok) coveragePassed++;
 		lines.push(`${ok ? "PASS" : "FAIL"} coverage ${lr.name} [${lr.cls}] fire=${nf} quiet=${nq}`);
 		if (!ok) failures.push(`COVERAGE ${lr.name}: fire=${nf} quiet=${nq}`);
 	}
@@ -308,6 +404,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		if (!byName.has(c.rule)) failures.push(`CASES line ${c.line}: unknown rule ${c.rule}`);
 	}
 
+	const quietCases = cases.filter(c => c.expect === "quiet").length;
 	lines.push("== G2 wire + G3 prefix sweep");
 	let quietPrefixFires = 0;
 	for (const c of cases) {
@@ -331,6 +428,11 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 			g3note = fired.length > 0 ? `first fire at ${Math.min(fired[0], length)}/${length}` : "never fired while streaming";
 		}
 		const ok = g2ok && g3ok;
+		if (g2ok) payloadPassed++;
+		if (g3ok) {
+			prefixPassed++;
+			if (c.expect === "quiet") quietPassed++;
+		}
 		const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
 		lines.push(
 			`${ok ? "PASS" : "FAIL"} ${tag} | G2 ${g2 ? "fire" : "quiet"}${g2ok ? "" : " (WRONG)"} | G3 ${g3note} | ${show(c.snippet)}`,
@@ -345,7 +447,14 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 			rules: rules.length,
 			ttsrRules: rules.filter(r => r.cls !== "always").length,
 			cases: cases.length,
+			quietCases,
 			quietPrefixFires,
+		},
+		checks: {
+			registration: { total: rules.length, passed: registrationPassed },
+			coverage: { total: rules.filter(r => r.cls !== "always").length, passed: coveragePassed },
+			payload: { total: cases.length, passed: payloadPassed },
+			prefix: { total: cases.length, passed: prefixPassed, quietCases, quietPassed },
 		},
 	};
 }
@@ -358,6 +467,31 @@ function printGate(rep: GateReport, label: string): void {
 	);
 	for (const f of rep.failures) console.log(`RED ${f}`);
 	console.log(rep.failures.length === 0 ? "GATE: GREEN" : "GATE: RED");
+}
+function structuredGate(rep: GateReport) {
+	return {
+		schema_version: 1,
+		status: rep.failures.length === 0 ? "PASS" : "FAIL",
+		counts: {
+			rules: rep.counts.rules,
+			ttsr_rules: rep.counts.ttsrRules,
+			cases: rep.counts.cases,
+			quiet_cases: rep.counts.quietCases,
+			quiet_prefix_fires: rep.counts.quietPrefixFires,
+		},
+		checks: {
+			registration: rep.checks.registration,
+			coverage: rep.checks.coverage,
+			payload: rep.checks.payload,
+			prefix: {
+				total: rep.checks.prefix.total,
+				passed: rep.checks.prefix.passed,
+				quiet_cases: rep.checks.prefix.quietCases,
+				quiet_passed: rep.checks.prefix.quietPassed,
+			},
+		},
+		failures: rep.failures,
+	};
 }
 
 // ---------------------------------------------------------------- selftest
@@ -781,6 +915,112 @@ async function corpus(limitFiles: number, outFile: string): Promise<number> {
 	console.log(`corpus: wrote ${path.relative(KIT, outFile)} (${rows.length - 1} rows)`);
 	return 0;
 }
+type WitnessObservation =
+	| { status: "OK"; rule: string; case_line: number; registration: "REGISTERED"; whole: "fire" | "quiet"; prefix: { phase: "stream" | "final"; position: number; wire_length: number } | null; evaluator: "OK"; witness: Pick<Case, "source" | "tool" | "path" | "expect">; bindings: Record<string, string> }
+	| { status: "UNAVAILABLE"; rule: string; case_line: number; reason: string; evaluator: "UNAVAILABLE"; detail?: string };
+
+function sha256(file: string): string {
+	const hash = createHash("sha256");
+	const handle = fs.openSync(file, "r");
+	const buffer = Buffer.allocUnsafe(64 * 1024);
+	try {
+		for (;;) {
+			const bytes = fs.readSync(handle, buffer, 0, buffer.length, null);
+			if (bytes === 0) break;
+			hash.update(bytes === buffer.length ? buffer : buffer.subarray(0, bytes));
+		}
+	} finally {
+		fs.closeSync(handle);
+	}
+	return hash.digest("hex");
+}
+
+function witnessBindings(ruleFile: string, casesFile: string): Record<string, string> {
+	const matcher = path.join(OMP_SRC, "export/ttsr.ts");
+	const nativeEntry = Bun.resolveSync("@oh-my-pi/pi-natives", matcher);
+	const nativeRoot = path.resolve(path.dirname(nativeEntry), "..");
+	const platformManifest = Bun.resolveSync(
+		"@oh-my-pi/pi-natives-" + process.platform + "-" + process.arch + "/package.json",
+		matcher,
+	);
+	const platformRoot = path.dirname(platformManifest);
+	const addons = fs.readdirSync(platformRoot).filter(file => file.endsWith(".node")).sort();
+	if (addons.length === 0) throw new Error("native addon bytes are unavailable for binding");
+	const nativeDigest = createHash("sha256");
+	for (const file of [path.join(nativeRoot, "package.json"), path.join(nativeRoot, "native/loader-state.js"), platformManifest, ...addons.map(file => path.join(platformRoot, file))]) {
+		nativeDigest.update(path.basename(file)).update(fs.readFileSync(file));
+	}
+	const launcher = fs.realpathSync(OMP_BIN.includes("/") ? OMP_BIN : (Bun.which(OMP_BIN) ?? OMP_BIN));
+	return {
+		omp_launcher: launcher,
+		omp_launcher_sha256: sha256(launcher),
+		omp_package: path.resolve(OMP_SRC, ".."),
+		omp_package_sha256: sha256(path.resolve(OMP_SRC, "../package.json")),
+		omp_source: fs.realpathSync(OMP_SRC),
+		matcher_sha256: sha256(matcher),
+		omp_rule_parser_sha256: sha256(path.join(OMP_SRC, "discovery/helpers.ts")),
+		native_package: fs.realpathSync(nativeRoot),
+		native_sha256: nativeDigest.digest("hex"),
+		kit_root: KIT,
+		harness_runtime: fs.realpathSync(process.execPath),
+		harness_runtime_sha256: sha256(process.execPath),
+		kit_harness_sha256: sha256(import.meta.path),
+		policy_sha256: sha256(path.join(KIT, "policy/ttsr.json")),
+		rule_loader_sha256: sha256(path.join(KIT, "scripts/rule-class.ts")),
+		rule_sha256: sha256(ruleFile),
+		cases_sha256: sha256(casesFile),
+	};
+}
+
+async function observeWitness(rulesDir: string, casesFile: string, ruleName: string, caseLine: number, expectedRuleSha?: string): Promise<WitnessObservation> {
+	const unavailable = (reason: string, detail?: string): WitnessObservation => ({ status: "UNAVAILABLE", rule: ruleName, case_line: caseLine, reason, evaluator: "UNAVAILABLE", ...(detail ? { detail } : {}) });
+	if (!/^[a-z0-9][a-z0-9_-]*$/i.test(ruleName) || !Number.isSafeInteger(caseLine) || caseLine < 2) return unavailable("INVALID_SELECTION");
+	if (expectedRuleSha !== undefined && !/^[a-f0-9]{64}$/.test(expectedRuleSha)) return unavailable("INVALID_SELECTION");
+	let selected: Case;
+	try {
+		const parsed = loadCases(casesFile);
+		if (parsed.errors.length > 0) return unavailable("INVALID_CASES", parsed.errors.join(" | "));
+		const found = parsed.cases.find(c => c.line === caseLine);
+		if (!found || found.rule !== ruleName) return unavailable("SELECTED_CASE_NOT_FOUND");
+		selected = found;
+	} catch (error) {
+		return unavailable("CASE_FILE_UNAVAILABLE", String(error));
+	}
+	try {
+		const pathLauncher = Bun.which("omp");
+		const configured = fs.realpathSync(OMP_BIN.includes("/") ? OMP_BIN : (Bun.which(OMP_BIN) ?? OMP_BIN));
+		const selectedLauncher = pathLauncher ? fs.realpathSync(pathLauncher) : null;
+		const packageRoot = fs.realpathSync(path.resolve(OMP_SRC, ".."));
+		const withinPackage = path.relative(packageRoot, configured);
+		if (!selectedLauncher || configured !== selectedLauncher || withinPackage === ".." || withinPackage.startsWith(".." + path.sep) || path.isAbsolute(withinPackage)) {
+			return unavailable("OMP_IDENTITY_MISMATCH");
+		}
+	} catch (error) {
+		return unavailable("OMP_IDENTITY_MISMATCH", String(error));
+	}
+	const ruleFile = path.join(rulesDir, `${ruleName}.md`);
+	if (!fs.existsSync(ruleFile)) return unavailable("SELECTED_RULE_NOT_FOUND");
+	try {
+		if (expectedRuleSha && sha256(ruleFile) !== expectedRuleSha) return unavailable("BUNDLED_SUBSTITUTION");
+		const lr = loadRuleFile(ruleFile);
+		if (lr.rule.question?.trim()) return unavailable("JUDGE_REQUIRED");
+		const validity = g1(lr);
+		if (!validity.ok) return unavailable("INVALID_RULE", validity.detail);
+		if (lr.cls === "always" || !new TtsrManager(SETTINGS).addRule(lr.rule)) return unavailable("RULE_NOT_REGISTERED");
+		const whole = await g2Fires(lr.rule, selected);
+		const { fired, length } = await g3Fires(lr.rule, selected);
+		const first = fired[0];
+		return {
+			status: "OK", rule: lr.name, case_line: selected.line, registration: "REGISTERED",
+			whole: whole ? "fire" : "quiet",
+			prefix: first === undefined ? null : { phase: first > length ? "final" : "stream", position: first, wire_length: length },
+			evaluator: "OK", witness: { source: selected.source, tool: selected.tool, path: selected.path, expect: selected.expect }, bindings: witnessBindings(ruleFile, casesFile),
+		};
+	} catch (error) {
+		return unavailable("EVALUATOR_FAILED", String(error));
+	}
+}
+
 
 // ---------------------------------------------------------------- main
 
@@ -791,9 +1031,19 @@ function flagValue(name: string): string | undefined {
 	return eq?.slice(name.length + 1);
 }
 
-const mode = process.argv.find(a => ["--gate", "--selftest", "--cli-crosscheck", "--corpus"].includes(a));
+const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus"].includes(a));
 let code: number;
 switch (mode) {
+	case "--observe": {
+		const observation = await observeWitness(
+			path.resolve(flagValue("--rules") ?? path.join(KIT, "rules")),
+			path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv")),
+			flagValue("--rule") ?? "", Number(flagValue("--line") ?? NaN), flagValue("--rule-sha256"),
+		);
+		console.log(JSON.stringify(observation));
+		code = observation.status === "OK" ? 0 : 1;
+		break;
+	}
 	case "--gate": {
 		// --rules/--cases grade another rule root (e.g. the installed ~/.agents/rules)
 		// against the kit's cases, read-only.
@@ -801,6 +1051,14 @@ switch (mode) {
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
 		const rep = await runGate(rulesDir, casesFile);
 		printGate(rep, `${path.relative(KIT, rulesDir) || "."} + ${path.relative(KIT, casesFile)}`);
+		code = rep.failures.length === 0 ? 0 : 1;
+		break;
+	}
+	case "--gate-json": {
+		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
+		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
+		const rep = await runGate(rulesDir, casesFile);
+		console.log(JSON.stringify(structuredGate(rep)));
 		code = rep.failures.length === 0 ? 0 : 1;
 		break;
 	}
@@ -817,7 +1075,7 @@ switch (mode) {
 		);
 		break;
 	default:
-		console.error("usage: bun scripts/ttsr-harness.ts --gate | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE]");
+		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE]");
 		code = 2;
 }
 process.exit(code);

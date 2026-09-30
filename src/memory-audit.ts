@@ -36,27 +36,38 @@ export interface MemoryAuditReport {
 }
 
 type CredentialCategory = "provider_token" | "bearer_token" | "private_key" | "password_assignment" | "credential_url";
-const OMP_VERSION = "18.4.2";
-const PINNED_FILES = [
-	// Inspected installed @oh-my-pi/pi-coding-agent and @oh-my-pi/pi-mnemopi 18.4.2 source.
-	// config.ts:69-78 sets the default dbPath; state.ts:962-967 maps other banks;
-	// banks.ts:51-67 enumerates default plus banks/<name>/mnemopi.db;
-	// schema.ts:24-92 defines working_memory and episodic_memory (content TEXT NOT NULL);
-	// db.ts:79-99 defaults to readwrite/create and WAL: NEVER import its opener.
-	["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
-	["agent", "src/mnemopi/state.ts", "5977f6855b7cbca1d68dda1328d5554b63f7581b0778b3f533e6a394e81ab3e4"],
-	["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
-	["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
-	["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
-	// Lazy/optional producer tables in these files are *not* scanned. They
-	// remain outside the exact two-column denominator even on a clean result.
-	["mnemopi", "src/core/episodic-graph.ts", "1148ffd68c02296b862660fa1ebed8a3bf7e262fd329b40682b493366f09621d"],
-	["mnemopi", "src/core/query-cache.ts", "6c9968cfd5125834e5c99b76b2557abb9a4176ef5ebc133a3cbc35617e022b58"],
-	["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
-	["mnemopi", "src/core/veracity-consolidation.ts", "eade612e425dad988aa7f3d0dd7139d75a1691ceb392621196b68b4d14f6afaf"],
-	["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
-	["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
-] as const;
+type PackageName = "agent" | "mnemopi";
+type SourcePin = readonly [PackageName, string, string];
+const PINNED_FILES_BY_VERSION: Record<string, readonly SourcePin[]> = {
+	"18.4.2": [
+		// Inspected @oh-my-pi/pi-coding-agent and @oh-my-pi/pi-mnemopi 18.4.2.
+		["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
+		["agent", "src/mnemopi/state.ts", "5977f6855b7cbca1d68dda1328d5554b63f7581b0778b3f533e6a394e81ab3e4"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
+		["mnemopi", "src/core/episodic-graph.ts", "1148ffd68c02296b862660fa1ebed8a3bf7e262fd329b40682b493366f09621d"],
+		["mnemopi", "src/core/query-cache.ts", "6c9968cfd5125834e5c99b76b2557abb9a4176ef5ebc133a3cbc35617e022b58"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "eade612e425dad988aa7f3d0dd7139d75a1691ceb392621196b68b4d14f6afaf"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
+	"18.4.4": [
+		// Inspected Studio @oh-my-pi/pi-coding-agent and @oh-my-pi/pi-mnemopi 18.4.4.
+		["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
+		["agent", "src/mnemopi/state.ts", "bcfae4f87015f8dd0cc6ba5c15a0cff7099e17fcabdc6c01df820a3d7f6dc7c7"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
+		["mnemopi", "src/core/episodic-graph.ts", "d7d3df0530b059e85505a5d380cdfbaaaa3b5b97af7e15b2ae0d85baf0994418"],
+		["mnemopi", "src/core/query-cache.ts", "ea0044afbe49833c50e2e04e3f362276a37fb35361550262e243969189bb86dc"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "6aad4bc4a847879a612a34a3f7768326a873c979b2d0ad5616c2d61aca49e088"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
+};
 const CONTENT_FIELDS = ["working_memory.content", "episodic_memory.content"] as const;
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0");
 const NOFOLLOW = constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -123,22 +134,24 @@ function validateRoots(home: string, project: string, storeRoot: string): void {
 		safeDirectory(path);
 	}
 }
-function sourcePinned(ompPath: string): boolean {
+function sourceVersion(ompPath: string): string | null {
 	try {
-		if (!isAbsolute(ompPath)) return false;
+		if (!isAbsolute(ompPath)) return null;
 		const launcher = realpathSync(ompPath);
 		const agent = dirname(dirname(launcher));
 		const mnemopi = join(dirname(agent), "pi-mnemopi");
 		const manifest = JSON.parse(safeFile(join(agent, "package.json")).toString("utf8"));
 		const engine = JSON.parse(safeFile(join(mnemopi, "package.json")).toString("utf8"));
-		if (manifest.name !== "@oh-my-pi/pi-coding-agent" || manifest.version !== OMP_VERSION ||
-			engine.name !== "@oh-my-pi/pi-mnemopi" || engine.version !== OMP_VERSION ||
-			!lstatSync(launcher).isFile()) return false;
-		return PINNED_FILES.every(([pkg, source, sha]) => {
+		const pins = PINNED_FILES_BY_VERSION[manifest.version];
+		if (manifest.name !== "@oh-my-pi/pi-coding-agent" || !pins ||
+			engine.name !== "@oh-my-pi/pi-mnemopi" || engine.version !== manifest.version ||
+			!lstatSync(launcher).isFile()) return null;
+		if (!pins.every(([pkg, source, sha]) => {
 			const bytes = safeFile(join(pkg === "agent" ? agent : mnemopi, source));
 			return createHash("sha256").update(bytes).digest("hex") === sha;
-		});
-	} catch { return false; }
+		})) return null;
+		return manifest.version;
+	} catch { return null; }
 }
 function stores(root: string): { paths: string[]; banks: string[] } {
 	const paths = [join(root, "mnemopi.db")], banks = ["default"];
@@ -210,10 +223,11 @@ function requireNoSidecars(paths: readonly string[]): void {
  * A no-match result is NOT an all-store, all-field, or universal secret-freedom certificate. */
 export async function auditMemoryAtRest(input: MemoryAuditInput): Promise<MemoryAuditReport> {
 	if (input.consent !== "AUDIT_PRIVATE_MEMORY") return denied("CONSENT_REQUIRED", null);
-	if (!sourcePinned(input.ompPath)) return denied("UNSUPPORTED_SOURCE", null);
-	const version = OMP_VERSION;
+	const version = sourceVersion(input.ompPath);
+	if (!version) return denied("UNSUPPORTED_SOURCE", null);
 	try { validateRoots(input.home, input.project, input.storeRoot); }
 	catch { return denied("UNSAFE_STORE", version); }
+	// Keep the readiness helper's independent redactor trust gate; 18.4.4 stays UNVERIFIED there until separately pinned.
 	let redactor: MemoryRedactorReport | undefined;
 	try {
 		redactor = (await inspectMemoryReadiness({ home: input.home, project: input.project, ompPath: input.ompPath })).redactor;

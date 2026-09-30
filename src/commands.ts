@@ -65,7 +65,26 @@ const lspReportData = { type: "object", required: ["status", "cwd", "file", "fil
 		runtime: { enum: ["NOT_PROBED"] }, reason: { type: "string" }, recommended_action: { type: "string" },
 	} } }, runtime: { enum: ["NOT_PROBED"] },
 } };
-const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData } };
+const deepDoctorData = { type: "object", required: ["status", "scope", "refusal"], properties: {
+	status: { enum: ["UNVERIFIED"] }, scope: { type: "string" },
+	refusal: { type: "object", required: ["code", "reason"], properties: { code: { type: "string" }, reason: { type: "string" } } },
+} };
+const lspProbeData = { type: "object", required: ["status", "scope", "requested_project", "requested_file", "selected_server", "selected_command", "reason", "checks", "calls", "omp_rc", "timed_out", "timeout_observation", "fixture_git_init_rc", "protected_input_snapshots", "profile_template_unchanged", "profile_template_snapshots", "fixture_project_unchanged", "fixture_project_snapshots", "runtime_home_omp_inventory", "runtime_state_outputs", "mux_stop_rc", "temporary_workspace_removed"], properties: {
+	status: { enum: ["PASS", "MISSING", "IMMEDIATE_EXIT", "WRONG_MARKER", "INCOMPLETE", "TIMEOUT", "UNVERIFIED"] },
+	scope: { enum: ["OMP_LSP_TOOL_ROUTE"] }, requested_project: { type: "string" }, requested_file: { type: ["string", "null"] },
+	selected_server: { type: ["string", "null"] }, selected_command: { type: ["string", "null"] }, reason: { type: "string" }, checks: { type: "object" },
+	calls: { type: "array", items: { type: "object", required: ["action", "result"], properties: {
+		action: { type: "string" }, file: { type: "string" }, line: { type: "number" }, symbol: { type: "string" }, query: { type: "string" }, elapsed_ms: { type: "number" }, result: { type: "string" }, result_truncated: { type: "boolean" },
+	} } }, omp_rc: { type: ["number", "null"] }, timed_out: { type: "boolean" },
+	timeout_observation: { type: ["object", "null"], properties: { source: { enum: ["OMP_PROCESS_DEADLINE", "LSP_TOOL_RESULT"] }, elapsed_scope: { enum: ["whole_probe", "lsp_tool_call"] }, elapsed_ms: { type: "number" }, deadline_ms: { type: "number" }, tool_result: { type: ["string", "null"] } } },
+	fixture_git_init_rc: { type: ["number", "null"] },
+	protected_input_snapshots: { type: ["object", "null"], properties: { before: { type: "object" }, after: { type: "object" }, unchanged: { type: "boolean" } } },
+	profile_template_unchanged: { type: ["boolean", "null"] }, profile_template_snapshots: { type: ["object", "null"], properties: { before: { type: "object" }, after: { type: "object" }, unchanged: { type: "boolean" } } },
+	fixture_project_unchanged: { type: ["boolean", "null"] }, fixture_project_snapshots: { type: ["object", "null"], properties: { before: { type: "object" }, after: { type: "object" }, unchanged: { type: "boolean" } } },
+	runtime_home_omp_inventory: { type: "array", items: { type: "string" } }, runtime_state_outputs: { type: "array", items: { type: "string" } },
+	mux_stop_rc: { type: ["number", "null"] }, temporary_workspace_removed: { type: "boolean" },
+} };
+const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
 	instructions: { type: "array", items: { type: "object", required: ["server", "status", "command", "note"], properties: {
@@ -130,8 +149,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--project", value: "PATH", description: "LSP or project-loading: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory or MCP: inspect an on-disk profile, not effective runtime activation" },
-		{ name: "--deep", available: false, description: "Request potentially migratory probe with guarded backup" },
-		{ name: "--yes", available: false, description: "Consent to deep probe; not implied by --robot" },
+		{ name: "--deep", available: true, description: "With --scope lsp, probe the built-in TypeScript route in a private fixture; other deep scopes remain unavailable" },
+		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
 	], example: "omp-kit doctor --scope lsp --json", runnable: true, dataSchema: doctorData },
 	{ name: "health", description: "Strict monitoring status", usage: "health", flags: [], example: "omp-kit health --json", runnable: true, dataSchema: statusData },
 	{ name: "lsp", description: "Inspect installed OMP language-server readiness without starting servers", usage: "lsp setup --plan", flags: [], subcommands: [
