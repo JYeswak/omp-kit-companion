@@ -139,7 +139,16 @@ function sourceVersion(ompPath: string): string | null {
 		if (!isAbsolute(ompPath)) return null;
 		const launcher = realpathSync(ompPath);
 		const agent = dirname(dirname(launcher));
-		const mnemopi = join(dirname(agent), "pi-mnemopi");
+		let dependencyBase = agent;
+		let mnemopi: string | undefined;
+		for (;;) {
+			const candidate = join(dependencyBase, "node_modules", "@oh-my-pi", "pi-mnemopi");
+			try { safeFile(join(candidate, "package.json")); mnemopi = realpathSync(candidate); break; }
+			catch (error) { if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error; }
+			const parent = dirname(dependencyBase);
+			if (parent === dependencyBase) return null;
+			dependencyBase = parent;
+		}
 		const manifest = JSON.parse(safeFile(join(agent, "package.json")).toString("utf8"));
 		const engine = JSON.parse(safeFile(join(mnemopi, "package.json")).toString("utf8"));
 		const pins = PINNED_FILES_BY_VERSION[manifest.version];

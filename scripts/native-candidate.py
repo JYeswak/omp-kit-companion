@@ -601,7 +601,11 @@ process.stdin.on("data", chunk => {
             if not omp_launcher or not bun:
                 raise ValueError("pinned OMP or Bun is unavailable for the synthetic memory audit")
             agent_root = Path(omp_launcher).resolve().parent.parent
-            mnemopi_root = agent_root.parent / "pi-mnemopi"
+            mnemopi_root = next((base / "node_modules" / "@oh-my-pi" / "pi-mnemopi"
+                                 for base in (agent_root, *agent_root.parents)
+                                 if (base / "node_modules" / "@oh-my-pi" / "pi-mnemopi" / "package.json").is_file()), None)
+            if mnemopi_root is None:
+                raise ValueError("pinned Mnemopi dependency is unavailable from the installed OMP package")
             schema = mnemopi_root / "src" / "core" / "beam" / "schema.ts"
             agent_metadata = load(agent_root / "package.json")
             mnemopi_metadata = load(mnemopi_root / "package.json")
