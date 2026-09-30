@@ -355,6 +355,8 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 	if (inside(project, tsls) || tsls !== pathServer) return result("UNVERIFIED", "The selected server does not resolve to the non-project PATH executable; no workspace command was run.", readiness, server);
 	const node = safePath("node", pathEnv, project);
 	if (!node) return result("MISSING", "Node.js required by typescript-language-server is absent from the non-project PATH.", readiness, server);
+	const bun = safePath("bun", pathEnv, project);
+	if (!bun) return result("MISSING", "Bun required by the installed OMP launcher is absent from the non-project PATH.", readiness, server);
 
 	let omp: string;
 	let defaultsPath: string;
@@ -527,7 +529,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			chmodSync(join(runtimeProfile, name), 0o600);
 		}
 
-		const pathParts = [dirname(node), dirname(tsls), dirname(gitBin), dirname(omp), dirname(realpathSync(process.execPath)), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+		const pathParts = [dirname(node), dirname(bun), dirname(tsls), dirname(gitBin), dirname(omp), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 		const safePathParts = [...new Set(pathParts.filter(directory => isAbsolute(directory) && !inside(project, resolve(directory)) && !isWorkspaceExecutablePath(join(directory, ".omp-path-check"))))];
 		const privateEnv: Record<string, string> = {
 			HOME: home, PATH: safePathParts.join(delimiter), TMPDIR: temp, TMP: temp, TEMP: temp,
