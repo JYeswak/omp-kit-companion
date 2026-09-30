@@ -11,7 +11,7 @@ export interface BundledRunResult {
 const CHILD_ENV_KEYS = ["CI", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER"] as const;
 const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"] as const;
 
-function runtimeTempRoot(): string {
+export function runtimeTempRoot(): string {
 	if (process.platform === "darwin") {
 		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {
 			stdout: "pipe",

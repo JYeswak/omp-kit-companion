@@ -12,7 +12,8 @@ export type PresentationResult = {
 
 export type PresentationOptions = { toolVersion: string; schemaVersion: string; json: boolean };
 
-function compare(left: string, right: string): number {
+/** Locale-independent ordering for serialized facts and authored witness identifiers. */
+export function compare(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
 }
 

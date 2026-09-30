@@ -34,6 +34,15 @@ const schemaData: DataSchema = { ...grammarData, required: [...grammarData.requi
 export const REFUSAL_DATA_SCHEMA: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["NOT_RUN", "UNVERIFIED"] },
 } };
+const testData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN"] },
+	test: { type: "object", required: ["status"], properties: {
+		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
+		scope: { enum: ["EXTERNAL_G1_G3"] },
+		counts: { type: "object" }, proofs: { type: "object" }, observations: { type: "array" }, failures: { type: "array" },
+	} },
+} };
+
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
 	overall: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL"] },
 	kit: { type: "object", required: ["version", "release", "data_paths", "platform"], properties: {
@@ -142,6 +151,13 @@ const repairData: DataSchema = { type: "object", required: ["overall", "action",
 	} } }, receipt_id: { type: ["string", "null"] },
 } };
 
+const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
+	overall: { enum: ["UNVERIFIED", "CONFLICTS", "DELTA", "NO_DELTA_IN_EXERCISED_WITNESSES"] },
+	status: { enum: ["COMPLETE", "UNAVAILABLE"] }, scope: { enum: ["MATCHER_PREFIX_ONLY"] },
+	reason: { type: ["string", "null"] }, review: { type: ["object", "null"] },
+	selectedPacksUnchanged: { type: "boolean" }, identityBracket: { type: ["object", "null"] }, producers: { type: "array" },
+} };
+
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
@@ -168,10 +184,22 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run pack conformance and optional isolated live checks", usage: "test [--project PATH] [--full]", flags: [
-		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code" },
-		{ name: "--full", description: "Request isolated live stage" },
-	], example: "omp-kit test --json", runnable: false },
+	{ name: "test", description: "Run bundled matcher conformance or external G1-G3 pack checks", usage: "test [--project PATH] [--full] | [--rules ABS_DIR --cases ABS_FILE]", flags: [
+		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
+		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
+		{ name: "--rules", value: "ABS_DIR", description: "Read-only external rules directory; run G1-G3 against its cases" },
+		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
+	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --json", runnable: false, dataSchema: testData },
+	{ name: "review", description: "Compare selected authored rules without applying them", usage: "review rules", flags: [], subcommands: [
+		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",
+			usage: "review rules --incumbent-rules ABS_DIR --incumbent-cases ABS_FILE --candidate-rules ABS_DIR --candidate-cases ABS_FILE", flags: [
+				{ name: "--incumbent-rules", value: "ABS_DIR", description: "Read-only incumbent rule directory" },
+				{ name: "--incumbent-cases", value: "ABS_FILE", description: "Incumbent authored TSV; its witnesses cannot be erased by the candidate" },
+				{ name: "--candidate-rules", value: "ABS_DIR", description: "Read-only candidate rule directory" },
+				{ name: "--candidate-cases", value: "ABS_FILE", description: "Candidate authored TSV in the existing seven-column format" },
+			], example: "omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json",
+			runnable: false, dataSchema: ruleReviewData },
+	], example: "omp-kit help review rules", runnable: true },
 	{ name: "update", description: "Preview or guardedly update the kit; OMP updates are managed externally", usage: "update [--plan|--apply] --version X.Y.Z --index PATH --archive PATH", flags: [
 		...planApply,
 		{ name: "--version", value: "X.Y.Z", description: "Exact kit version; never infer latest from an unverified source" },

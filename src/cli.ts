@@ -21,6 +21,8 @@ import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { runFullTest } from "./full-test-runner.ts";
 import { runFastTest } from "./test-runner.ts";
+import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
+import { runInstalledRuleReview } from "./rule-review-runner.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -847,9 +849,38 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 
 registerCommandHandler("repair", repairCommand);
 
+async function externalTestCommand(request: ParsedCommand): Promise<CliResult> {
+	const rules = request.flags.get("--rules"), cases = request.flags.get("--cases");
+	if (request.flags.has("--full")) return refusal("CONFLICTING_FLAGS", "--full cannot be combined with an external pack",
+		"Choose bundled --full mode or external --rules/--cases mode; external mode never runs project code.");
+	if (request.flags.has("--project")) return refusal("CONFLICTING_FLAGS", "--project is only valid for bundled test mode",
+		"Run external G1-G3 checks without --project; no project code is inspected or executed.");
+	if (typeof rules !== "string" || typeof cases !== "string") return refusal("INVALID_EXTERNAL_PACK", "--rules and --cases must be supplied together",
+		"Pass an absolute --rules directory and --cases TSV file, or omit both for the bundled test.");
+	const identity = kitIdentity();
+	if (!identity.release.root || !identity.release.executable) return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+		code: "INSTALL_UNAVAILABLE", message: "Installed kit root is unavailable",
+		remediation: "Run from an intact compiled release containing scripts/ttsr-harness.ts.",
+	}], verification: "UNVERIFIED" };
+	try {
+		const pack = readExternalPackSnapshot(rules, cases);
+		const report = await runExternalPackTest({ root: identity.release.root, executablePath: identity.release.executable, pack });
+		return { code: report.exitCode, data: { overall: report.status, test: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof ExternalPackInputError) return refusal(error.code, error.message,
+			"Correct the external static rule markdown and seven-column cases TSV, then rerun.");
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "EXTERNAL_TEST_UNAVAILABLE", message: "The selected external G1-G3 proof could not complete",
+			remediation: "Check the installed kit release and OMP native matcher; no quiet result was certified.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
+	if (request.flags.has("--rules") || request.flags.has("--cases")) return externalTestCommand(request);
 	const full = request.flags.has("--full");
 	const identity = kitIdentity();
+
 	const home = process.env.HOME;
 	if (!identity.release.root || !home || !isAbsolute(home))
 		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
@@ -876,6 +907,32 @@ async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 registerCommandHandler("test", fastTestCommand);
+
+async function reviewRulesCommand(request: ParsedCommand): Promise<CliResult> {
+	const selectedPath = (name: string): string | null => {
+		const value = request.flags.get(name);
+		return typeof value === "string" && isAbsolute(value) ? value : null;
+	};
+	const incumbentRules = selectedPath("--incumbent-rules"), incumbentCases = selectedPath("--incumbent-cases");
+	const candidateRules = selectedPath("--candidate-rules"), candidateCases = selectedPath("--candidate-cases");
+	if (!incumbentRules || !incumbentCases || !candidateRules || !candidateCases) {
+		return refusal("REVIEW_INPUT_REQUIRED", "Select both rule directories and both authored case files using absolute paths",
+			"Run omp-kit help review rules; no missing side is replaced by the bundled pack.");
+	}
+	const root = kitIdentity().release.root;
+	if (!root) return { code: 3, data: { overall: "UNVERIFIED", status: "UNAVAILABLE", scope: "MATCHER_PREFIX_ONLY", review: null },
+		errors: [{ code: "KIT_RELEASE_UNAVAILABLE", message: "An installed kit release is required for native rule review",
+			remediation: "Use an installed release with its bundled matcher harness and existing OMP installation." }], verification: "UNVERIFIED" };
+	const report = await runInstalledRuleReview({ root, executablePath: process.execPath, incumbentRules, incumbentCases, candidateRules, candidateCases });
+	const code = report.status === "UNAVAILABLE" ? 3 : report.review?.status === "NO_DELTA_IN_EXERCISED_WITNESSES" ? 0 : 1;
+	return { code, data: { ...report, overall: report.status === "UNAVAILABLE" ? "UNVERIFIED" : report.review?.status },
+		verification: report.status === "COMPLETE" ? "PERFORMED" : "UNVERIFIED",
+		warnings: ["Only selected authored matcher/prefix observations; not semantic equivalence, live blocking, or effective-profile certification."],
+		errors: report.reason ? [{ code: report.reason, message: "The selected paired native comparison could not be fully bound",
+			remediation: "Check the selected files, resource limits, and installed OMP identity; unavailable observations are never passing quiet cases." }] : [] };
+}
+
+registerCommandHandler("review rules", reviewRulesCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
