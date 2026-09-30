@@ -56,6 +56,8 @@ With the same installed `KIT` and OMP on PATH:
 
 `test` exercises the shipped rules with OMP's matcher, including streamed prefixes. `--full` additionally runs live/mock-model scenarios using an isolated HOME and no real model credentials. Neither proves your effective profile or that a project-local rule cannot shadow an installed global rule. A missing or unsupported OMP, native dependency, or post-check is reported rather than treated as GREEN.
 
+The installed fast test consumes structured native-harness results and rejects malformed or contradictory evidence. Matcher subprocesses receive isolated HOME/XDG/temp paths before Bun starts; invoking the source harness directly does not provide the same caller-cache guarantee. A successful isolated plan must come from the matching shell tool result, not from the model claiming it succeeded.
+
 ## Usage
 
 Start with plans and read-only views:
@@ -105,7 +107,35 @@ The plan does not change either component. Applying activates only the selected 
 "$KIT" doctor --scope project-loading --project "$PWD" --json
 ```
 
+The separate `memory audit --store-root ABSOLUTE_MNEMOPI_ROOT --yes --json` command requires explicit consent. It reads supported database bytes without opening a live SQLite connection, migrating stores, or making model/network calls. Exact source pins cover inspected OMP/pi-mnemopi 18.4.2 and 18.4.4 producers. It enumerates all banks under the selected root and reports category counts plus the exact working/episodic row denominator for `working_memory.content` and `episodic_memory.content`; it emits no stored text, row snippets, secret hashes, or store paths. WAL/SHM/journal sidecars, unsafe paths, unreadable stores, and unsupported schemas refuse coverage. `NO_MATCHES_IN_COVERED_CLASSES` is not clearance for other columns, roots, secret classes, or live memory behavior. The independent redactor-compatibility diagnostic may remain UNVERIFIED even when this bounded audit completes; source/schema support does not expand native archive certification.
+
+`doctor --scope lsp --json` and `lsp setup --plan` only inspect configuration. The opt-in `doctor --scope lsp --deep --yes --project ABSOLUTE_PROJECT --file ABSOLUTE_TS_FILE --json` drives OMP's `lsp` tool in a private synthetic TypeScript project, with an isolated HOME/profile and a loopback mock model. It does not send the selected source file to the mock model or execute workspace-configured LSP commands. Only OMP's built-in `typescript-language-server`, resolved outside the project, is eligible; custom or other-language routes return UNVERIFIED. The report separates protected source/config snapshots from isolated runtime outputs and stops only its private LSP mux. This proves that OMP route against the synthetic fixture, not runtime behavior for every server or the target project.
+
+The deep route requires the supported OMP launcher, Node, Git, and the built-in TypeScript language-server executable to be present on a non-project PATH; it installs none of them. These installations must be operator-trusted. The probe does not authenticate executable provenance or provide isolation from a malicious process running as the same user.
+
 These versioned recipes **render only**. Copy one manually into a **new**, operator-owned named profile after confirming the name does not collide; never merge into an existing or default profile. The memory-off recipe disables memory. The separate Mnemopi recipe disables automatic retain/recall and chooses per-project storage, but manual retain can still store private text; activation and effective runtime state remain unverified until safely observed. Model-role choices have no personal IDs, backend fallbacks, subscription assumptions, or automatic login. The MCP recipe only describes connecting an existing local server; it neither installs a server nor supplies credentials. LSP setup inventories the local route without starting servers. The project-loading preflight inventories startup inputs before opening OMP in that checkout; it cannot prove an extension harmless. `doctor --scope memory` reports configured readiness, not proof that private memory is free of secrets. Deep LSP probing and private-memory-store auditing are not certified installed workflows.
+
+## Native OMP first
+
+Before reaching for kit rules, use what OMP already ships. The recorded command probes below used stock OMP **18.4.3** with a disposable HOME. That historical run saw 27 installed rules and plugin-directory warnings; neither the inventory count nor a fresh-HOME warning is a compatibility requirement. Those observations do not certify 18.4.4 or any other installation: record the selected version and check its actual behavior separately. Interactive-only examples are identified below.
+
+```sh
+omp --version                                  # record the selected runtime; do not relabel a newer version as 18.4.3
+omp ttsr list                                   # installed TTSR rules, rc=0
+omp ttsr test --source tool --tool bash --path run.sh 'echo hello'   # quiet probe: no rules triggered, rc=0
+omp ttsr scan .                                 # scan the current project; rc=0 even when empty (not coverage proof)
+omp plugin doctor --json                        # plugin-dir health, not hook parity; rc=0
+```
+
+Interactive only: `/extensions` (slash command with no non-TTY form) and `omp --hook ./my-hook.ts` (refuses without a TTY, rc=2, verified with stdin closed). The former shows discovery/selection state, never firing proof; the latter loads JS/TS factories only — shell scripts are not loaded as handlers.
+
+Foreign hook manifests are declarations, not handlers. A Claude `settings.json` entry or a Codex `hooks.json` entry is CONFIGURED when written; it is not an active OMP guard. OMP discovery can report candidate paths without importing them, but a discovered path does not establish a callable JS/TS factory, and neither discovery nor dashboard presence proves firing. EFFECT_OBSERVED requires an isolated run showing the permitted/blocked effect. Kit G1–G4 proof (whole-payload, streamed-prefix, isolated live) is extra evidence for the kit's own shipped pack; it certifies neither foreign hooks nor your effective profile.
+
+The manifest-discovery distinction was derived from OMP 18.4.3 source, not a live hook run. For a fresh behavioral check, `bun test tests/cli/native-guide.test.ts` resolves the PATH-selected installed OMP launcher and matching source, compares CLI/package versions, and uses an empty disposable Git repository with sanitized HOME/XDG paths and no copied checkout or model credentials. Its native discovery fixture checks manifest-only absence and positive candidate-path discovery, with canaries for unexpected manifest-command, module-import, or factory execution. It calls the discovery API, never the runtime hook loader. A pass is discovery evidence for that exact installation, not factory-loadability, hook-firing, parity, or release-certification evidence; handler effects remain UNVERIFIED.
+
+For classification only, consider two **synthetic, uninstalled** fixture files: `.claude/settings.json` containing `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"printf fixture"}]}]}}`, and `.codex/hooks.json` containing `{"hooks":{"notify":[{"command":"printf fixture"}]}}`. These illustrate manifest data, **not validated provider configuration templates**. Each is merely CONFIGURED at its source path; with no OMP JS/TS factory selected, handler state and effect remain UNVERIFIED. Do not copy these into a live profile or run their commands.
+
+**Stop at native tooling** when `omp ttsr list/test/scan` answers the question. If a specific gap needs kit-authored prefix or isolated live evidence, preview the named rule/extension for the exact selected profile and target with `omp-kit test --json` and the applicable read-only `apply ... --plan --json`; ask the profile owner to approve that specific change before any apply. Do not blanket-enable foreign providers or copy an entire profile.
 
 ## Development and tests
 

@@ -78,6 +78,36 @@ async function coverage(rulesDir) {
 	}
 	console.log(`coverage ok: ${rules.length} rules, ${scenarios.length} scenarios`);
 }
+function toolResultFailures(messages, expected) {
+	// A model's scripted prose is not a command result; require a real tool-call binding.
+	const result = messages.filter(m => m.role === "tool").at(-1);
+	if (typeof result?.tool_call_id !== "string" || result.tool_call_id.length === 0) {
+		return ["tool result is not bound to a bash call"];
+	}
+	const failures = [];
+	const calls = messages.filter(m => m.role === "assistant").flatMap(m => m.tool_calls ?? []);
+	const call = calls.find(c => c.id === result.tool_call_id && c.function?.name === "bash");
+	let args;
+	try {
+		args = JSON.parse(call?.function?.arguments ?? "");
+	} catch {
+		failures.push("tool command arguments are not JSON");
+	}
+	if (args?.command !== expected.command) failures.push("tool command did not match " + expected.command);
+	if (typeof result?.content !== "string" || result.isError === true || /Command exited with code [1-9]\d*/.test(result.content)) {
+		failures.push("tool result did not show ok=" + expected.ok + " action=" + expected.action);
+		return failures;
+	}
+	try {
+		const payload = JSON.parse(result.content.split(/\r?\n/, 1)[0]);
+		if (payload.ok !== expected.ok || payload.data?.action !== expected.action) {
+			failures.push("tool result did not show ok=" + expected.ok + " action=" + expected.action);
+		}
+	} catch {
+		failures.push("tool result is not JSON from the selected bash call");
+	}
+	return failures;
+}
 
 function verdict(i, log, proj, ompExit) {
 	const s = scenarios[i];
@@ -114,6 +144,7 @@ function verdict(i, log, proj, ompExit) {
 	for (const t of e.transcript_contains ?? []) {
 		if (!transcript.includes(t)) errs.push(`transcript lacks ${JSON.stringify(t)}`);
 	}
+	if (e.tool_result_json) errs.push(...toolResultFailures(reqs.at(-1).body.messages, e.tool_result_json));
 
 	const marker = path.join(proj, `.ran_${s.id}`);
 	if (e.marker === "present" && !fs.existsSync(marker)) errs.push(`marker .ran_${s.id} absent: the command did not run`);

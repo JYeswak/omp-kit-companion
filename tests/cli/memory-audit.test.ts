@@ -1,22 +1,35 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { auditMemoryAtRest } from "../../src/memory-audit.ts";
 
-// Pinned upstream OMP + pi-mnemopi 18.4.2: schema.ts SHA256
-// 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0;
-// banks.ts SHA256 8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2.
+// OMP + pi-mnemopi 18.4.2 and 18.4.4 use this exact initBeam schema.
+// schema.ts SHA256: 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0.
 // Fixtures call the actual installed initBeam, not a hand-written imitation.
 // Runtime-selected installation: a static import would bind the contributor's
 // source tree instead of the supported OMP package under inspection.
+const SCHEMA_SHA_BY_VERSION: Record<string, string> = {
+	"18.4.2": "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0",
+	"18.4.4": "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0",
+};
 const installed = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp") ?? "";
 let initBeam: ((db: Database) => void) | undefined;
+let installedVersion: string | undefined;
 if (installed) {
 	try {
 		const agent = dirname(dirname(realpathSync(installed)));
+		const mnemopi = join(dirname(agent), "pi-mnemopi");
 		const metadata = JSON.parse(readFileSync(join(agent, "package.json"), "utf8"));
-		if (metadata.version === "18.4.2") ({ initBeam } = await import(join(agent, "../pi-mnemopi/src/core/beam/schema.ts")));
+		const engine = JSON.parse(readFileSync(join(mnemopi, "package.json"), "utf8"));
+		const schema = join(mnemopi, "src/core/beam/schema.ts");
+		if (metadata.name === "@oh-my-pi/pi-coding-agent" && engine.name === "@oh-my-pi/pi-mnemopi" &&
+			metadata.version === engine.version && SCHEMA_SHA_BY_VERSION[metadata.version] &&
+			createHash("sha256").update(readFileSync(schema)).digest("hex") === SCHEMA_SHA_BY_VERSION[metadata.version]) {
+			({ initBeam } = await import(schema));
+			installedVersion = metadata.version;
+		}
 	} catch { /* Stock OMP is unavailable on this test host; positive proof runs on supported native hosts. */ }
 }
 const supportedTest = initBeam ? test : test.skip;
@@ -37,7 +50,7 @@ function fixture() {
 		mkdirSync(join(path, ".."), { recursive: true });
 		const db = new Database(path);
 		try {
-			if (!initBeam) throw new Error("Pinned stock OMP 18.4.2 schema unavailable");
+			if (!initBeam) throw new Error("Pinned stock OMP 18.4.2 or 18.4.4 schema unavailable");
 			initBeam(db);
 			for (const [index, content] of working.entries()) db.run("INSERT INTO working_memory (id, content) VALUES (?, ?)", [`w-${index}`, content]);
 			for (const [index, content] of episodic.entries()) db.run("INSERT INTO episodic_memory (id, content) VALUES (?, ?)", [`e-${index}`, content]);
@@ -71,16 +84,18 @@ supportedTest("enumerates every supported bank; catches alphabetic bearer and bo
 	const before = snapshot(f.root);
 	const result = await auditMemoryAtRest({ ...f.args, expectedBanks: ["default", "project_A"] });
 	expect(result.status).toBe("MATCHES");
+	expect(result.version).toBe(installedVersion);
 	expect(result.coverage).toEqual({ banks_discovered: 2, banks_scanned: 2, stores_discovered: 2, stores_scanned: 2,
 		working_rows: 3, episodic_rows: 2, total_rows: 5, fields: ["working_memory.content", "episodic_memory.content"] });
 	expect(result.categories).toEqual({ bearer_token: 1, private_key: 1, password_assignment: 1, credential_url: 1, provider_token: 0 });
-	expect(result.redactor?.coverage).toBe("SYNTHETIC_ONLY");
+	if (installedVersion === "18.4.2") expect(result.redactor?.coverage).toBe("SYNTHETIC_ONLY");
+	else expect(result.redactor?.status).toBe("UNVERIFIED");
 	const text = JSON.stringify(result);
 	for (const sensitive of [secret, pem, "syntheticlettersforpasswordvalue", "syntheticpassword", f.root, f.storeRoot]) expect(text).not.toContain(sensitive);
 	expect(snapshot(f.root)).toEqual(before);
 });
 
-supportedTest("negative false-negative canary fails an otherwise clean audit", async () => {
+supportedTest("P29-FN-01: no-digit bearer control prevents a false clean verdict", async () => {
 	const f = fixture(); f.bank("default", ["a harmless note"]);
 	expect((await auditMemoryAtRest(f.args)).status).toBe("NO_MATCHES_IN_COVERED_CLASSES");
 	// Historical redactor misses the no-digit bearer class. Omitting that detector
@@ -96,7 +111,8 @@ supportedTest("negative false-negative canary fails an otherwise clean audit", a
 supportedTest("incomplete banks, WAL, symlinks and unknown tables refuse a clean verdict", async () => {
 	const absent = fixture(); absent.bank();
 	expect((await auditMemoryAtRest({ ...absent.args, expectedBanks: ["default", "omitted"] })).status).toBe("UNVERIFIED");
-	const wal = fixture(); wal.bank(); writeFileSync(`${wal.dbFile()}-wal`, "pending");
+	const wal = fixture(); wal.bank(); wal.bank("project_A");
+	writeFileSync(`${wal.dbFile("project_A")}-wal`, "pending");
 	expect((await auditMemoryAtRest(wal.args)).reason).toBe("UNSAFE_STORE");
 	const linked = fixture(); linked.bank(); mkdirSync(join(linked.storeRoot, "banks")); symlinkSync(linked.dbFile(), join(linked.storeRoot, "banks", "linked"));
 	expect((await auditMemoryAtRest(linked.args)).status).toBe("UNVERIFIED");
@@ -105,6 +121,33 @@ supportedTest("incomplete banks, WAL, symlinks and unknown tables refuse a clean
 	expect((await auditMemoryAtRest(opaque.args)).reason).toBe("UNSUPPORTED_SCHEMA");
 });
 
+supportedTest("zero-byte WAL refuses a clean synthetic store verdict", async () => {
+	const f = fixture(); f.bank();
+	const walPath = `${f.dbFile()}-wal`;
+	writeFileSync(walPath, Buffer.alloc(0));
+	const before = snapshot(f.root);
+	const result = await auditMemoryAtRest(f.args);
+	expect(result.status).toBe("UNVERIFIED");
+	expect(result.reason).toBe("UNSAFE_STORE");
+	expect(result.coverage).toBeNull();
+	expect(snapshot(f.root)).toEqual(before);
+});
+
+supportedTest("symlinked database file refuses a clean synthetic store verdict without disclosing the target", async () => {
+	const f = fixture();
+	const dbPath = f.bank();
+	const target = join(f.home, "synthetic-mnemopi-target.db");
+	writeFileSync(target, readFileSync(dbPath));
+	rmSync(dbPath);
+	symlinkSync(target, dbPath);
+	const before = snapshot(f.root);
+	const result = await auditMemoryAtRest(f.args);
+	expect(result.status).toBe("UNVERIFIED");
+	expect(result.reason).toBe("UNSAFE_STORE");
+	expect(result.coverage).toBeNull();
+	expect(JSON.stringify(result)).not.toContain(target);
+	expect(snapshot(f.root)).toEqual(before);
+});
 supportedTest("a symlink in an ancestor of the selected store root cannot turn a clean audit into clearance", async () => {
 	const f = fixture(); f.bank("default", ["harmless synthetic row"]);
 	const alias = join(f.root, "linked-parent");

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Certify a provisional archive on its native runner; never publish from CI."""
+# canonical-cli-scoping-allow-large: native acceptance stays in this assigned runner; scope excludes helper modules.
 import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import re
 import stat
@@ -211,14 +213,15 @@ def native(args):
                         snapshots = test["snapshots"]
                         if (test["status"] != "PASS" or test["proof_scope"] != "ISOLATED_FIXTURE_ONLY"
                                 or test["omp_version"] != OMP_VERSION or live["plant"] != "PASS"
-                                or live["expected_scenarios"] != 69 or live["observed_scenarios"] != 69
+                                or live["expected_scenarios"] != 70 or live["observed_scenarios"] != 70
                                 or scenarios["status"] != "PASS"
-                                or len(scenarios["expected_ids"]) != 69
-                                or len(set(scenarios["expected_ids"])) != 69
+                                or len(scenarios["expected_ids"]) != 70
+                                or len(set(scenarios["expected_ids"])) != 70
+                                or "settings-no-checkout-remedy" not in scenarios["expected_ids"]
                                 or scenarios["observed_ids"] != scenarios["expected_ids"]
                                 or any(snapshots[part]["complete"] is not True or snapshots[part]["unchanged"] is not True
                                        for part in ("release", "home"))):
-                            raise ValueError("native full ladder lacks 69 live scenarios, planted control, stock OMP, or complete unchanged release/HOME snapshots")
+                            raise ValueError("native full ladder lacks 70 live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
                 elif name == "memory_off":
                     if data.get("kind") != "memory-off" or "backend: off" not in data.get("content", ""):
                         raise ValueError("packaged memory-off recipe is unavailable")
@@ -280,6 +283,299 @@ def native(args):
                             or mcp_marker.exists()):
                         raise ValueError("named-profile MCP inventory failed or executed the fixture server")
                 receipt["proofs"][name] = {"status": "PASS", "stdout_sha256": hashlib.sha256(child.stdout).hexdigest()}
+            lsp_root = root / "lsp-fixtures"
+            lsp_root.mkdir()
+
+            def lsp_project(name, has_package=True):
+                selected = lsp_root / name
+                selected.mkdir()
+                if has_package:
+                    (selected / "package.json").write_text(
+                        json.dumps({"name": "native-lsp-fixture", "private": True}) + "\n", encoding="utf-8")
+                target = selected / "example.ts"
+                target.write_text("export const fixtureValue = 1;\n", encoding="utf-8")
+                return selected, target
+
+            def lsp_runtime_path(name, server_source=None):
+                directory = root / "lsp-runtime" / name
+                directory.mkdir(parents=True)
+                for command in ("node", "omp", "bun", "git"):
+                    executable = shutil.which(command, path=env["PATH"])
+                    if executable is None:
+                        if command == "bun":
+                            continue
+                        raise ValueError("native LSP runtime is missing a required node, OMP, or Git executable")
+                    (directory / command).symlink_to(Path(executable).resolve())
+                server = None
+                if server_source is not None:
+                    server = directory / "typescript-language-server"
+                    server.write_text(server_source, encoding="utf-8")
+                    server.chmod(0o700)
+                return str(directory), server
+
+            lsp_report_fields = {
+                "status", "scope", "requested_project", "requested_file", "selected_server", "selected_command",
+                "reason", "checks", "calls", "omp_rc", "timed_out", "timeout_observation", "fixture_git_init_rc",
+                "protected_input_snapshots", "profile_template_unchanged", "profile_template_snapshots",
+                "fixture_project_unchanged", "fixture_project_snapshots", "runtime_home_omp_inventory",
+                "runtime_state_outputs", "mux_stop_rc", "temporary_workspace_removed"}
+
+            def lsp_snapshot_unchanged(snapshot):
+                return (isinstance(snapshot, dict) and snapshot.get("unchanged") is True
+                        and snapshot.get("before") == snapshot.get("after"))
+
+            def lsp_call(selected, target, expected_status, path=None):
+                before = isolated_snapshot(home, project, selected)
+                child = subprocess.run(
+                    [str(binary), "doctor", "--scope", "lsp", "--deep", "--yes", "--project", str(selected),
+                     "--file", str(target), "--json"],
+                    cwd=root, env={**env, "PATH": path or env["PATH"]}, capture_output=True, timeout=240)
+                if isolated_snapshot(home, project, selected) != before:
+                    raise ValueError("compiled LSP probe changed protected HOME or project inputs")
+                try:
+                    envelope = json.loads(child.stdout)
+                except json.JSONDecodeError as error:
+                    raise ValueError("compiled LSP probe returned invalid JSON") from error
+                report = envelope.get("data", {}).get("deep_probe")
+                if (not isinstance(report, dict) or not lsp_report_fields.issubset(report)
+                        or report.get("scope") != "OMP_LSP_TOOL_ROUTE"
+                        or report.get("requested_project") != str(selected)
+                        or report.get("requested_file") != str(target)
+                        or report.get("status") != expected_status
+                        or report.get("selected_server") != "typescript-language-server"
+                        or report.get("temporary_workspace_removed") is not True):
+                    observed_status = report.get("status") if isinstance(report, dict) else "NO_REPORT"
+                    observed_reason = report.get("reason") if isinstance(report, dict) else str(envelope.get("errors", []))
+                    failed_checks = [key for key, value in report.get("checks", {}).items() if value is False] if isinstance(report, dict) else []
+                    raise ValueError(f"compiled LSP expected {expected_status}, observed {observed_status}, rc={child.returncode}; reason={observed_reason}; failed_checks={failed_checks}")
+                if expected_status == "PASS":
+                    static_data = envelope.get("data", {})
+                    static_report = static_data.get("report")
+                    lsp_finding = finding(static_data, "lsp")
+                    if (child.returncode != 0 or envelope.get("ok") is not True
+                            or static_data.get("overall") != "UNVERIFIED"
+                            or envelope.get("meta", {}).get("verification") != "PERFORMED"
+                            or not isinstance(static_report, dict)
+                            or static_report.get("runtime") != "NOT_PROBED"
+                            or lsp_finding.get("status") != "UNVERIFIED"
+                            or report.get("timed_out") is not False
+                            or report.get("timeout_observation") is not None):
+                        raise ValueError("synthetic LSP route PASS did not preserve static readiness and least-privilege semantics")
+                else:
+                    expected_overall = "DEGRADED" if expected_status in ("MISSING", "WRONG_MARKER") else "UNVERIFIED"
+                    if (child.returncode != (3 if expected_status == "MISSING" else 2)
+                            or envelope.get("data", {}).get("overall") != expected_overall
+                            or envelope.get("meta", {}).get("verification") != "UNVERIFIED"
+                            or not envelope.get("errors")
+                            or envelope["errors"][0].get("code") != "LSP_" + expected_status):
+                        raise ValueError(f"compiled LSP {expected_status} did not preserve {expected_overall} and its error class")
+                launched_statuses = ("PASS", "IMMEDIATE_EXIT", "TIMEOUT", "INCOMPLETE")
+                if expected_status in launched_statuses:
+                    protected = report.get("protected_input_snapshots")
+                    if (report.get("fixture_git_init_rc") != 0
+                            or not lsp_snapshot_unchanged(protected)
+                            or report.get("profile_template_unchanged") is not True
+                            or not lsp_snapshot_unchanged(report.get("profile_template_snapshots"))
+                            or report.get("fixture_project_unchanged") is not True
+                            or not lsp_snapshot_unchanged(report.get("fixture_project_snapshots"))
+                            or report.get("mux_stop_rc") != 0
+                            or report.get("checks", {}).get("lsp_mux_stopped") is not True
+                            or report.get("temporary_workspace_removed") is not True):
+                        raise ValueError("compiled LSP route did not prove bounded scoped cleanup and unchanged snapshots")
+                if expected_status == "TIMEOUT":
+                    timing = report.get("timeout_observation")
+                    if (not isinstance(timing, dict)
+                            or timing.get("source") != "LSP_TOOL_RESULT"
+                            or timing.get("elapsed_scope") != "lsp_tool_call"
+                            or type(timing.get("elapsed_ms")) not in (int, float)
+                            or type(timing.get("deadline_ms")) not in (int, float)
+                            or timing["deadline_ms"] != 60_000
+                            or not 0 < timing["elapsed_ms"] <= timing["deadline_ms"] + 5_000
+                            or not isinstance(timing.get("tool_result"), str)
+                            or "timed out" not in timing["tool_result"].lower()
+                            or report.get("timed_out") is not True):
+                        raise ValueError("compiled LSP timeout lacked bounded tool-call timing evidence")
+                elif report.get("timed_out") is not False or report.get("timeout_observation") is not None:
+                    raise ValueError(f"compiled LSP {expected_status} carried inconsistent timeout evidence")
+                return child, report
+
+            positive_project, positive_file = lsp_project("positive")
+            positive, lsp_pass = lsp_call(positive_project, positive_file, "PASS")
+            positive_checks = ("lsp_tool_advertised", "only_lsp_tool_enabled", "read_only_action_arguments",
+                               "all_tool_results_present", "selected_server_configured", "initialized_capabilities",
+                               "known_positive_reference", "absent_symbol_control", "server_ready_after_request",
+                               "profile_template_unchanged", "fixture_project_unchanged", "protected_inputs_unchanged",
+                               "lsp_mux_stopped", "mock_model_clean", "process_output_complete")
+            calls = lsp_pass["calls"]
+            if (any(lsp_pass["checks"].get(key) is not True for key in positive_checks)
+                    or lsp_pass["checks"].get("has_failed_checks") is not False
+                    or lsp_pass["timed_out"] is not False or lsp_pass["omp_rc"] != 0
+                    or len(calls) != 5
+                    or any(type(call.get("elapsed_ms")) not in (int, float)
+                           or not 0 <= call["elapsed_ms"] <= 180_000 for call in calls)
+                    or calls[2].get("symbol") != "lspProbeKnownSymbol"
+                    or "Found " not in calls[2].get("result", "")
+                    or not calls[3].get("query", "").startswith("LspProbeAbsentSymbol_")
+                    or "No symbols matching" not in calls[3].get("result", "")
+                    or lsp_pass["protected_input_snapshots"].get("unchanged") is not True
+                    or lsp_pass["profile_template_unchanged"] is not True
+                    or lsp_pass["fixture_project_unchanged"] is not True
+                    or lsp_pass["timeout_observation"] is not None):
+                raise ValueError("compiled LSP positive lacks timed known-reference, absent-symbol, or cleanup proof")
+            node_executable = shutil.which("node", path=env["PATH"])
+            omp_executable = shutil.which("omp", path=env["PATH"])
+            if not node_executable or not omp_executable:
+                raise ValueError("native LSP negative controls require the pinned Node and OMP launchers")
+            missing_path, _ = lsp_runtime_path("missing")
+            missing_project, missing_file = lsp_project("missing")
+            missing, lsp_missing = lsp_call(missing_project, missing_file, "MISSING", missing_path)
+            if lsp_missing.get("selected_command") is not None:
+                raise ValueError("compiled LSP missing-binary negative selected an executable")
+            wrong_project, wrong_file = lsp_project("wrong-marker", has_package=False)
+            wrong, lsp_wrong = lsp_call(wrong_project, wrong_file, "WRONG_MARKER")
+            if "root marker" not in lsp_wrong.get("reason", "").lower() or lsp_wrong["timed_out"]:
+                raise ValueError("compiled LSP wrong-marker negative launched or misclassified the server")
+            immediate_source = ("#!/bin/sh\nprintf started > \"$0.started\"\n"
+                               "printf 'server exited during initialize\\n' >&2\nexit 0\n")
+            immediate_path, immediate_server = lsp_runtime_path("immediate-exit", immediate_source)
+            immediate_project, immediate_file = lsp_project("immediate-exit")
+            immediate, lsp_exit = lsp_call(immediate_project, immediate_file, "IMMEDIATE_EXIT", immediate_path)
+            if (not Path(str(immediate_server) + ".started").is_file() or lsp_exit["timed_out"]
+                    or "exited" not in lsp_exit.get("reason", "").lower()):
+                raise ValueError("compiled LSP immediate-exit process was not exercised and classified")
+            incomplete_source = r'''#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.argv[1] + ".started", "started");
+let input = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
+  process.stdout.write(body);
+}
+process.stdin.on("data", chunk => {
+  input = Buffer.concat([input, chunk]);
+  for (;;) {
+    const boundary = input.indexOf("\r\n\r\n");
+    if (boundary < 0) return;
+    const headers = input.subarray(0, boundary).toString("ascii");
+    const length = /Content-Length:\s*(\d+)/i.exec(headers);
+    if (!length) process.exit(2);
+    const start = boundary + 4;
+    const size = Number(length[1]);
+    if (input.length < start + size) return;
+    const message = JSON.parse(input.subarray(start, start + size).toString("utf8"));
+    input = input.subarray(start + size);
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id,
+        result: { capabilities: { textDocumentSync: 1, referencesProvider: true,
+          workspaceSymbolProvider: true }, serverInfo: { name: "native-incomplete-lsp" } } });
+    } else if (message.method === "shutdown") {
+      send({ jsonrpc: "2.0", id: message.id, result: null });
+    } else if (message.method === "exit") {
+      process.exit(0);
+    } else if (message.id !== undefined) {
+      send({ jsonrpc: "2.0", id: message.id, result: [] });
+    }
+  }
+});
+'''
+            incomplete_path, incomplete_server = lsp_runtime_path("incomplete-response", incomplete_source)
+            incomplete_project, incomplete_file = lsp_project("incomplete-response")
+            incomplete, lsp_incomplete = lsp_call(
+                incomplete_project, incomplete_file, "INCOMPLETE", incomplete_path)
+            incomplete_checks = lsp_incomplete.get("checks", {})
+            incomplete_calls = lsp_incomplete.get("calls", [])
+            if (not Path(str(incomplete_server) + ".started").is_file()
+                    or incomplete_checks.get("lsp_tool_advertised") is not True
+                    or incomplete_checks.get("all_tool_results_present") is not True
+                    or incomplete_checks.get("server_ready_after_request") is not True
+                    or incomplete_checks.get("initialized_capabilities") is not True
+                    or incomplete_checks.get("known_positive_reference") is not False
+                    or incomplete_checks.get("absent_symbol_control") is not True
+                    or incomplete_checks.get("has_failed_checks") is not True
+                    or len(incomplete_calls) != 5
+                    or incomplete_calls[1].get("action") != "capabilities"
+                    or not incomplete_calls[1].get("result")):
+                raise ValueError("compiled LSP incomplete negative did not isolate a missing positive reference with healthy capabilities")
+            pending_source = r'''#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.argv[1] + ".started", "started");
+let input = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
+  process.stdout.write(body);
+}
+process.stdin.on("data", chunk => {
+  input = Buffer.concat([input, chunk]);
+  for (;;) {
+    const boundary = input.indexOf("\r\n\r\n");
+    if (boundary < 0) return;
+    const headers = input.subarray(0, boundary).toString("ascii");
+    const length = /Content-Length:\s*(\d+)/i.exec(headers);
+    if (!length) process.exit(2);
+    const start = boundary + 4;
+    const size = Number(length[1]);
+    if (input.length < start + size) return;
+    const message = JSON.parse(input.subarray(start, start + size).toString("utf8"));
+    input = input.subarray(start + size);
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id,
+        result: { capabilities: { textDocumentSync: 1, referencesProvider: true,
+          workspaceSymbolProvider: true }, serverInfo: { name: "native-pending-reference-lsp" } } });
+    } else if (message.method === "textDocument/references") {
+      // Withhold only this response to exercise the bounded OMP tool-call deadline.
+    } else if (message.method === "shutdown") {
+      send({ jsonrpc: "2.0", id: message.id, result: null });
+    } else if (message.method === "exit") {
+      process.exit(0);
+    } else if (message.id !== undefined) {
+      send({ jsonrpc: "2.0", id: message.id, result: [] });
+    }
+  }
+});
+'''
+            pending_path, pending_server = lsp_runtime_path("pending-reference", pending_source)
+            pending_project, pending_file = lsp_project("pending-reference")
+            pending, lsp_timeout = lsp_call(pending_project, pending_file, "TIMEOUT", pending_path)
+            timeout_checks = lsp_timeout.get("checks", {})
+            if (not Path(str(pending_server) + ".started").is_file()
+                    or lsp_timeout["timed_out"] is not True
+                    or "bounded timeout" not in lsp_timeout.get("reason", "").lower()
+                    or timeout_checks.get("initialized_capabilities") is not True
+                    or timeout_checks.get("known_positive_reference") is not False
+                    or timeout_checks.get("absent_symbol_control") is not True
+                    or timeout_checks.get("server_ready_after_request") is not True):
+                raise ValueError("compiled LSP reference-only timeout was not exercised with healthy capabilities and an answered absent-symbol control")
+            workspace, _ = lsp_project("untrusted-parent-workspace")
+            if any((ancestor / ".git").exists() for ancestor in (workspace, *workspace.parents)):
+                raise ValueError("non-Git workspace negative has an unrelated Git rejection precondition")
+            application = workspace / "packages" / "app"
+            application.mkdir(parents=True)
+            (application / "package.json").write_text("{\"private\":true}\n", encoding="utf-8")
+            application_file = application / "example.ts"
+            application_file.write_text("export const value = 1;\n", encoding="utf-8")
+            dependency_bin = workspace / "node_modules" / ".bin"
+            dependency_bin.mkdir(parents=True)
+            workspace_server = dependency_bin / "typescript-language-server"
+            workspace_server.write_text(incomplete_source, encoding="utf-8")
+            workspace_server.chmod(0o700)
+            workspace_before = isolated_snapshot(workspace)
+            untrusted, lsp_untrusted = lsp_call(application, application_file, "UNVERIFIED",
+                                              str(dependency_bin) + os.pathsep + env["PATH"])
+            selected = next((server for server in json.loads(untrusted.stdout)["data"]["report"]["servers"]
+                             if server.get("name") == "typescript-language-server"), None)
+            if (not selected or selected.get("eligible") is not True
+                    or selected.get("resolved_command") != str(workspace_server)
+                    or lsp_untrusted.get("omp_rc") is not None or lsp_untrusted.get("calls") != []
+                    or Path(str(workspace_server) + ".started").exists()
+                    or isolated_snapshot(workspace) != workspace_before):
+                raise ValueError("compiled LSP executed or mutated a non-Git parent workspace dependency")
+            receipt["proofs"]["lsp_deep"] = {
+                "status": "PASS",
+                "stdout_sha256": hashlib.sha256(
+                    positive.stdout + missing.stdout + wrong.stdout + immediate.stdout
+                    + incomplete.stdout + pending.stdout + untrusted.stdout).hexdigest()}
             # The configured profile is synthetic; never test a real private memory store.
             (agent / "config.yml").write_text("memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n", encoding="utf-8")
             before = isolated_snapshot(home, project)
@@ -300,6 +596,102 @@ def native(args):
                     or "pem_private_key" not in evidence["redactor"]["missed"]):
                 raise ValueError("synthetic redactor limitation was not reported")
             receipt["proofs"]["redactor_warning"] = {"status": "PASS", "stdout_sha256": hashlib.sha256(check.stdout).hexdigest()}
+            omp_launcher = shutil.which("omp", path=env["PATH"])
+            bun = shutil.which("bun", path=env["PATH"])
+            if not omp_launcher or not bun:
+                raise ValueError("pinned OMP or Bun is unavailable for the synthetic memory audit")
+            agent_root = Path(omp_launcher).resolve().parent.parent
+            mnemopi_root = next((base / "node_modules" / "@oh-my-pi" / "pi-mnemopi"
+                                 for base in (agent_root, *agent_root.parents)
+                                 if (base / "node_modules" / "@oh-my-pi" / "pi-mnemopi" / "package.json").is_file()), None)
+            if mnemopi_root is None:
+                raise ValueError("pinned Mnemopi dependency is unavailable from the installed OMP package")
+            schema = mnemopi_root / "src" / "core" / "beam" / "schema.ts"
+            agent_metadata = load(agent_root / "package.json")
+            mnemopi_metadata = load(mnemopi_root / "package.json")
+            if (agent_metadata.get("name") != "@oh-my-pi/pi-coding-agent"
+                    or agent_metadata.get("version") != OMP_VERSION
+                    or mnemopi_metadata.get("name") != "@oh-my-pi/pi-mnemopi"
+                    or mnemopi_metadata.get("version") != OMP_VERSION
+                    or digest(schema) != "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"):
+                raise ValueError("native synthetic memory fixture is not using the pinned stock initBeam schema")
+            store_root = home / ".omp" / "agent" / "memories" / "mnemopi"
+            seed = r'''
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const { initBeam } = await import(pathToFileURL(process.env.P29_SCHEMA).href);
+if (typeof initBeam !== "function") throw new Error("initBeam unavailable");
+const pem = ["-----BEGIN ", "PRIVATE KEY-----\n", "syntheticprivatekeymaterialnotvalid", "\n-----END PRIVATE KEY-----"].join("");
+const banks = [
+  ["default", ["public note", "Bearer syntheticbearerlettersonlyforevertoken"], [pem]],
+  ["project_A", [["password", "=", "syntheticlettersforpasswordvalue"].join("")], ["postgres://syntheticuser:syntheticpassword@invalid.example/test"]],
+];
+for (const [name, working, episodic] of banks) {
+  const path = name === "default" ? `${process.env.P29_STORE}/mnemopi.db` : `${process.env.P29_STORE}/banks/${name}/mnemopi.db`;
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path);
+  try {
+    initBeam(db);
+    for (const [index, content] of working.entries()) db.run("INSERT INTO working_memory (id, content) VALUES (?, ?)", [`w-${index}`, content]);
+    for (const [index, content] of episodic.entries()) db.run("INSERT INTO episodic_memory (id, content) VALUES (?, ?)", [`e-${index}`, content]);
+  } finally { db.close(); }
+}
+'''
+            seeded = subprocess.run([bun, "-e", seed], cwd=root,
+                                    env={**env, "P29_SCHEMA": str(schema), "P29_STORE": str(store_root)},
+                                    capture_output=True, timeout=120)
+            if seeded.returncode != 0:
+                raise ValueError("native initBeam synthetic Mnemopi stores could not be created")
+            audit_env = {**env, "TMPDIR": str(root)}
+            audit_args = [str(binary), "memory", "audit", "--store-root", str(store_root), "--json"]
+            canaries = ("Bearer syntheticbearerlettersonlyforevertoken", "syntheticprivatekeymaterialnotvalid",
+                        "syntheticlettersforpasswordvalue", "syntheticpassword", str(root),
+                        str(home), str(project), str(store_root))
+
+            def audit_call(flags):
+                before = isolated_snapshot(home, project)
+                child = subprocess.run([*audit_args[:-1], *flags, "--json"], cwd=project, env=audit_env,
+                                       capture_output=True, timeout=120)
+                if isolated_snapshot(home, project) != before:
+                    raise ValueError("compiled memory audit changed synthetic HOME, project, or store inputs")
+                output = child.stdout + child.stderr
+                text = output.decode(errors="replace")
+                if any(canary in text for canary in canaries):
+                    raise ValueError("compiled memory audit leaked synthetic row content or protected paths")
+                try:
+                    result = json.loads(child.stdout)
+                except json.JSONDecodeError as error:
+                    raise ValueError("compiled memory audit returned invalid JSON") from error
+                return child, result
+
+            refused, refusal = audit_call([])
+            if refused.returncode != 2 or not refusal.get("errors") or refusal["errors"][0].get("code") != "CONSENT_REQUIRED":
+                raise ValueError("compiled memory audit did not refuse without separate consent")
+            covered, match = audit_call(["--yes"])
+            audit = match.get("data", {}).get("audit", {})
+            if (covered.returncode != 1 or audit.get("status") != "MATCHES"
+                    or audit.get("reason") != "COVERED_CONTENT_ONLY" or audit.get("version") != OMP_VERSION
+                    or audit.get("coverage") != {
+                        "banks_discovered": 2, "banks_scanned": 2, "stores_discovered": 2, "stores_scanned": 2,
+                        "working_rows": 3, "episodic_rows": 2, "total_rows": 5,
+                        "fields": ["working_memory.content", "episodic_memory.content"]}
+                    or audit.get("categories") != {
+                        "provider_token": 0, "bearer_token": 1, "private_key": 1,
+                        "password_assignment": 1, "credential_url": 1}):
+                raise ValueError("compiled memory audit missed the pinned two-bank exact-count canary")
+            (store_root / "banks" / "project_A" / "mnemopi.db-wal").write_text(
+                "synthetic pending WAL bytes", encoding="utf-8")
+            active_wal, wal = audit_call(["--yes"])
+            wal_audit = wal.get("data", {}).get("audit", {})
+            if (active_wal.returncode != 3 or wal_audit.get("status") != "UNVERIFIED"
+                    or wal_audit.get("reason") != "UNSAFE_STORE" or wal_audit.get("coverage") is not None):
+                raise ValueError("compiled memory audit did not refuse the synthetic active-WAL store")
+            receipt["proofs"]["memory_audit"] = {
+                "status": "PASS",
+                "stdout_sha256": hashlib.sha256(refused.stdout + covered.stdout + active_wal.stdout).hexdigest()}
             receipt["certified"] = True
     except (AttributeError, KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         receipt["failure"] = str(error)
@@ -341,7 +733,7 @@ def candidate(args):
                 or proof.get("omp_version") != OMP_VERSION or "failure" in proof
                 or set(proof.get("proofs", {})) != {"status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory",
                                                 "memory_off", "mnemopi_manual", "model_roles", "mcp", "mcp_readiness",
-                                                "project_preflight", "redactor_warning"}
+                                                "project_preflight", "lsp_deep", "memory_audit", "redactor_warning"}
                 or any(set(item) != {"status", "stdout_sha256"} or item["status"] != "PASS"
                        or not isinstance(item["stdout_sha256"], str)
                        or re.fullmatch("[0-9a-f]{64}", item["stdout_sha256"]) is None
