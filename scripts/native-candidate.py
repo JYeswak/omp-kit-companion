@@ -344,7 +344,10 @@ def native(args):
                         or report.get("status") != expected_status
                         or report.get("selected_server") != "typescript-language-server"
                         or report.get("temporary_workspace_removed") is not True):
-                    raise ValueError(f"compiled LSP probe did not report {expected_status} in the P27 JSON contract")
+                    observed_status = report.get("status") if isinstance(report, dict) else "NO_REPORT"
+                    observed_reason = report.get("reason") if isinstance(report, dict) else str(envelope.get("errors", []))
+                    failed_checks = [key for key, value in report.get("checks", {}).items() if value is False] if isinstance(report, dict) else []
+                    raise ValueError(f"compiled LSP expected {expected_status}, observed {observed_status}, rc={child.returncode}; reason={observed_reason}; failed_checks={failed_checks}")
                 if expected_status == "PASS":
                     static_data = envelope.get("data", {})
                     static_report = static_data.get("report")
