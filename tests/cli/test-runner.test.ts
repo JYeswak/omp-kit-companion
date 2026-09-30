@@ -6,6 +6,7 @@ import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import type { FastTestInput, FastTestReport, MatcherObservationInput, MatcherObservationReport } from "../../src/test-runner.ts";
+import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 let fixtureBase = "";
@@ -673,5 +674,258 @@ describe("runMatcherObservation", () => {
 		expect(JSON.stringify(report)).not.toContain(installation);
 		expect(JSON.stringify(report)).not.toContain(realpathSync(installation));
 		expect(report.producer.producer_rc).toBeNull();
+	});
+	test("compiled installed CLI evaluates an external unique fire and quiet-prefix pair with external denominators", () => {
+		const identity = resolveOmpIdentity(process.env);
+		const home = makeTestHome("external-pack-home");
+		const project = join(fixtureBase, "external-pack-cwd");
+		const rules = join(fixtureBase, "external-pack-rules");
+		const cases = join(fixtureBase, "external-pack-cases.tsv");
+		const rule = "external-azure-cutover-unique";
+		expect(existsSync(join(matcherRoot, "rules", `${rule}.md`))).toBe(false);
+		mkdirSync(project, { recursive: true });
+		mkdirSync(rules, { recursive: true });
+		writeFileSync(join(rules, `${rule}.md`), [
+			"---",
+			"condition: 'omp-kit-external-cutover-unique-token'",
+			"scope: tool:bash",
+			"interruptMode: never",
+			"---",
+			"External-pack-only matcher regression.",
+			"",
+		].join("\n"));
+		writeFileSync(cases, [
+			"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
+			`${rule}\tfire\ttool\tbash\t-\techo omp-kit-external-cutover-unique-token\tunique external fire`,
+			`${rule}\tquiet\ttool\tbash\t-\techo omp-kit-external-cutover-unique-toke\tquiet near-prefix`,
+			"",
+		].join("\n"));
+
+		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const child = Bun.spawnSync([matcherExecutable, "test", "--rules", rules, "--cases", cases, "--json"], {
+			cwd: project, env, stdout: "pipe", stderr: "pipe",
+		});
+		const stdout = child.stdout.toString();
+		const stderr = child.stderr.toString();
+		if (!stdout.trim()) throw new Error(`EXTERNAL_PACK_IGNORED: compiled CLI produced no JSON (rc=${child.exitCode}): ${stderr}`);
+		const envelope = JSON.parse(stdout) as {
+			data?: { overall?: string; test?: {
+				scope?: string;
+				counts?: { rules?: number; cases?: number; quiet_cases?: number };
+				proofs?: {
+					G1_registration?: { expected_rules?: number; observed_rules?: number; status?: string };
+					G2_payload?: { expected_cases?: number; observed_cases?: number; status?: string };
+					G3_quiet_prefix?: { expected_cases?: number; expected_quiet_cases?: number; observed_cases?: number; observed_quiet_cases?: number; quiet_prefix_fires?: number; status?: string };
+				};
+				observations?: Array<{ rule?: string; case_line?: number; expected?: string; whole?: string; prefix?: unknown }>;
+			} };
+		};
+		const report = envelope.data?.test;
+		if (child.exitCode !== 0 || report?.scope !== "EXTERNAL_G1_G3"
+			|| !report.observations?.some((row) => row.rule === rule && row.case_line === 2)) {
+			throw new Error(`EXTERNAL_PACK_IGNORED: compiled CLI did not select the supplied external rule/cases (rc=${child.exitCode}): ${stdout}\n${stderr}`);
+		}
+
+		expect(envelope.data?.overall).toBe("PASS");
+		expect(report.counts).toEqual({ rules: 1, cases: 2, quiet_cases: 1 });
+		expect(report.proofs).toEqual({
+			G1_registration: { status: "PASS", expected_rules: 1, observed_rules: 1 },
+			G2_payload: { status: "PASS", expected_cases: 2, observed_cases: 2 },
+			G3_quiet_prefix: {
+				status: "PASS", expected_cases: 2, expected_quiet_cases: 1, observed_cases: 2, observed_quiet_cases: 1, quiet_prefix_fires: 0,
+			},
+		});
+		expect(report.observations).toEqual([
+			expect.objectContaining({ rule, case_line: 2, expected: "fire", whole: "fire" }),
+			expect.objectContaining({ rule, case_line: 3, expected: "quiet", whole: "quiet", prefix: null }),
+		]);
+	});
+
+	test("compiled installed CLI keeps bundled default denominators and seeded prefix plant", () => {
+		const identity = resolveOmpIdentity(process.env);
+		const home = makeTestHome("bundled-cli-home");
+		const project = join(fixtureBase, "bundled-cli-cwd");
+		mkdirSync(project, { recursive: true });
+		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const child = Bun.spawnSync([matcherExecutable, "test", "--json"], {
+			cwd: project, env, stdout: "pipe", stderr: "pipe",
+		});
+		const stdout = child.stdout.toString();
+		const stderr = child.stderr.toString();
+		if (!stdout.trim()) throw new Error(`Bundled CLI returned no JSON (rc=${child.exitCode}): ${stderr}`);
+		const envelope = JSON.parse(stdout) as { data?: { overall?: string; test?: FastTestReport } };
+		const report = envelope.data?.test;
+		expect(child.exitCode).toBe(0);
+		expect(envelope.data?.overall).toBe("UNVERIFIED");
+		expect(report?.status).toBe("PASS");
+		expect(report?.proofs.G1_registration).toMatchObject({ expected_rules: 18, observed_rules: 18, status: "PASS" });
+		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: 274, observed_cases: 274, status: "PASS" });
+		expect(report?.proofs.G3_quiet_prefix).toMatchObject({
+			expected_cases: 274, expected_quiet_cases: 138, observed_cases: 274, observed_quiet_cases: 138,
+			quiet_prefix_fires: 0, seeded_plant: "PASS", status: "PASS",
+		});
+		expect(report?.proofs.G4_live.status).toBe("NOT_RUN");
+	});
+
+	test("external pack failures stay blocked and --full never falls through to live or bundled mode", () => {
+		const home = makeTestHome("external-pack-negative-home");
+		const project = join(fixtureBase, "external-pack-negative-cwd");
+		mkdirSync(project, { recursive: true });
+		const identity = resolveOmpIdentity(process.env);
+		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		type Envelope = {
+			data?: { overall?: string; test?: { status?: string; proofs?: { G3_quiet_prefix?: { status?: string } } } };
+			errors?: Array<{ code?: string }>;
+		};
+		const invoke = (rules: string, cases: string, flags: string[] = [], childEnv = env) => {
+			const child = Bun.spawnSync([matcherExecutable, "test", "--rules", rules, "--cases", cases, ...flags, "--json"], {
+				cwd: project, env: childEnv, stdout: "pipe", stderr: "pipe",
+			});
+			const stdout = child.stdout.toString();
+			const stderr = child.stderr.toString();
+			if (!stdout.trim()) throw new Error(`External CLI returned no JSON (rc=${child.exitCode}): ${stderr}`);
+			return { exitCode: child.exitCode, envelope: JSON.parse(stdout) as Envelope };
+		};
+		const createPack = (directoryName: string, ruleName: string, ruleMarkdown?: string) => {
+			const root = join(fixtureBase, directoryName);
+			const rules = join(root, "rules");
+			const cases = join(root, "cases.tsv");
+			const token = `omp-kit-${directoryName}-unique-token`;
+			mkdirSync(rules, { recursive: true });
+			writeFileSync(join(rules, `${ruleName}.md`), ruleMarkdown ?? [
+				"---", `condition: '${token}'`, "scope: tool:bash", "interruptMode: never", "---", "External test rule.", "",
+			].join("\n"));
+			writeFileSync(cases, [
+				"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
+				`${ruleName}\tfire\ttool\tbash\t-\techo ${token}\tfire`,
+				`${ruleName}\tquiet\ttool\tbash\t-\techo ${token.slice(0, -1)}\tquiet prefix`,
+				"",
+			].join("\n"));
+			return { rules, cases };
+		};
+		const pack = createPack("external-pack-negative", "external-negative-rule");
+		const header = ["rule", "expect", "source", "tool", "path", "snippet", "note"].join("\t");
+		const emptyRules = join(fixtureBase, "external-empty-rules");
+		const emptyCases = join(fixtureBase, "external-empty-cases.tsv");
+		mkdirSync(emptyRules, { recursive: true });
+		writeFileSync(emptyCases, `${header}\n`);
+		const erasedCandidate = readExternalPackSnapshot(emptyRules, emptyCases);
+		expect(erasedCandidate.rules).toEqual([]);
+		expect(erasedCandidate.cases).toEqual([]);
+		const emptyPackFailure = invoke(emptyRules, emptyCases);
+		expect(emptyPackFailure.exitCode).toBe(2);
+		expect(emptyPackFailure.envelope.errors?.[0]?.code).toBe("EMPTY_EXTERNAL_RULES");
+
+		const fireOnlyCases = join(fixtureBase, "external-fire-only-cases.tsv");
+		writeFileSync(fireOnlyCases, [
+			header,
+			"external-negative-rule\tfire\ttool\tbash\t-\techo omp-kit-external-pack-negative-unique-token\tfire",
+			"",
+		].join("\n"));
+		const fireOnlyCandidate = readExternalPackSnapshot(pack.rules, fireOnlyCases);
+		expect(fireOnlyCandidate.cases).toHaveLength(1);
+		const missingQuiet = invoke(pack.rules, fireOnlyCases);
+		expect(missingQuiet.exitCode).toBe(2);
+		expect(missingQuiet.envelope.errors?.[0]?.code).toBe("INCOMPLETE_EXTERNAL_COVERAGE");
+
+		const missingReferenceCases = join(fixtureBase, "external-missing-reference-cases.tsv");
+		writeFileSync(missingReferenceCases, [
+			header,
+			"deleted-external-rule\tfire\ttool\tbash\t-\techo external-token\tfire",
+			"deleted-external-rule\tquiet\ttool\tbash\t-\techo external-toke\tquiet",
+			"",
+		].join("\n"));
+		const missingReferenceCandidate = readExternalPackSnapshot(pack.rules, missingReferenceCases);
+		expect(missingReferenceCandidate.cases[0]?.rule).toBe("deleted-external-rule");
+		const missingReference = invoke(pack.rules, missingReferenceCases);
+		expect(missingReference.exitCode).toBe(2);
+		expect(missingReference.envelope.errors?.[0]?.code).toBe("MISSING_EXTERNAL_RULE");
+
+		const oversizedCases = join(fixtureBase, "external-oversized-cases.tsv");
+		writeFileSync(oversizedCases, new Uint8Array(EXTERNAL_PACK_LIMITS.caseBytes + 1));
+		const oversize = invoke(pack.rules, oversizedCases);
+		expect(oversize.exitCode).toBe(2);
+		expect(oversize.envelope.errors?.[0]?.code).toBe("EXTERNAL_PACK_TOO_LARGE");
+		const missing = invoke(join(fixtureBase, "missing-external-rules"), pack.cases);
+		expect(missing.exitCode).toBe(2);
+		expect(missing.envelope.errors?.[0]?.code).toBe("EXTERNAL_PACK_UNAVAILABLE");
+
+		const linkedRules = join(fixtureBase, "external-pack-linked-rules");
+		symlinkSync(pack.rules, linkedRules);
+		const unsafeRoot = invoke(linkedRules, pack.cases);
+		expect(unsafeRoot.exitCode).toBe(2);
+		expect(unsafeRoot.envelope.errors?.[0]?.code).toBe("UNSAFE_RULES_ROOT");
+		const linkedCases = join(fixtureBase, "external-pack-linked-cases.tsv");
+		symlinkSync(pack.cases, linkedCases);
+		const unsafeCases = invoke(pack.rules, linkedCases);
+		expect(unsafeCases.exitCode).toBe(2);
+		expect(unsafeCases.envelope.errors?.[0]?.code).toBe("UNSAFE_CASES_FILE");
+
+		const badSchema = join(fixtureBase, "external-pack-bad-schema.tsv");
+		writeFileSync(badSchema, ["rule", "name", "source"].join("\t") + "\n");
+		const schemaMismatch = invoke(pack.rules, badSchema);
+		expect(schemaMismatch.exitCode).toBe(2);
+		expect(schemaMismatch.envelope.errors?.[0]?.code).toBe("INVALID_CASE_SCHEMA");
+
+		const unsupported = createPack("external-pack-question", "external-question-rule", [
+			"---", "question: Does this require a judge?", "scope: tool:bash", "---", "Judge-only external rule.", "",
+		].join("\n"));
+		const unsupportedKind = invoke(unsupported.rules, unsupported.cases);
+		expect(unsupportedKind.exitCode).toBe(2);
+		expect(unsupportedKind.envelope.errors?.[0]?.code).toBe("UNSUPPORTED_RULE_KIND");
+
+		const fullConflict = invoke(pack.rules, pack.cases, ["--full"]);
+		expect(fullConflict.exitCode).toBe(2);
+		expect(fullConflict.envelope.errors?.[0]?.code).toBe("CONFLICTING_FLAGS");
+
+		const emptyPath = join(fixtureBase, "external-pack-no-omp-path");
+		mkdirSync(emptyPath, { recursive: true });
+		const noOmp = invoke(pack.rules, pack.cases, [], environment(home, emptyPath));
+		expect(noOmp.exitCode).toBe(3);
+		expect(noOmp.envelope.data?.overall).toBe("BLOCKED");
+		expect(noOmp.envelope.data?.test?.status).toBe("BLOCKED");
+		expect(noOmp.envelope.data?.test?.proofs?.G3_quiet_prefix?.status).toBe("NOT_RUN");
+	});
+	test("stale later rule keeps incomplete G1 registration NOT_RUN while overall status fails", async () => {
+		resolveOmpIdentity(process.env);
+		const rules = join(fixtureBase, "external-g1-stale-rules");
+		const cases = join(fixtureBase, "external-g1-stale-cases.tsv");
+		mkdirSync(rules, { recursive: true });
+		const firstRule = "external-g1-stale-rule-azure";
+		const laterRule = "external-g1-stale-rule-cobalt";
+		const firstToken = "omp-kit-external-g1-stale-first-token";
+		const laterToken = "omp-kit-external-g1-stale-later-token";
+		writeFileSync(join(rules, `${firstRule}.md`), [
+			"---", `condition: '${firstToken}'`, "scope: tool:bash", "interruptMode: never", "---", "Stale snapshot regression rule.", "",
+		].join("\n"));
+		const laterRulePath = join(rules, `${laterRule}.md`);
+		writeFileSync(laterRulePath, [
+			"---", `condition: '${laterToken}'`, "scope: tool:bash", "interruptMode: never", "---", "Stale snapshot regression rule.", "",
+		].join("\n"));
+		writeFileSync(cases, [
+			"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
+			`${firstRule}\tfire\ttool\tbash\t-\techo ${firstToken}\tfirst rule fire`,
+			`${firstRule}\tquiet\ttool\tbash\t-\techo ${firstToken.slice(0, -1)}\tfirst rule quiet`,
+			`${laterRule}\tfire\ttool\tbash\t-\techo ${laterToken}\tlater rule fire`,
+			`${laterRule}\tquiet\ttool\tbash\t-\techo ${laterToken.slice(0, -1)}\tlater rule quiet`,
+			"",
+		].join("\n"));
+
+		const pack = readExternalPackSnapshot(rules, cases);
+		writeFileSync(laterRulePath, [
+			"---", `condition: '${laterToken}-changed'`, "scope: tool:bash", "interruptMode: never", "---", "Stale snapshot regression rule.", "",
+		].join("\n"));
+		const report = await runExternalPackTest({ root: matcherRoot, executablePath: matcherExecutable, pack });
+
+		expect(report.status).toBe("FAIL");
+		expect(report.exitCode).toBe(1);
+		expect(report.observations.map(row => [row.rule, row.case_line])).toEqual([
+			[firstRule, 2],
+			[firstRule, 3],
+		]);
+		expect(report.proofs.G1_registration).toEqual({ status: "NOT_RUN", expected_rules: 2, observed_rules: 1 });
+		expect(report.proofs.G2_payload.status).toBe("NOT_RUN");
+		expect(report.proofs.G3_quiet_prefix.status).toBe("NOT_RUN");
+		expect(report.blocker?.reason).toBe("BUNDLED_SUBSTITUTION");
 	});
 });

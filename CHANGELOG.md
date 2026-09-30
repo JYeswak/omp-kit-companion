@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- The internal TTSR harness can report a selected rule/case through the real OMP matcher: completed payload, first streamed or final hit, typed unavailable states, and OMP/kit artifact digests. An independently supplied rule SHA-256 rejects same-name substitutions. This does not add arbitrary-pack selection to the public CLI or prove G4/effective-profile behavior.
+- The internal TTSR harness reports a selected rule/case through the real OMP matcher: completed payload, first streamed or final hit, typed unavailable states, and OMP/kit artifact digests. An independently supplied rule SHA-256 rejects same-name substitutions; these are matcher/prefix observations, not G4/effective-profile proof.
+- Installed `test --rules ABS_DIR --cases ABS_FILE` checks the explicitly selected external pack through the real native matcher instead of silently testing the bundled pack. Bundled defaults remain separate; external mode refuses live/project scopes and reports unavailable dependencies without converting them to quiet passes.
+- Read-only `review rules` compares old/new rule bytes on the frozen union of authored witnesses, preserving deleted or relabeled incumbent cases. It reports provenance, conflicts, native whole/prefix transitions, identity brackets, and a bounded denominator; it never approves or applies a rule change.
+- The shared line-deletion reducer enforces strict UTF-8 size decrease, attempt/time budgets, stable evaluator identity, and independent final replay. Unavailable or lost predicates cannot produce an accepted result; it does not claim global minimality or provide a private-transcript export path.
 - The settings-mutation reminder offers installed-only read-only plans when the selected profile permits them, otherwise an explicit owner-approval handoff. A real OMP continuation case now checks the tool result rather than a scripted model claim; it never auto-applies profile changes.
 - The explicitly consented `doctor --scope lsp --deep` path exercises OMP's real `lsp` tool against a private TypeScript fixture and loopback mock model. It refuses workspace-local/custom commands, preserves static-readiness semantics, reports distinct failure classes and input/runtime snapshots, and stops only the private LSP mux; it does not certify every server type or the target workspace runtime.
 

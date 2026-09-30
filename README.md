@@ -58,6 +58,21 @@ With the same installed `KIT` and OMP on PATH:
 
 The installed fast test consumes structured native-harness results and rejects malformed or contradictory evidence. Matcher subprocesses receive isolated HOME/XDG/temp paths before Bun starts; invoking the source harness directly does not provide the same caller-cache guarantee. A successful isolated plan must come from the matching shell tool result, not from the model claiming it succeeded.
 
+**Selected packs and paired review require an unreleased build; the v0.1.1 assets linked above do not include these commands.** Both use the existing OMP matcher and the seven-column TSV format in [cases/cases.tsv](cases/cases.tsv), not project scripts or a second matcher:
+
+```sh
+"$KIT" test --rules /absolute/pack/rules --cases /absolute/pack/cases.tsv --json
+"$KIT" review rules \
+  --incumbent-rules /absolute/old/rules --incumbent-cases /absolute/old/cases.tsv \
+  --candidate-rules /absolute/new/rules --candidate-cases /absolute/new/cases.tsv --json
+```
+
+External `test` reports the selected rule/case identities and G1–G3 results. Each selected rule needs authored fire and quiet cases. It rejects `--full` and `--project` in external mode; bundled `test` and `test --full` keep their existing contracts. Missing native dependencies and unsupported rule kinds are not passing quiet cases.
+
+`review rules` evaluates both rule versions against the frozen union of authored witnesses. Deleting or relabeling a candidate case cannot erase the incumbent case or its expectation. The report retains source-file digests and line provenance, rule/witness conflicts, old/new observations, first-prefix positions, and an exercised/total denominator. TSV witness IDs bind contextual input; changed context is reported as removed/added input rather than guessed identity. Stream positions count UTF-16 code units; a final-snapshot hit is separately marked. The comparison is bounded to 1,024 witness variants and a two-minute native-observation budget.
+
+Review exit codes are `0` for `NO_DELTA_IN_EXERCISED_WITNESSES`, `1` for deltas/conflicts, `2` for invalid invocation, and `3` for unavailable or changed inputs/identities. No-delta covers only the exercised witnesses, never equivalence or safety. Neither command installs rules, changes profiles, or proves G4/live blocking or effective-profile behavior.
+
 ## Usage
 
 Start with plans and read-only views:
