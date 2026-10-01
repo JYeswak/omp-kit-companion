@@ -14,6 +14,8 @@
 #                                          exit 0 iff the streamed evidenced close goes RED
 # Env:   OMP=/path/to/omp  TIMEOUT=120 (seconds per scenario)  KEEP=1 (keep the temp dir)
 #        ONLY="id id ..." (run just these scenario ids)
+#        OMP_KIT_RULES_VIA=plugin  deliver rules as a linked OMP extension package (rules/ inside
+#        the package, `omp plugin link`) instead of $HOME/.agents/rules, which then stays empty
 set -u
 MODE=full
 case "${1:-}" in
@@ -90,11 +92,19 @@ if [ "$MODE" = full ]; then
   fi
   KIT_PATH="$(dirname "$KIT_STABLE"):"
 fi
-cp "$HERE"/rules/*.md "$H/.agents/rules/"
+case "${OMP_KIT_RULES_VIA:-agents}" in
+  agents) RULES_DIR="$H/.agents/rules" ;;
+  plugin)
+    RULES_DIR="$T/kit-plugin/rules"
+    mkdir -p "$RULES_DIR"
+    printf '{"name":"omp-kit-rules","version":"0.0.0","omp":{"name":"omp-kit-rules","version":"0.0.0"}}\n' >"$T/kit-plugin/package.json" ;;
+  *) KEEP_WORK=1; echo "OMP_KIT_RULES_VIA must be agents or plugin" >&2; exit 2 ;;
+esac
+cp "$HERE"/rules/*.md "$RULES_DIR/"
 if [ "$MODE" = plant ]; then
-  "$OMP_KIT_BUN" "$LIB" plant "$H/.agents/rules/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
+  "$OMP_KIT_BUN" "$LIB" plant "$RULES_DIR/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
   echo "plant: kit-close-needs-evidence condition ->"
-  grep '^condition:' "$H/.agents/rules/kit-close-needs-evidence.md"
+  grep '^condition:' "$RULES_DIR/kit-close-needs-evidence.md"
 else
   "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }
 fi
@@ -114,7 +124,10 @@ isolate() {
 }
 
 echo "omp: $(isolate && "$OMP" --version 2>/dev/null) ($OMP)"
-echo "rules root: $H/.agents/rules ($(find "$H/.agents/rules" -type f -name '*.md' | wc -l | tr -d ' ') files)"
+if [ "${OMP_KIT_RULES_VIA:-agents}" = plugin ]; then
+  (isolate && "$OMP" plugin link "$T/kit-plugin" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
+fi
+echo "rules root: $RULES_DIR ($(find "$RULES_DIR" -type f -name '*.md' | wc -l | tr -d ' ') files; isolated .agents/rules has $(find "$H/.agents/rules" -type f -name '*.md' | wc -l | tr -d ' '))"
 pass=0; fail=0; selected=0
 scenario_ids=$("$OMP_KIT_BUN" "$LIB" select "$MODE")
 select_rc=$?
