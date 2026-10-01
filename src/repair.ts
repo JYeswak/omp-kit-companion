@@ -47,7 +47,7 @@ function findingRefusal(scope: NamedScope, findings: readonly Finding[], project
 
 /** A diagnosis finding is a hint, never authority to edit. The scope planner supplies that authority. */
 export async function planRepair(input: RepairInput): Promise<RepairDecision> {
-	if (!input.scope) return refusal(undefined, "SCOPE_REQUIRED", "Select exactly one named repair scope: rules, policy or extensions.");
+	if (!input.scope) return refusal(undefined, "SCOPE_REQUIRED", "Select exactly one named repair scope: rules, policy, extensions or state.");
 	if (!supported.includes(input.scope)) return refusal(input.scope, "UNSUPPORTED_REPAIR_SCOPE", "No bounded reversible repair exists for this component; OMP, JSM, credentials, router and builtin state are not edited.");
 	const scope = input.scope as NamedScope;
 	try {

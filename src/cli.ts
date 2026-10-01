@@ -20,6 +20,7 @@ import { inspectProjectTrust } from "./project-trust.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { runFullTest } from "./full-test-runner.ts";
+import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest } from "./test-runner.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
@@ -109,6 +110,10 @@ function refusal(code: string, message: string, remediation: string): CliResult 
 type ParseResult = { request: ParsedCommand } | { failure: CliResult; json: boolean };
 function parse(args: readonly string[]): ParseResult {
 	const json = args.includes("--json") || args.includes("--robot");
+	// A lone --version/-V is the conventional version query; `update --version X.Y.Z` keeps its meaning.
+	const lone = args.filter((arg) => arg !== "--json" && arg !== "--robot" && arg !== "--no-color");
+	if (lone.length === 1 && (lone[0] === "--version" || lone[0] === "-V"))
+		return { request: { command: { name: "--version", usage: "--version", description: "Print the kit version", flags: [], example: "omp-kit --version", runnable: true }, flags: new Map(), json, robot: args.includes("--robot") } };
 	const positional: string[] = [];
 	const flags = new Map<string, string | true>();
 	let command: Command | undefined;
@@ -601,6 +606,20 @@ function receiptStateRoot(): string | null {
 	return isAbsolute(xdg) && resolve(xdg) === xdg ? join(xdg, "omp-kit") : null;
 }
 
+/** Commands whose receipts live in the private state root; checked before consent so the real cause is shown. */
+const STATE_ROOT_COMMANDS: Record<string, true> = {
+	audit: true, why: true, undo: true, repair: true, update: true,
+	"apply rules": true, "apply policy": true, "apply extensions": true,
+};
+
+function stateRootRefusal(issue: StateRootIssue): CliResult {
+	if (issue.problem === "MODE")
+		return refusal("STATE_ROOT_PERMISSIONS", `Kit state root ${issue.path} has mode ${issue.mode}; receipts require ${issue.expected}, owned by you`,
+			"Run omp-kit repair --scope state --plan, then --apply --yes. It changes only that directory's mode; its contents are untouched.");
+	return refusal("STATE_UNSAFE", `Kit state root ${issue.path} is unusable (${issue.problem}, mode ${issue.mode})`,
+		"Make it a real directory you own with mode 0700 (or move it aside); the kit will not change it.");
+}
+
 function receiptCommand(request: ParsedCommand): CliResult {
 	const stateRoot = receiptStateRoot();
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
@@ -810,6 +829,21 @@ registerCommandHandler("apply policy", policyCommand);
 
 async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
+	const scope = request.flags.get("--scope");
+	if (scope === "state") {
+		if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+			"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
+		const issue = inspectStateRoot(stateRoot);
+		const step = { action: "chmod 0700", path: stateRoot };
+		const data = { overall: "UNVERIFIED", scope: "state", receipt_id: null };
+		if (!issue) return { code: 0, data: { ...data, action: "UNCHANGED", changes: 0, steps: [] }, verification: "PERFORMED" };
+		if (issue.problem !== "MODE") return stateRootRefusal(issue);
+		if (!request.flags.has("--apply"))
+			return { code: 0, data: { ...data, action: "PLAN", changes: 1, steps: [step], previous_mode: issue.mode }, verification: "UNVERIFIED" };
+		const repaired = repairStateRootMode(stateRoot);
+		return { code: 0, data: { ...data, action: "APPLIED", changes: 1, steps: [step], previous_mode: repaired.previous_mode },
+			verification: "PERFORMED" };
+	}
 	if (!root || !home || !isAbsolute(home))
 		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
 			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
@@ -817,7 +851,7 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 		}], verification: "UNVERIFIED" };
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
-	const scope = request.flags.get("--scope");
+	// --scope state is handled above.
 	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(),
 		...(typeof scope === "string" ? { scope } : {}) });
 	if (decision.status === "REFUSED") return { code: 2,
@@ -1033,10 +1067,23 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 		}, verification: "UNVERIFIED" };
 	try {
 		const outcome = await applyKitUpdate(plan);
+		const report = outcome.postcheck.report;
+		// Name why a postcheck failed instead of a bare FAIL; operators cannot act on an unexplained PARTIAL.
+		const postcheckDetail = report ? {
+			status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
+			failed_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
+			changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
+			failures: report.failures.slice(0, 20),
+		} : null;
+		const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
 		return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
 			scope, action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
 			provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
-			postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null }, verification: "UNVERIFIED" };
+			postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
+			...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+				message: `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
+				remediation: `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
+			verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },
@@ -1053,11 +1100,17 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	const { command, parent, flags } = request;
 	const path = `${parent ? `${parent.name} ` : ""}${command.name}`;
 	if (flags.has("--help")) return { code: 0, data: { text: command.name === "help" ? help() : help(command, parent) }, verification: "PERFORMED" };
+	if (command.name === "--version") return { code: 0, data: { text: `omp-kit ${version}`, version }, verification: "PERFORMED" };
 	if (command.name === "--info") {
 		const kit = kitIdentity();
 		return { code: 0, data: { ...kit, omp: ompIdentity(), dependencies: { bun: "embedded when compiled", omp: "optional for help; required for status/test" } }, verification: "UNVERIFIED" };
 	}
 	const handler = handlers.get(path);
+	if (handler && STATE_ROOT_COMMANDS[path] && !(path === "repair" && flags.get("--scope") === "state")) {
+		const stateRoot = receiptStateRoot();
+		const issue = stateRoot ? inspectStateRoot(stateRoot) : null;
+		if (issue) return stateRootRefusal(issue);
+	}
 	if (handler) {
 		if (command.mutation && (flags.has("--apply") || command.name === "undo")) {
 			const accepted = await confirmMutation({

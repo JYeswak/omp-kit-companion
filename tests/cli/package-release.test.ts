@@ -98,17 +98,22 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	expect(report.snapshots.home.complete).toBe(true);
 });
 
-test("oversized private HOME file makes the installed full check snapshot incomplete", () => {
+test("oversized operator files bound the watched snapshot only where the kit could write", () => {
 	const { home, installedRoot, installedBinary } = installCandidate("bounded-home");
 	appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
-	const oversized = join(home, "large-private-file");
-	writeFileSync(oversized, "");
-	truncateSync(oversized, 256 * 1024 * 1024 + 1);
-	const bounded = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
-		cwd: output, env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" },
-		stdout: "pipe", stderr: "pipe",
-	});
+	const env = { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
+		XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
+	const unwatched = join(home, "large-private-file");
+	writeFileSync(unwatched, "");
+	truncateSync(unwatched, 600 * 1024 * 1024);
+	const ignored = Bun.spawnSync([installedBinary, "test", "--full", "--json"], { cwd: output, env, stdout: "pipe", stderr: "pipe" });
+	expect(ignored.exitCode, ignored.stdout.toString() + ignored.stderr.toString()).toBe(1);
+	expect(JSON.parse(ignored.stdout.toString()).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: true, incomplete_paths: [] });
+	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
+	const watched = join(home, ".agents", "rules", "oversized.md");
+	writeFileSync(watched, "");
+	truncateSync(watched, 512 * 1024 * 1024 + 1);
+	const bounded = Bun.spawnSync([installedBinary, "test", "--full", "--json"], { cwd: output, env, stdout: "pipe", stderr: "pipe" });
 	expect(bounded.exitCode, bounded.stdout.toString() + bounded.stderr.toString()).toBe(1);
-	expect(JSON.parse(bounded.stdout.toString()).data.test.snapshots.home).toEqual({ unchanged: true, complete: false });
+	expect(JSON.parse(bounded.stdout.toString()).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
 });

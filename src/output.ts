@@ -55,7 +55,17 @@ export function renderOutput(result: PresentationResult, options: PresentationOp
 	];
 	const stderr = diagnostics.length ? `${diagnostics.join("\n")}\n` : "";
 	if (errors.length) return { stdout: "", stderr, exitCode: result.code };
-	const data = typeof result.data.text === "string" ? result.data.text : JSON.stringify(stableData(result.data), null, 2);
+	let data = typeof result.data.text === "string" ? result.data.text : null;
+	const findings = result.data.findings;
+	if (data === null && Array.isArray(findings)) {
+		// Human view of status/doctor/health: one line per component, then the distinct next actions. --json keeps every field.
+		const rows = (stableData(findings) as { component?: unknown; status?: unknown; reason?: unknown; recommended_action?: unknown }[]);
+		const lines = rows.map((row) => `${String(row.status ?? "").padEnd(10)} ${String(row.component ?? "").padEnd(18)} ${String(row.reason ?? "")}`);
+		const actions = [...new Set(rows.filter((row) => row.status !== "OK").map((row) => String(row.recommended_action ?? "")).filter(Boolean))];
+		data = [`overall: ${String(result.data.overall ?? "UNVERIFIED")}`, ...lines, ...(actions.length ? ["", "Next:", ...actions.map((action) => `- ${action}`)] : []),
+			"", "Full detail: add --json."].join("\n");
+	}
+	data ??= JSON.stringify(stableData(result.data), null, 2);
 	return { stdout: `${data.endsWith("\n") ? data : `${data}\n`}`, stderr, exitCode: result.code };
 }
 

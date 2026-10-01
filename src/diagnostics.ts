@@ -3,6 +3,7 @@ import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readF
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
+import { inspectStateRoot } from "./state-root.ts";
 import type { Image } from "./mutations.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
@@ -19,6 +20,8 @@ export interface DiagnoseInput {
 	project?: string;
 	ompPath?: string;
 	jsmPath?: string;
+	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
+	stateRoot?: string;
 }
 export interface ManifestRule { name: string; sha256: string; pack: string }
 export type RuleOwnershipRecord = { version: 1; rules: Record<string, Image> };
@@ -182,7 +185,6 @@ type ConfigInspection = { name: string; dir: string; data?: Record<string, unkno
 type DisabledConflict = { profile: string; name: string; provider: "global" | "project" | "unknown" };
 const CONFIG_NAMES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
 const POLICY_KEYS = ["enabled", "repeatMode", "repeatGap", "contextMode", "disabledRules"] as const;
-const DEEP_COMMAND = "omp-kit doctor --deep --yes";
 
 function record(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -455,11 +457,19 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));
 	rows.push(inspectExtensions(root, home, profiles.profiles, projectConfig, profiles.issue));
 	rows.push(inspectRouter(input.jsmPath));
+	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
+	const stateIssue = inspectStateRoot(stateRoot);
+	rows.push(stateIssue === null
+		? finding("state_root", "OK", "Private state root is absent or a private directory you own", "None.")
+		: finding("state_root", stateIssue.problem === "MODE" ? "DEGRADED" : "FAIL",
+			`Private state root has ${stateIssue.problem === "MODE" ? `mode ${stateIssue.mode}` : stateIssue.problem.toLowerCase()}; receipts, audit, undo and update refuse until it is a 0700 directory you own`,
+			stateIssue.problem === "MODE" ? "Run omp-kit repair --scope state --plan, then --apply --yes." : "Make it a real directory you own with mode 0700, or move it aside.",
+			{ path: stateRoot, problem: stateIssue.problem, mode: stateIssue.mode }));
 	const backupScope = [join(home, ".omp", "settings.json"),
 		...profiles.profiles.flatMap((profile) => [...CONFIG_NAMES, "agent.db"].map((name) => join(profile.dir, name)))];
 	if (input.project) backupScope.push(join(input.project, ".omp", "config.yml"), join(input.project, ".omp", "settings.json"), join(input.project, ".claude", "settings.json"));
 	rows.push(finding("effective_profile", "UNVERIFIED", "On-disk settings cannot prove OMP effective values, runtime overlays or activation",
-		`Back up profile/settings files (including absent candidates before any migratory read): ${backupScope.join(", ")}. Only after the P15 guarded backup/receipt implementation is available, separately consent to ${DEEP_COMMAND}; otherwise do not probe.`,
+		"Inspect effective values with OMP itself: omp config list (named profiles: omp --profile NAME config list). Back up the files listed in evidence.backup_scope before changing any of them.",
 		{ profiles: profiles.profiles.map((profile) => profile.name), backup_scope: backupScope, ...(profiles.issue ? { inventory_issue: profiles.issue } : {}) }));
 	rows.push(finding("matcher", "NOT_RUN", "Matcher was not exercised by the inventory", "Run omp-kit test for matcher evidence."));
 	return rows.sort((a, b) => a.component.localeCompare(b.component));

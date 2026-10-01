@@ -9,21 +9,17 @@ const git = Bun.which("git");
 if (!git) throw new Error("git unavailable on PATH; cannot bound native discovery to the disposable project");
 const packageVersion: unknown = JSON.parse(readFileSync(join(omp.packageRoot, "package.json"), "utf8")).version;
 if (typeof packageVersion !== "string") throw new Error("selected OMP package has no version");
-// OMP 18.4.2 lacks the external pre-import TTY guard; its synthetic hook was observed importing.
-// Requalification is tracked by ompkit-native-hook-refusal-requalification-dpy; close only after
-// this probe runs green on a newly qualified version with rc=2, TTY refusal, and no import marker.
-const HOOK_REFUSAL_REQUALIFICATION_BEAD = "ompkit-native-hook-refusal-requalification-dpy";
-const supportedHookRefusalVersions: Record<string, true> = {
-	"18.4.3": true,
-	"18.4.4": true,
-	"18.4.5": true,
-};
-const supportedHookRefusalTest = supportedHookRefusalVersions[packageVersion] ? test : test.skip;
-if (!supportedHookRefusalVersions[packageVersion]) {
-	console.info(
-		`native-guide: UNAVAILABLE/NOT_RUN: external installed OMP ${packageVersion} is outside the documented/proven pre-import refusal versions (18.4.3, 18.4.4, 18.4.5); re-enable via ${HOOK_REFUSAL_REQUALIFICATION_BEAD}`,
-	);
-}
+// OMP added the external pre-import TTY guard in 18.4.3; 18.4.2 was observed importing the synthetic hook.
+// Every later OMP runs the probe automatically (the operator's updater moves OMP every few hours), so a
+// regression in a new release fails here instead of being skipped until someone extends an allowlist.
+const HOOK_REFUSAL_MIN = [18, 4, 3] as const;
+const versionParts = packageVersion.split(/[.-]/).slice(0, 3).map(Number);
+const atLeastMin = versionParts.length === 3 && versionParts.every(Number.isInteger) && (() => {
+	for (let i = 0; i < 3; i++) if (versionParts[i] !== HOOK_REFUSAL_MIN[i]) return versionParts[i]! > HOOK_REFUSAL_MIN[i]!;
+	return true;
+})();
+const supportedHookRefusalTest = atLeastMin ? test : test.skip;
+if (!atLeastMin) console.info(`native-guide: NOT_RUN: OMP ${packageVersion} predates the pre-import hook TTY guard (18.4.3)`);
 
 const roots: string[] = [];
 afterEach(() => {
@@ -104,7 +100,7 @@ test("published native commands use the selected installed OMP identity and beha
 }, 30000);
 
 supportedHookRefusalTest(
-	`hook flag without a terminal refuses before importing a hook [requalification: ${HOOK_REFUSAL_REQUALIFICATION_BEAD}]`,
+	"hook flag without a terminal refuses before importing a hook",
 	() => {
 		const target = fixture();
 		const marker = join(target.project, "hook-imported");
