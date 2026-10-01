@@ -28,6 +28,17 @@ KIT="$HOME/.local/opt/omp-kit/bin/omp-kit"
 
 These commands **do not apply rules or change profiles**. `--json` is output formatting, not consent to write. An inaccessible effective profile remains `UNVERIFIED`; project-local rules can shadow global ones. See [Installation](#installation) for the pinned native release, [Usage](#usage) for guarded writes, and [the hero identity receipt](visual/hero-identity-grade.json) for the independently checked image.
 
+### Rules as a native OMP plugin
+
+The repo itself is an OMP plugin: `package.json` carries the `omp` manifest, `rules/` is discovered automatically, and `extensions/kit-guard-optin.ts` is the declared extension entry point. Link a checkout instead of copying rules by hand:
+
+```sh
+omp plugin link /path/to/omp-kit-companion && omp plugin list
+omp ttsr list --json    # kit rules arrive with "provider": "omp-plugins"
+```
+
+Native `~/.omp/agent/rules` shadows a same-name plugin rule; `omp plugin disable` reactivates a same-name legacy copy under `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves the precedence matrix, one live block, the disabled-plugin negative, and clean uninstall in an isolated HOME. `apply rules`/`apply extensions` stay until the cutover is independently verified.
+
 ## Installation
 
 Start with an existing [OMP installation](https://github.com/can1357/oh-my-pi), Python 3, `git`, and `curl`. The [omp-kit v0.1.1 release](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.1) is pinned below: review its index and the appropriate native archive before installing. These commands clone the tagged source for the installer; the installer fetches only the selected platform archive from the same HTTPS release:
