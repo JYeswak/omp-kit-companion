@@ -254,7 +254,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    if (!verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error("KIT_STAGE_CHANGED");
    switchLink(plan.prefix, staged.version);
    if (!matches(plan.prefix, next)) throw new Error("KIT_POSTIMAGE_CHANGED");
-   const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project } satisfies FullTestInput);
+   const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project, stateRoot: plan.stateRoot } satisfies FullTestInput);
    const matcher = report.fast.status === "PASS" && report.fast.proofs.G1_registration.status === "PASS" && report.fast.proofs.G2_payload.status === "PASS" && report.fast.proofs.G3_quiet_prefix.status === "PASS" ? "PASS" : "FAIL";
    const live = report.proofs.G4_live.status === "PASS" && Object.values(report.stages).every(stage => stage.status === "PASS") ? "PASS" : "FAIL";
    const observedOmp = selectedOmpSnapshot();

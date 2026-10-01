@@ -1,0 +1,66 @@
+name: OMP latest compatibility
+
+# OMP ships often and operators update it on their own schedule (UCA runs every 3 h). This job runs the
+# CLI contracts and the full rule ladder against whatever OMP npm currently publishes, and keeps exactly one
+# open issue per breaking OMP version. GitHub disables schedules after 60 days without repository activity.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      omp_version:
+        description: OMP version to test (default latest)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: omp-latest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  latest:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install the selected OMP release and TypeScript LSP
+        env:
+          OMP_SPEC: ${{ inputs.omp_version || 'latest' }}
+        run: |
+          npm install --global "@oh-my-pi/pi-coding-agent@$OMP_SPEC" typescript-language-server@5.1.3 typescript@5.9.3
+          version="$(omp --version | sed 's#^omp/##')"
+          echo "OMP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "### OMP $version ($OMP_SPEC) on $(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
+      - name: CLI contracts against this OMP
+        run: bun test tests/cli
+      - name: Full rule ladder (G1-G4, planted negative) against this OMP
+        run: sh scripts/ladder.sh
+      - name: Open or update one issue for this OMP version
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="OMP ${OMP_VERSION:-unknown} breaks omp-kit main"
+          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: $RUN_URL"
+          else
+            gh issue create --title "$title" --body "The scheduled compatibility run failed against OMP ${OMP_VERSION:-unknown}: $RUN_URL. It stays open until a run on this or a later OMP passes."
+          fi
+      - name: Close compatibility issues once a run passes
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue list --state open --search "in:title \"breaks omp-kit main\"" --json number,title \
+            --jq '.[] | select(.title | test("^OMP .* breaks omp-kit main$")) | .number' |
+          while read -r number; do
+            gh issue close "$number" --comment "Passing on OMP $OMP_VERSION: $RUN_URL"
+          done

@@ -249,10 +249,10 @@ test("opaque or malformed profile remains unverified with concrete backup and co
 	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
 	expect(tree(f.home)).toEqual(before);
 	expect(finding(rows, "policy").status).toBe("UNVERIFIED");
-	expect(finding(rows, "effective_profile").recommended_action).toContain(join(agent, "config.yml"));
-	expect(finding(rows, "effective_profile").recommended_action).toContain(join(agent, "settings.json"));
-	expect(finding(rows, "effective_profile").recommended_action).toContain("omp-kit doctor --deep --yes");
-	expect(finding(rows, "effective_profile").recommended_action).toContain("P15");
+	const effective = finding(rows, "effective_profile");
+	expect(effective.evidence?.backup_scope).toEqual(expect.arrayContaining([join(agent, "config.yml"), join(agent, "settings.json")]));
+	expect(effective.recommended_action).toContain("omp config list");
+	expect(effective.recommended_action).not.toContain("--deep");
 });
 
 test("removed named profile is not recreated or treated as an observed config", async () => {

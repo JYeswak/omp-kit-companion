@@ -145,7 +145,7 @@ const planApply: readonly Flag[] = [
 
 const repairData: DataSchema = { type: "object", required: ["overall", "action", "scope", "changes", "steps", "receipt_id"], properties: {
 	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED", "UNCHANGED"] },
-	scope: { enum: ["rules", "policy", "extensions"] }, changes: { type: "number" },
+	scope: { enum: ["rules", "policy", "extensions", "state"] }, changes: { type: "number" },
 	steps: { type: "array", items: { type: "object", required: ["action", "path"], properties: {
 		action: { type: "string" }, path: { type: "string" }, profile: { type: "string" },
 	} } }, receipt_id: { type: ["string", "null"] },
@@ -233,8 +233,8 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--include-default", description: "Include the default profile explicitly" },
 		], example: "omp-kit apply extensions --plan --json", runnable: false, mutation: true },
 	], example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
-	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions [--plan|--apply --yes]", flags: [
-		{ name: "--scope", value: "rules|policy|extensions", description: "Required exact reversible repair scope" }, ...planApply,
+	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
+		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,
 	], example: "omp-kit repair --scope rules --plan --json", runnable: false, mutation: true, dataSchema: repairData },
 	{ name: "undo", description: "Guardedly restore one verified receipt", usage: "undo RUN_ID [--yes]", argument: "RUN_ID", flags: [
 		{ name: "--yes", description: "Confirm restore after state verification" },

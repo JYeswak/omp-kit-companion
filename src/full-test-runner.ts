@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
@@ -13,11 +14,12 @@ export type FullTestReport = {
  omp_version: string | null; stages: Record<FullStageName, FullStage>;
  proofs: { G4_live: { status: "PASS" | "FAIL" | "NOT_RUN"; expected_scenarios: number; observed_scenarios: number; plant: "PASS" | "FAIL" | "NOT_RUN" } };
  live_scenarios: { expected_ids: string[]; observed_ids: string[]; status: "PASS" | "FAIL" | "NOT_RUN" };
- snapshots: Record<"release" | "home" | "project", { unchanged: boolean | null; complete: boolean }>;
+ snapshots: { release: { unchanged: boolean | null; complete: boolean }; home: WatchedComparison; project: WatchedComparison };
  producer: { producer_rc: number | null; stdout: string; stderr: string };
  failures: string[]; proof_scope: "ISOLATED_FIXTURE_ONLY";
 };
-export type FullTestInput = FastTestInput;
+/** `stateRoot` defaults to $XDG_STATE_HOME/omp-kit (or ~/.local/state/omp-kit) and is part of the watched operator set. */
+export type FullTestInput = FastTestInput & { stateRoot?: string };
 
 type Snapshot = { digest: string | null; complete: boolean };
 function snapshot(root: string | undefined, release: boolean): Snapshot {
@@ -105,17 +107,20 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
 export async function runFullTest(input: FullTestInput): Promise<FullTestReport> {
  if (![input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])].every(isAbsolute))
   throw new Error("full-test release, executable, HOME, and project paths must be absolute");
- const before = { release: snapshot(input.root, true), home: snapshot(input.home, false), project: snapshot(input.project, false) };
+ const watchedPaths = operatorWatchedPaths(input.home, input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit"));
+ // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
+ const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
+ const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
  const fast = await runFastTest(input);
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null }])) as Record<FullStageName, FullStage>;
  const empty = { producer_rc: null, stdout: "", stderr: "" };
  if (fast.status !== "PASS") {
-  const after = { release: snapshot(input.root, true), home: snapshot(input.home, false), project: snapshot(input.project, false) };
+  const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
   const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-   home: { unchanged: before.home.digest === after.home.digest, complete: before.home.complete && after.home.complete },
-   project: { unchanged: before.project.digest === after.project.digest, complete: before.project.complete && after.project.complete } };
+   home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
   const failures = [...fast.failures];
-  if (!snapshots.release.unchanged || !snapshots.home.unchanged || !snapshots.project.unchanged) failures.push("Release, HOME, or project snapshot changed during failed fast stage");
+  if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
+  for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during failed fast stage: ${path}`);
   const status = failures.length > fast.failures.length ? "FAIL" : fast.status;
   return { status, exitCode: status === "FAIL" ? 1 : 3, fast, omp_version: null,
    stages: defaults, proofs: { G4_live: { status: "NOT_RUN", expected_scenarios: 0, observed_scenarios: 0, plant: "NOT_RUN" } },
@@ -135,15 +140,16 @@ export async function runFullTest(input: FullTestInput): Promise<FullTestReport>
  let result: BundledRunResult;
  try { result = await runIsolatedShell("scripts/ladder.sh", [], input.root, input.executablePath); }
  catch (error) { result = { code: 3, stdout: "", stderr: error instanceof Error ? error.message : String(error) }; }
- const after = { release: snapshot(input.root, true), home: snapshot(input.home, false), project: snapshot(input.project, false) };
+ const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-  home: { unchanged: before.home.digest === after.home.digest, complete: before.home.complete && after.home.complete },
-  project: { unchanged: before.project.digest === after.project.digest, complete: before.project.complete && after.project.complete } };
+  home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
  const classified = classifyLadder(result, ids);
  const failures = [...classified.failures];
- if (!snapshots.release.unchanged || !snapshots.home.unchanged || !snapshots.project.unchanged) failures.push("Release, HOME, or project snapshot changed during isolated test");
- const incomplete = Object.values(snapshots).some(part => !part.complete);
- if (incomplete) failures.push("Release, HOME, or project snapshot was incomplete");
+ if (!snapshots.release.unchanged) failures.push("Release snapshot changed during isolated test");
+ if (!snapshots.release.complete) failures.push("Release snapshot was incomplete");
+ for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during isolated test: ${path}`);
+ for (const path of [...snapshots.home.incomplete_paths, ...snapshots.project.incomplete_paths]) failures.push(`Operator file could not be read completely: ${path}`);
+ const incomplete = !snapshots.release.complete || !snapshots.project.complete || !snapshots.home.complete;
  const passed = result.code === 0 && !failures.length && classified.live_scenarios.status === "PASS" && classified.stages["e2e-plant"].status === "PASS";
  const redact = (text: string) => {
   let value = text;
