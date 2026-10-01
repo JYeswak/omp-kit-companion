@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Leaked mock servers can no longer accumulate silently: `scripts/e2e-live.sh` reaps each scenario mock with a bounded wait (TERM, grace, KILL) and fails at exit naming any defiant or surviving scenario, and the real-HOME journey ends with a `no_leaked_processes` step that expects zero processes with argv or cwd under the journey work dir.
 - The source `scripts/doctor.sh` no longer runs the legacy model-role/quota check; `scripts/role-check.ts` is removed from releases and embedded runtime allowlists. Model/provider routing remains outside the kit.
 - `doctor --scope settings` reads listed profile TTSR keys through native OMP `config get` and reports per-key `OK`, `DRIFT` or `UNVERIFIED` without claiming runtime activation. An optional JSON array at `$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` (default `$HOME/.config/omp-kit/ttsr-profiles.json`) selects profiles; invalid or unsafe files fail closed. `apply policy --plan` emits exact per-profile native `config set` commands; consented apply stores byte-exact configs for each changed profile under the private state root and verifies every changed key with native readback. Policy fields outside the TTSR allowlist are refused, leaving model/provider routing to their owner.
 - `apply policy --plan` no longer depends on legacy `~/.agents/rules`, so plugin-managed rules remain a valid route; repair preserves `INVALID_STATE_ROOT`, and pre-write policy drift is `FRESH_PLAN` while post-write failure remains `POLICY_APPLY_PARTIAL`.
