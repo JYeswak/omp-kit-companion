@@ -3,7 +3,7 @@
 Test OMP rules, preview every change, apply with receipts.
 
 ```sh
-KIT_VERSION=0.1.1
+KIT_VERSION=0.2.0
 KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
 git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git
 cd omp-kit-companion
@@ -13,9 +13,11 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
-installs OMP, models, profiles, or shell edits. v0.1.1 is the latest
-published release; a v0.1.x kit cannot self-update on a real HOME, so
-reinstall to move between versions.
+installs OMP, models, profiles, or shell edits. v0.2.0 is the latest
+published release. Coming from v0.1.x: reinstall with the commands above,
+because a v0.1.x binary cannot finish `update --apply` on a real HOME. If an
+earlier attempt left a pending update, `omp-kit undo RECEIPT --yes` (receipt
+from `omp-kit audit`) restores the previous release and clears it.
 
 ![Yuzu testing omp rule behavior](visual/hero.jpg)
 

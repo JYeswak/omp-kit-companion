@@ -27,21 +27,25 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
 | Native-certification receipts name the failing command, stages and scenarios | #7 |
 | `health` judges only what a read-only inventory can prove; the rest is listed as `not_judged` and never affects the exit code | #9 |
+| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
+| Real-HOME journey in CI: 52k-file HOME, edited rules, legacy 0755 state root, a concurrent writer, one JSONL line per step, on macOS and Linux | #12 |
+| Latest-OMP CI records first-fire indices per OMP version and reports a default-policy G4 run separately | #13 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
-| Rules as a native OMP plugin: repo links/installs as a plugin, precedence + live fire proven by `scripts/plugin-lifecycle.sh` | #14 |
+| Release v0.2.0 (changelog cut, install pin, release procedure in CONTRIBUTING) | this PR |
+| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade) | #14 |
 
 ## Next
 
-1. **Real-HOME journey in CI.** One script runs the README path against a realistic HOME (50k files, edited rules, legacy 0755 state root, a concurrent writer) on macOS and Linux, logging one JSONL line per step. This would have caught every real-machine bug above. Required before the next release.
-2. **Release v0.2.0**, then a regular cadence. v0.1.x binaries cannot update on a real HOME; reinstall with the installer.
-3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. Since #7, receipts name the cause; the first diagnosed case was the live scenario `test-skip-ts-fire` on linux-x64. The fix follows from the receipts.
-5. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-6. **Capability-preserving context.** After the release: a read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
+1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases).
+2. **Intermittent native-certification failures.** Diagnosed: both refusals with receipts name the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
+3. **After the plugin route lands:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
+4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
+5. **Rule false fires on quoted text.** `kit-settings-mutation` and `kit-test-skip` interrupt commands and files that merely quote their trigger text; add those shapes as quiet cases and tighten the conditions without losing a fire case.
+6. **Capability-preserving context.** A read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 
