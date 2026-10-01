@@ -58,7 +58,7 @@ function stageRelease(): string {
 	}
 	writeFileSync(join(root, "MANIFEST.tsv"), readFileSync(join(REPO_ROOT, "MANIFEST.tsv")));
 	mkdirSync(join(root, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts"]) {
+	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(root, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
 	const executable = join(root, "bin", "omp-kit");

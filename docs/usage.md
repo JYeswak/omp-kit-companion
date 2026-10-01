@@ -113,3 +113,32 @@ Native `~/.omp/agent/rules` shadows a same-name plugin rule;
 matrix, one live block, the disabled-plugin negative, and clean
 uninstall in an isolated HOME. `apply rules`/`apply extensions` stay
 until the cutover is independently verified.
+
+## Measure prompt listing cost
+
+`doctor --scope context` reports what a profile lists into the prompt,
+measured with OMP's own loaders: listed skills (name plus description,
+honouring `hide`), context files, rules, and tool counts with the native
+knobs in effect. Inline descriptor bytes stay UNVERIFIED without a live
+session. Nothing is written to the inspected HOME:
+
+```sh verified rc=0 contains='"component":"context"'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" doctor --scope context --json
+```
+
+Add `--profile NAME` for a named profile, `--project PATH` to select the
+session cwd. After pruning with OMP's native skill knobs, check that the
+capabilities you need still resolve:
+
+```sh verified rc=0 contains='"overall":"PASS"'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+printf '{"schema_version":1,"tools":["bash"]}' > "$HOME/caps.json"
+"$KIT" test --capabilities "$HOME/caps.json" --json
+```
+
+The file declares `skills`, `tools`, `rules`, and `lsp` arrays
+(`schema_version` 1). Each entry resolves to `RESOLVED`,
+`HIDDEN_BUT_READABLE`, or `MISSING`; any `MISSING` exits 1. A smaller
+listing that resolves every declared capability does not prove equal
+task success; that comparison belongs to dedicated benchmark tooling.

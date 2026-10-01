@@ -39,6 +39,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Item | PR |
 |---|---|
 | Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
+| Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
 
 ## Next
 
@@ -46,7 +47,6 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
 3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
 4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-5. **Capability-preserving context.** A read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 
