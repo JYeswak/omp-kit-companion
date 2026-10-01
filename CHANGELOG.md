@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-01
+
+- A real-HOME journey (52,000-file HOME, edited rules, legacy 0755 state root, a concurrent writer) runs the install-to-update path on macOS and Linux CI with a JSONL step log. It would have caught every real-machine failure fixed in this release.
+- The README is a 60-second start; usage, configuration and a native-OMP guide live under `docs/`, and their verified command blocks run in the test suite against the installed OMP.
 - The OMP-compatibility workflow records each case's G3 first-fire index per OMP version as an artifact and reports index changes against the previous version in the run summary, even when green. It also runs the G4 live suite a second time under OMP's own default TTSR settings (`scripts/e2e-live.sh` honors `OMP_KIT_DEFAULT_TTSR=1` to skip installing the kit policy) and reports that outcome separately; only the kit-policy run gates the job.
 - `test --record` saves the verdict and the tested OMP in the private state root, and `status`/`doctor` add an `omp_drift` finding that turns DEGRADED when OMP changes after the last recorded test or that test failed. `examples omp-watch` renders, but never installs, a launchd agent or systemd `.path` unit that re-runs `test --record` whenever OMP's package changes and notifies only on failure. Plain `test` remains read-only.
 - `omp-kit health` judges only what a read-only inventory can prove (kit, manifest, omp, state root, installed rules, and `omp_drift`), so a healthy install with a recorded passing test exits 0. Structurally unprovable rows (effective profile, matcher, and the rest) are still reported but listed separately in `data.not_judged` with their reasons and never affect the exit code. A passing `health` never certifies the effective OMP profile. `status` and `doctor` are unchanged.
