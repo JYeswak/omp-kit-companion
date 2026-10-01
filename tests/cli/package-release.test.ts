@@ -79,7 +79,7 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	expect(fast.exitCode, fast.stdout.toString() + fast.stderr.toString()).toBe(0);
 	expect(JSON.parse(fast.stdout.toString()).data.test.proofs).toMatchObject({
 		G1_registration: { status: "PASS", observed_rules: 18 },
-		G2_payload: { status: "PASS", observed_cases: 276 },
+		G2_payload: { status: "PASS", observed_cases: 278 },
 		G3_quiet_prefix: { status: "PASS", observed_quiet_cases: 140, quiet_prefix_fires: 0 },
 		G4_live: { status: "NOT_RUN" },
 	});
