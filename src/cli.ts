@@ -7,13 +7,13 @@ import { applyExtensions, inspectPendingExtensions, planExtensions } from "./app
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
-import { diagnose, health, type Finding } from "./diagnostics.ts";
+import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
-import { applyKitUpdate, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
+import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import type { PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
@@ -301,6 +301,13 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	settings: ["policy"],
 };
 
+/** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
+const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
+	kit: true, manifest: true, omp: true, state_root: true, installed_rules: true, omp_drift: true,
+};
+
+interface NotJudgedComponent { component: string; status: DiagnosticStatus; reason: string }
+
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.has("--deep")) {
 		const scope = String(request.flags.get("--scope") ?? "effective_profile");
@@ -370,18 +377,29 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 		evidence: { effective_profile: byComponent("effective_profile"), installed_rules: byComponent("installed_rules"), matcher: byComponent("matcher") },
 		recommended_actions: [...new Set(findings.filter((item) => item.status !== "OK").map((item) => item.recommended_action))],
 	};
-	if (availability === "UNAVAILABLE") return { code: 3, data, errors: [{
+	const strict = request.command.name === "health";
+	const notJudged: NotJudgedComponent[] = strict ? findings.filter((item) => !HEALTH_JUDGED_COMPONENTS[item.component])
+		.map((item) => ({ component: item.component, status: item.status, reason: item.reason }))
+		.sort((left, right) => left.component.localeCompare(right.component)) : [];
+	const judgedOverall = strict ? health(findings.filter((item) => HEALTH_JUDGED_COMPONENTS[item.component])) : null;
+	const healthData = strict ? { ...data, overall: judgedOverall, not_judged: notJudged } : data;
+	if (availability === "UNAVAILABLE") return { code: 3, data: healthData, errors: [{
 		code: "OMP_UNAVAILABLE", message: omp.reason, remediation: ompFinding?.recommended_action ?? "Install OMP and put it on PATH.",
 	}], verification: "UNVERIFIED" };
 	const failedRequired = findings.find((item) => (item.component === "kit" || item.component === "manifest") && item.status === "FAIL");
-	if (failedRequired) return { code: 1, data, errors: [{
+	if (failedRequired) return { code: 1, data: healthData, errors: [{
 		code: "REQUIRED_FINDING_FAILED", message: failedRequired.reason, remediation: failedRequired.recommended_action,
 	}], verification: "UNVERIFIED" };
-	const strict = request.command.name === "health";
+	if (strict) return {
+		code: judgedOverall !== "OK" ? 1 : 0,
+		data: healthData,
+		commands: ["omp-kit doctor --json"],
+		verification: judgedOverall === "OK" ? "PERFORMED" : "UNVERIFIED",
+	};
 	return {
-		code: strict && data.overall !== "OK" ? 1 : 0,
+		code: 0,
 		data,
-		commands: strict ? ["omp-kit doctor --json"] : ["omp-kit capabilities --json", "omp-kit doctor --json"],
+		commands: ["omp-kit capabilities --json", "omp-kit doctor --json"],
 		verification: data.overall === "OK" ? "PERFORMED" : "UNVERIFIED",
 	};
 }
@@ -1096,24 +1114,7 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 				source: plan.provenance, asset_sha256: plan.release.asset.sha256 },
 		}, verification: "UNVERIFIED" };
 	try {
-		const outcome = await applyKitUpdate(plan);
-		const report = outcome.postcheck.report;
-		// Name why a postcheck failed instead of a bare FAIL; operators cannot act on an unexplained PARTIAL.
-		const postcheckDetail = report ? {
-			status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
-			failed_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
-			changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
-			failures: report.failures.slice(0, 20),
-		} : null;
-		const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
-		return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
-			scope, action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
-			provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
-			postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
-			...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
-				message: `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
-				remediation: `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
-			verification: "UNVERIFIED" };
+		return kitUpdateEnvelope(plan, await applyKitUpdate(plan));
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },

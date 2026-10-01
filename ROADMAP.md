@@ -24,23 +24,28 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | `--version`/`-V`; human findings table; no internal tracker ids in user-facing text | #4 |
 | CI against the latest OMP every 3 hours, one issue per breaking version (`omp-latest.yml`) | #4 |
 | `test --record`, an `omp_drift` finding in status/doctor, and the render-only `examples omp-watch` (launchd/systemd re-test on every OMP update) | #5 |
+| Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
+| Native-certification receipts name the failing command, stages and scenarios | #7 |
+| `health` judges only what a read-only inventory can prove; the rest is listed as `not_judged` and never affects the exit code | #9 |
+| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
+| Real-HOME journey in CI: 52k-file HOME, edited rules, legacy 0755 state root, a concurrent writer, one JSONL line per step, on macOS and Linux | #12 |
+| Latest-OMP CI records first-fire indices per OMP version and reports a default-policy G4 run separately | #13 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
-| Native-certification receipts name the failing command, stages and scenarios | #7 |
+| Release v0.2.0 (changelog cut, install pin, release procedure in CONTRIBUTING) | this PR |
+| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade) | #14 |
 
 ## Next
 
-1. **Real-HOME journey in CI.** One script runs the README path against a realistic HOME (50k files, edited rules, legacy 0755 state root, a concurrent writer) on macOS and Linux, logging one JSONL line per step. This would have caught every real-machine bug above. Required before the next release.
-2. **Release v0.2.0**, then a regular cadence. v0.1.x binaries cannot update on a real HOME; reinstall with the installer.
-3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. #7 makes the cause visible; the fix follows from the receipts.
-4. **Rules as a native OMP plugin.** OMP plugins ship `rules/` natively, so the kit's own copy step can go. In a live proof with the rules delivered only through a linked plugin, 69 of 70 scenarios passed and the planted negative was caught. The one failure is the kit's own `apply policy` assuming `~/.agents/rules`. After the switch, `apply rules`/`apply extensions` are removed and `apply policy` writes through OMP's native config command.
-5. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-6. **`health` that can pass.** Today `health` exits 1 on every machine, because effective-profile and matcher evidence are structurally unprovable in an inventory. Either it judges only what an inventory can prove, or it goes away.
-7. **Docs for strangers.** A README a new user can follow in 60 seconds, plus a native-OMP guide (`omp ttsr list/test/scan`, `omp plugin`) that CI checks against the latest OMP.
+1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases).
+2. **Intermittent native-certification failures.** Diagnosed: both refusals with receipts name the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
+3. **After the plugin route lands:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
+4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
+5. **Rule false fires on quoted text.** `kit-settings-mutation` and `kit-test-skip` interrupt commands and files that merely quote their trigger text; add those shapes as quiet cases and tighten the conditions without losing a fire case.
+6. **Capability-preserving context.** A read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 

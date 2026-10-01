@@ -5,6 +5,7 @@ import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitR
 import { runFullTest, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
+import type { PresentationResult } from "./output.ts";
 
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
 function shaFile(path: string): string {
@@ -279,6 +280,26 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   const message = error instanceof Error ? error.message : "KIT_UPDATE_REFUSED";
   throw new Error(/^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_REFUSED");
  } finally { heldLock.release(); }
+}
+
+/** The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act. */
+export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
+ const report = outcome.postcheck.report;
+ const postcheckDetail = report ? {
+  status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
+  failed_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
+  changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
+  failures: report.failures.slice(0, 20),
+ } : null;
+ const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
+ return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
+  scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
+  provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
+  postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
+  ...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+   message: `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
+   remediation: `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
+  verification: "UNVERIFIED" };
 }
 
 /** Only the recorded, unchanged postimage may switch back; the new release remains intact. */

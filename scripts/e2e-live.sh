@@ -14,6 +14,12 @@
 #                                          exit 0 iff the streamed evidenced close goes RED
 # Env:   OMP=/path/to/omp  TIMEOUT=120 (seconds per scenario)  KEEP=1 (keep the temp dir)
 #        ONLY="id id ..." (run just these scenario ids)
+#        OMP_KIT_PLUGIN_SOURCE=/abs/dir  link that package (needs package.json with an omp
+#        field) instead of building a temp one; plant mode refuses this to protect the checkout
+#        OMP_KIT_PLUGIN_DISABLE_AFTER_LINK=name  disable that plugin right after linking
+#        (planted-negative runs: the live scenario must then NOT block)
+#        OMP_KIT_DEFAULT_TTSR=1 runs omp under its own default TTSR settings instead of
+#        installing the kit policy, so a second run reports policy-sensitive differences.
 set -u
 MODE=full
 case "${1:-}" in
@@ -90,15 +96,37 @@ if [ "$MODE" = full ]; then
   fi
   KIT_PATH="$(dirname "$KIT_STABLE"):"
 fi
-cp "$HERE"/rules/*.md "$H/.agents/rules/"
+case "${OMP_KIT_RULES_VIA:-agents}" in
+  agents) RULES_DIR="$H/.agents/rules"; PLUGIN_SOURCE="" ;;
+  plugin)
+    PLUGIN_SOURCE="${OMP_KIT_PLUGIN_SOURCE:-}"
+    if [ -n "$PLUGIN_SOURCE" ]; then
+      case "$PLUGIN_SOURCE" in /*) ;; *) KEEP_WORK=1; echo "OMP_KIT_PLUGIN_SOURCE must be an absolute directory" >&2; exit 2 ;; esac
+      [ -f "$PLUGIN_SOURCE/package.json" ] || { KEEP_WORK=1; echo "OMP_KIT_PLUGIN_SOURCE has no package.json: $PLUGIN_SOURCE" >&2; exit 2; }
+      RULES_DIR="$PLUGIN_SOURCE/rules"
+    else
+      RULES_DIR="$T/kit-plugin/rules"
+      mkdir -p "$RULES_DIR"
+      printf '{"name":"omp-kit-rules","version":"0.0.0","omp":{"name":"omp-kit-rules","version":"0.0.0"}}\n' >"$T/kit-plugin/package.json"
+    fi ;;
+  *) KEEP_WORK=1; echo "OMP_KIT_RULES_VIA must be agents or plugin" >&2; exit 2 ;;
+esac
+if [ -z "${PLUGIN_SOURCE:-}" ]; then cp "$HERE"/rules/*.md "$RULES_DIR/"; fi
+if [ "$MODE" = plant ] && [ -n "${PLUGIN_SOURCE:-}" ]; then
+  KEEP_WORK=1; echo "plant mode refuses a repo plugin source: it would mutate checked-out rules" >&2; exit 2
+fi
 if [ "$MODE" = plant ]; then
-  "$OMP_KIT_BUN" "$LIB" plant "$H/.agents/rules/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
+  "$OMP_KIT_BUN" "$LIB" plant "$RULES_DIR/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
   echo "plant: kit-close-needs-evidence condition ->"
-  grep '^condition:' "$H/.agents/rules/kit-close-needs-evidence.md"
+  grep '^condition:' "$RULES_DIR/kit-close-needs-evidence.md"
 else
   "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }
 fi
-"$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
+if [ -z "${OMP_KIT_DEFAULT_TTSR:-}" ]; then
+  "$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
+else
+  echo "default TTSR: kit policy not installed; omp runs under its own defaults"
+fi
 printf '[user]\n\temail = e2e@example.invalid\n\tname = e2e\n[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
 # br/bd stubs: a close that gets past the rules must not touch any real beads database.
 for b in br bd; do printf '#!/bin/sh\nexit 0\n' >"$T/bin/$b"; chmod +x "$T/bin/$b"; done
@@ -114,7 +142,13 @@ isolate() {
 }
 
 echo "omp: $(isolate && "$OMP" --version 2>/dev/null) ($OMP)"
-echo "rules root: $H/.agents/rules ($(find "$H/.agents/rules" -type f -name '*.md' | wc -l | tr -d ' ') files)"
+if [ "${OMP_KIT_RULES_VIA:-agents}" = plugin ]; then
+  (isolate && "$OMP" plugin link "${PLUGIN_SOURCE:-$T/kit-plugin}" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
+  if [ -n "${OMP_KIT_PLUGIN_DISABLE_AFTER_LINK:-}" ]; then
+    (isolate && "$OMP" plugin disable "$OMP_KIT_PLUGIN_DISABLE_AFTER_LINK" >/dev/null) || { disable_rc=$?; KEEP_WORK=1; echo "plugin disable producer_rc=$disable_rc" >&2; exit "$disable_rc"; }
+  fi
+fi
+echo "rules root: $RULES_DIR ($(find "$RULES_DIR" -type f -name '*.md' | wc -l | tr -d ' ') files; isolated .agents/rules has $(find "$H/.agents/rules" -type f -name '*.md' | wc -l | tr -d ' '))"
 pass=0; fail=0; selected=0
 scenario_ids=$("$OMP_KIT_BUN" "$LIB" select "$MODE")
 select_rc=$?

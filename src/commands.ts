@@ -61,6 +61,9 @@ const statusData: DataSchema = { type: "object", required: ["overall", "kit", "o
 		installed_rules: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL", "NOT_RUN"] },
 		matcher: { enum: ["NOT_RUN"] },
 	} },
+	not_judged: { type: "array", items: { type: "object", required: ["component", "status", "reason"], properties: {
+		component: { type: "string" }, status: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL", "NOT_RUN"] }, reason: { type: "string" },
+	} } },
 	recommended_actions: { type: "array", items: { type: "string" } },
 } };
 const lspReportData = { type: "object", required: ["status", "cwd", "file", "file_outside_cwd", "config_layers", "opaque_layers", "servers", "runtime"], properties: {
