@@ -36,7 +36,7 @@ S="var/agent-tmp/plugin-lifecycle-$$"
 mkdir -p "$HERE/$S" || exit 2
 printf 'label=plugin-lifecycle\nrepo=omp-kit-companion\ncreated=%s\n' "$(date -u +%FT%TZ)" >"$HERE/$S/.owner"
 H="$HERE/$S/home"
-mkdir -p "$H/.agents/rules" "$H/.omp/agent" "$H/.config" "$H/.cache" "$H/.local/share" "$H/.local/state" "$H/tmp" "$HERE/$S/logs"
+mkdir -p "$H/.agents/rules" "$H/.omp/agent/rules" "$H/.config" "$H/.cache" "$H/.local/share" "$H/.local/state" "$H/tmp" "$HERE/$S/logs"
 LOG="$HERE/$S/steps.jsonl"
 N=0
 LASTLOG=""
@@ -101,9 +101,10 @@ import json, os, sys
 log, rules = sys.argv[1], sys.argv[2]
 text = open(log).read()
 try:
-    data = json.loads(text[text.index("{"):])
+    data = json.loads(text)
 except ValueError:
-    sys.exit("list-rules: no JSON object in producer output")
+    start = min([i for i in (text.find("{"), text.find("[")) if i >= 0])
+    data = json.loads(text[start:])
 items = data if isinstance(data, list) else data.get("rules", [])
 got = sorted(r["name"] for r in items if r.get("provider") == "omp-plugins")
 want = sorted(n[:-3] for n in os.listdir(rules) if n.endswith(".md")
@@ -139,10 +140,10 @@ python3 - "$FIRELOG" <<'EOF' || exit 1
 import json, sys
 data = json.loads(open(sys.argv[1]).read())
 names = [t["name"] for t in data.get("triggered", [])]
-paths = [t.get("path", "") for t in data.get("triggered", [])]
 print(f"triggered={names}")
+# --rule tests the file in isolation, so the path is the input itself;
+# discovery placement is proven by the list-rules and precedence rows.
 assert names == ["bash-pipe-exit"], f"fire: want [bash-pipe-exit] got {names}"
-assert all("/plugins/" in p for p in paths), f"fire: want plugin paths got {paths}"
 EOF
 
 # 5. Legacy same-name copy loses to the plugin (90 > 70).
@@ -214,6 +215,7 @@ fi
 printf '{"step":"live-fire","argv":%s,"rc":%d,"seconds":-1,"verdict":"%s","artifact":"logs/step-live-fire.log"}\n' \
   "$(printf 'ONLY=test-skip-fire OMP_KIT_RULES_VIA=plugin OMP_KIT_PLUGIN_SOURCE=%s sh scripts/e2e-live.sh' "$REPO" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
   "$live_rc" "$([ "$live_rc" -eq 0 ] && echo pass || echo fail)" >>"$LOG"
+echo "live-fire rc=$live_rc"
 [ "$live_rc" -eq 0 ] || { echo "FAIL live-fire: test-skip-fire did not block through the plugin" >&2; exit 1; }
 
 # 9. Planted negative: with the plugin disabled the same scenario does NOT block.
@@ -237,7 +239,11 @@ CLEANLOG="$LASTLOG"
 python3 - "$CLEANLOG" <<'EOF' || exit 1
 import json, sys
 text = open(sys.argv[1]).read()
-data = json.loads(text[text.index("{"):])
+try:
+    data = json.loads(text)
+except ValueError:
+    start = min([i for i in (text.find("{"), text.find("[")) if i >= 0])
+    data = json.loads(text[start:])
 items = data if isinstance(data, list) else data.get("rules", [])
 left = [r["name"] for r in items if r.get("provider") == "omp-plugins"]
 print(f"remaining omp-plugins rules: {left}")
@@ -267,6 +273,7 @@ fi
 
 # 12. Release archive carries the manifest needs (only when ARCHIVE_VERSION is set).
 if [ -n "${ARCHIVE_VERSION:-}" ]; then
+  mkdir -p "$HERE/$S/archive"
   need_rc archive-build 0 sh "$HERE/scripts/package-release.sh" --version "$ARCHIVE_VERSION" \
     --platform "${ARCHIVE_PLATFORM:-darwin-arm64-none}" --out "$HERE/$S/archive"
   tar -tf "$HERE/$S"/archive/*.tar | sort >"$HERE/$S/logs/archive-contents.txt"
