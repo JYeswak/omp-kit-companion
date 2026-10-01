@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2329 # step functions (build_fixture, kit_env, ...) are invoked indirectly by step "$@".
+# shellcheck disable=SC2317,SC2329 # step functions (build_fixture, kit_env, ...) run indirectly via step "$@" (0.9 says SC2317, 0.10+ SC2329).
 # Real-HOME journey: the README path (install -> status -> doctor -> state-root repair -> test ->
 # test --full -> update --apply -> audit) against a realistic HOME instead of a tiny synthetic one.
 #
