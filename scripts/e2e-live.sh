@@ -14,8 +14,10 @@
 #                                          exit 0 iff the streamed evidenced close goes RED
 # Env:   OMP=/path/to/omp  TIMEOUT=120 (seconds per scenario)  KEEP=1 (keep the temp dir)
 #        ONLY="id id ..." (run just these scenario ids)
-#        OMP_KIT_RULES_VIA=plugin  deliver rules as a linked OMP extension package (rules/ inside
-#        the package, `omp plugin link`) instead of $HOME/.agents/rules, which then stays empty
+#        OMP_KIT_PLUGIN_SOURCE=/abs/dir  link that package (needs package.json with an omp
+#        field) instead of building a temp one; plant mode refuses this to protect the checkout
+#        OMP_KIT_PLUGIN_DISABLE_AFTER_LINK=name  disable that plugin right after linking
+#        (planted-negative runs: the live scenario must then NOT block)
 set -u
 MODE=full
 case "${1:-}" in
@@ -93,14 +95,24 @@ if [ "$MODE" = full ]; then
   KIT_PATH="$(dirname "$KIT_STABLE"):"
 fi
 case "${OMP_KIT_RULES_VIA:-agents}" in
-  agents) RULES_DIR="$H/.agents/rules" ;;
+  agents) RULES_DIR="$H/.agents/rules"; PLUGIN_SOURCE="" ;;
   plugin)
-    RULES_DIR="$T/kit-plugin/rules"
-    mkdir -p "$RULES_DIR"
-    printf '{"name":"omp-kit-rules","version":"0.0.0","omp":{"name":"omp-kit-rules","version":"0.0.0"}}\n' >"$T/kit-plugin/package.json" ;;
+    PLUGIN_SOURCE="${OMP_KIT_PLUGIN_SOURCE:-}"
+    if [ -n "$PLUGIN_SOURCE" ]; then
+      case "$PLUGIN_SOURCE" in /*) ;; *) KEEP_WORK=1; echo "OMP_KIT_PLUGIN_SOURCE must be an absolute directory" >&2; exit 2 ;; esac
+      [ -f "$PLUGIN_SOURCE/package.json" ] || { KEEP_WORK=1; echo "OMP_KIT_PLUGIN_SOURCE has no package.json: $PLUGIN_SOURCE" >&2; exit 2; }
+      RULES_DIR="$PLUGIN_SOURCE/rules"
+    else
+      RULES_DIR="$T/kit-plugin/rules"
+      mkdir -p "$RULES_DIR"
+      printf '{"name":"omp-kit-rules","version":"0.0.0","omp":{"name":"omp-kit-rules","version":"0.0.0"}}\n' >"$T/kit-plugin/package.json"
+    fi ;;
   *) KEEP_WORK=1; echo "OMP_KIT_RULES_VIA must be agents or plugin" >&2; exit 2 ;;
 esac
-cp "$HERE"/rules/*.md "$RULES_DIR/"
+if [ -z "${PLUGIN_SOURCE:-}" ]; then cp "$HERE"/rules/*.md "$RULES_DIR/"; fi
+if [ "$MODE" = plant ] && [ -n "${PLUGIN_SOURCE:-}" ]; then
+  KEEP_WORK=1; echo "plant mode refuses a repo plugin source: it would mutate checked-out rules" >&2; exit 2
+fi
 if [ "$MODE" = plant ]; then
   "$OMP_KIT_BUN" "$LIB" plant "$RULES_DIR/kit-close-needs-evidence.md" || { plant_rc=$?; KEEP_WORK=1; echo "plant producer_rc=$plant_rc" >&2; exit "$plant_rc"; }
   echo "plant: kit-close-needs-evidence condition ->"
@@ -125,7 +137,10 @@ isolate() {
 
 echo "omp: $(isolate && "$OMP" --version 2>/dev/null) ($OMP)"
 if [ "${OMP_KIT_RULES_VIA:-agents}" = plugin ]; then
-  (isolate && "$OMP" plugin link "$T/kit-plugin" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
+  (isolate && "$OMP" plugin link "${PLUGIN_SOURCE:-$T/kit-plugin}" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
+  if [ -n "${OMP_KIT_PLUGIN_DISABLE_AFTER_LINK:-}" ]; then
+    (isolate && "$OMP" plugin disable "$OMP_KIT_PLUGIN_DISABLE_AFTER_LINK" >/dev/null) || { disable_rc=$?; KEEP_WORK=1; echo "plugin disable producer_rc=$disable_rc" >&2; exit "$disable_rc"; }
+  fi
 fi
 echo "rules root: $RULES_DIR ($(find "$RULES_DIR" -type f -name '*.md' | wc -l | tr -d ' ') files; isolated .agents/rules has $(find "$H/.agents/rules" -type f -name '*.md' | wc -l | tr -d ' '))"
 pass=0; fail=0; selected=0
