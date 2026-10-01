@@ -27,21 +27,26 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
 | Native-certification receipts name the failing command, stages and scenarios | #7 |
 | `health` judges only what a read-only inventory can prove; the rest is listed as `not_judged` and never affects the exit code | #9 |
+| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
+| Real-HOME journey in CI: 52k-file HOME, edited rules, legacy 0755 state root, a concurrent writer, one JSONL line per step, on macOS and Linux | #12 |
+| Latest-OMP CI records first-fire indices per OMP version and reports a default-policy G4 run separately | #13 |
+| **Released [v0.2.0](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.2.0):** 4 natively certified archives, index and receipts; a fresh-HOME install from the published index passes `test --full` (70/70 live, plant caught) | #15 |
+| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade); ships in the next release | #14 |
+| `health.test.ts` runs in a fresh clone | #16 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
+| Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
 
 ## Next
 
-1. **Real-HOME journey in CI.** One script runs the README path against a realistic HOME (50k files, edited rules, legacy 0755 state root, a concurrent writer) on macOS and Linux, logging one JSONL line per step. This would have caught every real-machine bug above. Required before the next release.
-2. **Release v0.2.0**, then a regular cadence. v0.1.x binaries cannot update on a real HOME; reinstall with the installer.
-3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. Since #7, receipts name the cause; the first diagnosed case was the live scenario `test-skip-ts-fire` on linux-x64. The fix follows from the receipts.
-4. **Rules as a native OMP plugin.** OMP plugins ship `rules/` natively, so the kit's own copy step can go. In a live proof with the rules delivered only through a linked plugin, 69 of 70 scenarios passed and the planted negative was caught. The one failure is the kit's own `apply policy` assuming `~/.agents/rules`. After the switch, `apply rules`/`apply extensions` are removed and `apply policy` writes through OMP's native config command.
-5. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-6. **Capability-preserving context.** After the release: a read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
+1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases); v0.2.1 carries the plugin route.
+2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
+3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
+4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
+5. **Capability-preserving context.** A read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 
