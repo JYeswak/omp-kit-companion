@@ -23,12 +23,12 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | State-root permission gate with a named error; `repair --scope state` restores 0700 | #4 |
 | `--version`/`-V`; human findings table; no internal tracker ids in user-facing text | #4 |
 | CI against the latest OMP every 3 hours, one issue per breaking version (`omp-latest.yml`) | #4 |
+| `test --record`, an `omp_drift` finding in status/doctor, and the render-only `examples omp-watch` (launchd/systemd re-test on every OMP update) | #5 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| `test --record`, an `omp_drift` finding in status/doctor, and the render-only `examples omp-watch` (launchd/systemd re-test on every OMP update) | #5 |
 | Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
 | Native-certification receipts name the failing command, stages and scenarios | #7 |
 
