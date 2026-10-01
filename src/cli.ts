@@ -19,9 +19,10 @@ import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
-import { runFullTest } from "./full-test-runner.ts";
+import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
+import { ompFingerprint, recordTestReceipt, renderOmpWatch, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
-import { runFastTest } from "./test-runner.ts";
+import { runFastTest, type FastTestReport } from "./test-runner.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
@@ -940,7 +941,10 @@ async function externalTestCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
-	if (request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture")) return externalTestCommand(request);
+	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
+	if (external && request.flags.has("--record"))
+		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
+	if (external) return externalTestCommand(request);
 	const full = request.flags.has("--full");
 	const identity = kitIdentity();
 
@@ -955,19 +959,26 @@ async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	if (typeof project === "string" && !isAbsolute(project))
 		return refusal("INVALID_PROJECT", "Project inspection requires an absolute path",
 			"Pass an absolute --project path; project code is never executed.");
-	try {
-		const input = { root: identity.release.root, executablePath: identity.release.executable,
-			home, ...(typeof project === "string" ? { project } : {}) };
-		const report = full ? await runFullTest(input) : await runFastTest(input);
-		return { code: report.exitCode, data: { overall: report.status === "FAIL" ? "FAIL" : "UNVERIFIED",
-			test: report }, verification: "UNVERIFIED" };
-	} catch {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: full ? "FULL_TEST_UNAVAILABLE" : "FAST_TEST_UNAVAILABLE",
-			message: "The selected matcher/live proof could not complete",
-			remediation: "Check the installed release and OMP native matcher; no effective profile was certified.",
-		}], verification: "UNVERIFIED" };
+	const input = { root: identity.release.root, executablePath: identity.release.executable,
+		home, ...(typeof project === "string" ? { project } : {}) };
+	// Fingerprint before the run: if OMP changes mid-test, the next status reports drift instead of a false OK.
+	let omp: OmpFingerprint = { version: null, launcher_sha256: null };
+	try { omp = ompFingerprint(resolveOmpIdentity(process.env)); } catch { /* recorded as an unknown OMP */ }
+	let report: FullTestReport | FastTestReport | null = null;
+	try { report = full ? await runFullTest(input) : await runFastTest(input); } catch { /* refused below; still recorded */ }
+	let recorded: boolean | undefined;
+	if (request.flags.has("--record")) {
+		const stateRoot = receiptStateRoot();
+		recorded = stateRoot !== null && recordTestReceipt(stateRoot, { schema_version: 1, kit_version: identity.version,
+			scope: full ? "full" : "fast", status: report?.status ?? "UNAVAILABLE", recorded_at: new Date().toISOString(), ...omp });
 	}
+	if (!report) return { code: 3, data: { overall: "UNVERIFIED", ...(recorded === undefined ? {} : { recorded }) }, errors: [{
+		code: full ? "FULL_TEST_UNAVAILABLE" : "FAST_TEST_UNAVAILABLE",
+		message: "The selected matcher/live proof could not complete",
+		remediation: "Check the installed release and OMP native matcher; no effective profile was certified.",
+	}], verification: "UNVERIFIED" };
+	return { code: report.exitCode, data: { overall: report.status === "FAIL" ? "FAIL" : "UNVERIFIED",
+		test: report, ...(recorded === undefined ? {} : { recorded }) }, verification: "UNVERIFIED" };
 }
 
 registerCommandHandler("test", fastTestCommand);
@@ -1089,7 +1100,7 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		return { code: 0, data: { ...kit, omp: ompIdentity(), dependencies: { bun: "embedded when compiled", omp: "optional for help; required for status/test" } }, verification: "UNVERIFIED" };
 	}
 	const handler = handlers.get(path);
-	if (handler && STATE_ROOT_COMMANDS[path] && !(path === "repair" && flags.get("--scope") === "state")) {
+	if (handler && (STATE_ROOT_COMMANDS[path] || (path === "test" && flags.has("--record"))) && !(path === "repair" && flags.get("--scope") === "state")) {
 		const stateRoot = receiptStateRoot();
 		const issue = stateRoot ? inspectStateRoot(stateRoot) : null;
 		if (issue) return stateRootRefusal(issue);
@@ -1142,6 +1153,16 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	}
 	if (parent?.name === "examples") {
 		if (command.name === "mcp") return { code: 0, data: { text: mcpExample() }, verification: "UNVERIFIED" };
+		if (command.name === "omp-watch") {
+			// The job calls the stable launcher on PATH (a symlink that update re-points), never a versioned release binary.
+			const kitLauncher = Bun.which("omp-kit");
+			let ompPackageJson: string | null = null;
+			try { ompPackageJson = join(resolveOmpIdentity(process.env).packageRoot, "package.json"); } catch { /* refused below */ }
+			if (!kitLauncher || !ompPackageJson) return refusal("WATCH_UNAVAILABLE",
+				`${kitLauncher ? "OMP" : "omp-kit"} is not resolvable on PATH, so there is nothing for the watcher to run or watch`,
+				"Put the installed omp-kit and omp on PATH (the job copies this PATH), then re-run omp-kit examples omp-watch.");
+			return { code: 0, data: renderOmpWatch({ kitLauncher, ompPackageJson, path: process.env.PATH ?? "" }), verification: "UNVERIFIED" };
+		}
 		const kind = PROFILE_RECIPE_KINDS.find((entry) => entry === command.name);
 		if (!kind) return refusal("UNKNOWN_RECIPE", "Unknown profile recipe", "Run omp-kit help examples for supported recipes.");
 		const root = kitIdentity().release.root;

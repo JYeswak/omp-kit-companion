@@ -4,6 +4,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot } from "./state-root.ts";
+import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
@@ -465,6 +466,23 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 			`Private state root has ${stateIssue.problem === "MODE" ? `mode ${stateIssue.mode}` : stateIssue.problem.toLowerCase()}; receipts, audit, undo and update refuse until it is a 0700 directory you own`,
 			stateIssue.problem === "MODE" ? "Run omp-kit repair --scope state --plan, then --apply --yes." : "Make it a real directory you own with mode 0700, or move it aside.",
 			{ path: stateRoot, problem: stateIssue.problem, mode: stateIssue.mode }));
+	// OMP moves under the kit (operator updaters run every few hours): compare against the last recorded test.
+	const ompEvidence = rows.find((row) => row.component === "omp")?.evidence;
+	const lastTest = readTestReceipt(stateRoot);
+	if (typeof ompEvidence?.location !== "string" || typeof ompEvidence.package_root !== "string")
+		rows.push(finding("omp_drift", "NOT_RUN", "OMP is not resolvable, so drift since the last test cannot be checked", "Install OMP, then run omp-kit test --record."));
+	else if (!lastTest)
+		rows.push(finding("omp_drift", "NOT_RUN", "No kit test has been recorded against this OMP yet", "Run omp-kit test --record (add --full for live scenarios)."));
+	else {
+		const now = ompFingerprint({ launcher: ompEvidence.location, packageRoot: ompEvidence.package_root });
+		const same = now.version === lastTest.version && now.launcher_sha256 === lastTest.launcher_sha256;
+		const evidence = { tested: { version: lastTest.version, scope: lastTest.scope, status: lastTest.status, recorded_at: lastTest.recorded_at }, current: { version: now.version } };
+		rows.push(same && lastTest.status === "PASS"
+			? finding("omp_drift", "OK", `Last kit test passed against this OMP (${now.version ?? "unknown version"}, ${lastTest.scope})`, "None.", evidence)
+			: same
+				? finding("omp_drift", "DEGRADED", `Last kit test against this OMP did not pass (${lastTest.status})`, "Run omp-kit test --record --json and read its failures.", evidence)
+				: finding("omp_drift", "DEGRADED", `OMP changed since the last kit test (${lastTest.version ?? "unknown"} → ${now.version ?? "unknown"})`, "Run omp-kit test --record (add --full for live scenarios) against the new OMP.", evidence));
+	}
 	const backupScope = [join(home, ".omp", "settings.json"),
 		...profiles.profiles.flatMap((profile) => [...CONFIG_NAMES, "agent.db"].map((name) => join(profile.dir, name)))];
 	if (input.project) backupScope.push(join(input.project, ".omp", "config.yml"), join(input.project, ".omp", "settings.json"), join(input.project, ".claude", "settings.json"));

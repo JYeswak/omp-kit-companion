@@ -484,7 +484,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(invoke("completion", "bash").envelope.data.text).toContain("examples:mnemopi-manual)");
 		const caps = invoke("capabilities").envelope.data.commands;
 		expect(caps.find((row: { name: string }) => row.name === "examples")?.subcommands.map((row: { name: string }) => row.name)).toEqual(
-			["memory-off", "mnemopi-manual", "model-roles", "mcp"],
+			["memory-off", "mnemopi-manual", "model-roles", "mcp", "omp-watch"],
 		);
 		const unknown = invoke("examples", "unknown-kind");
 		expect(unknown.code).toBe(2);
