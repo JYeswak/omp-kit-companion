@@ -178,11 +178,12 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
-	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|extensions|router|profile|lsp|project-loading|memory|mcp|context", description: "Restrict diagnosis to a named component" },
+	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
+		{ name: "--scope", value: "kit|omp|rules|policy|extensions|router|profile|lsp|project-loading|memory|mcp|context|services", description: "Restrict diagnosis to a named component" },
 		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
+		{ name: "--services", value: "PATH", description: "Services only: validate a declared required-jobs JSON file against launchd inventory" },
 		{ name: "--deep", available: true, description: "With --scope lsp, probe the built-in TypeScript route in a private fixture; other deep scopes remain unavailable" },
 		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
 	], example: "omp-kit doctor --scope lsp --json", runnable: true, dataSchema: doctorData },

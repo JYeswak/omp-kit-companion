@@ -47,6 +47,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
 3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
 4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
+5. **Service monitoring.** `doctor --scope services` inventories launchd jobs read-only and validates a declared required-jobs file with per-job healthy exit codes and log-line predicates.
 
 ## Parked
 

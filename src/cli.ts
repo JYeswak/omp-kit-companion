@@ -12,6 +12,7 @@ import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnos
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
+import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./services.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
@@ -647,6 +648,46 @@ async function contextInventory(request: ParsedCommand): Promise<CliResult> {
 		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
 }
 
+async function servicesInventory(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no service was inspected.",
+		}], verification: "UNVERIFIED" };
+	}
+	const services = request.flags.get("--services");
+	if (typeof services === "string" && !isAbsolute(services)) {
+		return refusal("INVALID_SERVICES", "Declared services file requires an absolute path",
+			"Pass an absolute schema_version 1 declared-jobs JSON file; no service was changed.");
+	}
+	const omp = ompIdentity();
+	const dirsOverride = process.env.OMP_KIT_SERVICES_DIRS;
+	let report;
+	try {
+		report = inventoryServices(
+			{ home, ...(typeof services === "string" ? { servicesPath: services } : {}) },
+			defaultInventoryDeps(home, process.env.PATH ?? "/usr/bin:/bin",
+				typeof dirsOverride === "string" && dirsOverride ? dirsOverride.split(":") : undefined));
+	} catch (error) {
+		if (error instanceof ServicesInputError) {
+			return refusal(error.code, error.message, "Correct the declared services file; no service was changed.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "SERVICES_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check launchd availability; no service was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+	const finding: Finding = { component: "services", status: report.status, reason: report.reason,
+		recommended_action: report.status === "OK" ? "No action required."
+			: "Inspect flagged jobs with launchctl; this command never loads, unloads, or writes.",
+		evidence: { ...report } };
+	return { code: 0, data: { overall: report.status, kit, omp, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
+}
+
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--yes"))
 		return refusal("CONSENT_REQUIRED", "Private memory audit needs separate explicit consent; no store was inspected",
@@ -1258,6 +1299,9 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
 	}
+	if (command.name === "doctor" && flags.has("--services") && flags.get("--scope") !== "services") {
+		return refusal("INVALID_FLAG", "--services is only valid for doctor --scope services", "Use omp-kit doctor --scope services --services ABS_FILE.");
+	}
 	if (command.name === "doctor" && flags.get("--scope") === "lsp") return lspReadiness(request);
 	if (command.name === "doctor" && flags.get("--scope") === "project-loading") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope project-loading --project PATH.");
@@ -1270,6 +1314,10 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "mcp") {
 		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "MCP scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope mcp --profile NAME.");
 		return mcpInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "services") {
+		if (flags.has("--project") || flags.has("--file") || flags.has("--profile")) return refusal("INVALID_FLAG", "services scope inspects machine launchd state and cannot accept --project, --file or --profile", "Use omp-kit doctor --scope services [--services ABS_FILE].");
+		return servicesInventory(request);
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "context") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope context [--profile NAME] [--project PATH].");
