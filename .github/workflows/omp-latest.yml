@@ -16,6 +16,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: read
 
 concurrency:
   group: omp-latest-${{ github.ref }}
@@ -40,6 +41,80 @@ jobs:
         run: bun test tests/cli
       - name: Full rule ladder (G1-G4, planted negative) against this OMP
         run: sh scripts/ladder.sh
+      - name: Record G3 first-fire indices for this OMP
+        if: success()
+        run: |
+          sh scripts/runtime-adapter.sh "$GITHUB_WORKSPACE/scripts/ttsr-harness.ts" --gate-json > gate.json
+          bun -e '
+            const rep = await Bun.file("gate.json").json();
+            const cases = {};
+            for (const c of rep.cases ?? []) cases[c.rule + ":" + c.line] = { expect: c.expect, g2: c.g2, first_fire: c.first_fire, wire_length: c.wire_length };
+            await Bun.write("first-fire-" + process.env.OMP_VERSION + ".json", JSON.stringify({ schema_version: 1, omp_version: process.env.OMP_VERSION, cases }, null, 2) + "\n");
+          '
+      - name: Download previous first-fire baseline
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          current="first-fire-$OMP_VERSION.json"
+          pick() {
+            for id in $(gh run list --workflow omp-latest.yml --status completed --limit 20 --json databaseId --jq "[.[] | select(.databaseId != $RUN_ID) | .databaseId] | .[]"); do
+              name=$(gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '[.artifacts[] | select(.name | startswith("first-fire-")) | .name] | first // empty')
+              if [ -z "$name" ]; then continue; fi
+              if [ "$1" = different ] && [ "$name" = "$current" ]; then continue; fi
+              echo "$id:$name"
+              return 0
+            done
+            return 1
+          }
+          baseline="$(pick different || pick any || true)"
+          if [ -n "$baseline" ]; then
+            gh run download "${baseline%%:*}" -n "${baseline#*:}" -D baseline
+            echo "BASELINE_FILE=baseline/${baseline#*:}" >> "$GITHUB_ENV"
+          else
+            echo "BASELINE_FILE=" >> "$GITHUB_ENV"
+          fi
+      - name: Report first-fire differential
+        if: success()
+        run: |
+          {
+            echo "## First-fire differential (OMP $OMP_VERSION)"
+            if [ -n "$BASELINE_FILE" ]; then
+              bun -e '
+                const prev = await Bun.file(process.env.BASELINE_FILE).json();
+                const next = await Bun.file("first-fire-" + process.env.OMP_VERSION + ".json").json();
+                const keys = new Set([...Object.keys(prev.cases ?? {}), ...Object.keys(next.cases ?? {})]);
+                let changed = 0;
+                for (const k of [...keys].sort()) {
+                  const a = prev.cases ? prev.cases[k] : undefined, b = next.cases ? next.cases[k] : undefined;
+                  if (JSON.stringify(a) !== JSON.stringify(b)) { changed++; console.log("CHANGED " + k + ": " + JSON.stringify(a ? a.first_fire : null) + " -> " + JSON.stringify(b ? b.first_fire : null)); }
+                }
+                console.log(changed === 0 ? "No first-fire index changes vs " + prev.omp_version + "." : changed + " first-fire index change(s) vs " + prev.omp_version + ".");
+              '
+            else
+              echo "No prior first-fire baseline; this run establishes first-fire-$OMP_VERSION.json."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload first-fire artifact for this OMP
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-fire-${{ env.OMP_VERSION }}.json
+          path: first-fire-${{ env.OMP_VERSION }}.json
+          retention-days: 90
+      - name: Default-policy G4 run (reported separately, never gates)
+        if: success()
+        run: |
+          set +e
+          OMP_KIT_DEFAULT_TTSR=1 sh scripts/e2e-live.sh
+          rc=$?
+          {
+            echo "## Default-policy G4 (OMP $OMP_VERSION)"
+            echo "exit=$rc (report-only; the kit-policy G4 in the ladder above gates the job)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
       - name: Open or update one issue for this OMP version
         if: failure()
         env:
