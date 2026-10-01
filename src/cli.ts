@@ -23,6 +23,8 @@ import { runFullTest } from "./full-test-runner.ts";
 import { runFastTest } from "./test-runner.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
+import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
+import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -849,37 +851,65 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 
 registerCommandHandler("repair", repairCommand);
 
+async function externalLiveTest(input: ExternalLiveInput): Promise<CliResult> {
+	const report = await runExternalLive(input);
+	return { code: report.status === "PASS" ? 0 : report.status === "FAIL" ? 1 : 3,
+		data: { overall: report.status, test: report.fast, live: report.live },
+		verification: report.status === "BLOCKED" ? "UNVERIFIED" : "PERFORMED",
+		warnings: ["public-synthetic is a caller classification, not a privacy guarantee; the fixture is strictly data-only."],
+		...(report.status === "PASS" ? {} : { errors: [{ code: report.status,
+			message: "The external G1-G3 and G4 proof did not pass",
+			remediation: "Check the selected pack, public-synthetic fixture, native matcher, and live marker evidence." }] }) };
+}
+
+function externalTestFailure(error: unknown, live: boolean): CliResult {
+	if (error instanceof ExternalLiveInputError) return refusal(error.code, "The selected external live fixture could not be validated",
+		"Correct the strict public-synthetic data schema; live fixtures never accept executable or path-bearing fields.");
+	if (error instanceof ExternalPackInputError) return refusal(error.code, error.message,
+		"Correct the external static rule markdown and seven-column cases TSV, then rerun.");
+	return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+		code: live ? "EXTERNAL_LIVE_UNAVAILABLE" : "EXTERNAL_TEST_UNAVAILABLE",
+		message: "The selected external matcher proof could not complete",
+		remediation: "Check the installed kit release, OMP native matcher, and selected static inputs; unavailable observations are never passing quiet cases.",
+	}], verification: "UNVERIFIED" };
+}
+
 async function externalTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const rules = request.flags.get("--rules"), cases = request.flags.get("--cases");
+	const liveFixture = request.flags.get("--live-fixture");
+	const liveRequested = request.flags.has("--live-fixture");
 	if (request.flags.has("--full")) return refusal("CONFLICTING_FLAGS", "--full cannot be combined with an external pack",
 		"Choose bundled --full mode or external --rules/--cases mode; external mode never runs project code.");
 	if (request.flags.has("--project")) return refusal("CONFLICTING_FLAGS", "--project is only valid for bundled test mode",
 		"Run external G1-G3 checks without --project; no project code is inspected or executed.");
 	if (typeof rules !== "string" || typeof cases !== "string") return refusal("INVALID_EXTERNAL_PACK", "--rules and --cases must be supplied together",
 		"Pass an absolute --rules directory and --cases TSV file, or omit both for the bundled test.");
+	if (liveRequested && (typeof liveFixture !== "string" || !isAbsolute(liveFixture))) {
+		return refusal("INVALID_EXTERNAL_LIVE_INPUT", "--live-fixture requires an absolute JSON path",
+			"Pass a data-only public-synthetic fixture; commands and private transcripts are not accepted.");
+	}
 	const identity = kitIdentity();
 	if (!identity.release.root || !identity.release.executable) return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
 		code: "INSTALL_UNAVAILABLE", message: "Installed kit root is unavailable",
-		remediation: "Run from an intact compiled release containing scripts/ttsr-harness.ts.",
+		remediation: "Run from an intact compiled release containing its bundled matcher harness.",
 	}], verification: "UNVERIFIED" };
 	try {
 		const pack = readExternalPackSnapshot(rules, cases);
+		if (typeof liveFixture === "string") return await externalLiveTest({
+			root: identity.release.root, executablePath: identity.release.executable, pack, fixturePath: liveFixture,
+		});
 		const report = await runExternalPackTest({ root: identity.release.root, executablePath: identity.release.executable, pack });
 		return { code: report.exitCode, data: { overall: report.status, test: report }, verification: "UNVERIFIED" };
 	} catch (error) {
-		if (error instanceof ExternalPackInputError) return refusal(error.code, error.message,
-			"Correct the external static rule markdown and seven-column cases TSV, then rerun.");
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "EXTERNAL_TEST_UNAVAILABLE", message: "The selected external G1-G3 proof could not complete",
-			remediation: "Check the installed kit release and OMP native matcher; no quiet result was certified.",
-		}], verification: "UNVERIFIED" };
+		return externalTestFailure(error, liveRequested);
 	}
 }
 
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
-	if (request.flags.has("--rules") || request.flags.has("--cases")) return externalTestCommand(request);
+	if (request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture")) return externalTestCommand(request);
 	const full = request.flags.has("--full");
 	const identity = kitIdentity();
+
 
 	const home = process.env.HOME;
 	if (!identity.release.root || !home || !isAbsolute(home))
@@ -933,6 +963,45 @@ async function reviewRulesCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 registerCommandHandler("review rules", reviewRulesCommand);
+
+async function reviewReduceCommand(request: ParsedCommand): Promise<CliResult> {
+	const rules = request.flags.get("--rules"), fixture = request.flags.get("--fixture");
+	if (typeof rules !== "string" || !isAbsolute(rules) || typeof fixture !== "string" || !isAbsolute(fixture)) {
+		return refusal("FALSE_FIRE_INPUT_REQUIRED", "Select an absolute --rules directory and --fixture JSON file",
+			"Use a strict schema_version 1 false-fire fixture containing only public-synthetic witness data.");
+	}
+	const release = kitIdentity().release;
+	if (!release.root || !release.executable) {
+		return { code: 3, data: { overall: "UNVERIFIED", scope: "NATIVE_G2_G3_FALSE_FIRE", status: "UNAVAILABLE",
+			attempts: 0, original_bytes: 0, candidate_bytes: null, replay_fixture: null },
+		errors: [{ code: "KIT_RELEASE_UNAVAILABLE", message: "An installed compiled release is required for native false-fire reduction",
+			remediation: "Run from an intact installed release with its bundled native matcher harness." }], verification: "UNVERIFIED" };
+	}
+	try {
+		const report = await runFalseFireReduction({
+			root: release.root, executablePath: release.executable, rulesDirectory: rules, fixturePath: fixture,
+			replayOnly: request.flags.has("--replay-only"),
+		});
+		const success = report.status === "REDUCED" || report.status === "UNCHANGED" || report.status === "REPRODUCED";
+		return { code: success ? 0 : report.status === "NOT_REPRODUCED" ? 1 : 3,
+			data: { overall: report.status, ...report }, verification: success ? "PERFORMED" : "UNVERIFIED",
+			warnings: ["public-synthetic is a caller classification, not a privacy guarantee; only allowlisted witness fields and identity hashes are exported."],
+			...(!success ? { errors: [{ code: report.status, message: "The selected native false-fire proof did not produce a replayable reduction",
+				remediation: "Check the public-synthetic fixture, selected rules, installed OMP identity, and matcher availability; no fixture is exported on a miss." }] } : {}) };
+	} catch (error) {
+		if (error instanceof FalseFireInputError || error instanceof ExternalPackInputError) {
+			return refusal(error.code, "The selected false-fire fixture or external rules could not be validated",
+				"Correct the strict fixture schema and static rule pack; private transcripts are not accepted.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED", scope: "NATIVE_G2_G3_FALSE_FIRE", status: "UNAVAILABLE",
+			attempts: 0, original_bytes: 0, candidate_bytes: null, replay_fixture: null }, errors: [{
+			code: "FALSE_FIRE_UNAVAILABLE", message: "The selected native false-fire proof could not complete",
+			remediation: "Check the installed release and selected static inputs; no quiet result or replay fixture was certified.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
+registerCommandHandler("review reduce", reviewReduceCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {

@@ -8,6 +8,7 @@ const BUNDLED_SCRIPTS: Record<string, true> = {
 	"scripts/build-manifest.sh": true,
 	"scripts/doctor.sh": true,
 	"scripts/e2e-live.sh": true,
+	"scripts/external-live.mjs": true,
 	"scripts/install-extensions.sh": true,
 	"scripts/ladder.sh": true,
 	"scripts/role-check.ts": true,

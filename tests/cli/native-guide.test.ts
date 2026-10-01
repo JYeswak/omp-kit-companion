@@ -16,11 +16,12 @@ const HOOK_REFUSAL_REQUALIFICATION_BEAD = "ompkit-native-hook-refusal-requalific
 const supportedHookRefusalVersions: Record<string, true> = {
 	"18.4.3": true,
 	"18.4.4": true,
+	"18.4.5": true,
 };
 const supportedHookRefusalTest = supportedHookRefusalVersions[packageVersion] ? test : test.skip;
 if (!supportedHookRefusalVersions[packageVersion]) {
 	console.info(
-		`native-guide: UNAVAILABLE/NOT_RUN: external installed OMP ${packageVersion} is outside the documented/proven pre-import refusal versions (18.4.3, 18.4.4); re-enable via ${HOOK_REFUSAL_REQUALIFICATION_BEAD}`,
+		`native-guide: UNAVAILABLE/NOT_RUN: external installed OMP ${packageVersion} is outside the documented/proven pre-import refusal versions (18.4.3, 18.4.4, 18.4.5); re-enable via ${HOOK_REFUSAL_REQUALIFICATION_BEAD}`,
 	);
 }
 

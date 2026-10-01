@@ -39,8 +39,8 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	test: { type: "object", required: ["status"], properties: {
 		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
 		scope: { enum: ["EXTERNAL_G1_G3"] },
-		counts: { type: "object" }, proofs: { type: "object" }, observations: { type: "array" }, failures: { type: "array" },
 	} },
+	live: { type: "object" },
 } };
 
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
@@ -157,6 +157,13 @@ const ruleReviewData: DataSchema = { type: "object", required: ["overall", "stat
 	reason: { type: ["string", "null"] }, review: { type: ["object", "null"] },
 	selectedPacksUnchanged: { type: "boolean" }, identityBracket: { type: ["object", "null"] }, producers: { type: "array" },
 } };
+const falseFireData: DataSchema = { type: "object", required: ["overall", "scope", "status", "attempts", "original_bytes", "candidate_bytes", "replay_fixture"], properties: {
+	overall: { enum: ["REDUCED", "UNCHANGED", "REPRODUCED", "NOT_REPRODUCED", "UNAVAILABLE", "MINIMIZATION_INCOMPLETE", "UNVERIFIED"] },
+	scope: { enum: ["NATIVE_G2_G3_FALSE_FIRE"] },
+	status: { enum: ["REDUCED", "UNCHANGED", "REPRODUCED", "NOT_REPRODUCED", "UNAVAILABLE", "MINIMIZATION_INCOMPLETE"] },
+	attempts: { type: "number" }, original_bytes: { type: "number" }, candidate_bytes: { type: ["number", "null"] },
+	replay_fixture: { type: ["object", "null"] },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
@@ -184,13 +191,15 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance or external G1-G3 pack checks", usage: "test [--project PATH] [--full] | [--rules ABS_DIR --cases ABS_FILE]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, or a public-synthetic external G4 marker fixture",
+		usage: "test [--project PATH] [--full] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--rules", value: "ABS_DIR", description: "Read-only external rules directory; run G1-G3 against its cases" },
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
-	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --json", runnable: false, dataSchema: testData },
-	{ name: "review", description: "Compare selected authored rules without applying them", usage: "review rules", flags: [], subcommands: [
+		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
+	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
+	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",
 			usage: "review rules --incumbent-rules ABS_DIR --incumbent-cases ABS_FILE --candidate-rules ABS_DIR --candidate-cases ABS_FILE", flags: [
 				{ name: "--incumbent-rules", value: "ABS_DIR", description: "Read-only incumbent rule directory" },
@@ -199,6 +208,13 @@ export const COMMANDS: readonly Command[] = [
 				{ name: "--candidate-cases", value: "ABS_FILE", description: "Candidate authored TSV in the existing seven-column format" },
 			], example: "omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json",
 			runnable: false, dataSchema: ruleReviewData },
+		{ name: "reduce", description: "Minimize a reproduced public-synthetic quiet G2/G3 false-fire without weakening its benign context",
+			usage: "review reduce --rules ABS_DIR --fixture ABS_JSON [--replay-only]", flags: [
+				{ name: "--rules", value: "ABS_DIR", description: "Read-only absolute external rule directory" },
+				{ name: "--fixture", value: "ABS_JSON", description: "Strict false-fire-fixture/v1 public-synthetic witness" },
+				{ name: "--replay-only", description: "Reobserve the existing witness without reducing or exporting on a miss" },
+			], example: "omp-kit review reduce --rules /absolute/rules --fixture /absolute/fixture.json --json",
+			runnable: false, dataSchema: falseFireData },
 	], example: "omp-kit help review rules", runnable: true },
 	{ name: "update", description: "Preview or guardedly update the kit; OMP updates are managed externally", usage: "update [--plan|--apply] --version X.Y.Z --index PATH --archive PATH", flags: [
 		...planApply,

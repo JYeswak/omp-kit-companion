@@ -43,7 +43,7 @@ test("native release contains only declared regular files, runs relocated binary
 	for (const forbidden of ["reports/", ".git/", ".beads/", "var/", "src/", "private/"])
 		expect(staged.files.some(file => file.startsWith(forbidden))).toBe(false);
 	for (const essential of ["bin/omp-kit", "scripts/runtime-adapter.sh", "scripts/e2e-live.sh", "scripts/ladder.sh",
-		"scripts/limit-process-tree.sh", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
+		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
 		expect(staged.files).toContain(essential);
 	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output }, stdout: "pipe", stderr: "pipe" });

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
+import { runtimeTempRoot } from "../../src/runtime.ts";
+import { once } from "node:events";
 
 const fixtures: string[] = [];
 
@@ -181,6 +183,79 @@ describe("release paths", () => {
 		expect(snapshotTree(canaries)).toBe(canariesBefore);
 	});
 });
+
+test("terminating the packaged adapter closes its mock server and output streams", async () => {
+	const base = mkdtempSync(join(runtimeTempRoot(), "omp-kit-runtime-"));
+	fixtures.push(base);
+	const release = join(base, "release");
+	const workspace = join(base, "work");
+	for (const directory of ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install", "work", "release/bin", "release/scripts", "release/tests/live"]) {
+		mkdirSync(join(base, directory), { recursive: true, mode: 0o700 });
+	}
+	const executable = join(release, "bin", "omp-kit");
+	const built = Bun.spawnSync([process.execPath, "build", join(REPO_ROOT, "tests/cli/runtime-release-runner.ts"),
+		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
+		"--outfile=" + executable], { cwd: base, stdout: "pipe", stderr: "pipe",
+		env: { HOME: join(base, "home"), TMPDIR: join(base, "tmp"), BUN_INSTALL: join(base, "bun-install"),
+			XDG_CONFIG_HOME: join(base, "xdg-config"), XDG_CACHE_HOME: join(base, "xdg-cache"),
+			XDG_DATA_HOME: join(base, "xdg-data"), XDG_STATE_HOME: join(base, "xdg-state"),
+			PATH: process.env.PATH ?? "/usr/bin:/bin" },
+	});
+	expect(built.exitCode, built.stderr.toString()).toBe(0);
+	const adapter = join(release, "scripts/runtime-adapter.sh");
+	writeFileSync(adapter, readFileSync(join(REPO_ROOT, "scripts/runtime-adapter.sh")), { mode: 0o755 });
+	const mock = join(release, "tests/live/mock-model.mjs");
+	writeFileSync(mock, readFileSync(join(REPO_ROOT, "tests/live/mock-model.mjs")));
+	const scenario = join(workspace, "scenario.json"), portFile = join(workspace, "port");
+	writeFileSync(scenario, JSON.stringify({ turns: [{ text: "Done." }] }));
+	const omp = resolveOmpIdentity();
+	const env = {
+		PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: join(base, "home"), TMPDIR: join(base, "tmp"),
+		XDG_CONFIG_HOME: join(base, "xdg-config"), XDG_CACHE_HOME: join(base, "xdg-cache"),
+		XDG_DATA_HOME: join(base, "xdg-data"), XDG_STATE_HOME: join(base, "xdg-state"),
+		BUN_INSTALL: join(base, "bun-install"), OMP: omp.launcher, OMP_BIN: omp.launcher,
+		OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+	};
+	const watcher = watch(workspace);
+	let changed = once(watcher, "change");
+	const server = Bun.spawn([adapter, "--work-dir", workspace, "--scenario", scenario,
+		"--log", join(workspace, "requests.jsonl"), "--port-file", portFile, mock], {
+		cwd: release, env, stdout: "pipe", stderr: "pipe", stdin: "ignore",
+	});
+	const stdout = new Response(server.stdout).text(), stderr = new Response(server.stderr).text();
+	let descendants: number[] = [];
+	try {
+		while (!existsSync(portFile) || !readFileSync(portFile, "utf8").trim()) {
+			await Promise.race([changed, server.exited.then(code => { throw new Error("mock exited before readiness: " + code); })]);
+			changed = once(watcher, "change");
+		}
+		watcher.close();
+		const url = "http://127.0.0.1:" + readFileSync(portFile, "utf8").trim() + "/v1/chat/completions";
+		const request = { method: "POST", body: JSON.stringify({ messages: [], stream: true }) };
+		const ready = await fetch(url, request);
+		expect(ready.status).toBe(200);
+		expect(await ready.text()).toContain("[DONE]");
+		const processes = Bun.spawnSync(["/bin/ps", "-axo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
+		expect(processes.exitCode, processes.stderr.toString()).toBe(0);
+		descendants = processes.stdout.toString().trim().split("\n").map(row => row.trim().split(/\s+/).map(Number))
+			.filter(([, parent]) => parent === server.pid).map(([pid]) => pid!);
+		server.kill("SIGTERM");
+		await server.exited;
+		let stillListening = false;
+		try {
+			const response = await fetch(url, request);
+			stillListening = true;
+			await response.text();
+		} catch { /* Connection refusal is the required shutdown effect. */ }
+		expect(stillListening).toBe(false);
+	} finally {
+		watcher.close();
+		if (server.exitCode === null) server.kill("SIGTERM");
+		for (const pid of descendants) { try { process.kill(pid, "SIGTERM"); } catch {} }
+		await server.exited;
+		await Promise.all([stdout, stderr]);
+	}
+}, 15_000);
 
 describe("OMP installation identity", () => {
 	test("resolves launcher, source and native package from the same PATH install", () => {
