@@ -58,7 +58,7 @@ With the same installed `KIT` and OMP on PATH:
 
 The installed fast test consumes structured native-harness results and rejects malformed or contradictory evidence. Matcher subprocesses receive isolated HOME/XDG/temp paths before Bun starts; invoking the source harness directly does not provide the same caller-cache guarantee. A successful isolated plan must come from the matching shell tool result, not from the model claiming it succeeded.
 
-**Selected packs and paired review require an unreleased build; the v0.1.1 assets linked above do not include these commands.** Both use the existing OMP matcher and the seven-column TSV format in [cases/cases.tsv](cases/cases.tsv), not project scripts or a second matcher:
+**The selected-pack, review, and reduction features below require an unreleased build; the v0.1.1 assets linked above do not include them.** Selected-pack testing and paired rule review use the existing OMP matcher and the seven-column TSV format in [cases/cases.tsv](cases/cases.tsv), not project scripts or a second matcher:
 
 ```sh
 "$KIT" test --rules /absolute/pack/rules --cases /absolute/pack/cases.tsv --json
@@ -71,7 +71,72 @@ External `test` reports the selected rule/case identities and G1–G3 results. E
 
 `review rules` evaluates both rule versions against the frozen union of authored witnesses. Deleting or relabeling a candidate case cannot erase the incumbent case or its expectation. The report retains source-file digests and line provenance, rule/witness conflicts, old/new observations, first-prefix positions, and an exercised/total denominator. TSV witness IDs bind contextual input; changed context is reported as removed/added input rather than guessed identity. Stream positions count UTF-16 code units; a final-snapshot hit is separately marked. The comparison is bounded to 1,024 witness variants and a two-minute native-observation budget.
 
-Review exit codes are `0` for `NO_DELTA_IN_EXERCISED_WITNESSES`, `1` for deltas/conflicts, `2` for invalid invocation, and `3` for unavailable or changed inputs/identities. No-delta covers only the exercised witnesses, never equivalence or safety. Neither command installs rules, changes profiles, or proves G4/live blocking or effective-profile behavior.
+Paired-review exit codes are `0` for `NO_DELTA_IN_EXERCISED_WITNESSES`, `1` for deltas/conflicts, `2` for invalid invocation, and `3` for unavailable or changed inputs/identities. No-delta covers only the exercised witnesses, never equivalence or safety. Plain selected-pack testing and paired review never install rules, change profiles, or certify live blocking or effective-profile behavior.
+
+### Opt in to isolated custom live proof
+
+Add a data-only fixture to an explicit selected pack:
+
+```sh
+"$KIT" test --rules /absolute/pack/rules --cases /absolute/pack/cases.tsv \
+  --live-fixture /absolute/public-live.json --json
+```
+
+For a selected `public-live-marker` rule matching `PUBLIC_BLOCK_SAMPLE` in `tool:write`:
+
+```json
+{
+  "schema_version": 1,
+  "classification": "public-synthetic",
+  "rule": "public-live-marker",
+  "scenarios": [
+    {"id":"allow","role":"allow","content":"PUBLIC_ALLOW_SAMPLE","expected_marker_effect":"present"},
+    {"id":"block","role":"block","content":"PUBLIC_BLOCK_SAMPLE","expected_marker_effect":"absent"},
+    {"id":"quiet","role":"quiet","content":"PUBLIC_BLOCK_SAMPLe","expected_marker_effect":"present"}
+  ]
+}
+```
+
+The strict schema requires exactly one allow, block, and quiet scenario. It rejects unknown fields, caller paths, commands, extensions, project code, providers, and environment overrides. G1–G3 must pass before G4 runs; plain external testing never opts in implicitly.
+
+G4 copies only the selected rule into a fresh private HOME and uses fixed native `write` actions in disposable Git projects. It verifies exact bytes for the allow/quiet markers and requires both an absent blocked marker and a native user-role interruption naming the selected rule. Quoted interruption text or a model claim cannot substitute for the physical effect. `data.test` retains the selected G1–G3 result; `data.live` records the separate scenario IDs, effects, runtime/resource identity brackets, and input readback.
+
+The OMP installation remains operator-trusted. This is isolated synthetic evidence, not a hostile-code sandbox or certification of your effective profile. No model credentials, caller project execution, rule installation, or profile activation is implied.
+
+### Reduce a public/synthetic false fire
+
+An unreleased installed build can minimize an authored quiet witness that actually fires:
+
+```sh
+"$KIT" review reduce --rules /absolute/pack/rules --fixture /absolute/public-fixture.json --json
+"$KIT" review reduce --rules /absolute/pack/rules --fixture /absolute/replay.json --replay-only --json
+```
+
+For a selected synthetic `public-false-fire` rule matching `PUBLIC SAMPLE`, the first fixture can be:
+
+```json
+{
+  "schema_version": 1,
+  "classification": "public-synthetic",
+  "approved_fields": ["rule", "expect", "source", "tool", "path", "snippet"],
+  "witness": {
+    "rule": "public-false-fire",
+    "expect": "quiet",
+    "source": "text",
+    "tool": "-",
+    "path": "-",
+    "snippet": "BEGIN PUBLIC EXAMPLE\nremovable padding one\nPUBLIC SAMPLE\nremovable padding two\nEND PUBLIC EXAMPLE\n"
+  },
+  "preserve": {"prefix": "BEGIN PUBLIC EXAMPLE\n", "suffix": "END PUBLIC EXAMPLE\n"},
+  "predicate": "G2"
+}
+```
+
+Use `G2` for a whole-payload fire or `G3` for a prefix fire. The reducer preserves the rule, expectation, source/tool/path, and nonempty prefix/suffix. It deletes lines only, within attempt/time limits; it does not claim global minimality. The JSON fixture is limited to 128 KiB and must be valid UTF-8, with exactly the approved witness fields and no unknown keys.
+
+On success, save only `data.replay_fixture` from the JSON result as `replay.json`. It contains the approved witness and complete hash-only identity pins. Do not drop or partially edit those pins: replay invokes the real observer and rejects changed identities. A non-reproducing seed, unavailable observer, lost predicate, or incomplete final replay exports no fixture. Exit codes are `0` for reduced/unchanged/reproduced, `1` for not reproduced, `2` for invalid input, and `3` for unavailable/incomplete proof.
+
+`public-synthetic` and `approved_fields` are caller approvals, not automatic de-identification. Inspect every approved string yourself; never submit private transcripts or secrets. The command emits neither raw producer output nor generated shell replay instructions and never edits the selected inputs or OMP profile.
 
 ## Usage
 
@@ -147,6 +212,8 @@ Interactive only: `/extensions` (slash command with no non-TTY form) and `omp --
 Foreign hook manifests are declarations, not handlers. A Claude `settings.json` entry or a Codex `hooks.json` entry is CONFIGURED when written; it is not an active OMP guard. OMP discovery can report candidate paths without importing them, but a discovered path does not establish a callable JS/TS factory, and neither discovery nor dashboard presence proves firing. EFFECT_OBSERVED requires an isolated run showing the permitted/blocked effect. Kit G1–G4 proof (whole-payload, streamed-prefix, isolated live) is extra evidence for the kit's own shipped pack; it certifies neither foreign hooks nor your effective profile.
 
 The manifest-discovery distinction was derived from OMP 18.4.3 source, not a live hook run. For a fresh behavioral check, `bun test tests/cli/native-guide.test.ts` resolves the PATH-selected installed OMP launcher and matching source, compares CLI/package versions, and uses an empty disposable Git repository with sanitized HOME/XDG paths and no copied checkout or model credentials. Its native discovery fixture checks manifest-only absence and positive candidate-path discovery, with canaries for unexpected manifest-command, module-import, or factory execution. It calls the discovery API, never the runtime hook loader. A pass is discovery evidence for that exact installation, not factory-loadability, hook-firing, parity, or release-certification evidence; handler effects remain UNVERIFIED.
+
+The separate no-terminal refusal probe is qualified for OMP 18.4.3, 18.4.4, and 18.4.5. On 18.4.5 it observes exit 2, the TTY refusal, and no synthetic hook import. OMP 18.4.2 and unqualified versions skip this probe before fixture creation; a skip is not a refusal pass. No hook is activated by this qualification.
 
 For classification only, consider two **synthetic, uninstalled** fixture files: `.claude/settings.json` containing `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"printf fixture"}]}]}}`, and `.codex/hooks.json` containing `{"hooks":{"notify":[{"command":"printf fixture"}]}}`. These illustrate manifest data, **not validated provider configuration templates**. Each is merely CONFIGURED at its source path; with no OMP JS/TS factory selected, handler state and effect remain UNVERIFIED. Do not copy these into a live profile or run their commands.
 

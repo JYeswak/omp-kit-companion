@@ -146,7 +146,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     [ "$work_set" = 1 ] || die "live scenario data requires --work-dir"
     case "$data_path" in "$work_real"/*) ;; *) die "live scenario data escaped --work-dir" ;; esac
   done
-  /usr/bin/env -i \
+  exec /usr/bin/env -i \
     PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
     LANG="${LANG:-}" LC_ALL="${LC_ALL:-}" CI="${CI:-}" NO_COLOR="${NO_COLOR:-}" SHELL="${SHELL:-}" \
@@ -158,7 +158,6 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     OMP_PROFILE="$profile" OMP_KIT_USAGE_DIR="$usage_dir" OMP_KIT_WORK_DIR="$work_real" \
     SCEN="$scenario" LOG="$log_file" PORTFILE="$port_file" \
     BUN_BE_BUN=1 "$executable" "$script" "$@"
-  exit $?
 fi
 
 # A checkout is the only place where a separately installed Bun is an allowed fallback.

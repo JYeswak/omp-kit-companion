@@ -56,7 +56,7 @@ function inputError(code: string, message: string): never {
 	throw new ExternalPackInputError(code, message);
 }
 
-function digest(bytes: Uint8Array): string {
+export function digest(bytes: Uint8Array | string): string {
 	return createHash("sha256").update(bytes).digest("hex");
 }
 
@@ -67,10 +67,10 @@ function readUtf8(bytes: Uint8Array, label: string): string {
 		return inputError("INVALID_EXTERNAL_PACK", `${label} is not valid UTF-8`);
 	}
 }
-function readBoundedFile(path: string, maxBytes: number, label: string): Uint8Array {
+export function readBoundedFile(path: string, maxBytes: number, label: string): Uint8Array {
 	let fd: number | undefined;
 	try {
-		fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+		fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
 		const stat = fstatSync(fd);
 		if (!stat.isFile()) return inputError("UNSAFE_EXTERNAL_FILE", `${label} must be a regular file`);
 		if (stat.size > maxBytes) return inputError("EXTERNAL_PACK_TOO_LARGE", `${label} exceeds the ${maxBytes}-byte limit`);
