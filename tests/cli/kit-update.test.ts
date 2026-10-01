@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, planKitUpdate, undoKitUpdate } from "../../src/kit-update.ts";
+import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate } from "../../src/kit-update.ts";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const platform = { os: "darwin", arch: "arm64", libc: "none" } as const;
@@ -119,6 +119,52 @@ test("verified archive activates one symlink, retains old release and leaves fai
  const retry = await planKitUpdate(input(ctx));
  expect(retry).toMatchObject({ status: "REFUSED", reason: "KIT_TARGET_EXISTS", exitCode: 2 });
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}));
+
+// An operator facing PARTIAL must see which stages failed, which of their paths changed, and the exact recovery command.
+test("failed postcheck envelope names failed stages, changed operator paths and the undo command", async () => fixture(async ctx => {
+ const planned = await planKitUpdate(input(ctx));
+ if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ const result = await applyKitUpdate(planned);
+ const report = result.postcheck.report;
+ if (result.status !== "PARTIAL" || !result.receiptId || !report)
+  throw new Error(`expected a PARTIAL outcome carrying its full-test report, observed ${JSON.stringify({ status: result.status, receipt: result.receiptId, postcheck: result.postcheck.status, reason: result.postcheck.reason, report: Boolean(report) })}`);
+ const undoCommand = `omp-kit undo ${result.receiptId} --yes`;
+
+ // The real failed postcheck already explains itself: the first failure is in the error message.
+ const real = kitUpdateEnvelope(planned, result);
+ const realDetail = real.data.postcheck_detail as { failures: string[] } | null;
+ expect(realDetail?.failures.length ?? 0, JSON.stringify(real.data)).toBeGreaterThan(0);
+ expect(real.errors?.[0]?.message, JSON.stringify(real.errors)).toContain(realDetail!.failures[0]!);
+
+ // Named stages, both home and project changed paths, and a capped failure list.
+ const stages = Object.fromEntries(Object.keys(report.stages).map(name => [name, { status: "PASS", producer_rc: 0 }])) as typeof report.stages;
+ stages["harness-gate"] = { status: "FAIL", producer_rc: 1, reason: "gate refused" };
+ stages["e2e-live"] = { status: "FAIL", producer_rc: 1, reason: "scenario missing" };
+ stages["e2e-plant"] = { status: "NOT_RUN", producer_rc: null };
+ const homePath = join(ctx.home, ".omp", "agent", "config.yml"), projectPath = join(ctx.home, "project", ".omp", "settings.json");
+ const failures = Array.from({ length: 25 }, (_, index) => `failure ${index + 1}`);
+ const failedReport = { ...report, stages, failures, snapshots: { ...report.snapshots,
+  home: { ...report.snapshots.home, unchanged: false, changed_paths: [homePath] },
+  project: { ...report.snapshots.project, unchanged: false, changed_paths: [projectPath] } } };
+ const envelope = kitUpdateEnvelope(planned, { ...result, postcheck: { ...result.postcheck, status: "FAIL", report: failedReport } });
+ expect(envelope.code).toBe(1);
+ expect(envelope.data, JSON.stringify(envelope.data)).toMatchObject({ overall: "FAIL", action: "PARTIAL", postcheck: "FAIL",
+  receipt_id: result.receiptId, reason: result.postcheck.reason ?? null });
+ expect(envelope.data.postcheck_detail, JSON.stringify(envelope.data.postcheck_detail)).toMatchObject({
+  failed_stages: ["harness-gate", "e2e-live"], changed_operator_paths: [homePath, projectPath], failures: failures.slice(0, 20) });
+ expect(envelope.commands).toEqual([undoCommand]);
+ expect(envelope.errors?.[0], JSON.stringify(envelope.errors)).toMatchObject({ code: result.postcheck.reason ?? "KIT_POSTCHECK_FAILED" });
+ expect(envelope.errors?.[0]?.message).toContain("Kit update to 1.2.3 did not pass its postcheck; failure 1");
+ expect(envelope.errors?.[0]?.remediation).toContain(`To return to 1.2.2 and clear the pending receipt: ${undoCommand}`);
+
+ // An outcome that is not PARTIAL offers no undo and no error.
+ const updated = kitUpdateEnvelope(planned, { ...result, status: "UPDATED", exitCode: 0 });
+ expect({ commands: updated.commands, errors: updated.errors, overall: updated.data.overall }).toEqual({ commands: undefined, errors: undefined, overall: "UNVERIFIED" });
+
+ // The advertised command's receipt is the one undo restores.
+ expect(undoKitUpdate({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, receiptId: result.receiptId })).toMatchObject({ status: "RESTORED", updatePending: false });
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.2/bin/omp-kit");
 }));
 
 // A later edit to the activated binary or link defeats post-image-based undo.

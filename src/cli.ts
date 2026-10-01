@@ -13,7 +13,7 @@ import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
-import { applyKitUpdate, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
+import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import type { PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
@@ -1077,24 +1077,7 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 				source: plan.provenance, asset_sha256: plan.release.asset.sha256 },
 		}, verification: "UNVERIFIED" };
 	try {
-		const outcome = await applyKitUpdate(plan);
-		const report = outcome.postcheck.report;
-		// Name why a postcheck failed instead of a bare FAIL; operators cannot act on an unexplained PARTIAL.
-		const postcheckDetail = report ? {
-			status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
-			failed_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
-			changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
-			failures: report.failures.slice(0, 20),
-		} : null;
-		const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
-		return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
-			scope, action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
-			provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
-			postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
-			...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
-				message: `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
-				remediation: `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
-			verification: "UNVERIFIED" };
+		return kitUpdateEnvelope(plan, await applyKitUpdate(plan));
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },
