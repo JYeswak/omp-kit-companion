@@ -130,6 +130,21 @@ test("named policy repair uses native config commands and preserves unrelated pr
 	expect(nativeConfigValue(f.home, "ttsr.enabled")).toBe(true);
 }, 120_000);
 
+test("policy repair follows the optional operator profile list", async () => {
+	const f = fixture();
+	const rules = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "rules" });
+	if (rules.status !== "READY") throw new Error(JSON.stringify(rules));
+	applyRepairPlan(rules, { confirmed: true });
+	writeProfileConfig(f.home, "work", YAML.stringify({ model: "work-model", extensions: [], ttsr: { enabled: false, repeatMode: "once", repeatGap: 8, contextMode: "discard", disabledRules: [] } }), 0o600);
+	const profileConfigHome = join(f.home, "xdg-config");
+	const configDir = join(profileConfigHome, "omp-kit");
+	mkdirSync(configDir, { recursive: true, mode: 0o700 });
+	writeFileSync(join(configDir, "ttsr-profiles.json"), JSON.stringify(["work"]), { mode: 0o600 });
+	const policy = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "policy", profileConfigHome });
+	if (policy.status !== "READY") throw new Error(JSON.stringify(policy));
+	expect(new Set(policy.steps.map(step => step.profile))).toEqual(new Set(["work"]));
+}, 120_000);
+
 test("policy repair preserves project disabled-rule provider refusal beside native profile evidence", async () => {
 	const f = fixture();
 	mkdirSync(join(f.project, ".omp", "rules"), { recursive: true });

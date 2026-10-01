@@ -338,8 +338,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 		}
 	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
 	const diagnosedFindings = await diagnose({ root, home, project: process.cwd(), ...(ompPath ? { ompPath } : {}) });
-	const nativeSettings = request.command.name === "doctor" && request.flags.get("--scope") === "settings" ?
-		inspectPolicySettings({ root, home, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
+	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
+		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
 	const allFindings = nativeSettings ? [...diagnosedFindings.filter(item => item.component !== "policy"), nativeSettings] : diagnosedFindings;
 	const ompFinding = allFindings.find((item) => item.component === "omp");
 	const ompEvidence = ompFinding?.evidence;
@@ -799,13 +799,13 @@ function policyCommand(request: ParsedCommand): CliResult {
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
 	const selected = request.flags.get("--profiles");
-	const profiles: "all" | string[] = typeof selected === "string" && selected !== "all" ? selected.split(",") : "all";
-	if (profiles !== "all" && (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+	const profiles: "all" | string[] | undefined = typeof selected === "string" ? selected === "all" ? "all" : selected.split(",") : undefined;
+	if (profiles !== undefined && profiles !== "all" && (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
 		new Set(profiles).size !== profiles.length))
 		return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
 			"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
 	try {
-		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profiles, includeDefault: request.flags.has("--include-default") });
+		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(profiles === undefined ? {} : { profiles }), includeDefault: request.flags.has("--include-default") });
 		const data = { overall: plan.blockedProfiles.length ? "FAIL" : "UNVERIFIED", action: "PLAN", profiles: plan.profiles,
 			steps: plan.steps.map(step => ({ profile: step.profile, path: step.path, key: "ttsr." + step.key, command: step.command })),
 			blocked_profiles: plan.blockedProfiles, backup_id: null as string | null };
@@ -820,6 +820,9 @@ function policyCommand(request: ParsedCommand): CliResult {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
 		const code = message.split(":")[0] ?? "";
+		if (code === "PROFILE_LIST_UNVERIFIED") return refusal(code, "Optional TTSR profile list is invalid or unsafe",
+			"Fix XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json (default: $HOME/.config/omp-kit/ttsr-profiles.json), or pass explicit --profiles.");
+
 		if (code === "POLICY_APPLY_PARTIAL") {
 			const [, backupId, profile, key] = message.split(":");
 			return { code: 1, data: { overall: "UNVERIFIED", action: "PARTIAL", backup_id: backupId ?? null, failed_profile: profile ?? null, failed_key: key ?? null }, errors: [{
@@ -898,7 +901,7 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
 			remediation: "Run the compiled kit release with an absolute HOME; no repair was attempted.",
 		}], verification: "UNVERIFIED" };
-	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(), ...(typeof scope === "string" ? { scope } : {}) });
+	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(typeof scope === "string" ? { scope } : {}) });
 	if (decision.status === "REFUSED") return { code: 2,
 		data: { overall: "UNVERIFIED", scope: decision.scope, action: "REFUSED" },
 		errors: [{ code: decision.refusal.code, message: "No bounded repair is authorized for this state",

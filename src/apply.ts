@@ -5,7 +5,7 @@ import { applyRulePlan, planRules, type RulePlan } from "./apply-rules.ts";
 import { inspectPendingMutations, type ApplyOptions } from "./mutations.ts";
 
 export type NamedScope = "rules" | "policy" | "extensions";
-export type NamedApplyInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope: NamedScope }>;
+export type NamedApplyInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope: NamedScope; profileConfigHome?: string }>;
 export type NamedStep = Readonly<{ action: string; path: string; profile?: string; key?: string; command?: string; beforeSha256: string | null; afterSha256: string | null; beforeMode: number | null; afterMode: number | null }>;
 export type NamedApplyPlan = Readonly<{ scope: NamedScope; changes: number; steps: readonly NamedStep[] }>;
 export type NamedApplyResult = Readonly<{ status: "APPLIED" | "UNCHANGED"; receiptId: string | null; backupId: string | null; files: number }>;
@@ -36,7 +36,7 @@ export function planNamedApply(input: NamedApplyInput): NamedApplyPlan {
 	validateNamedApplyPaths(input);
 	if (inspectPendingMutations(input.stateRoot).length) throw new Error("PENDING_RECOVERY");
 	const plan = input.scope === "rules" ? planRules(input) : input.scope === "policy" ?
-		planPolicy({ ...input, includeDefault: true }) : planExtensions({ ...input, includeDefault: true });
+		planPolicy({ root: input.root, home: input.home, stateRoot: input.stateRoot, project: input.project, profileConfigHome: input.profileConfigHome }) : planExtensions({ ...input, includeDefault: true });
 	if (input.scope === "rules" && (plan as RulePlan).blocked) throw new Error("RULE_COLLISION");
 	if (input.scope === "policy" && (plan as PolicyPlan).blockedProfiles.length) throw new Error("DISABLED_RULE_REFUSED");
 	let steps: NamedStep[];

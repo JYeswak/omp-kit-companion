@@ -1,7 +1,7 @@
 import { applyNamedPlan, planNamedApply, validateNamedApplyPaths, type NamedApplyPlan, type NamedApplyResult, type NamedScope } from "./apply.ts";
 import { diagnose, type Finding } from "./diagnostics.ts";
 import type { ApplyOptions } from "./mutations.ts";
-export type RepairInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope?: string }>;
+export type RepairInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope?: string; profileConfigHome?: string }>;
 export type RepairRefusal = Readonly<{ code: string; reason: string }>;
 export type RepairDecision =
 	| Readonly<{ status: "READY"; scope: NamedScope; changes: number; steps: NamedApplyPlan["steps"]; finding: string; refusal?: never }>
@@ -56,7 +56,7 @@ export async function planRepair(input: RepairInput): Promise<RepairDecision> {
 		const diagnosed = await diagnose({ root: input.root, home: input.home, project: input.project });
 		const blocked = findingRefusal(scope, diagnosed, input.project);
 		if (blocked) return blocked;
-		const plan = planNamedApply({ root: input.root, home: input.home, stateRoot: input.stateRoot, project: input.project, scope });
+		const plan = planNamedApply({ root: input.root, home: input.home, stateRoot: input.stateRoot, project: input.project, scope, profileConfigHome: input.profileConfigHome });
 		const result: RepairDecision = Object.freeze({ status: "READY", scope, changes: plan.changes, steps: plan.steps,
 			finding: scope === "rules" ? "installed_rules" : scope });
 		prepared.set(result, plan);

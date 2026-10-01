@@ -172,7 +172,7 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp", description: "Restrict diagnosis to a named component; settings reads TTSR keys through native OMP config get per profile" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--project", value: "PATH", description: "LSP or project-loading: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory or MCP: inspect an on-disk profile, not effective runtime activation" },
@@ -230,8 +230,8 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
 		{ name: "policy", description: "Per-profile TTSR policy via native OMP config get/set with durable profile backup", usage: "apply policy [--plan|--apply]", flags: [...planApply,
-			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
-			{ name: "--include-default", description: "Include the default profile explicitly" },
+			{ name: "--profiles", value: "NAMES|all", description: "Override optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json; absent file selects all named profiles or default if none exist" },
+			{ name: "--include-default", description: "Include the default profile in the operator list or named selection" },
 		], example: "omp-kit apply policy --plan --json", runnable: false, mutation: true },
 		{ name: "extensions", description: "Opt-in guard extension for selected profiles", usage: "apply extensions [--plan|--apply]", flags: [...planApply,
 			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },

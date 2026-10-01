@@ -6,7 +6,7 @@ import { ensureMutationStateRoot, fsyncDirectory, inspectPendingMutations, write
 import { resolveOmpIdentity } from "./paths.ts";
 import { runtimeTempRoot } from "./runtime.ts";
 
-export type PolicyInput = Readonly<{ root: string; home: string; ompPath?: string; stateRoot?: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean }>;
+export type PolicyInput = Readonly<{ root: string; home: string; ompPath?: string; stateRoot?: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean; profileConfigHome?: string }>;
 export type PolicyStep = Readonly<{ profile: string; path: string; key: PolicyKey; command: string; beforeSha256: string | null; beforeMode: number | null; beforeValue: PolicyValue; value: PolicyValue }>;
 export type PolicyPlan = Readonly<{ scope: "policy"; profiles: readonly string[]; steps: readonly PolicyStep[]; blockedProfiles: readonly Readonly<{ profile: string; names: readonly string[] }>[] }>;
 export type PolicyReceipt = Readonly<{ status: "APPLIED" | "UNCHANGED"; backupId: string | null; files: number; keys: number }>;
@@ -116,9 +116,25 @@ function globalPreflight(root: string, home: string): string {
 	if (!release) fail("SOURCE_INVALID");
 	return hash(Buffer.from(JSON.stringify({ manifest: release.image.sha256, retired, installed: [...installed].sort() })));
 }
-function selectedProfiles(input: PolicyInput): PolicyConfig[] {
-	const home = input.home, namedDir = join(home, ".omp", "profiles");
-	const candidates: { name: string; directory: string; issue?: string }[] = [{ name: "default", directory: join(home, ".omp", "agent") }];
+function operatorProfileList(home: string, configHomeValue?: string): string[] | null {
+	const configHome = configHomeValue ?? join(home, ".config");
+	if (!isAbsolute(configHome) || resolve(configHome) !== configHome) fail("PROFILE_LIST_UNVERIFIED");
+	let source: FileImage | null;
+	try { source = optionalFile(join(configHome, "omp-kit", "ttsr-profiles.json")); }
+	catch { fail("PROFILE_LIST_UNVERIFIED"); }
+	if (!source) return null;
+	let value: unknown;
+	try { value = JSON.parse(source.bytes.toString("utf8")); }
+	catch { fail("PROFILE_LIST_UNVERIFIED"); }
+	if (!Array.isArray(value) || !value.length ||
+		value.some((name: unknown) => typeof name !== "string" || (name !== "default" && (!profileName.test(name) || name.endsWith(".")))) ||
+		new Set(value).size !== value.length) fail("PROFILE_LIST_UNVERIFIED");
+	return value as string[];
+}
+
+function selectedProfiles(input: PolicyInput, allowMissing = false): PolicyConfig[] {
+	const home = input.home, namedDir = join(home, ".omp", "profiles"), defaultDir = join(home, ".omp", "agent");
+	const candidates: { name: string; directory: string; issue?: string }[] = [{ name: "default", directory: defaultDir }];
 	let namedProfilesAvailable = false;
 	try { namedProfilesAvailable = safeDirectory(namedDir, true); } catch { fail("PROFILE_INVENTORY_UNVERIFIED"); }
 	if (namedProfilesAvailable) for (const name of readdirSync(namedDir).sort()) {
@@ -128,7 +144,7 @@ function selectedProfiles(input: PolicyInput): PolicyConfig[] {
 		try { available = safeDirectory(directory, true); } catch { unsafe = true; }
 		candidates.push({ name, directory, ...(!available ? { issue: unsafe ? "PROFILE_AGENT_DIRECTORY_UNAVAILABLE" : "PROFILE_AGENT_DIRECTORY_MISSING" } : {}) });
 	}
-	const requested = input.profiles ?? "all";
+	const requested = input.profiles ?? operatorProfileList(home, input.profileConfigHome) ?? "all";
 	let names: Set<string>;
 	if (requested === "all") {
 		names = new Set(candidates.length === 1 || input.includeDefault ? candidates.map(candidate => candidate.name) : candidates.slice(1).map(candidate => candidate.name));
@@ -136,7 +152,9 @@ function selectedProfiles(input: PolicyInput): PolicyConfig[] {
 		if (!Array.isArray(requested) || !requested.length || requested.some(name => name !== "default" && (!profileName.test(name) || name.endsWith(".")))) fail("INVALID_PROFILE_SELECTION");
 		names = new Set(requested);
 		if (input.includeDefault) names.add("default");
-		for (const name of names) if (!candidates.some(candidate => candidate.name === name)) fail("MISSING_PROFILE");
+		const missing = [...names].filter(name => !candidates.some(candidate => candidate.name === name));
+		if (missing.length && !allowMissing) fail("MISSING_PROFILE");
+		for (const name of missing) candidates.push({ name, directory: name === "default" ? defaultDir : join(namedDir, name, "agent"), issue: "PROFILE_NOT_FOUND" });
 	}
 	return candidates.filter(candidate => names.has(candidate.name)).map(candidate => {
 		if (candidate.issue) return { ...candidate, path: join(candidate.directory, "config.yml"), file: null };
@@ -252,13 +270,15 @@ function nativePolicyRead(ompPath: string, home: string, profiles: readonly Poli
 	} catch { return profiles.map(profile => ({ profile: profile.name, status: "UNVERIFIED", issue: "NATIVE_CONFIG_UNAVAILABLE" })); }
 	finally { rmSync(scratch, { recursive: true, force: true }); }
 }
-export function inspectPolicySettings(input: Pick<PolicyInput, "root" | "home" | "ompPath">): Finding {
+export function inspectPolicySettings(input: Pick<PolicyInput, "root" | "home" | "ompPath" | "profileConfigHome">): Finding {
 	try {
 		const home = absolute(input.home), root = absolute(input.root);
 		const ompPath = policyOmpPath(input.ompPath);
 		if (!isAbsolute(ompPath)) fail("OMP_CONFIG_UNAVAILABLE");
 		const policy = requirePolicy(root).value;
-		const profiles = selectedProfiles({ root, home, ompPath, profiles: "all", includeDefault: true });
+		const configuredProfiles = operatorProfileList(home, input.profileConfigHome);
+		const profiles = selectedProfiles({ root, home, ompPath, profiles: configuredProfiles ?? "all",
+			includeDefault: configuredProfiles === null }, true);
 		const reads = nativePolicyRead(ompPath, home, profiles);
 		let hasDrift = false, hasUnverified = false;
 		const rows = reads.map(read => {

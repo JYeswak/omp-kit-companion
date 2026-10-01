@@ -3,6 +3,8 @@
 
 Test OMP rules, preview every change, apply with receipts.
 
+## Installation
+
 ```sh
 KIT_VERSION=0.2.0
 KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
@@ -22,7 +24,7 @@ from `omp-kit audit`) restores the previous release and clears it.
 
 ![Yuzu testing omp rule behavior](visual/hero.jpg)
 
-## Try it in 60 seconds
+## Quick start
 
 With OMP on PATH and the installed binary above:
 
@@ -56,6 +58,11 @@ until rules are applied; that split is deliberate.
 - Native OMP where it fits: `ttsr list/test/scan`, plugins, and config
   reads come first. The [native-OMP guide](docs/native-omp.md) teaches
   them with runnable examples.
+- `doctor --scope settings` reports per-key TTSR status through native OMP `config get`.
+  An optional JSON array at `$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` (default
+  `$HOME/.config/omp-kit/ttsr-profiles.json`) selects profiles; an unsafe or
+  invalid list fails closed. `apply policy` previews native commands, backs up
+  changed configs, and reads each changed key back.
 
 ## What it is not
 
@@ -66,20 +73,22 @@ until rules are applied; that split is deliberate.
 - Not a daemon. Nothing runs unless you invoke it, except the optional
   watcher you install yourself ([usage](docs/usage.md)).
 
-## Limits
+## Limitations
 
 The case gate proves registration, whole-payload matches, and prefix
 behavior; only the isolated live suite checks blocking. Project-local
 rules can shadow installed global rules. The CLI never enables policy,
 extensions, providers, or a model by implication. Detailed usage, update,
 and configuration live in [docs/usage.md](docs/usage.md); what did not
-work and why lives in [NEGATIVE_EVIDENCE.md](NEGATIVE_EVIDENCE.md).
+work and why lives in [NEGATIVE_EVIDENCE.md](NEGATIVE_EVIDENCE.md). Stored TTSR values do not prove that a running OMP session loaded or enforced the policy.
 
 Bug reports: [CONTRIBUTING.md](CONTRIBUTING.md). Sensitive reports:
 [SECURITY.md](SECURITY.md). Source checkout work: [AGENTS.md](AGENTS.md).
 What is done, in review and next: [ROADMAP.md](ROADMAP.md).
 
-Please don't take this the wrong way: [CONTRIBUTING.md](CONTRIBUTING.md) welcomes bug reports and focused proposals; a pull request is a proposal, not an automatic merge commitment. The maintainer may independently implement a change after review. Send sensitive reports through [SECURITY.md](SECURITY.md).
+## About Contributions
+
+Bug reports and focused proposals are welcome through GitHub issues. A pull request is a proposal, not an automatic merge commitment; the maintainer may independently implement a change after review. Do not post session logs, local absolute paths, credentials, or private model transcripts. Use `CONTRIBUTING.md` for the workflow and `SECURITY.md` for sensitive reports.
 
 Maintained by [JYeswak](https://github.com/JYeswak).
 

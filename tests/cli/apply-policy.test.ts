@@ -117,6 +117,21 @@ nativeTest("compiled apply policy exposes native plan commands and a backup on c
 		const stdout = child.stdout.toString();
 		return { exitCode: child.exitCode, output: stdout + child.stderr.toString(), envelope: JSON.parse(stdout) };
 	};
+	const configDir = join(f.home, "xdg-config", "omp-kit");
+	mkdirSync(configDir, { recursive: true, mode: 0o700 });
+	const profileList = join(configDir, "ttsr-profiles.json"), outsideList = join(f.workspace, "outside-profiles.json");
+	writeFileSync(outsideList, JSON.stringify(["work"]));
+	symlinkSync(outsideList, profileList);
+	const unsafe = run(["apply", "policy", "--apply", "--yes"]);
+	expect(unsafe.exitCode).toBe(2);
+	expect(unsafe.envelope.errors[0].code).toBe("PROFILE_LIST_UNVERIFIED");
+	expect(readFileSync(configPath)).toEqual(before);
+	expect(existsSync(join(f.home, "xdg-state", "omp-kit"))).toBe(false);
+	rmSync(profileList);
+	writeFileSync(profileList, JSON.stringify(["work"]), { mode: 0o600 });
+	const defaultPlan = run(["apply", "policy", "--plan"]);
+	expect(defaultPlan.exitCode, defaultPlan.output).toBe(0);
+	expect(defaultPlan.envelope.data.profiles).toEqual(["work"]);
 	const unconfirmed = run(["apply", "policy", "--profiles", "work", "--apply"]);
 	expect(unconfirmed.envelope.errors[0].code).toBe("CONSENT_REQUIRED");
 	expect(readFileSync(configPath)).toEqual(before);
@@ -172,6 +187,30 @@ nativeTest("doctor settings reads native per-profile values and reports drift pl
 	expect(readFileSync(workPath)).toEqual(workBefore);
 });
 
+nativeTest("doctor settings reads implicit TTSR values through native OMP config get", () => {
+	const baseline = fixture();
+	writeProfileConfig(baseline.home, "implicit", "model: owned-by-user\n", 0o600);
+	const keys = ["enabled", "repeatMode", "repeatGap", "contextMode", "disabledRules"];
+	const values = new Map(keys.map(key => [key, nativeConfigValue(baseline.home, baseline.project, "implicit", "ttsr." + key)]));
+	const f = fixture();
+	const configPath = writeProfileConfig(f.home, "implicit", "model: owned-by-user\n", 0o600);
+	const beforeDoctor = readFileSync(configPath);
+	const policy: Record<string, unknown> = JSON.parse(readFileSync(join(f.root, "policy", "ttsr.json"), "utf8"));
+	const expectedKeys = keys.map(key => ({ key: "ttsr." + key,
+		status: JSON.stringify(values.get(key)) === JSON.stringify(policy[key]) ? "OK" : "DRIFT" }));
+	const run = Bun.spawnSync([process.execPath, "run", resolve(import.meta.dir, "../../src/cli.ts"),
+		"doctor", "--scope", "settings", "--json"], { cwd: f.project, env: nativeTestEnv(f.home), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	expect(run.exitCode, run.stdout.toString() + run.stderr.toString()).toBe(0);
+	const result = JSON.parse(run.stdout.toString());
+	const finding = result.data.findings.find((item: { component: string }) => item.component === "policy");
+	const profiles = finding.evidence.profiles;
+	expect(Array.isArray(profiles)).toBe(true);
+	const profile = profiles.find((item: { profile: string }) => item.profile === "implicit");
+	expect(profile?.status).toBe(expectedKeys.some(item => item.status === "DRIFT") ? "DRIFT" : "OK");
+	expect(profile?.keys).toEqual(expectedKeys);
+	expect(readFileSync(configPath)).toEqual(beforeDoctor);
+});
+
 nativeTest("native drift introduced after planning makes apply refuse without overwriting it", () => {
 	const f = fixture();
 	const configPath = seedProfile(f.home, "work", { ...policyValues, enabled: false });
@@ -194,4 +233,52 @@ nativeTest("disabled profile rules are never re-enabled and non-TTSR policy keys
 	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.disabledRules")).toEqual(["managed"]);
 	writeFileSync(join(f.root, "policy", "ttsr.json"), JSON.stringify({ ...policyValues, model: "forbidden" }));
 	expect(() => planPolicy({ ...f.input, profiles: ["work"] })).toThrow(/INVALID_POLICY/);
+});
+
+nativeTest("optional TTSR profile list controls settings diagnosis and default policy plan", () => {
+	const f = fixture();
+	seedProfile(f.home, "default", policyValues);
+	seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	seedProfile(f.home, "other", { ...policyValues, enabled: false });
+	const profileFile = join(f.home, "xdg-config", "omp-kit", "ttsr-profiles.json");
+	mkdirSync(dirname(profileFile), { recursive: true, mode: 0o700 });
+	const run = (args: string[]) => Bun.spawnSync([process.execPath, "run", resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"],
+		{ cwd: f.project, env: nativeTestEnv(f.home), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	const defaultDoctor = run(["doctor", "--scope", "settings"]);
+	const defaultFinding = JSON.parse(defaultDoctor.stdout.toString()).data.findings.find((item: { component: string }) => item.component === "policy");
+	expect(defaultFinding.evidence.profiles.map((item: { profile: string }) => item.profile).sort()).toEqual(["default", "other", "work"]);
+	writeFileSync(profileFile, JSON.stringify(["work"]), { mode: 0o600 });
+	const selectedDoctor = run(["doctor", "--scope", "settings"]);
+	const selectedFinding = JSON.parse(selectedDoctor.stdout.toString()).data.findings.find((item: { component: string }) => item.component === "policy");
+	expect(selectedFinding.evidence.profiles.map((item: { profile: string }) => item.profile)).toEqual(["work"]);
+	const profileConfigHome = join(f.home, "xdg-config");
+	const selectedPlan = planPolicy({ ...f.input, profileConfigHome });
+	expect(selectedPlan.profiles).toEqual(["work"]);
+	const overridePlan = planPolicy({ ...f.input, profiles: ["other"], profileConfigHome });
+	expect(overridePlan.profiles).toEqual(["other"]);
+	const homeConfigDir = join(f.home, ".config", "omp-kit");
+	mkdirSync(homeConfigDir, { recursive: true, mode: 0o700 });
+	writeFileSync(join(homeConfigDir, "ttsr-profiles.json"), JSON.stringify(["other"]), { mode: 0o600 });
+	const homeFallback = planPolicy({ ...f.input, profileConfigHome: undefined });
+	expect(homeFallback.profiles).toEqual(["other"]);
+});
+
+nativeTest("unsafe TTSR profile list makes diagnosis unverified and policy planning refuse without fallback", () => {
+	const f = fixture();
+	const configPath = seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	const before = readFileSync(configPath);
+	const profileConfigHome = join(f.home, "xdg-config");
+	const profileDir = join(profileConfigHome, "omp-kit");
+	mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+	const outside = join(f.workspace, "outside-profile-list.json");
+	writeFileSync(outside, JSON.stringify(["work"]));
+	symlinkSync(outside, join(profileDir, "ttsr-profiles.json"));
+	const run = (args: string[]) => Bun.spawnSync([process.execPath, "run", resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"],
+		{ cwd: f.project, env: nativeTestEnv(f.home), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	const doctor = run(["doctor", "--scope", "settings"]);
+	const finding = JSON.parse(doctor.stdout.toString()).data.findings.find((item: { component: string }) => item.component === "policy");
+	expect(finding.status).toBe("UNVERIFIED");
+	expect(() => planPolicy({ ...f.input, profileConfigHome })).toThrow(/PROFILE_LIST_UNVERIFIED/);
+	expect(readFileSync(configPath)).toEqual(before);
+	expect(existsSync(f.input.stateRoot)).toBe(false);
 });
