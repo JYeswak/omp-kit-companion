@@ -48,7 +48,8 @@ test_full|0|ok=true status=PASS exit=0 failures=[] home=unchanged,complete
 update_apply|0|ok=true action=UPDATED postcheck=PASS active=@CAND@ reason=null
 version_after_update|0|omp-kit @CAND@
 audit|0|ok=true latest_update_receipt=RECONCILED
-background_writer|0|alive=yes ticks>=10'
+background_writer|0|alive=yes ticks>=10
+no_leaked_processes|0|leaked=none'
 
 usage() {
   sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -192,6 +193,20 @@ check_writer() {
   [ -f "$WRITER_FILE" ] && ticks=$(wc -l < "$WRITER_FILE" | tr -d ' ')
   echo "alive=$alive ticks=$ticks"
 }
+check_leaked_processes() {
+  # Snapshot first, analyze the file: a concurrent pipeline would list our own analyzer.
+  ps -axo pid=,ppid=,etime=,command= > "$WORK/leaked.ps" 2>/dev/null || { echo "leaked=unknown-ps-failed"; return; }
+  hit=$(awk -v r="$WORK/" 'index($0, r) { print }' "$WORK/leaked.ps")
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -d cwd -F pn > "$WORK/leaked.lsof" 2>/dev/null
+    pid=""
+    while IFS= read -r line; do
+      case "$line" in p*) pid=${line#p} ;; n"$WORK"/*) hit=$(printf '%s\n%s' "$hit" "$(ps -o pid=,ppid=,etime=,command= -p "$pid" 2>/dev/null)") ;; esac
+    done < "$WORK/leaked.lsof"
+  fi
+  hit=$(printf '%s\n' "$hit" | awk 'NF' | sort -u)
+  if [ -z "$hit" ]; then echo "leaked=none"; else printf 'leaked=found\n%s\n' "$hit"; fi
+}
 
 # kit_env CMD...: the kit's environment for every journey step.
 kit_env() {
@@ -225,7 +240,7 @@ verdict() {
     doctor) envelope_verdict "$out" "$DOCTOR_FILTER" ;;
     doctor_after_repair) envelope_verdict "$out" '"ok=\(.ok) " + ([.data.findings[]? | select(.component == "state_root") | "state_root=\(.status)"][0] // "state_root=absent")' ;;
     repair_state_plan|repair_state_apply) envelope_verdict "$out" '"action=\(.data.action) scope=\(.data.scope) previous_mode=\(.data.previous_mode) changes=\(.data.changes)"' ;;
-    legacy_state_after_repair|background_writer) head -n 1 "$out" ;;
+    legacy_state_after_repair|background_writer|no_leaked_processes) head -n 1 "$out" ;;
     test) envelope_verdict "$out" '"ok=\(.ok) status=\(.data.test.status) exit=\(.data.test.exitCode) failures=[\(.data.test.failures // [] | join("; "))]"' ;;
     test_full) envelope_verdict "$out" '"ok=\(.ok) status=\(.data.test.status) exit=\(.data.test.exitCode) failures=[\(.data.test.failures // [] | join("; "))] home=\(if .data.test.snapshots.home.unchanged then "unchanged" else "changed" end),\(if .data.test.snapshots.home.complete then "complete" else "incomplete" end)"' ;;
     update_apply) envelope_verdict "$out" '"ok=\(.ok) action=\(.data.action) postcheck=\(.data.postcheck) active=\(.data.active_version) reason=\(.data.reason)"' ;;
@@ -305,4 +320,5 @@ step version_after_update kit_env "$KIT" --version
 step audit kit_env "$KIT" audit --json
 step background_writer check_writer
 stop_writer
+step no_leaked_processes check_leaked_processes
 finish

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Leaked mock servers can no longer accumulate silently: `scripts/e2e-live.sh` reaps each scenario mock with a bounded wait (TERM, grace, KILL) and fails at exit naming any defiant or surviving scenario, and the real-HOME journey ends with a `no_leaked_processes` step that expects zero processes with argv or cwd under the journey work dir.
 - Two quoted-text false fires are quiet: `kit-test-skip` now scopes `edit`/`write` to code extensions (`*.rs`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.py`, `*.go`) plus the `tests/` and `spec/` trees, so quoting a skip marker in Markdown no longer blocks; `kit-settings-mutation` no longer fires when the config-set text sits inside a double- or single-quoted argument opened by `=` or `--flag` of another command (executable `$(...)` substitutions still fire). All existing fire rows still fire.
 ## 0.2.0 — 2026-10-01
 
