@@ -295,11 +295,12 @@ describe("omp-kit CLI grammar and refusal", () => {
 		const health = invoke("health");
 		expect(health.code).toBe(1);
 		expect(health.envelope.ok).toBe(false);
-		expect(health.envelope.data.overall).toBe("DEGRADED");
+		expect(health.envelope.data.overall).toBe("UNVERIFIED");
 		expect(health.envelope.data.findings.find((row: { component: string }) => row.component === "installed_rules").status).toBe("DEGRADED");
+		expect(health.envelope.data.findings.find((row: { component: string }) => row.component === "omp_drift").status).toBe("NOT_RUN");
 		expect(health.envelope.data.not_judged.find((row: { component: string }) => row.component === "effective_profile").status).toBe("UNVERIFIED");
 		expect(health.envelope.data.not_judged.find((row: { component: string }) => row.component === "matcher").status).toBe("NOT_RUN");
-		expect(health.envelope.data.not_judged.some((row: { component: string }) => ["kit", "manifest", "omp", "state_root", "installed_rules"].includes(row.component))).toBe(false);
+		expect(health.envelope.data.not_judged.some((row: { component: string }) => ["kit", "manifest", "omp", "state_root", "installed_rules", "omp_drift"].includes(row.component))).toBe(false);
 		const doctor = invoke("doctor");
 		expect(doctor.code).toBe(0);
 		expect(doctor.envelope.ok).toBe(true);

@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-
+import { dirname, join, resolve } from "node:path";
+import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const bases: string[] = [];
 afterEach(() => { for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true }); });
@@ -58,23 +59,41 @@ function run(f: Healthy, args: string[]) {
 	const stdout = result.stdout.toString();
 	return { code: result.exitCode, data: JSON.parse(stdout), stderr: result.stderr.toString() };
 }
+function recordPass(f: Healthy) {
+	expect(recordTestReceipt(join(f.home, "xdg-state", "omp-kit"), { schema_version: 1, kit_version: "0.0.0-test",
+		scope: "fast", status: "PASS", recorded_at: "2026-10-01T00:00:00.000Z",
+		...ompFingerprint(resolveOmpIdentity({ PATH: f.ompBin })) })).toBe(true);
+}
 
 type Row = { component: string; status: string; reason: string };
 
-test("a healthy fixture install gives health exit 0 and lists structurally unprovable components as not judged", () => {
-	const health = run(sculpt(), ["health"]);
+test("a healthy fixture install with a recorded passing test gives health exit 0 and lists structurally unprovable components as not judged", () => {
+	const f = sculpt();
+	recordPass(f);
+	const health = run(f, ["health"]);
 	expect(health.code, health.stderr).toBe(0);
 	expect(health.data.data.overall).toBe("OK");
 	expect(health.data.data.findings.find((row: Row) => row.component === "installed_rules").status).toBe("OK");
+	expect(health.data.data.findings.find((row: Row) => row.component === "omp_drift").status).toBe("OK");
 	const notJudged = health.data.data.not_judged as Row[];
 	expect(notJudged.find((row) => row.component === "effective_profile")).toMatchObject({ status: "UNVERIFIED" });
 	expect(notJudged.find((row) => row.component === "matcher")).toMatchObject({ status: "NOT_RUN" });
 	expect(notJudged.every((row) => typeof row.reason === "string" && row.reason.length > 0)).toBe(true);
-	expect(notJudged.some((row) => ["kit", "manifest", "omp", "state_root", "installed_rules"].includes(row.component))).toBe(false);
+	expect(notJudged.some((row) => ["kit", "manifest", "omp", "state_root", "installed_rules", "omp_drift"].includes(row.component))).toBe(false);
 	expect(health.data.data.findings.some((row: Row) => row.component === "effective_profile")).toBe(true);
 	expect(health.stderr).toBe("");
 });
 
+test("no recorded test makes health exit 1 with omp_drift NOT_RUN naming test --record", () => {
+	const health = run(sculpt(), ["health"]);
+	expect(health.code).toBe(1);
+	expect(health.data.data.overall).toBe("UNVERIFIED");
+	const drift = health.data.data.findings.find((row: Row) => row.component === "omp_drift") as Row & { recommended_action: string };
+	expect(drift.status).toBe("NOT_RUN");
+	expect(drift.recommended_action).toContain("omp-kit test --record");
+	expect(JSON.stringify(health.data)).toContain('"component":"omp_drift"');
+	expect(health.data.data.not_judged.some((row: Row) => row.component === "matcher")).toBe(true);
+});
 test("planted manifest damage makes health exit 1 naming the manifest", () => {
 	const f = sculpt();
 	writeFileSync(join(f.release, "rules", "rule-a.md"), "tampered release\n");
@@ -88,6 +107,7 @@ test("planted manifest damage makes health exit 1 naming the manifest", () => {
 
 test("a 0755 state root makes health exit 1 naming the state root", () => {
 	const f = sculpt();
+	recordPass(f);
 	mkdirSync(join(f.home, "xdg-state", "omp-kit"), { recursive: true, mode: 0o755 });
 	chmodSync(join(f.home, "xdg-state", "omp-kit"), 0o755);
 	const health = run(f, ["health"]);
