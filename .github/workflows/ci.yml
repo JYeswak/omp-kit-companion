@@ -19,7 +19,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve-omp-versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      minimum: ${{ steps.resolve.outputs.minimum }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Resolve minimum and latest OMP versions once for this run
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="@oh-my-pi/pi-coding-agent"
+          minimum="$(jq -er '.minimum' scripts/omp-compat.json)"
+          if [[ ! "$minimum" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid minimum OMP version in scripts/omp-compat.json: $minimum" >&2
+            exit 1
+          fi
+          echo "Validating configured minimum OMP version $minimum is published"
+          npm view "$package@$minimum" version >/dev/null
+          latest="$(npm view "$package" version)"
+          if [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid latest OMP version returned by npm: $latest" >&2
+            exit 1
+          fi
+          matrix="$(jq -cn --arg minimum "$minimum" --arg latest "$latest" '[{track:"minimum",version:$minimum},{track:"latest",version:$latest}]')"
+          {
+            printf 'minimum=%s\n' "$minimum"
+            printf 'latest=%s\n' "$latest"
+            printf 'matrix=%s\n' "$matrix"
+          } >> "$GITHUB_OUTPUT"
   cli-contracts:
+    needs: resolve-omp-versions
     strategy:
       fail-fast: false
       matrix:
@@ -29,16 +62,21 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Install pinned OMP and TypeScript LSP for CLI contracts
-        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.4 typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Install current latest OMP and TypeScript LSP for CLI contracts
+        env:
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
       - name: Exercise self-contained CLI and native matcher consumer contracts
         run: bun test tests/cli
-
+      - name: Validate minimum/latest detached native receipts
+        run: python3 tests/cli/native_candidate_test.py
   ladder:
+    needs: resolve-omp-versions
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -51,8 +89,10 @@ jobs:
           shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh tests/e2e/real-home-journey.sh
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Install stock omp 18.4.0 for original ladder
-        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.0
+      - name: Install stock OMP for the ${{ matrix.omp.track }} ladder
+        env:
+          OMP_VERSION: ${{ matrix.omp.version }}
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Check manifest and rule behavior
         run: sh scripts/ladder.sh
       - name: Check versioned installer against native archive
@@ -87,7 +127,7 @@ jobs:
           retention-days: 7
 
   real-home-journey:
-    needs: build-candidates
+    needs: [build-candidates, resolve-omp-versions]
     strategy:
       fail-fast: false
       matrix:
@@ -104,8 +144,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Install pinned OMP and TypeScript LSP for the journey's test --full
-        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.4 typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Install current latest OMP and TypeScript LSP for the journey
+        env:
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
@@ -141,13 +183,15 @@ jobs:
           retention-days: 7
 
   native-certification:
-    needs: build-candidates
+    needs: [build-candidates, resolve-omp-versions]
     # One failing target is excluded; the aggregate still requires a nonempty native-certified set.
     continue-on-error: true
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        platform: [darwin-arm64-none, darwin-x64-none, linux-arm64-gnu, linux-x64-gnu]
+        omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
         include:
           - { platform: darwin-arm64-none, runner: macos-15 }
           - { platform: darwin-x64-none, runner: macos-15-intel }
@@ -156,24 +200,29 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      OMP_VERSION: ${{ matrix.omp.version }}
+      OMP_TRACK: ${{ matrix.omp.track }}
+      OMP_LATEST_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Install pinned stock OMP for native behavior
-        run: npm install --global @oh-my-pi/pi-coding-agent@18.4.2
+      - name: Install OMP ${{ matrix.omp.track }} for native behavior
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Install pinned TypeScript LSP for native route proof
         run: npm install --global typescript-language-server@5.1.3 typescript@5.9.3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
           path: ${{ runner.temp }}/native/${{ matrix.platform }}
-      - name: Certify the downloaded archive, never the source runner
+      - name: Certify downloaded archive on OMP ${{ matrix.omp.track }}
         env:
           TARGET: ${{ matrix.platform }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/native-candidate.py native --version "$CANDIDATE_VERSION" \
             --platform "$TARGET" --source-sha "$SOURCE_SHA" \
+            --omp-version "$OMP_VERSION" --omp-track "$OMP_TRACK" \
+            --latest-omp-version "$OMP_LATEST_VERSION" \
             --asset "$RUNNER_TEMP/native/$TARGET/asset.json" \
             --archive-dir "$RUNNER_TEMP/native/$TARGET" \
             --out "$RUNNER_TEMP/native-receipt/receipt.json"
@@ -181,18 +230,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-receipt-${{ matrix.platform }}
+          name: native-receipt-${{ matrix.platform }}-${{ matrix.omp.track }}
           path: ${{ runner.temp }}/native-receipt/receipt.json
           if-no-files-found: warn
           retention-days: 7
 
   candidate-index:
-    needs: [build-candidates, native-certification]
-    if: ${{ always() && needs.build-candidates.result == 'success' }}
+    needs: [build-candidates, native-certification, resolve-omp-versions]
+    if: ${{ always() && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      OMP_LATEST_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -203,13 +253,14 @@ jobs:
         with:
           pattern: native-receipt-*
           path: ${{ runner.temp }}/receipts
-      - name: Exclude uncertified targets and require at least one real native result
+      - name: Require minimum and latest receipts for each certified target
         env:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/native-candidate.py candidate --version "$CANDIDATE_VERSION" \
             --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/candidates" \
-            --receipts "$RUNNER_TEMP/receipts" --out "$RUNNER_TEMP/candidate-index"
+            --receipts "$RUNNER_TEMP/receipts" --latest-omp-version "$OMP_LATEST_VERSION" \
+            --out "$RUNNER_TEMP/candidate-index"
       - name: Retain private provisional index, never publish or update latest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

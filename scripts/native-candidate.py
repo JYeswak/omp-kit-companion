@@ -14,7 +14,6 @@ import sys
 import tempfile
 
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
-OMP_VERSION = "18.4.2"
 
 
 def digest(path):
@@ -28,6 +27,21 @@ def digest(path):
 def load(path):
     with open(path, encoding="utf-8") as source:
         return json.load(source)
+
+
+def valid_omp_version(value):
+    return isinstance(value, str) and re.fullmatch(r"\d+\.\d+\.\d+", value) is not None
+
+
+def load_omp_versions(latest):
+    compat_path = Path(__file__).resolve().with_name("omp-compat.json")
+    compat = load(compat_path)
+    if (not isinstance(compat, dict) or set(compat) != {"minimum"}
+            or not valid_omp_version(compat["minimum"])):
+        raise ValueError("scripts/omp-compat.json must contain only a stable minimum OMP version")
+    if not valid_omp_version(latest):
+        raise ValueError("latest OMP version must be a stable X.Y.Z")
+    return {"minimum": compat["minimum"], "latest": latest}
 
 
 def save(path, value):
@@ -113,6 +127,12 @@ def native(args):
         raise ValueError("unsupported native candidate")
     if not re.fullmatch("[0-9a-f]{40}", args.source_sha):
         raise ValueError("source commit must be a full Git SHA-1")
+    required_omp_versions = load_omp_versions(args.latest_omp_version)
+    if args.omp_track not in required_omp_versions:
+        raise ValueError("unsupported native OMP certification track")
+    omp_version = required_omp_versions[args.omp_track]
+    if args.omp_version != omp_version:
+        raise ValueError(f"native {args.omp_track} proof requires OMP {omp_version}")
     verified_source(args.source_sha)
     asset = asset_for(args.asset, args.platform, args.version, args.archive_dir)
     if (sys.platform == "darwin" and not args.platform.startswith("darwin-")
@@ -123,7 +143,8 @@ def native(args):
     if asset["arch"] != expected_arch:
         raise ValueError("archive architecture does not match native runner")
     receipt = {"schema_version": 1, "version": args.version, "source_sha": args.source_sha,
-               "platform": args.platform, "asset": asset, "omp_version": None,
+               "platform": args.platform, "asset": asset, "omp_track": args.omp_track,
+               "requested_omp_version": omp_version, "omp_version": None,
                "proofs": {}, "certified": False}
     out = Path(args.out)
     try:
@@ -136,9 +157,9 @@ def native(args):
                    "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data")}
             omp = subprocess.run(["omp", "--version"], cwd=root, env=env, capture_output=True, timeout=30)
             observed = (omp.stdout + omp.stderr).decode(errors="replace").strip()
-            if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(OMP_VERSION) + r"(?!\d)", observed):
-                raise ValueError("stock OMP version differs from the pinned native test version")
-            receipt["omp_version"] = OMP_VERSION
+            if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(omp_version) + r"(?!\d)", observed):
+                raise ValueError(f"stock OMP version does not match requested {args.omp_track} version {omp_version}")
+            receipt["omp_version"] = omp_version
             index = root / "release-index.json"
             save(index, {"schema_version": 1, "version": args.version, "source_tag": "v" + args.version,
                          "assets": {args.platform: asset}})
@@ -211,7 +232,7 @@ def native(args):
                             or Path(release["root"]).resolve() != release_root.resolve()
                             or Path(release["executable"]).resolve() != binary.resolve()
                             or omp_identity["status"] != "PRESENT"
-                            or omp_identity["version"] != OMP_VERSION
+                            or omp_identity["version"] != omp_version
                             or omp_identity["version_proof"] != "PACKAGE_METADATA"
                             or any(finding(data, component)["status"] != "OK" for component in ("kit", "manifest", "omp"))):
                         raise ValueError(f"native {name} did not identify the installed release and stock OMP")
@@ -233,7 +254,7 @@ def native(args):
                         scenarios = test["live_scenarios"]
                         snapshots = test["snapshots"]
                         if (test["status"] != "PASS" or test["proof_scope"] != "ISOLATED_FIXTURE_ONLY"
-                                or test["omp_version"] != OMP_VERSION or live["plant"] != "PASS"
+                                or test["omp_version"] != omp_version or live["plant"] != "PASS"
                                 or live["expected_scenarios"] != 70 or live["observed_scenarios"] != 70
                                 or scenarios["status"] != "PASS"
                                 or len(scenarios["expected_ids"]) != 70
@@ -632,9 +653,9 @@ process.stdin.on("data", chunk => {
             agent_metadata = load(agent_root / "package.json")
             mnemopi_metadata = load(mnemopi_root / "package.json")
             if (agent_metadata.get("name") != "@oh-my-pi/pi-coding-agent"
-                    or agent_metadata.get("version") != OMP_VERSION
+                    or agent_metadata.get("version") != omp_version
                     or mnemopi_metadata.get("name") != "@oh-my-pi/pi-mnemopi"
-                    or mnemopi_metadata.get("version") != OMP_VERSION
+                    or mnemopi_metadata.get("version") != omp_version
                     or digest(schema) != "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"):
                 raise ValueError("native synthetic memory fixture is not using the pinned stock initBeam schema")
             store_root = home / ".omp" / "agent" / "memories" / "mnemopi"
@@ -695,7 +716,7 @@ for (const [name, working, episodic] of banks) {
             covered, match = audit_call(["--yes"])
             audit = match.get("data", {}).get("audit", {})
             if (covered.returncode != 1 or audit.get("status") != "MATCHES"
-                    or audit.get("reason") != "COVERED_CONTENT_ONLY" or audit.get("version") != OMP_VERSION
+                    or audit.get("reason") != "COVERED_CONTENT_ONLY" or audit.get("version") != omp_version
                     or audit.get("coverage") != {
                         "banks_discovered": 2, "banks_scanned": 2, "stores_discovered": 2, "stores_scanned": 2,
                         "working_rows": 3, "episodic_rows": 2, "total_rows": 5,
@@ -727,52 +748,77 @@ for (const [name, working, episodic] of banks) {
     return 0
 
 
+def certified_omp_versions(args, platform, asset, required_omp_versions, required_proofs):
+    versions = {}
+    for track, expected_omp_version in required_omp_versions.items():
+        receipt_path = Path(args.receipts) / (f"native-receipt-{platform}-{track}") / "receipt.json"
+        if not receipt_path.is_file():
+            return None
+        proof = load(receipt_path)
+        identity_matches = (proof.get("schema_version") == 1 and proof.get("version") == args.version
+                            and proof.get("source_sha") == args.source_sha and proof.get("platform") == platform
+                            and proof.get("asset") == asset and proof.get("omp_track") == track
+                            and proof.get("requested_omp_version") == expected_omp_version)
+        if proof.get("certified") is False:
+            if not identity_matches:
+                raise ValueError(
+                    "detached native refusal disagrees with archive, source, or OMP track: " + platform + "/" + track
+                )
+            return None
+        if (not identity_matches or proof.get("certified") is not True
+                or proof.get("omp_version") != expected_omp_version or "failure" in proof
+                or set(proof.get("proofs", {})) != required_proofs
+                or any(set(item) != {"status", "stdout_sha256"} or item["status"] != "PASS"
+                       or not isinstance(item["stdout_sha256"], str)
+                       or re.fullmatch("[0-9a-f]{64}", item["stdout_sha256"]) is None
+                       for item in proof["proofs"].values())):
+            raise ValueError(
+                "detached native proof disagrees with archive, source, or OMP track: " + platform + "/" + track
+            )
+        versions[track] = expected_omp_version
+    return versions
+
+
 def candidate(args):
     version = args.version
     source = args.source_sha
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version) or not re.fullmatch("[0-9a-f]{40}", source):
         raise ValueError("candidate identity invalid")
+    required_omp_versions = load_omp_versions(args.latest_omp_version)
+    minimum = required_omp_versions["minimum"]
+    latest = required_omp_versions["latest"]
     verified_source(source)
-    assets, certified = {}, []
+    assets, certified, platform_omp_versions = {}, [], {}
+    required_proofs = {"status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory", "memory_off",
+                       "mnemopi_manual", "model_roles", "mcp", "mcp_readiness", "project_preflight", "lsp_deep",
+                       "memory_audit", "redactor_warning"}
     for platform in PLATFORMS:
         asset_dir = Path(args.assets) / ("candidate-" + platform)
         asset_path = asset_dir / "asset.json"
         if not asset_path.is_file():
             raise ValueError("candidate build missing: " + platform)
         asset = asset_for(asset_path, platform, version, asset_dir)
-        receipt_path = Path(args.receipts) / ("native-receipt-" + platform) / "receipt.json"
-        if not receipt_path.is_file():
-            continue  # Missing or failing native runner never becomes advertised support.
-        proof = load(receipt_path)
-        if proof.get("certified") is False:
-            # A native refusal excludes this target; it cannot turn another target's proof GREEN.
-            if (proof.get("schema_version") != 1 or proof.get("version") != version
-                    or proof.get("source_sha") != source or proof.get("platform") != platform
-                    or proof.get("asset") != asset):
-                raise ValueError("detached native refusal disagrees with archive or source: " + platform)
+        versions = certified_omp_versions(args, platform, asset, required_omp_versions, required_proofs)
+        if versions is None:
             continue
-        if (proof.get("certified") is not True or proof.get("schema_version") != 1
-                or proof.get("version") != version or proof.get("source_sha") != source
-                or proof.get("platform") != platform or proof.get("asset") != asset
-                or proof.get("omp_version") != OMP_VERSION or "failure" in proof
-                or set(proof.get("proofs", {})) != {"status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory",
-                                                "memory_off", "mnemopi_manual", "model_roles", "mcp", "mcp_readiness",
-                                                "project_preflight", "lsp_deep", "memory_audit", "redactor_warning"}
-                or any(set(item) != {"status", "stdout_sha256"} or item["status"] != "PASS"
-                       or not isinstance(item["stdout_sha256"], str)
-                       or re.fullmatch("[0-9a-f]{64}", item["stdout_sha256"]) is None
-                       for item in proof["proofs"].values())):
-            raise ValueError("detached native proof disagrees with archive or source: " + platform)
         assets[platform] = asset
         certified.append(platform)
+        platform_omp_versions[platform] = versions
     if not certified:
-        raise ValueError("no native-certified platform: refusing an empty release candidate")
+        raise ValueError(
+            "no native-certified platform has both required OMP versions "
+            f"(minimum={minimum}, latest={latest}): refusing an empty release candidate"
+        )
     save(Path(args.out) / "release-index.json", {"schema_version": 1, "version": version,
                                                   "source_tag": "v" + version, "assets": assets})
     save(Path(args.out) / "candidate-proof.json", {"schema_version": 1, "source_sha": source,
                                                     "version": version, "certified_platforms": certified,
+                                                    "omp_versions": required_omp_versions,
+                                                    "platform_omp_versions": platform_omp_versions,
                                                     "publication": "NOT_AUTHORIZED"})
-    print("unpublished candidate index: " + ", ".join(certified))
+    print(
+        f"unpublished candidate index (OMP minimum={minimum}, latest={latest}): " + ", ".join(certified)
+    )
     return 0
 
 
@@ -782,9 +828,13 @@ def main():
     native_parser = commands.add_parser("native")
     for name in ("version", "platform", "asset", "archive-dir", "source-sha", "out"):
         native_parser.add_argument("--" + name, required=True)
+    native_parser.add_argument("--omp-version", required=True)
+    native_parser.add_argument("--omp-track", choices=("minimum", "latest"), required=True)
+    native_parser.add_argument("--latest-omp-version", required=True)
     candidate_parser = commands.add_parser("candidate")
     for name in ("version", "source-sha", "assets", "receipts", "out"):
         candidate_parser.add_argument("--" + name, required=True)
+    candidate_parser.add_argument("--latest-omp-version", required=True)
     args = parser.parse_args()
     try:
         return native(args) if args.command == "native" else candidate(args)
