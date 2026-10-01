@@ -7,6 +7,7 @@ import { applyExtensions, inspectPendingExtensions, planExtensions } from "./app
 import { applyPolicyPlan, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair } from "./repair.ts";
+import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -589,6 +590,63 @@ function mcpInventory(request: ParsedCommand): CliResult {
 		recommended_actions: [report.recommended_action] }, verification: "UNVERIFIED" };
 }
 
+async function contextInventory(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !kit.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no profile was inspected.",
+		}], verification: "UNVERIFIED" };
+	}
+	const omp = ompIdentity();
+	if (omp.status !== "PRESENT" || typeof omp.location !== "string") {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "Validated OMP package is unavailable for context inspection",
+			remediation: "Install a supported OMP package and put its launcher on PATH; no profile was inspected.",
+		}], verification: "UNVERIFIED" };
+	}
+	const requested = request.flags.get("--profile");
+	let profile = "default";
+	if (typeof requested === "string") {
+		try {
+			profile = validateProfileName(requested);
+		} catch {
+			return refusal("INVALID_PROFILE", "Selected profile name is not a safe OMP profile name", "Use a simple existing OMP profile name without path separators.");
+		}
+	}
+	const selected = request.flags.get("--project");
+	let project: string;
+	try {
+		project = realpathSync(typeof selected === "string" ? resolve(process.cwd(), selected) : process.cwd());
+		if (!isAbsolute(project) || !statSync(project).isDirectory()) throw new Error("not an absolute directory");
+	} catch {
+		return refusal("INVALID_PROJECT", "Selected context project is not an accessible absolute directory", "Provide an existing project directory with --project PATH.");
+	}
+	let inventory;
+	try {
+		inventory = await runContextInventory({ root: kit.release.root, executablePath: kit.release.executable,
+			home, profile, project });
+	} catch (error) {
+		if (error instanceof ContextInputError) {
+			return { code: error.code === "INVALID_PROFILE" || error.code === "INVALID_PROJECT" ? 2 : 3,
+				data: { overall: "UNVERIFIED" }, errors: [{
+					code: error.code, message: error.message,
+					remediation: "Check the selected profile, project, and installed OMP identity; no profile was changed.",
+				}], verification: "UNVERIFIED" };
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CONTEXT_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP native loaders; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+	const finding: Finding = contextFinding(inventory, profile,
+		typeof requested === "string" ? "NAMED_ON_DISK" : "DEFAULT_ON_DISK");
+	return { code: 0, data: { overall: finding.status, kit, omp, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
+}
+
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--yes"))
 		return refusal("CONSENT_REQUIRED", "Private memory audit needs separate explicit consent; no store was inspected",
@@ -958,8 +1016,60 @@ async function externalTestCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--rules", "--cases", "--live-fixture", "--record"] as const) {
+		if (request.flags.has(flag)) {
+			return refusal("CONFLICTING_FLAGS", `${flag} cannot be combined with --capabilities`,
+				"Run the required-capability check alone; it never runs matcher packs or records.");
+		}
+	}
+	const capabilities = request.flags.get("--capabilities");
+	if (typeof capabilities !== "string" || !isAbsolute(capabilities)) {
+		return refusal("INVALID_CAPABILITIES", "--capabilities requires an absolute JSON path",
+			"Pass an absolute schema_version 1 capabilities file; commands and transcripts are not accepted.");
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !identity.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME.",
+		}], verification: "UNVERIFIED" };
+	}
+	const project = request.flags.get("--project");
+	if (typeof project === "string" && !isAbsolute(project)) {
+		return refusal("INVALID_PROJECT", "Project inspection requires an absolute path",
+			"Pass an absolute --project path; project code is never executed.");
+	}
+	try {
+		const report = await runCapabilitiesCheck({ root: identity.release.root, executablePath: identity.release.executable,
+			home, profile: "default", project: typeof project === "string" ? project : process.cwd(), capabilitiesPath: capabilities });
+		const passed = report.overall === "PASS";
+		return { code: passed ? 0 : 1, data: { overall: report.overall, capabilities: report }, verification: "UNVERIFIED",
+			...(!passed ? { errors: [{ code: "CAPABILITY_MISSING",
+				message: `${report.missing} required capabilities are MISSING`,
+				remediation: "Restore the missing capabilities with OMP's native knobs, then re-run the check." }] } : {}) };
+	} catch (error) {
+		if (error instanceof ContextInputError) {
+			const invalid = error.code === "INVALID_CAPABILITIES" || error.code === "INVALID_CONTEXT_SELECTION"
+				|| error.code === "INVALID_TIMEOUT";
+			return invalid
+				? refusal(error.code, error.message, "Correct the selected capabilities file and scope; no profile was changed.")
+				: { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+					code: error.code, message: error.message,
+					remediation: "Check the installed release and OMP native loaders; no profile was changed.",
+				}], verification: "UNVERIFIED" };
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CAPABILITY_CHECK_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP native loaders; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
+	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
 	if (external) return externalTestCommand(request);
@@ -1145,8 +1255,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
-	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp"].includes(String(flags.get("--scope")))) {
-		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory or mcp", "Use omp-kit doctor --scope memory --profile NAME or doctor --scope mcp --profile NAME.");
+	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
+		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "lsp") return lspReadiness(request);
 	if (command.name === "doctor" && flags.get("--scope") === "project-loading") {
@@ -1160,6 +1270,10 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "mcp") {
 		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "MCP scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope mcp --profile NAME.");
 		return mcpInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "context") {
+		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope context [--profile NAME] [--project PATH].");
+		return contextInventory(request);
 	}
 	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
 		return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading", "Use omp-kit doctor --scope project-loading --project PATH or doctor --scope lsp --file PATH.");

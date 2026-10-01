@@ -13,7 +13,7 @@ const platformTargets: Record<string, string> = {
 };
 const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers"];
 const files = ["LICENSE", "MANIFEST.tsv", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
-	"scripts/doctor.sh", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
+	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/role-check.ts", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs"];
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
