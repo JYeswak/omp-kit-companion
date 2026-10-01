@@ -27,14 +27,28 @@ function snapshot(dir: string, prefix = ""): string[] {
 	});
 }
 
-test("unsupported installed OMP version cannot inherit 18.4.2 config semantics", async () => {
+test("unreviewed OMP versions cannot inherit known memory config semantics", async () => {
+	for (const version of ["18.4.10", "19.0.0"]) {
+		const f = fixture();
+		writeFileSync(f.config, "memory:\n  backend: off\n");
+		writeFileSync(join(f.root, "omp", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+		const report = await f.inspect();
+		expect(report.backend).toBe("UNVERIFIED");
+		expect(report.status).toBe("UNVERIFIED");
+		expect(report.recommended_action).toContain("installed OMP");
+	}
+});
+
+test("known OMP 18.4.9 reports on-disk memory OFF without runtime claims", async () => {
 	const f = fixture();
 	writeFileSync(f.config, "memory:\n  backend: off\n");
-	writeFileSync(join(f.root, "omp", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "19.0.0" }));
+	writeFileSync(join(f.root, "omp", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
 	const report = await f.inspect();
-	expect(report.backend).toBe("UNVERIFIED");
-	expect(report.status).toBe("UNVERIFIED");
-	expect(report.recommended_action).toContain("installed OMP");
+	expect(report.backend).toBe("off");
+	expect(report.configured).toBe(false);
+	expect(report.runtime).toBe("NOT_PROBED");
+	expect(report.redactor.status).toBe("UNVERIFIED");
+	expect(report.redactor.version).toBeNull();
 });
 
 test("OFF and configured Mnemopi do not turn into runtime OK", async () => {
@@ -123,12 +137,11 @@ test("custom store symlink and inaccessible store do not get dereferenced or cer
 test("synthetic canary misses report class, coverage and OMP version, never canary bytes", async () => {
 	const f = fixture(); writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n");
 	const installed = process.env.OMP_INSTALLED_PATH ?? join(homedir(), ".bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js");
-	// An installed OMP can be newer than the pinned redactor; it must fail closed,
-	// not inherit the 18.4.2 synthetic coverage claim.
 	if (!existsSync(installed)) return;
 	const installedVersion = JSON.parse(readFileSync(join(dirname(dirname(realpathSync(installed))), "package.json"), "utf8")).version;
 	const before = [snapshot(f.home), snapshot(f.project)];
 	const report = await f.inspect(installed);
+	// Memory config semantics are reviewed for 18.4.9; its redactor remains unpinned.
 	if (installedVersion === "18.4.2") {
 		expect(report.redactor.version).toBe("18.4.2");
 		expect(report.redactor.coverage).toBe("SYNTHETIC_ONLY");
@@ -136,8 +149,14 @@ test("synthetic canary misses report class, coverage and OMP version, never cana
 		expect(report.status).toBe("DEGRADED");
 	} else {
 		expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [] });
-		expect(report.backend).toBe("UNVERIFIED");
-		expect(report.status).toBe("UNVERIFIED");
+		if (installedVersion === "18.4.9") {
+			expect(report.backend).toBe("mnemopi");
+			expect(report.configured).toBe(true);
+			expect(report.runtime).toBe("NOT_PROBED");
+		} else {
+			expect(report.backend).toBe("UNVERIFIED");
+			expect(report.status).toBe("UNVERIFIED");
+		}
 	}
 	expect(JSON.stringify(report)).not.toContain("PRIVATE KEY-----");
 	expect(JSON.stringify(report)).not.toContain("syntheticbearerletters");

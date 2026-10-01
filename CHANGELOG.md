@@ -9,6 +9,8 @@
 - The `test-skip-ts-fire` live scenario carries a realistic post-match tail so the gate no longer depends on OMP's late-interrupt race; the old short-tail shape survives as the report-only `omp-late-interrupt-probe` scenario (`PROBE omp-late-interrupt: continued|aborted`, never counted, surfaced per OMP version in the compatibility workflow summary).
 - Two quoted-text false fires are quiet: `kit-test-skip` now scopes `edit`/`write` to code extensions (`*.rs`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.py`, `*.go`) plus the `tests/` and `spec/` trees, so quoting a skip marker in Markdown no longer blocks; `kit-settings-mutation` no longer fires when the config-set text sits inside a double- or single-quoted argument opened by `=` or `--flag` of another command (executable `$(...)` substitutions still fire). All existing fire rows still fire.
 - `scripts/omp-compat.json` is the only checked-in OMP minimum; CI runs the ladder and native certification on that floor and the run-resolved npm latest, recording both versions per advertised platform.
+- Memory readiness now inspects OMP 18.4.9 on-disk backend settings; runtime and redactor evidence remain unverified.
+
 ## 0.2.0 — 2026-10-01
 
 - A real-HOME journey (52,000-file HOME, edited rules, legacy 0755 state root, a concurrent writer) runs the install-to-update path on macOS and Linux CI with a JSONL step log. It would have caught every real-machine failure fixed in this release.

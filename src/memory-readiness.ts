@@ -36,7 +36,10 @@ export interface MemoryReadinessReport {
 }
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
-// This narrowly pins the inspected, import-free 18.4.2 source. Newer versions need their own review.
+// OMP 18.4.9 memory.backend enum, resolver and explicit-setting migration match 18.4.2.
+// Other versions remain UNVERIFIED for config semantics; the redactor stays 18.4.2-only.
+const MEMORY_CONFIG_OMP_VERSIONS = new Set(["18.4.2", "18.4.9"]);
+// The synthetic redactor probe remains pinned to the inspected, import-free 18.4.2 source.
 const REDACTOR_SHA_18_4_2 = "bec8892217e1b7a3ea577b25ff52631883fc41646351ea1f5a7b5e3359564270";
 const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
@@ -165,7 +168,8 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 		embedding: "UNVERIFIED" as const, runtime: "NOT_PROBED" as const, redactor };
 	const unknown = (reason: string, action: string): MemoryReadinessReport => ({ ...base, status: "UNVERIFIED", backend: "UNVERIFIED", configured: false,
 		store: "UNVERIFIED", reason, recommended_action: action });
-	if (installedPackage(input.ompPath)?.version !== "18.4.2")
+	const ompPackage = installedPackage(input.ompPath);
+	if (!ompPackage || !MEMORY_CONFIG_OMP_VERSIONS.has(ompPackage.version))
 		return unknown("Installed OMP version has unverified memory config semantics", "Inspect the installed OMP version and its memory settings schema before relying on this report.");
 	const home = resolve(input.home);
 	const name = input.profile ?? "default";
