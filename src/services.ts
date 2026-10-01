@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-export type ServiceClass = "RUNNING" | "IDLE_OK" | "FAILING" | "NOT_LOADED" | "BROKEN" | "LOADED_NO_PLIST" | "UNVERIFIED";
+export type ServiceClass = "RUNNING" | "IDLE_OK" | "FAILING" | "NOT_LOADED" | "BROKEN" | "LOADED_NO_PLIST" | "LOADED_PATH_MISMATCH" | "UNVERIFIED";
 export type ServiceDomain = "user" | "global-agent" | "system";
 
 export interface ServiceRow {
@@ -15,6 +15,8 @@ export interface ServiceRow {
 	program: string;
 	program_ok: string;
 	plist: string | null;
+	/** Plist path launchd actually loaded, from launchctl print; null when unasked or unanswered. */
+	loaded_plist: string | null;
 	tags: string[];
 	omp_related: boolean;
 	verified: boolean;
@@ -145,6 +147,15 @@ export function parseLaunchdList(text: string): Map<string, { pid: number | null
 	return rows;
 }
 
+/** First `path = ...` line of launchctl print output; null when absent. */
+export function parsePrintPath(text: string): string | null {
+	for (const line of text.split("\n")) {
+		const match = /^[ \t]*path[ \t]*=[ \t]*(.+?)[ \t]*$/.exec(line);
+		if (match) return match[1] ?? null;
+	}
+	return null;
+}
+
 function executableOnPath(program: string, pathEnv: string): boolean {
 	if (program.includes("/")) return false;
 	for (const directory of pathEnv.split(":")) {
@@ -192,6 +203,8 @@ function tagRow(label: string, program: string, args: string): string[] {
 export interface InventoryDeps {
 	listAll: () => { code: number; stdout: string };
 	printDomain: (domain: string, label: string) => number;
+	/** Loaded plist path via launchctl print; null when the domain is unprintable here. */
+	printPath: (domain: ServiceDomain, label: string) => string | null;
 	plistDirs: () => { directory: string; domain: ServiceDomain }[];
 	pathEnv: string;
 }
@@ -301,6 +314,10 @@ function readLogSnippet(home: string, file: string): string | null {
 
 function judgeRequired(row: ServiceRow | null, job: DeclaredJob, home: string): RequiredResult {
 	if (!row) return { name: job.name, label: job.label, status: "MISSING", detail: "Declared job has no inventory row" };
+	if (row.class === "LOADED_PATH_MISMATCH") {
+		return { name: job.name, label: job.label, status: "UNHEALTHY",
+			detail: `LOADED_PATH_MISMATCH: launchd loaded ${row.loaded_plist ?? "an unknown path"}, expected ${row.plist ?? "the on-disk plist"}` };
+	}
 	if (row.class === "RUNNING") {
 		return { name: job.name, label: job.label, status: "OK", detail: `Running with pid ${row.pid ?? "unknown"}` };
 	}
@@ -358,7 +375,8 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 			}
 			if (!stat.isFile() || stat.size > PLIST_BYTES_MAX) {
 				rows.push({ label: name, class: "BROKEN", domain, loaded: "no", pid: null, last_exit: null,
-					trigger: "-", program: "?", program_ok: "missing", plist, tags: [], omp_related: false, verified: true });
+					trigger: "-", program: "?", program_ok: "missing", plist, loaded_plist: null,
+					tags: [], omp_related: false, verified: true });
 				continue;
 			}
 			let parsed;
@@ -369,7 +387,8 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 			}
 			if (!parsed) {
 				rows.push({ label: name, class: "BROKEN", domain, loaded: "no", pid: null, last_exit: null,
-					trigger: "-", program: "?", program_ok: "missing", plist, tags: [], omp_related: false, verified: true });
+					trigger: "-", program: "?", program_ok: "missing", plist, loaded_plist: null,
+					tags: [], omp_related: false, verified: true });
 				continue;
 			}
 			const { program, args, trigger } = parsed.program;
@@ -402,11 +421,17 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 			}
 			const pid = entry && rowLoaded === "yes" ? entry.pid : null;
 			const exit = entry && rowLoaded === "yes" ? entry.exit : null;
+			// A job loaded from a different plist than the on-disk one is not the
+			// validated job, even when its program still exists: today's incident.
+			const loadedPlist = rowLoaded === "yes" ? deps.printPath(domain, parsed.label) : null;
+			const pathMismatch = loadedPlist !== null && loadedPlist !== plist;
 			let cls: ServiceClass;
 			if (!verified) {
 				cls = "UNVERIFIED";
 			} else if (programOk !== "ok") {
 				cls = "BROKEN";
+			} else if (pathMismatch) {
+				cls = "LOADED_PATH_MISMATCH";
 			} else if (rowLoaded === "no") {
 				cls = "NOT_LOADED";
 			} else if (pid !== null) {
@@ -418,8 +443,8 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 			}
 			const tags = tagRow(parsed.label, program, args);
 			rows.push({ label: parsed.label, class: cls, domain, loaded: rowLoaded, pid, last_exit: exit,
-				trigger: trigger || "-", program, args, program_ok: programOk, plist, tags,
-				omp_related: isOmpRelated(`${parsed.label} ${program} ${args}`), verified });
+				trigger: trigger || "-", program, args, program_ok: programOk, plist, loaded_plist: loadedPlist,
+				tags, omp_related: isOmpRelated(`${parsed.label} ${program} ${args}`), verified });
 		}
 	}
 	for (const [label, entry] of loaded) {
@@ -427,7 +452,7 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 		if (rows.some(row => row.label === label)) continue;
 		rows.push({ label, class: "LOADED_NO_PLIST", domain: "user", loaded: "yes", pid: entry.pid,
 			last_exit: entry.exit, trigger: "-", program: "?", program_ok: "missing", plist: null,
-		tags: tagRow(label, "", ""), omp_related: isOmpRelated(label), verified: true });
+		loaded_plist: null, tags: tagRow(label, "", ""), omp_related: isOmpRelated(label), verified: true });
 	}
 	const byProgram = new Map<string, string[]>();
 	for (const row of rows) {
@@ -448,11 +473,13 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 	}
 	const flagged = required.filter(item => item.status !== "OK");
 	const cleared = new Set(required.filter(item => item.status === "OK").map(item => item.label));
-	const unhealthyOmp = rows.filter(row => row.omp_related && !cleared.has(row.label) && (row.class === "FAILING" || row.class === "BROKEN"));
+	const unhealthyOmp = rows.filter(row => row.omp_related && !cleared.has(row.label) && (row.class === "FAILING" || row.class === "BROKEN" || row.class === "LOADED_PATH_MISMATCH"));
 	if (flagged.length > 0 || unhealthyOmp.length > 0) {
 		const parts: string[] = [];
 		if (flagged.length > 0) parts.push(`${flagged.length} declared jobs need attention: ${flagged.map(item => `${item.name} (${item.status})`).join(", ")}`);
-		if (unhealthyOmp.length > 0) parts.push(`${unhealthyOmp.length} OMP-related jobs failing: ${unhealthyOmp.map(row => `${row.label} (${row.class})`).join(", ")}`);
+		if (unhealthyOmp.length > 0) parts.push(`${unhealthyOmp.length} OMP-related jobs failing: ${unhealthyOmp.map(row => row.class === "LOADED_PATH_MISMATCH"
+			? `${row.label} (LOADED_PATH_MISMATCH: loaded ${row.loaded_plist ?? "?"} != ${row.plist ?? "?"})`
+			: `${row.label} (${row.class})`).join(", ")}`);
 		if (systemUnverified) parts.push("system domain loaded state is UNVERIFIED without elevated privileges");
 		return { status: "DEGRADED", rows, duplicates, required, reason: parts.join("; ") };
 	}
@@ -480,6 +507,19 @@ export function defaultInventoryDeps(home: string, pathEnv: string, dirsOverride
 				return child.exitCode;
 			} catch {
 				return 127;
+			}
+		},
+		printPath: (domain: ServiceDomain, label: string) => {
+			const uid = typeof process.getuid === "function" ? process.getuid() : null;
+			const spec = domain === "system" ? `system/${label}`
+				: uid === null ? null : `gui/${uid}/${label}`;
+			if (spec === null) return null;
+			try {
+				const child = Bun.spawnSync(["launchctl", "print", spec], { stdout: "pipe", stderr: "pipe" });
+				if (child.exitCode !== 0) return null;
+				return parsePrintPath(child.stdout.toString());
+			} catch {
+				return null;
 			}
 		},
 		plistDirs: () => dirsOverride !== undefined

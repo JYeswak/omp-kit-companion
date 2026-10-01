@@ -76,11 +76,12 @@ beforeAll(() => {
 		`-\t1\tdev.localbench.omp-update`,
 	].join("\n"));
 	const listFile = join(fakebin, "launchctl-list.txt");
+	const printTable = join(fakebin, "launchctl-print.txt");
 	// The stub is resolved via PATH, so $0 carries no directory: the table path is baked in.
 	writeFileSync(join(fakebin, "launchctl"), [
 		"#!/bin/sh",
 		`if [ "$1" = "list" ]; then cat ${JSON.stringify(listFile)}; exit 0; fi`,
-		'if [ "$1" = "print" ]; then exit 1; fi',
+		`if [ "$1" = "print" ]; then hit=$(grep -F -e "$2 " ${JSON.stringify(printTable)} 2>/dev/null | head -n 1); if [ -z "$hit" ]; then exit 1; fi; echo "path = \${hit#* }"; exit 0; fi`,
 		"exit 1",
 	].join("\n"));
 	chmodSync(join(fakebin, "launchctl"), 0o755);
@@ -109,7 +110,7 @@ type ServicesEnvelope = {
 	data?: {
 		overall?: string;
 		findings?: { component?: string; status?: string; reason?: string; evidence?: {
-			rows?: { label?: string; class?: string; program_ok?: string; omp_related?: boolean; verified?: boolean }[];
+			rows?: { label?: string; class?: string; program_ok?: string; loaded_plist?: string | null; plist?: string | null; omp_related?: boolean; verified?: boolean }[];
 			required?: { name?: string; label?: string; status?: string; detail?: string }[];
 			duplicates?: { program?: string; labels?: string[] }[];
 		} }[];
@@ -259,6 +260,64 @@ test("MISSING_REQUIRED_PLANT: a declared job with no inventory row is flagged", 
 	const { finding, required } = evidenceOf(envelope);
 	expect(required.find(item => item.name === "sbh")).toMatchObject({ status: "MISSING" });
 	expect(finding?.reason).toContain("sbh (MISSING)");
+}, 120_000);
+
+test("LOADED_PATH_MISMATCH_PLANT: a job loaded from a stale plist path is flagged with both paths", () => {
+	const prog = writeProgram("stale-prog.sh");
+	const label = "com.example.omp-stale";
+	writePlist(label,
+		`\t<key>Program</key>\n\t<string>${prog}</string>\n\t<key>StartInterval</key>\n\t<integer>60</integer>\n`);
+	writeLaunchctlList([
+		`123\t0\tcom.example.omp-watch`,
+		`-\t1\tcom.example.uca`,
+		`-\t1\tdev.localbench.omp-update`,
+		`123\t0\t${label}`,
+	].join("\n"));
+	const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+	const onDisk = join(agents, `${label}.plist`);
+	const stalePath = `/stale/loaded/${label}.plist`;
+	writeFileSync(join(fakebin, "launchctl-print.txt"), `gui/${uid}/${label} ${stalePath}\n`);
+	try {
+		const { exitCode, envelope } = runCli(["doctor", "--scope", "services", "--json"]);
+		expect(exitCode).toBe(0);
+		expect(envelope.data?.overall).toBe("DEGRADED");
+		const { finding, rows } = evidenceOf(envelope);
+		const stale = rows.find(row => row.label === label);
+		expect(stale).toMatchObject({ class: "LOADED_PATH_MISMATCH", program_ok: "ok" });
+		expect(stale?.loaded_plist).toBe(stalePath);
+		expect(finding?.reason).toContain(`${label} (LOADED_PATH_MISMATCH: loaded ${stalePath} != ${onDisk})`);
+		const declared = declaredFile("required-stale.json", { schema_version: 1, jobs: [
+			{ label, name: "omp-stale" },
+		] });
+		const checked = runCli(["doctor", "--scope", "services", "--services", declared, "--json"]);
+		const req = evidenceOf(checked.envelope).required.find(item => item.name === "omp-stale");
+		expect(req?.status).toBe("UNHEALTHY");
+		expect(req?.detail).toContain("LOADED_PATH_MISMATCH");
+		expect(req?.detail).toContain(stalePath);
+		expect(req?.detail).toContain(onDisk);
+	} finally {
+		rmSync(join(agents, `${label}.plist`), { force: true });
+		rmSync(join(fakebin, "launchctl-print.txt"), { force: true });
+		writeLaunchctlList([`123\t0\tcom.example.omp-watch`, `-\t1\tcom.example.uca`, `-\t1\tdev.localbench.omp-update`].join("\n"));
+	}
+}, 120_000);
+
+test("matching loaded plist path stays quiet", () => {
+	const label = "com.example.omp-watch";
+	const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+	const onDisk = join(agents, `${label}.plist`);
+	writeFileSync(join(fakebin, "launchctl-print.txt"), `gui/${uid}/${label} ${onDisk}\n`);
+	try {
+		const { exitCode, envelope } = runCli(["doctor", "--scope", "services", "--json"]);
+		expect(exitCode).toBe(0);
+		const { finding, rows } = evidenceOf(envelope);
+		const watch = rows.find(row => row.label === label);
+		expect(watch).toMatchObject({ class: "RUNNING" });
+		expect(watch?.loaded_plist).toBe(onDisk);
+		expect(finding?.reason).not.toContain("LOADED_PATH_MISMATCH");
+	} finally {
+		rmSync(join(fakebin, "launchctl-print.txt"), { force: true });
+	}
 }, 120_000);
 
 test("invalid declared files and misused flags refuse with named codes", () => {
