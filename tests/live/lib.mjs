@@ -5,6 +5,7 @@
 //   bun lib.mjs name <i>                     scenario id
 //   bun lib.mjs prep <i> <outFile>           write the mock's {turns, chunk} file
 //   bun lib.mjs verdict <i> <log> <proj> <ompExit>   print "ok" or "FAIL: ..."
+//   bun lib.mjs probe <i> <log>              print PROBE omp-late-interrupt: continued|aborted (never fails)
 //   bun lib.mjs config <policy.json> <out>   isolated-HOME config.yml
 //   bun lib.mjs models <port> <out>          isolated-HOME models.yml pointing at the mock
 //   bun lib.mjs plant <ruleFile>             overwrite kit-close-needs-evidence with the baseline condition
@@ -174,6 +175,25 @@ switch (cmd) {
 	case "verdict":
 		verdict(Number(args[0]), args[1], args[2], args[3]);
 		break;
+	case "probe": {
+		// Report-only OMP race probe: continued iff the scenario rule was named in the
+		// last transcript. Never fails: unreadable input is an aborted observation, not a gate failure.
+		let outcome = "aborted";
+		const s = scenarios[Number(args[0])];
+		try {
+			if (!s || typeof s.rule !== "string") throw new Error("unknown probe scenario");
+			const rows = fs.readFileSync(args[1], "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.main);
+			const last = rows.at(-1);
+			if (last) {
+				const transcript = strings(last.body.messages.filter(m => !isSystem(m))).join("\n");
+				const named = {};
+				for (const m of transcript.matchAll(/rule="([^"]+)"/g)) named[m[1]] = (named[m[1]] ?? 0) + 1;
+				if ((named[s.rule] ?? 0) >= 1) outcome = "continued";
+			}
+		} catch { /* report-only: keep aborted */ }
+		console.log(`PROBE omp-late-interrupt: ${outcome}`);
+		break;
+	}
 	case "config": {
 		const t = JSON.parse(fs.readFileSync(args[0], "utf8"));
 		const lines = ["ttsr:"];

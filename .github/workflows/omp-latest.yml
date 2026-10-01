@@ -40,7 +40,16 @@ jobs:
       - name: CLI contracts against this OMP
         run: bun test tests/cli
       - name: Full rule ladder (G1-G4, planted negative) against this OMP
-        run: sh scripts/ladder.sh
+        run: |
+          set -o pipefail
+          sh scripts/ladder.sh 2>&1 | tee ladder.log
+      - name: Report OMP late-interrupt probe outcome
+        if: always()
+        run: |
+          {
+            echo "## Late-interrupt probe (OMP $OMP_VERSION)"
+            grep -E "^PROBE omp-late-interrupt: " ladder.log || echo "probe did not run (ladder ended before the probe scenario)"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Record G3 first-fire indices for this OMP
         if: success()
         run: |
