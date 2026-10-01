@@ -290,10 +290,11 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
 	{ name: "service", description: "Manage operator service jobs (launchd/systemd); reads foreign jobs, never rewrites them", usage: "service list|install|uninstall|status|doctor|logs|run", flags: [], subcommands: [
 		{ name: "list", description: "List known jobs with installed and loaded state", usage: "service list", flags: [], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify", usage: "service install JOB [--dry-run] [--apply --yes]", argument: "JOB", flags: [
+		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--apply --yes] [--replace]", argument: "JOB", flags: [
 			{ name: "--dry-run", description: "Render the plist, diff and commands without changing anything" },
 			{ name: "--apply", description: "Request guarded install" },
 			{ name: "--yes", description: "Confirm the install in noninteractive mode" },
+			{ name: "--replace", description: "Take over a label already loaded from a different plist (a backup is kept)" },
 		], example: "omp-kit service install omp-watch --dry-run --json", runnable: false, mutation: true, dataSchema: serviceData },
 		{ name: "uninstall", description: "Bootout a job and move its plist to the backup dir (logs kept unless --purge-logs)", usage: "service uninstall JOB [--purge-logs] [--apply --yes]", argument: "JOB", flags: [
 			{ name: "--purge-logs", description: "Delete the job's logs as well as moving the plist" },
@@ -313,7 +314,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--errors", description: "Show the error log instead of the output log" },
 			{ name: "-n", value: "N", description: "Print the last N lines" },
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
-		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt and notifies on failure", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [

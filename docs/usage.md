@@ -68,9 +68,11 @@ mkdir -p "$HOME/.local/bin" && cp "$KIT" "$HOME/.local/bin/omp-kit" && chmod +x 
 "$KIT" service install omp-watch --dry-run --json
 ```
 
-It watches OMP's `package.json` and re-runs `test --record` on change.
-The dry run renders the plist, the diff and the install plan without
-changing anything; add `--apply --yes` to install it for real.
+It watches OMP's `package.json` and re-runs `test --record` on change,
+notifying on failure exactly as the retired example did. The dry run
+renders the plist, the diff and the install plan without changing
+anything; add `--apply --yes` to install it for real. Install refuses a
+label already loaded from a different plist unless `--replace` is given.
 
 ## Update the kit, not OMP
 

@@ -29,7 +29,7 @@ import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest }
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -1217,8 +1217,15 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				remediation: "Run service commands on macOS or Linux; nothing was changed." }], verification: "UNVERIFIED" };
 	}
 	const linux = platform === "linux";
+	const scoped: Record<string, ServiceJobDef> = {};
+	try {
+		for (const name of names) scoped[name] = { ...KNOWN_JOBS[name]!, label: serviceLabel(name) };
+	} catch {
+		return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
+			"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
+	}
  const resolveJob = (name: string) => {
-		const job = KNOWN_JOBS[name]!;
+		const job = scoped[name]!;
 		const launcher = stableLauncher(home);
 		const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 		return { job, launcher, watch };
@@ -1251,9 +1258,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (platform === "linux") {
 			const units = renderSystemdUnits(home, job, launcher, watch);
 			if (dry) return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true, service: units.service, timer: units.timer, path: units.path }, verification: "UNVERIFIED" };
-			const result = installSystemd(home, job, units, defaultRunner);
+			const result = installSystemd(home, job, units, defaultRunner, request.flags.has("--replace"));
 			return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, ...result }, verification: "UNVERIFIED",
-				errors: result.ok ? [] : [{ code: "INSTALL_FAILED", message: result.detail, remediation: "Check systemctl output and rerun." }] };
+				errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check systemctl output and rerun." }] };
 		}
 		const installed = readInstalledPlist(home, job.label);
 		if (dry) {
@@ -1261,9 +1268,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, dry_run: true, changed: !plan.alreadyInstalled, backup: plan.backup, diff: plan.diff, plist: plan.plist }, verification: "UNVERIFIED" };
 		}
 		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
-		const result = installService(home, job, launcher, watch, installed, print, defaultRunner);
+		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
 		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, label: job.label, ...result }, verification: "UNVERIFIED",
-			errors: result.ok ? [] : [{ code: "INSTALL_FAILED", message: result.detail, remediation: "Check launchctl output and rerun; a backup was kept when a plist was replaced." }] };
+			errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check launchctl output and rerun; a backup was kept when a plist was replaced." }] };
 	}
 	if (sub === "uninstall") {
 		if (!request.flags.has("--dry-run") && !request.flags.has("--apply")) {
@@ -1271,7 +1278,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				"Re-run with --apply --yes, or add --dry-run to preview without changing anything.");
 		}
 		const [name] = names;
-		const job = KNOWN_JOBS[name!]!;
+		const job = scoped[name!]!;
 		if (linux) {
 			if (request.flags.has("--dry-run")) {
 				return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true }, verification: "UNVERIFIED" };
@@ -1288,7 +1295,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (sub === "status") {
 		const rows = names.map(name => {
-			const job = KNOWN_JOBS[name!]!;
+			const job = scoped[name!]!;
 			if (linux) {
 				const state = systemctlState(job.name, defaultRunner);
 				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath };
@@ -1313,7 +1320,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const allChecks: ServiceCheck[] = [];
 		let fixed = 0;
 		for (const name of names) {
-			const job = KNOWN_JOBS[name!]!;
+			const job = scoped[name!]!;
 			const launcher = stableLauncher(home);
 			const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 			const checks = linux
@@ -1348,7 +1355,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (sub === "logs") {
 		const [name] = names;
-		const job = KNOWN_JOBS[name!]!;
+		const job = scoped[name!]!;
 		const count = Number(request.flags.get("-n") ?? 50);
 		const file = join(home, "Library", "Logs", "omp-kit", request.flags.has("--errors") ? `${job.name}.err.log` : `${job.name}.out.log`);
 		let text: string;
@@ -1364,7 +1371,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (sub === "run") {
 		const [name] = names;
-		const job = KNOWN_JOBS[name!]!;
+		const job = scoped[name!]!;
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
@@ -1383,7 +1390,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
 					remediation: "Repair the state root, then rerun; the test itself may have passed." }], verification: "UNVERIFIED" };
 		}
-		return { code: child.exitCode === 0 ? 0 : 1, data: { overall: child.exitCode === 0 ? "OK" : "FINDINGS", job: job.name, receipt }, verification: "UNVERIFIED",
+		// The watcher exists to be seen when the post-update test fails: notify in-process, best-effort.
+		const notification = child.exitCode !== 0 && job.name === "omp-watch"
+			? notifyJobFailure({ title: "omp-kit", message: "omp-kit test did not pass after an OMP update. Run: omp-kit test --json",
+				platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null })
+			: { attempted: false, method: "none" as const };
+		return { code: child.exitCode === 0 ? 0 : 1, data: { overall: child.exitCode === 0 ? "OK" : "FINDINGS", job: job.name, receipt, notification }, verification: "UNVERIFIED",
 			errors: child.exitCode === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${child.exitCode}: ${child.stderr.toString().trim().slice(0, 300) || child.stdout.toString().trim().slice(0, 300)}`,
 				remediation: "Run the recorded command manually with --json and read its failures." }] };
 	}
@@ -1551,7 +1563,13 @@ async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
 			if (!isAbsolute(home) || !ompPackageJson) return refusal("WATCH_UNAVAILABLE",
 				`${isAbsolute(home) ? "OMP" : "HOME and OMP"} ${isAbsolute(home) ? "is" : "are"} not resolvable, so there is nothing for the watcher to run or watch`,
 				"Set a canonical absolute HOME, install OMP, then re-run omp-kit examples omp-watch.");
-			const job = KNOWN_JOBS["omp-watch"]!;
+			let job: ServiceJobDef;
+			try {
+				job = { ...KNOWN_JOBS["omp-watch"]!, label: serviceLabel("omp-watch") };
+			} catch {
+				return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
+					"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
+			}
 			const units = renderSystemdUnits(home, job, launcher, ompPackageJson);
 			return { code: 0, data: { label: job.label, watch_path: ompPackageJson,
 				launchd_plist: renderLaunchdPlist(home, job, launcher, ompPackageJson).text,

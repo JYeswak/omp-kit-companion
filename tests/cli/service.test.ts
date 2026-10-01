@@ -1,7 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkService, checkServiceLinux, installService, installSystemd, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { checkService, checkServiceLinux, installService, installSystemd, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+
+// Every CLI spawn below inherits this namespace, so even real launchctl calls address
+// test-only labels: an isolated HOME does not isolate the per-uid launchd domain.
+const testNamespace = `com.omp-kit.test.s1${Math.random().toString(36).slice(2, 10)}`;
+process.env.OMP_KIT_TEST_LABEL_NAMESPACE = testNamespace;
+const testLabel = `${testNamespace}.omp-watch`;
 
 const job: ServiceJobDef = { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 };
 const intervalJob: ServiceJobDef = { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 86400 };
@@ -391,9 +397,9 @@ test("linux doctor flags a missing unit and a stopped trigger", () => {
   expect(found).toEqual(["loaded", "unit-matches-renderer", "unit-present"]);
 });
 
-function cli(args: string[], home: string) {
+function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe",
+    cwd: home, env: { ...process.env, HOME: home, ...extraEnv }, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }
@@ -443,8 +449,13 @@ test("service status reports HOME-scoped install state from source", () => {
 });
 
 function prodLabelLoaded(): boolean {
-  const child = Bun.spawnSync(["launchctl", "print", `gui/${process.getuid?.() ?? 501}/${job.label}`], { stdout: "pipe", stderr: "pipe" });
-  return child.exitCode === 0;
+  if (process.platform !== "darwin") return false;
+  try {
+    const child = Bun.spawnSync(["launchctl", "print", `gui/${process.getuid?.() ?? 501}/${job.label}`], { stdout: "pipe", stderr: "pipe" });
+    return child.exitCode === 0;
+  } catch {
+    return false;
+  }
 }
 
 test("service install without --apply refuses and writes no plist", () => {
@@ -452,13 +463,13 @@ test("service install without --apply refuses and writes no plist", () => {
   const result = cli(["service", "install", "omp-watch"], home);
   expect(result.code).toBe(2);
   expect(result.envelope.errors[0].code).toBe("INSTALL_REQUIRES_APPLY");
-  expect(() => readFileSync(join(home, "Library", "LaunchAgents", `${job.label}.plist`), "utf8")).toThrow();
+  expect(() => readFileSync(join(home, "Library", "LaunchAgents", `${testLabel}.plist`), "utf8")).toThrow();
 });
 
 test("service uninstall without --apply refuses and keeps the plist", () => {
   const { home } = fixture();
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
-  const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
   writeFileSync(dest, "stale-bytes\n");
   const result = cli(["service", "uninstall", "omp-watch"], home);
   expect(result.code).toBe(2);
@@ -471,14 +482,14 @@ test("service uninstall reports already_absent through the CLI wire", () => {
   const { home } = fixture();
   const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
   expect(result.code).toBe(0);
-  expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch", already_absent: true });
+  expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch", label: testLabel, already_absent: true });
 });
 
 test("service uninstall moves a stale plist to backup through the CLI wire", () => {
   if (prodLabelLoaded()) return; // never bootout a live production job; CI never has it loaded
   const { home } = fixture();
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
-  const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
   writeFileSync(dest, "stale-bytes\n");
   const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
   expect(result.code).toBe(0);
@@ -525,9 +536,157 @@ test("examples omp-watch renders the managed plist and installs nothing", () => 
   const { home } = fixture();
   const result = cli(["examples", "omp-watch"], home);
   expect(result.code).toBe(0);
-  expect(result.envelope.data.label).toBe(job.label);
+  // Planted anchor: drop the test namespace and this label is the production one.
+  expect(result.envelope.data.label).toBe(testLabel);
+  expect(result.envelope.data.launchd_plist).toContain(`<string>${testLabel}</string>`);
   expect(result.envelope.data.launchd_plist).toContain("<string>service</string>");
   expect(result.envelope.data.launchd_plist).not.toContain("/bin/sh -c");
   expect(result.envelope.data.systemd_service_unit).toContain("service run omp-watch");
-  expect(() => readFileSync(join(home, "Library", "LaunchAgents", `${job.label}.plist`), "utf8")).toThrow();
+  expect(() => readFileSync(join(home, "Library", "LaunchAgents", `${testLabel}.plist`), "utf8")).toThrow();
+});
+
+test("service labels stay production without the test namespace and namespace under it", () => {
+  const saved = process.env.OMP_KIT_TEST_LABEL_NAMESPACE;
+  delete process.env.OMP_KIT_TEST_LABEL_NAMESPACE;
+  expect(serviceLabel("omp-watch")).toBe("com.omp-kit.omp-watch");
+  process.env.OMP_KIT_TEST_LABEL_NAMESPACE = testNamespace;
+  expect(serviceLabel("omp-watch")).toBe(testLabel);
+  expect(() => { process.env.OMP_KIT_TEST_LABEL_NAMESPACE = "com.omp-kit.omp-watch"; serviceLabel("omp-watch"); }).toThrow();
+  expect(() => { process.env.OMP_KIT_TEST_LABEL_NAMESPACE = "evil;rm"; serviceLabel("omp-watch"); }).toThrow();
+  if (saved === undefined) delete process.env.OMP_KIT_TEST_LABEL_NAMESPACE;
+  else process.env.OMP_KIT_TEST_LABEL_NAMESPACE = saved;
+});
+
+test("service commands refuse a non-test label namespace", () => {
+  const { home } = fixture();
+  const result = cli(["service", "status", "omp-watch"], home, { OMP_KIT_TEST_LABEL_NAMESPACE: "com.evil.job" });
+  expect(result.code).toBe(2);
+  expect(result.envelope.errors[0].code).toBe("TEST_LABEL_NAMESPACE_INVALID");
+});
+
+test("install refuses a label loaded from a different plist and names both paths", () => {
+  const { home, launcher, watch } = fixture();
+  const foreign = { loaded: true, path: "/tmp/foreign.plist", state: "running", pid: 1, runs: 1, lastExit: 0 };
+  const refused = installService(home, job, launcher, watch, null, foreign, runner([]));
+  expect(refused.ok).toBe(false);
+  expect(refused.error).toBe("LABEL_LOADED_ELSEWHERE");
+  expect(refused.detail).toContain("/tmp/foreign.plist");
+  expect(refused.detail).toContain(join(home, "Library", "LaunchAgents", `${job.label}.plist`));
+  const calls: string[][] = [];
+  const taken = installService(home, job, launcher, watch, null, foreign,
+    runner(calls, args => {
+      if (args[1] === "print") return { code: 0, stdout: healthyPrint(join(home, "Library", "LaunchAgents", `${job.label}.plist`)), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    }), true);
+  expect(taken.ok).toBe(true);
+});
+
+test("systemd install refuses a unit enabled from elsewhere unless replaced", () => {
+  const { home, launcher, watch } = fixture();
+  const units = renderSystemdUnits(home, job, launcher, watch);
+  const foreign = (args: readonly string[]): ServiceRunResult => {
+    if (args[2] === "is-enabled" || args[2] === "is-active") return { code: 0, stdout: "yes", stderr: "" };
+    if (args[2] === "show") return { code: 0, stdout: "/etc/systemd/user/foreign.service\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const refused = installSystemd(home, job, units, foreign);
+  expect(refused.ok).toBe(false);
+  expect(refused.error).toBe("LABEL_LOADED_ELSEWHERE");
+  const taken = installSystemd(home, job, units, foreign, true);
+  expect(taken.ok).toBe(true);
+});
+
+test("notify posts osascript on darwin failure, notify-send on linux, and nothing elsewhere", () => {
+  const calls: string[][] = [];
+  const run = (code: number) => (args: readonly string[]): ServiceRunResult => {
+    calls.push([...args]);
+    return { code, stdout: "", stderr: "" };
+  };
+  const quote = notifyJobFailure({ title: "omp-kit", message: 'bad "quote" \\ back', platform: "darwin", run: run(0), notifySendPresent: false });
+  expect(quote).toEqual({ attempted: true, method: "osascript" });
+  expect(calls[0]?.[2]).toContain('\\"quote\\"');
+  const failed = notifyJobFailure({ title: "t", message: "m", platform: "darwin", run: run(3), notifySendPresent: false });
+  expect(failed).toEqual({ attempted: false, method: "osascript" });
+  const linux = notifyJobFailure({ title: "t", message: "m", platform: "linux", run: run(0), notifySendPresent: true });
+  expect(linux).toEqual({ attempted: true, method: "notify-send" });
+  const headless = notifyJobFailure({ title: "t", message: "m", platform: "linux", run: run(0), notifySendPresent: false });
+  expect(headless).toEqual({ attempted: false, method: "none" });
+  const throwing = notifyJobFailure({ title: "t", message: "m", platform: "darwin", run: () => { throw new Error("nope"); }, notifySendPresent: false });
+  expect(throwing).toEqual({ attempted: false, method: "none" });
+});
+
+function fakebin(): { dir: string; log: string } {
+  const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
+  roots.push(dir);
+  const log = join(dir, "notify.log");
+  const shim = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$NOTIFY_LOG\"\nexit 0\n";
+  writeFileSync(join(dir, "osascript"), shim, { mode: 0o755 });
+  chmodSync(join(dir, "osascript"), 0o755);
+  writeFileSync(join(dir, "notify-send"), shim, { mode: 0o755 });
+  chmodSync(join(dir, "notify-send"), 0o755);
+  return { dir, log };
+}
+
+function runHome(exitCode: number): string {
+  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  roots.push(home);
+  const bin = join(home, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "omp-kit"), `#!/bin/sh\necho failing >&2\nexit ${exitCode}\n`, { mode: 0o755 });
+  chmodSync(join(bin, "omp-kit"), 0o755);
+  mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
+  chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
+  return home;
+}
+
+test("service run notifies on failure and stays silent on success", () => {
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    console.info("skip: desktop notification only exists on macOS and Linux");
+    return;
+  }
+  const { dir, log } = fakebin();
+  const path = `${dir}:${process.env.PATH ?? ""}`;
+  const failing = cli(["service", "run", "omp-watch"], runHome(3), { PATH: path, NOTIFY_LOG: log });
+  expect(failing.code).toBe(1);
+  expect(failing.envelope.data.notification.attempted).toBe(true);
+  expect(readFileSync(log, "utf8")).toContain("omp-kit test did not pass after an OMP update");
+  rmSync(log, { force: true });
+  const passing = cli(["service", "run", "omp-watch"], runHome(0), { PATH: path, NOTIFY_LOG: log });
+  expect(passing.code).toBe(0);
+  expect(passing.envelope.data.notification).toEqual({ attempted: false, method: "none" });
+  expect(existsSync(log)).toBe(false);
+});
+
+function realLaunchctlPath(label: string): { code: number; path: string | null } {
+  const child = Bun.spawnSync(["launchctl", "print", `gui/${process.getuid?.() ?? 501}/${label}`], { stdout: "pipe", stderr: "pipe" });
+  const line = child.stdout.toString().split("\n").find(entry => entry.trim().startsWith("path ="));
+  return { code: child.exitCode, path: line?.trim() ?? null };
+}
+
+test("a fixture install never takes over a foreign label, and --replace does it openly", () => {
+  if (process.platform !== "darwin") {
+    console.info("skip: launchd labels exist only on macOS");
+    return;
+  }
+  const prodBefore = realLaunchctlPath("com.omp-kit.omp-watch");
+  const first = fixture();
+  const second = fixture();
+  try {
+    const installed = cli(["service", "install", "omp-watch", "--apply", "--yes"], first.home);
+    expect(installed.envelope.data.label).toBe(testLabel);
+    expect(installed.code).toBe(0);
+    expect(realLaunchctlPath(testLabel).path).toContain(join(first.home, "Library", "LaunchAgents", `${testLabel}.plist`));
+    const refused = cli(["service", "install", "omp-watch", "--apply", "--yes"], second.home);
+    expect(refused.code).toBe(1);
+    expect(refused.envelope.errors[0].code).toBe("LABEL_LOADED_ELSEWHERE");
+    expect(refused.envelope.errors[0].message).toContain(first.home);
+    expect(refused.envelope.errors[0].message).toContain(second.home);
+    const replaced = cli(["service", "install", "omp-watch", "--apply", "--yes", "--replace"], second.home);
+    expect(replaced.code).toBe(0);
+    expect(realLaunchctlPath(testLabel).path).toContain(join(second.home, "Library", "LaunchAgents", `${testLabel}.plist`));
+  } finally {
+    Bun.spawnSync(["launchctl", "bootout", `gui/${process.getuid?.() ?? 501}/${testLabel}`], { stdout: "pipe", stderr: "pipe" });
+  }
+  expect(realLaunchctlPath(testLabel).code).not.toBe(0);
+  expect(realLaunchctlPath("com.omp-kit.omp-watch")).toEqual(prodBefore);
 });

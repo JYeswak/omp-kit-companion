@@ -26,6 +26,22 @@ export function validateLabel(label: string): boolean {
 	return LABEL_PATTERN.test(label) && label.length > 0 && label.length <= 255;
 }
 
+const TEST_NAMESPACE_PATTERN = /^com\.omp-kit\.test\.[A-Za-z0-9._-]+$/;
+
+/**
+ * The launchd/systemd label for a job. Production is always `com.omp-kit.<name>`.
+ * Tests and smoke runs set OMP_KIT_TEST_LABEL_NAMESPACE to a unique
+ * `com.omp-kit.test.<random>` value so even real launchctl calls can never address
+ * a production label: an isolated HOME does not isolate the per-uid launchd domain.
+ * Anything else set (including empty segments) throws instead of touching prod.
+ */
+export function serviceLabel(name: string): string {
+	const namespace = process.env.OMP_KIT_TEST_LABEL_NAMESPACE;
+	if (namespace === undefined || namespace === "") return `com.omp-kit.${name}`;
+	if (!TEST_NAMESPACE_PATTERN.test(namespace)) throw new Error(`refusing to build a service label from OMP_KIT_TEST_LABEL_NAMESPACE=${namespace}`);
+	return `${namespace}.${name}`;
+}
+
 export function serviceHome(home?: string): string {
 	const resolved = home ?? process.env.HOME ?? "";
 	if (!isAbsolute(resolved)) throw new Error("service commands need an absolute HOME");
@@ -439,17 +455,21 @@ export function systemctlState(job: string, run: ServiceRunner): SystemdState {
 	return { enabled: enabled.code === 0, active: active.code === 0, fragmentPath: fragment };
 }
 
-export function installSystemd(home: string, job: ServiceJobDef, units: RenderedSystemd, run: ServiceRunner): LifecycleResult {
+export function installSystemd(home: string, job: ServiceJobDef, units: RenderedSystemd, run: ServiceRunner, replace = false): LifecycleResult {
 	const dir = join(home, ".config", "systemd", "user");
 	const serviceFile = join(dir, `omp-kit-${job.name}.service`);
 	const triggerFile = units.path ? join(dir, `omp-kit-${job.name}.path`) : join(dir, `omp-kit-${job.name}.timer`);
 	const triggerUnit = units.path ? `omp-kit-${job.name}.path` : `omp-kit-${job.name}.timer`;
 	const have = readText(serviceFile);
-	if (have !== null && have === units.service) {
-		const state = systemctlState(job.name, run);
-		if (state.enabled && state.fragmentPath === serviceFile) {
-			return { ok: true, changed: false, backup: null, detail: "Identical bytes and enabled; no-op." };
-		}
+	const loaded = systemctlState(job.name, run);
+	if (loaded.fragmentPath !== null && loaded.fragmentPath !== serviceFile && !replace) {
+		// Same shared-domain hazard as launchd: systemctl --user is per user, not per HOME.
+		return { ok: false, changed: false, backup: null,
+			detail: `Unit omp-kit-${job.name}.service is already enabled from ${loaded.fragmentPath}, not ${serviceFile}. Re-run with --replace to take it over (a backup is kept).`,
+			error: "LABEL_LOADED_ELSEWHERE" };
+	}
+	if (have !== null && have === units.service && loaded.enabled && loaded.fragmentPath === serviceFile) {
+		return { ok: true, changed: false, backup: null, detail: "Identical bytes and enabled; no-op." };
 	}
 	mkdirSync(dir, { recursive: true, mode: 0o755 });
 	const triggerText = units.path ?? systemdTimer(job);
@@ -514,7 +534,7 @@ export function planInstall(home: string, job: ServiceJobDef, launcher: string, 
 		alreadyInstalled: false };
 }
 
-export interface LifecycleResult { ok: boolean; changed: boolean; backup: string | null; detail: string }
+export interface LifecycleResult { ok: boolean; changed: boolean; backup: string | null; detail: string; error?: string }
 
 export function ensureLogDir(home: string, jobName: string): void {
 	const dir = join(home, "Library", "Logs", "omp-kit");
@@ -527,12 +547,19 @@ export function ensureLogDir(home: string, jobName: string): void {
 }
 
 export function installService(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null,
-	installed: InstalledPlist | null, print: LaunchctlPrint, run: ServiceRunner): LifecycleResult {
+	installed: InstalledPlist | null, print: LaunchctlPrint, run: ServiceRunner, replace = false): LifecycleResult {
+	const dest = plistPath(home, job.label);
+	if (print.loaded && print.path !== dest && !replace) {
+		// An isolated HOME does not isolate the per-uid launchd domain: replacing a label
+		// loaded from anywhere else would silently take over (or shadow) a foreign job.
+		return { ok: false, changed: false, backup: null,
+			detail: `Label ${job.label} is already loaded from ${print.path ?? "an unknown plist"}, not ${dest}. Re-run with --replace to take it over (a backup is kept).`,
+			error: "LABEL_LOADED_ELSEWHERE" };
+	}
 	const plan = planInstall(home, job, launcher, watchPath, installed);
-	if (plan.alreadyInstalled && print.loaded && print.path === plistPath(home, job.label)) {
+	if (plan.alreadyInstalled && print.loaded && print.path === dest) {
 		return { ok: true, changed: false, backup: null, detail: "Identical bytes and loaded; no-op." };
 	}
-	ensureLogDir(home, job.name);
 	if (plan.backup && installed) {
 		mkdirSync(dirname(plan.backup), { recursive: true, mode: 0o700 });
 		writeFileSync(plan.backup, installed.text, { mode: 0o600 });
@@ -550,7 +577,6 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	if (!bootoutAbsent && out.code !== 0) {
 		return { ok: false, changed: true, backup: plan.backup, detail: `bootout failed: ${out.stderr.trim() || out.stdout.trim()}` };
 	}
-	const dest = plistPath(home, job.label);
 	mkdirSync(dirname(dest), { recursive: true });
 	const temp = `${dest}.${process.pid}.tmp`;
 	writeFileSync(temp, plan.plist, { mode: 0o600 });
@@ -623,3 +649,26 @@ export function jobReceiptPath(home: string, job: string): string {
 }
 
 export interface JobReceipt { started_at: string; finished_at: string; exit: number; omp_version: string | null }
+
+export interface NotifyResult { attempted: boolean; method: "osascript" | "notify-send" | "none" }
+
+export interface NotifyInput { title: string; message: string; platform: string; run: ServiceRunner; notifySendPresent: boolean }
+
+/**
+ * Desktop failure notification for watched jobs, in-process (no sh -c).
+ * Best-effort: a failed notifier never fails the job; the receipt keeps the verdict.
+ */
+export function notifyJobFailure(input: NotifyInput): NotifyResult {
+	try {
+		if (input.platform === "darwin") {
+			const apple = (text: string): string => text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+			const out = input.run(["osascript", "-e", `display notification "${apple(input.message)}" with title "${apple(input.title)}"`]);
+			return { attempted: out.code === 0, method: "osascript" };
+		}
+		if (input.platform === "linux" && input.notifySendPresent) {
+			const out = input.run(["notify-send", input.title, input.message]);
+			return { attempted: out.code === 0, method: "notify-send" };
+		}
+	} catch { /* notification never fails the job */ }
+	return { attempted: false, method: "none" };
+}
