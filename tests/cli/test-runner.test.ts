@@ -249,10 +249,10 @@ describe("runFastTest", () => {
 		expect(report.proofs.G1_registration.expected_rules).toBe(18);
 		expect(report.proofs.G1_registration.observed_rules).toBe(18);
 		expect(report.proofs.G2_payload.status).toBe("PASS");
-		expect(report.proofs.G2_payload.expected_cases).toBe(274);
-		expect(report.proofs.G2_payload.observed_cases).toBe(274);
+		expect(report.proofs.G2_payload.expected_cases).toBe(276);
+		expect(report.proofs.G2_payload.observed_cases).toBe(276);
 		expect(report.proofs.G3_quiet_prefix.status).toBe("PASS");
-		expect(report.proofs.G3_quiet_prefix.expected_quiet_cases).toBe(138);
+		expect(report.proofs.G3_quiet_prefix.expected_quiet_cases).toBe(140);
 		expect(report.proofs.G3_quiet_prefix.quiet_prefix_fires).toBe(0);
 		expect(report.proofs.G3_quiet_prefix.seeded_plant).toBe("PASS");
 		expect(report.proofs.G4_live.status).toBe("NOT_RUN");
@@ -264,7 +264,7 @@ describe("runFastTest", () => {
 		expect(report.diagnostics.effective_profile.status).toBe("UNVERIFIED");
 		expect(report.producers.gate.producer_rc).toBe(0);
 		const gate = JSON.parse(report.producers.gate.stdout);
-		expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: 18, ttsr_rules: 17, cases: 274, quiet_cases: 138, quiet_prefix_fires: 0 } });
+		expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: 18, ttsr_rules: 17, cases: 276, quiet_cases: 140, quiet_prefix_fires: 0 } });
 		expect(gate.failures).toEqual([]);
 		expect(report.producers.selftest.producer_rc).toBe(0);
 		expect(report.producers.selftest.stdout).toContain("plant (b) RED as intended");
@@ -759,9 +759,9 @@ describe("runMatcherObservation", () => {
 		expect(envelope.data?.overall).toBe("UNVERIFIED");
 		expect(report?.status).toBe("PASS");
 		expect(report?.proofs.G1_registration).toMatchObject({ expected_rules: 18, observed_rules: 18, status: "PASS" });
-		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: 274, observed_cases: 274, status: "PASS" });
+		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: 276, observed_cases: 276, status: "PASS" });
 		expect(report?.proofs.G3_quiet_prefix).toMatchObject({
-			expected_cases: 274, expected_quiet_cases: 138, observed_cases: 274, observed_quiet_cases: 138,
+			expected_cases: 276, expected_quiet_cases: 140, observed_cases: 276, observed_quiet_cases: 140,
 			quiet_prefix_fires: 0, seeded_plant: "PASS", status: "PASS",
 		});
 		expect(report?.proofs.G4_live.status).toBe("NOT_RUN");

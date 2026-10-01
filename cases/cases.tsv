@@ -273,3 +273,5 @@ kit-close-needs-evidence	fire	tool	bash	-	br close x '--reason'	E4 quoted reason
 kit-close-reason-no-evidence	quiet	tool	bash	-	br close x -r "commit abc1234; git ls-tree -r HEAD"	E5 reason contents cannot be reinterpreted as another reason option
 kit-close-reason-no-evidence	fire	tool	bash	-	br close --actor "pane=2;agent=worker" x --reason "passed"	E5 quoted actor does not exempt a reason with no evidence
 kit-close-reason-no-evidence	quiet	tool	bash	-	cat <<'EOF'\nRead the evidence, then br close --reason with the proof.\nEOF	E5 unquoted-reason prose is not an executable close
+kit-settings-mutation	quiet	tool	bash	-	br update --description "rollout note: run omp config set ttsr.enabled false on staging"	R1 double-quoted argument of another command
+kit-test-skip	quiet	tool	write	var/agent-tmp/reality-check/dispatch/note.md	Quote of a skipped-test marker: it.skip("renders", () => {}) in dispatch markdown	R1 quoted marker in markdown

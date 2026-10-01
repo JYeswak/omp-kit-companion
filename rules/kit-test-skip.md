@@ -7,7 +7,7 @@ condition:
   - '@pytest\.mark\.(skip(?:if)?|xfail)\b'
   - '@unittest\.skip'
   - '\bt\.Skip(Now|f)?\('
-scope: "tool:edit(**/*), tool:write(**/*)"
+scope: "tool:edit(**/{*.rs,*.ts,*.test.*,*_test.go}), tool:edit(**/{tests,spec}/**), tool:write(**/{*.rs,*.ts,*.test.*,*_test.go}), tool:write(**/{tests,spec}/**)"
 interruptMode: always
 ---
 **Blocked before it was written.** Your last edit adds a skip or ignore marker to a test. The file was not changed. Do not re-issue the same edit.
