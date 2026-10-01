@@ -11,7 +11,9 @@ afterEach(() => { for (const base of bases.splice(0)) rmSync(base, { recursive: 
 interface Healthy { home: string; project: string; release: string; ompBin: string; binary: string }
 
 function sculpt(): Healthy {
-	const base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "health-"));
+	const scratch = join(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(scratch, { recursive: true });
+	const base = mkdtempSync(join(scratch, "health-"));
 	bases.push(base);
 	const release = join(base, "release");
 	const home = join(base, "home");
