@@ -46,6 +46,7 @@ test("native release contains only declared regular files, runs relocated binary
 		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
 		expect(staged.files).toContain(essential);
+	expect(staged.files).not.toContain("scripts/role-check.ts");
 	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output }, stdout: "pipe", stderr: "pipe" });
 	expect(compiled.exitCode).toBe(0);
 	expect(JSON.parse(compiled.stdout.toString()).data.release.source_tag).toBe("v1.2.3");

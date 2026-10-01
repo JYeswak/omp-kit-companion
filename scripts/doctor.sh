@@ -11,12 +11,7 @@
 #   6 shadows      ~/Developer/*/.omp/rules/<managed>.md matches the managed copy (WARN on drift)
 #   7 router       jsm knows rust-unsafe-code-exorcist and rust-undefined-behavior-exorcist, and `jsm search miri` returns both
 #   8 checkers     checkers/*.sh --selftest passes under /bin/sh
-#   9 models       scripts/role-check.ts resolves each profile's modelRoles with omp's own resolver: RED when a
-#                  role has nothing runnable or points at an ollama tag `ollama list` lacks (Ollama discovery is
-#                  cached 24 h per profile, so a parked tag still resolves and 404s) or whose provider has no
-#                  account with quota left in any profile's `omp usage`; WARN when omp silently substitutes a
-#                  fallback. Runs `role-check.ts --selftest` (per-account quota fixtures) first
-#  10 extensions   each extension in policy/extensions.json is installed in ~/.omp/omp-extensions/ as an
+#   9 extensions   each extension in policy/extensions.json is installed in ~/.omp/omp-extensions/ as an
 #                  exact copy of extensions/<name> and is in every profile's `extensions` list except
 #                  policy skipProfiles
 #   --target DIR    rule root (default ~/.agents/rules)
@@ -246,34 +241,7 @@ for c in check-claim-discipline.sh check-readiness.sh; do
 done
 [ "$ran" = 0 ] && report WARN checkers "no checkers present in $ROOT/checkers; skipped"
 
-# ---- 9 models ----
-st=$("$OMP_KIT_BUN" "$ROOT/scripts/role-check.ts" --selftest < /dev/null 2>&1); rc=$?
-last=$(printf '%s\n' "$st" | grep . | tail -n 1)
-if [ "$rc" = 0 ]; then
-  report GREEN models "role-check.ts --selftest exit 0: $last"
-else
-  report RED models "role-check.ts --selftest exit $rc: $last"
-fi
-# Quota is per account and an account can live in several profiles: dump every profile's usage first
-# so role-check can apply an exhaustion seen in one profile to every profile holding that account.
-mkdir -p "$neutral/usage"
-for p in $(live_profiles); do
-  run_omp "$p" usage --json < /dev/null > "$neutral/usage/$p.json" 2>/dev/null
-done
-for p in $(live_profiles); do
-  profile_exists "$p" || continue
-  if [ "$p" = default ]; then
-    line=$("$OMP_KIT_BUN" --usage-dir "$neutral/usage" "$ROOT/scripts/role-check.ts" < /dev/null 2>"$neutral/role-check.err")
-  else
-    line=$("$OMP_KIT_BUN" --profile "$p" --usage-dir "$neutral/usage" "$ROOT/scripts/role-check.ts" < /dev/null 2>"$neutral/role-check.err")
-  fi
-  case "${line%% *}" in
-    GREEN|WARN|RED) report "${line%% *}" models "$p: ${line#* }" ;;
-    *) report RED models "$p: role-check.ts gave no status; stderr: $(tr '\n' ' ' < "$neutral/role-check.err" | cut -c1-200)" ;;
-  esac
-done
-
-# ---- 10 extensions ----
+# ---- 9 extensions ----
 EXTPOL="$ROOT/policy/extensions.json"
 skip=$(jq -r '.skipProfiles[]' "$EXTPOL" 2>/dev/null | tr '\n' ' ')
 for name in $(jq -r '.extensions[]' "$EXTPOL" 2>/dev/null); do

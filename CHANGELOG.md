@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+- The source `scripts/doctor.sh` no longer runs the legacy model-role/quota check; `scripts/role-check.ts` is removed from releases and embedded runtime allowlists. Model/provider routing remains outside the kit.
+- `doctor --scope settings` reads listed profile TTSR keys through native OMP `config get` and reports per-key `OK`, `DRIFT` or `UNVERIFIED` without claiming runtime activation. An optional JSON array at `$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` (default `$HOME/.config/omp-kit/ttsr-profiles.json`) selects profiles; invalid or unsafe files fail closed. `apply policy --plan` emits exact per-profile native `config set` commands; consented apply stores byte-exact configs for each changed profile under the private state root and verifies every changed key with native readback. Policy fields outside the TTSR allowlist are refused, leaving model/provider routing to their owner.
+- `apply policy --plan` no longer depends on legacy `~/.agents/rules`, so plugin-managed rules remain a valid route; repair preserves `INVALID_STATE_ROOT`, and pre-write policy drift is `FRESH_PLAN` while post-write failure remains `POLICY_APPLY_PARTIAL`.
+
 - The `test-skip-ts-fire` live scenario carries a realistic post-match tail so the gate no longer depends on OMP's late-interrupt race; the old short-tail shape survives as the report-only `omp-late-interrupt-probe` scenario (`PROBE omp-late-interrupt: continued|aborted`, never counted, surfaced per OMP version in the compatibility workflow summary).
 - Two quoted-text false fires are quiet: `kit-test-skip` now scopes `edit`/`write` to code extensions (`*.rs`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.py`, `*.go`) plus the `tests/` and `spec/` trees, so quoting a skip marker in Markdown no longer blocks; `kit-settings-mutation` no longer fires when the config-set text sits inside a double- or single-quoted argument opened by `=` or `--flag` of another command (executable `$(...)` substitutions still fire). All existing fire rows still fire.
+
 ## 0.2.0 — 2026-10-01
 
 - A real-HOME journey (52,000-file HOME, edited rules, legacy 0755 state root, a concurrent writer) runs the install-to-update path on macOS and Linux CI with a JSONL step log. It would have caught every real-machine failure fixed in this release.
