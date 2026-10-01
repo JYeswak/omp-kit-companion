@@ -88,8 +88,13 @@ supportedTest("enumerates every supported bank; catches alphabetic bearer and bo
 	expect(result.coverage).toEqual({ banks_discovered: 2, banks_scanned: 2, stores_discovered: 2, stores_scanned: 2,
 		working_rows: 3, episodic_rows: 2, total_rows: 5, fields: ["working_memory.content", "episodic_memory.content"] });
 	expect(result.categories).toEqual({ bearer_token: 1, private_key: 1, password_assignment: 1, credential_url: 1, provider_token: 0 });
-	if (installedVersion === "18.4.2") expect(result.redactor?.coverage).toBe("SYNTHETIC_ONLY");
-	else expect(result.redactor?.status).toBe("UNVERIFIED");
+	if (result.redactor?.coverage === "SYNTHETIC_ONLY") {
+		expect(result.redactor.status).toBe("MISSES");
+		expect(result.redactor.version).toBe(installedVersion);
+		expect(result.redactor.missed).toContain("pem_private_key");
+	} else {
+		expect(result.redactor?.status).toBe("UNVERIFIED");
+	}
 	const text = JSON.stringify(result);
 	for (const sensitive of [secret, pem, "syntheticlettersforpasswordvalue", "syntheticpassword", f.root, f.storeRoot]) expect(text).not.toContain(sensitive);
 	expect(snapshot(f.root)).toEqual(before);

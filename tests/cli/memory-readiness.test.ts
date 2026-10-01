@@ -1,22 +1,37 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
 
 const fixtures: string[] = [];
+const INSTALLED_OMP_PATH = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+if (!INSTALLED_OMP_PATH) throw new Error("memory-readiness tests require an installed OMP on PATH");
+const INSTALLED_OMP_ROOT = dirname(dirname(realpathSync(INSTALLED_OMP_PATH)));
+const INSTALLED_OMP_VERSION = JSON.parse(readFileSync(join(INSTALLED_OMP_ROOT, "package.json"), "utf8")).version as string;
+const OMP_SOURCE_FILES = [
+	"src/memory-backend/redact.ts",
+	"src/memory-backend/settings.ts",
+	"src/memory-backend/resolve.ts",
+	"src/config/settings.ts",
+] as const;
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-function fixture() {
+function fixture(version: string = INSTALLED_OMP_VERSION) {
 	const root = mkdtempSync(join(tmpdir(), "omp-kit-memory-"));
 	fixtures.push(root);
 	const home = join(root, "home"), project = join(root, "project"), agent = join(home, ".omp", "agent");
 	const pkg = join(root, "omp");
 	mkdirSync(agent, { recursive: true }); mkdirSync(project); mkdirSync(join(pkg, "dist"), { recursive: true });
-	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.2" }));
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
 	const ompPath = join(pkg, "dist", "cli.js"); writeFileSync(ompPath, "#!/bin/sh\nexit 91\n");
+	for (const relativePath of OMP_SOURCE_FILES) {
+		const target = join(pkg, relativePath);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, readFileSync(join(INSTALLED_OMP_ROOT, relativePath)));
+	}
 	const config = join(agent, "config.yml");
 	const inspect = (installedPath = ompPath) => inspectMemoryReadiness({ home, project, ompPath: installedPath });
-	return { root, home, project, agent, config, ompPath, inspect };
+	return { root, home, project, agent, config, ompPath, ompRoot: pkg, inspect };
 }
 function snapshot(dir: string, prefix = ""): string[] {
 	return readdirSync(dir).sort().flatMap(name => {
@@ -27,28 +42,50 @@ function snapshot(dir: string, prefix = ""): string[] {
 	});
 }
 
-test("unreviewed OMP versions cannot inherit known memory config semantics", async () => {
-	for (const version of ["18.4.10", "19.0.0"]) {
-		const f = fixture();
-		writeFileSync(f.config, "memory:\n  backend: off\n");
-		writeFileSync(join(f.root, "omp", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
-		const report = await f.inspect();
-		expect(report.backend).toBe("UNVERIFIED");
-		expect(report.status).toBe("UNVERIFIED");
-		expect(report.recommended_action).toContain("installed OMP");
-	}
-});
-
-test("known OMP 18.4.9 reports on-disk memory OFF without runtime claims", async () => {
-	const f = fixture();
+test("reviewed OMP 18.4.9 source hashes report on-disk OFF and the redactor limitation", async () => {
+	const f = fixture("18.4.9");
 	writeFileSync(f.config, "memory:\n  backend: off\n");
-	writeFileSync(join(f.root, "omp", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
 	const report = await f.inspect();
 	expect(report.backend).toBe("off");
 	expect(report.configured).toBe(false);
 	expect(report.runtime).toBe("NOT_PROBED");
-	expect(report.redactor.status).toBe("UNVERIFIED");
-	expect(report.redactor.version).toBeNull();
+	expect(report.redactor).toMatchObject({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY" });
+	expect(report.redactor.missed).toContain("pem_private_key");
+});
+
+test("reviewed source hashes, not package version, govern memory inspection", async () => {
+	const f = fixture("99.0.0");
+	writeFileSync(f.config, "memory:\n  backend: off\n");
+	const report = await f.inspect();
+	expect(report.backend).toBe("off");
+	expect(report.redactor.status).toBe("MISSES");
+	expect(report.redactor.version).toBe("99.0.0");
+});
+
+test("one changed redactor source byte refuses the synthetic probe", async () => {
+	const f = fixture("18.4.9");
+	const accepted = await f.inspect();
+	expect(accepted.redactor).toMatchObject({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY" });
+	const path = join(f.ompRoot, "src/memory-backend/redact.ts");
+	const bytes = Buffer.from(readFileSync(path));
+	bytes[0] = (bytes[0] ?? 0) ^ 1;
+	writeFileSync(path, bytes);
+	const report = await f.inspect();
+	expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [] });
+});
+
+test("one changed memory settings source byte refuses config semantics", async () => {
+	for (const source of OMP_SOURCE_FILES.filter(path => path !== "src/memory-backend/redact.ts")) {
+		const f = fixture("18.4.9");
+		writeFileSync(f.config, "memory:\n  backend: off\n");
+		const path = join(f.ompRoot, source);
+		const bytes = Buffer.from(readFileSync(path));
+		bytes[0] = (bytes[0] ?? 0) ^ 1;
+		writeFileSync(path, bytes);
+		const report = await f.inspect();
+		expect(report.backend).toBe("UNVERIFIED");
+		expect(report.status).toBe("UNVERIFIED");
+	}
 });
 
 test("OFF and configured Mnemopi do not turn into runtime OK", async () => {
@@ -73,7 +110,9 @@ test("empty-not-created store and observed local SQLite store remain distinct wi
 	writeFileSync(db, Buffer.concat([Buffer.from("SQLite format 3\0"), Buffer.alloc(100)]));
 	const before = snapshot(f.home);
 	const observed = await f.inspect();
-	expect(observed.store).toBe("OBSERVED_SCHEMA_UNVERIFIED"); expect(observed.status).toBe("UNVERIFIED");
+	expect(observed.store).toBe("OBSERVED_SCHEMA_UNVERIFIED");
+	expect(observed.status).toBe("DEGRADED");
+	expect(observed.redactor.missed).toContain("pem_private_key");
 	expect(snapshot(f.home)).toEqual(before);
 	writeFileSync(db, "not a SQLite database");
 	expect((await f.inspect()).store).toBe("UNKNOWN_SCHEMA");
@@ -95,7 +134,9 @@ test("parked model role cannot count as model availability and remains separate 
 	const f = fixture();
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmodelRoles:\n  memory: ollama/qwen3.8:27b-mlx\nmnemopi:\n  noEmbeddings: true\n");
 	const parked = await f.inspect();
-	expect(parked.model).toBe("UNVERIFIED_LOCAL"); expect(parked.status).toBe("UNVERIFIED");
+	expect(parked.model).toBe("UNVERIFIED_LOCAL");
+	expect(parked.status).toBe("DEGRADED");
+	expect(parked.redactor.missed).toContain("pem_private_key");
 	expect(parked.recommended_action).toContain("local model");
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmodelRoles:\n  smol: ollama/qwen3.8:27b-mlx\nmnemopi:\n  noEmbeddings: true\n");
 	expect((await f.inspect()).model).toBe("UNVERIFIED_LOCAL");
@@ -134,30 +175,15 @@ test("custom store symlink and inaccessible store do not get dereferenced or cer
 	expect((await f.inspect()).store).toBe("INACCESSIBLE");
 });
 
-test("synthetic canary misses report class, coverage and OMP version, never canary bytes", async () => {
-	const f = fixture(); writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n");
-	const installed = process.env.OMP_INSTALLED_PATH ?? join(homedir(), ".bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js");
-	if (!existsSync(installed)) return;
-	const installedVersion = JSON.parse(readFileSync(join(dirname(dirname(realpathSync(installed))), "package.json"), "utf8")).version;
+test("synthetic redactor canaries report source-pinned limits without exposing canary bytes", async () => {
+	const f = fixture(INSTALLED_OMP_VERSION);
+	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n");
 	const before = [snapshot(f.home), snapshot(f.project)];
-	const report = await f.inspect(installed);
-	// Memory config semantics are reviewed for 18.4.9; its redactor remains unpinned.
-	if (installedVersion === "18.4.2") {
-		expect(report.redactor.version).toBe("18.4.2");
-		expect(report.redactor.coverage).toBe("SYNTHETIC_ONLY");
-		expect(report.redactor.missed).toContain("pem_private_key");
-		expect(report.status).toBe("DEGRADED");
-	} else {
-		expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [] });
-		if (installedVersion === "18.4.9") {
-			expect(report.backend).toBe("mnemopi");
-			expect(report.configured).toBe(true);
-			expect(report.runtime).toBe("NOT_PROBED");
-		} else {
-			expect(report.backend).toBe("UNVERIFIED");
-			expect(report.status).toBe("UNVERIFIED");
-		}
-	}
+	const report = await f.inspect(INSTALLED_OMP_PATH);
+	expect(report.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
+	expect(report.redactor.missed).toContain("pem_private_key");
+	expect(report.backend).toBe("mnemopi");
+	expect(report.runtime).toBe("NOT_PROBED");
 	expect(JSON.stringify(report)).not.toContain("PRIVATE KEY-----");
 	expect(JSON.stringify(report)).not.toContain("syntheticbearerletters");
 	expect([snapshot(f.home), snapshot(f.project)]).toEqual(before);
