@@ -30,22 +30,23 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
 | Real-HOME journey in CI: 52k-file HOME, edited rules, legacy 0755 state root, a concurrent writer, one JSONL line per step, on macOS and Linux | #12 |
 | Latest-OMP CI records first-fire indices per OMP version and reports a default-policy G4 run separately | #13 |
+| **Released [v0.2.0](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.2.0):** 4 natively certified archives, index and receipts; a fresh-HOME install from the published index passes `test --full` (70/70 live, plant caught) | #15 |
+| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade); ships in the next release | #14 |
+| `health.test.ts` runs in a fresh clone | #16 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Release v0.2.0 (changelog cut, install pin, release procedure in CONTRIBUTING) | this PR |
-| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade) | #14 |
+| Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
 | Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
 
 ## Next
 
-1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases).
-2. **Intermittent native-certification failures.** Diagnosed: both refusals with receipts name the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
-3. **After the plugin route lands:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
+1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases); v0.2.1 carries the plugin route.
+2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
+3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
 4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-5. **Rule false fires on quoted text.** `kit-settings-mutation` and `kit-test-skip` interrupt commands and files that merely quote their trigger text; add those shapes as quiet cases and tighten the conditions without losing a fire case.
 
 ## Parked
 
