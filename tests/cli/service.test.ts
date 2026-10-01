@@ -448,16 +448,6 @@ test("service status reports HOME-scoped install state from source", () => {
   expect(["OK", "FINDINGS"]).toContain(status.envelope.data.overall);
 });
 
-function prodLabelLoaded(): boolean {
-  if (process.platform !== "darwin") return false;
-  try {
-    const child = Bun.spawnSync(["launchctl", "print", `gui/${process.getuid?.() ?? 501}/${job.label}`], { stdout: "pipe", stderr: "pipe" });
-    return child.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
 test("service install without --apply refuses and writes no plist", () => {
   const { home } = fixture();
   const result = cli(["service", "install", "omp-watch"], home);
@@ -478,21 +468,21 @@ test("service uninstall without --apply refuses and keeps the plist", () => {
 });
 
 test("service uninstall reports already_absent through the CLI wire", () => {
-  if (prodLabelLoaded()) return; // never bootout a live production job; CI never has it loaded
   const { home } = fixture();
   const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
   expect(result.code).toBe(0);
   expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch", label: testLabel, already_absent: true });
+  expect("alreadyAbsent" in result.envelope.data).toBe(false);
 });
 
 test("service uninstall moves a stale plist to backup through the CLI wire", () => {
-  if (prodLabelLoaded()) return; // never bootout a live production job; CI never has it loaded
   const { home } = fixture();
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
   const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
   writeFileSync(dest, "stale-bytes\n");
   const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
   expect(result.code).toBe(0);
+  expect(result.envelope.data.label).toBe(testLabel);
   expect(result.envelope.data.backup).toContain("service-backups");
   expect(() => readFileSync(dest, "utf8")).toThrow();
   expect(readFileSync(result.envelope.data.backup, "utf8")).toBe("stale-bytes\n");

@@ -1283,8 +1283,8 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			if (request.flags.has("--dry-run")) {
 				return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true }, verification: "UNVERIFIED" };
 			}
-			const result = uninstallSystemd(home, job, defaultRunner);
-			return { code: 0, data: { overall: result.changed ? "CHANGED" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
+		const result = uninstallSystemd(home, job, defaultRunner);
+		return { code: 0, data: { overall: result.changed ? "CHANGED" : "OK", job: job.name, label: job.label, changed: result.changed, backup: result.backup, detail: result.detail, already_absent: result.alreadyAbsent }, verification: "UNVERIFIED" };
 		}
 		if (request.flags.has("--dry-run")) {
 			const installed = readInstalledPlist(home, job.label);
