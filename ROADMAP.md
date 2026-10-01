@@ -41,6 +41,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
 | Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
 | **TTSR policy drift check.** `doctor --scope settings` reads each listed profile’s `ttsr.*` with OMP’s native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them. | #20 |
+| Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
 
 ## Next
 

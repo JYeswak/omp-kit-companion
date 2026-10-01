@@ -19,6 +19,8 @@ export interface ContextRunInput {
 	project: string;
 	/** Harness budget in ms; 5000..600000 when set. */
 	timeoutMs?: number;
+	/** Profile-knob overrides applied after settings load; includeSkills, ignoredSkills only. */
+	overrides?: { includeSkills?: string[]; ignoredSkills?: string[] };
 }
 
 export interface CapabilitiesRunInput extends ContextRunInput {
@@ -86,8 +88,11 @@ function baseArgs(input: ContextRunInput): string[] {
 	if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 5_000 || input.timeoutMs > 600_000)) {
 		throw new ContextInputError("INVALID_TIMEOUT", "Context timeout must be an integer from 5000 through 600000");
 	}
+	const knobs: string[] = [];
+	if (input.overrides?.includeSkills !== undefined) knobs.push("--knob", `skills.includeSkills=${JSON.stringify(input.overrides.includeSkills)}`);
+	if (input.overrides?.ignoredSkills !== undefined) knobs.push("--knob", `skills.ignoredSkills=${JSON.stringify(input.overrides.ignoredSkills)}`);
 	return ["--home", input.home, "--profile", input.profile, "--project", input.project,
-		...(input.timeoutMs === undefined ? [] : ["--timeout-ms", String(input.timeoutMs)])];
+		...(input.timeoutMs === undefined ? [] : ["--timeout-ms", String(input.timeoutMs)]), ...knobs];
 }
 
 function parseEnvelope(stdout: string): Record<string, unknown> {
