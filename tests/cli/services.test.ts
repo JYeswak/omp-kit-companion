@@ -165,6 +165,29 @@ test("inventory classifies rows and flags only OMP-related jobs", () => {
 	expect(finding?.reason).not.toContain("localbench omp-update (FAILING)");
 }, 120_000);
 
+test("exit 1 without the required STALE line is UNHEALTHY, not silently healthy", () => {
+	writeFileSync(join(home, "s3-logs-clean.log"), "2026-10-01T11:00:00Z all caught up\n");
+	writeLaunchctlList([
+		`123\t0\tcom.example.omp-watch`,
+		`-\t1\tdev.localbench.omp-update`,
+	].join("\n"));
+	try {
+		const path = declaredFile("required-nostale.json", { schema_version: 1, jobs: [
+			{ label: "dev.localbench.omp-update", name: "localbench omp-update",
+				healthy_exit: [0, 1], log_file: "~/s3-logs-clean.log", require_log_line_if_exit_1: "STALE" },
+		] });
+		const { exitCode, envelope } = runCli(["doctor", "--scope", "services", "--services", path, "--json"]);
+		expect(exitCode).toBe(0);
+		expect(envelope.data?.overall).toBe("DEGRADED");
+		const { required } = evidenceOf(envelope);
+		const localbench = required.find(item => item.name === "localbench omp-update");
+		expect(localbench?.status).toBe("UNHEALTHY");
+		expect(localbench?.detail).toContain("lacks required log line");
+	} finally {
+		writeLaunchctlList([`123\t0\tcom.example.omp-watch`, `-\t1\tcom.example.uca`, `-\t1\tdev.localbench.omp-update`].join("\n"));
+	}
+}, 120_000);
+
 test("DUPLICATE_WRAPPER_PLANT: shared wrapper scripts deduplicate on the resolved script", () => {
 	const shared = writeProgram("shared-nightly.sh");
 	const first = join(agents, "com.example.nightly-a.plist");
