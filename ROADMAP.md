@@ -37,6 +37,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 |---|---|
 | Release v0.2.0 (changelog cut, install pin, release procedure in CONTRIBUTING) | this PR |
 | Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade) | #14 |
+| Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
 
 ## Next
 
@@ -45,7 +46,6 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 3. **After the plugin route lands:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
 4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
 5. **Rule false fires on quoted text.** `kit-settings-mutation` and `kit-test-skip` interrupt commands and files that merely quote their trigger text; add those shapes as quiet cases and tighten the conditions without losing a fire case.
-6. **Capability-preserving context.** A read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 
