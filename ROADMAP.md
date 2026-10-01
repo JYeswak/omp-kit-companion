@@ -31,23 +31,30 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Real-HOME journey in CI: 52k-file HOME, edited rules, legacy 0755 state root, a concurrent writer, one JSONL line per step, on macOS and Linux | #12 |
 | Latest-OMP CI records first-fire indices per OMP version and reports a default-policy G4 run separately | #13 |
 | **Released [v0.2.0](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.2.0):** 4 natively certified archives, index and receipts; a fresh-HOME install from the published index passes `test --full` (70/70 live, plant caught) | #15 |
-| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade); ships in the next release | #14 |
+| Rules as a native OMP plugin: root plugin manifest, lifecycle e2e (link, fire, disable, uninstall, git install and upgrade) | #14 |
 | `health.test.ts` runs in a fresh clone | #16 |
+| Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
+| Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE`, checked through OMP discovery | #19 |
+| TTSR policy drift check: `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader; the kit writes only `ttsr.*`, through native `config set` with readback | #20 |
+| The `test-skip-ts-fire` gate no longer depends on OMP's late-interrupt race; a report-only probe keeps measuring it | #21 |
+| Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
+| **Released v0.2.1:** the plugin route, settings drift, capability context and skill-set recipe | this PR |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
-| Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
-| **TTSR policy drift check.** `doctor --scope settings` reads each listed profile’s `ttsr.*` with OMP’s native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them. | #20 |
-| Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
+| A kit test run leaves no processes behind (2,395 orphaned mock servers found on one machine) | #23 |
+| `doctor --scope services`: launchd/systemd inventory plus a declared set of required jobs | #24 |
+| Certify releases on the minimum AND the latest OMP | #25 |
 
 ## Next
 
-1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases); v0.2.1 carries the plugin route.
-2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
-3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
+1. **Latest-OMP certification.** #25 found that memory inspection gates on the OMP version string (18.4.2) rather than on the reviewed source bytes, which are identical in 18.4.9. Gate on content instead.
+2. **`omp-kit service`:** install/status/doctor for the kit's own background jobs, following the launchd pattern of established CLIs. Then a scratch reaper that runs as one of those jobs, so agent scratch is reclaimed without anyone deleting by hand.
+3. **Rules that enforce the save/store/push procedures** every session loads (no scratch in `/tmp`, no pattern kills, no force-push).
+4. **OMP late-interrupt fix upstream:** reported as can1357/oh-my-pi#14018, fixed in PR #14020 (not yet released). When a release contains it, the report-only probe becomes a gate again.
+5. **After the plugin route has users:** remove `apply rules`/`apply extensions`.
 
 ## Parked
 
