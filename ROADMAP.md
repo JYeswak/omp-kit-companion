@@ -40,6 +40,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 |---|---|
 | Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
 | Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
+| Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
 
 ## Next
 
