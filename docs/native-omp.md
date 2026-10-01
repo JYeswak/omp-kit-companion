@@ -147,6 +147,18 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 "$KIT" apply rules --plan --json
 ```
 
+```sh verified rc=0 contains='"component":"policy"'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" doctor --scope settings --json
+```
+
+`doctor --scope settings --json` reads each selected profile with OMP native `config get` and reports each key as `OK`, `DRIFT`, or `UNVERIFIED`. These are stored settings; they do not prove rule activation.
+
+`$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` is an optional JSON array of profile names, for example `["work"]`. When XDG_CONFIG_HOME is unset, the kit reads `$HOME/.config/omp-kit/ttsr-profiles.json`.
+
+When the file is absent, diagnosis reads all profiles. Default policy plans select all named profiles, or the default when none exist. `--profiles` overrides the file; `--include-default` adds the default. Invalid or unsafe files make diagnosis UNVERIFIED and default policy planning refuses; neither falls back to all profiles.
+
+`apply policy --plan` emits native per-profile `config set` commands only when the global managed-rule inventory matches the release manifest. A fresh HOME must apply the managed rules first. `--apply --yes` backs up each changed profile config before the first write, changes only allowlisted `ttsr.*` keys, then verifies each changed key with native readback. Model/provider routing is outside this policy.
 `$KIT` is the installed release binary. On a fresh HOME, `test` passes
 the shipped pack while the overall result stays `UNVERIFIED` until rules
 are applied; that split is the point. Render a profile recipe the same

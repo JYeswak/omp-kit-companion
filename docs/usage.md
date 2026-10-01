@@ -142,3 +142,21 @@ The file declares `skills`, `tools`, `rules`, and `lsp` arrays
 `HIDDEN_BUT_READABLE`, or `MISSING`; any `MISSING` exits 1. A smaller
 listing that resolves every declared capability does not prove equal
 task success; that comparison belongs to dedicated benchmark tooling.
+
+## Derive a skill set from usage
+
+`examples skill-set` reads a profile's session transcripts (read-only)
+and lists every skill actually read plus the skills named explicitly in
+prompts. It renders, never applies, a pruned-profile recipe: the
+candidate `includeSkills` list with listing bytes before and after
+(both measured through OMP's loader), and the capability check result:
+
+```sh verified rc=0 contains='"candidate_skills":[]'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" examples skill-set --from-history 7 --json
+```
+
+Add `--profile NAME` to measure another profile. Copy the recipe into a
+NEW named profile by hand, then benchmark real tasks (localbench
+Experiment C) before adopting the pruned set: passing the check does
+not prove equal task success.

@@ -155,11 +155,11 @@ const planApply: readonly Flag[] = [
 ];
 
 const repairData: DataSchema = { type: "object", required: ["overall", "action", "scope", "changes", "steps", "receipt_id"], properties: {
-	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED", "UNCHANGED"] },
+	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED", "UNCHANGED", "PARTIAL"] },
 	scope: { enum: ["rules", "policy", "extensions", "state"] }, changes: { type: "number" },
 	steps: { type: "array", items: { type: "object", required: ["action", "path"], properties: {
-		action: { type: "string" }, path: { type: "string" }, profile: { type: "string" },
-	} } }, receipt_id: { type: ["string", "null"] },
+		action: { type: "string" }, path: { type: "string" }, profile: { type: "string" }, key: { type: "string" }, command: { type: "string" },
+	} } }, receipt_id: { type: ["string", "null"] }, backup_id: { type: ["string", "null"] },
 } };
 
 const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
@@ -179,7 +179,7 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|extensions|router|profile|lsp|project-loading|memory|mcp|context", description: "Restrict diagnosis to a named component" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
@@ -237,9 +237,9 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
-		{ name: "policy", description: "Opt-in policy for selected existing profiles", usage: "apply policy [--plan|--apply]", flags: [...planApply,
-			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
-			{ name: "--include-default", description: "Include the default profile explicitly" },
+		{ name: "policy", description: "Per-profile TTSR policy via native OMP config get/set with durable profile backup", usage: "apply policy [--plan|--apply]", flags: [...planApply,
+			{ name: "--profiles", value: "NAMES|all", description: "Override optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json; absent file selects all named profiles or default if none exist" },
+			{ name: "--include-default", description: "Include the default profile in the operator list or named selection" },
 		], example: "omp-kit apply policy --plan --json", runnable: false, mutation: true },
 		{ name: "extensions", description: "Opt-in guard extension for selected profiles", usage: "apply extensions [--plan|--apply]", flags: [...planApply,
 			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
@@ -255,7 +255,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "audit", description: "Inspect receipt chronology", usage: "audit", flags: [], example: "omp-kit audit --json", runnable: false },
 	{ name: "why", description: "Explain one recorded run", usage: "why RUN_ID", argument: "RUN_ID", flags: [], example: "omp-kit why RUN_ID --json", runnable: false },
 	{ name: "quickstart", description: "Safe first commands and their limits", usage: "quickstart", flags: [], example: "omp-kit quickstart", runnable: true, dataSchema: textData },
-	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch]", flags: [],
+	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch|skill-set --from-history DAYS [--profile NAME]]", flags: [],
 		subcommandOptional: true, subcommands: [
 			...PROFILE_RECIPE_KINDS.map((kind) => ({
 				name: kind, description: "Show a versioned, unverified profile recipe for manual use",
@@ -263,6 +263,15 @@ export const COMMANDS: readonly Command[] = [
 			})),
 			{ name: "mcp", description: "Show a static manual example for an existing named MCP profile",
 				usage: "examples mcp", flags: [], example: "omp-kit examples mcp --json", runnable: true, dataSchema: textData },
+			{ name: "skill-set", description: "Derive a usage-based candidate skill set from session history and render a pruned-profile recipe; never applies it",
+				usage: "examples skill-set --from-history DAYS [--profile NAME]", flags: [
+					{ name: "--from-history", value: "DAYS", description: "Look back this many days of session transcripts (1..90)" },
+					{ name: "--profile", value: "NAME", description: "Profile whose history and settings are measured (default profile when omitted)" },
+				], example: "omp-kit examples skill-set --from-history 7 --json", runnable: true, dataSchema: { type: "object",
+					required: ["overall", "skill_set"], properties: {
+						overall: { enum: ["OK", "DEGRADED"] },
+						skill_set: { type: "object", required: ["candidate_skills", "reads", "explicit", "history", "bytes_before", "bytes_after", "capability_check", "recipe", "guidance"] },
+					} } },
 			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
 				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
 					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {
