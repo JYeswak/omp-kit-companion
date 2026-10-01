@@ -304,7 +304,7 @@ describe("runFastTest", () => {
 		expect(native.report.producers.gate.producer_rc).toBe(null);
 	});
 
-	test("returns exit 1 and G3 evidence for a quiet-prefix plant in the unchanged 274-case corpus", () => {
+	test("returns exit 1 and G3 evidence for a quiet-prefix plant in the unchanged 278-case corpus", () => {
 		const plant = createPlantedRelease();
 		const identity = resolveOmpIdentity(process.env);
 		const home = makeTestHome("plant-home");
