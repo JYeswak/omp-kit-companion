@@ -59,16 +59,14 @@ if [ "${1:-}" = --workdir ]; then
   exit $?
 fi
 
-profile_set=0; usage_set=0; work_set=0; scenario_set=0; log_set=0; port_set=0
-profile=; usage_dir=; work_dir=; scenario=; log_file=; port_file=
+work_set=0; scenario_set=0; log_set=0; port_set=0
+work_dir=; scenario=; log_file=; port_file=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --profile|--usage-dir|--work-dir|--scenario|--log|--port-file)
+    --work-dir|--scenario|--log|--port-file)
       [ "$#" -ge 2 ] || die "$1 needs a value"
       option=$1; value=$2; shift 2
       case "$option" in
-        --profile) profile=$value; profile_set=1 ;;
-        --usage-dir) usage_dir=$value; usage_set=1 ;;
         --work-dir) work_dir=$value; work_set=1 ;;
         --scenario) scenario=$value; scenario_set=1 ;;
         --log) log_file=$value; log_set=1 ;;
@@ -81,7 +79,6 @@ done
 [ "${script:-}" ] || die "expected an allowlisted script path"
 case "$script" in
   "$ROOT/scripts/rule-class.ts"|\
-  "$ROOT/scripts/role-check.ts"|\
   "$ROOT/scripts/ttsr-harness.ts"|\
   "$ROOT/tests/live/lib.mjs"|\
   "$ROOT/tests/live/mock-model.mjs") ;;
@@ -90,9 +87,7 @@ esac
 if [ ! -f "$script" ] || [ -L "$script" ]; then
   die "packaged script is absent or symlinked: $script"
 fi
-if [ "$profile_set" = 1 ] || [ "$usage_set" = 1 ]; then
-  [ "$script" = "$ROOT/scripts/role-check.ts" ] || die "profile and usage options are only valid for role-check.ts"
-fi
+
 if [ "$work_set" = 1 ] || [ "$scenario_set" = 1 ] || [ "$log_set" = 1 ] || [ "$port_set" = 1 ]; then
   [ "$script" = "$ROOT/tests/live/mock-model.mjs" ] || die "live scenario options are only valid for mock-model.mjs"
 fi
@@ -138,9 +133,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     case "$work_real" in "$ROOT"|"$ROOT"/*|"$HOME"|"$HOME"/*) die "--work-dir overlaps the release or HOME" ;; esac
     private_owner_mode "$work_real" || die "--work-dir must be owned by this user and mode 700"
   fi
-  if [ "$usage_set" = 1 ]; then
-    case "$usage_dir" in "$sandbox"/*) ;; *) die "--usage-dir must stay inside the isolated sandbox" ;; esac
-  fi
+
   for data_path in "$scenario" "$log_file" "$port_file"; do
     [ -n "$data_path" ] || continue
     [ "$work_set" = 1 ] || die "live scenario data requires --work-dir"
@@ -155,7 +148,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     XDG_DATA_HOME="$XDG_DATA_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
     BUN_INSTALL="$BUN_INSTALL" \
     OMP="$OMP" OMP_BIN="$OMP" OMP_PATH="$OMP" OMP_SRC="$OMP_SRC" \
-    OMP_PROFILE="$profile" OMP_KIT_USAGE_DIR="$usage_dir" OMP_KIT_WORK_DIR="$work_real" \
+    OMP_KIT_WORK_DIR="$work_real" \
     SCEN="$scenario" LOG="$log_file" PORTFILE="$port_file" \
     BUN_BE_BUN=1 "$executable" "$script" "$@"
 fi
@@ -163,9 +156,7 @@ fi
 # A checkout is the only place where a separately installed Bun is an allowed fallback.
 [ -e "$ROOT/.git" ] || die "embedded omp-kit executable missing; Bun fallback is source-checkout-only"
 command -v bun >/dev/null 2>&1 || die "bun not found in contributor source checkout"
-unset OMP_PROFILE OMP_KIT_USAGE_DIR OMP_KIT_WORK_DIR SCEN LOG PORTFILE BUN_BE_BUN
-[ "$profile_set" = 0 ] || { OMP_PROFILE=$profile; export OMP_PROFILE; }
-[ "$usage_set" = 0 ] || { OMP_KIT_USAGE_DIR=$usage_dir; export OMP_KIT_USAGE_DIR; }
+unset OMP_PROFILE OMP_KIT_WORK_DIR SCEN LOG PORTFILE BUN_BE_BUN
 [ "$work_set" = 0 ] || { OMP_KIT_WORK_DIR=$work_dir; export OMP_KIT_WORK_DIR; }
 [ "$scenario_set" = 0 ] || { SCEN=$scenario; export SCEN; }
 [ "$log_set" = 0 ] || { LOG=$log_file; export LOG; }

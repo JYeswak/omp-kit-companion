@@ -32,9 +32,12 @@ function createOmp(prefix: string, version: string): { launcher: string; source:
 	writeFileSync(join(packageRoot, "dist", "cli.js"), "#!/bin/sh\nexit 0\n");
 	chmodSync(join(packageRoot, "dist", "cli.js"), 0o755);
 	writeFileSync(join(packageRoot, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
-	for (const relative of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
-		writeFileSync(join(source, relative), "export {};\n");
-	}
+	const piUtils = join(packageRoot, "node_modules", "@oh-my-pi", "pi-utils");
+	mkdirSync(piUtils, { recursive: true });
+	writeFileSync(join(piUtils, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-utils", exports: "./index.js" }));
+	writeFileSync(join(piUtils, "index.js"), "export function parseFrontmatter(content) { return { frontmatter: {}, body: content }; }\n");
+	for (const relative of ["export/ttsr.ts", "capability/rule.ts"]) writeFileSync(join(source, relative), "export {};\n");
+	writeFileSync(join(source, "discovery", "helpers.ts"), "export const buildRuleFromMarkdown = () => ({});\nexport const createSourceMeta = () => ({});\n");
 	mkdirSync(join(prefix, "bin"), { recursive: true });
 	symlinkSync(join(packageRoot, "dist", "cli.js"), launcher);
 	return { launcher, source };
@@ -101,7 +104,7 @@ describe("release paths", () => {
 		expect(() => resolveBundledScript("scripts/unknown.ts", root)).toThrow(/allow|packag|path/i);
 	});
 
-	test("runs a relocated allowlisted resource through the versioned release behind the stable link", () => {
+	test("runs the packaged rule classifier and refuses the retired local-model checker", () => {
 		const base = fixtureRoot();
 		const prefix = join(base, "kit");
 		const versioned = join(prefix, "releases", "v1.2.3");
@@ -110,8 +113,12 @@ describe("release paths", () => {
 		const fakeOmp = createOmp(join(base, "fake-omp"), "v18.4.2");
 		mkdirSync(join(versioned, "scripts"), { recursive: true });
 		mkdirSync(join(versioned, "bin"), { recursive: true });
-		const roleCheck = join(REPO_ROOT, "scripts", "role-check.ts");
-		writeFileSync(join(versioned, "scripts", "role-check.ts"), readFileSync(roleCheck));
+		const ruleClass = join(REPO_ROOT, "scripts", "rule-class.ts");
+		writeFileSync(join(versioned, "scripts", "rule-class.ts"), readFileSync(ruleClass));
+		mkdirSync(join(versioned, "rules"), { recursive: true });
+		const ruleFile = join(versioned, "rules", "zz-canary-scope-probe.md");
+		writeFileSync(ruleFile, "---\ninterruptMode: never\n---\nfixture\n");
+		writeFileSync(join(versioned, "scripts", "role-check.ts"), "console.log('REMOVED_ROLE_CHECK_EXECUTED');\n");
 		writeFileSync(join(versioned, "scripts", "not-allowlisted.ts"), "console.log('UNALLOWLISTED_RESOURCE_EXECUTED');\n");
 		mkdirSync(join(prefix, "bin"), { recursive: true });
 
@@ -166,14 +173,19 @@ describe("release paths", () => {
 				OMP_KIT_FIXTURE_ROOT: versioned,
 				OMP_KIT_FIXTURE_EXECUTABLE: stable,
 				OMP_KIT_FIXTURE_SCRIPT: resource,
-				OMP_KIT_FIXTURE_ARGS: JSON.stringify(resource === "scripts/role-check.ts" ? ["--selftest"] : []),
+				OMP_KIT_FIXTURE_ARGS: JSON.stringify(resource === "scripts/rule-class.ts" ? [ruleFile] : []),
 			},
 			stdout: "pipe", stderr: "pipe",
 		});
 
-		const allowed = run("scripts/role-check.ts");
+		const allowed = run("scripts/rule-class.ts");
 		expect(allowed.exitCode, allowed.stderr.toString()).toBe(0);
-		expect(allowed.stdout.toString()).toContain("role-check selftest: 6/6 ok");
+		expect(allowed.stdout.toString()).toBe("zz-canary-scope-probe\tcanary\n");
+
+		const retired = run("scripts/role-check.ts");
+		expect(retired.exitCode).not.toBe(0);
+		expect(retired.stdout.toString()).not.toContain("REMOVED_ROLE_CHECK_EXECUTED");
+		expect(retired.stderr.toString()).toContain("not an allowlisted packaged path");
 
 		const rejected = run("scripts/not-allowlisted.ts");
 		expect(rejected.exitCode).not.toBe(0);

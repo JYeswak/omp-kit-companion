@@ -211,6 +211,12 @@ for i in $scenario_ids; do
     [ "$verdict_rc" -ne 0 ] || verdict_rc=2
     KEEP_WORK=1; echo "verdict producer_rc=$verdict_rc scenario=$name" >&2; exit "$verdict_rc"
   fi
+  if [ "$name" = omp-late-interrupt-probe ]; then
+    # Report-only OMP race probe: prints PROBE omp-late-interrupt: continued|aborted and
+    # never counts toward pass/fail, so the gate does not depend on OMP's continuation race.
+    "$OMP_KIT_BUN" "$LIB" probe "$i" "$LOG"
+    continue
+  fi
   if [ "$verdict" = ok ]; then
     pass=$((pass+1)); echo "ok    $name"
   else

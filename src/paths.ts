@@ -12,7 +12,6 @@ const BUNDLED_SCRIPTS: Record<string, true> = {
 	"scripts/external-live.mjs": true,
 	"scripts/install-extensions.sh": true,
 	"scripts/ladder.sh": true,
-	"scripts/role-check.ts": true,
 	"scripts/rule-class.ts": true,
 	"scripts/ttsr-harness.ts": true,
 };

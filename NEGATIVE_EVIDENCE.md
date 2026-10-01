@@ -50,3 +50,10 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 - Historical result: the best pattern set matched 11/19 private samples against 16/19 for the regex. Pattern strings could not express every item carrying an unsafe modifier, and the observed TTSR interface accepted pattern strings rather than structured ast-grep rules. The sample script is not distributed, so the count is an archival observation rather than a current conformance claim.
 - Verdict: NO-SHIP.
 - Retry condition: omp accepts structured ast-grep rule objects, or a new pattern set matches at least the regex's 16/19 on equivalent samples while retaining every positive case.
+
+## NE-8 (2026-10-01) — late TTSR interrupt aborts the run instead of continuing the turn
+
+- Hypothesis: a TTSR interrupt that fires at or after assistant-message completion still continues the turn with the interrupt message.
+- Historical result: `test-skip-ts-fire` (short post-match tail) failed 8/20 local runs on omp 18.4.6 and 4/28 on 18.4.8 with the identical signature — 1 model request, rule named 0x, omp exit 1, file correctly absent — while three control scenarios passed 30/30 and the same scenario with a ~25-line post-match tail passed 10/10. Root-cause path: the installed `@oh-my-pi/pi-coding-agent` package schedules the post-interrupt continuation 50 ms out, and the turn continues only if the abort is still pending, the prompt generation is unchanged, and the target message is still found; otherwise the gate resolves without continuing and the run ends. An upstream issue draft with file:line refs was prepared from this evidence; filing is tracked separately.
+- Verdict: NO kit fix — the abort/continue decision is inside omp. The gating `test-skip-ts-fire` scenario carries a realistic post-match tail, and the short-tail shape survives as the report-only `omp-late-interrupt-probe` scenario.
+- Retry condition: when an omp release continues 20/20 on the probe scenario, make it gating again and delete this note.

@@ -131,7 +131,7 @@ export async function runFullTest(input: FullTestInput): Promise<FullTestReport>
  if (!Array.isArray(parsed) || !parsed.length || !parsed.every(row =>
   row && typeof row === "object" && typeof row.id === "string" && (row.plant === undefined || typeof row.plant === "boolean")))
   throw new Error("INVALID_LIVE_SCENARIOS");
- const ids: string[] = parsed.filter(row => row.plant !== true).map(row => row.id);
+const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "probe").map(row => row.id);
  const identity = resolveOmpIdentity(process.env);
  const ompPackage: unknown = JSON.parse(readFileSync(join(identity.packageRoot, "package.json"), "utf8"));
  const ompVersion = ompPackage && typeof ompPackage === "object" && "version" in ompPackage && typeof ompPackage.version === "string"
