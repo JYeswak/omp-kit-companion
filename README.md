@@ -6,7 +6,7 @@ Test OMP rules, preview every change, apply with receipts.
 ## Installation
 
 ```sh
-KIT_VERSION=0.2.0
+KIT_VERSION=0.2.1
 KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
 git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git
 cd omp-kit-companion
@@ -16,11 +16,17 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
-installs OMP, models, profiles, or shell edits. v0.2.0 is the latest
-published release. Coming from v0.1.x: reinstall with the commands above,
-because a v0.1.x binary cannot finish `update --apply` on a real HOME. If an
-earlier attempt left a pending update, `omp-kit undo RECEIPT --yes` (receipt
-from `omp-kit audit`) restores the previous release and clears it.
+installs OMP, models, profiles, or shell edits. v0.2.1 is the latest
+published release. From v0.2.0, `omp-kit update --apply` moves to it. Coming
+from v0.1.x: reinstall with the commands above, because a v0.1.x binary cannot
+finish `update --apply` on a real HOME. If an earlier attempt left a pending
+update, `omp-kit undo RECEIPT --yes` (receipt from `omp-kit audit`) restores the
+previous release and clears it.
+
+The rules themselves can also come straight through OMP's plugin loader:
+`omp plugin install github:JYeswak/omp-kit-companion#v0.2.1`. See
+[docs/usage.md](docs/usage.md) for how plugin rules rank against native and
+`~/.agents/rules` copies. An automated move off existing copies is still to come.
 
 ![Yuzu testing omp rule behavior](visual/hero.jpg)
 
