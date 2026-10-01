@@ -65,7 +65,6 @@ const MAX_MODEL_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_MODEL_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 64 * 1024;
-const ACTIONS = ["status", "capabilities", "references", "symbols", "status"] as const;
 
 function classifyLspProbeOutcome(input: LspProbeClassification): LspProbeState {
 	if (input.timed_out) return "TIMEOUT";
@@ -483,11 +482,10 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			{ tool: { name: "lsp", args: { action: "capabilities", file: "src/api.ts", timeout: 60 } } },
 			{ tool: { name: "lsp", args: { action: "references", file: "src/api.ts", line: 1, symbol: "lspProbeKnownSymbol", timeout: 60 } } },
 			{ tool: { name: "lsp", args: { action: "symbols", file: "*", query: absentSymbol, timeout: 60 } } },
-			{ tool: { name: "lsp", args: { action: "status" } } },
-			{ text: "LSP route probe complete." },
 		];
 		const toolCallIssuedAt = new Map<string, number>();
-		let turnIndex = 0;
+		let stage: "status" | "capabilities" | "wait" | "references" | "symbols" | "done" = "status";
+		let readinessPolls = 0;
 		mockServer = Bun.serve({
 			hostname: "127.0.0.1", port: 0,
 			async fetch(request) {
@@ -503,10 +501,45 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 				modelRequests.push(body);
 				modelRequestTimes.push(performance.now());
 				const main = isRecord(body) && Array.isArray(body.tools) && body.tools.length > 0;
-				const turn = main ? turns[turnIndex++] ?? { text: "LSP route probe complete." } : { text: "ok" };
+				let turn: { tool: { name: string; args: Record<string, unknown> } } | { text: string };
+				if (!main) {
+					turn = { text: "ok" };
+				} else {
+					let latestToolResult = "";
+					const messages = isRecord(body) && Array.isArray(body.messages) ? body.messages : [];
+					for (let index = messages.length - 1; index >= 0; index--) {
+						const message = messages[index];
+						if (isRecord(message) && message.role === "tool") {
+							latestToolResult = typeof message.content === "string" ? message.content : "";
+							break;
+						}
+					}
+					if (stage === "status") {
+						turn = turns[0]!;
+						stage = "capabilities";
+					} else if (stage === "capabilities") {
+						turn = turns[1]!;
+						stage = "wait";
+					} else if (stage === "wait" && /Language servers: typescript-language-server \(ready\)/.test(latestToolResult)) {
+						turn = turns[2]!;
+						stage = "references";
+					} else if (stage === "wait" && readinessPolls < 5) {
+						readinessPolls += 1;
+						turn = turns[0]!;
+					} else if (stage === "wait") {
+						stage = "done";
+						turn = { text: "LSP readiness did not reach ready within five bounded status checks." };
+					} else if (stage === "references") {
+						turn = turns[3]!;
+						stage = "symbols";
+					} else {
+						stage = "done";
+						turn = { text: "LSP route probe complete." };
+					}
+				}
 				let stream = sseEvent({ role: "assistant" });
 				if ("tool" in turn && turn.tool) {
-					const callId = "call_" + turnIndex;
+					const callId = "call_" + String(toolCallIssuedAt.size + 1);
 					toolCallIssuedAt.set(callId, performance.now());
 					stream += sseEvent({ tool_calls: [{ index: 0, id: callId, type: "function", function: { name: turn.tool.name, arguments: JSON.stringify(turn.tool.args) } }] });
 					stream += sseEvent({}, "tool_calls");
@@ -611,25 +644,22 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			protectedAfter = snapshotFiles(protectedPaths, optionalMarkers);
 			protectedUnchanged = JSON.stringify(protectedBefore) === JSON.stringify(protectedAfter);
 		} catch { protectedUnchanged = false; }
-		const statusBefore = calls.filter(call => call.action === "status")[0]?.result ?? "";
-		const capabilities = calls.find(call => call.action === "capabilities")?.result ?? "";
-		const references = calls.find(call => call.action === "references")?.result ?? "";
-		const absent = calls.find(call => call.action === "symbols")?.result ?? "";
-		const statusAfter = calls.filter(call => call.action === "status")[1]?.result ?? "";
+		const statusCalls = calls.filter(call => call.action === "status");
+		const statusBefore = statusCalls[0]?.result ?? "";
+		const statusAfter = statusCalls[statusCalls.length - 1]?.result ?? "";
+		const capabilitiesCall = calls.find(call => call.action === "capabilities");
+		const referencesCall = calls.find(call => call.action === "references");
+		const absentCall = calls.find(call => call.action === "symbols");
+		const capabilities = capabilitiesCall?.result ?? "";
+		const references = referencesCall?.result ?? "";
+		const absent = absentCall?.result ?? "";
 		const capability = capabilityObject(capabilities, "typescript-language-server");
-		const expected: Array<{ action: string; file?: string; line?: number; symbol?: string; query?: string }> = [
-			{ action: "status" },
-			{ action: "capabilities", file: "src/api.ts" },
-			{ action: "references", file: "src/api.ts", line: 1, symbol: "lspProbeKnownSymbol" },
-			{ action: "symbols", file: "*", query: absentSymbol },
-			{ action: "status" },
-		];
-		const actionArgumentsMatch = calls.length === ACTIONS.length && calls.every((call, index) => {
-			const wanted = expected[index]!;
-			return call.action === ACTIONS[index] && call.action === wanted.action && call.file === wanted.file &&
-				call.line === wanted.line && call.symbol === wanted.symbol && call.query === wanted.query;
-		});
-		const resultsPresent = calls.length === ACTIONS.length && calls.every(call => call.result.length > 0 && !call.result_truncated);
+		const actionArgumentsMatch = statusCalls.length >= 2 && calls[0]?.action === "status" &&
+			capabilitiesCall?.file === "src/api.ts" && referencesCall?.file === "src/api.ts" &&
+			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
+			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
+			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
+		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
 		checks = {
 			lsp_tool_advertised: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.some(tool => isRecord(tool) && isRecord(tool.function) && tool.function.name === "lsp")),
 			only_lsp_tool_enabled: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.length > 0) && modelRequests.every(request => !isRecord(request) || !Array.isArray(request.tools) || request.tools.length === 1 && isRecord(request.tools[0]) && isRecord(request.tools[0].function) && request.tools[0].function.name === "lsp"),
