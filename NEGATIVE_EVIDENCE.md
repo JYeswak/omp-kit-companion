@@ -37,12 +37,13 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 - Verdict: NO-SHIP.
 - Retry condition: a candidate separates executable shell input from quoted test/documentation input on a fresh authorized corpus and preserves every quiet streamed prefix, without a blanket heredoc exemption.
 
-## NE-6 (2026-09-24) — replace `kit-test-skip`'s regex with AST patterns
+## NE-6 (2026-09-24; retried 2026-10-01) — AST candidate for kit-test-skip
 
 - Hypothesis: AST patterns distinguish actual test-skip markers from text mentions without losing blocking behavior.
-- Historical result: a private candidate classified sampled edit/write payloads more precisely, but both live skip scenarios wrote the target file before the AST interrupt. On omp 18.3.0, `astCondition` was evaluated at `toolcall_end` after the write. Matching accuracy did not imply blocking. Those experiment logs are private; the public harness and live suite can be rerun against a new omp release.
-- Verdict: NO-SHIP for blocking rules. The regex remains; G1 rejects `astCondition` on tripwires.
-- Retry condition: on a newer omp, an AST-only tripwire passes the live `test-skip-ts-fire` scenario with `web/app.test.ts` absent. Only then reconsider the G1 restriction.
+- Historical result: on OMP 18.3.0, astCondition was evaluated after the write, so both private live skip scenarios wrote their target files. Verdict was NO-SHIP and G1 rejected blocking AST tripwires.
+- Retry result on OMP 18.4.9: the AST candidate with astLiveScenario test-skip-ts-fire blocked before execution; web/app.test.ts was absent. The same scenario with the AST plugin disabled wrote web/app.test.ts and named no rule (planted negative). G1/G2/G3 passed 278/278 cases with 0 quiet-prefix fires. The regex conditions remain as a compatibility fallback.
+- Verdict: SHIP candidate evidence is green on OMP 18.4.9; the kit gate accepts a blocking astCondition only when it names the pre-execution live scenario. This is not coverage of all test-skip forms or older OMP releases.
+- Retry condition: if a future OMP release fails the named live scenario or the AST candidate loses a required fire/quiet case, revert to the regex-only rule and reopen NE-6.
 
 ## NE-7 (2026-09-24) — replace `rs-unsafe-added-router`'s regex with AST patterns
 
