@@ -6,6 +6,7 @@ const NATIVE_PACKAGE = "@oh-my-pi/pi-natives";
 const BUNDLED_SCRIPTS: Record<string, true> = {
 	"scripts/apply-policy.sh": true,
 	"scripts/build-manifest.sh": true,
+	"scripts/context-inventory.ts": true,
 	"scripts/doctor.sh": true,
 	"scripts/e2e-live.sh": true,
 	"scripts/external-live.mjs": true,

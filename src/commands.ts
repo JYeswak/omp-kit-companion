@@ -39,7 +39,14 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	recorded: { type: "boolean" },
 	test: { type: "object", required: ["status"], properties: {
 		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
-		scope: { enum: ["EXTERNAL_G1_G3"] },
+		scope: { enum: ["EXTERNAL_G1_G3", "CAPABILITY_CHECK"] },
+	} },
+	capabilities: { type: "object", required: ["overall", "capabilities"], properties: {
+		overall: { enum: ["PASS", "FAIL"] },
+		missing: { type: "number" },
+		capabilities: { type: "array", items: { type: "object", required: ["kind", "name", "status"],
+			properties: { kind: { type: "string" }, name: { type: "string" },
+				status: { enum: ["RESOLVED", "HIDDEN_BUT_READABLE", "MISSING"] }, detail: { type: "string" } } } },
 	} },
 	live: { type: "object" },
 } };
@@ -172,10 +179,10 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
-		{ name: "--project", value: "PATH", description: "LSP or project-loading: select session cwd instead of the current directory" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
-		{ name: "--profile", value: "NAME", description: "Memory or MCP: inspect an on-disk profile, not effective runtime activation" },
+		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
 		{ name: "--deep", available: true, description: "With --scope lsp, probe the built-in TypeScript route in a private fixture; other deep scopes remain unavailable" },
 		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
 	], example: "omp-kit doctor --scope lsp --json", runnable: true, dataSchema: doctorData },
@@ -195,14 +202,15 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, or a public-synthetic external G4 marker fixture",
-		usage: "test [--project PATH] [--full] [--record] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, or a required-capability check",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
 		{ name: "--rules", value: "ABS_DIR", description: "Read-only external rules directory; run G1-G3 against its cases" },
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
 		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
+		{ name: "--capabilities", value: "ABS_JSON", description: "Check a declared required-capability set (skills, tools, rules, LSP) through OMP discovery; exit 1 on MISSING" },
 	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
 	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",
