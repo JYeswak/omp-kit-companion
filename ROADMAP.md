@@ -38,13 +38,13 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | TTSR policy drift check: `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader; the kit writes only `ttsr.*`, through native `config set` with readback | #20 |
 | The `test-skip-ts-fire` gate no longer depends on OMP's late-interrupt race; a report-only probe keeps measuring it | #21 |
 | Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
-| **Released v0.2.1:** the plugin route, settings drift, capability context and skill-set recipe | this PR |
+| A kit test run leaves no processes behind (2,395 orphaned mock servers found on one machine) | #23 |
+| **Released v0.2.1:** the plugin route, settings drift, capability context, skill-set recipe and the leak guard | #26 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| A kit test run leaves no processes behind (2,395 orphaned mock servers found on one machine) | #23 |
 | `doctor --scope services`: launchd/systemd inventory plus a declared set of required jobs | #24 |
 | Certify releases on the minimum AND the latest OMP | #25 |
 
