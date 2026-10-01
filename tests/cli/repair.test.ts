@@ -4,30 +4,41 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
 import { auditMutations, undoMutation } from "../../src/mutations.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair } from "../../src/repair.ts";
-
+import { writeProfileConfig } from "./profile-fixture.ts";
+const nativeOmp = resolveOmpIdentity().launcher;
+function nativeConfigValue(home: string, key: string): unknown {
+	const tmp = join(home, "tmp");
+	mkdirSync(tmp, { recursive: true, mode: 0o700 });
+	const env = { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: tmp, TMP: tmp, TEMP: tmp, NO_COLOR: "1", TERM: "dumb" };
+	const child = Bun.spawnSync([nativeOmp, "config", "get", key, "--json"], { cwd: tmp, env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	if (child.exitCode !== 0) throw new Error("OMP config get failed for " + key + ": " + child.stdout.toString() + child.stderr.toString());
+	const result: unknown = JSON.parse(child.stdout.toString());
+	if (!result || typeof result !== "object" || !("key" in result) || result.key !== key || !("value" in result)) throw new Error("invalid OMP config get result for " + key);
+	return result.value;
+}
 const fixtures: string[] = [];
 function fixture() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(scratch, { recursive: true });
 	const workspace = mkdtempSync(join(scratch, "p15-repair-"));
 	fixtures.push(workspace);
-	const root = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state");
+	const root = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state"), project = join(workspace, "project");
 	const rule = "Kit rule\n";
 	mkdirSync(join(root, "rules"), { recursive: true });
 	mkdirSync(join(root, "retired"));
 	mkdirSync(join(root, "policy"));
 	mkdirSync(join(root, "extensions"));
 	mkdirSync(home);
+	mkdirSync(project);
 	writeFileSync(join(root, "rules", "managed.md"), rule);
 	writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nmanaged\t${createHash("sha256").update(rule).digest("hex")}\talways\taaaaaaa\n`);
 	writeFileSync(join(root, "policy", "ttsr.json"), JSON.stringify({ enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] }));
 	writeFileSync(join(root, "policy", "extensions.json"), JSON.stringify({ extensions: ["kit-guard-optin.ts"], skipProfiles: [] }));
 	writeFileSync(join(root, "extensions", "kit-guard-optin.ts"), "export default function guard() {}\n");
-	const profile = join(home, ".omp", "agent", "config.yml");
-	mkdirSync(join(home, ".omp", "agent"), { recursive: true });
-	writeFileSync(profile, YAML.stringify({ model: "user-model", extensions: [], ttsr: { enabled: false, repeatMode: "never", repeatGap: 8, contextMode: "drop", disabledRules: [] } }));
-	return { workspace, root, home, stateRoot, profile, rulePath: join(home, ".agents", "rules", "managed.md") };
+	const profile = writeProfileConfig(home, "default", YAML.stringify({ model: "user-model", extensions: [], ttsr: { enabled: false, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] } }), 0o644);
+	return { workspace, root, home, stateRoot, project, profile, rulePath: join(home, ".agents", "rules", "managed.md") };
 }
 afterEach(() => { for (const path of fixtures.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
@@ -72,7 +83,7 @@ test("known rules repair is read-only until consent, yields receipt, and undo re
 	const repeated = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "rules" });
 	if (repeated.status !== "READY") throw new Error(JSON.stringify(repeated));
 	expect(repeated.changes).toBe(0);
-	expect(applyRepairPlan(repeated, { confirmed: true })).toEqual({ status: "UNCHANGED", receiptId: null, files: 0 });
+	expect(applyRepairPlan(repeated, { confirmed: true })).toEqual({ status: "UNCHANGED", receiptId: null, backupId: null, files: 0 });
 	expect(readdirSync(join(f.stateRoot, "receipts"))).toHaveLength(1);
 	undoMutation(f.stateRoot, result.receiptId!, { confirmed: true });
 	expect(snapshot(f.home)).toEqual(before);
@@ -100,32 +111,49 @@ test("a stale rule plan cannot replace a file written after planning", async () 
 	expect(existsSync(f.stateRoot)).toBe(false);
 });
 
-test("named policy repair uses the guarded profile planner and preserves unrelated profile settings", async () => {
+test("named policy repair uses native config commands and preserves unrelated profile settings", async () => {
 	const f = fixture();
 	const rules = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "rules" });
 	applyRepairPlan(rules, { confirmed: true });
-	const input = { root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "policy" };
-	const plan = await planRepair(input);
+	const original = readFileSync(f.profile);
+	const plan = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "policy" });
 	if (plan.status !== "READY") throw new Error(JSON.stringify(plan));
-	expect(plan.steps).toContainEqual(expect.objectContaining({ profile: "default" }));
+	expect(plan.steps).toContainEqual(expect.objectContaining({ profile: "default", command: "omp config set ttsr.enabled true" }));
 	const result = applyRepairPlan(plan, { confirmed: true });
-	expect(result.receiptId).toEqual(expect.any(String));
+	expect(result.receiptId).toBeNull();
+	expect(result.backupId).toEqual(expect.any(String));
+	const backup = join(f.stateRoot, "policy-backups", result.backupId!, "profiles", "default", "config.yml");
+	expect(readFileSync(backup)).toEqual(original);
 	const config = YAML.parse(readFileSync(f.profile, "utf8")) as Record<string, unknown>;
 	expect(config.model).toBe("user-model");
 	expect(config.ttsr).toEqual({ enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] });
-});
+	expect(nativeConfigValue(f.home, "ttsr.enabled")).toBe(true);
+}, 120_000);
+
+test("policy repair preserves project disabled-rule provider refusal beside native profile evidence", async () => {
+	const f = fixture();
+	mkdirSync(join(f.project, ".omp", "rules"), { recursive: true });
+	writeFileSync(join(f.project, ".omp", "rules", "external.md"), "Project rule\n");
+	writeFileSync(join(f.project, ".omp", "config.yml"), YAML.stringify({ ttsr: { disabledRules: ["external"] } }));
+	const before = snapshot(f.home);
+	const decision = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, project: f.project, scope: "policy" });
+	expect(decision.status).toBe("REFUSED");
+	expect(decision.refusal?.code).toBe("DISABLED_PROVIDER_REFUSED");
+	expect(snapshot(f.home)).toEqual(before);
+	expect(existsSync(f.stateRoot)).toBe(false);
+}, 60_000);
 
 test("disabled rule of unknown provider blocks policy without altering any profile", async () => {
 	const f = fixture();
 	const rules = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "rules" });
 	applyRepairPlan(rules, { confirmed: true });
-	writeFileSync(f.profile, YAML.stringify({ model: "user-model", ttsr: { enabled: false, repeatMode: "never", repeatGap: 8, contextMode: "drop", disabledRules: ["unknown-builtin"] } }));
+	writeFileSync(f.profile, YAML.stringify({ model: "user-model", ttsr: { enabled: false, repeatMode: "once", repeatGap: 8, contextMode: "discard", disabledRules: ["unknown-builtin"] } }));
 	const before = snapshot(f.home);
 	const decision = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "policy" });
 	expect(decision.status).toBe("REFUSED");
 	expect(decision.refusal?.code).toMatch(/DISABLED|PROVIDER/);
 	expect(snapshot(f.home)).toEqual(before);
-});
+}, 60_000);
 
 test("extension repair is named, and interrupted install exposes pending receipt instead of silent retry", async () => {
 	const f = fixture();

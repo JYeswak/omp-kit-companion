@@ -1,7 +1,6 @@
-import { applyNamedPlan, planNamedApply, type NamedApplyPlan, type NamedApplyResult, type NamedScope } from "./apply.ts";
+import { applyNamedPlan, planNamedApply, validateNamedApplyPaths, type NamedApplyPlan, type NamedApplyResult, type NamedScope } from "./apply.ts";
 import { diagnose, type Finding } from "./diagnostics.ts";
 import type { ApplyOptions } from "./mutations.ts";
-
 export type RepairInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope?: string }>;
 export type RepairRefusal = Readonly<{ code: string; reason: string }>;
 export type RepairDecision =
@@ -31,9 +30,10 @@ function findingRefusal(scope: NamedScope, findings: readonly Finding[], project
 			return refusal(scope, "RULE_PROVIDER_UNVERIFIED", "Inspect installed rules and ownership with omp-kit doctor --scope rules --json; do not adopt or overwrite unverified files.");
 	} else if (scope === "policy") {
 		const policy = row("policy");
-		if (!policy || has(policy, "inventory_issue") || has(policy, "project_issue") || strings(policy, "unverified_profiles").length)
+		if (!policy || has(policy, "inventory_issue") || has(policy, "project_issue"))
 			return refusal(scope, "PROFILE_UNVERIFIED", "A profile or project policy is not safely understood; repair will not guess its values.");
-		if (Array.isArray(policy.evidence?.disabled_conflicts) && policy.evidence.disabled_conflicts.length)
+		const conflicts = policy.evidence?.disabled_conflicts;
+		if (Array.isArray(conflicts) && conflicts.some(value => value !== null && typeof value === "object" && "profile" in value && value.profile === "project"))
 			return refusal(scope, "DISABLED_PROVIDER_REFUSED", "A disabled rule might be supplied by a project, builtin or unknown provider; generic consent cannot re-enable it.");
 	} else {
 		const extension = row("extensions");
@@ -45,14 +45,16 @@ function findingRefusal(scope: NamedScope, findings: readonly Finding[], project
 	return null;
 }
 
+
 /** A diagnosis finding is a hint, never authority to edit. The scope planner supplies that authority. */
 export async function planRepair(input: RepairInput): Promise<RepairDecision> {
 	if (!input.scope) return refusal(undefined, "SCOPE_REQUIRED", "Select exactly one named repair scope: rules, policy, extensions or state.");
 	if (!supported.includes(input.scope)) return refusal(input.scope, "UNSUPPORTED_REPAIR_SCOPE", "No bounded reversible repair exists for this component; OMP, JSM, credentials, router and builtin state are not edited.");
 	const scope = input.scope as NamedScope;
 	try {
-		const findings = await diagnose({ root: input.root, home: input.home, project: input.project });
-		const blocked = findingRefusal(scope, findings, input.project);
+		validateNamedApplyPaths({ root: input.root, home: input.home, stateRoot: input.stateRoot });
+		const diagnosed = await diagnose({ root: input.root, home: input.home, project: input.project });
+		const blocked = findingRefusal(scope, diagnosed, input.project);
 		if (blocked) return blocked;
 		const plan = planNamedApply({ root: input.root, home: input.home, stateRoot: input.stateRoot, project: input.project, scope });
 		const result: RepairDecision = Object.freeze({ status: "READY", scope, changes: plan.changes, steps: plan.steps,
@@ -73,7 +75,7 @@ export async function planRepair(input: RepairInput): Promise<RepairDecision> {
 	}
 }
 
-/** Unforgeable in-process plan; no write without explicit consent and the P10 durable receipt. */
+/** Unforgeable in-process plan; consented writes use a mutation receipt or native profile backup. */
 export function applyRepairPlan(plan: RepairDecision, options: { confirmed: true; onBoundary?: ApplyOptions["onBoundary"] }): NamedApplyResult {
 	if (options?.confirmed !== true) throw new Error("CONSENT_REQUIRED");
 	if (plan.status !== "READY") throw new Error("REPAIR_REFUSED");

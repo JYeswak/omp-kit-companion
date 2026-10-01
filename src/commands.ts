@@ -145,11 +145,11 @@ const planApply: readonly Flag[] = [
 ];
 
 const repairData: DataSchema = { type: "object", required: ["overall", "action", "scope", "changes", "steps", "receipt_id"], properties: {
-	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED", "UNCHANGED"] },
+	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED", "UNCHANGED", "PARTIAL"] },
 	scope: { enum: ["rules", "policy", "extensions", "state"] }, changes: { type: "number" },
 	steps: { type: "array", items: { type: "object", required: ["action", "path"], properties: {
-		action: { type: "string" }, path: { type: "string" }, profile: { type: "string" },
-	} } }, receipt_id: { type: ["string", "null"] },
+		action: { type: "string" }, path: { type: "string" }, profile: { type: "string" }, key: { type: "string" }, command: { type: "string" },
+	} } }, receipt_id: { type: ["string", "null"] }, backup_id: { type: ["string", "null"] },
 } };
 
 const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
@@ -169,7 +169,7 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|extensions|router|profile|lsp|project-loading|memory|mcp", description: "Restrict diagnosis to a named component" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp", description: "Restrict diagnosis to a named component; settings reads TTSR keys through native OMP config get per profile" },
 		{ name: "--project", value: "PATH", description: "LSP or project-loading: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory or MCP: inspect an on-disk profile, not effective runtime activation" },
@@ -226,7 +226,7 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
-		{ name: "policy", description: "Opt-in policy for selected existing profiles", usage: "apply policy [--plan|--apply]", flags: [...planApply,
+		{ name: "policy", description: "Per-profile TTSR policy via native OMP config get/set with durable profile backup", usage: "apply policy [--plan|--apply]", flags: [...planApply,
 			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
 			{ name: "--include-default", description: "Include the default profile explicitly" },
 		], example: "omp-kit apply policy --plan --json", runnable: false, mutation: true },

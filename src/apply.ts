@@ -1,4 +1,3 @@
-import { lstatSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { applyExtensions, planExtensions, type ExtensionPlan } from "./apply-extensions.ts";
 import { applyPolicyPlan, planPolicy, type PolicyPlan } from "./apply-policy.ts";
@@ -7,9 +6,9 @@ import { inspectPendingMutations, type ApplyOptions } from "./mutations.ts";
 
 export type NamedScope = "rules" | "policy" | "extensions";
 export type NamedApplyInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope: NamedScope }>;
-export type NamedStep = Readonly<{ action: string; path: string; profile?: string; beforeSha256: string | null; afterSha256: string | null; beforeMode: number | null; afterMode: number | null }>;
+export type NamedStep = Readonly<{ action: string; path: string; profile?: string; key?: string; command?: string; beforeSha256: string | null; afterSha256: string | null; beforeMode: number | null; afterMode: number | null }>;
 export type NamedApplyPlan = Readonly<{ scope: NamedScope; changes: number; steps: readonly NamedStep[] }>;
-export type NamedApplyResult = Readonly<{ status: "APPLIED" | "UNCHANGED"; receiptId: string | null; files: number }>;
+export type NamedApplyResult = Readonly<{ status: "APPLIED" | "UNCHANGED"; receiptId: string | null; backupId: string | null; files: number }>;
 
 type Backing = { input: NamedApplyInput; plan: RulePlan | PolicyPlan | ExtensionPlan };
 const plans = new WeakMap<NamedApplyPlan, Backing>();
@@ -24,13 +23,17 @@ function homeRelative(home: string, path: string): string {
 	return name;
 }
 
-/** Exact, independent scope preview. No subset of a colliding plan is ever applied. */
-export function planNamedApply(input: NamedApplyInput): NamedApplyPlan {
-	if (!(["rules", "policy", "extensions"] as readonly string[]).includes(input.scope)) throw new Error("UNSUPPORTED_REPAIR_SCOPE");
+export function validateNamedApplyPaths(input: Pick<NamedApplyInput, "root" | "home" | "stateRoot">): void {
 	if (![input.root, input.home, input.stateRoot].every(path => isAbsolute(path)) ||
 		inside(input.root, input.stateRoot) || inside(input.stateRoot, input.root) ||
 		inside(input.stateRoot, input.home) || inside(join(input.home, ".omp"), input.stateRoot) ||
 		inside(join(input.home, ".agents"), input.stateRoot)) throw new Error("UNSAFE_PATH");
+}
+
+/** Exact, independent scope preview. No subset of a colliding plan is ever applied. */
+export function planNamedApply(input: NamedApplyInput): NamedApplyPlan {
+	if (!(["rules", "policy", "extensions"] as readonly string[]).includes(input.scope)) throw new Error("UNSUPPORTED_REPAIR_SCOPE");
+	validateNamedApplyPaths(input);
 	if (inspectPendingMutations(input.stateRoot).length) throw new Error("PENDING_RECOVERY");
 	const plan = input.scope === "rules" ? planRules(input) : input.scope === "policy" ?
 		planPolicy({ ...input, includeDefault: true }) : planExtensions({ ...input, includeDefault: true });
@@ -40,11 +43,10 @@ export function planNamedApply(input: NamedApplyInput): NamedApplyPlan {
 	if (input.scope === "rules") steps = (plan as RulePlan).entries.filter(entry => ["install", "update", "retire"].includes(entry.action))
 		.map(entry => ({ action: entry.action, path: entry.path, beforeSha256: entry.beforeSha256, afterSha256: entry.desiredSha256,
 			beforeMode: entry.beforeMode, afterMode: entry.desiredMode }));
-	else if (input.scope === "policy") steps = (plan as PolicyPlan).steps.map(step => {
-		const mode = lstatSync(join(input.home, step.path)).mode & 0o7777;
-		return { action: "update", path: step.path, profile: step.profile,
-			beforeSha256: step.beforeSha256, afterSha256: step.afterSha256, beforeMode: mode, afterMode: mode };
-	});
+	else if (input.scope === "policy") steps = (plan as PolicyPlan).steps.map(step => ({
+		action: "config set", path: step.path, profile: step.profile, key: step.key, command: step.command,
+		beforeSha256: step.beforeSha256, afterSha256: null, beforeMode: step.beforeMode, afterMode: null,
+	}));
 	else {
 		const extension = plan as ExtensionPlan;
 		steps = extension.steps.map(step => {
@@ -78,15 +80,15 @@ export function applyNamedPlan(plan: NamedApplyPlan, options: { confirmed: true;
 		// The P13 chokepoint compares target preimages under its lock; this check also
 		// compares the source bytes, selected profiles and resulting steps.
 		const receipt = applyExtensions(plans.get(fresh)!.plan as ExtensionPlan, { onBoundary: options.onBoundary });
-		return { status: receipt.receiptId ? "APPLIED" : "UNCHANGED", receiptId: receipt.receiptId, files: receipt.files };
+		return { status: receipt.receiptId ? "APPLIED" : "UNCHANGED", receiptId: receipt.receiptId, backupId: null, files: receipt.files };
 	}
 	if (saved.input.scope === "rules") {
 		const receipt = applyRulePlan(saved.plan as RulePlan, { confirmed: true });
-		return { status: receipt.status, receiptId: receipt.id, files: receipt.files };
+		return { status: receipt.status, receiptId: receipt.id, backupId: null, files: receipt.files };
 	}
 	if (saved.input.scope === "policy") {
 		const receipt = applyPolicyPlan(saved.plan as PolicyPlan, { confirmed: true });
-		return { status: receipt.status, receiptId: receipt.id, files: receipt.files };
+		return { status: receipt.status, receiptId: null, backupId: receipt.backupId, files: receipt.files };
 	}
 	throw new Error("INVALID_PLAN");
 }

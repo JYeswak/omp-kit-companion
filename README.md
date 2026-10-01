@@ -1,4 +1,5 @@
 # omp-kit
+## Overview
 
 **Using OMP? Here's what we learned:** a coding agent needs useful reminders at the moment it drifts, not another wall of instructions in every prompt. [oh-my-pi (`omp`)](https://github.com/can1357/oh-my-pi) is a coding agent with tools for working in your project. `omp-kit` is a versioned, local-first companion for an **existing** OMP installation: tested stream-triggered rules plus a CLI to inspect, test, and *optionally* apply them.
 
@@ -159,7 +160,11 @@ After reviewing the rules plan, request only that change and confirm interactive
 "$KIT" audit --json
 ```
 
-Use the receipt ID returned by apply or audit with `"$KIT" why RUN_ID --json`; `"$KIT" undo RUN_ID --yes` requests a guarded restore only when the recorded postimage is unchanged. Rule, policy, and extension application are separate opt-ins; mutations need `--apply` and interactive confirmation or `--yes`. For agents, `--robot --json` returns a versioned JSON envelope without prompting; it does **not** authorize writes.
+Rule and extension applies create mutation receipts; use their receipt ID, or one from `audit`, with `why RUN_ID --json` and `undo RUN_ID --yes`. Policy apply is separate: it reports `backup_id`, not a mutation receipt, and that identifier is not accepted by `why` or `undo`. The durable backup preserves each changed profile's existing config byte-for-byte and records absent configs in its manifest under `<state-root>/policy-backups/<backup_id>`; the kit does not automatically roll it back after a partial native apply.
+
+`apply policy --plan` prints the exact per-profile `omp [--profile NAME] config set ttsr.KEY VALUE` commands. `apply policy --apply --yes` writes only the five keys in the shipped TTSR policy through OMP, backs up profile config before the first write, and verifies each changed key with native `config get`. Named profiles are selected by `--profiles NAME[,NAME]`; the default profile is opt-in with `--include-default` when named profiles exist. Model/provider routing keys are not accepted or changed.
+
+`doctor --scope settings --json` reads every listed profile with OMP's native `config get ttsr.KEY --json` in an isolated copy; named profiles use `omp --profile NAME`. It reports per-key `OK`, `DRIFT` or `UNVERIFIED`. The finding describes stored profile settings, not activation in a running session.
 
 On a fresh HOME, the policy plan refuses until the global managed rules match the release manifest—do not bypass that preflight. An interrupted kit update is partial until rechecked; historical OMP/all receipts remain visible and no automatic OMP rollback is promised.
 
@@ -182,6 +187,7 @@ The plan does not change either component. Applying activates only the selected 
 "$KIT" examples model-roles --json
 "$KIT" examples mcp --json
 "$KIT" doctor --scope memory --json
+"$KIT" doctor --scope settings --json
 "$KIT" doctor --scope lsp --json
 "$KIT" lsp setup --plan --json
 "$KIT" doctor --scope project-loading --project "$PWD" --json
@@ -235,15 +241,15 @@ For classification only, consider two **synthetic, uninstalled** fixture files: 
 
 In the source checkout, edit `rules/*.md` alongside fire and nearby quiet cases in `cases/cases.tsv`. Run `sh scripts/build-manifest.sh --check` and `sh scripts/ladder.sh`; the latter exercises the case gate and isolated live suite and writes local `reports/`, which must never ship. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change workflow, [ROADMAP.md](ROADMAP.md) for what is done, in review and next, and [SKILL.md](SKILL.md) for the source-only operator reference. The installed CLI embeds Bun, but a separately installed OMP launcher with a Bun shebang may still require Bun for its own live process. Source development also needs Bun. Native release support is limited to the platforms certified against stock OMP 18.4.2; other OMP versions are not certified.
 
-## Limits and safety
+## Limitations
 
 The case gate proves registration, whole-payload matches, and prefix behavior; only the isolated live suite checks blocking. OMP profile inspection can migrate settings, so read-only diagnostics do not call a potentially migratory path on the operator profile and label inaccessible effective settings `UNVERIFIED`. Project-local rules may override installed global rules. No CLI command installs OMP or enables policy, extensions, providers, or a model by implication. The source pack does not authenticate cited SHAs, counts, or audit rows; run acceptance commands yourself.
 
 This public source root has no inherited history from the original private checkout; the original repository stays private. Only native-certified archive targets appear in the versioned release index; check the [tagged release assets](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.1) and exact [hero grade](visual/hero-identity-grade.json), which discloses that the original gpt-4o-mini model could not run and names the independent substitute judge. No kit command proves your effective OMP profile safe. Never publish `reports/`, private receipts, tracker exports, or session logs. Refuted hypotheses and conditions for revisiting them are in [NEGATIVE_EVIDENCE.md](NEGATIVE_EVIDENCE.md).
 
-Bug reports and proposals: [CONTRIBUTING.md](CONTRIBUTING.md). Sensitive reports: [SECURITY.md](SECURITY.md).
+## About Contributions
 
-## Who built this
+Please don't take this the wrong way: [CONTRIBUTING.md](CONTRIBUTING.md) welcomes bug reports and focused proposals; a pull request is a proposal, not an automatic merge commitment. The maintainer may independently implement a change after review. Send sensitive reports through [SECURITY.md](SECURITY.md).
 
 Maintained by [JYeswak](https://github.com/JYeswak).
 

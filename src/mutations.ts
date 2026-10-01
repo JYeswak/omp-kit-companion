@@ -100,7 +100,8 @@ function target(root: string, name: string): string {
 	safeDirectory(dirname(path), false, true);
 	return path;
 }
-function fsyncDirectory(path: string): void {
+/** Persist a caller-validated directory's entries after durable file creation or removal. */
+export function fsyncDirectory(path: string): void {
 	const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
 	try { fsyncSync(fd); } finally { closeSync(fd); }
 }
@@ -112,7 +113,8 @@ function writeAll(fd: number, value: Buffer | string): void {
 		offset += written;
 	}
 }
-function writePrivate(path: string, value: Buffer | string): void {
+/** Exclusively create a mode-0600 file and sync its contents and parent directory. */
+export function writePrivate(path: string, value: Buffer | string): void {
 	const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
 	try { fchmodSync(fd, 0o600); writeAll(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
 	fsyncDirectory(dirname(path));
@@ -495,8 +497,8 @@ function observedState(receipt: Receipt): PendingInspection["state"] {
 }
 /** Read-only restart diagnostic. Any pending transaction blocks all new mutations until reconciled. */
 export function inspectPendingMutations(stateRoot: string): PendingInspection[] { return guarded(() => pendingReceipts(stateRoot).map(classify)); }
-
-export type AuditFile = { root: string; name: string; action: "CREATED" | "REPLACED" | "DELETED"; backup: "NONE" | "READY" | "MISSING" | "CORRUPT" };
+/** Create and validate the private root before a durable feature backup is written. */
+export function ensureMutationStateRoot(stateRoot: string): void { guarded(() => safeState(stateRoot, true)); }
 export type AuditStatus = "APPLIED" | "RESTORED" | "UNDO_PARTIAL" | "BEFORE" | "AFTER" |
 	"PARTIAL" | "DRIFT" | "ABORTED_BEFORE" | "ABORTED_AFTER_COMPENSATION" | "COMPLETED_AFTER" | "PENDING" | "RECONCILED";
 export type AuditReport = {
