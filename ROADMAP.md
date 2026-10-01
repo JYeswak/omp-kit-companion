@@ -24,23 +24,24 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | `--version`/`-V`; human findings table; no internal tracker ids in user-facing text | #4 |
 | CI against the latest OMP every 3 hours, one issue per breaking version (`omp-latest.yml`) | #4 |
 | `test --record`, an `omp_drift` finding in status/doctor, and the render-only `examples omp-watch` (launchd/systemd re-test on every OMP update) | #5 |
+| Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
+| Native-certification receipts name the failing command, stages and scenarios | #7 |
+| `health` judges only what a read-only inventory can prove; the rest is listed as `not_judged` and never affects the exit code | #9 |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
-| Native-certification receipts name the failing command, stages and scenarios | #7 |
+| Docs for strangers: 60-second README plus a native-OMP guide checked by `bun test tests/cli/docs.test.ts` | #10 |
 | Rules as a native OMP plugin: repo links/installs as a plugin, precedence + live fire proven by `scripts/plugin-lifecycle.sh` | #14 |
 
 ## Next
 
 1. **Real-HOME journey in CI.** One script runs the README path against a realistic HOME (50k files, edited rules, legacy 0755 state root, a concurrent writer) on macOS and Linux, logging one JSONL line per step. This would have caught every real-machine bug above. Required before the next release.
 2. **Release v0.2.0**, then a regular cadence. v0.1.x binaries cannot update on a real HOME; reinstall with the installer.
-3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. #7 makes the cause visible; the fix follows from the receipts.
+3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. Since #7, receipts name the cause; the first diagnosed case was the live scenario `test-skip-ts-fire` on linux-x64. The fix follows from the receipts.
 5. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-6. **`health` that can pass.** Today `health` exits 1 on every machine, because effective-profile and matcher evidence are structurally unprovable in an inventory. Either it judges only what an inventory can prove, or it goes away.
-7. **Docs for strangers.** A README a new user can follow in 60 seconds, plus a native-OMP guide (`omp ttsr list/test/scan`, `omp plugin`) that CI checks against the latest OMP.
+6. **Capability-preserving context.** After the release: a read-only report of what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders, plus `test --capabilities FILE`, which checks that a declared set of required skills, tools, rules and LSP still resolves after a profile is pruned with OMP's native skill settings. Benchmarks of pruned profiles belong to dedicated benchmark tooling; the kit supplies the capability check they gate on.
 
 ## Parked
 

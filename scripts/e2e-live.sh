@@ -18,6 +18,8 @@
 #        field) instead of building a temp one; plant mode refuses this to protect the checkout
 #        OMP_KIT_PLUGIN_DISABLE_AFTER_LINK=name  disable that plugin right after linking
 #        (planted-negative runs: the live scenario must then NOT block)
+#        OMP_KIT_DEFAULT_TTSR=1 runs omp under its own default TTSR settings instead of
+#        installing the kit policy, so a second run reports policy-sensitive differences.
 set -u
 MODE=full
 case "${1:-}" in
@@ -120,7 +122,11 @@ if [ "$MODE" = plant ]; then
 else
   "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }
 fi
-"$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
+if [ -z "${OMP_KIT_DEFAULT_TTSR:-}" ]; then
+  "$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
+else
+  echo "default TTSR: kit policy not installed; omp runs under its own defaults"
+fi
 printf '[user]\n\temail = e2e@example.invalid\n\tname = e2e\n[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
 # br/bd stubs: a close that gets past the rules must not touch any real beads database.
 for b in br bd; do printf '#!/bin/sh\nexit 0\n' >"$T/bin/$b"; chmod +x "$T/bin/$b"; done

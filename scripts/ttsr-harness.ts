@@ -359,6 +359,7 @@ interface GateReport {
 		payload: { total: number; passed: number };
 		prefix: { total: number; passed: number; quietCases: number; quietPassed: number };
 	};
+	firstFires: { rule: string; line: number; expect: string; g2: string; first_fire: number | null; wire_length: number }[];
 }
 
 async function runGate(rulesDir: string, casesFile: string): Promise<GateReport> {
@@ -407,6 +408,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	const quietCases = cases.filter(c => c.expect === "quiet").length;
 	lines.push("== G2 wire + G3 prefix sweep");
 	let quietPrefixFires = 0;
+	const firstFires: GateReport["firstFires"] = [];
 	for (const c of cases) {
 		const lr = byName.get(c.rule);
 		if (!lr || lr.cls === "always") continue;
@@ -439,6 +441,8 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		);
 		if (!g2ok) failures.push(`G2 ${tag}: wanted ${c.expect}, full payload ${g2 ? "fires" : "is quiet"}: ${show(wire)}`);
 		if (!g3ok) failures.push(`G3 ${tag}: ${g3note}`);
+		firstFires.push({ rule: c.rule, line: c.line, expect: c.expect, g2: g2 ? "fire" : "quiet",
+			first_fire: fired.length > 0 ? Math.min(fired[0] ?? length, length) : null, wire_length: length });
 	}
 	return {
 		failures,
@@ -456,6 +460,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 			payload: { total: cases.length, passed: payloadPassed },
 			prefix: { total: cases.length, passed: prefixPassed, quietCases, quietPassed },
 		},
+		firstFires,
 	};
 }
 
@@ -491,6 +496,7 @@ function structuredGate(rep: GateReport) {
 			},
 		},
 		failures: rep.failures,
+		cases: rep.firstFires,
 	};
 }
 
