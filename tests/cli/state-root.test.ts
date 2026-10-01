@@ -39,6 +39,8 @@ test("a 0755 legacy state root names its mode and the exact repair instead of a 
 	expect(audit.envelope.errors[0].remediation).toContain("omp-kit repair --scope state");
 	expect(run(home, ["update", "--plan", "--version", "9.9.9", "--index", "/abs/i.json", "--archive", "/abs/a.tar"]).envelope.errors[0].code)
 		.toBe("STATE_ROOT_PERMISSIONS");
+	// test is read-only unless --record, which writes into the state root and so is gated like any receipt writer.
+	expect(run(home, ["test", "--record"]).envelope.errors[0].code).toBe("STATE_ROOT_PERMISSIONS");
 });
 
 test("repair --scope state plans without writing, then restores 0700 and leaves legacy contents byte-identical", () => {
