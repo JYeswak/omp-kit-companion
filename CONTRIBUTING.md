@@ -12,7 +12,7 @@ A pull request is a proposal, not an automatic merge commitment. The maintainer 
 
 The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days. A release is:
 
-1. A PR that moves `CHANGELOG.md` "Unreleased" under the new version and updates the README install pin.
+1. A PR that moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
 2. A `vX.Y.Z` tag on that merge commit.
 3. The "Unpublished release candidate" workflow (`release.yml`) run against the tag. It builds the four native archives and certifies each one on its own runner.
 4. Publication of the certified archives and `release-index.json` as a GitHub release, then a fresh-HOME install from the published index.

@@ -91,3 +91,25 @@ Selected-pack testing, paired rule review, and false-fire reduction use
 the existing OMP matcher and the seven-column TSV format in
 `cases/cases.tsv`. Start from the built-in help in each command; the
 native-OMP guide shows the matcher primitives they rest on.
+
+## Rules as a native OMP plugin
+
+The repo itself is an OMP plugin: `package.json` carries the `omp`
+manifest, `rules/` is discovered automatically, and
+`extensions/kit-guard-optin.ts` is the declared extension entry point.
+Link a checkout instead of copying rules by hand:
+
+```sh verified rc=0 contains="omp-kit-companion"
+omp plugin link "$WT" && omp plugin list
+```
+
+```sh verified rc=0 contains="omp-plugins"
+omp ttsr list --json
+```
+
+Native `~/.omp/agent/rules` shadows a same-name plugin rule;
+`omp plugin disable` reactivates a same-name legacy copy under
+`~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves the precedence
+matrix, one live block, the disabled-plugin negative, and clean
+uninstall in an isolated HOME. `apply rules`/`apply extensions` stay
+until the cutover is independently verified.
