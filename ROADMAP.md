@@ -31,6 +31,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 |---|---|
 | Acceptance tests: update postcheck envelope; a rendered-output scan for internal ids | #6 |
 | Native-certification receipts name the failing command, stages and scenarios | #7 |
+| `health` judges only what a read-only inventory can prove; the rest is listed as `not_judged` and never affects the exit code | #9 |
 
 ## Next
 
@@ -39,8 +40,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 3. **Diagnose intermittent native-certification failures.** One target in a run sometimes refuses. #7 makes the cause visible; the fix follows from the receipts.
 4. **Rules as a native OMP plugin.** OMP plugins ship `rules/` natively, so the kit's own copy step can go. In a live proof with the rules delivered only through a linked plugin, 69 of 70 scenarios passed and the planted negative was caught. The one failure is the kit's own `apply policy` assuming `~/.agents/rules`. After the switch, `apply rules`/`apply extensions` are removed and `apply policy` writes through OMP's native config command.
 5. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
-6. **`health` that can pass.** Today `health` exits 1 on every machine, because effective-profile and matcher evidence are structurally unprovable in an inventory. Either it judges only what an inventory can prove, or it goes away.
-7. **Docs for strangers.** A README a new user can follow in 60 seconds, plus a native-OMP guide (`omp ttsr list/test/scan`, `omp plugin`) that CI checks against the latest OMP.
+6. **Docs for strangers.** A README a new user can follow in 60 seconds, plus a native-OMP guide (`omp ttsr list/test/scan`, `omp plugin`) that CI checks against the latest OMP.
 
 ## Parked
 
