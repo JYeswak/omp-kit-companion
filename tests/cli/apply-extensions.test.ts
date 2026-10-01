@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { writeProfileConfig } from "./profile-fixture.ts";
 import { applyExtensions, inspectExtensionGuard, planExtensions } from "../../src/apply-extensions.ts";
-
 const fixtures: string[] = [];
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
@@ -17,11 +17,7 @@ function fixture() {
 	writeFileSync(join(release, "policy", "extensions.json"), JSON.stringify({ extensions: ["kit-guard-optin.ts"], skipProfiles: ["ignored"] }));
 	writeFileSync(join(release, "extensions", "kit-guard-optin.ts"), "export default function guard() {}\n");
 	function profile(name: string, extensions: string[] = []) {
-		const dir = name === "default" ? join(home, ".omp", "agent") : join(home, ".omp", "profiles", name, "agent");
-		mkdirSync(dir, { recursive: true });
-		const path = join(dir, "config.yml");
-		writeFileSync(path, `model: test\nextensions: ${JSON.stringify(extensions)}\n`);
-		return path;
+		return writeProfileConfig(home, name, "model: test\nextensions: " + JSON.stringify(extensions) + "\n", 0o666);
 	}
 	return { workspace, release, home, stateRoot, destination, profile, input: { root: release, home, stateRoot } };
 }

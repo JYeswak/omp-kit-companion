@@ -23,8 +23,7 @@ tools. Command behavior, release limits, and safe first commands live in `README
 4. `sh scripts/build-manifest.sh` to refresh `MANIFEST.tsv`; `--check` must pass.
 5. Only for explicit source-rule deployment, `sh scripts/install.sh --dry-run`, read the plan, then `sh scripts/install.sh`. This does not install the compiled CLI.
 6. `sh scripts/doctor.sh` must exit 0 before claiming the local source deployment is ready.
-   Report a `models` RED separately: it indicates an unresolved profile role or provider,
-   not proof that a rule is broken.
+   It checks the rule pack, TTSR policy, router skills, checkers, and extensions; model/provider routing is outside its scope.
 
 Retiring a rule: move it to `retired/`, add a `retired/REASONS.tsv` row with evidence, rebuild the
 manifest, install (the installer backs up and removes it from the target).
@@ -43,7 +42,7 @@ then without `--dry-run`, then the doctor.
 | `scripts/install.sh [--dry-run] [--target DIR] [--state DIR]` | Refuses a stale manifest; backs up the target to `STATE/backups/<UTC>/`; installs atomically; removes retired rules; lists unmanaged files; idempotent | target, `~/.local/state/omp-kit/` |
 | `scripts/apply-policy.sh [--dry-run] [--profiles all\|p1,p2] [--include-default] [--target DIR]` | Sets `ttsr.enabled`, `repeatMode`, `repeatGap`, `disabledRules` in each profile to `policy/ttsr.json` and reads them back; refuses a profile whose cleared disable would re-enable a rule file still in the target | profile `config.yml` |
 | `scripts/install-extensions.sh [--dry-run]` | Copies each extension in `policy/extensions.json` to `~/.omp/omp-extensions/` (backs up a differing copy) and appends it to every profile's `extensions` list except `skipProfiles`, reading each list back; idempotent | `~/.omp/omp-extensions/`, profile `config.yml` |
-| `scripts/doctor.sh` | Checks target hashes, policy, loaded rules, shadows, router skills, checker selftests, model roles/quota, and extension installation; exit 1 on any RED. Uses omp CLI reads that may migrate settings; back up existing profiles first. | no direct writes; omp CLI may migrate config |
+| `scripts/doctor.sh` | Checks target hashes, policy, loaded rules, shadows, router skills, checker selftests, and extension installation; it does not judge model/provider routing. Exit 1 on any RED. Uses omp CLI reads that may migrate settings; back up existing profiles first. | no direct writes; omp CLI may migrate config |
 | `extensions/kit-guard-optin.ts` | Loads an opted-in repository's own guard when `.omp/kit-guard.json` is present; does not load in other repos and does not duplicate a repository extension. An opted-in guard that cannot load refuses tool calls. | nothing |
 | `checkers/check-claim-discipline.sh`, `checkers/check-readiness.sh` | Checkers the rules point at; `--selftest` passes under macOS `/bin/sh` | nothing |
 

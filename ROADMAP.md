@@ -40,6 +40,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 |---|---|
 | Rule false fires on quoted text (`kit-settings-mutation`, `kit-test-skip`) | #17 |
 | Capability-preserving context: read-only listing-cost report plus `test --capabilities FILE` checked through OMP discovery | #19 |
+| **TTSR policy drift check.** `doctor --scope settings` reads each listed profile’s `ttsr.*` with OMP’s native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them. | #20 |
 | Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
 
 ## Next
@@ -47,7 +48,6 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 1. **Release cadence.** Merged user-visible changes ship within 7 days (CONTRIBUTING, Releases); v0.2.1 carries the plugin route.
 2. **Intermittent native-certification failures.** Diagnosed: every refusal whose receipt names a cause names the live scenario `test-skip-ts-fire`. The kit's rule blocks the write every time; OMP occasionally ends the run instead of continuing the turn when the match lands late in a short tool call. The upstream report is ready to file; no kit gate is relaxed.
 3. **After the plugin route lands in a release:** remove `apply rules`/`apply extensions`, and make `apply policy` write through OMP's native config command.
-4. **TTSR policy drift check.** `doctor --scope settings` reads each listed profile's `ttsr.*` with OMP's native config reader and reports drift. The kit writes only `ttsr.*` and its own extension; local-model routing keys belong to the tools that own them.
 
 ## Parked
 

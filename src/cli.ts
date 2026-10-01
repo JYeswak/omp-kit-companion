@@ -4,9 +4,9 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
-import { applyPolicyPlan, planPolicy } from "./apply-policy.ts";
+import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
-import { applyRepairPlan, planDeepDoctor, planRepair } from "./repair.ts";
+import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
@@ -300,6 +300,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	omp: ["omp"],
 	rules: ["installed_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
+	settings: ["policy"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
@@ -328,17 +329,20 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			remediation: "Run an installed omp-kit executable with an absolute HOME; no profile or rule data was read.",
 		}], verification: "UNVERIFIED" };
 	}
-	let ompPath: string | undefined;
+	let ompPath: string | undefined, ompLauncher: string | undefined;
 	try {
 		const identity = resolveOmpIdentity(process.env);
 		for (const directory of (process.env.PATH ?? "").split(delimiter)) {
 			const candidate = resolve(directory || ".", "omp");
 			try {
-				if (realpathSync(candidate) === identity.launcher) { ompPath = candidate; break; }
+				if (realpathSync(candidate) === identity.launcher) { ompPath = candidate; ompLauncher = identity.launcher; break; }
 			} catch { /* The next PATH entry may contain the validated launcher. */ }
 		}
 	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
-	const allFindings = await diagnose({ root, home, project: process.cwd(), ...(ompPath ? { ompPath } : {}) });
+	const diagnosedFindings = await diagnose({ root, home, project: process.cwd(), ...(ompPath ? { ompPath } : {}) });
+	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
+		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
+	const allFindings = nativeSettings ? [...diagnosedFindings.filter(item => item.component !== "policy"), nativeSettings] : diagnosedFindings;
 	const ompFinding = allFindings.find((item) => item.component === "omp");
 	const ompEvidence = ompFinding?.evidence;
 	const availability = ompEvidence?.availability;
@@ -854,56 +858,77 @@ function policyCommand(request: ParsedCommand): CliResult {
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
 	const selected = request.flags.get("--profiles");
-	let profiles: "all" | string[] = "all";
-	if (typeof selected === "string" && selected !== "all") {
-		profiles = selected.split(",");
-		if (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
-			new Set(profiles).size !== profiles.length)
-			return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
-				"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
-	}
+	const profiles: "all" | string[] | undefined = typeof selected === "string" ? selected === "all" ? "all" : selected.split(",") : undefined;
+	if (profiles !== undefined && profiles !== "all" && (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+		new Set(profiles).size !== profiles.length))
+		return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
+			"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
 	try {
-		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profiles,
-			includeDefault: request.flags.has("--include-default") });
-		const steps = plan.steps.map(step => ({ profile: step.profile, path: step.path }));
-		const data = { overall: plan.blockedProfiles.length ? "FAIL" : "UNVERIFIED", action: "PLAN",
-			profiles: plan.profiles, steps, blocked_profiles: plan.blockedProfiles,
-			receipt_id: null as string | null };
+		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(profiles === undefined ? {} : { profiles }), includeDefault: request.flags.has("--include-default") });
+		const data = { overall: plan.blockedProfiles.length ? "FAIL" : "UNVERIFIED", action: "PLAN", profiles: plan.profiles,
+			steps: plan.steps.map(step => ({ profile: step.profile, path: step.path, key: "ttsr." + step.key, command: step.command })),
+			blocked_profiles: plan.blockedProfiles, backup_id: null as string | null };
 		if (plan.blockedProfiles.length) return { code: 2, data, errors: [{
 			code: "DISABLED_RULE_REFUSED", message: "Selected profiles contain disabled names that policy would re-enable",
 			remediation: "Keep disabled names unchanged; generic --yes cannot authorize a re-enable.",
 		}], verification: "UNVERIFIED" };
 		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
 		const result = applyPolicyPlan(plan, { confirmed: true });
-		return { code: 0, data: { ...data, action: result.status, receipt_id: result.id },
+		return { code: 0, data: { ...data, action: result.status, backup_id: result.backupId },
 			verification: "UNVERIFIED" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
 		const code = message.split(":")[0] ?? "";
-		if (code === "PENDING_RECOVERY" || code === "MUTATION_FAILED")
-			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+		if (code === "PROFILE_LIST_UNVERIFIED") return refusal(code, "Optional TTSR profile list is invalid or unsafe",
+			"Fix XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json (default: $HOME/.config/omp-kit/ttsr-profiles.json), or pass explicit --profiles.");
+
+		if (code === "POLICY_APPLY_PARTIAL") {
+			const [, backupId, profile, key] = message.split(":");
+			return { code: 1, data: { overall: "UNVERIFIED", action: "PARTIAL", backup_id: backupId ?? null, failed_profile: profile ?? null, failed_key: key ?? null }, errors: [{
+				code, message: "Native policy apply did not complete; the original profile config is backed up under backup_id " + (backupId ?? "unknown"),
+				remediation: "Inspect the named backup and each native TTSR key; do not retry until readback and profile state are reconciled.",
+			}], verification: "UNVERIFIED" };
+		}
+		if (code === "PENDING_RECOVERY" || code === "MUTATION_FAILED") return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
 				code: "PARTIAL_APPLY", message: "Policy apply may have left a durable pending receipt",
 				remediation: "Inspect audit and verify exact postimages before another write; no rollback is implied.",
 			}], verification: "UNVERIFIED" };
-		if (code === "GLOBAL_PREFLIGHT_FAILED") {
-			const violations = message.slice("GLOBAL_PREFLIGHT_FAILED: ".length).split(", ")
-				.filter(path => /^\.agents\/rules\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(path));
-			return { code: 2, data: { overall: "FAIL", violations }, errors: [{
-				code, message: "Global managed rules do not match the release manifest or retirement set",
-				remediation: "Inspect the named relative rule paths, restore the expected global inventory, then replan.",
-			}], verification: "UNVERIFIED" };
-		}
 		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "UNSAFE_PROJECT",
 			"MISSING_PROFILE", "UNRECOGNIZED_PROFILE", "UNRECOGNIZED_PROFILE_CONFIG", "UNRECOGNIZED_DISABLED_RULES",
+			"PROFILE_INVENTORY_UNVERIFIED", "UNVERIFIED_PROFILE", "NATIVE_CONFIG_UNAVAILABLE", "NATIVE_CONFIG_RESULT_INVALID", "OMP_CONFIG_UNAVAILABLE", "OMP_IDENTITY_MISMATCH",
 			"INVALID_POLICY", "INVALID_PROFILE_SELECTION", "DISABLED_RULE_REFUSED", "FRESH_PLAN", "INVALID_PLAN",
 			"INSUFFICIENT_SPACE", "LOCK_BUSY"];
 		return refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
 			"Policy plan or apply refused without claiming a completed change",
-			"Inspect the global manifest, selected profile configs and disabled rules, then replan.");
+			"Inspect the declared TTSR policy, selected profile configs and disabled rules, then replan.");
 	}
 }
 
 registerCommandHandler("apply policy", policyCommand);
+
+function repairPlanData(decision: Extract<RepairDecision, { status: "READY" }>) {
+	return { overall: "UNVERIFIED", scope: decision.scope, action: "PLAN", changes: decision.changes,
+		steps: decision.steps.map(({ action, path, profile, key, command }) => ({
+			action, path, ...(profile ? { profile } : {}), ...(key ? { key } : {}), ...(command ? { command } : {}),
+		})), receipt_id: null as string | null, backup_id: null as string | null };
+}
+
+function repairApplyFailure(error: unknown, data: ReturnType<typeof repairPlanData>): CliResult | null {
+	const message = error instanceof Error ? error.message : "";
+	const code = message.split(":")[0] ?? "";
+	if (code === "POLICY_APPLY_PARTIAL") {
+		const [, backupId] = message.split(":");
+		return { code: 1, data: { ...data, action: "PARTIAL", backup_id: backupId ?? null }, errors: [{
+			code, message: "Native policy repair did not complete; backup_id " + (backupId ?? "unknown"),
+			remediation: "Inspect backup manifest and read back every selected TTSR key before retrying.",
+		}], verification: "UNVERIFIED" };
+	}
+	if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code)) return { code: 1, data: { ...data, action: "PARTIAL" }, errors: [{
+		code: "PARTIAL_APPLY", message: "Repair may have a durable pending receipt",
+		remediation: "Run omp-kit audit --json and reconcile its postimages before another repair; no rollback is implied.",
+	}], verification: "UNVERIFIED" };
+	return null;
+}
 
 async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
@@ -929,32 +954,23 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 		}], verification: "UNVERIFIED" };
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
-	// --scope state is handled above.
-	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(),
-		...(typeof scope === "string" ? { scope } : {}) });
+	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(typeof scope === "string" ? { scope } : {}) });
 	if (decision.status === "REFUSED") return { code: 2,
 		data: { overall: "UNVERIFIED", scope: decision.scope, action: "REFUSED" },
 		errors: [{ code: decision.refusal.code, message: "No bounded repair is authorized for this state",
 			remediation: decision.refusal.reason }], verification: "UNVERIFIED" };
-	const steps = decision.steps.map(({ action, path, profile }) => ({
-		action, path, ...(profile ? { profile } : {}),
-	}));
-	const data = { overall: "UNVERIFIED", scope: decision.scope, action: "PLAN",
-		changes: decision.changes, steps, receipt_id: null as string | null };
+	const data = repairPlanData(decision);
 	if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
 	try {
 		const result = applyRepairPlan(decision, { confirmed: true });
-		return { code: 0, data: { ...data, action: result.status, receipt_id: result.receiptId },
+		return { code: 0, data: { ...data, action: result.status, receipt_id: result.receiptId, backup_id: result.backupId },
 			verification: "UNVERIFIED" };
 	} catch (error) {
+		const failure = repairApplyFailure(error, data);
+		if (failure) return failure;
 		const code = error instanceof Error ? error.message.split(":")[0] ?? "" : "";
-		if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code))
-			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
-				code: "PARTIAL_APPLY", message: "Repair may have a durable pending receipt",
-				remediation: "Run omp-kit audit --json and reconcile its postimages before another repair; no rollback is implied.",
-			}], verification: "UNVERIFIED" };
 		const safe = ["FRESH_PLAN", "INVALID_PLAN", "UNSAFE_PATH", "STATE_UNSAFE", "LOCK_BUSY",
-			"RULE_COLLISION", "UNMANAGED_EXTENSION_COLLISION", "DISABLED_RULE_REFUSED"];
+			"RULE_COLLISION", "UNMANAGED_EXTENSION_COLLISION", "DISABLED_RULE_REFUSED", "PROFILE_UNVERIFIED", "UNVERIFIED_PROFILE", "NATIVE_CONFIG_UNAVAILABLE", "NATIVE_CONFIG_RESULT_INVALID"];
 		return refusal(safe.includes(code) ? code : "REPAIR_PLAN_FAILED",
 			"Selected repair refused without claiming completion",
 			"Inspect the named scope and private receipts, then run omp-kit repair --scope NAME --plan --json again.");
