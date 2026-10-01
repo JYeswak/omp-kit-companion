@@ -273,13 +273,18 @@ test("compiled named repair plans without consent, applies once, and undoes exac
 		cwd: f.workspace, stdout: "pipe", stderr: "pipe",
 	});
 	expect(build.exitCode, build.stderr.toString()).toBe(0);
-	const run = (args: string[]) => {
+	const run = (args: string[], extraEnv: Record<string, string> = {}) => {
 		const result = Bun.spawnSync([binary, ...args, "--json"], {
-			cwd: f.workspace, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: f.workspace },
+			cwd: f.workspace, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: f.workspace, ...extraEnv },
 			stdout: "pipe", stderr: "pipe",
 		});
 		return { code: result.exitCode, envelope: JSON.parse(result.stdout.toString()) };
 	};
+	const invalidState = run(["repair", "--scope", "rules", "--plan"], { XDG_STATE_HOME: "relative-state" });
+	expect(invalidState.code).toBe(2);
+	expect(invalidState.envelope.errors[0].code).toBe("INVALID_STATE_ROOT");
+	expect(snapshot(f.home)).toEqual(before);
+	expect(existsSync(join(f.workspace, "relative-state"))).toBe(false);
 	const capabilities = run(["capabilities"]);
 	expect(capabilities.code).toBe(0);
 	const repair = capabilities.envelope.data.commands.find((command: { name: string }) => command.name === "repair");

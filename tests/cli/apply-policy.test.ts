@@ -49,7 +49,7 @@ function seedProfile(home: string, name: string, values: Record<string, unknown>
 	return writeProfileConfig(home, name, YAML.stringify({ model: "owned-by-user", ttsr: values }), 0o600);
 }
 const policyValues = { enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] };
-function fixture() {
+function fixture(options: { legacyRules?: boolean } = {}) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
 	const workspace = mkdtempSync(join(base, "p12-policy-native-"));
@@ -60,23 +60,28 @@ function fixture() {
 	mkdirSync(join(root, "rules"), { recursive: true });
 	mkdirSync(join(root, "retired"));
 	mkdirSync(join(root, "policy"));
-	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
+	if (options.legacyRules !== false) {
+		const legacyRules = join(home, ".agents", "rules");
+		mkdirSync(legacyRules, { recursive: true });
+		writeFileSync(join(legacyRules, "managed.md"), body);
+	}
 	mkdirSync(project);
 	writeFileSync(join(root, "rules", "managed.md"), body);
-	writeFileSync(join(home, ".agents", "rules", "managed.md"), body);
 	writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nmanaged\t${digest}\talways\taaaaaaa\n`);
 	writeFileSync(join(root, "policy", "ttsr.json"), JSON.stringify(policyValues));
 	return { workspace, root, home, project, input: { root, home, project, ompPath: nativeOmp, stateRoot: join(home, ".local", "state", "omp-kit") } };
 }
 afterEach(() => { for (const path of fixtures.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-nativeTest("global rule drift refuses native profile planning without creating policy state", () => {
-	const f = fixture();
-	const configPath = seedProfile(f.home, "work", policyValues);
+nativeTest("policy planning is independent of the legacy ~/.agents/rules tree", () => {
+	const f = fixture({ legacyRules: false });
+	const configPath = seedProfile(f.home, "work", { ...policyValues, enabled: false });
 	const before = readFileSync(configPath);
-	writeFileSync(join(f.home, ".agents", "rules", "managed.md"), "changed by another owner\n");
-	expect(() => planPolicy({ ...f.input, profiles: ["work"] })).toThrow(/GLOBAL_PREFLIGHT_FAILED/);
+	const plan = planPolicy({ ...f.input, profiles: ["work"] });
+	expect(plan.steps.map(step => step.key)).toEqual(["enabled"]);
+	expect(plan.steps[0]?.command).toBe("omp --profile work config set ttsr.enabled true");
 	expect(readFileSync(configPath)).toEqual(before);
+	expect(existsSync(join(f.home, ".agents", "rules"))).toBe(false);
 	expect(existsSync(f.input.stateRoot)).toBe(false);
 });
 
@@ -150,14 +155,79 @@ nativeTest("compiled apply policy exposes native plan commands and a backup on c
 	expect((YAML.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>).model).toBe("owned-by-user");
 });
 
-nativeTest("apply rechecks global rule inventory and refuses a stale native policy plan", () => {
+nativeTest("pre-write native profile drift preserves FRESH_PLAN instead of partial apply", () => {
+	const f = fixture();
+	seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	const plan = planPolicy({ ...f.input, profiles: ["work"] });
+	expect(plan.steps.map(step => step.key)).toEqual(["enabled"]);
+	const injectedMarker = join(f.workspace, "external-native-writer");
+	const policySetMarker = join(f.workspace, "policy-native-set");
+	const originalSpawnSync = Bun.spawnSync;
+	let injected = false;
+	let policySetStarted = false;
+	Bun.spawnSync = (args: string[], options?: { env?: Record<string, string>; cwd?: string; stdin?: string; stdout?: string; stderr?: string }) => {
+		const isWorkProfile = args[0] === nativeOmp && args[1] === "--profile" && args[2] === "work";
+		if (!injected && options?.env?.HOME === f.home && isWorkProfile && args[3] === "config" && args[4] === "get" && args[5] === "ttsr.enabled") {
+			const externalWrite = originalSpawnSync([nativeOmp, "--profile", "work", "config", "set", "ttsr.enabled", "true", "--json"], options);
+			if (externalWrite.exitCode !== 0) throw new Error("real OMP external profile write failed: " + externalWrite.stderr.toString());
+			writeFileSync(injectedMarker, "external profile write observed\n");
+			injected = true;
+		} else if (options?.env?.HOME === f.home && isWorkProfile && args[3] === "config" && args[4] === "set") {
+			policySetStarted = true;
+			writeFileSync(policySetMarker, "policy set started\n");
+		}
+		return originalSpawnSync(args, options);
+	};
+	try {
+		expect(() => applyPolicyPlan(plan, { confirmed: true })).toThrow(/FRESH_PLAN/);
+	} finally {
+		Bun.spawnSync = originalSpawnSync;
+	}
+	expect(injected).toBe(true);
+	expect(existsSync(injectedMarker)).toBe(true);
+	expect(policySetStarted).toBe(false);
+	expect(existsSync(policySetMarker)).toBe(false);
+	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.enabled")).toBe(true);
+});
+
+nativeTest("post-write native policy drift remains partial and retains the backup identity", () => {
+	const f = fixture();
+	seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	const plan = planPolicy({ ...f.input, profiles: ["work"] });
+	expect(plan.steps.map(step => step.key)).toEqual(["enabled"]);
+	const originalSpawnSync = Bun.spawnSync;
+	let policySetReturned = false;
+	let driftInjected = false;
+	Bun.spawnSync = (args: string[], options?: { env?: Record<string, string>; cwd?: string; stdin?: string; stdout?: string; stderr?: string }) => {
+		const isWorkProfile = args[0] === nativeOmp && args[1] === "--profile" && args[2] === "work" && options?.env?.HOME === f.home;
+		if (policySetReturned && !driftInjected && isWorkProfile && args[3] === "config" && args[4] === "get" && args[5] === "ttsr.enabled") {
+			const externalWrite = originalSpawnSync([nativeOmp, "--profile", "work", "config", "set", "ttsr.enabled", "false", "--json"], options);
+			if (externalWrite.exitCode !== 0) throw new Error("real OMP external profile write failed: " + externalWrite.stderr.toString());
+			driftInjected = true;
+		}
+		const result = originalSpawnSync(args, options);
+		if (isWorkProfile && args[3] === "config" && args[4] === "set" && args[5] === "ttsr.enabled" && result.exitCode === 0)
+			policySetReturned = true;
+		return result;
+	};
+	let failure = "";
+	try { applyPolicyPlan(plan, { confirmed: true }); }
+	catch (error) { failure = error instanceof Error ? error.message : String(error); }
+	finally { Bun.spawnSync = originalSpawnSync; }
+	expect(policySetReturned).toBe(true);
+	expect(driftInjected).toBe(true);
+	expect(failure).toMatch(/^POLICY_APPLY_PARTIAL:[0-9a-f-]+:work:enabled$/);
+	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.enabled")).toBe(false);
+});
+
+nativeTest("profile config edit after planning refuses without overwriting it", () => {
 	const f = fixture();
 	const configPath = seedProfile(f.home, "work", { ...policyValues, enabled: false });
-	const before = readFileSync(configPath);
 	const plan = planPolicy({ ...f.input, profiles: ["work"] });
-	writeFileSync(join(f.home, ".agents", "rules", "managed.md"), "changed after plan\n");
+	writeFileSync(configPath, YAML.stringify({ model: "operator-updated", ttsr: { ...policyValues, enabled: false } }));
+	const external = readFileSync(configPath);
 	expect(() => applyPolicyPlan(plan, { confirmed: true })).toThrow(/FRESH_PLAN/);
-	expect(readFileSync(configPath)).toEqual(before);
+	expect(readFileSync(configPath)).toEqual(external);
 	expect(existsSync(f.input.stateRoot)).toBe(false);
 });
 nativeTest("doctor settings reads native per-profile values and reports drift plus unsafe profiles", () => {

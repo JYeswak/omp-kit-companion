@@ -892,14 +892,6 @@ function policyCommand(request: ParsedCommand): CliResult {
 				code: "PARTIAL_APPLY", message: "Policy apply may have left a durable pending receipt",
 				remediation: "Inspect audit and verify exact postimages before another write; no rollback is implied.",
 			}], verification: "UNVERIFIED" };
-		if (code === "GLOBAL_PREFLIGHT_FAILED") {
-			const violations = message.slice("GLOBAL_PREFLIGHT_FAILED: ".length).split(", ")
-				.filter(path => /^\.agents\/rules\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(path));
-			return { code: 2, data: { overall: "FAIL", violations }, errors: [{
-				code, message: "Global managed rules do not match the release manifest or retirement set",
-				remediation: "Inspect the named relative rule paths, restore the expected global inventory, then replan.",
-			}], verification: "UNVERIFIED" };
-		}
 		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "UNSAFE_PROJECT",
 			"MISSING_PROFILE", "UNRECOGNIZED_PROFILE", "UNRECOGNIZED_PROFILE_CONFIG", "UNRECOGNIZED_DISABLED_RULES",
 			"PROFILE_INVENTORY_UNVERIFIED", "UNVERIFIED_PROFILE", "NATIVE_CONFIG_UNAVAILABLE", "NATIVE_CONFIG_RESULT_INVALID", "OMP_CONFIG_UNAVAILABLE", "OMP_IDENTITY_MISMATCH",
@@ -907,7 +899,7 @@ function policyCommand(request: ParsedCommand): CliResult {
 			"INSUFFICIENT_SPACE", "LOCK_BUSY"];
 		return refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
 			"Policy plan or apply refused without claiming a completed change",
-			"Inspect the global manifest, selected profile configs and disabled rules, then replan.");
+			"Inspect the declared TTSR policy, selected profile configs and disabled rules, then replan.");
 	}
 }
 
@@ -959,6 +951,8 @@ async function repairCommand(request: ParsedCommand): Promise<CliResult> {
 			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
 			remediation: "Run the compiled kit release with an absolute HOME; no repair was attempted.",
 		}], verification: "UNVERIFIED" };
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
 	const decision = await planRepair({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(typeof scope === "string" ? { scope } : {}) });
 	if (decision.status === "REFUSED") return { code: 2,
 		data: { overall: "UNVERIFIED", scope: decision.scope, action: "REFUSED" },

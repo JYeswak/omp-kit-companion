@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { readManifest, type Finding } from "./diagnostics.ts";
+import { type Finding } from "./diagnostics.ts";
 import { ensureMutationStateRoot, fsyncDirectory, inspectPendingMutations, writePrivate, type Image } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runtimeTempRoot } from "./runtime.ts";
@@ -78,43 +78,6 @@ function requirePolicy(root: string): { value: PolicySettings; digest: string } 
 		!["discard", "keep"].includes(String(value.contextMode)) || !Array.isArray(value.disabledRules) ||
 		!value.disabledRules.every((name: unknown) => typeof name === "string" && ruleName.test(name))) fail("INVALID_POLICY");
 	return { value: value as PolicySettings, digest: source.image.sha256 };
-}
-function globalPreflight(root: string, home: string): string {
-	const manifest = readManifest(root);
-	if (manifest.error) fail("SOURCE_INVALID");
-	const retiredDir = join(root, "retired");
-	if (!safeDirectory(retiredDir)) fail("SOURCE_INVALID");
-	const retired: string[] = [];
-	for (const entry of readdirSync(retiredDir).sort()) {
-		if (!entry.endsWith(".md")) continue;
-		const name = entry.slice(0, -3);
-		if (!ruleName.test(name) || manifest.rules.some(rule => rule.name === name) || !optionalFile(join(retiredDir, entry))) fail("SOURCE_INVALID");
-		retired.push(name);
-	}
-	const target = join(home, ".agents", "rules");
-	const violations: string[] = [];
-	const installed = new Map<string, string>();
-	if (!safeDirectory(target, true)) {
-		for (const rule of manifest.rules) violations.push(`.agents/rules/${rule.name}.md`);
-	} else {
-		for (const rule of manifest.rules) {
-			const path = `.agents/rules/${rule.name}.md`;
-			let actual: FileImage | null = null;
-			try { actual = optionalFile(join(target, `${rule.name}.md`)); }
-			catch { violations.push(path); continue; }
-			if (!actual || actual.image.sha256 !== rule.sha256) violations.push(path);
-			installed.set(rule.name, actual?.image.sha256 ?? "missing");
-		}
-		for (const name of retired) {
-			const path = `.agents/rules/${name}.md`;
-			try { if (optionalFile(join(target, `${name}.md`))) violations.push(path); }
-			catch { violations.push(path); }
-		}
-	}
-	if (violations.length) fail("GLOBAL_PREFLIGHT_FAILED", violations);
-	const release = optionalFile(join(root, "MANIFEST.tsv"));
-	if (!release) fail("SOURCE_INVALID");
-	return hash(Buffer.from(JSON.stringify({ manifest: release.image.sha256, retired, installed: [...installed].sort() })));
 }
 function operatorProfileList(home: string, configHomeValue?: string): string[] | null {
 	const configHome = configHomeValue ?? join(home, ".config");
@@ -354,7 +317,6 @@ export function planPolicy(input: PolicyInput): PolicyPlan {
 	if (home === sep || root === home || !safeDirectory(root) || !safeDirectory(home)) fail("UNSAFE_PATH");
 	if (input.project && !safeDirectory(absolute(input.project))) fail("UNSAFE_PROJECT");
 	const source = requirePolicy(root);
-	const inventory = globalPreflight(root, home);
 	const profiles = selectedProfiles(input);
 	const ompPath = policyOmpPath(input.ompPath);
 	if (!isAbsolute(ompPath)) fail("OMP_CONFIG_UNAVAILABLE");
@@ -367,7 +329,7 @@ export function planPolicy(input: PolicyInput): PolicyPlan {
 		if (result.blockedProfile) blockedProfiles.push(result.blockedProfile);
 	}
 	const plan: PolicyPlan = Object.freeze({ scope: "policy", profiles: Object.freeze(profiles.map(profile => profile.name)), steps: Object.freeze(steps), blockedProfiles: Object.freeze(blockedProfiles) });
-	const signature = hash(Buffer.from(JSON.stringify({ source: source.digest, inventory, settings,
+	const signature = hash(Buffer.from(JSON.stringify({ source: source.digest, settings,
 		profiles: profiles.map(profile => [profile.name, profile.path, profile.file?.image ?? null]) })));
 	privatePlans.set(plan, { input: { ...input, ompPath, stateRoot }, signature, profiles });
 	return plan;
@@ -392,13 +354,14 @@ function changedPolicyProfiles(plan: PolicyPlan, profiles: readonly PolicyConfig
 	return affected;
 }
 
-type NativePolicyApplyContext = { backupId: string; home: string; ompPath: string; scratch: string; profiles: Map<string, PolicyConfig>; currentImages: Map<string, FileImage | null> };
+type NativePolicyApplyContext = { backupId: string; home: string; ompPath: string; scratch: string; profiles: Map<string, PolicyConfig>; currentImages: Map<string, FileImage | null>; writeStarted: boolean };
 
 function applyNativePolicyStep(step: PolicyStep, profile: PolicyConfig, context: NativePolicyApplyContext): void {
 	try {
 		if (!sameFileImage(optionalFile(profile.path), context.currentImages.get(profile.name) ?? null)) fail("FRESH_PLAN");
 		const before = readNativeValue(runNativeConfig(context.ompPath, context.home, profile.name, "get", step.key, undefined, context.scratch), step.key);
 		if (before.issue || JSON.stringify(before.value) !== JSON.stringify(step.beforeValue)) fail("FRESH_PLAN");
+		context.writeStarted = true;
 		const setResult = readNativeValue(runNativeConfig(context.ompPath, context.home, profile.name, "set", step.key, encodePolicyValue(step.value), context.scratch), step.key);
 		if (setResult.issue || JSON.stringify(setResult.value) !== JSON.stringify(step.value)) fail("NATIVE_CONFIG_SET_FAILED");
 		const readback = readNativeValue(runNativeConfig(context.ompPath, context.home, profile.name, "get", step.key, undefined, context.scratch), step.key);
@@ -406,7 +369,10 @@ function applyNativePolicyStep(step: PolicyStep, profile: PolicyConfig, context:
 		const afterImage = optionalFile(profile.path);
 		if (!afterImage) fail("POLICY_READBACK_FAILED");
 		context.currentImages.set(profile.name, afterImage);
-	} catch { throw new Error("POLICY_APPLY_PARTIAL:" + context.backupId + ":" + step.profile + ":" + step.key); }
+	} catch (error) {
+		if (!context.writeStarted) throw error;
+		throw new Error("POLICY_APPLY_PARTIAL:" + context.backupId + ":" + step.profile + ":" + step.key);
+	}
 }
 
 function applyNativePolicySteps(plan: PolicyPlan, context: NativePolicyApplyContext): number {
@@ -436,8 +402,9 @@ export function applyPolicyPlan(plan: PolicyPlan, options: { confirmed: true }):
 	const scratch = join(stateRoot, "policy-backups", backupId);
 	try { for (const name of ["project", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"]) mkdirSync(join(scratch, name), { mode: 0o700 }); }
 	catch { throw new Error("POLICY_APPLY_PARTIAL:" + backupId + ":setup:scratch"); }
-	const context: NativePolicyApplyContext = { backupId, home, ompPath, scratch, profiles: new Map(prepared.profiles.map(profile => [profile.name, profile])),
-		currentImages: new Map(originals.map(profile => [profile.name, profile.file])) };
+	const context: NativePolicyApplyContext = { backupId, home, ompPath, scratch,
+		profiles: new Map(prepared.profiles.map(profile => [profile.name, profile])),
+		currentImages: new Map(originals.map(profile => [profile.name, profile.file])), writeStarted: false }
 	const files = applyNativePolicySteps(plan, context);
 	return { status: "APPLIED", backupId, files, keys: plan.steps.length };
 }

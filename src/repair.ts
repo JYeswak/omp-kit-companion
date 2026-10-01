@@ -68,8 +68,6 @@ export async function planRepair(input: RepairInput): Promise<RepairDecision> {
 				"Inspect the named collision with omp-kit doctor --json; resolve ownership manually before replanning." :
 			code === "UNSAFE_PATH" || code === "STATE_UNSAFE" ?
 				"Select a private receipt directory outside the release and managed paths, resolve unsafe links, then replan." :
-			code === "GLOBAL_PREFLIGHT_FAILED" ?
-				"Run omp-kit apply rules --plan --json; resolve missing or retired global rule files before policy repair." :
 				"Inspect omp-kit doctor --json and the selected scope's read-only plan; no writes were authorized.";
 		return refusal(scope, code, action);
 	}
