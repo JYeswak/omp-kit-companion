@@ -195,6 +195,18 @@ The deep route requires the supported OMP launcher, Node, Git, and the built-in 
 
 These versioned recipes **render only**. Copy one manually into a **new**, operator-owned named profile after confirming the name does not collide; never merge into an existing or default profile. The memory-off recipe disables memory. The separate Mnemopi recipe disables automatic retain/recall and chooses per-project storage, but manual retain can still store private text; activation and effective runtime state remain unverified until safely observed. Model-role choices have no personal IDs, backend fallbacks, subscription assumptions, or automatic login. The MCP recipe only describes connecting an existing local server; it neither installs a server nor supplies credentials. LSP setup inventories the local route without starting servers. The project-loading preflight inventories startup inputs before opening OMP in that checkout; it cannot prove an extension harmless. `doctor --scope memory` reports configured readiness, not proof that private memory is free of secrets. Deep LSP probing and private-memory-store auditing are not certified installed workflows.
 
+### Keeping up with OMP
+
+OMP releases often, and updaters such as UCA, `npm update -g` or `bun update -g` install new versions unattended. `omp-kit test --record` saves the verdict and the tested OMP (version and launcher hash) in the private state root. `status` and `doctor` then report an `omp_drift` finding: OK while the recorded test passed on the current OMP, DEGRADED once OMP changes or the last recorded test failed. Plain `omp-kit test` stays read-only and records nothing.
+
+To re-test after every update, render a watcher and install it yourself:
+
+```sh
+"$KIT" examples omp-watch --json   # launchd agent (macOS) and systemd .path/.service pair (Linux)
+```
+
+It watches OMP's `package.json`, runs `omp-kit test --record` when that file changes, and posts a desktop notification only when the test does not pass. Rendering installs nothing; the output lists install and uninstall commands. The job calls the `omp-kit` launcher on your PATH, so it keeps working across kit updates. A passing re-test proves the shipped pack on the new OMP; it does not stop an updater from installing a breaking OMP.
+
 ## Native OMP first
 
 Before reaching for kit rules, use what OMP already ships. The recorded command probes below used stock OMP **18.4.3** with a disposable HOME. That historical run saw 27 installed rules and plugin-directory warnings; neither the inventory count nor a fresh-HOME warning is a compatibility requirement. Those observations do not certify 18.4.4 or any other installation: record the selected version and check its actual behavior separately. Interactive-only examples are identified below.
