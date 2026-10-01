@@ -221,7 +221,7 @@ For classification only, consider two **synthetic, uninstalled** fixture files: 
 
 ## Development and tests
 
-In the source checkout, edit `rules/*.md` alongside fire and nearby quiet cases in `cases/cases.tsv`. Run `sh scripts/build-manifest.sh --check` and `sh scripts/ladder.sh`; the latter exercises the case gate and isolated live suite and writes local `reports/`, which must never ship. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change workflow and [SKILL.md](SKILL.md) for the source-only operator reference. The installed CLI embeds Bun, but a separately installed OMP launcher with a Bun shebang may still require Bun for its own live process. Source development also needs Bun. Native release support is limited to the platforms certified against stock OMP 18.4.2; other OMP versions are not certified.
+In the source checkout, edit `rules/*.md` alongside fire and nearby quiet cases in `cases/cases.tsv`. Run `sh scripts/build-manifest.sh --check` and `sh scripts/ladder.sh`; the latter exercises the case gate and isolated live suite and writes local `reports/`, which must never ship. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change workflow, [ROADMAP.md](ROADMAP.md) for what is done, in review and next, and [SKILL.md](SKILL.md) for the source-only operator reference. The installed CLI embeds Bun, but a separately installed OMP launcher with a Bun shebang may still require Bun for its own live process. Source development also needs Bun. Native release support is limited to the platforms certified against stock OMP 18.4.2; other OMP versions are not certified.
 
 ## Limits and safety
 
