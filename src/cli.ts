@@ -8,6 +8,7 @@ import { applyPolicyPlan, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
+import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -1331,8 +1332,49 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (!flags.has("--plan")) return refusal("PLAN_REQUIRED", "lsp setup only supports an explicit read-only --plan", "Run omp-kit lsp setup --plan.");
 		return lspReadiness(request);
 	}
+async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !kit.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no history was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	const daysRaw = request.flags.get("--from-history");
+	const days = typeof daysRaw === "string" ? Number(daysRaw) : NaN;
+	if (!Number.isSafeInteger(days) || days < 1 || days > 90) {
+		return refusal("INVALID_HISTORY_WINDOW", "--from-history requires an integer window of 1..90 days",
+			"Pass the lookback window explicitly; session transcripts are only read, never written.");
+	}
+	const requested = request.flags.get("--profile");
+	let profile = "default";
+	if (typeof requested === "string") {
+		try {
+			profile = validateProfileName(requested);
+		} catch {
+			return refusal("INVALID_PROFILE", "Selected profile name is not a safe OMP profile name", "Use a simple existing OMP profile name without path separators.");
+		}
+	}
+	try {
+		const report = await renderSkillSet({ home, profile, days,
+			root: kit.release.root, executablePath: kit.release.executable, project: process.cwd() });
+		return { code: 0, data: { overall: report.capability_check.overall === "PASS" ? "OK" : "DEGRADED", skill_set: report },
+			verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof SkillSetInputError) {
+			return refusal(error.code, error.message, "Correct the selected window and profile; no history was written.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "SKILL_SET_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP session history; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 	if (parent?.name === "examples") {
 		if (command.name === "mcp") return { code: 0, data: { text: mcpExample() }, verification: "UNVERIFIED" };
+		if (command.name === "skill-set") return skillSetExample(request);
 		if (command.name === "omp-watch") {
 			// The job calls the stable launcher on PATH (a symlink that update re-points), never a versioned release binary.
 			const kitLauncher = Bun.which("omp-kit");

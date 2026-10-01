@@ -256,7 +256,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "audit", description: "Inspect receipt chronology", usage: "audit", flags: [], example: "omp-kit audit --json", runnable: false },
 	{ name: "why", description: "Explain one recorded run", usage: "why RUN_ID", argument: "RUN_ID", flags: [], example: "omp-kit why RUN_ID --json", runnable: false },
 	{ name: "quickstart", description: "Safe first commands and their limits", usage: "quickstart", flags: [], example: "omp-kit quickstart", runnable: true, dataSchema: textData },
-	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch]", flags: [],
+	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch|skill-set --from-history DAYS [--profile NAME]]", flags: [],
 		subcommandOptional: true, subcommands: [
 			...PROFILE_RECIPE_KINDS.map((kind) => ({
 				name: kind, description: "Show a versioned, unverified profile recipe for manual use",
@@ -264,6 +264,15 @@ export const COMMANDS: readonly Command[] = [
 			})),
 			{ name: "mcp", description: "Show a static manual example for an existing named MCP profile",
 				usage: "examples mcp", flags: [], example: "omp-kit examples mcp --json", runnable: true, dataSchema: textData },
+			{ name: "skill-set", description: "Derive a usage-based candidate skill set from session history and render a pruned-profile recipe; never applies it",
+				usage: "examples skill-set --from-history DAYS [--profile NAME]", flags: [
+					{ name: "--from-history", value: "DAYS", description: "Look back this many days of session transcripts (1..90)" },
+					{ name: "--profile", value: "NAME", description: "Profile whose history and settings are measured (default profile when omitted)" },
+				], example: "omp-kit examples skill-set --from-history 7 --json", runnable: true, dataSchema: { type: "object",
+					required: ["overall", "skill_set"], properties: {
+						overall: { enum: ["OK", "DEGRADED"] },
+						skill_set: { type: "object", required: ["candidate_skills", "reads", "explicit", "history", "bytes_before", "bytes_after", "capability_check", "recipe", "guidance"] },
+					} } },
 			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
 				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
 					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {

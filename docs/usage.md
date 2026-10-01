@@ -143,6 +143,7 @@ The file declares `skills`, `tools`, `rules`, and `lsp` arrays
 listing that resolves every declared capability does not prove equal
 task success; that comparison belongs to dedicated benchmark tooling.
 
+
 ## Monitor macOS services
 
 `doctor --scope services` inventories launchd jobs without loading,
@@ -180,3 +181,21 @@ carries a `STALE` line. `healthy_exit` lists the acceptable codes and
 `~/` path, last megabyte) when the job exits N. Missing jobs report
 `MISSING`; an unreadable declared file refuses with
 `INVALID_SERVICES_FILE`.
+
+## Derive a skill set from usage
+
+`examples skill-set` reads a profile's session transcripts (read-only)
+and lists every skill actually read plus the skills named explicitly in
+prompts. It renders, never applies, a pruned-profile recipe: the
+candidate `includeSkills` list with listing bytes before and after
+(both measured through OMP's loader), and the capability check result:
+
+```sh verified rc=0 contains='"candidate_skills":[]'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" examples skill-set --from-history 7 --json
+```
+
+Add `--profile NAME` to measure another profile. Copy the recipe into a
+NEW named profile by hand, then benchmark real tasks (localbench
+Experiment C) before adopting the pruned set: passing the check does
+not prove equal task success.

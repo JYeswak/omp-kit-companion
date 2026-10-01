@@ -41,6 +41,7 @@ const option = (flag: string): string => {
 };
 
 const CHILD = "--inventory-child";
+const KNOB_KEYS = ["skills.includeSkills", "skills.ignoredSkills"] as const;
 
 function parent(): void {
 	const home = option("--home");
@@ -69,9 +70,27 @@ function parent(): void {
 	} catch {
 		fail(2, "INVALID_ENTRYPOINT", "Harness entrypoint is not a resolvable file");
 	}
+	const knobArgs = [];
+	for (let i = 0; i < process.argv.length; i++) {
+		if (process.argv[i] === "--knob" && i + 1 < process.argv.length) knobArgs.push(process.argv[i + 1] ?? "");
+	}
+	for (const knob of knobArgs) {
+		const key = knob.split("=", 1)[0] ?? "";
+		if (!KNOB_KEYS.includes(key)) fail(2, "INVALID_KNOB", "--knob allows only skills.includeSkills and skills.ignoredSkills");
+		let parsed = null;
+		try {
+			parsed = JSON.parse(knob.slice(key.length + 1));
+		} catch (e) {
+		fail(2, "INVALID_KNOB", "--knob value must be JSON");
+		}
+		if (!Array.isArray(parsed) || !parsed.every(item => typeof item === "string")) {
+			fail(2, "INVALID_KNOB", "--knob value must be an array of strings");
+		}
+	}
 	const args = [entry, "--home", home, "--profile", profile, "--project", project,
 		"--mode", mode, "--timeout-ms", String(timeoutMs), CHILD];
 	if (mode === "check") args.splice(args.length - 1, 0, "--capabilities", capabilitiesPath);
+	for (const knob of knobArgs) args.splice(args.length - 1, 0, "--knob", knob);
 	const childEnv: Record<string, string> = {};
 	for (const key of ["PATH", "LANG", "LC_ALL", "NO_COLOR"] as const) {
 		const value = process.env[key];
@@ -168,6 +187,23 @@ async function childMain(): Promise<void> {
 		enableAgentsProject: asBoolean(knobs.enableAgentsProject, true),
 		disabledExtensions: asStringArray(knobs.disabledExtensions),
 	};
+	for (let i = 0; i < process.argv.length; i++) {
+		if (process.argv[i] !== "--knob" || i + 1 >= process.argv.length) continue;
+		const pair = process.argv[i + 1] ?? "";
+		const key = pair.split("=", 1)[0] ?? "";
+		let parsed = null;
+		try {
+			parsed = JSON.parse(pair.slice(key.length + 1));
+		} catch (e) {
+		fail(2, "INVALID_KNOB", "--knob value must be JSON");
+		}
+		if (!Array.isArray(parsed) || !parsed.every(item => typeof item === "string")) {
+			fail(2, "INVALID_KNOB", "--knob value must be an array of strings");
+		}
+		if (key === "skills.includeSkills") skillOptions.includeSkills = parsed;
+		else if (key === "skills.ignoredSkills") skillOptions.ignoredSkills = parsed;
+		else fail(2, "INVALID_KNOB", "--knob allows only skills.includeSkills and skills.ignoredSkills");
+	}
 	const active = await skillsExt.loadSkills(skillOptions);
 	const discovered = await capabilityIndex.loadCapability("skills", { cwd: project, includeDisabled: true });
 	const discoveredNames = new Set<string>(((discovered.all ?? []) as { name: string }[]).map(item => item.name));
