@@ -2,8 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { diagnose, health, type Finding } from "../../src/diagnostics.ts";
+import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const fixtures: string[] = [];
 interface Fixture { base: string; root: string; home: string; project: string; bytes: string; ompPath: string }
@@ -363,4 +365,29 @@ test("project-level disabledRules overlay is not hidden by a matching global pol
 	expect(finding(rows, "policy").status).toBe("DEGRADED");
 	expect(finding(rows, "policy").evidence?.matching_profiles).toEqual(["default"]);
 	expect(finding(rows, "policy").evidence?.disabled_conflicts).toEqual([{ profile: "project", name: "project-only", provider: "project" }]);
+});
+
+test("omp_drift tracks the OMP of the last recorded test and clears only after a recorded re-test", async () => {
+	const f = fixture(); installOmp(f, "18.4.4");
+	const stateRoot = join(f.base, "state", "omp-kit");
+	const drift = async () => finding(await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath, stateRoot }), "omp_drift");
+	const record = (status: string) => expect(recordTestReceipt(stateRoot, { schema_version: 1, kit_version: "0.0.0-test", scope: "fast",
+		status, recorded_at: "2026-10-01T00:00:00.000Z", ...ompFingerprint(resolveOmpIdentity({ PATH: dirname(f.ompPath) })) })).toBe(true);
+	expect(await drift()).toMatchObject({ status: "NOT_RUN", recommended_action: expect.stringContaining("omp-kit test --record") });
+	record("PASS");
+	expect((await drift()).status).toBe("OK");
+	// An updater rewrites the package: same launcher bytes, new version.
+	const pkg = join(f.base, "omp", "releases", "v1");
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.5" }));
+	const updated = await drift();
+	expect(updated.status).toBe("DEGRADED");
+	expect(updated.reason).toContain("18.4.4 → 18.4.5");
+	expect(updated.recommended_action).toContain("omp-kit test --record");
+	record("PASS");
+	expect((await drift()).status).toBe("OK");
+	// Same version string but different launcher bytes (a rebuilt or replaced OMP) is still a change.
+	writeFileSync(join(pkg, "dist", "cli.js"), "#!/bin/sh\nexit 92\n");
+	expect((await drift()).status).toBe("DEGRADED");
+	record("FAIL");
+	expect(await drift()).toMatchObject({ status: "DEGRADED", reason: expect.stringContaining("did not pass (FAIL)") });
 });

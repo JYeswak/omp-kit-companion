@@ -297,6 +297,10 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(health.envelope.ok).toBe(false);
 		expect(health.envelope.data.overall).toBe("UNVERIFIED");
 		expect(health.envelope.data.findings.find((row: { component: string }) => row.component === "installed_rules").status).toBe("DEGRADED");
+		expect(health.envelope.data.findings.find((row: { component: string }) => row.component === "omp_drift").status).toBe("NOT_RUN");
+		expect(health.envelope.data.not_judged.find((row: { component: string }) => row.component === "effective_profile").status).toBe("UNVERIFIED");
+		expect(health.envelope.data.not_judged.find((row: { component: string }) => row.component === "matcher").status).toBe("NOT_RUN");
+		expect(health.envelope.data.not_judged.some((row: { component: string }) => ["kit", "manifest", "omp", "state_root", "installed_rules", "omp_drift"].includes(row.component))).toBe(false);
 		const doctor = invoke("doctor");
 		expect(doctor.code).toBe(0);
 		expect(doctor.envelope.ok).toBe(true);
@@ -484,7 +488,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(invoke("completion", "bash").envelope.data.text).toContain("examples:mnemopi-manual)");
 		const caps = invoke("capabilities").envelope.data.commands;
 		expect(caps.find((row: { name: string }) => row.name === "examples")?.subcommands.map((row: { name: string }) => row.name)).toEqual(
-			["memory-off", "mnemopi-manual", "model-roles", "mcp"],
+			["memory-off", "mnemopi-manual", "model-roles", "mcp", "omp-watch"],
 		);
 		const unknown = invoke("examples", "unknown-kind");
 		expect(unknown.code).toBe(2);

@@ -97,7 +97,7 @@ The kit is an installable companion for an existing OMP: a tested rule pack, a p
 
 ## Landing the Plane
 
-A task is done when its change is merged to `main` with CI green and its acceptance re-run by someone other than the implementer, with the output cited at the exact commit. Any merged user-visible change ships in a release within 7 days. New research or decision-gate work needs a named user who asked for it. Before ending a session: commit and push your branch, open or update the pull request, and leave no finished work uncommitted.
+A task is done when its change is merged to `main` with CI green and its acceptance re-run by someone other than the implementer, with the output cited at the exact commit. Any merged user-visible change ships in a release within 7 days. New research or decision-gate work needs a named user who asked for it. This project is built in public: a PR that changes an item's status updates [ROADMAP.md](ROADMAP.md) in the same change. Before ending a session: commit and push your branch, open or update the pull request, and leave no finished work uncommitted.
 
 ## Note on Built-in TODO Functionality
 

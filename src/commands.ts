@@ -36,6 +36,7 @@ export const REFUSAL_DATA_SCHEMA: DataSchema = { type: "object", required: ["ove
 } };
 const testData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN"] },
+	recorded: { type: "boolean" },
 	test: { type: "object", required: ["status"], properties: {
 		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
 		scope: { enum: ["EXTERNAL_G1_G3"] },
@@ -60,6 +61,9 @@ const statusData: DataSchema = { type: "object", required: ["overall", "kit", "o
 		installed_rules: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL", "NOT_RUN"] },
 		matcher: { enum: ["NOT_RUN"] },
 	} },
+	not_judged: { type: "array", items: { type: "object", required: ["component", "status", "reason"], properties: {
+		component: { type: "string" }, status: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL", "NOT_RUN"] }, reason: { type: "string" },
+	} } },
 	recommended_actions: { type: "array", items: { type: "string" } },
 } };
 const lspReportData = { type: "object", required: ["status", "cwd", "file", "file_outside_cwd", "config_layers", "opaque_layers", "servers", "runtime"], properties: {
@@ -192,9 +196,10 @@ export const COMMANDS: readonly Command[] = [
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
 	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, or a public-synthetic external G4 marker fixture",
-		usage: "test [--project PATH] [--full] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
+		usage: "test [--project PATH] [--full] [--record] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
+		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
 		{ name: "--rules", value: "ABS_DIR", description: "Read-only external rules directory; run G1-G3 against its cases" },
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
 		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
@@ -242,7 +247,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "audit", description: "Inspect receipt chronology", usage: "audit", flags: [], example: "omp-kit audit --json", runnable: false },
 	{ name: "why", description: "Explain one recorded run", usage: "why RUN_ID", argument: "RUN_ID", flags: [], example: "omp-kit why RUN_ID --json", runnable: false },
 	{ name: "quickstart", description: "Safe first commands and their limits", usage: "quickstart", flags: [], example: "omp-kit quickstart", runnable: true, dataSchema: textData },
-	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp]", flags: [],
+	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch]", flags: [],
 		subcommandOptional: true, subcommands: [
 			...PROFILE_RECIPE_KINDS.map((kind) => ({
 				name: kind, description: "Show a versioned, unverified profile recipe for manual use",
@@ -250,6 +255,12 @@ export const COMMANDS: readonly Command[] = [
 			})),
 			{ name: "mcp", description: "Show a static manual example for an existing named MCP profile",
 				usage: "examples mcp", flags: [], example: "omp-kit examples mcp --json", runnable: true, dataSchema: textData },
+			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
+				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
+					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {
+						label: { type: "string" }, launchd_plist: { type: "string" }, systemd_path_unit: { type: "string" },
+						systemd_service_unit: { type: "string" }, install: { type: "object" }, uninstall: { type: "object" }, guidance: { type: "string" },
+					} } },
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [

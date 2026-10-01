@@ -44,6 +44,25 @@ def finding(data, component):
     return matches[0]
 
 
+def refusal_detail(name, child):
+    """Bounded, kit-redacted cause of a refused native command, so a CI receipt names the failing stage and scenarios."""
+    detail = {"command": name, "rc": child.returncode, "stderr_tail": child.stderr.decode(errors="replace")[-2000:]}
+    try:
+        result = json.loads(child.stdout)
+    except json.JSONDecodeError:
+        detail["stdout_tail"] = child.stdout.decode(errors="replace")[-2000:]
+        return detail
+    detail["errors"] = [{"code": error.get("code"), "message": error.get("message")} for error in (result.get("errors") or [])[:5]]
+    test = (result.get("data") or {}).get("test") or {}
+    if test:
+        scenarios = test.get("live_scenarios") or {}
+        detail.update(status=test.get("status"),
+                      failed_stages=[stage for stage, value in (test.get("stages") or {}).items() if value.get("status") == "FAIL"],
+                      failures=(test.get("failures") or [])[:20],
+                      missing_scenarios=sorted(set(scenarios.get("expected_ids") or []) - set(scenarios.get("observed_ids") or [])))
+    return detail
+
+
 def isolated_snapshot(*roots):
     """Hash the complete bounded synthetic HOME/project without following links."""
     h = hashlib.sha256()
@@ -176,9 +195,11 @@ def native(args):
                 (root / (name + ".stdout")).write_bytes(child.stdout)
                 (root / (name + ".stderr")).write_bytes(child.stderr)
                 if child.returncode != 0:
+                    receipt["refusal_detail"] = refusal_detail(name, child)
                     raise ValueError(f"native {name} refused rc={child.returncode}")
                 result = json.loads(child.stdout)
                 if result.get("ok") is not True:
+                    receipt["refusal_detail"] = refusal_detail(name, child)
                     raise ValueError(f"native {name} did not report a successful probe")
                 data = result["data"]
                 if name in ("status", "doctor"):
@@ -221,6 +242,7 @@ def native(args):
                                 or scenarios["observed_ids"] != scenarios["expected_ids"]
                                 or any(snapshots[part]["complete"] is not True or snapshots[part]["unchanged"] is not True
                                        for part in ("release", "home"))):
+                            receipt["refusal_detail"] = refusal_detail(name, child)
                             raise ValueError("native full ladder lacks 70 live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
                 elif name == "memory_off":
                     if data.get("kind") != "memory-off" or "backend: off" not in data.get("content", ""):
@@ -699,6 +721,8 @@ for (const [name, working, episodic] of banks) {
     print(f"native candidate {args.platform}: {'CERTIFIED' if receipt['certified'] else 'REFUSED'}")
     if not receipt["certified"]:
         print(receipt["failure"], file=sys.stderr)
+        if "refusal_detail" in receipt:
+            print(json.dumps(receipt["refusal_detail"], indent=1), file=sys.stderr)
         return 1
     return 0
 
