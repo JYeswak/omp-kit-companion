@@ -142,33 +142,46 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	let manifest: unknown;
 	try { manifest = JSON.parse(policy.bytes.toString("utf8")); } catch { stop("INVALID_EXTENSION_POLICY"); }
 	if (!record(manifest) || !stringArray(manifest.extensions) || !stringArray(manifest.skipProfiles) ||
-		Object.keys(manifest).length !== 2 || manifest.extensions.length !== 1 || manifest.extensions[0] !== "kit-guard-optin.ts" ||
-		!manifest.extensions.every(name => validName.test(name)) || !manifest.skipProfiles.every(name => name === "default" || validProfile.test(name))) stop("INVALID_EXTENSION_POLICY");
-	const name = manifest.extensions[0]!;
-	const source = required(join(root, "extensions", name));
-	const destinationDir = join(home, ".omp", "omp-extensions");
-	inspectDirectory(destinationDir, true);
-	const destination = join(destinationDir, name);
-	const existing = readOptional(destination);
-	if (existing && !existing.bytes.equals(source.bytes)) stop("UNMANAGED_EXTENSION_COLLISION");
+		Object.keys(manifest).length !== 2 || manifest.extensions.length < 1 || !manifest.extensions.every(name => validName.test(name)) || !manifest.skipProfiles.every(name => name === "default" || validProfile.test(name))) stop("INVALID_EXTENSION_POLICY");
+	const names = [...new Set(manifest.extensions)];
+	if (names.length !== manifest.extensions.length) stop("INVALID_EXTENSION_POLICY");
 	const { selected, skipped } = profiles(home, manifest.skipProfiles, input.profiles, input.includeDefault);
-	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: destinationDir }];
-	if (!existing) {
-		files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
-		steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
+	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: join(home, ".omp", "omp-extensions") }];
+	const seen = new Set<string>();
+	for (const name of names) {
+		const source = required(join(root, "extensions", name));
+		const destinationDir = join(home, ".omp", "omp-extensions");
+		inspectDirectory(destinationDir, true);
+		const destination = join(destinationDir, name);
+		const existing = readOptional(destination);
+		if (existing && !existing.bytes.equals(source.bytes)) stop("UNMANAGED_EXTENSION_COLLISION");
+		if (seen.has(destination)) stop("INVALID_EXTENSION_POLICY");
+		seen.add(destination);
+		if (!existing) {
+			files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
+			steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
+		}
 	}
 	const skippedProfiles = skipped, alreadyListedProfiles: string[] = [];
+	const destinations = names.map(name => join(home, ".omp", "omp-extensions", name));
 	for (const profile of selected) {
-		const decision = planExtensionChanges(destination, profile.name, stringArray(profile.data.extensions) ? profile.data.extensions : [], manifest.skipProfiles);
-		if (decision.action === "already-listed") { alreadyListedProfiles.push(profile.name); continue; }
-		const next = Buffer.from(YAML.stringify({ ...profile.data, extensions: decision.extensions }));
+		let current: readonly string[] = stringArray(profile.data.extensions) ? profile.data.extensions as string[] : [];
+		let listed = true;
+		for (const destination of destinations) {
+			const decision = planExtensionChanges(destination, profile.name, current, manifest.skipProfiles);
+			if (decision.action === "skip") { listed = false; break; }
+			if (decision.action !== "already-listed") listed = false;
+			current = decision.extensions;
+		}
+		if (listed) { alreadyListedProfiles.push(profile.name); continue; }
+		const next = Buffer.from(YAML.stringify({ ...profile.data, extensions: current }));
 		const rootId = `profile-${steps.length}`;
 		roots.push({ id: rootId, path: resolve(profile.path, "..") });
 		files.push({ root: rootId, relativePath: basename(profile.path), expectedBefore: profile.source?.image ?? null,
 			after: { bytes: next, mode: profile.source?.image.mode ?? 0o600, ...(profile.source ? { uid: profile.source.image.uid, gid: profile.source.image.gid } : {}) } });
 		steps.push({ kind: "profile", path: profile.path, profile: profile.name, beforeSha256: profile.source?.image.sha256 ?? null, afterSha256: hash(next) });
 	}
-	return { destination, stateRoot, steps, skippedProfiles, alreadyListedProfiles, guard: inspectExtensionGuard(input),
+	return { destination: destinations[0]!, stateRoot, steps, skippedProfiles, alreadyListedProfiles, guard: inspectExtensionGuard(input),
 		mutation: files.length ? planMutation({ stateRoot, roots, files }) : null };
 }
 

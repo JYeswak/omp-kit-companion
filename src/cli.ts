@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
@@ -14,6 +15,7 @@ import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
+import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./services.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
@@ -26,6 +28,7 @@ import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, renderOmpWatch, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
+import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
@@ -303,6 +306,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	profile: ["effective_profile"],
 	settings: ["policy"],
 	work: ["work"],
+	extensions: ["extensions", "extension_imports"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
@@ -664,6 +668,46 @@ async function contextInventory(request: ParsedCommand): Promise<CliResult> {
 		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
 }
 
+async function servicesInventory(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no service was inspected.",
+		}], verification: "UNVERIFIED" };
+	}
+	const services = request.flags.get("--services");
+	if (typeof services === "string" && !isAbsolute(services)) {
+		return refusal("INVALID_SERVICES", "Declared services file requires an absolute path",
+			"Pass an absolute schema_version 1 declared-jobs JSON file; no service was changed.");
+	}
+	const omp = ompIdentity();
+	const dirsOverride = process.env.OMP_KIT_SERVICES_DIRS;
+	let report;
+	try {
+		report = inventoryServices(
+			{ home, ...(typeof services === "string" ? { servicesPath: services } : {}) },
+			defaultInventoryDeps(home, process.env.PATH ?? "/usr/bin:/bin",
+				typeof dirsOverride === "string" && dirsOverride ? dirsOverride.split(":") : undefined));
+	} catch (error) {
+		if (error instanceof ServicesInputError) {
+			return refusal(error.code, error.message, "Correct the declared services file; no service was changed.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "SERVICES_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check launchd availability; no service was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+	const finding: Finding = { component: "services", status: report.status, reason: report.reason,
+		recommended_action: report.status === "OK" ? "No action required."
+			: "Inspect flagged jobs with launchctl; this command never loads, unloads, or writes.",
+		evidence: { ...report } };
+	return { code: 0, data: { overall: report.status, kit, omp, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
+}
+
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--yes"))
 		return refusal("CONSENT_REQUIRED", "Private memory audit needs separate explicit consent; no store was inspected",
@@ -832,12 +876,12 @@ function extensionCommand(request: ParsedCommand): CliResult {
 		if (!request.flags.has("--apply"))
 			return { code: guard.status === "FAIL" ? 1 : 0,
 				data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: "PLAN", guard,
-					steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+					steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
 					receipt_id: null }, verification: "UNVERIFIED" };
 		const applied = applyExtensions(plan);
 		return { code: guard.status === "FAIL" ? 1 : 0,
 			data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: applied.receiptId ? "APPLIED" : "NO_CHANGE",
-				guard, steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+				guard, steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
 				receipt_id: applied.receiptId }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
@@ -1096,9 +1140,63 @@ async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResul
 	}
 }
 
+async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project"]) {
+		if (request.flags.has(flag)) {
+			return refusal("INVALID_FLAG", `test --integrations cannot be combined with ${flag}`,
+				"Run integration proof on named profiles; nothing was measured.");
+		}
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INTEGRATIONS_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME; no profile was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	if (request.flags.has("--plan")) {
+		return { code: 0, data: { overall: "OK", integrations_plan: {
+			reads: ["agent/config.yml extensions list", "agent/mcp.json servers", "agent/hooks tree"],
+			integrations: [...INTEGRATIONS],
+			writes: "isolated HOME under the work dir plus the optional --out report; the real profile is never written",
+		} }, verification: "UNVERIFIED" };
+	}
+	const profileRaw = request.flags.get("--profile");
+	if (typeof profileRaw !== "string" || profileRaw.trim() === "") {
+		return refusal("PROFILE_REQUIRED", "test --integrations needs --profile NAME[,NAME...]",
+			"Name the profiles to prove; the default profile is never assumed.");
+	}
+	const profiles = profileRaw.split(",").map(part => part.trim()).filter(part => part.length > 0);
+	if (profiles.some(name => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name))) {
+		return refusal("INVALID_PROFILE", "Profile names must be simple directory names",
+			"Use the profile directory name under .omp/profiles.");
+	}
+	const outRaw = request.flags.get("--out");
+	if (outRaw !== undefined && (typeof outRaw !== "string" || !isAbsolute(outRaw))) {
+		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
+			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
+	}
+	try {
+		const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
+		const report = await runIntegrations({ root: identity.release.root, home,
+			profiles, workDir, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
+		return { code: 0, data: { overall: "OK", integrations: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof IntegrationsInputError) {
+			return refusal(error.code, error.message, "Correct the selection; no profile was read and nothing was written.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INTEGRATIONS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP installation; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
+	if (request.flags.has("--integrations")) return integrationsCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
 	if (external) return externalTestCommand(request);
@@ -1288,6 +1386,9 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
 	}
+	if (command.name === "doctor" && flags.has("--services") && flags.get("--scope") !== "services") {
+		return refusal("INVALID_FLAG", "--services is only valid for doctor --scope services", "Use omp-kit doctor --scope services --services ABS_FILE.");
+	}
 	if (command.name === "doctor" && flags.get("--scope") === "lsp") return lspReadiness(request);
 	if (command.name === "doctor" && flags.get("--scope") === "project-loading") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope project-loading --project PATH.");
@@ -1300,6 +1401,10 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "mcp") {
 		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "MCP scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope mcp --profile NAME.");
 		return mcpInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "services") {
+		if (flags.has("--project") || flags.has("--file") || flags.has("--profile")) return refusal("INVALID_FLAG", "services scope inspects machine launchd state and cannot accept --project, --file or --profile", "Use omp-kit doctor --scope services [--services ABS_FILE].");
+		return servicesInventory(request);
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "context") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope context [--profile NAME] [--project PATH].");
