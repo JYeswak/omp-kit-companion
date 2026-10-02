@@ -224,7 +224,7 @@ def native(args):
                     for gate, observed_count in (("G1_registration", "observed_rules"),
                                                  ("G2_payload", "observed_cases"), ("G3_quiet_prefix", "quiet_prefix_fires")):
                         proof = fast[gate]
-                        if proof["status"] != "PASS" or proof[observed_count] != (0 if gate == "G3_quiet_prefix" else 18 if gate == "G1_registration" else 278):
+                        if proof["status"] != "PASS" or proof[observed_count] != (0 if gate == "G3_quiet_prefix" else 22 if gate == "G1_registration" else 295):
                             raise ValueError(f"native {name} {gate} is not the pinned passing corpus")
                     live = test["proofs"]["G4_live"] if name == "full" else fast["G4_live"]
                     if live["status"] != ("PASS" if name == "full" else "NOT_RUN"):
@@ -234,16 +234,16 @@ def native(args):
                         snapshots = test["snapshots"]
                         if (test["status"] != "PASS" or test["proof_scope"] != "ISOLATED_FIXTURE_ONLY"
                                 or test["omp_version"] != OMP_VERSION or live["plant"] != "PASS"
-                                or live["expected_scenarios"] != 70 or live["observed_scenarios"] != 70
+                                or live["expected_scenarios"] != 78 or live["observed_scenarios"] != 78
                                 or scenarios["status"] != "PASS"
-                                or len(scenarios["expected_ids"]) != 70
-                                or len(set(scenarios["expected_ids"])) != 70
+                                or len(scenarios["expected_ids"]) != 78
+                                or len(set(scenarios["expected_ids"])) != 78
                                 or "settings-no-checkout-remedy" not in scenarios["expected_ids"]
                                 or scenarios["observed_ids"] != scenarios["expected_ids"]
                                 or any(snapshots[part]["complete"] is not True or snapshots[part]["unchanged"] is not True
                                        for part in ("release", "home"))):
                             receipt["refusal_detail"] = refusal_detail(name, child)
-                            raise ValueError("native full ladder lacks 70 live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
+                            raise ValueError("native full ladder lacks 78 live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
                 elif name == "memory_off":
                     if data.get("kind") != "memory-off" or "backend: off" not in data.get("content", ""):
                         raise ValueError("packaged memory-off recipe is unavailable")
