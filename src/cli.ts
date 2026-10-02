@@ -301,6 +301,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	rules: ["installed_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
 	settings: ["policy"],
+	extensions: ["extensions", "extension_imports"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
