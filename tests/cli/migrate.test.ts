@@ -20,6 +20,8 @@ interface Fixture {
 }
 
 function workspace(): string {
+	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	// Repo scratch, not tmpdir(): /var is a symlink on macOS and the mutation
 	// guards refuse symlinked path components.
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-"));
@@ -73,8 +75,8 @@ function pluginFixture(editCount: number): Fixture {
 	mkdirSync(join(pluginDir, "rules"), { recursive: true });
 	writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: "test-migrate-plugin", version: "0.0.1", omp: { rules: ["rules/"] } }));
 	for (const name of kitNames) writeFileSync(join(pluginDir, "rules", `${name}.md`), readFileSync(join(repoRules, `${name}.md`)));
-	const identical = kitNames.slice(0, 12);
-	const edited = kitNames.slice(12, 12 + editCount);
+	const edited = kitNames.slice(12, 12 + editCount).filter((name) => name !== "kit-standing-law");
+	const identical = kitNames.filter((name) => !edited.includes(name));
 	for (const name of identical) writeFileSync(join(rulesDir, `${name}.md`), readFileSync(join(repoRules, `${name}.md`)));
 	for (const name of edited) writeFileSync(join(rulesDir, `${name}.md`), `${readFileSync(join(repoRules, `${name}.md`), "utf8")}# local edit\n`);
 	omp(["plugin", "link", pluginDir], home, realOmpDir());
@@ -109,7 +111,7 @@ test("migrate plan lists each legacy copy with its plugin equivalent and byte di
 	expect(standing.verdict).toBe("identical-to-manifest");
 	expect(standing.pluginSha256).toBeNull();
 	expect(standing.overlay).toBe(false);
-	for (const name of kitNames.slice(12, 18)) {
+	for (const name of kitNames.slice(12, 18).filter((entry) => entry !== "kit-standing-law")) {
 		const row = rowByName(rows, name);
 		expect(row.verdict).toBe("edited");
 		expect(row.overlay).toBe(true);
