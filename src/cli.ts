@@ -29,6 +29,7 @@ import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
+import { runMutants, MutantsInputError } from "./mutants.ts";
 import { runMetamorphicReport } from "./metamorphic.ts";
 import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
@@ -1183,6 +1184,44 @@ async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResul
 		}], verification: "UNVERIFIED" };
 	}
 }
+async function mutantsCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project"]) {
+		if (request.flags.has(flag)) {
+			return refusal("INVALID_FLAG", `test --mutants cannot be combined with ${flag}`,
+				"Run mutation adequacy on the bundled pack or one external --rules/--cases pair; nothing was measured.");
+		}
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !identity.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "MUTANTS_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME; no rules were mutated.",
+		}], verification: "UNVERIFIED" };
+	}
+	const selected = (name: string): string | undefined => {
+		const value = request.flags.get(name);
+		return typeof value === "string" ? value : undefined;
+	};
+	const rules = selected("--rules");
+	const cases = selected("--cases");
+	const budgetRaw = selected("--mutant-budget-secs");
+	try {
+		const report = await runMutants({ root: identity.release.root, executablePath: identity.release.executable,
+			...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}),
+			...(budgetRaw !== undefined ? { budgetSecs: Number(budgetRaw) } : {}) });
+		return { code: 0, data: { overall: "OK", mutants: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof MutantsInputError) {
+			return refusal(error.code, error.message, "Correct the selection; no rules were mutated and nothing was written.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "MUTANTS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP native matcher; no rules were mutated.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 
 async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project"]) {
@@ -1274,6 +1313,7 @@ async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
 
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
+	if (request.flags.has("--mutants")) return mutantsCommand(request);
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (request.flags.has("--integrations")) return integrationsCommand(request);
 	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);

@@ -294,3 +294,39 @@ kit-no-force-push	fire	tool	bash	-	git push --force origin main	bare force push
 kit-no-force-push	fire	tool	bash	-	git push -f origin main	short force flag after push
 kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanctioned lease form stays quiet
 kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
+bash-glob-silenced	quiet	tool	bash	-	GREP -RL 'X' CRATES/*/CARGO.TOML 2>/DEV/NULL	H3: uppercase stays quiet, (?i) fires
+bash-pipe-exit	quiet	tool	bash	-	./SCRIPTS/LANE-STATUS.SH 2>&1 | TAIL -16; ECHO "EXIT=$?"	H3: uppercase stays quiet
+kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet
+kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON ""	H3: empty reason stays quiet
+kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON	H3: bare flag stays quiet
+kit-gate-must-name-the-plant	quiet	tool	bash	-	SH STARTER-KIT/SCRIPTS/CHECK-CLAIM-DISCIPLINE.SH CLAIMS.TSV	H3: uppercase stays quiet
+kit-relative-path-not-cwd	quiet	tool	bash	-	CD /TMP && SH ~/ZIP/STARTER-KIT/SCRIPTS/CHECK-READINESS.SH NOTES/PACKET.MD	H3: uppercase stays quiet
+kit-settings-mutation	quiet	tool	bash	-	OMP CONFIG SET TTSR.ENABLED FALSE	H3: uppercase stays quiet
+kit-solo-review-not-review	quiet	tool	write	samples/packet.md	## 11. INDEPENDENT REVIEW\n<!-- CHECK: REVIEW -->\nINDEPENDENT REVIEW: NOT PERFORMED. AN UNTRACKED PLANNING DRAFT INFORMED THIS WORKING COPY.\n	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	edit	src/lib.rs	#[TEST]\n#[IGNORE]\nFN PARSES() {}	H3: uppercase markers stay quiet
+kit-test-skip	quiet	tool	write	web/app.test.ts	IT.SKIP("RENDERS", () => {})	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	write	web/app.test.ts	XIT("RENDERS", () => {})	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	write	tests/test_x.py	@PYTEST.MARK.SKIP(REASON="FLAKY")	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	write	tests/test_x.py	@PYTEST.MARK.SKIPIF(SYS.PLATFORM == "WIN32", REASON="POSIX ONLY")	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	write	tests/test_x.go	T.SKIPNOW()	H3: uppercase stays quiet
+kit-test-skip	quiet	tool	write	tests/test_x.py	@UNITTEST.SKIP	H3: uppercase stays quiet
+rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	UNSAFE FN F() {}	H3: uppercase stays quiet
+ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	CONDITION: 'FOO|(?i)BAR'	H3: uppercase stays quiet
+zz-canary-scope-probe	quiet	tool	bash	-	ECHO ZZZZ_SYSTEMWIDE_CANARY_9C42	H3: uppercase stays quiet
+kit-structure-not-truth	quiet	text	-	-	READY: ALL 12 CHECKS PASS ON THE PACKET.	H3: uppercase stays quiet
+kit-close-reason-no-evidence	fire	tool	bash	-	BR CLOSE X --REASON DONE	H3: unquoted value fires only via cond1 (?i)
+kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"ID":"KIT-A1","STATUS":"CLOSED","CLOSE_REASON":"DONE"}	H3: uppercase fires only via (?i)
+kit-structure-not-truth	fire	text	-	-	The Packet Is Now Execution-Ready.	H3: mixed case fires only via (?i)
+kit-structure-not-truth	fire	text	-	-	Structure-Green Build.	H3: mixed case fires only via (?i)
+kit-structure-not-truth	fire	text	-	-	Execution Sign-Off Is Done.	H3: mixed case fires only via (?i)
+kit-structure-not-truth	fire	text	-	-	We Have The Execution Sign-Off.	H3: mixed case fires only via (?i)
+kit-unverified-done	fire	text	-	-	ALL TESTS SHOULD NOW PASS	H3: uppercase fires only via (?i)
+kit-unverified-done	fire	text	-	-	THE BUG IS NOW FIXED	H3: uppercase fires only via (?i)
+kit-unverified-done	fire	text	-	-	THIS SHOULD WORK	H3: uppercase fires only via (?i)
+kit-no-verify	quiet	tool	bash	-	GIT COMMIT --NO-VERIFY -M X	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT PUSH --NO-VERIFY ORIGIN MAIN	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT CONFIG CORE.HOOKSPATH /DEV/NULL	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT CONFIG --UNSET CORE.HOOKSPATH	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT -C CORE.HOOKSPATH=/DEV/NULL COMMIT -Q -M X	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/DEV/NULL GIT COMMIT -Q -M X	H3: uppercase stays quiet
+kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH'='/DEV/NULL'" GIT COMMIT -M X	H3: uppercase stays quiet
