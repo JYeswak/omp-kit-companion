@@ -1,4 +1,4 @@
 {
-  "extensions": ["kit-guard-optin.ts"],
+  "extensions": ["kit-guard-optin.ts", "fleet-guard.ts"],
   "skipProfiles": []
 }
