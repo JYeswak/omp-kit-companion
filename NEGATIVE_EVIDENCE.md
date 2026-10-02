@@ -64,3 +64,24 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 - Result: refused on the maintainer's machine (OMP 18.4.9 unchanged before and after). The postcheck reported `OMP_CHANGED_DURING_KIT_UPDATE` with G2/G3 "case count did not match the shipped contract". The running binary judges the new release with its own compiled counts (v0.2.0: 274 cases, 138 quiet; v0.2.1: 278 and 140 after the quoted-text fixes), and a failed run's missing OMP version is misread as an OMP change. The earlier journey passed only because its candidate had the same case count. `omp-kit undo` restored v0.2.0 cleanly; the installer then installed v0.2.1, and `test` passes on it.
 - Verdict: kit bug. The fix takes the expected counts from the release being judged and reports an OMP change only when two successful identity reads differ. Until a release carrying the fix is the one running the update, upgrade by reinstalling with the installer (README).
 - Retry condition: an update from a fixed release to a build with more cases completes in the journey test, and a mutant that uses the running binary's counts fails it.
+
+## NE-10 (2026-10-02) — metamorphic relation breaks recorded as known limits
+
+- Hypothesis: the five MT3 relations hold for every rule case (quoting suppresses;
+  whitespace, env prefix, path form and chaining preserve the verdict).
+- Measured result (`bun scripts/ttsr-harness.ts --metamorphic-json`, 295 cases,
+  1765 variants, OMP 18.4.9): 182 breaks. Quoting 138 (quoted payload still fires;
+  rules deliberately match quoted shell words, e.g. `''commit''` forms, and a local
+  regex cannot tell `echo "..."` from `bash -c "..."`); backslash-newline
+  continuations 37 (wire-position anchors match at wire start or after shell
+  separators, not after a continuation); env-prefix 4 fire-quiet (same anchor
+  family, e.g. `FOO=1 pkill`) plus 3 quiet-fire where the prefix defeats the
+  HOME=/tmp test-harness exemption; leading/trailing space, chaining and
+  path-form hold everywhere (the one leading-space miss, kit-no-pattern-kill,
+  was fixed by allowing `\\s*` after wire starts).
+- Verdict: record, do not fix by loosening anchors here. Anchor and quoting
+  semantics are recall/precision tradeoffs owned per rule; loosening them risks
+  the prose false-fires S4/R1 closed. The ladder does not run the metamorphic
+  step until these classes are fixed or formally exempted per rule.
+- Retry condition: re-run the metamorphic report after any rule-condition edit;
+  a class reaching zero breaks is removed from this entry.

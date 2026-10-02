@@ -311,6 +311,7 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 	} catch (error) { return finding("extensions", "UNVERIFIED", `Opt-in extension manifest could not be read: ${errorText(error)}`, "Inspect the shipped extension manifest before planning an opt-in install."); }
 	const skip = new Set(policy.skipProfiles as string[]);
 	const checked: string[] = [], missing: string[] = [], drifted: string[] = [], unsafe: string[] = [], listed: string[] = [], unverified: string[] = [], skipped: string[] = [];
+	const notCovered: { profile: string; reason: string }[] = [];
 	const destinations: string[] = [];
 	for (const name of policy.extensions as string[]) {
 		const source = join(root, "extensions", name), destination = join(home, ".omp", "omp-extensions", name);
@@ -326,8 +327,23 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 		} catch { unsafe.push(name); }
 	}
 	for (const profile of profiles) {
-		if (skip.has(profile.name)) { skipped.push(profile.name); continue; }
-		if (profile.issue || !strings(profile.data?.extensions)) { unverified.push(profile.name); continue; }
+		if (skip.has(profile.name)) {
+			skipped.push(profile.name);
+			notCovered.push({ profile: profile.name, reason: "policy skipProfiles: profile opted out of extension installs" });
+			continue;
+		}
+		if (profile.issue || !strings(profile.data?.extensions)) {
+			unverified.push(profile.name);
+			if (profile.issue) {
+				const files = CONFIG_NAMES.filter(file => pathState(join(profile.dir, file)) !== "missing");
+				const reason = profile.issue.includes("no on-disk profile config") ? "NO_CONFIG: no config.yml/yaml present; the kit creates nothing unasked" :
+					files.length > 1 ? `DUAL_CONFIG: ${files.join(" + ")} present; OMP loads config.yml first and merges settings.json separately, so a single-file edit cannot be proven effective` :
+					/removed or is unsafe|disappeared|unsafe config|not safely resolved|could not be listed/.test(profile.issue) ? `UNREADABLE: ${profile.issue}` :
+					`UNPARSEABLE: ${profile.issue}`;
+				notCovered.push({ profile: profile.name, reason });
+			}
+			continue;
+		}
 		if (destinations.every((path) => (profile.data!.extensions as string[]).includes(path))) listed.push(profile.name);
 		else missing.push(`profile:${profile.name}`);
 	}
@@ -340,6 +356,7 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 		"Review the extension opt-in plan and project settings; never infer guard activation from installed bytes.",
 		{ matching_bytes: checked, missing, drifted, unsafe, listed_profiles: listed, unverified_profiles: unverified,
 			skipped_profiles: skipped, ...(shadow.override ? { project_override: shadow.override } : {}),
+			not_covered_profiles: notCovered,
 			...(shadow.issue ? { project_issue: shadow.issue } : {}), ...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}) });
 }
 function inspectExtensionImports(home: string): Finding {

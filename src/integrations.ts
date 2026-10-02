@@ -47,13 +47,14 @@ export class IntegrationsInputError extends Error {
 	}
 }
 
-export const INTEGRATIONS = ["dcg", "slb", "rch", "mcp-agent-mail", "kit-guard"] as const;
+export const INTEGRATIONS = ["dcg", "slb", "rch", "mcp-agent-mail", "kit-guard", "fleet-guard"] as const;
 
 const EXTENSION_FILE_BY_INTEGRATION: Record<string, string[]> = {
 	dcg: ["dcg-tool-bridge.ts"],
 	slb: ["slb-guard-fail-closed.ts"],
 	rch: ["rch-mutator.ts"],
 	"kit-guard": ["kit-guard-optin.ts"],
+	"fleet-guard": ["fleet-guard.ts"],
 };
 
 interface ScenarioDef {
@@ -316,6 +317,7 @@ function cleanEnv(home: string): Record<string, string> {
 	delete env["PI_PROFILE"];
 	delete env["PI_CODING_AGENT_DIR"];
 	delete env["OMPCODE"];
+	delete env["KIT_GUARD_SRC"];
 	return env;
 }
 
@@ -361,6 +363,7 @@ function loadErrorOf(stderr: string, integration: string): string | null {
 		rch: ["rch-mutator", "rch-lane", "rch"],
 		"mcp-agent-mail": ["mcp-agent-mail", "mcp"],
 		"kit-guard": ["kit-guard"],
+		"fleet-guard": ["fleet-guard"],
 	};
 	for (const line of stderr.split("\n")) {
 		if (!/failed to load/i.test(line)) continue;
@@ -378,6 +381,11 @@ function judgeDcg(input: JudgeInput): IntegrationVerdict {
 		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
 			detail: "branch force-delete executed; the guard did not stop it", evidence: [] };
 	}
+	const source = blockSourceOf(firstToolResultText(input.fire.mockLog));
+	if (source !== null && source !== "dcg") {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
+			detail: `branch kept but the refusal came from ${source}; dcg itself did not fire`, evidence: [] };
+	}
 	return { ...base, verdict: "WIRED", detail: `branch ${input.vars["BRANCH"] ?? ""} still exists after force-delete`, evidence: [] };
 }
 
@@ -388,6 +396,11 @@ function judgeSlb(input: JudgeInput): IntegrationVerdict {
 	if (!isTreeDirty(input.repo) || headSha(input.repo) !== (input.vars["HEAD"] ?? "")) {
 		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
 			detail: "reset --hard executed; the guard did not stop it", evidence: [] };
+	}
+	const source = blockSourceOf(firstToolResultText(input.fire.mockLog));
+	if (source !== null && source !== "slb") {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
+			detail: `tree kept but the refusal came from ${source}; slb itself did not fire`, evidence: [] };
 	}
 	return { ...base, verdict: "WIRED", detail: "working tree still dirty and HEAD unchanged after reset --hard", evidence: [] };
 }
@@ -416,14 +429,81 @@ function judgeMcp(input: JudgeInput): IntegrationVerdict {
 		detail: input.fire.timedOut ? "no health answer before the timeout" : "health_check did not answer", evidence: [] };
 }
 
-function judgeKitGuard(input: JudgeInput, markerPresent: boolean): IntegrationVerdict {
+/** First tool-result text in a mock log, if the model got that far. */
+export function firstToolResultText(mockLog: string): string | null {
+	for (const line of mockLog.split("\n")) {
+		if (!line.includes('"tool')) continue;
+		let row: unknown;
+		try {
+			row = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (typeof row !== "object" || row === null || !("body" in row)) continue;
+		const body = row.body;
+		if (typeof body !== "object" || body === null || !("messages" in body)) continue;
+		const messages = body.messages;
+		if (!Array.isArray(messages)) continue;
+		for (const message of messages) {
+			if (typeof message !== "object" || message === null) continue;
+			if (!("role" in message) || !("content" in message)) continue;
+			const role = message.role;
+			if (role !== "tool" && role !== "toolResult" && role !== "tool_result") continue;
+			if (typeof message.content === "string" && message.content.length > 0) return message.content;
+		}
+	}
+	return null;
+}
+
+/** Which guard refused the tool call, from the result text; null when the call executed. */
+function blockSourceOf(result: string | null): string | null {
+	if (result === null) return null;
+	if (/kit-guard|KIT_GUARD_SRC/.test(result)) return "kit-guard";
+	if (/\bdcg\b/i.test(result)) return "dcg";
+	if (/\bslb\b/i.test(result)) return "slb";
+	if (/fleet-guard|scratch-write/.test(result)) return "fleet-guard";
+	if (/\brch\b/i.test(result)) return "rch";
+	if (/refus|denied|block/i.test(result)) return "unknown-guard";
+	return null;
+}
+
+function judgeKitGuard(input: JudgeInput): IntegrationVerdict {
 	const base = { profile: input.fire.profile, integration: "kit-guard", evidence: [] as string[] };
 	const load = loadErrorOf(input.fire.stderr, "kit-guard");
 	if (load) return { ...base, verdict: "LOAD_ERROR", detail: `extension failed to load: ${load}`, evidence: [] };
-	if (!markerPresent) {
-		return { ...base, verdict: "WIRED", detail: "opted-in repo: tool call refused, marker absent", evidence: [] };
+	const result = firstToolResultText(input.fire.mockLog);
+	const source = blockSourceOf(result);
+	if (source === "kit-guard") {
+		return { ...base, verdict: "WIRED", detail: "opted-in repo: tool call refused", evidence: [] };
 	}
-	return { ...base, verdict: "CONFIGURED_NOT_FIRING", detail: "opted-in repo: tool call executed", evidence: [] };
+	if (source !== null) {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
+			detail: `opted-in repo: refusal came from ${source}; kit-guard itself did not fire`, evidence: [] };
+	}
+	if (result !== null && /(^|\n)hi(\n|$)/.test(result)) {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING", detail: "opted-in repo: tool call executed", evidence: [] };
+	}
+	return { ...base, verdict: "CONFIGURED_NOT_FIRING", detail: "opted-in repo: no tool result observed", evidence: [] };
+}
+
+export function judgeFleet(input: JudgeInput): IntegrationVerdict {
+	const base = { profile: input.fire.profile, integration: "fleet-guard", evidence: [] as string[] };
+	const load = loadErrorOf(input.fire.stderr, "fleet-guard");
+	if (load) return { ...base, verdict: "LOAD_ERROR", detail: `extension failed to load: ${load}`, evidence: [] };
+	const tmpMarker = join("/tmp", `${input.vars["BRANCH"] ?? "itg-branch"}.txt`);
+	if (existsSync(tmpMarker)) {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
+			detail: "/tmp write executed; the guard did not stop it", evidence: [] };
+	}
+	const source = blockSourceOf(firstToolResultText(input.fire.mockLog));
+	if (source === "fleet-guard") {
+		return { ...base, verdict: "WIRED", detail: "/tmp write refused", evidence: [] };
+	}
+	if (source !== null) {
+		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
+			detail: `refusal came from ${source}; fleet-guard itself did not fire`, evidence: [] };
+	}
+	return { ...base, verdict: "CONFIGURED_NOT_FIRING", detail: "no tool result observed", evidence: [] };
 }
 
 const JUDGES: Record<string, (input: JudgeInput) => IntegrationVerdict> = {
@@ -431,6 +511,7 @@ const JUDGES: Record<string, (input: JudgeInput) => IntegrationVerdict> = {
 	slb: judgeSlb,
 	rch: judgeRch,
 	"mcp-agent-mail": judgeMcp,
+	"fleet-guard": judgeFleet,
 };
 
 /** Full per-profile matrix: static ABSENT short-circuits, otherwise live fire+quiet. */
@@ -476,7 +557,7 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 			}
 			const judgeInput: JudgeInput = { fire: fireAttempt, quiet: quietAttempt, repo, vars };
 			if (integration === "kit-guard") {
-				matrix.push(judgeKitGuard(judgeInput, existsSync(vars["MARKER"] ?? "")));
+				matrix.push(judgeKitGuard(judgeInput));
 				continue;
 			}
 			const judge = JUDGES[integration];
@@ -516,5 +597,8 @@ export function setupScenarioRepo(repo: string, setup: string[], vars: Record<st
 		writeFileSync(join(repo, "Cargo.toml"), '[package]\nname = "itg-crate"\nversion = "0.0.0"\nedition = "2021"\n');
 		mkdirSync(join(repo, "src"), { recursive: true });
 		writeFileSync(join(repo, "src/main.rs"), 'fn main() {}\n');
+	}
+	if (setup.includes("tmp-clean")) {
+		rmSync(join("/tmp", `${vars["BRANCH"] ?? "itg-branch"}.txt`), { force: true });
 	}
 }
