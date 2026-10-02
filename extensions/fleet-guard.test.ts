@@ -5,6 +5,8 @@ import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import { planExtensions } from "../src/apply-extensions.ts";
 import type { FleetGuardBlock } from "../src/fleet-guard/scratch.ts";
+// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+mkdirSync(join(import.meta.dir, "../var/agent-tmp"), { recursive: true });
 
 const roots: string[] = [];
 afterEach(() => {
@@ -117,4 +119,25 @@ test("two-extension policy installs both destinations and appends both to profil
 	].sort());
 	const profileStep = plan.steps.find(step => step.kind === "profile");
 	expect(profileStep?.path).toContain(join("work", "agent"));
+});
+
+test("session load completes and registers the chain when the storage-root export fails", async () => {
+	const saved = { url: process.env.AGENTMAIL_HTTP_URL, token: process.env.AGENTMAIL_HTTP_BEARER_TOKEN, root: process.env.AGENT_MAIL_STORAGE_ROOT };
+	process.env.AGENTMAIL_HTTP_URL = "http://127.0.0.1:1/api";
+	delete process.env.AGENTMAIL_HTTP_BEARER_TOKEN;
+	delete process.env.AGENT_MAIL_STORAGE_ROOT;
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	try {
+		await fleetGuard(pi, { cwd, pid });
+		expect(pi.labels).toEqual(["fleet-guard"]);
+		expect(pi.handlers).toHaveLength(1);
+		expect(process.env.AGENT_MAIL_STORAGE_ROOT).toBeUndefined();
+	} finally {
+		if (saved.url === undefined) delete process.env.AGENTMAIL_HTTP_URL; else process.env.AGENTMAIL_HTTP_URL = saved.url;
+		if (saved.token === undefined) delete process.env.AGENTMAIL_HTTP_BEARER_TOKEN; else process.env.AGENTMAIL_HTTP_BEARER_TOKEN = saved.token;
+		if (saved.root === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT; else process.env.AGENT_MAIL_STORAGE_ROOT = saved.root;
+	}
+	const repoRoot = resolve(import.meta.dir, "..");
+	roots.push(join(repoRoot, "var", "agent-tmp", `omp.${pid}`));
 });

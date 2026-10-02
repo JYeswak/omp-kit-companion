@@ -46,17 +46,35 @@ private_owner_mode() {
 }
 
 new_workdir() {
-  base=$(system_tmp_root) || die "no supported private temporary root"
-  umask 077
-  work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
-  /bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
-  printf '%s\n' "$work"
+	# os.tmpdir() semantics, not a literal path and never the release tree:
+	# honor TMPDIR (under the fleet guard it lands in the repo's var/agent-tmp;
+	# on a user machine, the system temp), else /tmp. A TMPDIR inside the
+	# release root (e.g. an agent session under the fleet guard) falls back to
+	# /tmp: the --work-dir validation below requires system-temp containment
+	# outside the release/HOME, and the release snapshot fails on any leftover
+	# under the release tree. Callers trap-remove the work root.
+	base="${TMPDIR:-/tmp}"
+	base_real=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || base_real=""
+	root_real=$(CDPATH='' cd -- "$ROOT" && pwd -P) || die "cannot resolve release root"
+	case "$base_real" in
+	"$root_real"|"$root_real"/*)
+		echo "runtime-adapter: TMPDIR ($base) is inside the release tree; falling back to /tmp" >&2
+		base=/tmp ;;
+	esac
+	if [ -z "$base" ] || [ ! -d "$base" ]; then
+		die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})"
+	fi
+	umask 077
+	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
+	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
+	work=$(CDPATH='' cd -- "$work" && pwd -P) || die "cannot resolve private work directory"
+	printf '%s\n' "$work"
 }
 
 if [ "${1:-}" = --workdir ]; then
-  [ "$#" -eq 1 ] || die "--workdir takes no arguments"
-  new_workdir
-  exit $?
+	[ "$#" -eq 1 ] || die "--workdir takes no arguments"
+	new_workdir
+	exit $?
 fi
 
 work_set=0; scenario_set=0; log_set=0; port_set=0

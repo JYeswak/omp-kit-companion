@@ -1,66 +1,165 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { runFullTest } from "../../src/full-test-runner.ts";
+import type { ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate } from "../../src/kit-update.ts";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const platform = { os: "darwin", arch: "arm64", libc: "none" } as const;
+const platform: ReleasePlatform = { os: "darwin", arch: "arm64", libc: "none" };
+
+const hostPlatform: ReleasePlatform = process.platform === "darwin"
+	? { os: "darwin", arch: process.arch === "arm64" ? "arm64" : "x64", libc: "none" }
+	: { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", libc: "gnu" };
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
+type FixtureFile = { name: string; bytes: Buffer };
+type FixtureContext = { root: string; prefix: string; stateRoot: string; home: string; source: string;
+	indexPath: string; archivePath: string; oldBinary: Buffer; contractFiles: FixtureFile[];
+	platform: ReleasePlatform; currentVersion: string; nextVersion: string };
+type FixtureOptions = { platform?: ReleasePlatform; currentVersion?: string; nextVersion?: string };
 
 function tar(entries: { name: string; bytes: Buffer }[]): Buffer {
- const blocks: Buffer[] = [];
- for (const entry of entries) {
-  const header = Buffer.alloc(512);
-  header.write(entry.name, 0, 100);
-  header.write("0000755\0", 100, "ascii");
-  header.write("0000000\0", 108, "ascii");
-  header.write("0000000\0", 116, "ascii");
-  header.write(entry.bytes.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
-  header.write("00000000000\0", 136, "ascii");
-  header.fill(32, 148, 156);
-  header.write("0", 156, "ascii");
-  header.write("ustar\0", 257, "ascii");
-  header.write("00", 263, "ascii");
-  const sum = header.reduce((total, byte) => total + byte, 0);
-  header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
-  blocks.push(header, entry.bytes, Buffer.alloc((512 - entry.bytes.length % 512) % 512));
- }
- return Buffer.concat([...blocks, Buffer.alloc(1024)]);
+	const blocks: Buffer[] = [];
+	for (const entry of entries) {
+		const header = Buffer.alloc(512);
+		header.write(entry.name, 0, 100);
+		header.write("0000755\0", 100, "ascii");
+		header.write("0000000\0", 108, "ascii");
+		header.write("0000000\0", 116, "ascii");
+		header.write(entry.bytes.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+		header.write("00000000000\0", 136, "ascii");
+		header.fill(32, 148, 156);
+		header.write("0", 156, "ascii");
+		header.write("ustar\0", 257, "ascii");
+		header.write("00", 263, "ascii");
+		const sum = header.reduce((total, byte) => total + byte, 0);
+		header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+		blocks.push(header, entry.bytes, Buffer.alloc((512 - entry.bytes.length % 512) % 512));
+	}
+	return Buffer.concat([...blocks, Buffer.alloc(1024)]);
+}
+function binary(version: string, selectedPlatform: ReleasePlatform = platform): Buffer {
+	const info = JSON.stringify(JSON.stringify({ version, source_tag: "v" + version,
+		platform: { os: selectedPlatform.os, arch: selectedPlatform.arch } }));
+	return Buffer.from("#!/bin/sh\nprintf '%s\\n' " + info + "\n");
+}
+function manifest(version: string, executable: Buffer, extraFiles: readonly FixtureFile[] = []): Buffer {
+	const files = [{ path: "bin/omp-kit", sha256: sha(executable) },
+		...extraFiles.map(({ name, bytes }) => ({ path: name, sha256: sha(bytes) }))]
+		.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+	return Buffer.from(JSON.stringify({ schema_version: 1, version, source_tag: "v" + version, files }));
+}
+function fixtureContractFiles(): FixtureFile[] {
+	const rule = Buffer.from("# Rule A\n");
+	const manifestFile = Buffer.from("name\tsha256\tclass\tpack\nrule-a\t" + sha(rule) + "\ttripwire\t1234567\n");
+	const cases = Buffer.from("rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n" +
+		"rule-a\tfire\ttext\t-\t-\tbr close x\tfixture fire\n" +
+		"rule-a\tquiet\ttext\t-\t-\tbr list\tfixture quiet\n");
+	return [{ name: "MANIFEST.tsv", bytes: manifestFile }, { name: "cases/cases.tsv", bytes: cases }, { name: "rules/rule-a.md", bytes: rule }];
+}
+async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
+	mkdirSync(scratch, { recursive: true });
+	const root = mkdtempSync(join(scratch, "kit-update-"));
+	const prefix = join(root, "prefix"), stateRoot = join(root, "state"), home = join(root, "home"), source = join(root, "source");
+	const selectedPlatform = options.platform ?? platform;
+	const currentVersion = options.currentVersion ?? "1.2.2", nextVersion = options.nextVersion ?? "1.2.3";
+	mkdirSync(join(prefix, "bin"), { recursive: true });
+	mkdirSync(join(prefix, "releases", currentVersion, "bin"), { recursive: true });
+	mkdirSync(home);
+	mkdirSync(source);
+	const oldBinary = binary(currentVersion, selectedPlatform);
+	writeFileSync(join(prefix, "releases", currentVersion, "bin", "omp-kit"), oldBinary, { mode: 0o755 });
+	chmodSync(join(prefix, "releases", currentVersion, "bin", "omp-kit"), 0o755);
+	writeFileSync(join(prefix, "releases", currentVersion, "release-manifest.json"), manifest(currentVersion, oldBinary));
+	symlinkSync("../releases/" + currentVersion + "/bin/omp-kit", join(prefix, "bin", "omp-kit"));
+	const contractFiles = fixtureContractFiles();
+	const next = binary(nextVersion, selectedPlatform), releaseManifest = manifest(nextVersion, next, contractFiles);
+	const archive = tar([{ name: "bin/omp-kit", bytes: next }, ...contractFiles, { name: "release-manifest.json", bytes: releaseManifest }]);
+	const key = [selectedPlatform.os, selectedPlatform.arch, selectedPlatform.libc].join("-");
+	const filename = "omp-kit-v" + nextVersion + "-" + key + ".tar";
+	const archivePath = join(source, filename), indexPath = join(source, "release-index.json");
+	writeFileSync(archivePath, archive);
+	writeFileSync(indexPath, JSON.stringify({ schema_version: 1, version: nextVersion, source_tag: "v" + nextVersion, assets: {
+		[key]: { ...selectedPlatform, filename, sha256: sha(archive), manifest_sha256: sha(releaseManifest) },
+	} }));
+	try { return await run({ root, prefix, stateRoot, home, source, indexPath, archivePath, oldBinary, contractFiles,
+		platform: selectedPlatform, currentVersion, nextVersion }); }
+	finally { rmSync(root, { recursive: true, force: true }); }
+}
+const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, home: ctx.home,
+	indexPath: ctx.indexPath, archivePath: ctx.archivePath, platform: ctx.platform,
+	version: ctx.nextVersion, sourceTag: "v" + ctx.nextVersion });
+
+function copyReleaseSource(sourceRoot: string, destination: string): void {
+	mkdirSync(destination, { recursive: true });
+	for (const directory of ["src", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "tests/live"]) {
+		const target = join(destination, directory);
+		mkdirSync(dirname(target), { recursive: true });
+		cpSync(join(sourceRoot, directory), target, { recursive: true });
+	}
+	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json", "tests/cli/metamorphic-baseline.json"]) {
+		const target = join(destination, file);
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(sourceRoot, file), target);
+	}
 }
 
-function binary(version: string): Buffer {
- return Buffer.from(`#!/bin/sh\nprintf '{"version":"${version}","source_tag":"v${version}","platform":{"os":"darwin","arch":"arm64"}}\\n'\n`);
+function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable: string; baseCases: number; baseQuiet: number; targetCases: number; targetQuiet: number } {
+	const sourceRoot = join(ctx.root, "candidate-source");
+	copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
+	const casesPath = join(sourceRoot, "cases", "cases.tsv");
+	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
+	const caseLines = rawCases.split("\n");
+	if (caseLines[0] !== "rule\texpect\tsource\ttool\tpath\tsnippet\tnote") throw new Error("candidate cases fixture has an unknown schema");
+	const rows = caseLines.slice(1).filter(row => row.trim() !== "" && !row.startsWith("#"));
+	// These existing controls have no known metamorphic breaks; N+2 tests case-count drift only.
+	const fire = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "fire" && columns[5] === "br close x";
+	});
+	const quiet = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "quiet" &&
+			columns[5] === 'br close x --reason "cargo test -> 41 passed; commit a1b2c3d"';
+	});
+	if (!fire || !quiet) throw new Error("candidate cases fixture needs metamorphic-clean fire and quiet controls");
+	const annotate = (row: string, label: string): string => {
+		const columns = row.split("\t");
+		columns[6] = ((columns[6] ?? "") + " " + label).trim();
+		return columns.join("\t");
+	};
+	const baseCases = rows.length, baseQuiet = rows.filter(row => row.split("\t")[1] === "quiet").length;
+	writeFileSync(casesPath, rawCases + "\n" + annotate(fire, "U1-N-plus-two-fire") + "\n" + annotate(quiet, "U1-N-plus-two-quiet") + "\n");
+	const ruleLines = readFileSync(join(sourceRoot, "MANIFEST.tsv"), "utf8").trimEnd().split(/\r?\n/).slice(1);
+	const rules = ruleLines.length, ttsrRules = ruleLines.filter(row => row.split("\t")[2] !== "always").length;
+	const runnerPath = join(sourceRoot, "src", "test-runner.ts");
+	const runner = readFileSync(runnerPath, "utf8");
+	const expectedPattern = /const EXPECTED = \{ rules: (\d+), ttsrRules: (\d+), cases: (\d+), quietCases: (\d+) \} as const;/;
+	const old = expectedPattern.exec(runner);
+	if (!old || Number(old[1]) !== rules || Number(old[2]) !== ttsrRules || Number(old[3]) !== baseCases || Number(old[4]) !== baseQuiet)
+		throw new Error("candidate source counts do not match its shipped MANIFEST.tsv/cases.tsv");
+	const targetCases = baseCases + 2, targetQuiet = baseQuiet + 1;
+	const nextExpected = "const EXPECTED = { rules: " + rules + ", ttsrRules: " + ttsrRules +
+		", cases: " + targetCases + ", quietCases: " + targetQuiet + " } as const;";
+	writeFileSync(runnerPath, runner.replace(expectedPattern, nextExpected));
+	const output = join(ctx.root, "candidate-package");
+	mkdirSync(output);
+	const key = [ctx.platform.os, ctx.platform.arch, ctx.platform.libc].join("-");
+	const build = Bun.spawnSync(["sh", join(sourceRoot, "scripts", "package-release.sh"), "--version", ctx.nextVersion,
+		"--platform", key, "--out", output], { cwd: sourceRoot, env: { ...process.env, TMPDIR: ctx.root }, stdout: "pipe", stderr: "pipe" });
+	if (build.exitCode !== 0) throw new Error("N+2 candidate package build failed: " + build.stdout.toString() + build.stderr.toString());
+	const asset = JSON.parse(build.stdout.toString()) as { os: string; arch: string; libc: string; filename: string; sha256: string; manifest_sha256: string };
+	const packagedArchive = join(output, asset.filename), archive = readFileSync(packagedArchive);
+	writeFileSync(ctx.archivePath, archive);
+	writeFileSync(ctx.indexPath, JSON.stringify({ schema_version: 1, version: ctx.nextVersion, source_tag: "v" + ctx.nextVersion, assets: { [key]: asset } }));
+	const root = join(ctx.root, "candidate-release");
+	mkdirSync(root);
+	const extract = Bun.spawnSync(["tar", "xf", packagedArchive, "-C", root], { cwd: ctx.root, env: { ...process.env, TMPDIR: ctx.root }, stdout: "pipe", stderr: "pipe" });
+	if (extract.exitCode !== 0) throw new Error("N+2 candidate extraction failed: " + extract.stdout.toString() + extract.stderr.toString());
+	return { root, executable: join(root, "bin", "omp-kit"), baseCases, baseQuiet, targetCases, targetQuiet };
 }
-function manifest(version: string, executable: Buffer): Buffer {
- return Buffer.from(JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`, files: [{ path: "bin/omp-kit", sha256: sha(executable) }] }));
-}
-async function fixture<T>(run: (ctx: { prefix: string; stateRoot: string; home: string; indexPath: string; archivePath: string; oldBinary: Buffer }) => Promise<T>): Promise<T> {
- mkdirSync(scratch, { recursive: true });
- const root = mkdtempSync(join(scratch, "kit-update-"));
- const prefix = join(root, "prefix"), stateRoot = join(root, "state"), home = join(root, "home"), source = join(root, "source");
- mkdirSync(join(prefix, "bin"), { recursive: true });
- mkdirSync(join(prefix, "releases", "1.2.2", "bin"), { recursive: true });
- mkdirSync(home);
- mkdirSync(source);
- const oldBinary = binary("1.2.2");
- writeFileSync(join(prefix, "releases", "1.2.2", "bin", "omp-kit"), oldBinary, { mode: 0o755 });
- chmodSync(join(prefix, "releases", "1.2.2", "bin", "omp-kit"), 0o755);
- writeFileSync(join(prefix, "releases", "1.2.2", "release-manifest.json"), manifest("1.2.2", oldBinary));
- symlinkSync("../releases/1.2.2/bin/omp-kit", join(prefix, "bin", "omp-kit"));
- const next = binary("1.2.3"), archive = tar([{ name: "bin/omp-kit", bytes: next }, { name: "release-manifest.json", bytes: manifest("1.2.3", next) }]);
- const filename = "omp-kit-v1.2.3-darwin-arm64-none.tar";
- const archivePath = join(source, filename), indexPath = join(source, "release-index.json");
- writeFileSync(archivePath, archive);
- writeFileSync(indexPath, JSON.stringify({ schema_version: 1, version: "1.2.3", source_tag: "v1.2.3", assets: {
-  "darwin-arm64-none": { ...platform, filename, sha256: sha(archive), manifest_sha256: sha(manifest("1.2.3", next)) },
- } }));
- try { return await run({ prefix, stateRoot, home, indexPath, archivePath, oldBinary }); }
- finally { rmSync(root, { recursive: true, force: true }); }
-}
-const input = (ctx: { prefix: string; stateRoot: string; home: string; indexPath: string; archivePath: string }) =>
- ({ ...ctx, platform, version: "1.2.3", sourceTag: "v1.2.3" });
 
 // A version/hash/source drift must be rejected under the same lock that owns activation.
 test("stale plan and competing writer refuse without touching the stable link", async () => fixture(async ctx => {
@@ -152,7 +251,7 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  expect(envelope.data, JSON.stringify(envelope.data)).toMatchObject({ overall: "FAIL", action: "PARTIAL", postcheck: "FAIL",
   receipt_id: result.receiptId, reason: result.postcheck.reason ?? null });
  expect(envelope.data.postcheck_detail, JSON.stringify(envelope.data.postcheck_detail)).toMatchObject({
-  failed_stages: ["harness-gate", "e2e-live"], changed_operator_paths: [homePath, projectPath], failures: failures.slice(0, 20) });
+  failed_stages: ["harness-gate", "e2e-live", "fast-test", "omp-version"], changed_operator_paths: [homePath, projectPath], failures: failures.slice(0, 20) });
  expect(envelope.commands).toEqual([undoCommand]);
  expect(envelope.errors?.[0], JSON.stringify(envelope.errors)).toMatchObject({ code: result.postcheck.reason ?? "KIT_POSTCHECK_FAILED" });
  expect(envelope.errors?.[0]?.message).toContain("Kit update to 1.2.3 did not pass its postcheck; failure 1");
@@ -212,8 +311,8 @@ test("a selected OMP package replaced after kit planning cannot certify the kit 
  writeFileSync(launcher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
  symlinkSync(launcher, join(ompBin, "omp"));
  const next = Buffer.from(`#!/bin/sh\nprintf '%s' '{"name":"@oh-my-pi/pi-coding-agent","version":"18.4.3"}' > ${JSON.stringify(manifestPath)}\nprintf '{"version":"1.2.3","source_tag":"v1.2.3","platform":{"os":"darwin","arch":"arm64"}}\\n'\n`);
- const releaseManifest = manifest("1.2.3", next);
- const archive = tar([{ name: "bin/omp-kit", bytes: next }, { name: "release-manifest.json", bytes: releaseManifest }]);
+	const releaseManifest = manifest("1.2.3", next, ctx.contractFiles);
+	const archive = tar([{ name: "bin/omp-kit", bytes: next }, ...ctx.contractFiles, { name: "release-manifest.json", bytes: releaseManifest }]);
  const index = JSON.parse(readFileSync(ctx.indexPath, "utf8"));
  index.assets["darwin-arm64-none"].sha256 = sha(archive);
  index.assets["darwin-arm64-none"].manifest_sha256 = sha(releaseManifest);
@@ -233,9 +332,44 @@ test("a selected OMP package replaced after kit planning cannot certify the kit 
  } finally { process.env.PATH = previousPath; }
 }));
 
+test("a null full-test OMP version is a named postcheck failure, not an OMP change", async () => fixture(async ctx => {
+	const packageRoot = join(ctx.home, "omp-package"), ompBin = join(ctx.home, "omp-bin");
+	const manifestPath = join(packageRoot, "package.json");
+	mkdirSync(join(packageRoot, "dist"), { recursive: true });
+	mkdirSync(join(packageRoot, "node_modules", "@oh-my-pi", "pi-natives"), { recursive: true });
+	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
+		const target = join(packageRoot, "src", file);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, "export {};\n");
+	}
+	mkdirSync(ompBin);
+	writeFileSync(manifestPath, JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.2" }));
+	writeFileSync(join(packageRoot, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
+	const launcher = join(packageRoot, "dist", "cli.js");
+	writeFileSync(launcher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	symlinkSync(launcher, join(ompBin, "omp"));
+	const previousPath = process.env.PATH;
+	process.env.PATH = [ompBin, previousPath ?? ""].filter(Boolean).join(":");
+	try {
+		const plan = await planKitUpdate(input(ctx));
+		if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+		const result = await applyKitUpdate(plan);
+		expect(result.status).toBe("PARTIAL");
+		expect(result.postcheck.report?.omp_version).toBeNull();
+		expect(result.postcheck.reason).toBe("KIT_POSTCHECK_FAILED");
+		expect(JSON.parse(readFileSync(manifestPath, "utf8")).version).toBe("18.4.2");
+		const envelope = kitUpdateEnvelope(plan, result);
+		const detail = envelope.data.postcheck_detail as { omp_version: string | null; failed_stages: string[] };
+		expect(detail.omp_version).toBeNull();
+		expect(detail.failed_stages).toContain("fast-test");
+		expect(detail.failed_stages).toContain("omp-version");
+	} finally { process.env.PATH = previousPath; }
+}));
+
 test("already-current version does not create a pending receipt or re-switch the stable link", async () => fixture(async ctx => {
  const release = join(ctx.prefix, "releases", "1.2.3");
  mkdirSync(join(release, "bin"), { recursive: true });
+
  writeFileSync(join(release, "bin", "omp-kit"), binary("1.2.3"), { mode: 0o755 });
  chmodSync(join(release, "bin", "omp-kit"), 0o755);
  writeFileSync(join(release, "release-manifest.json"), manifest("1.2.3", binary("1.2.3")));
@@ -250,6 +384,36 @@ test("already-current version does not create a pending receipt or re-switch the
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
  expect(auditMutations(ctx.stateRoot)).toEqual([]);
 }));
+
+// Full N to N+2 journey: two package builds plus fast, matcher, ratchet and the
+// complete e2e-live suite in postcheck. Per-scenario timeouts bound hangs; the
+// 900 s budget fits the suite on slow disks.
+test("update completes from an N-case build to an N+2-case release; the legacy in-process contract is RED", async () => fixture(async ctx => {
+	const candidate = buildNPlusTwoCandidate(ctx);
+	const plan = await planKitUpdate(input(ctx));
+	if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+
+	// Mutant control: the old updater's in-process test runner still expects N.
+	const legacy = await runFullTest({ root: candidate.root, executablePath: candidate.executable,
+		home: ctx.home, stateRoot: ctx.stateRoot });
+	expect(legacy.fast.status).toBe("FAIL");
+	expect(legacy.fast.proofs.G2_payload).toMatchObject({ status: "FAIL",
+		expected_cases: candidate.baseCases, observed_cases: candidate.targetCases });
+	expect(legacy.fast.proofs.G3_quiet_prefix).toMatchObject({ status: "FAIL",
+		expected_cases: candidate.baseCases, expected_quiet_cases: candidate.baseQuiet,
+		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
+
+	const updated = await applyKitUpdate(plan);
+	expect(updated.status).toBe("UPDATED");
+	expect(updated.postcheck.status).toBe("PASS");
+	expect(updated.postcheck.report?.fast.proofs.G2_payload).toMatchObject({ status: "PASS",
+		expected_cases: candidate.targetCases, observed_cases: candidate.targetCases });
+	expect(updated.postcheck.report?.fast.proofs.G3_quiet_prefix).toMatchObject({ status: "PASS",
+		expected_cases: candidate.targetCases, expected_quiet_cases: candidate.targetQuiet,
+		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
+	expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/" + ctx.nextVersion + "/bin/omp-kit");
+	expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}, { platform: hostPlatform, currentVersion: "0.2.2", nextVersion: "0.2.3" }), 900_000);
 
 test("unsupported source and dangling stable link refuse without creating state", async () => fixture(async ctx => {
  const unsupported = await planKitUpdate({ ...input(ctx), sourceTag: "" });
