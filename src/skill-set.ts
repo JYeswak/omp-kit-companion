@@ -1,7 +1,7 @@
-import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { runCapabilitiesCheck, runContextInventory, validateProfileName, type CapabilitiesReport } from "./context.ts";
+import { runCapabilitiesCheck, runContextInventory, validateProfileName, type CapabilitiesReport, type ContextInventory } from "./context.ts";
 
 export const SKILL_URL_PATTERN = "skill://";
 const SKILL_NAME = "[a-z0-9][a-z0-9_-]*";
@@ -15,11 +15,20 @@ const TOTAL_BYTES_MAX = 64 * 1024 * 1024;
 const FILES_MAX = 5000;
 const LINE_BYTES_MAX = 1024 * 1024;
 
+export interface HistoryProjectUsage {
+	/** Skill names read in sessions rooted at this cwd, with distinct mentioning rows. */
+	reads: Record<string, number>;
+	/** Skill names written explicitly in sessions rooted at this cwd. */
+	explicit: Record<string, number>;
+}
+
 export interface HistoryScan {
 	/** Skill names read (skill:// mentions) with distinct mentioning rows. */
 	reads: Record<string, number>;
 	/** Skill names written explicitly (/skill: tokens or skill:// in user text). */
 	explicit: Record<string, number>;
+	/** Per-session-cwd usage; a session row's cwd decides, "" when no session row precedes. */
+	by_project: Record<string, HistoryProjectUsage>;
 	files_scanned: number;
 	files_skipped_window: number;
 	files_skipped_oversize: number;
@@ -49,7 +58,13 @@ export interface SkillSetReport {
 	candidate_skills: string[];
 	reads: Record<string, number>;
 	explicit: Record<string, number>;
-	history: Omit<HistoryScan, "reads" | "explicit">;
+	history: Omit<HistoryScan, "reads" | "explicit" | "by_project">;
+	/** Usage grouped by session cwd; session rows without a preceding session row land under "". */
+	projects: Record<string, HistoryProjectUsage>;
+	/** Rendered recipes per session-cwd project, each resolved through that project's own loader. */
+	project_recipes: SkillSetProjectRecipe[];
+	/** Skills used in a session cwd that resolve in no inventoried scope; in no recipe. */
+	unresolved_projects: Record<string, string[]>;
 	bytes_before: number;
 	bytes_after: number;
 	listed_before: number;
@@ -57,6 +72,18 @@ export interface SkillSetReport {
 	capability_check: { overall: "PASS" | "FAIL"; missing: number; capabilities: CapabilitiesReport["capabilities"] };
 	recipe: string;
 	guidance: string;
+}
+
+export interface SkillSetProjectRecipe {
+	/** Session cwd this recipe resolves; "project:<path>" in human-facing summaries. */
+	project: string;
+	candidate_skills: string[];
+	bytes_before: number;
+	bytes_after: number;
+	listed_before: number;
+	listed_after: number;
+	capability_check: { overall: "PASS" | "FAIL"; missing: number; capabilities: CapabilitiesReport["capabilities"] };
+	recipe: string;
 }
 
 export class SkillSetInputError extends Error {
@@ -102,9 +129,11 @@ export function scanSessionHistory(sessionsDir: string, days: number): HistorySc
 	const cutoff = Date.now() - days * 86400 * 1000;
 	const reads: Record<string, number> = {};
 	const explicit: Record<string, number> = {};
-	const scan: HistoryScan = { reads, explicit, files_scanned: 0, files_skipped_window: 0,
+	const scan: HistoryScan = { reads, explicit, by_project: {}, files_scanned: 0, files_skipped_window: 0,
 		files_skipped_oversize: 0, files_skipped_unsafe: 0, bytes_scanned: 0, rows_scanned: 0,
 		rows_malformed: 0, truncated: false };
+	const projectUsage = (project: string): HistoryProjectUsage =>
+		scan.by_project[project] ?? (scan.by_project[project] = { reads: {}, explicit: {} });
 	const files: string[] = [];
 	const visit = (directory: string, depth: number): void => {
 		if (scan.truncated || files.length >= FILES_MAX) return;
@@ -157,25 +186,35 @@ export function scanSessionHistory(sessionsDir: string, days: number): HistorySc
 		}
 		scan.files_scanned += 1;
 		scan.bytes_scanned += text.length;
+		let sessionCwd = "";
 		for (const line of text.split("\n")) {
 			if (!line.trim()) continue;
 			if (line.length > LINE_BYTES_MAX) continue;
 			scan.rows_scanned += 1;
-			const seen = new Set(skillUrls(line));
-			if (seen.size > 0) countInto(reads, seen);
 			let row: unknown;
 			try {
 				row = JSON.parse(line);
 			} catch {
 				scan.rows_malformed += 1;
-				continue;
+				row = null;
+			}
+			if (typeof row === "object" && row !== null && "type" in row && row.type === "session"
+				&& "cwd" in row && typeof row.cwd === "string") {
+				sessionCwd = row.cwd;
+			}
+			const seen = new Set(skillUrls(line));
+			if (seen.size > 0) {
+				countInto(reads, seen);
+				countInto(projectUsage(sessionCwd).reads, seen);
 			}
 			if (typeof row === "object" && row !== null && "message" in row) {
 				const message = row.message;
 				if (typeof message === "object" && message !== null && "role" in message
 					&& message.role === "user" && "content" in message) {
 					const userText = textOf(message.content);
-					countInto(explicit, new Set([...skillTokens(userText), ...skillUrls(userText)]));
+					const names = new Set([...skillTokens(userText), ...skillUrls(userText)]);
+					countInto(explicit, names);
+					countInto(projectUsage(sessionCwd).explicit, names);
 				}
 			}
 		}
@@ -201,6 +240,31 @@ function renderRecipe(candidate: string[], before: number, after: number,
 	return lines.join("\n") + "\n";
 }
 
+/** A session cwd resolves through its own directory; "" (no session row) falls back to the invocation cwd. */
+function resolveDir(sessionCwd: string, fallback: string): string {
+	if (sessionCwd === "") return fallback;
+	return sessionCwd;
+}
+
+async function measureRecipe(input: SkillSetInput, profile: string, project: string,
+	candidate: string[], before: ContextInventory, capabilitiesPath: string): Promise<Omit<SkillSetProjectRecipe,
+		"project" | "candidate_skills" | "recipe"> & { recipe: string }> {
+	writeFileSync(capabilitiesPath, JSON.stringify({ schema_version: 1, skills: candidate }));
+	const after = await runContextInventory({ root: input.root, executablePath: input.executablePath,
+		home: input.home, profile, project, overrides: { includeSkills: candidate } });
+	const check = await runCapabilitiesCheck({ root: input.root, executablePath: input.executablePath,
+		home: input.home, profile, project, overrides: { includeSkills: candidate },
+		capabilitiesPath });
+	return {
+		bytes_before: before.skills.listed_bytes,
+		bytes_after: after.skills.listed_bytes,
+		listed_before: before.skills.listed,
+		listed_after: after.skills.listed,
+		capability_check: { overall: check.overall, missing: check.missing, capabilities: check.capabilities },
+		recipe: renderRecipe(candidate, before.skills.listed_bytes, after.skills.listed_bytes, check),
+	};
+}
+
 /** Derive a usage-based candidate set and render (never apply) a pruned-profile recipe. */
 export async function renderSkillSet(input: SkillSetInput): Promise<SkillSetReport> {
 	if (![input.home, input.root, input.executablePath, input.project].every(path => typeof path === "string" && isAbsolute(path))) {
@@ -214,31 +278,73 @@ export async function renderSkillSet(input: SkillSetInput): Promise<SkillSetRepo
 		? join(input.home, ".omp", "agent", "sessions")
 		: join(input.home, ".omp", "profiles", profile, "agent", "sessions");
 	const scan = scanSessionHistory(sessionsDir, input.days);
-	const candidate = [...new Set([...Object.keys(scan.reads), ...Object.keys(scan.explicit)])].sort();
-	const before = await runContextInventory({ root: input.root, executablePath: input.executablePath,
+	const projects: Record<string, HistoryProjectUsage> = {};
+	for (const [key, usage] of Object.entries(scan.by_project)) {
+		if (Object.keys(usage.reads).length > 0 || Object.keys(usage.explicit).length > 0) projects[key] = usage;
+	}
+	// The global recipe holds only user-scope skills: resolve usage from the invocation
+	// project so project-scoped skills from other cwds cannot leak into it.
+	const globalInventory = await runContextInventory({ root: input.root, executablePath: input.executablePath,
 		home: input.home, profile, project: input.project });
+	const userNames = new Set(globalInventory.skills.rows.map(row => row.name));
+	const projectInventories: Record<string, ContextInventory> = {};
+	for (const key of Object.keys(projects)) {
+		const dir = resolveDir(key, input.project);
+		if (!existsSync(dir)) continue;
+		try {
+			projectInventories[key] = await runContextInventory({ root: input.root, executablePath: input.executablePath,
+				home: input.home, profile, project: dir });
+		} catch {
+			continue;
+		}
+	}
+	const projectNames: Record<string, Set<string>> = {};
+	for (const [key, inventory] of Object.entries(projectInventories)) {
+		projectNames[key] = new Set(inventory.skills.rows.map(row => row.name));
+	}
+	const usedOf = (usage: HistoryProjectUsage): string[] =>
+		[...new Set([...Object.keys(usage.reads), ...Object.keys(usage.explicit)])].sort();
+	const globalCandidate = [...new Set(Object.values(projects).flatMap(usage =>
+		usedOf(usage).filter(name => userNames.has(name))))].sort();
+	const unresolved: Record<string, string[]> = {};
+	for (const [key, usage] of Object.entries(projects)) {
+		const names = projectNames[key];
+		const missing = usedOf(usage).filter(name => !userNames.has(name)
+			&& (names === undefined || !names.has(name)));
+		if (missing.length > 0) unresolved[key] = missing;
+	}
 	const capabilitiesPath = join(mkdtempSync(join(tmpdir(), "omp-kit-skill-set-")), "capabilities.json");
 	try {
-		writeFileSync(capabilitiesPath, JSON.stringify({ schema_version: 1, skills: candidate }));
-		const after = await runContextInventory({ root: input.root, executablePath: input.executablePath,
-			home: input.home, profile, project: input.project, overrides: { includeSkills: candidate } });
-		const check = await runCapabilitiesCheck({ root: input.root, executablePath: input.executablePath,
-			home: input.home, profile, project: input.project, overrides: { includeSkills: candidate },
-			capabilitiesPath });
+		const global = await measureRecipe(input, profile, input.project, globalCandidate, globalInventory, capabilitiesPath);
+		const recipes: SkillSetProjectRecipe[] = [];
+		for (const [key, usage] of Object.entries(projects)) {
+			const dir = resolveDir(key, input.project);
+			const names = projectNames[key];
+			const before = projectInventories[key];
+			if (names === undefined || before === undefined || !existsSync(dir)) continue;
+			const candidate = usedOf(usage).filter(name => userNames.has(name) || names.has(name));
+			if (candidate.length === 0) continue;
+			const measured = await measureRecipe(input, profile, dir, candidate, before, capabilitiesPath);
+			recipes.push({ project: key, candidate_skills: candidate, ...measured });
+		}
+		recipes.sort((a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : 0));
 		return {
-			candidate_skills: candidate,
+			candidate_skills: globalCandidate,
 			reads: scan.reads,
 			explicit: scan.explicit,
 			history: { files_scanned: scan.files_scanned, files_skipped_window: scan.files_skipped_window,
 				files_skipped_oversize: scan.files_skipped_oversize, files_skipped_unsafe: scan.files_skipped_unsafe,
 				bytes_scanned: scan.bytes_scanned, rows_scanned: scan.rows_scanned,
 				rows_malformed: scan.rows_malformed, truncated: scan.truncated },
-			bytes_before: before.skills.listed_bytes,
-			bytes_after: after.skills.listed_bytes,
-			listed_before: before.skills.listed,
-			listed_after: after.skills.listed,
-			capability_check: { overall: check.overall, missing: check.missing, capabilities: check.capabilities },
-			recipe: renderRecipe(candidate, before.skills.listed_bytes, after.skills.listed_bytes, check),
+			projects,
+			project_recipes: recipes,
+			unresolved_projects: unresolved,
+			bytes_before: global.bytes_before,
+			bytes_after: global.bytes_after,
+			listed_before: global.listed_before,
+			listed_after: global.listed_after,
+			capability_check: global.capability_check,
+			recipe: global.recipe,
 			guidance: RECIPE_GUIDANCE,
 		};
 	} finally {
