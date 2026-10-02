@@ -4,6 +4,10 @@
 
 - NE-6: on OMP 18.4.9, kit-test-skip carries an AST-grep candidate with explicit astLiveScenario: test-skip-ts-fire evidence; the G1 harness accepts blocking AST rules only when that live scenario exists with an absent-file expectation, and the gate remains green across 278 cases with 0 quiet-prefix fires. The regex conditions remain as a compatibility fallback.
 
+- `omp-kit test --metamorphic` checks every rule against its metamorphic variants (quoting, whitespace, env-prefix, path, chaining): any rule that fires inside quotes, or breaks under an invariant-preserving variant, fails the run with the exact breaking variants. With `--baseline ABS_FILE` it ratchets: only NEW breaks beyond the checked-in baseline fail, so the ladder enforces the strict check while 170 known per-rule breaks (each with a fix-class reason in `tests/cli/metamorphic-baseline.json`) are tracked.
+
+- `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Bare `@oh-my-pi/*` (and sibling-scope) host packages resolve through OMP's bundle map, matching the loader; nothing is executed; type-only imports are skipped.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
@@ -15,6 +19,7 @@
 - `apply policy --plan` no longer depends on legacy `~/.agents/rules`, so plugin-managed rules remain a valid route; repair preserves `INVALID_STATE_ROOT`, and pre-write policy drift is `FRESH_PLAN` while post-write failure remains `POLICY_APPLY_PARTIAL`.
 - The `test-skip-ts-fire` live scenario carries a realistic post-match tail so the gate no longer depends on OMP's late-interrupt race; the old short-tail shape survives as the report-only `omp-late-interrupt-probe` scenario (`PROBE omp-late-interrupt: continued|aborted`, never counted, surfaced per OMP version in the compatibility workflow summary).
 - Two quoted-text false fires are quiet: `kit-test-skip` now scopes `edit`/`write` to code extensions (`*.rs`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.py`, `*.go`) plus the `tests/` and `spec/` trees, so quoting a skip marker in Markdown no longer blocks; `kit-settings-mutation` no longer fires when the config-set text sits inside a double- or single-quoted argument opened by `=` or `--flag` of another command (executable `$(...)` substitutions still fire). All existing fire rows still fire.
+- Four agent-procedure rules enforce `~/.agents/AGENTS.md`: `kit-scratch-tmp` (writes under `/tmp` by write tool or shell redirect; reads and `$TMPDIR`-under-`var/agent-tmp` stay quiet), `kit-no-pattern-kill` (`pkill`/`killall`; PID kills and quoted mentions stay quiet), `kit-no-ask-rmrf` (assistant text asking the human to clear scratch; refusals and backticked mentions stay quiet), and `kit-no-force-push` (bare `--force`/`-f`; `--force-with-lease` stays quiet). Each cites its AGENTS.md section and carries fire plus quiet near-miss rows; quotes that merely mention a pattern do not fire. Corpus now 22 rules, 295 cases, 78 live scenarios.
 
 ## 0.2.0 — 2026-10-01
 
