@@ -3,16 +3,20 @@ import { repeatTestCommand } from "../../src/cli.ts";
 import { findCommand } from "../../src/commands.ts";
 import { clopperPearson, cohensH, fisherExact, repeatVerdict, sampleSize } from "../../src/repeat-stats.ts";
 
-test("Clopper-Pearson matches textbook bounds", () => {
-	const clean = clopperPearson(0, 20);
-	expect(clean.lower).toBe(0);
-	expect(Math.abs(clean.upper - 0.1684)).toBeLessThan(0.002);
-	const two = clopperPearson(2, 20);
-	expect(Math.abs(two.lower - 0.0123)).toBeLessThan(0.003);
-	expect(Math.abs(two.upper - 0.3173)).toBeLessThan(0.003);
-	const all = clopperPearson(20, 20);
-	expect(all.upper).toBe(1);
-	expect(Math.abs(all.lower - 0.8316)).toBeLessThan(0.002);
+test("Clopper-Pearson matches SciPy beta.ppf to 1e-9", () => {
+	const cases: [number, number, number, number][] = [
+		[0, 20, 0, 0.168433470983],
+		[1, 20, 0.001265089498, 0.248732762772],
+		[2, 20, 0.01234852717, 0.316982714019],
+		[10, 20, 0.271957849561, 0.728042150439],
+		[20, 20, 0.831566529017, 1],
+		[2, 100, 0.002431336824, 0.070383932471],
+	];
+	for (const [failures, runs, lower, upper] of cases) {
+		const interval = clopperPearson(failures, runs);
+		expect(interval.lower).toBeCloseTo(lower, 9);
+		expect(interval.upper).toBeCloseTo(upper, 9);
+	}
 	expect(() => clopperPearson(21, 20)).toThrow(/INVALID_REPEAT_COUNTS/);
 	expect(() => clopperPearson(1, 0)).toThrow(/INVALID_REPEAT_COUNTS/);
 });
@@ -69,4 +73,10 @@ test("repeat handler refuses bad counts, clashing flags, and bad selections befo
 	expect((await call([["--repeat", "5"], ["--full", true]])).errors?.[0]?.code).toBe("INVALID_FLAG");
 	expect((await call([["--repeat", "5"], ["--scenario", ""]])).errors?.[0]?.code).toBe("INVALID_SCENARIO");
 	expect((await call([["--repeat", "5"], ["--baseline", "relative/path.json"]])).errors?.[0]?.code).toBe("INVALID_BASELINE");
+});
+
+test("receipt results must agree with the summary counts and the scenario", () => {
+	const mismatch = { version: 1, runs: 20, failures: 0, results: Array(20).fill("fail") };
+	expect(() => repeatVerdict({ version: 1, runs: 20, failures: 0 }, { baseline: JSON.parse(JSON.stringify(mismatch)) })).toThrow(/INVALID_REPEAT_RECEIPT/);
+	expect(() => repeatVerdict({ version: 1, scenario: "canary-near", runs: 20, failures: 1 }, { baseline: { version: 1, scenario: "unsafe-router-fire", runs: 20, failures: 8 } })).toThrow(/SCENARIO_MISMATCH/);
 });

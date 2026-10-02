@@ -46,11 +46,12 @@ private_owner_mode() {
 }
 
 new_workdir() {
-  base=$(system_tmp_root) || die "no supported private temporary root"
-  umask 077
-  work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
-  /bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
-  printf '%s\n' "$work"
+	base="$ROOT/var/agent-tmp"
+	/bin/mkdir -p "$base" || die "cannot create repo scratch root $base"
+	umask 077
+	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
+	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
+	printf '%s\n' "$work"
 }
 
 if [ "${1:-}" = --workdir ]; then

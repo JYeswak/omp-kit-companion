@@ -39,7 +39,7 @@ function betaFraction(a: number, b: number, x: number): number {
 		if (Math.abs(c) < TINY) c = TINY;
 		d = 1 / d;
 		h *= d * c;
-		const odd = -(a + m) * (a + b + m) * x / ((a + m) * (a + m + 1));
+		const odd = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1));
 		d = 1 + odd * d;
 		if (Math.abs(d) < TINY) d = TINY;
 		c = 1 + odd / c;
@@ -144,7 +144,7 @@ function checkReceipt(receipt: RepeatReceipt, role: string): void {
 	if (!receipt || receipt.version !== 1 || !Number.isInteger(receipt.runs) || !Number.isInteger(receipt.failures) || receipt.runs <= 0 || receipt.failures < 0 || receipt.failures > receipt.runs) {
 		throw new Error(`INVALID_REPEAT_RECEIPT: ${role}`);
 	}
-	if (receipt.results !== undefined && (!Array.isArray(receipt.results) || receipt.results.length !== receipt.runs || receipt.results.some((entry) => entry !== "pass" && entry !== "fail"))) {
+	if (receipt.results !== undefined && (!Array.isArray(receipt.results) || receipt.results.length !== receipt.runs || receipt.results.some((entry) => entry !== "pass" && entry !== "fail") || receipt.results.filter((entry) => entry === "fail").length !== receipt.failures)) {
 		throw new Error(`INVALID_REPEAT_RECEIPT: ${role} results`);
 	}
 }
@@ -163,6 +163,7 @@ export function repeatVerdict(current: RepeatReceipt, options?: { baseline?: Rep
 	const interval = clopperPearson(current.failures, current.runs, alpha);
 	if (options?.baseline) {
 		checkReceipt(options.baseline, "baseline");
+		if (current.scenario && options.baseline.scenario && current.scenario !== options.baseline.scenario) throw new Error(`SCENARIO_MISMATCH: current ${current.scenario} vs baseline ${options.baseline.scenario}`);
 		const baseRate = options.baseline.failures / options.baseline.runs;
 		const p = fisherExact(current.failures, current.runs, options.baseline.failures, options.baseline.runs);
 		const effect = cohensH(rate, baseRate);

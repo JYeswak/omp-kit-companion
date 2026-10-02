@@ -1241,6 +1241,10 @@ export async function repeatTestCommand(request: ParsedCommand): Promise<CliResu
 				"Pass a repeat receipt (version 1 with integer runs/failures) or omit --baseline.");
 		}
 	}
+	if (baseline?.scenario && scenario && baseline.scenario !== scenario) {
+		return refusal("INVALID_BASELINE", `SCENARIO_MISMATCH: current ${scenario} vs baseline ${baseline.scenario}`,
+			"Compare a scenario only against its own baseline receipt; nothing was run.");
+	}
 	const script = join(identity.release.root, "scripts", "e2e-live.sh");
 	const perRunMs = (Number(process.env.TIMEOUT) > 0 ? Number(process.env.TIMEOUT) : 120) * 1000 + 30000;
 	const results: ("pass" | "fail")[] = [];
