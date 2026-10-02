@@ -57,10 +57,13 @@ test("child PATH carries the bun binary dir for the omp launcher shim", () => {
 
 
 function omp(args: string[], home: string, ompDir: string) {
+	const started = Date.now();
 	const child = Bun.spawnSync(["omp", ...args], {
 		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
 	});
-	if (child.exitCode !== 0) throw new Error(`omp ${args.join(" ")} failed: ${child.stderr.toString()}`);
+	if (child.exitCode !== 0) {
+		throw new Error(`omp ${args.join(" ")} failed: exit=${child.exitCode} signal=${child.signalCode ?? "none"} elapsed_ms=${Date.now() - started} stdout=${child.stdout.toString().slice(-500)} stderr=${child.stderr.toString().slice(-500)}`);
+	}
 	return child.stdout.toString();
 }
 
@@ -128,7 +131,8 @@ test("migrate plan lists each legacy copy with its plugin equivalent and byte di
 	const unknown = rowByName(rows, "not-a-kit-rule");
 	expect(unknown.verdict).toBe("unknown-keep");
 	expect(unknown.manifestSha256).toBeNull();
-});
+// Cold omp/CLI spawns run ~1s each; this test chains several (measured 5.4s locally). Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("migrate apply removes identical copies, keeps edited and unknown, and verifies sources", () => {
 	const { home } = pluginFixture(6);
@@ -150,7 +154,8 @@ test("migrate apply removes identical copies, keeps edited and unknown, and veri
 		expect(row.path.startsWith(join(home, ".agents", "rules"))).toBe(false);
 	}
 	expect(result.envelope.data.verified.map((row: { name: string }) => row.name).sort()).toEqual([...removed].sort());
-});
+// Chains link, apply CLI, and per-row omp verify spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("undo restores the removed legacy files byte-for-byte", () => {
 	const { home } = pluginFixture(0);
@@ -167,7 +172,8 @@ test("undo restores the removed legacy files byte-for-byte", () => {
 	for (const [name, bytes] of Object.entries(before)) {
 		expect(readFileSync(join(home, ".agents", "rules", name), "utf8")).toBe(bytes);
 	}
-});
+// Chains link, apply CLI, undo CLI, and fixture omp spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("a file one byte off the release is never treated as identical", () => {
 	const { home, kitNames } = pluginFixture(0);
@@ -181,7 +187,8 @@ test("a file one byte off the release is never treated as identical", () => {
 	writeFileSync(path, `${bytes.slice(0, -1)}${bytes.endsWith("\n") ? "" : "\n"}`);
 	const plan = cli(["migrate", "--plan"], home, realOmpDir());
 	expect(rowByName(plan.envelope.data.rows, target).verdict).toBe("edited");
-});
+// Chains link and two plan CLI spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("a symlinked rules directory is refused without touching anything", () => {
 	const { home } = pluginFixture(0);
@@ -211,7 +218,8 @@ test("after migration, disabling the plugin reactivates no kit rule", () => {
 		expect(names.has(name)).toBe(false);
 	}
 	omp(["plugin", "enable", pluginName], home, realOmpDir());
-});
+// Five cold omp/CLI spawns (link, apply, disable, ttsr list, enable) at ~1s each; measured 5.2s on CI. Bun's 5s default SIGTERMs the test mid-spawn, which surfaced as an empty-stderr enable failure.
+}, 60000);
 
 test("without an installed plugin the plan reports absence and apply refuses", () => {
 	const base = workspace();
@@ -229,6 +237,7 @@ test("without an installed plugin the plan reports absence and apply refuses", (
 });
 
 test("applyMigration refuses without a plugin even when called directly", () => {
+	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-unit-"));
 	fixtures.push(root);
 	const home = join(root, "home");
@@ -300,4 +309,21 @@ test("unifiedDiff marks changed lines with context", () => {
 	expect(diff).toContain("+B");
 	expect(diff).toContain("@@ ");
 	expect(unifiedDiff("same\n", "same\n", "a", "b")).toBe("--- a\n+++ b\n");
+});
+
+test("omp helper failure reports exit, signal, elapsed, and both streams", () => {
+	const base = workspace();
+	const home = join(base, "home");
+	mkdirSync(home, { recursive: true });
+	let message = "";
+	try {
+		omp(["plugin", "enable", "no-such-plugin"], home, realOmpDir());
+	} catch (error) {
+		message = error instanceof Error ? error.message : String(error);
+	}
+	expect(message).toContain("exit=1");
+	expect(message).toContain("signal=");
+	expect(message).toContain("elapsed_ms=");
+	expect(message).toContain("stdout=");
+	expect(message).toContain("not found in runtime config");
 });

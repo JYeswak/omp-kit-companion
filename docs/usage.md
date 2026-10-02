@@ -72,13 +72,17 @@ DEGRADED once OMP changes or the last recorded test failed. Plain `test`
 stays read-only and records nothing. For hands-off re-testing, render the
 watcher and install it yourself:
 
-```sh verified rc=0 contains="test --record"
+```sh verified rc=0 contains="dry_run"
 KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
-export PATH="$(dirname "$KIT"):$PATH" && omp-kit examples omp-watch --json
+mkdir -p "$HOME/.local/bin" && cp "$KIT" "$HOME/.local/bin/omp-kit" && chmod +x "$HOME/.local/bin/omp-kit"
+"$KIT" service install omp-watch --dry-run --json
 ```
 
-It watches OMP's `package.json`, re-runs `test --record` on change, and
-notifies only on failure. Rendering installs nothing.
+It watches OMP's `package.json` and re-runs `test --record` on change,
+notifying on failure exactly as the retired example did. The dry run
+renders the plist, the diff and the install plan without changing
+anything; add `--apply --yes` to install it for real. Install refuses a
+label already loaded from a different plist unless `--replace` is given.
 
 ## Update the kit, not OMP
 

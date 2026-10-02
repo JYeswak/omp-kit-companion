@@ -195,6 +195,27 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 	attempts: { type: "number" }, original_bytes: { type: "number" }, candidate_bytes: { type: ["number", "null"] },
 	replay_fixture: { type: ["object", "null"] },
 } };
+const serviceData: DataSchema = { type: "object", required: ["overall", "job"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	job: { type: "string" }, label: { type: ["string", "null"] }, changed: { type: "boolean" },
+	backup: { type: ["string", "null"] }, dry_run: { type: "boolean" }, already_absent: { type: "boolean" },
+	checks: { type: "array", items: { type: "object", required: ["id", "status", "message", "remediation"], properties: {
+		id: { type: "string" }, status: { enum: ["PASS", "WARN", "FAIL"] }, message: { type: "string" }, remediation: { type: "string" },
+	} } },
+	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
+} };
+const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	roots: { type: "array", items: { type: "string" } },
+	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
+		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
+		reason: { type: "string" }, sizeBytes: { type: "number" },
+	} } },
+	orphans: { type: "array", items: { type: "object" } },
+	killed: { type: "array", items: { type: "object" } },
+	expired: { type: "array", items: { type: "object" } },
+	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
@@ -300,13 +321,48 @@ export const COMMANDS: readonly Command[] = [
 						overall: { enum: ["OK", "DEGRADED"] },
 						skill_set: { type: "object", required: ["candidate_skills", "reads", "explicit", "history", "bytes_before", "bytes_after", "capability_check", "recipe", "guidance"] },
 					} } },
-			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
+			{ name: "omp-watch", description: "Render the managed omp-watch launchd/systemd job exactly as service install would write it; never installs it",
 				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
-					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {
-						label: { type: "string" }, launchd_plist: { type: "string" }, systemd_path_unit: { type: "string" },
-						systemd_service_unit: { type: "string" }, install: { type: "object" }, uninstall: { type: "object" }, guidance: { type: "string" },
+					required: ["label", "watch_path", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "guidance"], properties: {
+						label: { type: "string" }, watch_path: { type: "string" }, launchd_plist: { type: "string" },
+						systemd_path_unit: { type: "string" }, systemd_service_unit: { type: "string" }, guidance: { type: "string" },
 					} } },
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
+	{ name: "service", description: "Manage operator service jobs (launchd/systemd); reads foreign jobs, never rewrites them", usage: "service list|install|uninstall|status|doctor|logs|run", flags: [], subcommands: [
+		{ name: "list", description: "List known jobs with installed and loaded state", usage: "service list", flags: [], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--apply --yes] [--replace]", argument: "JOB", flags: [
+			{ name: "--dry-run", description: "Render the plist, diff and commands without changing anything" },
+			{ name: "--apply", description: "Request guarded install" },
+			{ name: "--yes", description: "Confirm the install in noninteractive mode" },
+			{ name: "--replace", description: "Take over a label already loaded from a different plist (a backup is kept)" },
+		], example: "omp-kit service install omp-watch --dry-run --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "uninstall", description: "Bootout a job and move its plist to the backup dir (logs kept unless --purge-logs)", usage: "service uninstall JOB [--purge-logs] [--apply --yes]", argument: "JOB", flags: [
+			{ name: "--purge-logs", description: "Delete the job's logs as well as moving the plist" },
+			{ name: "--apply", description: "Request guarded uninstall" },
+			{ name: "--yes", description: "Confirm the uninstall in noninteractive mode" },
+		], example: "omp-kit service uninstall omp-watch --apply --yes --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "status", description: "Read-only loaded state for one job or --all", usage: "service status [JOB|--all]", argument: "JOB", flags: [
+			{ name: "--all", description: "Report every known job" },
+		], example: "omp-kit service status omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "doctor", description: "Read-only checks for one job or --all; --fix reinstalls and rotates own logs", usage: "service doctor [JOB|--all] [--fix --apply --yes]", argument: "JOB", flags: [
+			{ name: "--all", description: "Check every known job" },
+			{ name: "--fix", description: "Reinstall drifted jobs and rotate oversized own logs" },
+			{ name: "--apply", description: "Request guarded fixes" },
+			{ name: "--yes", description: "Confirm fixes in noninteractive mode" },
+		], example: "omp-kit service doctor omp-watch --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "logs", description: "Print a job's out/err logs", usage: "service logs JOB [--errors] [-n N]", argument: "JOB", flags: [
+			{ name: "--errors", description: "Show the error log instead of the output log" },
+			{ name: "-n", value: "N", description: "Print the last N lines" },
+		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt (omp-watch notifies on failure, scratch-reaper reports)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+	{ name: "scratch", description: "Reap dead operator scratch: owned+dead+lsof-clear sessions, idle unowned quarantine, expired quarantine delete", usage: "scratch plan|apply [--apply --yes]", flags: [], subcommands: [
+		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "--apply", description: "Request guarded apply" },
+			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
+	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },
