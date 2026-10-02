@@ -181,14 +181,12 @@ function g1(lr: LoadedRule): G1Result {
 	// omp's ~/.agents/rules discovery drops a file whose frontmatter says `enabled: false`
 	// (discoverRuleFromMarkdown); every other kit gate would still grade it GREEN.
 	if (lr.frontmatter.enabled === false) problems.push("enabled: false: omp's discovery skips this file, so it never loads");
-	// omp 18.3.0 matches astCondition asynchronously at toolcall_end and does not hold the tool for
-	// the verdict. Measured live (e2e-live test-skip-ts-fire, 2026-09-24): the write landed, then
-	// the interrupt told the model "Blocked before it was written". An interrupting rule needs a
-	// regex condition; an AST match that interrupts reports a block that did not happen, even beside
-	// a regex. prose-only is exempt: omp never interrupts a tool-source match under it.
-	// Retire this check when e2e-live shows an astCondition tripwire leave its file unwritten.
+	// Blocking AST rules are accepted only when they name a live pre-execution scenario; the G4 live run is the independent pass gate.
+	const astLiveScenario = lr.frontmatter.astLiveScenario;
 	if (lr.cls === "tripwire" && lr.rule.interruptMode !== "prose-only" && (lr.rule.astCondition?.length ?? 0) > 0) {
-		problems.push("astCondition on a blocking rule cannot block: omp runs it after the tool has executed (interruptMode never, or a regex condition)");
+		if (typeof astLiveScenario !== "string" || astLiveScenario.length === 0) {
+			problems.push("astCondition on a blocking rule requires astLiveScenario evidence from a passing pre-execution live scenario");
+		}
 	}
 	let how: string;
 	if (lr.cls === "always") {
@@ -500,6 +498,148 @@ function structuredGate(rep: GateReport) {
 	};
 }
 
+// ---------------------------------------------------------------- metamorphic (MT3)
+
+type MetamorphicRelation = "quoting" | "whitespace" | "env-prefix" | "path-form" | "chaining";
+
+interface MetamorphicVariant { relation: MetamorphicRelation; snippet: string; }
+interface MetamorphicBreak {
+	rule: string; line: number; relation: MetamorphicRelation; variant: string;
+	expected: "fire" | "quiet"; observed: "fire" | "quiet";
+}
+
+/** Double-quote a snippet so it is inert inside "...": no execution, no interpolation. */
+function quoteForDouble(feed: string): string {
+	return feed.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$").replace(/`/g, "\\`");
+}
+
+/**
+ * Invariant-preserving variants of one case. Relations that cannot apply to the
+ * case kind are reported as skipped with a reason instead of guessed variants.
+ */
+function variantsFor(c: Case): { variants: MetamorphicVariant[]; skipped: { relation: MetamorphicRelation; reason: string }[] } {
+	const variants: MetamorphicVariant[] = [];
+	const skipped: { relation: MetamorphicRelation; reason: string }[] = [];
+	const bash = c.source === "tool" && c.tool === "bash";
+	const text = c.source === "text" || c.source === "thinking";
+	if (text) {
+		skipped.push({ relation: "quoting", reason: "prose in quotes is the same claim; no shell quoting model for text scope" });
+		skipped.push({ relation: "whitespace", reason: "shell whitespace variants do not apply to prose" });
+		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
+		skipped.push({ relation: "path-form", reason: "path toggling is shell syntax, not prose" });
+		skipped.push({ relation: "chaining", reason: "chaining is shell syntax" });
+		return { variants, skipped };
+	}
+	if (bash) {
+		const quoted = quoteForDouble(c.snippet);
+		variants.push({ relation: "quoting", snippet: `echo "${quoted}"` });
+		variants.push({ relation: "quoting", snippet: `printf '%s\\n' "${quoted}"` });
+	} else {
+		skipped.push({ relation: "quoting", reason: "file content is data, not an invocation" });
+	}
+	variants.push({ relation: "whitespace", snippet: `${c.snippet} ` });
+	if (bash) variants.push({ relation: "whitespace", snippet: `  ${c.snippet}` });
+	if (c.snippet.includes(" --")) variants.push({ relation: "whitespace", snippet: c.snippet.replace(" --", " \\\n--") });
+	if (bash) {
+		variants.push({ relation: "env-prefix", snippet: `FOO=1 ${c.snippet}` });
+	} else {
+		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
+	}
+	const token = /(?:^|[\s"'`(=])(\.?\/?[\w.-]+\/[\w./-]+)/.exec(c.snippet)?.[1];
+	if (token && !token.startsWith("/")) {
+		const toggled = token.startsWith("./") ? token.slice(2) : `./${token}`;
+		variants.push({ relation: "path-form", snippet: c.snippet.replace(token, toggled) });
+	} else {
+		skipped.push({ relation: "path-form", reason: "snippet carries no relative path token" });
+	}
+	if (bash) {
+		variants.push({ relation: "chaining", snippet: `true; ${c.snippet}` });
+		variants.push({ relation: "chaining", snippet: `true && ${c.snippet}` });
+	} else {
+		skipped.push({ relation: "chaining", reason: "chaining is shell syntax" });
+	}
+	return { variants, skipped };
+}
+
+interface MetamorphicReport {
+	breaks: MetamorphicBreak[];
+	counts: { cases: number; variants: number; breaks: number; skipped: number };
+}
+
+/** Stable ratchet id for one break: rule, case line, relation, exact variant. */
+export function metamorphicBreakId(b: { rule: string; line: number; relation: MetamorphicRelation; variant: string }): string {
+	return `${b.rule}\t${b.line}\t${b.relation}\t${b.variant}`;
+}
+
+interface MetamorphicBaselineEntry { id: string; reason: string; }
+interface MetamorphicBaselineDoc { schema_version: 1; breaks: MetamorphicBaselineEntry[]; }
+
+function isBaselineDoc(value: unknown): value is MetamorphicBaselineDoc {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("schema_version" in value) || value.schema_version !== 1) return false;
+	if (!("breaks" in value) || !Array.isArray(value.breaks)) return false;
+	return value.breaks.every((entry: unknown) =>
+		typeof entry === "object" && entry !== null
+		&& "id" in entry && typeof entry.id === "string" && entry.id !== ""
+		&& "reason" in entry && typeof entry.reason === "string" && entry.reason !== "");
+}
+
+function loadBaseline(file: string): { ids: Set<string>; reasons: Record<string, string> } {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch (error) {
+		throw new Error(`metamorphic baseline unreadable: ${file} (${(error as Error).message})`);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error(`metamorphic baseline is not JSON: ${file}`);
+	}
+	if (!isBaselineDoc(parsed)) {
+		throw new Error(`metamorphic baseline schema mismatch (want schema_version 1 with breaks[{id, reason}]): ${file}`);
+	}
+	const ids = new Set<string>();
+	const reasons: Record<string, string> = {};
+	for (const entry of parsed.breaks) {
+		ids.add(entry.id);
+		reasons[entry.id] = entry.reason;
+	}
+	return { ids, reasons };
+}
+
+async function runMetamorphic(rulesDir: string, casesFile: string): Promise<MetamorphicReport> {
+	const rules = loadRules(rulesDir);
+	const byName = new Map(rules.map(r => [r.name, r]));
+	const { cases, errors } = loadCases(casesFile);
+	if (errors.length > 0) throw new Error(`metamorphic cases unreadable: ${errors[0]}`);
+	const breaks: MetamorphicBreak[] = [];
+	let evaluated = 0;
+	let variants = 0;
+	let skipped = 0;
+	for (const c of cases) {
+		const rule = byName.get(c.rule)?.rule;
+		if (!rule) continue;
+		const generated = variantsFor(c);
+		skipped += generated.skipped.length;
+		if (generated.variants.length === 0) continue;
+		evaluated += 1;
+		for (const [vi, v] of generated.variants.entries()) {
+			variants += 1;
+			// Each variant is an independent hypothetical stream: sharing the
+			// case's streamKey across different wires would let OMP's
+			// per-stream state leak between evaluations.
+			const observed = await g2Fires(rule, { ...c, snippet: v.snippet, line: c.line * 1000 + vi }) ? "fire" as const : "quiet" as const;
+			const expected = v.relation === "quoting" ? "quiet" as const : c.expect;
+			if (observed !== expected) {
+				breaks.push({ rule: c.rule, line: c.line, relation: v.relation, variant: v.snippet, expected, observed });
+			}
+		}
+	}
+	return { breaks, counts: { cases: evaluated, variants, breaks: breaks.length, skipped } };
+}
+
 // ---------------------------------------------------------------- selftest
 
 function writePlant(
@@ -596,7 +736,7 @@ async function selftest(): Promise<number> {
 			cases:
 				'plant-ast-tripwire\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tplanted\nplant-ast-tripwire\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tplanted\n',
 			// Correct matches, wrong mechanism: a blocking rule that omp cannot run before the tool.
-			wantRed: /^G1 plant-ast-tripwire: astCondition on a blocking rule cannot block/,
+			wantRed: /^G1 plant-ast-tripwire: astCondition on a blocking rule requires astLiveScenario evidence/,
 		},
 		{
 			id: "g",
@@ -1037,7 +1177,7 @@ function flagValue(name: string): string | undefined {
 	return eq?.slice(name.length + 1);
 }
 
-const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus"].includes(a));
+const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus", "--metamorphic-json"].includes(a));
 let code: number;
 switch (mode) {
 	case "--observe": {
@@ -1080,8 +1220,26 @@ switch (mode) {
 			path.resolve(KIT, flagValue("--out") ?? "reports/corpus-fire-rate.tsv"),
 		);
 		break;
+	case "--metamorphic-json": {
+		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
+		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
+		const rep = await runMetamorphic(rulesDir, casesFile);
+		const baselinePath = flagValue("--baseline");
+		if (baselinePath === undefined) {
+			console.log(JSON.stringify({ schema_version: 1, status: rep.breaks.length === 0 ? "PASS" : "FAIL", counts: rep.counts, breaks: rep.breaks }));
+			code = rep.breaks.length === 0 ? 0 : 1;
+			break;
+		}
+		const baseline = loadBaseline(path.resolve(baselinePath));
+		const current = new Set(rep.breaks.map(metamorphicBreakId));
+		const fresh = rep.breaks.filter(b => !baseline.ids.has(metamorphicBreakId(b)));
+		const stale = [...baseline.ids].filter(id => !current.has(id));
+		console.log(JSON.stringify({ schema_version: 1, status: fresh.length === 0 ? "PASS" : "FAIL", mode: "ratchet", counts: { ...rep.counts, fresh: fresh.length, stale: stale.length }, breaks: rep.breaks, new_breaks: fresh, stale_baseline_ids: stale }));
+		code = fresh.length === 0 ? 0 : 1;
+		break;
+	}
 	default:
-		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE]");
+		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE] | --metamorphic-json [--rules DIR] [--cases FILE]");
 		code = 2;
 }
 process.exit(code);

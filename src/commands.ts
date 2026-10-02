@@ -50,6 +50,7 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	} },
 	live: { type: "object" },
 	integrations: { type: "object" },
+	metamorphic: { type: "object" },
 } };
 
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
@@ -176,11 +177,20 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 	attempts: { type: "number" }, original_bytes: { type: "number" }, candidate_bytes: { type: ["number", "null"] },
 	replay_fixture: { type: ["object", "null"] },
 } };
+const serviceData: DataSchema = { type: "object", required: ["overall", "job"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	job: { type: "string" }, label: { type: ["string", "null"] }, changed: { type: "boolean" },
+	backup: { type: ["string", "null"] }, dry_run: { type: "boolean" }, already_absent: { type: "boolean" },
+	checks: { type: "array", items: { type: "object", required: ["id", "status", "message", "remediation"], properties: {
+		id: { type: "string" }, status: { enum: ["PASS", "WARN", "FAIL"] }, message: { type: "string" }, remediation: { type: "string" },
+	} } },
+	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context|services", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context|services|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
@@ -204,8 +214,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, or per-profile integration proof",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, or metamorphic relation report",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE [--baseline ABS_FILE]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -217,6 +227,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
 		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
 		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
+		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break, or only on NEW breaks with --baseline" },
+		{ name: "--baseline", value: "ABS_FILE", description: "Metamorphic only: ratchet against a checked-in baseline of known break ids; exits 1 only on NEW breaks" },
 	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
 	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",
@@ -278,13 +290,41 @@ export const COMMANDS: readonly Command[] = [
 						overall: { enum: ["OK", "DEGRADED"] },
 						skill_set: { type: "object", required: ["candidate_skills", "reads", "explicit", "history", "bytes_before", "bytes_after", "capability_check", "recipe", "guidance"] },
 					} } },
-			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
+			{ name: "omp-watch", description: "Render the managed omp-watch launchd/systemd job exactly as service install would write it; never installs it",
 				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
-					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {
-						label: { type: "string" }, launchd_plist: { type: "string" }, systemd_path_unit: { type: "string" },
-						systemd_service_unit: { type: "string" }, install: { type: "object" }, uninstall: { type: "object" }, guidance: { type: "string" },
+					required: ["label", "watch_path", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "guidance"], properties: {
+						label: { type: "string" }, watch_path: { type: "string" }, launchd_plist: { type: "string" },
+						systemd_path_unit: { type: "string" }, systemd_service_unit: { type: "string" }, guidance: { type: "string" },
 					} } },
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
+	{ name: "service", description: "Manage operator service jobs (launchd/systemd); reads foreign jobs, never rewrites them", usage: "service list|install|uninstall|status|doctor|logs|run", flags: [], subcommands: [
+		{ name: "list", description: "List known jobs with installed and loaded state", usage: "service list", flags: [], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--apply --yes] [--replace]", argument: "JOB", flags: [
+			{ name: "--dry-run", description: "Render the plist, diff and commands without changing anything" },
+			{ name: "--apply", description: "Request guarded install" },
+			{ name: "--yes", description: "Confirm the install in noninteractive mode" },
+			{ name: "--replace", description: "Take over a label already loaded from a different plist (a backup is kept)" },
+		], example: "omp-kit service install omp-watch --dry-run --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "uninstall", description: "Bootout a job and move its plist to the backup dir (logs kept unless --purge-logs)", usage: "service uninstall JOB [--purge-logs] [--apply --yes]", argument: "JOB", flags: [
+			{ name: "--purge-logs", description: "Delete the job's logs as well as moving the plist" },
+			{ name: "--apply", description: "Request guarded uninstall" },
+			{ name: "--yes", description: "Confirm the uninstall in noninteractive mode" },
+		], example: "omp-kit service uninstall omp-watch --apply --yes --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "status", description: "Read-only loaded state for one job or --all", usage: "service status [JOB|--all]", argument: "JOB", flags: [
+			{ name: "--all", description: "Report every known job" },
+		], example: "omp-kit service status omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "doctor", description: "Read-only checks for one job or --all; --fix reinstalls and rotates own logs", usage: "service doctor [JOB|--all] [--fix --apply --yes]", argument: "JOB", flags: [
+			{ name: "--all", description: "Check every known job" },
+			{ name: "--fix", description: "Reinstall drifted jobs and rotate oversized own logs" },
+			{ name: "--apply", description: "Request guarded fixes" },
+			{ name: "--yes", description: "Confirm fixes in noninteractive mode" },
+		], example: "omp-kit service doctor omp-watch --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "logs", description: "Print a job's out/err logs", usage: "service logs JOB [--errors] [-n N]", argument: "JOB", flags: [
+			{ name: "--errors", description: "Show the error log instead of the output log" },
+			{ name: "-n", value: "N", description: "Print the last N lines" },
+		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt and notifies on failure", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },
