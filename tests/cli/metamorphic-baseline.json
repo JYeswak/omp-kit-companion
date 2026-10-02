@@ -7,53 +7,13 @@
   "counts": {
    "cases": 276,
    "variants": 1726,
-   "breaks": 170
+   "breaks": 144
   }
  },
  "breaks": [
   {
-   "id": "bash-glob-silenced\t2\tquoting\techo \"grep -rl 'x' crates/*/Cargo.toml 2>/dev/null\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-glob-silenced\t2\tquoting\tprintf '%s\\n' \"grep -rl 'x' crates/*/Cargo.toml 2>/dev/null\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-pipe-exit\t5\tquoting\techo \"./scripts/lane-status.sh 2>&1 | tail -16; echo \\\"EXIT=\\$?\\\"\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-pipe-exit\t5\tquoting\tprintf '%s\\n' \"./scripts/lane-status.sh 2>&1 | tail -16; echo \\\"EXIT=\\$?\\\"\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t10\tquoting\techo \"br close kit-x; br list\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t10\tquoting\tprintf '%s\\n' \"br close kit-x; br list\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t12\tquoting\techo \"br close kit-r --actor sample-worker 2>&1 | head -c 200\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t12\tquoting\tprintf '%s\\n' \"br close kit-r --actor sample-worker 2>&1 | head -c 200\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
    "id": "kit-close-needs-evidence\t12\twhitespace\tbr close kit-r \\\n--actor sample-worker 2>&1 | head -c 200",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-needs-evidence\t245\tquoting\techo \"br close x --reason\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t245\tquoting\tprintf '%s\\n' \"br close x --reason\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-close-needs-evidence\t245\twhitespace\tbr close x \\\n--reason",
@@ -62,14 +22,6 @@
   {
    "id": "kit-close-needs-evidence\t246\twhitespace\tbr close x \\\n--reason \"\"",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-needs-evidence\t9\tquoting\techo \"br close bd-42 && git push\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t9\tquoting\tprintf '%s\\n' \"br close bd-42 && git push\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-close-reason-no-evidence\t19\twhitespace\tbr close x \\\n--reason \"done\"",
@@ -124,32 +76,8 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
-   "id": "kit-gate-must-name-the-plant\t30\tquoting\techo \"cd /tmp/proj && bash ../starter-kit/scripts/init.sh\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-gate-must-name-the-plant\t30\tquoting\tprintf '%s\\n' \"cd /tmp/proj && bash ../starter-kit/scripts/init.sh\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t293\tquoting\techo \"git push --force origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t293\tquoting\tprintf '%s\\n' \"git push --force origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
    "id": "kit-no-force-push\t293\twhitespace\tgit push \\\n--force origin main",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-force-push\t294\tquoting\techo \"git push -f origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t294\tquoting\tprintf '%s\\n' \"git push -f origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-no-pattern-kill\t287\tenv-prefix\tFOO=1 pkill -f 'bun test'",
@@ -448,30 +376,6 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
-   "id": "kit-relative-path-not-cwd\t145\tquoting\techo \"cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-relative-path-not-cwd\t145\tquoting\tprintf '%s\\n' \"cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-scratch-tmp\t281\tquoting\techo \"echo done > /tmp/out.txt\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-scratch-tmp\t281\tquoting\tprintf '%s\\n' \"echo done > /tmp/out.txt\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-scratch-tmp\t282\tquoting\techo \"cmd >> /tmp/log.txt 2>&1\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-scratch-tmp\t282\tquoting\tprintf '%s\\n' \"cmd >> /tmp/log.txt 2>&1\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
    "id": "kit-settings-mutation\t149\tquoting\techo \"omp config set ttsr.enabled false\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
   },
@@ -682,14 +586,6 @@
   {
    "id": "kit-settings-mutation\t276\tquoting\tprintf '%s\\n' \"br update --description \\\"rollout note: run omp config set ttsr.enabled false on staging\\\"\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
-  },
-  {
-   "id": "zz-canary-scope-probe\t243\tquoting\techo \"echo zzzz_systemwide_canary_9c42\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "zz-canary-scope-probe\t243\tquoting\tprintf '%s\\n' \"echo zzzz_systemwide_canary_9c42\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   }
  ]
 }
