@@ -34,10 +34,12 @@ function realOmpDir(): string {
 }
 
 function childEnv(home: string, ompDir: string): Record<string, string | undefined> {
+	// dirname(process.execPath): the omp launcher is a bun shim; CI minimal PATH lacks it.
+	const bunDir = dirname(process.execPath);
 	const env: Record<string, string | undefined> = { ...process.env, HOME: home,
 		XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_STATE_HOME: join(home, "xdg-state"),
 		XDG_DATA_HOME: join(home, "xdg-data"), XDG_CACHE_HOME: join(home, "xdg-cache"), TMPDIR: join(home, "tmp"),
-		PATH: `${ompDir}:/usr/bin:/bin:/usr/sbin:/sbin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" };
+		PATH: `${bunDir}:${ompDir}:/usr/bin:/bin:/usr/sbin:/sbin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" };
 	// An inherited profile makes OMP read that profile's config and rules instead of
 	// the fixture HOME's (native dir especially); the lifecycle script unsets these too.
 	delete env.OMP_PROFILE;
@@ -45,6 +47,11 @@ function childEnv(home: string, ompDir: string): Record<string, string | undefin
 	delete env.PI_CODING_AGENT_DIR;
 	return env;
 }
+
+test("child PATH carries the bun binary dir for the omp launcher shim", () => {
+	const path = childEnv("/tmp/fake-home", "/tmp/fake-omp").PATH ?? "";
+	expect(path.split(":")[0]).toBe(dirname(process.execPath));
+});
 
 function omp(args: string[], home: string, ompDir: string) {
 	const child = Bun.spawnSync(["omp", ...args], {
