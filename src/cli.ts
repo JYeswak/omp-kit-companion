@@ -30,7 +30,7 @@ import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, isApplyFailure, planScratch } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -1382,7 +1382,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (job.name === "scratch-reaper") {
 			// The scheduled job reports; apply stays an explicit operator verb (needs coordinator go on real machines).
 			const started = new Date().toISOString();
-			const plan = planScratch(home, { liveness: defaultLiveness(), run: defaultRunner });
+			const plan = planScratch(home, { liveness: defaultLiveness(), run: scratchRunner });
 			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null };
 			try {
 				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
@@ -1432,7 +1432,10 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
 				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
 	}
-	const deps = { liveness: defaultLiveness(), run: defaultRunner };
+	const deps = { liveness: defaultLiveness(), run: scratchRunner,
+		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
+			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
+		} };
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);
 		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
@@ -1444,9 +1447,9 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
 		}
 		const result = applyScratch(home, { ...deps, home });
-		const failed = result.sessions.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
 		return { code: failed > 0 ? 1 : 0,
-			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.sessions,
+			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
 				orphans: result.orphans, killed: result.killed, expired: result.expired,
 				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
 			verification: "UNVERIFIED" };

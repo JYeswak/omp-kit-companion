@@ -15,8 +15,8 @@ import { delimiter, dirname, join, resolve } from "node:path";
  * servers (ppid 1, older than 1 h, mock-model.mjs / external-live.mjs argv).
  */
 
-export interface ScratchRunResult { code: number; stdout: string; stderr: string }
-export type ScratchRunner = (args: readonly string[]) => ScratchRunResult;
+export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
+export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number }) => ScratchRunResult;
 
 export interface ScratchOwner { pid: number; processStart: string; label: string; repo: string; createdAt: string; argv0: string }
 
@@ -104,13 +104,14 @@ function isSymlink(path: string): boolean {
 }
 
 /** true = no open descriptors; false = open descriptors present; null = lsof evidence unavailable. */
-export function lsofClear(dir: string, run: ScratchRunner): boolean | null {
+export function lsofClear(dir: string, run: ScratchRunner, timeoutMs = 0): boolean | null {
 	let out: ScratchRunResult;
 	try {
-		out = run(["lsof", "+D", dir]);
+		out = timeoutMs > 0 ? run(["lsof", "+D", dir], { timeoutMs }) : run(["lsof", "+D", dir]);
 	} catch {
 		return null;
 	}
+	if (out.code === null) return null;
 	const text = `${out.stdout}\n${out.stderr}`;
 	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text)) return null;
 	if (out.stdout.trim() === "") {
@@ -121,9 +122,11 @@ export function lsofClear(dir: string, run: ScratchRunner): boolean | null {
 	return false;
 }
 
-export function defaultRunner(args: readonly string[]): ScratchRunResult {
+export const LSOF_TIMEOUT_MS = 15000;
+
+export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: number }): ScratchRunResult {
 	try {
-		const child = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe" });
+		const child = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
 		return { code: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
 	} catch (error) {
 		return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
@@ -154,7 +157,7 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 	return verdict.action === "SKIP" && APPLY_FAILURE_REASONS[verdict.reason] === true;
 }
 
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number }
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; onProgress?: (verdict: ScratchVerdict) => void }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -213,7 +216,7 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 	const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 	if (state === "live" || state === "live-unreachable") return verdict("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
 	if (state === "unknown") return verdict("SKIP", "owner-liveness-unproven", owner);
-	const clear = lsofClear(dir, deps.run);
+	const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
 	if (clear === null) return verdict("SKIP", "lsof-evidence-unavailable", owner);
 	if (!clear) return verdict("LIVE", `owner-${state}-but-open-fds-present`, owner);
 	return { dir, action: "REAP", reason: `owner-${state}-no-open-fds`, owner, sizeBytes: dirSize(dir) };
@@ -429,7 +432,7 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	}
 	const finalText = readText(join(deleting, ".owner"));
 	const finalOwner = finalText === null ? null : parseOwnerFile(finalText);
-	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || lsofClear(deleting, deps.run) !== true) {
+	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || lsofClear(deleting, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) {
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
 	}
 	try {
@@ -466,7 +469,7 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps): Scratc
 	} catch {
 		return { ...base, reason: "atomic-quarantine-failed" };
 	}
-	if (inodeOf(moved) !== identity || lsofClear(moved, deps.run) !== true) {
+	if (inodeOf(moved) !== identity || lsofClear(moved, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) {
 		try {
 			renameSync(moved, dir);
 		} catch {
@@ -498,7 +501,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		if (isSymlink(path)) continue;
 		const { owner, malformed } = readOwner(path);
 	 if (!owner || malformed) {
-			if (lsofClear(path, deps.run) !== true) continue;
+			if (lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
 			try {
 				rmSync(path, { recursive: true, force: true });
 			} catch {
@@ -512,7 +515,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		}
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "dead" && state !== "reused") continue;
-		if (lsofClear(path, deps.run) !== true) continue;
+		if (lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
 		try {
 			rmSync(path, { recursive: true, force: true });
 		} catch {
@@ -561,36 +564,47 @@ export function killOrphan(pid: number, deps: ApplyDeps): boolean {
 
 export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number }
 
+/** One directory through the full plan verdict (owned gates + unowned idle mapping). */
+export function inspectOne(dir: string, root: string, deps: InspectDeps): ScratchVerdict | null {
+	try {
+		if (!statSync(dir).isDirectory() || isSymlink(dir)) return null;
+	} catch {
+		return null;
+	}
+	const verdict = inspectSession(dir, root, deps);
+ if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" || verdict.reason === "malformed-owner-file")) {
+		const freshest = idleSince(dir, deps.now ?? Date.now());
+		if (freshest !== null && freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS) {
+			return { ...verdict, action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine", sizeBytes: dirSize(dir) };
+		}
+		return { ...verdict, action: "LIVE", reason: "unowned-but-active" };
+	}
+	return verdict;
+}
+
+function eachSessionDir(root: string, visit: (dir: string) => void): void {
+	let entries: string[];
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (entry === "." || entry === "..") continue;
+		visit(join(root, entry));
+	}
+}
+
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = resolveScratchRoots(home);
 	const sessions: ScratchVerdict[] = [];
 	for (const root of roots) {
-		let entries: string[];
-		try {
-			entries = readdirSync(root);
-		} catch {
-			continue;
-		}
-		for (const entry of entries) {
-			if (entry === "." || entry === "..") continue;
-			const dir = join(root, entry);
-			try {
-				if (!statSync(dir).isDirectory() || isSymlink(dir)) continue;
-			} catch {
-				continue;
-			}
-		const verdict = inspectSession(dir, root, deps);
-		if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" || verdict.reason === "malformed-owner-file")) {
-			const freshest = idleSince(dir, deps.now ?? Date.now());
-			if (freshest !== null && freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS) {
-				sessions.push({ ...verdict, action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine", sizeBytes: dirSize(dir) });
-			} else {
-				sessions.push({ ...verdict, action: "LIVE", reason: "unowned-but-active" });
-			}
-			continue;
-		}
-		sessions.push(verdict);
-		}
+		eachSessionDir(root, dir => {
+			const verdict = inspectOne(dir, root, deps);
+			if (verdict === null) return;
+			sessions.push(verdict);
+			deps.onProgress?.(verdict);
+		});
 	}
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	return { roots, sessions, orphans,
@@ -601,26 +615,30 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 export interface ScratchApplyResult extends ScratchPlan { applied: ScratchVerdict[]; killed: { pid: number; command: string; ok: boolean }[]; expired: ScratchVerdict[] }
 
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
-	const plan = planScratch(home, deps);
+	const roots = resolveScratchRoots(home);
+	const sessions: ScratchVerdict[] = [];
 	const applied: ScratchVerdict[] = [];
-	for (const verdict of plan.sessions) {
-		if (verdict.action === "REAP") {
-			const root = plan.roots.find(r => verdict.dir.startsWith(`${r}/`)) ?? dirname(verdict.dir);
-			applied.push(applyReap(verdict.dir, root, verdict, deps));
-		} else if (verdict.action === "QUARANTINE") {
-			const root = plan.roots.find(r => verdict.dir.startsWith(`${r}/`)) ?? dirname(verdict.dir);
-			applied.push(applyUnowned(verdict.dir, root, deps));
-		} else {
-			applied.push(verdict);
-		}
+	const rootOf = (dir: string): string => roots.find(r => dir.startsWith(`${r}/`)) ?? dirname(dir);
+	for (const root of roots) {
+		eachSessionDir(root, dir => {
+			const verdict = inspectOne(dir, root, deps);
+			if (verdict === null) return;
+			sessions.push(verdict);
+			let terminal = verdict;
+			if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, deps);
+			else if (verdict.action === "QUARANTINE") terminal = applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
+			applied.push(terminal);
+			deps.onProgress?.(terminal);
+		});
 	}
-	const killed = plan.orphans.map(proc => {
+	const orphans = selectHarnessOrphans(listProcesses(deps.run));
+	const killed = orphans.map(proc => {
 		const ok = killOrphan(proc.pid, deps);
 		appendLog(home, { event: "orphan-kill", dir: "", at: new Date(deps.now ?? Date.now()).toISOString(), pid: proc.pid, command: proc.command, ok });
 		return { pid: proc.pid, command: proc.command, ok };
 	});
 	const expired = applyQuarantineExpiry(home, deps);
-	return { ...plan, sessions: applied, killed, expired,
+	return { roots, sessions, orphans, applied, killed, expired,
 		reapableBytes: applied.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: applied.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }

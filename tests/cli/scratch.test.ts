@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 
 const roots: string[] = [];
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -389,4 +389,53 @@ test("resolveScratchRoots honors the override and skips symlinked components", (
     if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
     else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
   }
+});
+
+test("lsof forwards the per-dir timeout and treats a killed run as unavailable", () => {
+	const seen: { timeoutMs?: number }[] = [];
+	const recording = (args: readonly string[], opts?: { timeoutMs?: number }) => {
+		seen.push(opts ?? {});
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	expect(lsofClear("/x", recording, 15000)).toBe(true);
+	expect(seen).toEqual([{ timeoutMs: 15000 }]);
+	expect(lsofClear("/x", () => ({ code: null, stdout: "", stderr: "" }), 15000)).toBeNull();
+	expect(lsofClear("/x", recording)).toBe(true);
+	expect(seen[seen.length - 1]).toEqual({});
+});
+
+test("defaultRunner honors the timeout and reports the kill", () => {
+	const slow = defaultRunner(["sleep", "30"], { timeoutMs: 400 });
+	expect(slow.code).toBeNull();
+	const fast = defaultRunner(["true"], { timeoutMs: 5000 });
+	expect(fast.code).toBe(0);
+});
+
+test("plan reports progress per directory as verdicts complete", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const live = sessionDir(root, "live", process.pid);
+	writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
+	const naked = join(root, "naked.1");
+	mkdirSync(naked, { recursive: true });
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const seen: string[] = [];
+	const plan = planScratch(root, { ...depsFor(), now: Date.now(), onProgress: verdict => { seen.push(`${verdict.action} ${verdict.dir}`); } });
+	expect(plan.sessions.length).toBe(2);
+	expect(seen.sort()).toEqual(plan.sessions.map(v => `${v.action} ${v.dir}`).sort());
+});
+
+test("a timed-out lsof keeps the directory instead of reaping it", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const dead = sessionDir(root, "gone", deadPid());
+	writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
+ const hanging = (args: readonly string[]) => {
+		if (args[0] === "lsof") return { code: null, stdout: "", stderr: "" };
+		return { code: 1, stdout: "", stderr: "" };
+	};
+	const verdict = inspectSession(dead, root, { ...depsFor(), run: hanging, lsofTimeoutMs: 100 });
+	expect(verdict.action).toBe("SKIP");
+	expect(verdict.reason).toBe("lsof-evidence-unavailable");
+	expect(existsSync(dead)).toBe(true);
 });
