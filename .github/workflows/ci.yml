@@ -1,8 +1,13 @@
 name: CI
 
+# Every push to main runs the fast Linux gate (CLI contracts, ladder); a newer push cancels the older run.
+# The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
+# (workflow_call from release.yml), daily, or on demand.
 on:
   push:
-  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 9 * * *"
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -23,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -38,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -61,6 +66,7 @@ jobs:
         run: sh tests/cli/installer.test.sh
 
   build-candidates:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -188,7 +194,7 @@ jobs:
 
   candidate-index:
     needs: [build-candidates, native-certification]
-    if: ${{ always() && needs.build-candidates.result == 'success' }}
+    if: ${{ always() && github.event_name != 'push' && needs.build-candidates.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
