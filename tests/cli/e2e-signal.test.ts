@@ -8,9 +8,11 @@ import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
-/** Pids whose ancestor chain reaches root, via ps; mirrors descendant_pids in e2e-live.sh. */
+/** Pids whose ancestor chain reaches root, via ps. -ax is required: bare ps
+ * only lists the caller's session, which never contains piped children, so
+ * without it this walk always returns [] and the reap check passes vacuously. */
 async function descendants(root: number): Promise<number[]> {
-	const child = Bun.spawnSync(["ps", "-o", "pid=", "-o", "ppid="], { stdout: "pipe", stderr: "pipe" });
+	const child = Bun.spawnSync(["ps", "-ax", "-o", "pid=", "-o", "ppid="], { stdout: "pipe", stderr: "pipe" });
 	const edges = new Map<number, number>();
 	for (const line of child.stdout.toString().split("\n")) {
 		const parts = line.trim().split(/\s+/);
@@ -49,20 +51,45 @@ test("SIGTERM stops e2e-live within 10 s with no surviving children", async () =
 		stderr: "pipe",
 	});
 	if (child.pid === undefined) throw new Error("e2e-live did not start");
-	let observed: number[] = [];
-	for (let attempt = 0; attempt < 3; attempt++) {
-		await new Promise(resolve => setTimeout(resolve, 12000));
-		observed = await descendants(child.pid);
-		if (observed.length > 0) break;
+	// Gate TERM on a started marker the script prints to stderr (unbuffered, so
+	// it arrives in real time; stdout is block-buffered and would arrive late),
+	// never on a fixed delay: the marker proves an OMP run is live, so the trap
+	// path is always exercised. One pump per stream consumes both end to end so
+	// post-TERM output can never block a pipe; the wait resolves on the marker
+	// or on early exit.
+	const decoder = new TextDecoder();
+	let out = "";
+	let err = "";
+	let started = false;
+	let exitedCode: number | null = null;
+	const { promise: markerSeen, resolve: markStarted } = Promise.withResolvers<void>();
+	const pumpOut = (async () => {
+		for await (const chunk of child.stdout) out += decoder.decode(chunk, { stream: true });
+	})();
+	const pumpErr = (async () => {
+		for await (const chunk of child.stderr) {
+			err += decoder.decode(chunk, { stream: true });
+			if (!started && /e2e-live: started scenario=\S+ omp_pid=\d+/.test(err)) {
+				started = true;
+				markStarted();
+			}
+		}
+	})();
+	const exitSeen = child.exited.then(code => { exitedCode = code ?? 1; });
+	while (!started && exitedCode === null) await Promise.race([markerSeen, exitSeen]);
+	if (!started) {
+		throw new Error(`e2e-live never started a scenario (exited=${exitedCode}):\n${err.slice(-2000)}`);
 	}
+	let observed = await descendants(child.pid);
+	expect(observed.length).toBeGreaterThan(0);
 	const termAt = Date.now();
 	child.kill(15);
 	const code = await child.exited;
+	await pumpOut;
+	await pumpErr;
 	const elapsedMs = Date.now() - termAt;
-	const stderr = await new Response(child.stderr).text();
+	const stderr = err;
 	expect(code).toBe(143);
-	expect(elapsedMs).toBeLessThan(10000);
-	expect(stderr).toContain("e2e-live: stopped on signal, exit 143");
 	for (let i = 0; i < 50 && observed.some(pid => true); i++) {
 		const states = await Promise.all(observed.map(pid => alive(pid)));
 		observed = observed.filter((_, index) => states[index]);

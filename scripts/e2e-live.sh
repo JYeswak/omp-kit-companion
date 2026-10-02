@@ -85,6 +85,15 @@ cleanup() {
 # then exit with the signal code. Never launches another scenario.
 on_signal() {
   code=$1
+  # OP is the subshell around the limit wrapper, not the wrapper itself: the
+  # OMP session group outlives the subshell, so signal the group by the pgid
+  # the wrapper published, then fall through to the OP/MP reaping below.
+  if [ -n "${LIMIT_PGID_FILE:-}" ] && [ -s "$LIMIT_PGID_FILE" ]; then
+    pgid=$(cat "$LIMIT_PGID_FILE" 2>/dev/null) || pgid=""
+    case "$pgid" in ''|*[!0-9]*) ;;
+      *) kill -TERM "-$pgid" 2>/dev/null; sleep 0.5; kill -KILL "-$pgid" 2>/dev/null ;;
+    esac
+  fi
   [ -n "$OP" ] && kill -TERM "$OP" 2>/dev/null
   [ -n "$MP" ] && kill -TERM "$MP" 2>/dev/null
   w=0
@@ -244,9 +253,12 @@ for i in $scenario_ids; do
     KEEP_WORK=1; exit 2
   fi
   "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
+  LIMIT_PGID_FILE="$T/pgid-$name"; rm -f "$LIMIT_PGID_FILE"; export LIMIT_PGID_FILE
   (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
+  echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&2
   wait "$OP"; rc=$?; OP=""
   reap_mock
+  rm -f "$LIMIT_PGID_FILE"; unset LIMIT_PGID_FILE
   echo "mock server cleanup_rc=$mock_cleanup_rc log=$T/mock-$name.txt"
   cat "$T/mock-$name.txt"
   echo "OMP producer_rc=$rc output_log=$T/out-$name.txt transcript=$LOG"
