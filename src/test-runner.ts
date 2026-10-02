@@ -5,7 +5,7 @@ import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
 
 const HARNESS = "scripts/ttsr-harness.ts";
-const EXPECTED = { rules: 22, ttsrRules: 21, cases: 295, quietCases: 150 } as const;
+const EXPECTED = { rules: 22, ttsrRules: 21, cases: 331, quietCases: 177 } as const;
 const SEEDED_PREFIX_PLANT = /^ok\s+plant \(b\) RED as intended: G3 plant-prefix-close quiet tool:bash line 3: fired on prefix/m;
 const SELFTEST_GREEN = /^SELFTEST: all seven plants RED and named; controls GREEN$/m;
 
