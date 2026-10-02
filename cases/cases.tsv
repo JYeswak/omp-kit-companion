@@ -330,3 +330,11 @@ kit-no-verify	quiet	tool	bash	-	GIT CONFIG --UNSET CORE.HOOKSPATH	H3: uppercase 
 kit-no-verify	quiet	tool	bash	-	GIT -C CORE.HOOKSPATH=/DEV/NULL COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/DEV/NULL GIT COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH'='/DEV/NULL'" GIT COMMIT -M X	H3: uppercase stays quiet
+bash-glob-silenced	fire	tool	bash	-	echo "$(grep -rl 'x' crates/*/Cargo.toml 2>/dev/null)"	Q31 executable substitution
+bash-pipe-exit	fire	tool	bash	-	echo "$(./scripts/lane-status.sh 2>&1 | tail -16; echo EXIT=$?)"	Q31 executable substitution
+kit-close-needs-evidence	fire	tool	bash	-	echo "$(br close x)"	Q31 executable substitution
+kit-gate-must-name-the-plant	fire	tool	bash	-	echo "$(sh starter-kit/scripts/init.sh)"	Q31 executable substitution
+kit-no-force-push	fire	tool	bash	-	echo "$(git push --force)"	Q31 executable substitution
+kit-relative-path-not-cwd	fire	tool	bash	-	echo "$(sh starter-kit/scripts/check-readiness.sh)"	Q31 executable substitution
+kit-scratch-tmp	fire	tool	bash	-	echo "$(echo > /tmp/omp-danger)"	Q31 executable substitution
+zz-canary-scope-probe	fire	tool	bash	-	echo "$(echo zzzz_systemwide_canary_9c42)"	Q31 executable substitution
