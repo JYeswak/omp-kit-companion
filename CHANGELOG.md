@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Test runs no longer touch real local model providers: `scripts/e2e-live.sh` disables implicit socket discovery (`ollama`, `llama.cpp`, `lm-studio`) in the isolated test config, so a release check cannot hold the machine's Ollama port. The per-scenario mock provider is unaffected. `e2e-live.sh` also traps TERM/INT now: it kills every descendant, reaps bounded with KILL escalation, and exits 143/130 instead of spawning the next scenario.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.

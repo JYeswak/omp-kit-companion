@@ -17,6 +17,18 @@ exec /usr/bin/perl -MPOSIX=setsid -MErrno=EINTR -e '
     die "limit-process-tree: launch failed: $!\n";
   }
   my $timed_out = 0;
+  # L2: a TERM/INT to the wrapper must reach the session group. Without this
+  # the wrapper died and orphaned the group (e2e-live pid 93914 survived
+  # SIGTERM). Forward, reap bounded, and exit with the signal code.
+  $SIG{TERM} = $SIG{INT} = sub {
+    my $sig = $_[0];
+    kill $sig, -$child;
+    select undef, undef, undef, 0.5;
+    kill "KILL", -$child;
+    my $done;
+    do { $done = waitpid($child, 0) } while ($done == -1 && $! == EINTR);
+    exit $sig eq "TERM" ? 143 : 130;
+  };
   $SIG{ALRM} = sub {
     $timed_out = 1;
     kill "TERM", -$child;
