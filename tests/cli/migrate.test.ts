@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { applyMigration, planMigration } from "../../src/migrate.ts";
+import { applyMigration, planMigration, unifiedDiff } from "../../src/migrate.ts";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const repoRules = resolve(import.meta.dir, "../../rules");
 const fixtures: string[] = [];
@@ -35,12 +35,19 @@ function realOmpDir(): string {
 	return dirname(launcher);
 }
 
-function childEnv(home: string, ompDir: string): Record<string, string> {
+function childEnv(home: string, ompDir: string): Record<string, string | undefined> {
 	// dirname(process.execPath): the omp launcher is a bun shim; CI minimal PATH lacks it.
 	const bunDir = dirname(process.execPath);
-	return { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_STATE_HOME: join(home, "xdg-state"),
+	const env: Record<string, string | undefined> = { ...process.env, HOME: home,
+		XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_STATE_HOME: join(home, "xdg-state"),
 		XDG_DATA_HOME: join(home, "xdg-data"), XDG_CACHE_HOME: join(home, "xdg-cache"), TMPDIR: join(home, "tmp"),
 		PATH: `${bunDir}:${ompDir}:/usr/bin:/bin:/usr/sbin:/sbin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" };
+	// An inherited profile makes OMP read that profile's config and rules instead of
+	// the fixture HOME's (native dir especially); the lifecycle script unsets these too.
+	delete env.OMP_PROFILE;
+	delete env.PI_PROFILE;
+	delete env.PI_CODING_AGENT_DIR;
+	return env;
 }
 
 test("child PATH carries the bun binary dir for the omp launcher shim", () => {
@@ -48,12 +55,6 @@ test("child PATH carries the bun binary dir for the omp launcher shim", () => {
 	expect(path.split(":")[0]).toBe(dirname(process.execPath));
 });
 
-function cli(args: string[], home: string, ompDir: string) {
-	const child = Bun.spawnSync([process.execPath, entry, ...args, "--json"], {
-		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
-	});
-	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
-}
 
 function omp(args: string[], home: string, ompDir: string) {
 	const started = Date.now();
@@ -64,6 +65,13 @@ function omp(args: string[], home: string, ompDir: string) {
 		throw new Error(`omp ${args.join(" ")} failed: exit=${child.exitCode} signal=${child.signalCode ?? "none"} elapsed_ms=${Date.now() - started} stdout=${child.stdout.toString().slice(-500)} stderr=${child.stderr.toString().slice(-500)}`);
 	}
 	return child.stdout.toString();
+}
+
+function cli(args: string[], home: string, ompDir: string) {
+	const child = Bun.spawnSync([process.execPath, entry, ...args, "--json"], {
+		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
+	});
+	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }
 
 /** Isolated HOME with a linked fixture plugin serving copies of the repo rules. */
@@ -89,7 +97,7 @@ function pluginFixture(editCount: number): Fixture {
 function rowByName(rows: { name: string }[], name: string) {
 	const row = rows.find(entry => entry.name === name);
 	if (!row) throw new Error(`missing plan row for ${name}`);
-	return row as { name: string; verdict: string; overlay: boolean; manifestSha256: string | null; pluginSha256: string | null; pluginPath: string | null; firstDiffLine: number | null };
+	return row as { name: string; verdict: string; overlay: boolean; overlayPath: string | null; unlisted: boolean; manifestSha256: string | null; pluginSha256: string | null; pluginPath: string | null; firstDiffLine: number | null; diff: string | null };
 }
 
 test("migrate plan lists each legacy copy with its plugin equivalent and byte diff", () => {
@@ -239,6 +247,68 @@ test("applyMigration refuses without a plugin even when called directly", () => 
 	const plan = planMigration(input);
 	expect(plan.pluginAbsent).toBe(true);
 	expect(() => applyMigration(plan, input, { confirmed: true })).toThrow("PLUGIN_ABSENT");
+});
+
+test("overlay rows carry the unified diff and the native destination", () => {
+	const { home } = pluginFixture(6);
+	const result = cli(["migrate", "--plan"], home, realOmpDir());
+	expect(result.code).toBe(0);
+	const edited = result.envelope.data.rows.filter((row: { verdict: string }) => row.verdict === "edited");
+	expect(edited.length).toBeGreaterThan(0);
+	for (const row of edited) {
+		const full = rowByName(result.envelope.data.rows, row.name);
+		expect(full.overlayPath).toBe(`.omp/agent/rules/${row.name}.md`);
+		expect(full.diff).toContain("--- a/.agents/rules/");
+		expect(full.diff).toContain("+++ b/plugin/");
+		expect(full.diff).toContain("# local edit");
+	}
+	const identical = result.envelope.data.rows.filter((row: { verdict: string }) => row.verdict === "identical-to-plugin");
+	expect(identical.length).toBeGreaterThan(0);
+	for (const row of identical) {
+		expect(rowByName(result.envelope.data.rows, row.name).diff).toBeNull();
+	}
+});
+
+test("an installed native overlay wins over the plugin in ttsr test", () => {
+	const { home } = pluginFixture(0);
+	const nativeDir = join(home, ".omp", "agent", "rules");
+	mkdirSync(nativeDir, { recursive: true });
+	writeFileSync(join(nativeDir, "bash-pipe-exit.md"),
+		"---\ncondition: OVERLAY_ONLY_XYZ\nscope: tool:bash\ninterruptMode: never\n---\nOverlay probe.\n");
+	const fired = JSON.parse(omp(["ttsr", "test", "--source", "tool", "--tool", "bash", "echo OVERLAY_ONLY_XYZ", "--json"], home, realOmpDir()));
+	const overlayHits = (fired.triggered ?? []).filter((entry: { name?: string }) => entry.name === "bash-pipe-exit");
+	expect(overlayHits.length).toBeGreaterThan(0);
+	for (const entry of overlayHits) expect(entry.sourceProvider ?? entry.provider).toBe("native");
+	const shadowed = JSON.parse(omp(["ttsr", "test", "--source", "tool", "--tool", "bash", "deploy.sh | head -1; echo $?", "--json"], home, realOmpDir()));
+	expect((shadowed.triggered ?? []).filter((entry: { name?: string }) => entry.name === "bash-pipe-exit")).toEqual([]);
+});
+
+test("kit-standing-law stays unlisted with and without a native overlay", () => {
+	const { home } = pluginFixture(0);
+	const namesOf = (json: string): Set<string> => {
+		const data = JSON.parse(json);
+		const items = Array.isArray(data) ? data : data.rules;
+		return new Set(items.map((entry: { name: string }) => entry.name));
+	};
+	const before = namesOf(omp(["ttsr", "list", "--json"], home, realOmpDir()));
+	expect(before.has("kit-standing-law")).toBe(false);
+	const nativeDir = join(home, ".omp", "agent", "rules");
+	mkdirSync(nativeDir, { recursive: true });
+	writeFileSync(join(nativeDir, "kit-standing-law.md"), readFileSync(join(repoRules, "kit-standing-law.md")));
+	const after = namesOf(omp(["ttsr", "list", "--json"], home, realOmpDir()));
+	expect(after.has("kit-standing-law")).toBe(false);
+	const plan = cli(["migrate", "--plan"], home, realOmpDir());
+	expect(rowByName(plan.envelope.data.rows, "kit-standing-law").unlisted).toBe(true);
+});
+
+test("unifiedDiff marks changed lines with context", () => {
+	const diff = unifiedDiff("a\nb\nc\nd\ne\nf\ng\n", "a\nB\nc\nd\ne\nf\ng\n", "a/old", "b/new");
+	expect(diff).toContain("--- a/old");
+	expect(diff).toContain("+++ b/new");
+	expect(diff).toContain("-b");
+	expect(diff).toContain("+B");
+	expect(diff).toContain("@@ ");
+	expect(unifiedDiff("same\n", "same\n", "a", "b")).toBe("--- a\n+++ b\n");
 });
 
 test("omp helper failure reports exit, signal, elapsed, and both streams", () => {

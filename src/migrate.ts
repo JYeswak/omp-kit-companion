@@ -21,8 +21,7 @@ export type MigrateVerdict = "identical-to-plugin" | "identical-to-manifest" | "
 export type OmpRunner = (args: readonly string[]) => OmpRunResult;
 
 export interface PluginRule { name: string; path: string; sha256: string }
-export type MigrateVerdict = "identical-to-plugin" | "edited" | "unknown-keep";
-export interface MigrateRow { name: string; file: string; legacySha256: string; manifestSha256: string | null; pluginSha256: string | null; pluginPath: string | null; verdict: MigrateVerdict; overlay: boolean; firstDiffLine: number | null }
+export interface MigrateRow { name: string; file: string; legacySha256: string; manifestSha256: string | null; pluginSha256: string | null; pluginPath: string | null; verdict: MigrateVerdict; overlay: boolean; overlayPath: string | null; unlisted: boolean; firstDiffLine: number | null; diff: string | null }
 export interface MigratePlan { rows: readonly MigrateRow[]; pluginRules: number; pluginAbsent: boolean; backupDir: string | null; removable: number; kept: number }
 export interface MigrateVerifyRow { name: string; provider: string | null; path: string | null }
 export interface MigrateResult { receiptId: string | null; backupDir: string; removed: string[]; kept: string[]; verified: MigrateVerifyRow[] }
@@ -110,6 +109,59 @@ function firstDiffLine(a: Buffer, b: Buffer): number | null {
 	return count + 1;
 }
 
+type DiffOp = { kind: "equal" | "del" | "ins"; a: number; b: number };
+
+/** Minimal unified diff for small text files (rule files, not arbitrary blobs). */
+export function unifiedDiff(aText: string, bText: string, aLabel: string, bLabel: string): string {
+	const a = aText.split("\n");
+	const b = bText.split("\n");
+	if (a.length * b.length > 250000) {
+		return `--- ${aLabel}\n+++ ${bLabel}\n@@ -1,${a.length} +1,${b.length} @@\n(files differ; too large for a line diff)\n`;
+	}
+	const width = b.length + 1;
+	const table = new Array<number>((a.length + 1) * width).fill(0);
+	const at = (i: number, j: number): number => table[i * width + j]!;
+	for (let i = a.length - 1; i >= 0; i--) {
+		for (let j = b.length - 1; j >= 0; j--) {
+			table[i * width + j] = a[i] === b[j] ? at(i + 1, j + 1) + 1 : Math.max(at(i + 1, j), at(i, j + 1));
+		}
+	}
+	const ops: DiffOp[] = [];
+	let i = 0, j = 0;
+	while (i < a.length || j < b.length) {
+		if (i < a.length && j < b.length && a[i] === b[j]) { ops.push({ kind: "equal", a: i, b: j }); i++; j++; }
+		else if (j >= b.length || (i < a.length && at(i + 1, j) >= at(i, j + 1))) { ops.push({ kind: "del", a: i, b: j }); i++; }
+		else { ops.push({ kind: "ins", a: i, b: j }); j++; }
+	}
+	const context = 3;
+	const out = [`--- ${aLabel}`, `+++ ${bLabel}`];
+	let k = 0;
+	while (k < ops.length) {
+		if (ops[k]!.kind === "equal") { k++; continue; }
+		const start = Math.max(0, k - context);
+		let end = k + 1;
+		for (;;) {
+			let next = end;
+			while (next < ops.length && ops[next]!.kind === "equal") next++;
+			if (next >= ops.length || next - end > 2 * context) { end = Math.min(ops.length, end + context); break; }
+			end = next + 1;
+		}
+		const body = ops.slice(start, end);
+		const aCount = body.filter(op => op.kind !== "ins").length;
+		const bCount = body.filter(op => op.kind !== "del").length;
+		let aStart = body[0]!.a + 1;
+		let bStart = body[0]!.b + 1;
+		if (body[0]!.kind === "ins" && aCount === 0) aStart = body[0]!.a;
+		if (body[0]!.kind === "del" && bCount === 0) bStart = body[0]!.b;
+		out.push(`@@ -${aStart},${aCount} +${bStart},${bCount} @@`);
+		for (const op of body) {
+			const line = op.kind === "ins" ? b[op.b]! : a[op.a]!;
+			out.push(`${op.kind === "equal" ? " " : op.kind === "del" ? "-" : "+"}${line}`);
+		}
+		k = end;
+	}
+	return `${out.join("\n")}\n`;
+}
 function legacyDir(home: string): string {
 	const agents = join(home, ".agents");
 	const dir = join(agents, "rules");
@@ -156,15 +208,21 @@ export function planMigration(input: MigrateInput): MigratePlan {
 		let pluginBytes: Buffer | null = null;
 		if (plugin) pluginBytes = readBytesNoFollow(plugin.path);
 		const pluginSha256 = pluginBytes === null ? null : hex(pluginBytes);
+		const base = { name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null };
+		const unlisted = manifestSha256 !== null && pluginSha256 === null && pluginRules.length > 0;
 		if (manifestSha256 === null) {
-			rows.push({ name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null, verdict: "unknown-keep", overlay: false, firstDiffLine: null });
+			rows.push({ ...base, verdict: "unknown-keep", overlay: false, overlayPath: null, unlisted: false, firstDiffLine: null, diff: null });
 		} else if (pluginSha256 !== null && legacySha256 === pluginSha256) {
-			rows.push({ name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null, verdict: "identical-to-plugin", overlay: false, firstDiffLine: null });
+			rows.push({ ...base, verdict: "identical-to-plugin", overlay: false, overlayPath: null, unlisted: false, firstDiffLine: null, diff: null });
 		} else if (legacySha256 === manifestSha256) {
-			rows.push({ name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null, verdict: "identical-to-manifest", overlay: false, firstDiffLine: null });
+			rows.push({ ...base, verdict: "identical-to-manifest", overlay: false, overlayPath: null, unlisted, firstDiffLine: null, diff: null });
 		} else {
-			rows.push({ name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null, verdict: "edited", overlay: true,
-				firstDiffLine: pluginBytes === null ? null : firstDiffLine(bytes, pluginBytes) });
+			const manifestBytes = readBytesNoFollow(join(input.root, "rules", `${name}.md`));
+			const shipped = pluginBytes ?? manifestBytes;
+			rows.push({ ...base, verdict: "edited", overlay: true, overlayPath: `.omp/agent/rules/${name}.md`, unlisted,
+				firstDiffLine: pluginBytes === null ? null : firstDiffLine(bytes, pluginBytes),
+				diff: shipped === null ? null : unifiedDiff(bytes.toString("utf8"), shipped.toString("utf8"),
+					`a/.agents/rules/${file} (legacy)`, pluginBytes !== null ? `b/plugin/${name}.md` : `b/manifest/${name}.md`) });
 		}
 	}
 	const removable = rows.filter(row => row.verdict === "identical-to-plugin").length;
