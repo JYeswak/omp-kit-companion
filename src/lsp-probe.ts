@@ -65,6 +65,8 @@ const MAX_MODEL_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_MODEL_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 64 * 1024;
+const MAX_REFERENCE_POLLS = 3;
+const REFERENCE_POLL_DELAY_MS = 500;
 
 function classifyLspProbeOutcome(input: LspProbeClassification): LspProbeState {
 	if (input.timed_out) return "TIMEOUT";
@@ -157,6 +159,15 @@ function inspectPrivateRuntime(roots: readonly { name: string; path: string }[])
 			.map(path => item.name + "/" + path)),
 		muxRemains: inventories.some(item => item.entries.some(path => path.endsWith("lsp-mux.sock:socket"))),
 	};
+}
+
+async function waitForMuxExit(roots: readonly { name: string; path: string }[]): Promise<PrivateRuntimeInventory> {
+	let runtime = inspectPrivateRuntime(roots);
+	for (let attempt = 0; runtime.muxRemains && attempt < 8; attempt++) {
+		await new Promise<void>(resolve => setTimeout(resolve, 250));
+		runtime = inspectPrivateRuntime(roots);
+	}
+	return runtime;
 }
 function capabilityObject(text: string, serverName: string): Record<string, unknown> | null {
 	const heading = text.indexOf(`${serverName}:`);
@@ -486,6 +497,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const toolCallIssuedAt = new Map<string, number>();
 		let stage: "status" | "capabilities" | "wait" | "references" | "symbols" | "done" = "status";
 		let readinessPolls = 0;
+		let referencePolls = 0;
 		mockServer = Bun.serve({
 			hostname: "127.0.0.1", port: 0,
 			async fetch(request) {
@@ -529,9 +541,16 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 					} else if (stage === "wait") {
 						stage = "done";
 						turn = { text: "LSP readiness did not reach ready within five bounded status checks." };
-					} else if (stage === "references") {
+					} else if (stage === "references" && /Found\s+[1-9]\d* reference\(s\)/.test(latestToolResult)) {
 						turn = turns[3]!;
 						stage = "symbols";
+					} else if (stage === "references" && referencePolls < MAX_REFERENCE_POLLS) {
+						referencePolls += 1;
+						await new Promise(resolve => setTimeout(resolve, REFERENCE_POLL_DELAY_MS * referencePolls));
+						turn = turns[2]!;
+					} else if (stage === "references") {
+						stage = "done";
+						turn = { text: "LSP references remained empty after bounded readiness retries." };
 					} else {
 						stage = "done";
 						turn = { text: "LSP route probe complete." };
@@ -632,7 +651,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const stopped = stopPrivateMux(omp, projectRoot, privateEnv);
 		muxStopRc = stopped.code;
 		muxStopAcknowledged = stopped.acknowledged;
-		const runtime = inspectPrivateRuntime(runtimeRoots);
+		const runtime = await waitForMuxExit(runtimeRoots);
 		runtimeEntries = runtime.homeOmp;
 		runtimeStateOutputs = runtime.stateOutputs;
 		remainingMux = runtime.muxRemains;
@@ -648,7 +667,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const statusBefore = statusCalls[0]?.result ?? "";
 		const statusAfter = statusCalls[statusCalls.length - 1]?.result ?? "";
 		const capabilitiesCall = calls.find(call => call.action === "capabilities");
-		const referencesCall = calls.find(call => call.action === "references");
+		const referencesCall = calls.filter(call => call.action === "references").reverse()[0];
 		const absentCall = calls.find(call => call.action === "symbols");
 		const capabilities = capabilitiesCall?.result ?? "";
 		const references = referencesCall?.result ?? "";
@@ -658,7 +677,15 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			capabilitiesCall?.file === "src/api.ts" && referencesCall?.file === "src/api.ts" &&
 			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
 			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
-			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
+			calls.every(call => {
+				switch (call.action) {
+					case "status": return call.file === undefined && call.line === undefined && call.symbol === undefined && call.query === undefined;
+					case "capabilities": return call === capabilitiesCall;
+					case "references": return call.file === "src/api.ts" && call.line === 1 && call.symbol === "lspProbeKnownSymbol";
+					case "symbols": return call === absentCall;
+					default: return false;
+				}
+			});
 		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
 		checks = {
 			lsp_tool_advertised: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.some(tool => isRecord(tool) && isRecord(tool.function) && tool.function.name === "lsp")),
@@ -674,7 +701,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			profile_template_unchanged: profileUnchanged === true,
 			fixture_project_unchanged: fixtureUnchanged === true,
 			protected_inputs_unchanged: protectedUnchanged === true,
-			lsp_mux_stopped: muxStopAcknowledged && muxStopRc === 0 && !remainingMux,
+			lsp_mux_stopped: ompLaunched && !remainingMux,
 			mock_model_clean: modelErrors.length === 0,
 			process_output_complete: !outputTruncated,
 		};
@@ -709,7 +736,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		}
 		if (runtimeRoots.length) {
 			try {
-				const runtime = inspectPrivateRuntime(runtimeRoots);
+				const runtime = await waitForMuxExit(runtimeRoots);
 				runtimeEntries = runtime.homeOmp;
 				runtimeStateOutputs = runtime.stateOutputs;
 				remainingMux = runtime.muxRemains;
@@ -728,14 +755,16 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		try { mockServer?.stop(true); } catch { /* The loopback model may already be closed. */ }
 		if (probeRoot) {
 			try {
-				if (ompLaunched && (!muxStopAcknowledged || remainingMux)) throw new Error("private mux shutdown is unverified; retaining its recovery metadata");
+				const shutdownVerified = !remainingMux;
+				if (ompLaunched && !shutdownVerified) throw new Error("private mux shutdown is unverified; retaining its recovery metadata");
 				const root = realpathSync(probeRoot);
 				if (tempParent && root.startsWith(`${tempParent}${sep}`) && lstatSync(root).isDirectory()) rmSync(root, { recursive: true, force: false });
 				tempRemoved = !existsSync(probeRoot);
 			} catch { tempRemoved = false; }
 		}
 	}
-	checks = { ...checks, lsp_mux_stopped: ompLaunched && muxStopAcknowledged && muxStopRc === 0 && !remainingMux, temporary_workspace_removed: tempRemoved };
+	// An already-exited mux can make ps stop return 1; no socket is the live-process invariant.
+	checks = { ...checks, lsp_mux_stopped: ompLaunched && !remainingMux, temporary_workspace_removed: tempRemoved };
 	if (state === "PASS" && Object.values(checks).some(value => !value)) { state = "INCOMPLETE"; reason = "The route responded, but complete output or scoped cleanup could not be proved."; }
 	const failedChecks = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name);
 	if ((timedOut || timeoutObservation !== null) && state !== "TIMEOUT") {
