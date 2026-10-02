@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `test --mutants` measures mutation adequacy of rule conditions against their cases through the real matcher, with per-rule scores, survivor edits, compile-failure counts, and a bounding `--mutant-budget-secs` flag; works on external packs too.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
