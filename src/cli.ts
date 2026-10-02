@@ -1276,7 +1276,7 @@ export async function repeatTestCommand(request: ParsedCommand): Promise<CliResu
 }
 
 async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario", "--baseline"]) {
+	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario"]) {
 		if (request.flags.has(flag)) {
 			return refusal("INVALID_FLAG", `test --metamorphic cannot be combined with ${flag}`,
 				"Run metamorphic relations on the bundled pack or one external --rules/--cases pair; nothing was measured.");
