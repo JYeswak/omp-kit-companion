@@ -164,6 +164,24 @@ const repairData: DataSchema = { type: "object", required: ["overall", "action",
 	} } }, receipt_id: { type: ["string", "null"] }, backup_id: { type: ["string", "null"] },
 } };
 
+const migrateData: DataSchema = { type: "object", required: ["overall", "action"], properties: {
+	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED"] },
+	rows: { type: "array", items: { type: "object", required: ["name", "verdict"], properties: {
+		name: { type: "string" }, file: { type: "string" }, legacySha256: { type: "string" },
+		manifestSha256: { type: ["string", "null"] }, pluginSha256: { type: ["string", "null"] },
+		pluginPath: { type: ["string", "null"] }, verdict: { enum: ["identical-to-plugin", "identical-to-manifest", "edited", "unknown-keep"] },
+		overlay: { type: "boolean" }, overlayPath: { type: ["string", "null"] }, unlisted: { type: "boolean" },
+		firstDiffLine: { type: ["number", "null"] }, diff: { type: ["string", "null"] },
+	} } },
+	pluginRules: { type: "number" }, pluginAbsent: { type: "boolean" },
+	removable: { type: "number" }, keptCount: { type: "number" }, receipt_id: { type: ["string", "null"] },
+	backup_dir: { type: "string" }, removed: { type: "array", items: { type: "string" } },
+	kept: { type: "array", items: { type: "string" } },
+	verified: { type: "array", items: { type: "object", required: ["name"], properties: {
+		name: { type: "string" }, provider: { type: ["string", "null"] }, path: { type: ["string", "null"] },
+	} } },
+} };
+
 const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
 	overall: { enum: ["UNVERIFIED", "CONFLICTS", "DELTA", "NO_DELTA_IN_EXERCISED_WITNESSES"] },
 	status: { enum: ["COMPLETE", "UNAVAILABLE"] }, scope: { enum: ["MATCHER_PREFIX_ONLY"] },
@@ -185,6 +203,18 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"], 
 		id: { type: "string" }, status: { enum: ["PASS", "WARN", "FAIL"] }, message: { type: "string" }, remediation: { type: "string" },
 	} } },
 	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
+} };
+const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	roots: { type: "array", items: { type: "string" } },
+	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
+		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
+		reason: { type: "string" }, sizeBytes: { type: "number" },
+	} } },
+	orphans: { type: "array", items: { type: "object" } },
+	killed: { type: "array", items: { type: "object" } },
+	expired: { type: "array", items: { type: "object" } },
+	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
 } };
 
 export const COMMANDS: readonly Command[] = [
@@ -267,6 +297,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
 		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,
 	], example: "omp-kit repair --scope rules --plan --json", runnable: false, mutation: true, dataSchema: repairData },
+	{ name: "migrate", description: "Move legacy ~/.agents/rules kit copies to native plugin layering; edited copies are kept and flagged for overlay", usage: "migrate [--plan|--apply --yes]", flags: planApply, example: "omp-kit migrate --plan --json", runnable: false, mutation: true, dataSchema: migrateData },
 	{ name: "undo", description: "Guardedly restore one verified receipt", usage: "undo RUN_ID [--yes]", argument: "RUN_ID", flags: [
 		{ name: "--yes", description: "Confirm restore after state verification" },
 	], example: "omp-kit undo RUN_ID --yes", runnable: false, mutation: true },
@@ -323,8 +354,15 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--errors", description: "Show the error log instead of the output log" },
 			{ name: "-n", value: "N", description: "Print the last N lines" },
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
-		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt and notifies on failure", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt (omp-watch notifies on failure, scratch-reaper reports)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+	{ name: "scratch", description: "Reap dead operator scratch: owned+dead+lsof-clear sessions, idle unowned quarantine, expired quarantine delete", usage: "scratch plan|apply [--apply --yes]", flags: [], subcommands: [
+		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "--apply", description: "Request guarded apply" },
+			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
+	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },
