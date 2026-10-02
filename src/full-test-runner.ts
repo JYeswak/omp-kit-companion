@@ -4,9 +4,9 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runIsolatedShell, type BundledRunResult } from "./runtime.ts";
-import { runFastTest, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
+import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
 
-const STAGES = ["manifest", "harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
+const STAGES = ["manifest", "harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
 export type FullStage = { status: "PASS" | "FAIL" | "NOT_RUN"; producer_rc: number | null; reason?: string };
 export type FullTestReport = {
@@ -97,21 +97,21 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
  if (stages["e2e-live"].status === "PASS" && !livePassed) failures.push("Live scenario rows did not match the exact shipped ordered scenario IDs");
  const plantPassed = stages["e2e-plant"].status === "PASS" && result.stdout.includes("plant RED as required: baseline kit-close-needs-evidence fires on the streamed prefix of an evidenced close");
  if (stages["e2e-plant"].status === "PASS" && !plantPassed) failures.push("Planted negative control was not named RED");
- if (result.code === 0 && (next !== STAGES.length || !/^LADDER: GREEN$/m.test(result.stdout))) failures.push("Producer returned success without eight named GREEN stages and LADDER: GREEN");
+ if (result.code === 0 && (next !== STAGES.length || !/^LADDER: GREEN$/m.test(result.stdout))) failures.push("Producer returned success without nine named GREEN stages and LADDER: GREEN");
  if (result.code !== 0 && !failures.length) failures.push(`Ladder exited ${result.code} before a named RED stage`);
  return { stages, live_scenarios: { expected_ids: [...ids], observed_ids: ordinary,
   status: stages["e2e-live"].status === "NOT_RUN" ? "NOT_RUN" : livePassed ? "PASS" : "FAIL" }, failures };
 }
 
 /** Actual OMP live calls run in a private HOME; never claim the operator's effective profile was certified. */
-export async function runFullTest(input: FullTestInput): Promise<FullTestReport> {
+export async function runFullTest(input: FullTestInput, expectedCounts?: FastTestExpectations): Promise<FullTestReport> {
  if (![input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])].every(isAbsolute))
   throw new Error("full-test release, executable, HOME, and project paths must be absolute");
  const watchedPaths = operatorWatchedPaths(input.home, input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit"));
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
  const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
- const fast = await runFastTest(input);
+	const fast = expectedCounts ? await runFastTest(input, expectedCounts) : await runFastTest(input);
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null }])) as Record<FullStageName, FullStage>;
  const empty = { producer_rc: null, stdout: "", stderr: "" };
  if (fast.status !== "PASS") {

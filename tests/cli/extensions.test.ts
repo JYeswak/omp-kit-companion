@@ -25,6 +25,8 @@ function writeHook(home: string, body: string): string {
 
 
 beforeAll(() => {
+	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	const omp = resolveOmpIdentity(process.env);
 	base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "omp-kit-extensions-"));
 	const release = join(base, "relocated", "release");

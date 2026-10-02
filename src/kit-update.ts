@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform } from "./kit-release.ts";
+import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
 import { runFullTest, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
+import { parseRuleManifest } from "./diagnostics.ts";
+import type { FastTestExpectations } from "./test-runner.ts";
 
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
 function shaFile(path: string): string {
@@ -65,6 +67,33 @@ function verifiedRelease(root: string, manifest: ReleaseManifest, manifestSha256
    return lstatSync(target).isFile() && shaFile(target) === entry.sha256;
   });
  } catch { return false; }
+}
+
+function releaseTestExpectations(staged: StagedKitRelease): FastTestExpectations {
+	try {
+		const root = staged.root, manifest = staged.manifest;
+		const readVerified = (path: string): Buffer => {
+			const entry = manifest.files.find(file => file.path === path);
+			if (!entry) throw new Error("KIT_POSTCHECK_FAILED");
+			const bytes = regular(join(root, path));
+			if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new Error("KIT_POSTCHECK_FAILED");
+			return bytes;
+		};
+		const rules = parseRuleManifest(readVerified("MANIFEST.tsv").toString("utf8"));
+		const caseLines = readVerified("cases/cases.tsv").toString("utf8").split("\n");
+		let cases = 0, quietCases = 0, ttsrRules = 0;
+		for (const rule of rules) if (rule.ruleClass !== "always") ttsrRules++;
+		for (let index = 1; index < caseLines.length; index++) {
+			const row = caseLines[index]!.replace(/\r$/, "");
+			if (row.trim() === "" || row.startsWith("#")) continue;
+			cases++;
+			if (row.split("\t")[1] === "quiet") quietCases++;
+		}
+		return { rules: rules.length, ttsrRules, cases, quietCases };
+	} catch {
+		rmSync(staged.root, { recursive: true, force: true });
+		throw new Error("KIT_POSTCHECK_FAILED");
+	}
 }
 function readInstallation(prefix: string): { target: string; binary: string; sha256: string } {
  directory(prefix);
@@ -241,6 +270,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   const selectedOmp = selectedOmpSnapshot();
   // An archive is read only from the explicit source paired to the revalidated index.
   const staged = await stageKitRelease({ archive: regular(source.archivePath), plan: plan.release, stagingParent: join(plan.prefix, "releases"), probeBinaryInfo: binaryInfo });
+  const expectedCounts = releaseTestExpectations(staged);
   const next: KitInstallation = { version: staged.version, target: relativeTarget(staged.version), binary: installedBinary(plan.prefix, staged.version),
    sha256: staged.manifest.files.find(file => file.path === "bin/omp-kit")!.sha256 };
   let postcheck = notRun();
@@ -255,13 +285,14 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    if (!verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error("KIT_STAGE_CHANGED");
    switchLink(plan.prefix, staged.version);
    if (!matches(plan.prefix, next)) throw new Error("KIT_POSTIMAGE_CHANGED");
-   const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project, stateRoot: plan.stateRoot } satisfies FullTestInput);
+   const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project, stateRoot: plan.stateRoot } satisfies FullTestInput, expectedCounts);
    const matcher = report.fast.status === "PASS" && report.fast.proofs.G1_registration.status === "PASS" && report.fast.proofs.G2_payload.status === "PASS" && report.fast.proofs.G3_quiet_prefix.status === "PASS" ? "PASS" : "FAIL";
    const live = report.proofs.G4_live.status === "PASS" && Object.values(report.stages).every(stage => stage.status === "PASS") ? "PASS" : "FAIL";
    const observedOmp = selectedOmpSnapshot();
-   const ompChanged = selectedOmp ? !sameOmpSnapshot(selectedOmp, observedOmp) || report.omp_version !== selectedOmp.version :
-    observedOmp !== null || report.status === "PASS";
-   postcheck = { status: !ompChanged && report.status === "PASS" && report.exitCode === 0 && matcher === "PASS" && live === "PASS" ? "PASS" : "FAIL",
+   const ompIdentityKnown = selectedOmp !== null && observedOmp !== null && report.omp_version !== null && report.omp_version === selectedOmp.version;
+   const ompChanged = selectedOmp !== null && observedOmp !== null &&
+    (!sameOmpSnapshot(selectedOmp, observedOmp) || (report.omp_version !== null && report.omp_version !== selectedOmp.version));
+   postcheck = { status: !ompChanged && ompIdentityKnown && report.status === "PASS" && report.exitCode === 0 && matcher === "PASS" && live === "PASS" ? "PASS" : "FAIL",
     matcher, live, report };
    if (ompChanged) throw new Error("OMP_CHANGED_DURING_KIT_UPDATE");
    if (postcheck.status !== "PASS" || !matches(plan.prefix, next) ||
@@ -287,7 +318,11 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
  const report = outcome.postcheck.report;
  const postcheckDetail = report ? {
   status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
-  failed_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
+  failed_stages: [
+   ...Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
+   ...(report.fast.status !== "PASS" ? ["fast-test"] : []),
+   ...(report.omp_version === null ? ["omp-version"] : []),
+  ],
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
   failures: report.failures.slice(0, 20),
  } : null;

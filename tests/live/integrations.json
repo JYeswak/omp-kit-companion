@@ -22,7 +22,7 @@
       "integration": "slb",
       "kind": "quiet",
       "setup": ["git-init"],
-      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi" } } }, { "text": "done" }]
     },
     {
       "integration": "rch",
@@ -40,13 +40,25 @@
       "integration": "kit-guard",
       "kind": "fire",
       "setup": ["git-init", "kit-guard-optin"],
-      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi" } } }, { "text": "done" }]
     },
     {
       "integration": "kit-guard",
       "kind": "quiet",
       "setup": ["git-init"],
-      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "fleet-guard",
+      "kind": "fire",
+      "setup": ["git-init", "tmp-clean"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > /tmp/${BRANCH}.txt" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "fleet-guard",
+      "kind": "quiet",
+      "setup": ["git-init"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi" } } }, { "text": "done" }]
     }
   ]
 }

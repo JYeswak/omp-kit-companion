@@ -15,7 +15,8 @@ const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", 
 const files = ["LICENSE", "MANIFEST.tsv", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
-	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs"];
+	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs",
+	"tests/cli/metamorphic-baseline.json"];
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fail = (reason: string): never => { throw new Error(reason); };
 const octal = (header: Buffer, offset: number, width: number, value: number) => {
