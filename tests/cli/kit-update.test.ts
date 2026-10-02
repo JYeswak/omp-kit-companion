@@ -243,7 +243,7 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  expect(envelope.data, JSON.stringify(envelope.data)).toMatchObject({ overall: "FAIL", action: "PARTIAL", postcheck: "FAIL",
   receipt_id: result.receiptId, reason: result.postcheck.reason ?? null });
  expect(envelope.data.postcheck_detail, JSON.stringify(envelope.data.postcheck_detail)).toMatchObject({
-  failed_stages: ["harness-gate", "e2e-live"], changed_operator_paths: [homePath, projectPath], failures: failures.slice(0, 20) });
+  failed_stages: ["harness-gate", "e2e-live", "fast-test", "omp-version"], changed_operator_paths: [homePath, projectPath], failures: failures.slice(0, 20) });
  expect(envelope.commands).toEqual([undoCommand]);
  expect(envelope.errors?.[0], JSON.stringify(envelope.errors)).toMatchObject({ code: result.postcheck.reason ?? "KIT_POSTCHECK_FAILED" });
  expect(envelope.errors?.[0]?.message).toContain("Kit update to 1.2.3 did not pass its postcheck; failure 1");
