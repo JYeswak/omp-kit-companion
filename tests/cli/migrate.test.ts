@@ -123,7 +123,8 @@ test("migrate plan lists each legacy copy with its plugin equivalent and byte di
 	const unknown = rowByName(rows, "not-a-kit-rule");
 	expect(unknown.verdict).toBe("unknown-keep");
 	expect(unknown.manifestSha256).toBeNull();
-});
+// Cold omp/CLI spawns run ~1s each; this test chains several (measured 5.4s locally). Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("migrate apply removes identical copies, keeps edited and unknown, and verifies sources", () => {
 	const { home } = pluginFixture(6);
@@ -145,7 +146,8 @@ test("migrate apply removes identical copies, keeps edited and unknown, and veri
 		expect(row.path.startsWith(join(home, ".agents", "rules"))).toBe(false);
 	}
 	expect(result.envelope.data.verified.map((row: { name: string }) => row.name).sort()).toEqual([...removed].sort());
-});
+// Chains link, apply CLI, and per-row omp verify spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("undo restores the removed legacy files byte-for-byte", () => {
 	const { home } = pluginFixture(0);
@@ -162,7 +164,8 @@ test("undo restores the removed legacy files byte-for-byte", () => {
 	for (const [name, bytes] of Object.entries(before)) {
 		expect(readFileSync(join(home, ".agents", "rules", name), "utf8")).toBe(bytes);
 	}
-});
+// Chains link, apply CLI, undo CLI, and fixture omp spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("a file one byte off the release is never treated as identical", () => {
 	const { home, kitNames } = pluginFixture(0);
@@ -176,7 +179,8 @@ test("a file one byte off the release is never treated as identical", () => {
 	writeFileSync(path, `${bytes.slice(0, -1)}${bytes.endsWith("\n") ? "" : "\n"}`);
 	const plan = cli(["migrate", "--plan"], home, realOmpDir());
 	expect(rowByName(plan.envelope.data.rows, target).verdict).toBe("edited");
-});
+// Chains link and two plan CLI spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
 
 test("a symlinked rules directory is refused without touching anything", () => {
 	const { home } = pluginFixture(0);
@@ -206,7 +210,8 @@ test("after migration, disabling the plugin reactivates no kit rule", () => {
 		expect(names.has(name)).toBe(false);
 	}
 	omp(["plugin", "enable", pluginName], home, realOmpDir());
-});
+// Five cold omp/CLI spawns (link, apply, disable, ttsr list, enable) at ~1s each; measured 5.2s on CI. Bun's 5s default SIGTERMs the test mid-spawn, which surfaced as an empty-stderr enable failure.
+}, 60000);
 
 test("without an installed plugin the plan reports absence and apply refuses", () => {
 	const base = workspace();
