@@ -160,3 +160,14 @@ Add `--profile NAME` to measure another profile. Copy the recipe into a
 NEW named profile by hand, then benchmark real tasks (localbench
 Experiment C) before adopting the pruned set: passing the check does
 not prove equal task success.
+
+## Measure rule fire rates on your own sessions
+
+`corpus --sessions ABS_DIR` replays local OMP session transcripts through
+the kit's own matcher and reports per-rule fire counts with Wilson 95%
+intervals. Rules with zero fires show the rule-of-three upper bound
+instead of a bare zero. Nothing is uploaded and command text stays out
+of the JSON; add `--out ABS_FILE` to keep the report. `corpus --plan`
+prints the session schema fields read before reading anything, and an
+unknown schema version refuses with no partial counts. A fire rate is
+not precision: precision needs human labels.

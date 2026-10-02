@@ -788,7 +788,7 @@ async function* jsonlLines(file: string): AsyncGenerator<string> {
 
 const APPROX_EDIT_FIELDS = /^(new_?text|new_?string|newText|newString|content|replacement|replace|patch|diff|input|text)$/i;
 
-async function corpus(limitFiles: number, outFile: string): Promise<number> {
+async function corpus(limitFiles: number, outFile: string, sessionsRoot: string | null): Promise<number> {
 	const natives = await import(path.join(path.dirname(OMP_SRC), "..", "pi-natives"));
 	const editInspect = natives.editInspect as (mode: string, json: string) => { entries: { path: string; digest: string }[] };
 	const rules = loadRules(path.join(KIT, "rules")).filter(r => r.cls !== "always");
@@ -824,22 +824,37 @@ async function corpus(limitFiles: number, outFile: string): Promise<number> {
 		for (const r of inScope) bump(r.name, kind, fired.has(r.name), payload);
 	};
 	const files: string[] = [];
-	for (const root of corpusRoots()) for (const f of walkJsonl(root)) files.push(f);
+	const roots = sessionsRoot !== null ? [sessionsRoot] : corpusRoots();
+	if (sessionsRoot !== null && (!path.isAbsolute(sessionsRoot) || !fs.existsSync(sessionsRoot))) {
+		console.error(`corpus: sessions root is not an absolute existing directory: ${sessionsRoot}`);
+		return 2;
+	}
+	for (const root of roots) for (const f of walkJsonl(root)) files.push(f);
 	files.sort();
 	const scanFiles = limitFiles > 0 ? files.slice(0, limitFiles) : files;
 	const kindCounts: Record<string, number> = {};
 	let lineCount = 0;
 	let parseErrors = 0;
+	const versionsSeen = new Set<string>();
+	const unknownVersions = new Set<string>();
 	const started = Date.now();
 	for (const [fi, file] of scanFiles.entries()) {
 		for await (const line of jsonlLines(file)) {
-			if (!line.includes('"assistant"')) continue;
-			let entry: { type?: string; message?: { role?: string; content?: unknown } };
+			if (!line.includes('"assistant') && !line.includes('"version"') && !line.includes('"v"')) continue;
+			let entry: { type?: string; version?: unknown; v?: unknown; message?: { role?: string; content?: unknown } };
 			try {
 				entry = JSON.parse(line);
 			} catch {
 				parseErrors++;
 				continue;
+			}
+			if (typeof entry.version === "number") {
+				versionsSeen.add(`version:${entry.version}`);
+				if (entry.version !== 3) unknownVersions.add(`version:${entry.version}`);
+			}
+			if (typeof entry.v === "number") {
+				versionsSeen.add(`v:${entry.v}`);
+				if (entry.v !== 1) unknownVersions.add(`v:${entry.v}`);
 			}
 			if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
 			lineCount++;
@@ -900,6 +915,10 @@ async function corpus(limitFiles: number, outFile: string): Promise<number> {
 		}
 		if ((fi + 1) % 200 === 0) console.error(`corpus: ${fi + 1}/${scanFiles.length} files, ${lineCount} assistant messages`);
 	}
+	if (unknownVersions.size > 0) {
+		console.error(`corpus: unknown session schema versions: ${[...unknownVersions].sort().join(", ")} (seen ${[...versionsSeen].sort().join(", ") || "none"}); refusing with no partial counts`);
+		return 2;
+	}
 	const rows: string[] = ["rule\tclass\tsource_kind\tevents_scanned\tfires\trate\tsample_fire"];
 	const keyed = [...stats.entries()].map(([k, s]) => {
 		const [rule, kind] = k.split("\t");
@@ -916,7 +935,7 @@ async function corpus(limitFiles: number, outFile: string): Promise<number> {
 	fs.writeFileSync(outFile, `${rows.join("\n")}\n`);
 	const secs = ((Date.now() - started) / 1000).toFixed(1);
 	console.log(
-		`corpus: files=${scanFiles.length}/${files.length} assistant_messages=${lineCount} parse_errors=${parseErrors} events=${JSON.stringify(kindCounts)} secs=${secs}`,
+		`corpus: files=${scanFiles.length}/${files.length} assistant_messages=${lineCount} parse_errors=${parseErrors} versions=[${[...versionsSeen].sort().join(",")}] events=${JSON.stringify(kindCounts)} secs=${secs}`,
 	);
 	console.log(`corpus: wrote ${path.relative(KIT, outFile)} (${rows.length - 1} rows)`);
 	return 0;
@@ -1074,14 +1093,17 @@ switch (mode) {
 	case "--cli-crosscheck":
 		code = await cliCrosscheck(Number(flagValue("--jobs") ?? 8));
 		break;
-	case "--corpus":
+	case "--corpus": {
+		const root = flagValue("--sessions-root");
 		code = await corpus(
 			Number(flagValue("--limit-files") ?? 0),
 			path.resolve(KIT, flagValue("--out") ?? "reports/corpus-fire-rate.tsv"),
+			root === "" ? null : root,
 		);
 		break;
+	}
 	default:
-		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE]");
+		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE] [--sessions-root ABS_DIR]");
 		code = 2;
 }
 process.exit(code);

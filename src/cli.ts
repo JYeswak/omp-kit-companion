@@ -8,7 +8,7 @@ import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-poli
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
-import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
+import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -1340,6 +1340,43 @@ async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+async function corpusReport(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !kit.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CORPUS_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no history was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	if (request.flags.has("--plan")) {
+		return { code: 0, data: { overall: "OK", corpus_plan: CORPUS_PLAN }, verification: "UNVERIFIED" };
+	}
+	const sessionsRaw = request.flags.get("--sessions");
+	if (typeof sessionsRaw !== "string" || !isAbsolute(sessionsRaw)) {
+		return refusal("INVALID_CORPUS_SELECTION", "corpus needs --sessions ABS_DIR",
+			"Point --sessions at an absolute session transcripts directory; it is only read, never written.");
+	}
+	const outRaw = request.flags.get("--out");
+	if (outRaw !== undefined && (typeof outRaw !== "string" || !isAbsolute(outRaw))) {
+		return refusal("INVALID_CORPUS_SELECTION", "corpus --out needs an absolute file path",
+			"Pass an absolute --out path or omit it; the JSON still returns on stdout.");
+	}
+	try {
+		const report = await runCorpus({ root: kit.release.root, executablePath: kit.release.executable,
+			sessionsDir: sessionsRaw, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
+		return { code: 0, data: { overall: "OK", corpus: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof CorpusInputError) {
+			return refusal(error.code, error.message, "Correct the selection; session transcripts are only read, never written, and never leave the machine.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CORPUS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and session transcripts; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 	if (parent?.name === "examples") {
 		if (command.name === "mcp") return { code: 0, data: { text: mcpExample() }, verification: "UNVERIFIED" };
 		if (command.name === "skill-set") return skillSetExample(request);
@@ -1370,6 +1407,7 @@ async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
 		}
 	}
 	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
+	if (command.name === "corpus") return corpusReport(request);
 	if (command.name === "schema") return { code: 0, data: schema(version), verification: "PERFORMED" };
 	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };

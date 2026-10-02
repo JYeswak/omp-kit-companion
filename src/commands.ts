@@ -187,6 +187,16 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
 	], example: "omp-kit doctor --scope lsp --json", runnable: true, dataSchema: doctorData },
 	{ name: "health", description: "Strict monitoring status", usage: "health", flags: [], example: "omp-kit health --json", runnable: true, dataSchema: statusData },
+	{ name: "corpus", description: "Report per-rule fire rates over local OMP session transcripts; never uploads", usage: "corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]", flags: [
+		{ name: "--sessions", value: "ABS_DIR", description: "Absolute session transcripts root; read-only, never written" },
+		{ name: "--out", value: "ABS_FILE", description: "Write the JSON report to this absolute path as well as stdout" },
+		{ name: "--plan", description: "Print the session schema fields read before reading anything" },
+	], example: "omp-kit corpus --sessions /absolute/sessions --json", runnable: true, dataSchema: { type: "object",
+		required: ["overall"], properties: {
+			overall: { enum: ["OK"] },
+			corpus: { type: "object" },
+			corpus_plan: { type: "object" },
+		} } },
 	{ name: "lsp", description: "Inspect installed OMP language-server readiness without starting servers", usage: "lsp setup --plan", flags: [], subcommands: [
 		{ name: "setup", description: "Plan manual language-server setup; never install packages or start binaries", usage: "lsp setup --plan [--project PATH] [--file PATH]", flags: [
 			{ name: "--plan", description: "Return read-only manual setup instructions" },

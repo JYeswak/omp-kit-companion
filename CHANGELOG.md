@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `corpus --sessions ABS_DIR` replays local OMP session transcripts through the kit's own matcher and reports per-rule fire counts with Wilson 95% intervals (rule-of-three upper bound for zero fires). Nothing is uploaded, command text stays out of the JSON, and an unknown session schema version refuses with no partial counts.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
