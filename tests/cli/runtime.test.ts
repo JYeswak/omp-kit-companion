@@ -318,7 +318,8 @@ test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () =
 	});
 	expect(planted.exitCode).toBe(0);
 	const fallback = planted.stdout.toString().trim();
-	expect(fallback.startsWith("/tmp/")).toBe(true);
+	expect(realpathSync(fallback)).toBe(fallback);
+	expect(fallback.startsWith(nested)).toBe(false);
 	expect(planted.stderr.toString()).toContain("falling back to /tmp");
 	rmSync(fallback, { recursive: true, force: true });
 	const normalBase = mkdtempSync(join(tmpdir(), "omp-kit-workdir-"));
@@ -327,5 +328,7 @@ test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () =
 		stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: normalBase },
 	});
 	expect(normal.exitCode).toBe(0);
-	expect(normal.stdout.toString().trim().startsWith(normalBase)).toBe(true);
+	const normalDir = normal.stdout.toString().trim();
+	expect(normalDir.startsWith(realpathSync(normalBase))).toBe(true);
+	expect(realpathSync(normalDir)).toBe(normalDir);
 });

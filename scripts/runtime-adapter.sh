@@ -67,6 +67,7 @@ new_workdir() {
 	umask 077
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
+	work=$(CDPATH='' cd -- "$work" && pwd -P) || die "cannot resolve private work directory"
 	printf '%s\n' "$work"
 }
 
