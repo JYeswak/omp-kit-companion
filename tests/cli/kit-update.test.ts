@@ -99,7 +99,7 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
-	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json", "tests/cli/metamorphic-baseline.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
@@ -114,9 +114,17 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable
 	const caseLines = rawCases.split("\n");
 	if (caseLines[0] !== "rule\texpect\tsource\ttool\tpath\tsnippet\tnote") throw new Error("candidate cases fixture has an unknown schema");
 	const rows = caseLines.slice(1).filter(row => row.trim() !== "" && !row.startsWith("#"));
-	const fire = rows.find(row => row.split("\t")[1] === "fire");
-	const quiet = rows.find(row => row.split("\t")[1] === "quiet");
-	if (!fire || !quiet) throw new Error("candidate cases fixture needs fire and quiet controls");
+	// These existing controls have no known metamorphic breaks; N+2 tests case-count drift only.
+	const fire = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "fire" && columns[5] === "br close x";
+	});
+	const quiet = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "quiet" &&
+			columns[5] === 'br close x --reason "cargo test -> 41 passed; commit a1b2c3d"';
+	});
+	if (!fire || !quiet) throw new Error("candidate cases fixture needs metamorphic-clean fire and quiet controls");
 	const annotate = (row: string, label: string): string => {
 		const columns = row.split("\t");
 		columns[6] = ((columns[6] ?? "") + " " + label).trim();
