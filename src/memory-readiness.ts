@@ -40,7 +40,7 @@ const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
 const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:a8d31351ac47afac206af4a1555842074c12199f41f26a1343d71368c2f2bb2f",
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:24df81c28f1610924e3e26330db04c22508bb40c60f9dee3ce94acaf550f6584",
-	// OMP 18.4.10: memory remains off by default, resolves to the no-op backend, and migrates legacy enabled=false to off.
+	// OMP 18.4.10/18.4.11 share these reviewed source hashes: default off, no-op fallback, legacy false -> off.
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:d7929e81066485010e65740f79b4cf13c6375acd52952018dc321aa0e979d023",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [

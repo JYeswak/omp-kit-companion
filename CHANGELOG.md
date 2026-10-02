@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Memory readiness now recognizes the reviewed OMP 18.4.10 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
+- Memory readiness recognizes the shared OMP 18.4.10/18.4.11 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
 
 - Legacy `~/.agents/rules` kit copies move to native plugin layering with `migrate --plan|--apply`: the read-only plan lists each file with its plugin equivalent and byte diff; apply backs everything up, removes only copies byte-identical to what the installed plugin serves, keeps edited copies in place flagged for overlay (C3) and unknown files untouched, then verifies with `omp ttsr list` that each removed rule still resolves from a non-legacy source. Without an installed plugin, apply refuses; undo restores removals byte-for-byte. Note: `kit-standing-law` is never plugin-listed (alwaysApply prompt), so it is kept and flagged even when byte-identical.
 
