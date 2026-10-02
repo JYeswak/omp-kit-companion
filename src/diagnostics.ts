@@ -24,11 +24,12 @@ export interface DiagnoseInput {
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
 	stateRoot?: string;
 }
-export interface ManifestRule { name: string; sha256: string; pack: string }
+export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
+export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
 export type RuleOwnershipRecord = { version: 1; rules: Record<string, Image> };
 const HEADER = "name\tsha256\tclass\tpack";
 const RECORD_HEADER = "name\tsha256\tpack\tinstalled_utc";
-const CLASSES: Record<string, true> = { always: true, tripwire: true, reminder: true, router: true, canary: true };
+const CLASSES: Record<RuleClass, true> = { always: true, tripwire: true, reminder: true, router: true, canary: true };
 const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 function fileBytes(path: string): Buffer {
@@ -117,33 +118,39 @@ function directoryPath(base: string, segments: readonly string[]): "missing" | "
 function finding(component: string, status: DiagnosticStatus, reason: string, recommended_action: string, evidence?: Record<string, unknown>): Finding {
 	return { component, status, reason, recommended_action, ...(evidence ? { evidence } : {}) };
 }
+export function parseRuleManifest(manifest: string): ManifestRule[] {
+	if (!manifest.endsWith("\n")) throw new Error("MANIFEST.tsv must end with a newline");
+	const lines = manifest.slice(0, -1).split("\n");
+	if (lines.shift() !== HEADER || !lines.length) throw new Error("MANIFEST.tsv header or records are invalid");
+	const seen = new Set<string>();
+	const rules: ManifestRule[] = [];
+	for (const [index, row] of lines.entries()) {
+		const fields = row.split("\t");
+		if (fields.length !== 4) throw new Error("manifest row " + (index + 2) + " must have four tab-separated fields");
+		const [name, sha256, ruleClass, pack] = fields as [string, string, string, string];
+		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || seen.has(name) || !/^[a-f0-9]{64}$/.test(sha256) || !Object.hasOwn(CLASSES, ruleClass) || !/^(?:[a-f0-9]{7,64}|uncommitted-\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))$/.test(pack)) {
+			throw new Error("invalid or duplicate manifest row " + (index + 2));
+		}
+		seen.add(name);
+		rules.push({ name, sha256, ruleClass: ruleClass as RuleClass, pack });
+	}
+	return rules;
+}
+
 export function readManifest(root: string): { rules: ManifestRule[]; sourceUnverified: boolean; error?: string } {
 	try {
 		if (directoryPath(root, ["rules"]) !== "directory") throw new Error("rules directory is missing or unsafe");
-		const manifest = fileBytes(join(root, "MANIFEST.tsv")).toString("utf8");
-		if (!manifest.endsWith("\n")) throw new Error("MANIFEST.tsv must end with a newline");
-		const lines = manifest.slice(0, -1).split("\n");
-		if (lines.shift() !== HEADER || !lines.length) throw new Error("MANIFEST.tsv header or records are invalid");
+		const rules = parseRuleManifest(fileBytes(join(root, "MANIFEST.tsv")).toString("utf8"));
 		const seen = new Set<string>();
-		let sourceUnverified = false;
-		const rules: ManifestRule[] = [];
-		for (const [index, row] of lines.entries()) {
-			const fields = row.split("\t");
-			if (fields.length !== 4) throw new Error(`manifest row ${index + 2} must have four tab-separated fields`);
-			const [name, sha256, ruleClass, pack] = fields as [string, string, string, string];
-			if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || seen.has(name) || !/^[a-f0-9]{64}$/.test(sha256) || !Object.hasOwn(CLASSES, ruleClass) || !/^(?:[a-f0-9]{7,64}|uncommitted-\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))$/.test(pack)) {
-				throw new Error(`invalid or duplicate manifest row ${index + 2}`);
-			}
-			if (pack.startsWith("uncommitted-")) sourceUnverified = true;
-			seen.add(name);
-			const file = join(root, "rules", `${name}.md`);
-			if (pathState(file) !== "file" || digest(fileBytes(file)) !== sha256) throw new Error(`shipped rule hash or file type disagrees with manifest: ${name}`);
-			rules.push({ name, sha256, pack });
+		for (const rule of rules) {
+			seen.add(rule.name);
+			const file = join(root, "rules", rule.name + ".md");
+			if (pathState(file) !== "file" || digest(fileBytes(file)) !== rule.sha256) throw new Error("shipped rule hash or file type disagrees with manifest: " + rule.name);
 		}
 		for (const entry of readdirSync(join(root, "rules"))) {
-			if (entry.endsWith(".md") && !seen.has(entry.slice(0, -3))) throw new Error(`shipped rule omitted from MANIFEST.tsv: ${entry}`);
+			if (entry.endsWith(".md") && !seen.has(entry.slice(0, -3))) throw new Error("shipped rule omitted from MANIFEST.tsv: " + entry);
 		}
-		return { rules, sourceUnverified };
+		return { rules, sourceUnverified: rules.some(rule => rule.pack.startsWith("uncommitted-")) };
 	} catch (error) {
 		return { rules: [], sourceUnverified: false, error: errorText(error) };
 	}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `update --apply` derives matcher expectations from hash-verified target release files. A missing OMP version is `KIT_POSTCHECK_FAILED` with named failed stages; `OMP_CHANGED_DURING_KIT_UPDATE` requires differing successful identity reads. Binaries from `v0.2.0` and `v0.2.1` retain embedded counts, so use the installer when upgrading from either to a release with different case counts (`ompkit-rc-epic-land-fix-release-dogfood-rz5.49`).
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
