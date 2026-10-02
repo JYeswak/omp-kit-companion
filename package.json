@@ -9,6 +9,7 @@
     "description": "Tested stream-triggered rules and the project-loading guard extension",
     "extensions": [
       "extensions/kit-guard-optin.ts",
+      "extensions/kit-save-guard.ts",
       "extensions/fleet-guard.ts"
     ]
   }
