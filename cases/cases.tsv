@@ -277,6 +277,23 @@ kit-settings-mutation	quiet	tool	bash	-	br update --description "rollout note: r
 kit-test-skip	quiet	tool	write	var/agent-tmp/reality-check/dispatch/note.md	Quote of a skipped-test marker: it.skip("renders", () => {}) in dispatch markdown	R1 quoted marker in markdown
 kit-test-skip	fire	tool	write	src/pkg/test_x.py	@pytest.mark.skip(reason="flaky")	R1 pytest marker outside tests dir
 kit-test-skip	fire	tool	write	web/App.test.tsx	it.skip("renders", () => {})	R1 tsx test file
+kit-scratch-tmp	fire	tool	write	/tmp/out.txt	{"path": "/tmp/out.txt", "content": "hi"}	write tool straight to /tmp
+kit-scratch-tmp	fire	tool	bash	-	echo done > /tmp/out.txt	bash redirect into /tmp
+kit-scratch-tmp	fire	tool	bash	-	cmd >> /tmp/log.txt 2>&1	append redirect into /tmp
+kit-scratch-tmp	quiet	tool	write	var/agent-tmp/x.1/out.txt	{"path": "var/agent-tmp/x.1/out.txt", "content": "hi"}	write under repo scratch stays quiet
+kit-scratch-tmp	quiet	tool	bash	-	cat /tmp/out.txt	reading /tmp is not a write
+kit-scratch-tmp	quiet	tool	bash	-	echo 'never write scratch to /tmp/old'	quoted prose mention stays quiet
+kit-scratch-tmp	quiet	tool	bash	-	TMPDIR=var/agent-tmp/x.1 ./run.sh > $TMPDIR/out.txt	$TMPDIR under repo scratch, no /tmp literal
+kit-no-pattern-kill	fire	tool	bash	-	pkill -f 'bun test'	pattern kill with quoted arg still fires
+kit-no-pattern-kill	quiet	tool	bash	-	kill 12934	PID kill from own record stays quiet
+kit-no-pattern-kill	quiet	tool	bash	-	echo 'never pkill -f shared runners'	quoted prose mention stays quiet
+kit-no-ask-rmrf	fire	text	-	-	Please run rm -rf var/agent-tmp/old.1 to clean up	asking the human to clear scratch
+kit-no-ask-rmrf	quiet	text	-	-	I will not run rm -rf on your machine; the reaper owns scratch	compliant refusal stays quiet
+kit-no-ask-rmrf	quiet	text	-	-	the reaper deletes scratch, so never type `rm -rf` yourself	backticked mention with no ask verb stays quiet
+kit-no-force-push	fire	tool	bash	-	git push --force origin main	bare force push
+kit-no-force-push	fire	tool	bash	-	git push -f origin main	short force flag after push
+kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanctioned lease form stays quiet
+kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
 bash-glob-silenced	quiet	tool	bash	-	GREP -RL 'X' CRATES/*/CARGO.TOML 2>/DEV/NULL	H3: uppercase stays quiet, (?i) fires
 bash-pipe-exit	quiet	tool	bash	-	./SCRIPTS/LANE-STATUS.SH 2>&1 | TAIL -16; ECHO "EXIT=$?"	H3: uppercase stays quiet
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet
@@ -313,20 +330,3 @@ kit-no-verify	quiet	tool	bash	-	GIT CONFIG --UNSET CORE.HOOKSPATH	H3: uppercase 
 kit-no-verify	quiet	tool	bash	-	GIT -C CORE.HOOKSPATH=/DEV/NULL COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/DEV/NULL GIT COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH'='/DEV/NULL'" GIT COMMIT -M X	H3: uppercase stays quiet
-kit-scratch-tmp	fire	tool	write	/tmp/out.txt	{"path": "/tmp/out.txt", "content": "hi"}	write tool straight to /tmp
-kit-scratch-tmp	fire	tool	bash	-	echo done > /tmp/out.txt	bash redirect into /tmp
-kit-scratch-tmp	fire	tool	bash	-	cmd >> /tmp/log.txt 2>&1	append redirect into /tmp
-kit-scratch-tmp	quiet	tool	write	var/agent-tmp/x.1/out.txt	{"path": "var/agent-tmp/x.1/out.txt", "content": "hi"}	write under repo scratch stays quiet
-kit-scratch-tmp	quiet	tool	bash	-	cat /tmp/out.txt	reading /tmp is not a write
-kit-scratch-tmp	quiet	tool	bash	-	echo 'never write scratch to /tmp/old'	quoted prose mention stays quiet
-kit-scratch-tmp	quiet	tool	bash	-	TMPDIR=var/agent-tmp/x.1 ./run.sh > $TMPDIR/out.txt	$TMPDIR under repo scratch, no /tmp literal
-kit-no-pattern-kill	fire	tool	bash	-	pkill -f 'bun test'	pattern kill with quoted arg still fires
-kit-no-pattern-kill	quiet	tool	bash	-	kill 12934	PID kill from own record stays quiet
-kit-no-pattern-kill	quiet	tool	bash	-	echo 'never pkill -f shared runners'	quoted prose mention stays quiet
-kit-no-ask-rmrf	fire	text	-	-	Please run rm -rf var/agent-tmp/old.1 to clean up	asking the human to clear scratch
-kit-no-ask-rmrf	quiet	text	-	-	I will not run rm -rf on your machine; the reaper owns scratch	compliant refusal stays quiet
-kit-no-ask-rmrf	quiet	text	-	-	the reaper deletes scratch, so never type `rm -rf` yourself	backticked mention with no ask verb stays quiet
-kit-no-force-push	fire	tool	bash	-	git push --force origin main	bare force push
-kit-no-force-push	fire	tool	bash	-	git push -f origin main	short force flag after push
-kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanctioned lease form stays quiet
-kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
