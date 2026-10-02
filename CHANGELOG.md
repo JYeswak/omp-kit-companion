@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- `omp-kit test --metamorphic` checks every rule against its metamorphic variants (quoting, whitespace, env-prefix, path, chaining): any rule that fires inside quotes, or breaks under an invariant-preserving variant, fails the run with the exact breaking variants. With `--baseline ABS_FILE` it ratchets: only NEW breaks beyond the checked-in baseline fail, so the ladder enforces the strict check while 170 known per-rule breaks (each with a fix-class reason in `tests/cli/metamorphic-baseline.json`) are worked off.
+- NE-6: on OMP 18.4.9, kit-test-skip carries an AST-grep candidate with explicit astLiveScenario: test-skip-ts-fire evidence; the G1 harness accepts blocking AST rules only when that live scenario exists with an absent-file expectation, and the gate remains green across 278 cases with 0 quiet-prefix fires. The regex conditions remain as a compatibility fallback.
+
+- `omp-kit test --metamorphic` checks every rule against its metamorphic variants (quoting, whitespace, env-prefix, path, chaining): any rule that fires inside quotes, or breaks under an invariant-preserving variant, fails the run with the exact breaking variants. With `--baseline ABS_FILE` it ratchets: only NEW breaks beyond the checked-in baseline fail, so the ladder enforces the strict check while 170 known per-rule breaks (each with a fix-class reason in `tests/cli/metamorphic-baseline.json`) are tracked.
 
 - `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Bare `@oh-my-pi/*` (and sibling-scope) host packages resolve through OMP's bundle map, matching the loader; nothing is executed; type-only imports are skipped.
 
