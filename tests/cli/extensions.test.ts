@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { checkExtensionImports, extractImportSpecifiers } from "../../src/extensions.ts";
@@ -172,6 +172,18 @@ test("host-provided bare specifiers stay quiet", () => {
 		'import shellTokenize from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";',
 		'export const run = [settings, utils, pathUtils, shellTokenize];',
 	].join("\n") + "\n");
+	const report = checkExtensionImports({ home });
+	expect(report.findings).toEqual([]);
+	expect(report.status).toBe("OK");
+}, 120_000);
+
+test("symlinked hook resolves relative imports from the link target", () => {
+	const home = mkhome("symlink");
+	const real = join(home, "real-pkg");
+	mkdirSync(real, { recursive: true });
+	writeFileSync(join(real, "lib.ts"), "export const helper = (): string => 'ok';\n");
+	writeFileSync(join(real, "hook.ts"), 'import { helper } from "./lib";\nexport const run = (): string => helper();\n');
+	symlinkSync(join(real, "hook.ts"), join(home, ".omp", "profiles", "codex", "agent", "hooks", "post", "hook.ts"));
 	const report = checkExtensionImports({ home });
 	expect(report.findings).toEqual([]);
 	expect(report.status).toBe("OK");
