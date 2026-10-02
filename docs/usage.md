@@ -95,8 +95,10 @@ native-OMP guide shows the matcher primitives they rest on.
 ## Rules as a native OMP plugin
 
 The repo itself is an OMP plugin: `package.json` carries the `omp`
-manifest, `rules/` is discovered automatically, and
-`extensions/kit-guard-optin.ts` is the declared extension entry point.
+manifest, `rules/` is discovered automatically, and the declared extension
+entry points are `extensions/kit-guard-optin.ts` and
+`extensions/kit-save-guard.ts` (session-end save guard: one read-only
+warning line for unsaved repo work at shutdown).
 Link a checkout instead of copying rules by hand:
 
 ```sh verified rc=0 contains="omp-kit-companion"
