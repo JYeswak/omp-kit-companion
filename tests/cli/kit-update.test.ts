@@ -397,6 +397,9 @@ test("already-current version does not create a pending receipt or re-switch the
  expect(auditMutations(ctx.stateRoot)).toEqual([]);
 }));
 
+// Full N to N+2 journey: two package builds plus fast, matcher, ratchet and the
+// complete e2e-live suite in postcheck. Per-scenario timeouts bound hangs; the
+// 900 s budget fits the suite on slow disks.
 test("update completes from an N-case build to an N+2-case release; the legacy in-process contract is RED", async () => fixture(async ctx => {
 	const candidate = buildNPlusTwoCandidate(ctx);
 	const plan = await planKitUpdate(input(ctx));
@@ -422,7 +425,7 @@ test("update completes from an N-case build to an N+2-case release; the legacy i
 		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
 	expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/" + ctx.nextVersion + "/bin/omp-kit");
 	expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
-}, { platform: hostPlatform, currentVersion: "0.2.2", nextVersion: "0.2.3" }), 300_000);
+}, { platform: hostPlatform, currentVersion: "0.2.2", nextVersion: "0.2.3" }), 900_000);
 
 test("unsupported source and dangling stable link refuse without creating state", async () => fixture(async ctx => {
  const unsupported = await planKitUpdate({ ...input(ctx), sourceTag: "" });
