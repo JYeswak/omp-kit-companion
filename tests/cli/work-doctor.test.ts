@@ -68,6 +68,9 @@ test("read-only work scope classifies clean dirty ahead no-upstream stash detach
 	const row = (name: string) => report.repos.find((entry) => entry.name === name)!;
 	expect(row("clean").dirty_file_count).toBe(0);
 	expect(row("dirty").dirty_file_count).toBeGreaterThan(0);
+	expect(row("dirty").tracked_dirty_file_count).toBe(0);
+	expect(row("dirty").untracked_file_count).toBe(1);
+	expect(row("dirty").untracked_scan_status).toBe("OK");
 	expect(row("ahead").commits_ahead).toBe(1);
 	expect(row("ahead").has_upstream).toBe(true);
 	expect(row("no-upstream").has_upstream).toBe(false);
