@@ -224,7 +224,7 @@ def native(args):
                     for gate, observed_count in (("G1_registration", "observed_rules"),
                                                  ("G2_payload", "observed_cases"), ("G3_quiet_prefix", "quiet_prefix_fires")):
                         proof = fast[gate]
-                        if proof["status"] != "PASS" or proof[observed_count] != (0 if gate == "G3_quiet_prefix" else 22 if gate == "G1_registration" else 295):
+                        if proof["status"] != "PASS" or proof[observed_count] != (0 if gate == "G3_quiet_prefix" else 22 if gate == "G1_registration" else 331):
                             raise ValueError(f"native {name} {gate} is not the pinned passing corpus")
                     live = test["proofs"]["G4_live"] if name == "full" else fast["G4_live"]
                     if live["status"] != ("PASS" if name == "full" else "NOT_RUN"):

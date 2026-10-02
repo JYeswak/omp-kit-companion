@@ -1,13 +1,13 @@
 {
  "schema_version": 1,
  "generated": {
-  "commit": "6a38bcb",
-  "omp": "omp/18.4.10",
+  "commit": "3f62468",
+  "omp": "omp/18.4.12",
   "date": "2026-10-02",
   "counts": {
    "cases": 276,
    "variants": 1726,
-   "breaks": 144
+   "breaks": 135
   }
  },
  "breaks": [
@@ -36,14 +36,6 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
-   "id": "kit-close-reason-no-evidence\t22\tenv-prefix\tFOO=1 br close x --reason done",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t22\twhitespace\tbr close x \\\n--reason done",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-close-reason-no-evidence\t249\twhitespace\tbr close x \\\n--reason \"passed\"",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
@@ -60,28 +52,12 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
-   "id": "kit-close-reason-no-evidence\t262\tenv-prefix\tFOO=1 br close x --reason passed",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t262\twhitespace\tbr close x \\\n--reason passed",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t263\tenv-prefix\tFOO=1 br close x '--reason' done",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
    "id": "kit-close-reason-no-evidence\t274\twhitespace\tbr close \\\n--actor \"pane=2;agent=worker\" x --reason \"passed\"",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-force-push\t293\twhitespace\tgit push \\\n--force origin main",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-pattern-kill\t287\tenv-prefix\tFOO=1 pkill -f 'bun test'",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
   },
   {
    "id": "kit-no-verify\t105\tquoting\techo \"rg -n \\\"git commit '--no-verify'|git commit '-n'\\\" .\"",
@@ -448,20 +424,12 @@
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
   },
   {
-   "id": "kit-settings-mutation\t162\tenv-prefix\tFOO=1 HOME=/tmp/omp-home omp config set ttsr.enabled false",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
    "id": "kit-settings-mutation\t162\tquoting\techo \"HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
   },
   {
    "id": "kit-settings-mutation\t162\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
-  },
-  {
-   "id": "kit-settings-mutation\t163\tenv-prefix\tFOO=1 HOME=/tmp/omp-home omp --profile claude config set ttsr.enabled false",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
   },
   {
    "id": "kit-settings-mutation\t163\tquoting\techo \"HOME=/tmp/omp-home omp --profile claude config set ttsr.enabled false\"",
@@ -542,10 +510,6 @@
   {
    "id": "kit-settings-mutation\t183\tquoting\tprintf '%s\\n' \"rg -n \\\"\\\\\\`omp config set ttsr.enabled false\\\\\\`\\\" .\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
-  },
-  {
-   "id": "kit-settings-mutation\t188\tenv-prefix\tFOO=1 HOME=/tmp/omp-home omp config set \"ttsr.enabled\" false",
-   "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
   },
   {
    "id": "kit-settings-mutation\t189\tquoting\techo \"HOME=/tmp/omp-home; omp config set ttsr.enabled false\"",
