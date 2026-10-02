@@ -35,7 +35,7 @@ export const REFUSAL_DATA_SCHEMA: DataSchema = { type: "object", required: ["ove
 	overall: { enum: ["NOT_RUN", "UNVERIFIED"] },
 } };
 const testData: DataSchema = { type: "object", required: ["overall"], properties: {
-	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN"] },
+	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN", "OK"] },
 	recorded: { type: "boolean" },
 	test: { type: "object", required: ["status"], properties: {
 		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
@@ -49,6 +49,7 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 				status: { enum: ["RESOLVED", "HIDDEN_BUT_READABLE", "MISSING"] }, detail: { type: "string" } } } },
 	} },
 	live: { type: "object" },
+	integrations: { type: "object" },
 } };
 
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
@@ -203,8 +204,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, or a required-capability check",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, or per-profile integration proof",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -212,6 +213,10 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
 		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
 		{ name: "--capabilities", value: "ABS_JSON", description: "Check a declared required-capability set (skills, tools, rules, LSP) through OMP discovery; exit 1 on MISSING" },
+		{ name: "--integrations", description: "Prove per-profile integrations live with a scripted mock model; never uploads" },
+		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
+		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
+		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
 	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
 	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",

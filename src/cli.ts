@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
@@ -26,6 +27,7 @@ import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, renderOmpWatch, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
+import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
@@ -861,12 +863,12 @@ function extensionCommand(request: ParsedCommand): CliResult {
 		if (!request.flags.has("--apply"))
 			return { code: guard.status === "FAIL" ? 1 : 0,
 				data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: "PLAN", guard,
-					steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+					steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
 					receipt_id: null }, verification: "UNVERIFIED" };
 		const applied = applyExtensions(plan);
 		return { code: guard.status === "FAIL" ? 1 : 0,
 			data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: applied.receiptId ? "APPLIED" : "NO_CHANGE",
-				guard, steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
+				guard, steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
 				receipt_id: applied.receiptId }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
@@ -1125,9 +1127,63 @@ async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResul
 	}
 }
 
+async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project"]) {
+		if (request.flags.has(flag)) {
+			return refusal("INVALID_FLAG", `test --integrations cannot be combined with ${flag}`,
+				"Run integration proof on named profiles; nothing was measured.");
+		}
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INTEGRATIONS_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME; no profile was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	if (request.flags.has("--plan")) {
+		return { code: 0, data: { overall: "OK", integrations_plan: {
+			reads: ["agent/config.yml extensions list", "agent/mcp.json servers", "agent/hooks tree"],
+			integrations: [...INTEGRATIONS],
+			writes: "isolated HOME under the work dir plus the optional --out report; the real profile is never written",
+		} }, verification: "UNVERIFIED" };
+	}
+	const profileRaw = request.flags.get("--profile");
+	if (typeof profileRaw !== "string" || profileRaw.trim() === "") {
+		return refusal("PROFILE_REQUIRED", "test --integrations needs --profile NAME[,NAME...]",
+			"Name the profiles to prove; the default profile is never assumed.");
+	}
+	const profiles = profileRaw.split(",").map(part => part.trim()).filter(part => part.length > 0);
+	if (profiles.some(name => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name))) {
+		return refusal("INVALID_PROFILE", "Profile names must be simple directory names",
+			"Use the profile directory name under .omp/profiles.");
+	}
+	const outRaw = request.flags.get("--out");
+	if (outRaw !== undefined && (typeof outRaw !== "string" || !isAbsolute(outRaw))) {
+		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
+			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
+	}
+	try {
+		const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
+		const report = await runIntegrations({ root: identity.release.root, home,
+			profiles, workDir, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
+		return { code: 0, data: { overall: "OK", integrations: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof IntegrationsInputError) {
+			return refusal(error.code, error.message, "Correct the selection; no profile was read and nothing was written.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INTEGRATIONS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and OMP installation; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
+	if (request.flags.has("--integrations")) return integrationsCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
 	if (external) return externalTestCommand(request);

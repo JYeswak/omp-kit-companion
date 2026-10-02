@@ -1,0 +1,52 @@
+{
+  "scenarios": [
+    {
+      "integration": "dcg",
+      "kind": "fire",
+      "setup": ["git-init", "git-branch"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "git branch -D ${BRANCH}" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "dcg",
+      "kind": "quiet",
+      "setup": ["git-init"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "git branch --list" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "slb",
+      "kind": "fire",
+      "setup": ["git-init", "git-dirty"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "git reset --hard HEAD" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "slb",
+      "kind": "quiet",
+      "setup": ["git-init"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "rch",
+      "kind": "fire",
+      "setup": ["cargo-crate"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "cargo check" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "mcp-agent-mail",
+      "kind": "fire",
+      "setup": [],
+      "turns": [{ "tool": { "name": "mcp__mcp_agent_mail__health_check", "args": {} } }, { "text": "done" }]
+    },
+    {
+      "integration": "kit-guard",
+      "kind": "fire",
+      "setup": ["git-init", "kit-guard-optin"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+    },
+    {
+      "integration": "kit-guard",
+      "kind": "quiet",
+      "setup": ["git-init"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > ${MARKER}" } } }, { "text": "done" }]
+    }
+  ]
+}
