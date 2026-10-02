@@ -42,6 +42,13 @@ without one. Applying needs `--apply` plus interactive confirmation or
 authorizes a write. `undo RUN_ID --yes` restores one verified receipt;
 `why RUN_ID` explains it.
 
+Legacy `~/.agents/rules` copies from before the plugin route move with
+`migrate --plan`: each file is listed with its plugin equivalent and byte
+diff. Copies identical to the installed plugin are removed on
+`migrate --apply --yes` (backed up first, verified through `ttsr list`,
+undoable); edited copies stay in place flagged for overlay, unknown files
+are never touched. Without an installed plugin, apply refuses.
+
 ## Keep up with OMP
 
 Updaters install new OMP versions unattended. Record a passing test so
