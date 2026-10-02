@@ -154,9 +154,15 @@ task success; that comparison belongs to dedicated benchmark tooling.
 
 `examples skill-set` reads a profile's session transcripts (read-only)
 and lists every skill actually read plus the skills named explicitly in
-prompts. It renders, never applies, a pruned-profile recipe: the
-candidate `includeSkills` list with listing bytes before and after
-(both measured through OMP's loader), and the capability check result:
+prompts. Usage is grouped by session working directory, and each
+project's set is resolved through that project's own loader: the global
+recipe holds only user-scope skills, while project-scoped skills appear
+under per-project recipes (`project_recipes`, one entry per session
+directory). Skills used in a directory that resolves nowhere are listed
+under `unresolved_projects` and belong to no recipe. It renders, never
+applies, a pruned-profile recipe: the candidate `includeSkills` list
+with listing bytes before and after (both measured through OMP's
+loader), and the capability check result:
 
 ```sh verified rc=0 contains='"candidate_skills":[]'
 KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
