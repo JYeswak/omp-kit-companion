@@ -26,6 +26,7 @@
 - `test --metamorphic` checks rule behavior under invariant-preserving transformations and ratchets against a reviewed baseline. (PR #48)
 - The cold-start LSP probe removes an unproven reference retry and cleans up while retaining failure-only diagnostics. (PR #49)
 - The metamorphic corpus now covers seven env-prefix anchors; the corresponding rule fixes and baseline updates ship together. (PR #50)
+- Quoting and line-continuation false-fire fixes bring the metamorphic ratchet baseline from 161 to 0. (PR #53)
 
 ## 0.2.1 — 2026-10-01
 
