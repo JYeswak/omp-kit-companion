@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Bare `@oh-my-pi/*` (and sibling-scope) host packages resolve through OMP's bundle map, matching the loader; nothing is executed; type-only imports are skipped.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
