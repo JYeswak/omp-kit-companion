@@ -88,6 +88,8 @@ jobs:
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test tests/cli tests/fleet-guard
+      - name: Exercise memory readiness against the installed latest OMP source
+        run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/latest detached native receipts
         run: python3 tests/cli/native_candidate_test.py
   ladder:

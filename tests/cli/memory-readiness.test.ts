@@ -42,14 +42,14 @@ function snapshot(dir: string, prefix = ""): string[] {
 	});
 }
 
-test("reviewed OMP 18.4.9 source hashes report on-disk OFF and the redactor limitation", async () => {
-	const f = fixture("18.4.9");
+test(`reviewed OMP [1m${INSTALLED_OMP_VERSION}[0m source hashes report on-disk OFF and the redactor limitation`, async () => {
+	const f = fixture(INSTALLED_OMP_VERSION);
 	writeFileSync(f.config, "memory:\n  backend: off\n");
 	const report = await f.inspect();
 	expect(report.backend).toBe("off");
 	expect(report.configured).toBe(false);
 	expect(report.runtime).toBe("NOT_PROBED");
-	expect(report.redactor).toMatchObject({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY" });
+	expect(report.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
 	expect(report.redactor.missed).toContain("pem_private_key");
 });
 
@@ -63,9 +63,9 @@ test("reviewed source hashes, not package version, govern memory inspection", as
 });
 
 test("one changed redactor source byte refuses the synthetic probe", async () => {
-	const f = fixture("18.4.9");
+	const f = fixture(INSTALLED_OMP_VERSION);
 	const accepted = await f.inspect();
-	expect(accepted.redactor).toMatchObject({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY" });
+	expect(accepted.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
 	const path = join(f.ompRoot, "src/memory-backend/redact.ts");
 	const bytes = Buffer.from(readFileSync(path));
 	bytes[0] = (bytes[0] ?? 0) ^ 1;
@@ -76,8 +76,10 @@ test("one changed redactor source byte refuses the synthetic probe", async () =>
 
 test("one changed memory settings source byte refuses config semantics", async () => {
 	for (const source of OMP_SOURCE_FILES.filter(path => path !== "src/memory-backend/redact.ts")) {
-		const f = fixture("18.4.9");
+		const f = fixture(INSTALLED_OMP_VERSION);
 		writeFileSync(f.config, "memory:\n  backend: off\n");
+		const accepted = await f.inspect();
+		expect(accepted).toMatchObject({ backend: "off", configured: false, runtime: "NOT_PROBED" });
 		const path = join(f.ompRoot, source);
 		const bytes = Buffer.from(readFileSync(path));
 		bytes[0] = (bytes[0] ?? 0) ^ 1;

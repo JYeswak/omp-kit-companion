@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Memory readiness now recognizes the reviewed OMP 18.4.10 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
+
 - Scratch reaper runs bounded: every `lsof +D` carries a 15 s per-dir timeout (a timed-out or killed run is unavailable evidence, never clear), `scratch plan`/`apply` interleave inspect-act-log per directory instead of planning the whole fleet first, and each verdict is printed to stderr as it completes with JSONL appended per action. A killed lsof can no longer be misread as an empty result.
 - Scratch reaper: `omp-kit scratch plan` reports dead operator scratch read-only, and `scratch apply --apply --yes` reaps it, ported from the zeststream owner-identity gates. A session is removed only when its owner PID is dead or demonstrably reused AND lsof reports no open descriptor, via atomic quarantine plus inode/owner/lsof rechecks. Dirs with no (or legacy) owner file are never reaped outright: past 72 h idle they move to a central quarantine, past 7 d quarantined they are deleted after the same rechecks. Orphan kill targets only kit harness servers (ppid 1, older than 1 h). Every mutation appends JSONL to the state root. `service run scratch-reaper` (daily interval job) reports and writes a receipt; apply stays an explicit operator verb.
 - The source `scripts/doctor.sh` no longer runs the legacy model-role/quota check; `scripts/role-check.ts` is removed from releases and embedded runtime allowlists. Model/provider routing remains outside the kit.
