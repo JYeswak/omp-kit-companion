@@ -44,6 +44,7 @@ then without `--dry-run`, then the doctor.
 | `scripts/install-extensions.sh [--dry-run]` | Copies each extension in `policy/extensions.json` to `~/.omp/omp-extensions/` (backs up a differing copy) and appends it to every profile's `extensions` list except `skipProfiles`, reading each list back; idempotent | `~/.omp/omp-extensions/`, profile `config.yml` |
 | `scripts/doctor.sh` | Checks target hashes, policy, loaded rules, shadows, router skills, checker selftests, and extension installation; it does not judge model/provider routing. Exit 1 on any RED. Uses omp CLI reads that may migrate settings; back up existing profiles first. | no direct writes; omp CLI may migrate config |
 | `extensions/kit-guard-optin.ts` | Loads an opted-in repository's own guard when `.omp/kit-guard.json` is present; does not load in other repos and does not duplicate a repository extension. An opted-in guard that cannot load refuses tool calls. | nothing |
+| `extensions/kit-save-guard.ts` | At `session_shutdown`, read-only git inspection of the session repo warns once about uncommitted files, commits ahead of upstream, or a missing upstream. Installing the plugin is the opt-in; never writes, silent for clean repos, non-repos, and errors. | nothing |
 | `checkers/check-claim-discipline.sh`, `checkers/check-readiness.sh` | Checkers the rules point at; `--selftest` passes under macOS `/bin/sh` | nothing |
 
 ## Traps

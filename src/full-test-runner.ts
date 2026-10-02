@@ -6,7 +6,7 @@ import { resolveOmpIdentity } from "./paths.ts";
 import { runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
 
-const STAGES = ["manifest", "harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
+const STAGES = ["manifest", "harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
 export type FullStage = { status: "PASS" | "FAIL" | "NOT_RUN"; producer_rc: number | null; reason?: string };
 export type FullTestReport = {
@@ -97,7 +97,7 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
  if (stages["e2e-live"].status === "PASS" && !livePassed) failures.push("Live scenario rows did not match the exact shipped ordered scenario IDs");
  const plantPassed = stages["e2e-plant"].status === "PASS" && result.stdout.includes("plant RED as required: baseline kit-close-needs-evidence fires on the streamed prefix of an evidenced close");
  if (stages["e2e-plant"].status === "PASS" && !plantPassed) failures.push("Planted negative control was not named RED");
- if (result.code === 0 && (next !== STAGES.length || !/^LADDER: GREEN$/m.test(result.stdout))) failures.push("Producer returned success without eight named GREEN stages and LADDER: GREEN");
+ if (result.code === 0 && (next !== STAGES.length || !/^LADDER: GREEN$/m.test(result.stdout))) failures.push("Producer returned success without nine named GREEN stages and LADDER: GREEN");
  if (result.code !== 0 && !failures.length) failures.push(`Ladder exited ${result.code} before a named RED stage`);
  return { stages, live_scenarios: { expected_ids: [...ids], observed_ids: ordinary,
   status: stages["e2e-live"].status === "NOT_RUN" ? "NOT_RUN" : livePassed ? "PASS" : "FAIL" }, failures };

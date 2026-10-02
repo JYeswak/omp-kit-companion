@@ -17,13 +17,15 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
 installs OMP, models, profiles, or shell edits. `v0.2.1` is the latest
-published release. Binaries from `v0.2.0` and `v0.2.1` use fixed test counts
-and cannot complete `update --apply` to a release that changes the shipped
-case counts. For such an upgrade, set `KIT_VERSION` and the tag above to the
-destination release and use the installer. From `v0.1.x`, reinstall with the
-commands above because those binaries cannot finish `update --apply` on a real
-HOME. If an earlier attempt left a pending update, `omp-kit undo RECEIPT --yes`
-(receipt from `omp-kit audit`) restores the previous release and clears it.
+published release. To upgrade from any earlier version, set `KIT_VERSION` to
+the destination release and run the installer commands above. In particular,
+binaries from `v0.2.0` and `v0.2.1` embed fixed test counts; their
+`update --apply` postcheck judges the target using the running binary's counts
+and refuses a release that changes shipped case counts. From `v0.1.x`,
+reinstall with the commands above because those binaries cannot finish
+`update --apply` on a real HOME. If an earlier attempt left a pending update,
+`omp-kit undo RECEIPT --yes` (receipt from `omp-kit audit`) restores the
+previous release and clears it.
 
 The rules themselves can also come straight through OMP's plugin loader:
 `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1`. See
