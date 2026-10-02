@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { check, clearReservationCache, reservationLookupFromResponse, storageRootFromEnvironment } from "../../src/fleet-guard/reservations.ts";
+import { check, clearReservationCache, exportAgentMailStorageRoot, reservationLookupFromResponse, storageRootFromEnvironment } from "../../src/fleet-guard/reservations.ts";
 
 type Event = { toolName: string; arguments?: Record<string, unknown> };
 const repo = "/workspace/repo";
@@ -72,4 +72,26 @@ describe("fleet guard reservation checks", () => {
 		expect(storageRootFromEnvironment({ database_url: "sqlite:////Users/josh/.local/share/mcp-agent-mail-rust-live/storage.sqlite3" })).toBe("/Users/josh/.local/share/mcp-agent-mail-rust-live");
 		expect(storageRootFromEnvironment({ database_url: "postgres://localhost/db" })).toBeUndefined();
 	});
+
+	test("exports the live storage root from the Agent Mail environment resource", async () => {
+		const saved = { url: process.env.AGENTMAIL_HTTP_URL, token: process.env.AGENTMAIL_HTTP_BEARER_TOKEN, root: process.env.AGENT_MAIL_STORAGE_ROOT };
+		const server = Bun.serve({ port: 0, async fetch(request) {
+			const body = await request.json() as { params?: { uri?: string } };
+			if (body.params?.uri !== "resource://config/environment") return Response.json({ error: { message: "unknown" } });
+			return Response.json({ result: { contents: [{ text: JSON.stringify({ database_url: "sqlite:////tmp/am1-proof/storage.sqlite3" }) }] } });
+		} });
+		process.env.AGENTMAIL_HTTP_URL = `http://127.0.0.1:${server.port}/api`;
+		process.env.AGENTMAIL_HTTP_BEARER_TOKEN = "proof-token";
+		delete process.env.AGENT_MAIL_STORAGE_ROOT;
+		try {
+			await expect(exportAgentMailStorageRoot()).resolves.toBe("/tmp/am1-proof");
+			expect(process.env.AGENT_MAIL_STORAGE_ROOT).toBe("/tmp/am1-proof");
+		} finally {
+			server.stop(true);
+			if (saved.url === undefined) delete process.env.AGENTMAIL_HTTP_URL; else process.env.AGENTMAIL_HTTP_URL = saved.url;
+			if (saved.token === undefined) delete process.env.AGENTMAIL_HTTP_BEARER_TOKEN; else process.env.AGENTMAIL_HTTP_BEARER_TOKEN = saved.token;
+			if (saved.root === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT; else process.env.AGENT_MAIL_STORAGE_ROOT = saved.root;
+		}
+	});
 });
+
