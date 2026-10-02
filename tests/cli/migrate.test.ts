@@ -56,10 +56,13 @@ function cli(args: string[], home: string, ompDir: string) {
 }
 
 function omp(args: string[], home: string, ompDir: string) {
+	const started = Date.now();
 	const child = Bun.spawnSync(["omp", ...args], {
 		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
 	});
-	if (child.exitCode !== 0) throw new Error(`omp ${args.join(" ")} failed: ${child.stderr.toString()}`);
+	if (child.exitCode !== 0) {
+		throw new Error(`omp ${args.join(" ")} failed: exit=${child.exitCode} signal=${child.signalCode ?? "none"} elapsed_ms=${Date.now() - started} stdout=${child.stdout.toString().slice(-500)} stderr=${child.stderr.toString().slice(-500)}`);
+	}
 	return child.stdout.toString();
 }
 
@@ -221,6 +224,7 @@ test("without an installed plugin the plan reports absence and apply refuses", (
 });
 
 test("applyMigration refuses without a plugin even when called directly", () => {
+	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-unit-"));
 	fixtures.push(root);
 	const home = join(root, "home");
@@ -230,4 +234,21 @@ test("applyMigration refuses without a plugin even when called directly", () => 
 	const plan = planMigration(input);
 	expect(plan.pluginAbsent).toBe(true);
 	expect(() => applyMigration(plan, input, { confirmed: true })).toThrow("PLUGIN_ABSENT");
+});
+
+test("omp helper failure reports exit, signal, elapsed, and both streams", () => {
+	const base = workspace();
+	const home = join(base, "home");
+	mkdirSync(home, { recursive: true });
+	let message = "";
+	try {
+		omp(["plugin", "enable", "no-such-plugin"], home, realOmpDir());
+	} catch (error) {
+		message = error instanceof Error ? error.message : String(error);
+	}
+	expect(message).toContain("exit=1");
+	expect(message).toContain("signal=");
+	expect(message).toContain("elapsed_ms=");
+	expect(message).toContain("stdout=");
+	expect(message).toContain("not found in runtime config");
 });
