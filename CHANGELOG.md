@@ -4,6 +4,8 @@
 
 - Memory readiness recognizes the shared OMP 18.4.10/18.4.11 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
 
+- `migrate --plan` rows for edited copies now carry the unified diff against the shipped rule, the proposed native destination (`.omp/agent/rules/<name>.md`, which outranks the plugin), and an `unlisted` flag for manifest-known rules nothing serves. `kit-standing-law` is alwaysApply (never plugin-listed), so it stays unlisted with and without a native copy: its migration needs a human decision, recorded for C4.
+
 - Legacy `~/.agents/rules` kit copies move to native plugin layering with `migrate --plan|--apply`: the read-only plan lists each file with its plugin equivalent and byte diff; apply backs everything up, removes only copies byte-identical to what the installed plugin serves, keeps edited copies in place flagged for overlay (C3) and unknown files untouched, then verifies with `omp ttsr list` that each removed rule still resolves from a non-legacy source. Without an installed plugin, apply refuses; undo restores removals byte-for-byte. Note: `kit-standing-law` is never plugin-listed (alwaysApply prompt), so it is kept and flagged even when byte-identical.
 
 - Scratch reaper runs bounded: every `lsof +D` carries a 15 s per-dir timeout (a timed-out or killed run is unavailable evidence, never clear), `scratch plan`/`apply` interleave inspect-act-log per directory instead of planning the whole fleet first, and each verdict is printed to stderr as it completes with JSONL appended per action. A killed lsof can no longer be misread as an empty result.
