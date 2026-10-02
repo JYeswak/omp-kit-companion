@@ -8,12 +8,16 @@ For a change to install, `doctor`, `repair`, `test --full`, `update` or `audit`,
 
 A pull request is a proposal, not an automatic merge commitment. The maintainer may independently implement the change after reviewing the report. For sensitive vulnerabilities, use [SECURITY.md](SECURITY.md) instead of a public issue.
 
+## CI cadence
+
+Every push to `main` runs the fast Linux gate (CLI contracts and the rule ladder); a newer push cancels an older run. The full set (macOS, the four native archives, the real-HOME journey and native certification) runs on every release, daily, or on demand (`gh workflow run ci.yml`). The latest-OMP check runs every 3 hours but only when OMP or `main` changed since its last green run. A red `main` stops everyone until whoever broke it fixes or reverts it.
+
 ## Releases
 
 The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days. A release is:
 
-1. A PR that moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
-2. A `vX.Y.Z` tag on that merge commit.
+1. A commit on `main` that moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
+2. A `vX.Y.Z` tag on that commit.
 3. The "Unpublished release candidate" workflow (`release.yml`) run against the tag. It builds the four native archives and certifies each one on its own runner.
 4. Publication of the certified archives and `release-index.json` as a GitHub release, then a fresh-HOME install from the published index.
 
