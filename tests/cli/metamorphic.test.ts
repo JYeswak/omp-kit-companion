@@ -68,7 +68,7 @@ afterAll(() => {
 type MetamorphicEnvelope = {
 	data?: {
 		overall?: string;
-		metamorphic?: { status?: string; counts?: { cases?: number; variants?: number; breaks?: number; fresh?: number; stale?: number };
+		metamorphic?: { status?: string; counts?: { cases?: number; variants?: number; breaks?: number; skipped?: number; fresh?: number; stale?: number };
 			breaks?: { rule?: string; line?: number; relation?: string; variant?: string; expected?: string; observed?: string }[];
 			new_breaks?: { rule?: string; line?: number; relation?: string; variant?: string }[] };
 	};
@@ -135,4 +135,18 @@ test("a checked-in baseline ratchets: known breaks pass, a dropped entry fails",
 	expect(red.exitCode).toBe(1);
 	expect(red.report?.status).toBe("FAIL");
 	expect(red.report?.new_breaks?.length).toBe(1);
+}, 120_000);
+
+test("text-scope cases have no shell relations: prose in quotes still fires, nothing counted", () => {
+	const textPack = join(base, "textpack");
+	mkdirSync(join(textPack, "rules"), { recursive: true });
+	writeFileSync(join(textPack, "rules", "plant-prose.md"), `---\ncondition:\n  - 'sign-off token'\nscope: text\ninterruptMode: never\n---\nPlanted prose rule.\n`);
+	writeFileSync(join(textPack, "cases.tsv"), CASES_HEADER +
+		"plant-prose\tfire\ttext\t-\t-\tWe have sign-off token now\tprose claim\n");
+	const { exitCode, envelope } = runCli(["test", "--metamorphic",
+		"--rules", join(textPack, "rules"), "--cases", join(textPack, "cases.tsv"), "--json"]);
+	expect(exitCode).toBe(0);
+	expect(envelope.data?.metamorphic?.status).toBe("PASS");
+	expect(envelope.data?.metamorphic?.counts).toMatchObject({ cases: 0, breaks: 0 });
+	expect(envelope.data?.metamorphic?.counts?.skipped).toBeGreaterThanOrEqual(5);
 }, 120_000);

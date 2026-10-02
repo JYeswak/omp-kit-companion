@@ -524,12 +524,18 @@ function variantsFor(c: Case): { variants: MetamorphicVariant[]; skipped: { rela
 	const skipped: { relation: MetamorphicRelation; reason: string }[] = [];
 	const bash = c.source === "tool" && c.tool === "bash";
 	const text = c.source === "text" || c.source === "thinking";
+	if (text) {
+		skipped.push({ relation: "quoting", reason: "prose in quotes is the same claim; no shell quoting model for text scope" });
+		skipped.push({ relation: "whitespace", reason: "shell whitespace variants do not apply to prose" });
+		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
+		skipped.push({ relation: "path-form", reason: "path toggling is shell syntax, not prose" });
+		skipped.push({ relation: "chaining", reason: "chaining is shell syntax" });
+		return { variants, skipped };
+	}
 	if (bash) {
 		const quoted = quoteForDouble(c.snippet);
 		variants.push({ relation: "quoting", snippet: `echo "${quoted}"` });
 		variants.push({ relation: "quoting", snippet: `printf '%s\\n' "${quoted}"` });
-	} else if (text) {
-		skipped.push({ relation: "quoting", reason: "prose in quotes is the same claim; no shell quoting model for text scope" });
 	} else {
 		skipped.push({ relation: "quoting", reason: "file content is data, not an invocation" });
 	}
@@ -611,6 +617,7 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 	const { cases, errors } = loadCases(casesFile);
 	if (errors.length > 0) throw new Error(`metamorphic cases unreadable: ${errors[0]}`);
 	const breaks: MetamorphicBreak[] = [];
+	let evaluated = 0;
 	let variants = 0;
 	let skipped = 0;
 	for (const c of cases) {
@@ -618,6 +625,8 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 		if (!rule) continue;
 		const generated = variantsFor(c);
 		skipped += generated.skipped.length;
+		if (generated.variants.length === 0) continue;
+		evaluated += 1;
 		for (const [vi, v] of generated.variants.entries()) {
 			variants += 1;
 			// Each variant is an independent hypothetical stream: sharing the
@@ -630,7 +639,7 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 			}
 		}
 	}
-	return { breaks, counts: { cases: cases.length, variants, breaks: breaks.length, skipped } };
+	return { breaks, counts: { cases: evaluated, variants, breaks: breaks.length, skipped } };
 }
 
 // ---------------------------------------------------------------- selftest
