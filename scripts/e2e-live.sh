@@ -20,6 +20,8 @@
 #        (planted-negative runs: the live scenario must then NOT block)
 #        OMP_KIT_DEFAULT_TTSR=1 runs omp under its own default TTSR settings instead of
 #        installing the kit policy, so a second run reports policy-sensitive differences.
+#        OMP_KIT_TEST_NO_PROVIDER_PIN=1 skips the disabledProviders isolation so a test
+#        can prove OMP would otherwise probe OLLAMA_HOST (test-only).
 set -u
 MODE=full
 case "${1:-}" in
@@ -66,13 +68,53 @@ KEEP_WORK=0
 T=$(mktemp -d "$WORK_ROOT/e2e-live.XXXXXX") || { rm -rf "$WORK_ROOT"; exit 2; }
 H="$T/home"
 MP=""
+OP=""
 MOCK_PIDS=""
 DEFIANT_MOCK_SCENARIOS=""
 cleanup() {
   [ -n "$MP" ] && kill "$MP" 2>/dev/null
   if [ "$OWN_WORK_ROOT" = 1 ] && [ "$KEEP_WORK" != 1 ]; then rm -rf "$WORK_ROOT"; fi
 }
-trap cleanup EXIT INT TERM
+# The trap below only uses shell builtins (kill, wait) plus sleep, and only
+# signals pids tracked in shell variables: fork pressure cannot wedge it the
+# way process discovery could. OP is the limit wrapper, which forwards the
+# signal to the omp session group; MP is the current mock.
+# L2: a TERM/INT that lands mid-scenario must stop the run. The old EXIT-only
+# trap let the loop spawn the next scenario after the signal (pid 93914 kept
+# going until SIGKILL). Kill both children, reap bounded with KILL escalation,
+# then exit with the signal code. Never launches another scenario.
+on_signal() {
+  code=$1
+  # OP is the subshell around the limit wrapper, not the wrapper itself: the
+  # OMP session group outlives the subshell, so signal the group by the pgid
+  # the wrapper published, then fall through to the OP/MP reaping below.
+  if [ -n "${LIMIT_PGID_FILE:-}" ] && [ -s "$LIMIT_PGID_FILE" ]; then
+    pgid=$(cat "$LIMIT_PGID_FILE" 2>/dev/null) || pgid=""
+    case "$pgid" in ''|*[!0-9]*) ;;
+      *) kill -TERM "-$pgid" 2>/dev/null; sleep 0.5; kill -KILL "-$pgid" 2>/dev/null ;;
+    esac
+  fi
+  [ -n "$OP" ] && kill -TERM "$OP" 2>/dev/null
+  [ -n "$MP" ] && kill -TERM "$MP" 2>/dev/null
+  w=0
+  while [ "$w" -lt 50 ]; do
+    op_alive=0
+    mock_alive=0
+    [ -n "$OP" ] && kill -0 "$OP" 2>/dev/null && op_alive=1
+    [ -n "$MP" ] && kill -0 "$MP" 2>/dev/null && mock_alive=1
+    [ "$op_alive" = 0 ] && [ "$mock_alive" = 0 ] && break
+    sleep 0.1; w=$((w+1))
+  done
+  [ -n "$OP" ] && kill -0 "$OP" 2>/dev/null && kill -KILL "$OP" 2>/dev/null
+  [ -n "$MP" ] && kill -0 "$MP" 2>/dev/null && kill -KILL "$MP" 2>/dev/null
+  wait 2>/dev/null
+  OP=""; MP=""
+  echo "e2e-live: stopped on signal, exit $code" >&2
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
 mkdir -p "$H/.agents/rules" "$H/.omp/agent" "$H/.config" "$H/.cache" "$H/.local/share" "$H/.local/state" "$H/.bun" "$T/bin" "$T/tmp"
 # Launchd-domain isolation: an isolated HOME does not isolate the per-uid launchd domain,
 # so the suite snapshots the production watcher's identity and fails if it moves.
@@ -141,6 +183,19 @@ if [ -z "${OMP_KIT_DEFAULT_TTSR:-}" ]; then
   "$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
 else
   echo "default TTSR: kit policy not installed; omp runs under its own defaults"
+fi
+# L2: test runs must never reach real local model providers. On 2026-10-02 a
+# release-check omp child held this machine's real Ollama :11434 and blocked
+# localbench for an hour: an isolated HOME isolates config, but OMP still
+# discovers implicit socket providers (ollama/llama.cpp/lm-studio). Disable
+# them in the isolated config; the per-scenario mock provider is configured
+# explicitly in models.yml and is unaffected, as is on-device Apple FM.
+# OMP_KIT_TEST_NO_PROVIDER_PIN=1 skips the append so tests can prove OMP would
+# otherwise probe OLLAMA_HOST (test-only; production runs never set it).
+if [ -z "${OMP_KIT_TEST_NO_PROVIDER_PIN:-}" ]; then
+  printf 'disabledProviders:\n- ollama\n- "llama.cpp"\n- lm-studio\n' >>"$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "provider isolation producer_rc=$config_rc" >&2; exit "$config_rc"; }
+else
+  echo "provider isolation skipped by OMP_KIT_TEST_NO_PROVIDER_PIN (test-only)" >&2
 fi
 printf '[user]\n\temail = e2e@example.invalid\n\tname = e2e\n[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
 # br/bd stubs: a close that gets past the rules must not touch any real beads database.
@@ -211,9 +266,12 @@ for i in $scenario_ids; do
     KEEP_WORK=1; exit 2
   fi
   "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
-  (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1
-  rc=$?
+  LIMIT_PGID_FILE="$T/pgid-$name"; rm -f "$LIMIT_PGID_FILE"; export LIMIT_PGID_FILE
+  (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
+  echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&2
+  wait "$OP"; rc=$?; OP=""
   reap_mock
+  rm -f "$LIMIT_PGID_FILE"; unset LIMIT_PGID_FILE
   echo "mock server cleanup_rc=$mock_cleanup_rc log=$T/mock-$name.txt"
   cat "$T/mock-$name.txt"
   echo "OMP producer_rc=$rc output_log=$T/out-$name.txt transcript=$LOG"
