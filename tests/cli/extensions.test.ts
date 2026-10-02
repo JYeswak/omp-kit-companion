@@ -162,3 +162,17 @@ test("a HOME with no extension or hook files is UNVERIFIED, never OK", () => {
 	expect(report.status).toBe("UNVERIFIED");
 	expect(report.files_checked).toBe(0);
 }, 120_000);
+
+test("host-provided bare specifiers stay quiet", () => {
+	const home = mkhome("host");
+	writeHook(home, [
+		'import settings from "@oh-my-pi/pi-coding-agent/config/settings";',
+		'import utils from "@oh-my-pi/pi-utils";',
+		'import pathUtils from "@oh-my-pi/pi-coding-agent/tools/path-utils";',
+		'import shellTokenize from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";',
+		'export const run = [settings, utils, pathUtils, shellTokenize];',
+	].join("\n") + "\n");
+	const report = checkExtensionImports({ home });
+	expect(report.findings).toEqual([]);
+	expect(report.status).toBe("OK");
+}, 120_000);

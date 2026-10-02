@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Nothing is executed; type-only imports are skipped.
+- `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Bare `@oh-my-pi/*` (and sibling-scope) host packages resolve through OMP's bundle map, matching the loader; nothing is executed; type-only imports are skipped.
 
 ## 0.2.1 — 2026-10-01
 

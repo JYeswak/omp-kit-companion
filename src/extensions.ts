@@ -187,7 +187,40 @@ export function extractImportSpecifiers(source: string): ImportSpecifier[] {
 
 const SOURCE_BYTES_MAX = 1024 * 1024;
 
+/**
+ * Bare specifiers OMP's extension loader serves from its own bundle instead of
+ * the file's node_modules. Mirrors the 18.4.9 bundle: scopes oh-my-pi,
+ * mariozechner, earendil-works over pi-agent-core, pi-ai, pi-catalog,
+ * pi-coding-agent, pi-natives, pi-tui, pi-utils (any subpath), the pi-ai legacy
+ * path aliases, and the bundled typebox special-case. Anything else resolves
+ * file-relatively with Bun semantics, exactly like the loader's fallthrough.
+ */
+const OMP_HOST_PATTERN = /^@(?:oh-my-pi|mariozechner|earendil-works)\/(?:pi-agent-core|pi-ai|pi-catalog|pi-coding-agent|pi-natives|pi-tui|pi-utils)(?:\/.*)?$/;
+const OMP_HOST_ALIASES: Record<string, string> = {
+	"pi-ai/utils/oauth": "pi-ai/oauth",
+	"pi-ai/utils/oauth/": "pi-ai/oauth/",
+	"pi-ai/compat": "pi-ai",
+};
+const OMP_BUNDLED_PATTERN = /^(?:@sinclair\/typebox|typebox)$/;
+
+function isOmpHostSpecifier(specifier: string): boolean {
+	if (OMP_BUNDLED_PATTERN.test(specifier)) return true;
+	if (OMP_HOST_PATTERN.test(specifier)) return true;
+	const slash = specifier.indexOf("/", 1);
+	if (slash !== -1) {
+		const head = specifier.slice(0, slash);
+		const tail = specifier.slice(slash + 1);
+		for (const [legacy, canonical] of Object.entries(OMP_HOST_ALIASES)) {
+			if (head === "@oh-my-pi" && (tail === legacy || tail.startsWith(legacy))) {
+				return OMP_HOST_PATTERN.test(`@oh-my-pi/${canonical}${tail.slice(legacy.length)}`);
+			}
+		}
+	}
+	return false;
+}
+
 function resolveSpecifier(specifier: string, fromFile: string): string | null {
+	if (isOmpHostSpecifier(specifier)) return specifier;
 	try {
 		return Bun.resolveSync(specifier, fromFile);
 	} catch {
