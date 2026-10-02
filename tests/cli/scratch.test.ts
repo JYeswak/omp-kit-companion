@@ -1,0 +1,392 @@
+import { afterEach, expect, test } from "bun:test";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { delimiter, join, resolve } from "node:path";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+
+const roots: string[] = [];
+const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
+const savedState = process.env.XDG_STATE_HOME;
+const savedTmp = process.env.TMPDIR;
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+  else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+  if (savedTmp === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = savedTmp;
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = savedState;
+});
+
+/** Isolated state dir for in-process apply tests (which append JSONL to XDG state). */
+function useState(): string {
+  const state = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-xdg-"));
+  roots.push(state);
+  process.env.XDG_STATE_HOME = state;
+  return state;
+}
+
+const HAVE_LSOF = Bun.which("lsof") !== null;
+const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
+const depsFor = (overrides: Partial<InspectDeps> = {}): InspectDeps => ({
+  liveness: defaultLiveness(), run: clearRun, ...overrides,
+});
+
+function deadPid(): number {
+  for (let pid = 60000; pid > 1000; pid--) {
+    try {
+      process.kill(pid, 0);
+      continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+      const out = Bun.spawnSync(["ps", "-p", String(pid), "-o", "pid="], { stdout: "pipe", stderr: "ignore" });
+      if (out.exitCode !== 0) return pid;
+    }
+  }
+  throw new Error("no dead pid fixture");
+}
+
+function ownerText(fields: Record<string, string>): string {
+  return `${Object.entries(fields).map(([key, value]) => `${key}=${value}`).join("\n")}\n`;
+}
+
+function liveFields(label: string): Record<string, string> {
+  const start = defaultLiveness().processStart(process.pid);
+  if (start === null) throw new Error("process identity unavailable");
+  return { pid: String(process.pid), process_start: start, label, repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "test" };
+}
+
+function deadFields(label: string, pid: number): Record<string, string> {
+  return { pid: String(pid), process_start: "Thu Jan  1 00:00:00 1970", label, repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "test" };
+}
+
+function sessionDir(root: string, label: string, pid: number | string): string {
+  const dir = join(root, `${label}.${pid}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function backdateTree(dir: string, ageMs: number, now: number): void {
+  const past = new Date(now - ageMs);
+  const stack: string[] = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of readdirSync(current)) {
+      const path = join(current, entry);
+      const stat = lstatSync(path);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
+      utimesSync(path, past, past);
+    }
+  }
+  utimesSync(dir, past, past);
+}
+
+test("owner files parse strictly: duplicates, unknown keys, empty values and bad pids are null", () => {
+  const good = ownerText(liveFields("a"));
+  expect(parseOwnerFile(good)?.label).toBe("a");
+  expect(parseOwnerFile(`${good}pid=2\n`)).toBeNull();
+  expect(parseOwnerFile(`${good}owner=x\n`)).toBeNull();
+  expect(parseOwnerFile(good.replace("label=a", "label="))).toBeNull();
+  expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=0"))).toBeNull();
+  expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=abc"))).toBeNull();
+  expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=1234567"))).toBeNull();
+  expect(parseOwnerFile("owner=x\npurpose=y\ncreated=z\n")).toBeNull();
+  expect(parseOwnerFile(good.split("\n").slice(0, 5).join("\n"))).toBeNull();
+});
+
+test("probeOwner maps live, reused, dead, unreachable and unknown", () => {
+  const live = { signalAlive: () => true, psVisible: () => true, processStart: () => "S" };
+  expect(probeOwner(1, "S", live)).toBe("live");
+  expect(probeOwner(1, "other", live)).toBe("reused");
+  expect(probeOwner(1, "S", { ...live, processStart: () => null })).toBe("unknown");
+  const dead = { signalAlive: () => false, psVisible: () => false, processStart: () => "S" };
+  expect(probeOwner(1, "S", dead)).toBe("dead");
+  expect(probeOwner(1, "S", { ...dead, psVisible: () => true })).toBe("live-unreachable");
+});
+
+test("lsof maps empty to clear, output to open, diagnostics and missing binary to unavailable", () => {
+  expect(lsofClear("/x", clearRun)).toBe(true);
+  expect(lsofClear("/x", () => ({ code: 0, stdout: "sh 123 foo /x/bar", stderr: "" }))).toBe(false);
+  expect(lsofClear("/x", () => ({ code: 1, stdout: "", stderr: "lsof: WARNING something" }))).toBeNull();
+  expect(lsofClear("/x", () => { throw new Error("spawn ENOENT"); })).toBeNull();
+});
+
+test("etime and harness patterns parse the ps table", () => {
+  expect(parseEtime("00:02")).toBe(2);
+  expect(parseEtime("01:02:03")).toBe(3723);
+  expect(parseEtime("2-03:04:05")).toBe(183845);
+  expect(parseEtime("bogus")).toBeNull();
+  expect(isHarnessServer("/k/mock-model.mjs --port 1")).toBe(true);
+  expect(isHarnessServer("/k/external-live.mjs")).toBe(true);
+  expect(isHarnessServer("/usr/bin/sleep 60")).toBe(false);
+  const rows = [
+    { pid: 11, ppid: 1, ageSeconds: 7200, command: "bun /k/mock-model.mjs" },
+    { pid: 12, ppid: 1, ageSeconds: 60, command: "bun /k/mock-model.mjs" },
+    { pid: 13, ppid: 500, ageSeconds: 7200, command: "bun /k/mock-model.mjs" },
+    { pid: 14, ppid: 1, ageSeconds: 7200, command: "sleep 60" },
+  ];
+  expect(selectHarnessOrphans(rows).map(row => row.pid)).toEqual([11]);
+});
+
+test("quarantine entry names round-trip their timestamp", () => {
+  const at = new Date("2026-09-20T10:00:00.000Z");
+  const entry = quarantineEntryFor("lane.123", at);
+  expect(entry.startsWith("lane.123.q-")).toBe(true);
+  expect(quarantineTimeOf(entry)).toBe(at.getTime());
+  expect(quarantineTimeOf("lane.123")).toBeNull();
+});
+
+test("inspect keeps live owners, reaps dead ones, and skips missing or legacy owners", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const live = sessionDir(root, "live", process.pid);
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
+  const dead = sessionDir(root, "dead", deadPid());
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("dead", Number(dead.split(".").at(-1)))));
+  const naked = join(root, "naked.1");
+  mkdirSync(naked, { recursive: true });
+  const legacy = join(root, "legacy.2");
+  mkdirSync(legacy, { recursive: true });
+  writeFileSync(join(legacy, ".owner"), "owner=X\npurpose=y\ncreated=z\n");
+  const deps = depsFor();
+  expect(inspectSession(live, root, deps).action).toBe("LIVE");
+  expect(inspectSession(dead, root, deps).action).toBe("REAP");
+  expect(inspectSession(naked, root, deps).reason).toBe("no-owner-file");
+  expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
+});
+
+test("inspect refuses a dead owner with open descriptors and a name that mismatches", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const open = sessionDir(root, "open", deadPid());
+  writeFileSync(join(open, ".owner"), ownerText(deadFields("open", Number(open.split(".").at(-1)))));
+  writeFileSync(join(open, "held"), "x\n");
+  const openRun = () => ({ code: 0, stdout: `sh 999 ${join(open, "held")}`, stderr: "" });
+  expect(inspectSession(open, root, depsFor({ run: openRun })).reason).toBe("owner-dead-but-open-fds-present");
+  const wrong = join(root, "renamed.3");
+  mkdirSync(wrong, { recursive: true });
+  writeFileSync(join(wrong, ".owner"), ownerText(deadFields("else", deadPid())));
+  expect(inspectSession(wrong, root, depsFor()).reason).toBe("session-name-owner-mismatch");
+});
+
+test.skipIf(!HAVE_LSOF)("a real open descriptor blocks a real lsof reap", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const open = sessionDir(root, "realopen", deadPid());
+  writeFileSync(join(open, ".owner"), ownerText(deadFields("realopen", Number(open.split(".").at(-1)))));
+  writeFileSync(join(open, "held"), "x\n");
+  const fd = openSync(join(open, "held"), "r");
+  try {
+    const verdict = inspectSession(open, root, depsFor({ run: defaultRunner }));
+    expect(verdict.action).toBe("LIVE");
+  } finally {
+    closeSync(fd);
+  }
+});
+
+test("apply removes a proven-dead session after quarantine and restores on an owner race", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const deps: ApplyDeps = { ...depsFor(), home };
+  const dead = sessionDir(root, "gone", deadPid());
+  const pid = Number(dead.split(".").at(-1));
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", pid)));
+  writeFileSync(join(dead, "data"), "dead\n");
+  const verdict = inspectSession(dead, root, deps);
+  expect(verdict.action).toBe("REAP");
+  const applied = applyReap(dead, root, verdict, deps);
+  expect(applied.action).toBe("REAP");
+  expect(existsSync(dead)).toBe(false);
+  const raced = sessionDir(root, "raced", deadPid());
+  const rpid = Number(raced.split(".").at(-1));
+  writeFileSync(join(raced, ".owner"), ownerText(deadFields("raced", rpid)));
+  const rverdict = inspectSession(raced, root, deps);
+  expect(rverdict.action).toBe("REAP");
+  writeFileSync(join(raced, ".owner"), ownerText(deadFields("raced2", deadPid())));
+  const restored = applyReap(raced, root, rverdict, deps);
+  expect(restored.action).toBe("SKIP");
+  expect(restored.reason).toBe("final-recheck-refused");
+  expect(existsSync(raced)).toBe(true);
+});
+
+test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const deps: ApplyDeps = { ...depsFor(), home, now };
+  const old = join(root, "stale.9");
+  mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "data"), "stale\n");
+  backdateTree(old, 73 * 3600 * 1000, now);
+  const moved = applyUnowned(old, root, deps);
+  expect(moved.action).toBe("QUARANTINE");
+  expect(existsSync(old)).toBe(false);
+  expect(existsSync(moved.dir)).toBe(true);
+  const fresh = join(root, "fresh.9");
+  mkdirSync(fresh, { recursive: true });
+  expect(applyUnowned(fresh, root, deps).action).toBe("LIVE");
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const expired = join(qt, quarantineEntryFor("ancient.1", new Date(now - 8 * 24 * 3600 * 1000)));
+  mkdirSync(expired, { recursive: true });
+  writeFileSync(join(expired, ".owner"), ownerText(deadFields("ancient", deadPid())));
+  backdateTree(expired, 8 * 24 * 3600 * 1000, now);
+  const deleted = applyQuarantineExpiry(home, deps);
+  expect(deleted.map(v => v.dir)).toContain(expired);
+  expect(existsSync(expired)).toBe(false);
+  expect(isApplyFailure({ dir: "x", action: "SKIP", reason: "delete-failed", owner: null, sizeBytes: 0 })).toBe(true);
+  expect(isApplyFailure({ dir: "x", action: "LIVE", reason: "owner-alive", owner: null, sizeBytes: 0 })).toBe(false);
+});
+
+test("killOrphan reaps a real sleeper and reports a missing pid as gone", () => {
+  // A reparented grandchild behaves like a true orphan: no zombie lingers for us.
+  const launcher = Bun.spawnSync(["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!"], { stdout: "pipe", stderr: "ignore" });
+  const orphanPid = Number(launcher.stdout.toString().trim());
+  expect(Number.isSafeInteger(orphanPid)).toBe(true);
+  const deps: ApplyDeps = { ...depsFor(), home: "/tmp" };
+  expect(killOrphan(orphanPid, deps)).toBe(true);
+  expect(killOrphan(deadPid(), deps)).toBe(true);
+});
+test("apply kills only selected harness orphans and logs JSONL", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  try {
+    const killed: number[] = [];
+    const psTable = "  PID  PPID ELAPSED COMMAND\n90210     1 02:00:00 bun /k/mock-model.mjs --port 9\n90211   500 02:00:00 bun /k/mock-model.mjs\n";
+    const deps: ApplyDeps = { liveness: defaultLiveness(),
+      run: (args: readonly string[]) => args[0] === "ps"
+        ? { code: 0, stdout: psTable, stderr: "" }
+        : { code: 1, stdout: "", stderr: "" },
+      home, kill: (pid: number) => { killed.push(pid); return true; } };
+    const result = applyScratch(home, deps);
+    expect(killed).toEqual([90210]);
+    const lines = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const event = lines.find(entry => entry.event === "orphan-kill");
+    expect(event).toMatchObject({ pid: 90210, ok: true });
+  } finally {
+    if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+    else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+  }
+});
+
+function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
+  const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
+    cwd: home, env: { ...process.env, HOME: home, ...extraEnv }, stdout: "pipe", stderr: "pipe",
+  });
+  return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
+}
+
+function cliHome(): { home: string; state: string } {
+  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-cli-"));
+  roots.push(home);
+  const state = join(home, "state");
+  mkdirSync(state, { recursive: true });
+  const bin = join(home, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  chmodSync(join(bin, "omp-kit"), 0o755);
+  return { home, state };
+}
+
+function fakeLsof(): { dir: string } {
+  const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
+  roots.push(dir);
+  writeFileSync(join(dir, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  chmodSync(join(dir, "lsof"), 0o755);
+  return { dir };
+}
+
+test("scratch plan reports planted sessions and apply refuses without consent", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const dead = sessionDir(root, "gone", deadPid());
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
+  const live = sessionDir(root, "live", process.pid);
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const plan = cli(["scratch", "plan"], home, env);
+  expect(plan.code).toBe(0);
+  const byDir = Object.fromEntries(plan.envelope.data.sessions.map((v: { dir: string; action: string }) => [v.dir, v.action]));
+  expect(byDir[dead]).toBe("REAP");
+  expect(byDir[live]).toBe("LIVE");
+  const refused = cli(["scratch", "apply"], home, env);
+  expect(refused.code).toBe(2);
+  expect(refused.envelope.errors[0].code).toBe("SCRATCH_REQUIRES_APPLY");
+  expect(existsSync(dead)).toBe(true);
+});
+
+test("scratch apply removes dead sessions, quarantines idle unowned, and logs JSONL", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const dead = sessionDir(root, "gone", deadPid());
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
+  writeFileSync(join(dead, "data"), "dead\n");
+  const live = sessionDir(root, "live", process.pid);
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
+  const old = join(root, "stale.9");
+  mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "data"), "stale\n");
+  backdateTree(old, 73 * 3600 * 1000, Date.now());
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const applied = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+  expect(applied.code).toBe(0);
+  expect(applied.envelope.data.overall).toBe("OK");
+  expect(existsSync(dead)).toBe(false);
+  expect(existsSync(live)).toBe(true);
+  expect(existsSync(old)).toBe(false);
+  const quarantined = applied.envelope.data.sessions.find((v: { action: string }) => v.action === "QUARANTINE");
+  expect(quarantined.dir).toContain("scratch-quarantine");
+  const lines = readFileSync(join(state, "omp-kit", "scratch-reap-log.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(lines.some(entry => entry.event === "reap" && entry.dir === dead)).toBe(true);
+  expect(lines.some(entry => entry.event === "quarantine")).toBe(true);
+});
+
+test("service run scratch-reaper reports and writes a receipt without reaping", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const dead = sessionDir(root, "gone", deadPid());
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const run = cli(["service", "run", "scratch-reaper"], home, env);
+  expect(run.code).toBe(0);
+  expect(run.envelope.data.stats.reapableBytes).toBeGreaterThan(0);
+  expect(existsSync(dead)).toBe(true);
+  const receipt = JSON.parse(readFileSync(join(state, "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
+  expect(typeof receipt.started_at).toBe("string");
+  expect(receipt.exit).toBe(0);
+});
+
+test("resolveScratchRoots honors the override and skips symlinked components", () => {
+  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-home-"));
+  roots.push(home);
+  const emptyTmp = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-tmp-"));
+  roots.push(emptyTmp);
+  process.env.OMP_KIT_SCRATCH_ROOTS = `/a${delimiter}/b`;
+  try {
+    expect(resolveScratchRoots(home)).toEqual(["/a", "/b"]);
+  } finally {
+    if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+    else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+  }
+  delete process.env.OMP_KIT_SCRATCH_ROOTS;
+  process.env.TMPDIR = emptyTmp;
+  try {
+    const linkTarget = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-real-"));
+    roots.push(linkTarget);
+    mkdirSync(join(home, "Developer"), { recursive: true });
+    Bun.spawnSync(["ln", "-s", linkTarget, join(home, "Developer", "linkproj")], { stdout: "ignore", stderr: "ignore" });
+    mkdirSync(join(linkTarget, "var", "agent-tmp"), { recursive: true });
+    const found = resolveScratchRoots(home);
+    expect(found.some(root => root.includes("linkproj"))).toBe(false);
+    expect(found.filter(root => root.startsWith(emptyTmp))).toEqual([]);
+  } finally {
+    if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+    else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+  }
+});
