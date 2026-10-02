@@ -16,6 +16,7 @@ export type ServiceRunner = (args: readonly string[]) => ServiceRunResult;
 export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
+	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 86400 },
 };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;

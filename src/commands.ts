@@ -203,6 +203,18 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"], 
 	} } },
 	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
 } };
+const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	roots: { type: "array", items: { type: "string" } },
+	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
+		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
+		reason: { type: "string" }, sizeBytes: { type: "number" },
+	} } },
+	orphans: { type: "array", items: { type: "object" } },
+	killed: { type: "array", items: { type: "object" } },
+	expired: { type: "array", items: { type: "object" } },
+	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
@@ -341,8 +353,15 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--errors", description: "Show the error log instead of the output log" },
 			{ name: "-n", value: "N", description: "Print the last N lines" },
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
-		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt and notifies on failure", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt (omp-watch notifies on failure, scratch-reaper reports)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+	{ name: "scratch", description: "Reap dead operator scratch: owned+dead+lsof-clear sessions, idle unowned quarantine, expired quarantine delete", usage: "scratch plan|apply [--apply --yes]", flags: [], subcommands: [
+		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "--apply", description: "Request guarded apply" },
+			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
+	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },

@@ -36,6 +36,7 @@ import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -1565,6 +1566,23 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; the job did not run." }], verification: "UNVERIFIED" };
 		}
+		if (job.name === "scratch-reaper") {
+			// The scheduled job reports; apply stays an explicit operator verb (needs coordinator go on real machines).
+			const started = new Date().toISOString();
+			const plan = planScratch(home, { liveness: defaultLiveness(), run: scratchRunner });
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null };
+			try {
+				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
+				writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+			} catch {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root, then rerun; nothing was reaped." }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "OK", job: job.name, receipt,
+				stats: { roots: plan.roots.length, sessions: plan.sessions.length, orphans: plan.orphans.length,
+					reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes } }, verification: "UNVERIFIED" };
+		}
 		const started = new Date().toISOString();
 		const child = Bun.spawnSync([launcher, "test", "--record", "--json"], { stdout: "pipe", stderr: "pipe", env: process.env });
 		const ompVersion = (() => { try { return ompIdentity().version; } catch { return null; } })();
@@ -1590,6 +1608,43 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
+
+async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
+	const sub = request.command.name;
+	let home: string;
+	try {
+		home = serviceHome();
+	} catch {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
+				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
+	}
+	const deps = { liveness: defaultLiveness(), run: scratchRunner,
+		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
+			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
+		} };
+	if (sub === "plan") {
+		const plan = planScratch(home, deps);
+		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
+			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes }, verification: "UNVERIFIED" };
+	}
+	if (sub === "apply") {
+		if (!request.flags.has("--apply")) {
+			return refusal("SCRATCH_REQUIRES_APPLY", "scratch apply deletes scratch and kills orphaned harness servers",
+				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
+		}
+		const result = applyScratch(home, { ...deps, home });
+		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+		return { code: failed > 0 ? 1 : 0,
+			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
+				orphans: result.orphans, killed: result.killed, expired: result.expired,
+				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
+			verification: "UNVERIFIED" };
+	}
+	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
+}
+
+for (const subcommand of ["plan", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {

@@ -369,6 +369,19 @@ function inspectExtensionImports(home: string): Finding {
 		{ files_checked: report.files_checked, profiles_checked: report.profiles_checked,
 			plugin_packages: report.plugin_packages, findings: report.findings });
 }
+function inspectAgentMailGuard(): Finding {
+	const root = process.env.AGENT_MAIL_STORAGE_ROOT;
+	if (!root) return finding("agent_mail_guard", "UNVERIFIED", "AGENT_MAIL_STORAGE_ROOT is unset in this process; the pre-commit guard falls back to the legacy archive root and fails open in shells without it",
+		"Export AGENT_MAIL_STORAGE_ROOT from the live server root before committing (fleet-guard sessions do this at load); never infer reservation enforcement from a passing commit.",
+		{ storage_root: null });
+	let state: string;
+	try { state = pathState(root); } catch { state = "unsafe"; }
+	if (state !== "directory") return finding("agent_mail_guard", "DEGRADED", `AGENT_MAIL_STORAGE_ROOT names a ${state} path; the guard cannot resolve reservations against it`,
+		"Point AGENT_MAIL_STORAGE_ROOT at the live Agent Mail root.", { storage_root: root });
+	return finding("agent_mail_guard", "OK", `Pre-commit guard resolves reservations against ${root}; bare shells without the variable still fail open`,
+		"None.", { storage_root: root });
+}
+
 /** Dicklesworthstone stack currency: binary to release repo plus the one chosen install source (tap formula preferred). Formula names follow the JS1 bead inventory; anything without a tap formula is undecided until Josh approves a source. */
 const STACK_SOURCE: Record<string, { repo: string; formula: string | null }> = {
 	ntm: { repo: "ntm", formula: "ntm" },
@@ -584,6 +597,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	rows.push(inspectExtensions(root, home, profiles.profiles, projectConfig, profiles.issue));
 	rows.push(inspectExtensionImports(home));
 	rows.push(inspectRouter(input.jsmPath));
+	rows.push(inspectAgentMailGuard());
 	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	const stateIssue = inspectStateRoot(stateRoot);
 	rows.push(stateIssue === null
