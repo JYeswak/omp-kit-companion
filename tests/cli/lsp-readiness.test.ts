@@ -215,6 +215,7 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 	const input = { home: f.home, project: f.project, file, ompPath: installedOmp, pathEnv: process.env.PATH };
 	const report = await probeLspReadiness({ ...input, readiness: inspectLspReadiness(input), timeoutMs: 60_000 });
 	expect(report.status).toBe("PASS");
+	expect(report.elapsed_ms).toBeGreaterThan(0);
 	for (const marker of ["jsconfig.json", "tsconfig.json"]) {
 		expect(report.protected_input_snapshots?.before[join(f.project, marker)]).toEqual({ kind: "absent" });
 		expect(report.protected_input_snapshots?.after[join(f.project, marker)]).toEqual({ kind: "absent" });

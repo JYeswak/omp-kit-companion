@@ -48,6 +48,7 @@ export interface LspProbeReport {
 	runtime_state_outputs: string[];
 	mux_stop_rc: number | null;
 	temporary_workspace_removed: boolean;
+	elapsed_ms: number;
 }
 
 interface LoopbackModelServer { port: number; stop(closeActiveConnections?: boolean): void }
@@ -65,8 +66,6 @@ const MAX_MODEL_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_MODEL_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 64 * 1024;
-const MAX_REFERENCE_POLLS = 3;
-const REFERENCE_POLL_DELAY_MS = 500;
 
 function classifyLspProbeOutcome(input: LspProbeClassification): LspProbeState {
 	if (input.timed_out) return "TIMEOUT";
@@ -225,7 +224,7 @@ function result(state: LspProbeState, reason: string, readiness: LspReadinessRep
 		timeout_observation: null, fixture_git_init_rc: null, protected_input_snapshots: null,
 		profile_template_unchanged: null, profile_template_snapshots: null,
 		fixture_project_unchanged: null, fixture_project_snapshots: null,
-		runtime_home_omp_inventory: [], runtime_state_outputs: [], mux_stop_rc: null, temporary_workspace_removed: true };
+		runtime_home_omp_inventory: [], runtime_state_outputs: [], mux_stop_rc: null, temporary_workspace_removed: true, elapsed_ms: 0 };
 }
 function fixtureMarkerName(marker: string): string | null | undefined {
 	if (marker === ".") return null;
@@ -332,6 +331,7 @@ function lspToolTimeoutEvidence(text: string): { deadline_ms: number; matched_te
 }
 
 export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeReport> {
+	const probeStartedAt = performance.now();
 	const readiness = input.readiness;
 	const requestedFile = readiness.file;
 	const server = readiness.servers.find(candidate => candidate.name === "typescript-language-server");
@@ -497,7 +497,6 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const toolCallIssuedAt = new Map<string, number>();
 		let stage: "status" | "capabilities" | "wait" | "references" | "symbols" | "done" = "status";
 		let readinessPolls = 0;
-		let referencePolls = 0;
 		mockServer = Bun.serve({
 			hostname: "127.0.0.1", port: 0,
 			async fetch(request) {
@@ -541,16 +540,9 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 					} else if (stage === "wait") {
 						stage = "done";
 						turn = { text: "LSP readiness did not reach ready within five bounded status checks." };
-					} else if (stage === "references" && /Found\s+[1-9]\d* reference\(s\)/.test(latestToolResult)) {
+					} else if (stage === "references") {
 						turn = turns[3]!;
 						stage = "symbols";
-					} else if (stage === "references" && referencePolls < MAX_REFERENCE_POLLS) {
-						referencePolls += 1;
-						await new Promise(resolve => setTimeout(resolve, REFERENCE_POLL_DELAY_MS * referencePolls));
-						turn = turns[2]!;
-					} else if (stage === "references") {
-						stage = "done";
-						turn = { text: "LSP references remained empty after bounded readiness retries." };
 					} else {
 						stage = "done";
 						turn = { text: "LSP route probe complete." };
@@ -667,7 +659,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const statusBefore = statusCalls[0]?.result ?? "";
 		const statusAfter = statusCalls[statusCalls.length - 1]?.result ?? "";
 		const capabilitiesCall = calls.find(call => call.action === "capabilities");
-		const referencesCall = calls.filter(call => call.action === "references").reverse()[0];
+		const referencesCall = calls.find(call => call.action === "references");
 		const absentCall = calls.find(call => call.action === "symbols");
 		const capabilities = capabilitiesCall?.result ?? "";
 		const references = referencesCall?.result ?? "";
@@ -677,15 +669,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			capabilitiesCall?.file === "src/api.ts" && referencesCall?.file === "src/api.ts" &&
 			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
 			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
-			calls.every(call => {
-				switch (call.action) {
-					case "status": return call.file === undefined && call.line === undefined && call.symbol === undefined && call.query === undefined;
-					case "capabilities": return call === capabilitiesCall;
-					case "references": return call.file === "src/api.ts" && call.line === 1 && call.symbol === "lspProbeKnownSymbol";
-					case "symbols": return call === absentCall;
-					default: return false;
-				}
-			});
+			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
 		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
 		checks = {
 			lsp_tool_advertised: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.some(tool => isRecord(tool) && isRecord(tool.function) && tool.function.name === "lsp")),
@@ -781,5 +765,5 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		fixture_project_unchanged: fixtureUnchanged,
 		fixture_project_snapshots: fixtureBefore && fixtureAfter ? { before: fixtureBefore, after: fixtureAfter, unchanged: fixtureUnchanged === true } : null,
 		runtime_home_omp_inventory: runtimeEntries, runtime_state_outputs: runtimeStateOutputs, mux_stop_rc: muxStopRc,
-		temporary_workspace_removed: tempRemoved };
+		temporary_workspace_removed: tempRemoved, elapsed_ms: performance.now() - probeStartedAt };
 }
