@@ -543,12 +543,12 @@ function variantsFor(c: Case): { variants: MetamorphicVariant[]; skipped: { rela
 	} else {
 		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
 	}
-	const token = /[\w.-]+\/[\w./-]+/.exec(c.snippet)?.[0];
-	if (token) {
+	const token = /(?:^|[\s"'`(=])(\.?\/?[\w.-]+\/[\w./-]+)/.exec(c.snippet)?.[1];
+	if (token && !token.startsWith("/")) {
 		const toggled = token.startsWith("./") ? token.slice(2) : `./${token}`;
 		variants.push({ relation: "path-form", snippet: c.snippet.replace(token, toggled) });
 	} else {
-		skipped.push({ relation: "path-form", reason: "snippet carries no path token" });
+		skipped.push({ relation: "path-form", reason: "snippet carries no relative path token" });
 	}
 	if (bash) {
 		variants.push({ relation: "chaining", snippet: `true; ${c.snippet}` });
