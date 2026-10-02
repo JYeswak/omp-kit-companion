@@ -46,11 +46,13 @@ private_owner_mode() {
 }
 
 new_workdir() {
-	# System temp, not repo scratch: the --work-dir validation below requires
-	# containment in the system temporary roots (and non-overlap with the
-	# release/HOME), and the release snapshot fails on any leftover under the
-	# release tree. Callers trap-remove the work root; nothing leaks.
-	base=$(system_tmp_root) || die "no supported private temporary root"
+	# os.tmpdir() semantics, not a literal path and never the release tree:
+	# honor TMPDIR (under the fleet guard it lands in the repo's var/agent-tmp;
+	# on a user machine, the system temp), else /tmp. The --work-dir validation
+	# below requires system-temp containment, and the release snapshot fails on
+	# any leftover under the release tree. Callers trap-remove the work root.
+	base="${TMPDIR:-/tmp}"
+	[ -n "$base" ] && [ -d "$base" ] || die "no usable temporary root (TMPDIR=$base)"
 	umask 077
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
