@@ -17,8 +17,8 @@ let environment: Record<string, string>;
 const SKILL = (name: string, description: string): string =>
 	`---\nname: ${name}\ndescription: ${description}\n---\n\n${name} body.\n`;
 
-const SESSION = (id: string, lines: string[]): string =>
-	[`{"type":"session","version":3,"id":"${id}","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`, ...lines].join("\n") + "\n";
+const SESSION = (id: string, lines: string[], cwd = "/tmp"): string =>
+	[`{"type":"session","version":3,"id":"${id}","timestamp":"2026-09-30T10:00:00.000Z","cwd":${JSON.stringify(cwd)}}`, ...lines].join("\n") + "\n";
 
 function sessionRow(id: string, role: string, text: string): string {
 	return JSON.stringify({ type: "message", id, timestamp: "2026-09-30T10:01:00.000Z",
@@ -63,6 +63,16 @@ beforeAll(() => {
 		sessionRow("m2", "assistant", "reading skill://alpha now"),
 		sessionRow("m3", "toolResult", "read skill://alpha complete"),
 	]));
+	const projA = join(home, "projA");
+	const projASkills = join(projA, ".omp", "skills", "beta");
+	mkdirSync(projASkills, { recursive: true });
+	writeFileSync(join(projASkills, "SKILL.md"), SKILL("beta", "project-scoped fixture skill"));
+	writeFileSync(join(sessions, "s3.jsonl"), SESSION("s3", [
+		sessionRow("m1", "assistant", "reading skill://beta and skill://alpha now"),
+	], projA));
+	writeFileSync(join(sessions, "s4.jsonl"), SESSION("s4", [
+		sessionRow("m1", "assistant", "reading skill://ghostskill and skill://alpha now"),
+	], "/nonexistent-omp-kit-proj-xyz"));
 	const stale = join(sessions, "stale.jsonl");
 	writeFileSync(stale, SESSION("stale", [sessionRow("m9", "assistant", "reading skill://zeta now")]));
 	utimesSync(stale, (Date.now() - 30 * 86400 * 1000) / 1000, (Date.now() - 30 * 86400 * 1000) / 1000);
@@ -105,11 +115,15 @@ test("skill-set derives the exact usage candidate and renders a measured recipe"
 		bytes_before?: number; bytes_after?: number; listed_before?: number; listed_after?: number;
 		capability_check?: { overall?: string; missing?: number }; recipe?: string;
 		history?: { files_scanned?: number; files_skipped_window?: number };
+		projects?: Record<string, { reads?: Record<string, number>; explicit?: Record<string, number> }>;
+		project_recipes?: { project?: string; candidate_skills?: string[];
+			capability_check?: { overall?: string; missing?: number }; recipe?: string }[];
+		unresolved_projects?: Record<string, string[]>;
 	} };
 	expect(data.overall).toBe("OK");
 	const set = data.skill_set;
 	expect(set?.candidate_skills).toEqual(["alpha", "gamma"]);
-	expect(set?.reads).toMatchObject({ alpha: 2 });
+	expect(set?.reads).toMatchObject({ alpha: 4 });
 	expect(set?.explicit).toMatchObject({ gamma: 1 });
 	expect(set?.history?.files_skipped_window).toBe(1);
 	expect(set?.listed_before).toBe(3);
@@ -119,6 +133,42 @@ test("skill-set derives the exact usage candidate and renders a measured recipe"
 	expect(set?.capability_check?.missing).toBe(0);
 	expect(set?.recipe).toContain("includeSkills:");
 	expect(set?.recipe).toContain("- alpha");
+	expect(set?.recipe).not.toContain("- beta");
+}, 300_000);
+
+test("skill-set resolves project-scoped skills under their own project", () => {
+	const { exitCode, envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	expect(exitCode).toBe(0);
+	const set = (envelope.data as { skill_set?: {
+		candidate_skills?: string[];
+		projects?: Record<string, { reads?: Record<string, number>; explicit?: Record<string, number> }>;
+		project_recipes?: { project?: string; candidate_skills?: string; listed_after?: number;
+			capability_check?: { overall?: string; missing?: number }; recipe?: string }[];
+	} }).skill_set;
+	expect(set?.candidate_skills).toEqual(["alpha", "gamma"]);
+	expect(set?.projects?.["/tmp"]?.reads).toMatchObject({ alpha: 2 });
+	const projKey = Object.keys(set?.projects ?? {}).find(key => key.endsWith("/projA"));
+	expect(projKey).toBeDefined();
+	expect(set?.projects?.[projKey as string]?.reads).toMatchObject({ alpha: 1, beta: 1 });
+	const recipe = (set?.project_recipes ?? []).find(entry => entry.project === projKey);
+	expect(recipe?.candidate_skills).toEqual(["alpha", "beta"]);
+	expect(recipe?.listed_after).toBe(2);
+	expect(recipe?.capability_check?.overall).toBe("PASS");
+	expect(recipe?.capability_check?.missing).toBe(0);
+	expect(recipe?.recipe).toContain("- beta");
+}, 300_000);
+
+test("skill-set lists unresolvable cwd skills separately instead of failing the global recipe", () => {
+	const { exitCode, envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	expect(exitCode).toBe(0);
+	const set = (envelope.data as { skill_set?: {
+		candidate_skills?: string[]; capability_check?: { overall?: string; missing?: number };
+		project_recipes?: { project?: string }[]; unresolved_projects?: Record<string, string[]>;
+	} }).skill_set;
+	expect(set?.candidate_skills).toEqual(["alpha", "gamma"]);
+	expect(set?.capability_check?.overall).toBe("PASS");
+	expect(set?.unresolved_projects?.["/nonexistent-omp-kit-proj-xyz"]).toEqual(["ghostskill"]);
+	expect((set?.project_recipes ?? []).find(entry => entry.project === "/nonexistent-omp-kit-proj-xyz")).toBeUndefined();
 }, 300_000);
 
 test("skill-set reads only the selected profile history", () => {

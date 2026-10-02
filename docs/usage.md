@@ -145,13 +145,58 @@ The file declares `skills`, `tools`, `rules`, and `lsp` arrays
 listing that resolves every declared capability does not prove equal
 task success; that comparison belongs to dedicated benchmark tooling.
 
+
+## Monitor macOS services
+
+`doctor --scope services` inventories launchd jobs without loading,
+unloading, or writing anything: one row per installed plist plus every
+loaded non-Apple job with no plist. Classes are `RUNNING`, `IDLE_OK`,
+`FAILING`, `NOT_LOADED`, `BROKEN`, `LOADED_NO_PLIST`, and `UNVERIFIED`
+(system-domain state without elevated privileges). Duplicate detection
+keys on the script a wrapper actually runs, so two jobs sharing one
+script are reported together even when both go through `/bin/sh`.
+Only OMP-related jobs (the omp token as a standalone path/label
+segment, plus `oh-my-pi`, `uca`, `localbench`, `sbh`, `omp-kit`,
+`kit-guard`) can turn the verdict; everything else is listed for
+context but never flagged.
+
+```
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" doctor --scope services --json
+```
+
+Add `--services FILE` to validate a declared file of required jobs:
+
+```json
+{"schema_version": 1, "jobs": [
+  {"label": "com.omp-kit.omp-watch", "name": "omp-watch"},
+  {"label": "dev.localbench.omp-update", "name": "localbench omp-update",
+   "healthy_exit": [0, 1], "log_file": "~/.localbench/omp-watch/refresh.log",
+   "require_log_line_if_exit_1": "STALE"}
+]}
+```
+
+A job's exit code is not universally failure: `localbench omp-update`
+exits 1 when STALE work is queued, by design, and its refresh log then
+carries a `STALE` line. `healthy_exit` lists the acceptable codes and
+`require_log_line_if_exit_N` demands a line in the log (absolute or
+`~/` path, last megabyte) when the job exits N. Missing jobs report
+`MISSING`; an unreadable declared file refuses with
+`INVALID_SERVICES_FILE`.
+
 ## Derive a skill set from usage
 
 `examples skill-set` reads a profile's session transcripts (read-only)
 and lists every skill actually read plus the skills named explicitly in
-prompts. It renders, never applies, a pruned-profile recipe: the
-candidate `includeSkills` list with listing bytes before and after
-(both measured through OMP's loader), and the capability check result:
+prompts. Usage is grouped by session working directory, and each
+project's set is resolved through that project's own loader: the global
+recipe holds only user-scope skills, while project-scoped skills appear
+under per-project recipes (`project_recipes`, one entry per session
+directory). Skills used in a directory that resolves nowhere are listed
+under `unresolved_projects` and belong to no recipe. It renders, never
+applies, a pruned-profile recipe: the candidate `includeSkills` list
+with listing bytes before and after (both measured through OMP's
+loader), and the capability check result:
 
 ```sh verified rc=0 contains='"candidate_skills":[]'
 KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
