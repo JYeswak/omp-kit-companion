@@ -49,6 +49,7 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 				status: { enum: ["RESOLVED", "HIDDEN_BUT_READABLE", "MISSING"] }, detail: { type: "string" } } } },
 	} },
 	live: { type: "object" },
+	mutants: { type: "object" },
 	integrations: { type: "object" },
 	repeat: { type: "object" },
 	metamorphic: { type: "object" },
@@ -245,8 +246,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, metamorphic relation report with an optional known-break ratchet, or repeat flake verdicts",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE [--baseline ABS_JSON]]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, metamorphic relation report with an optional known-break ratchet, mutation adequacy, or repeat flake verdicts",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE [--baseline ABS_JSON]]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -254,6 +255,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
 		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
 		{ name: "--capabilities", value: "ABS_JSON", description: "Check a declared required-capability set (skills, tools, rules, LSP) through OMP discovery; exit 1 on MISSING" },
+		{ name: "--mutants", description: "Measure mutation adequacy of rule conditions against their cases through the real matcher" },
+		{ name: "--mutant-budget-secs", value: "N", description: "Wall-clock budget bounding mutant evaluation; the report marks early stops truncated" },
 		{ name: "--integrations", description: "Prove per-profile integrations live with a scripted mock model; never uploads" },
 		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
 		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
