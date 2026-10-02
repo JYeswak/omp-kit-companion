@@ -391,3 +391,25 @@ test("omp_drift tracks the OMP of the last recorded test and clears only after a
 	record("FAIL");
 	expect(await drift()).toMatchObject({ status: "DEGRADED", reason: expect.stringContaining("did not pass (FAIL)") });
 });
+
+test("agent_mail_guard flags an unset or dangling storage root and passes a live one", async () => {
+	const f = fixture(); installOmp(f);
+	const saved = process.env.AGENT_MAIL_STORAGE_ROOT;
+	const live = mkdtempSync(join(tmpdir(), "omp-kit-am1-"));
+	try {
+		delete process.env.AGENT_MAIL_STORAGE_ROOT;
+		let rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+		expect(finding(rows, "agent_mail_guard").status).toBe("UNVERIFIED");
+		expect(finding(rows, "agent_mail_guard").reason).toContain("fails open");
+		process.env.AGENT_MAIL_STORAGE_ROOT = join(live, "missing");
+		rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+		expect(finding(rows, "agent_mail_guard").status).toBe("DEGRADED");
+		process.env.AGENT_MAIL_STORAGE_ROOT = live;
+		rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+		expect(finding(rows, "agent_mail_guard").status).toBe("OK");
+		expect(finding(rows, "agent_mail_guard").evidence?.storage_root).toBe(live);
+	} finally {
+		if (saved === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT; else process.env.AGENT_MAIL_STORAGE_ROOT = saved;
+		rmSync(live, { recursive: true, force: true });
+	}
+});
