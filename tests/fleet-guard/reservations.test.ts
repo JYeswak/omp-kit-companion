@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { check, clearReservationCache } from "../../src/fleet-guard/reservations.ts";
+import { check, clearReservationCache, storageRootFromEnvironment } from "../../src/fleet-guard/reservations.ts";
 
 type Event = { toolName: string; arguments?: Record<string, unknown> };
 const repo = "/workspace/repo";
@@ -44,5 +44,9 @@ describe("fleet guard reservation checks", () => {
 		await check({ toolName: "edit", arguments: { path: "src/main.ts" } }, context);
 		await check({ toolName: "edit", arguments: { path: "src/main.ts" } }, context);
 		expect(calls).toBe(1);
+	});
+	test("derives the live storage root from the Agent Mail environment resource", () => {
+		expect(storageRootFromEnvironment({ database_url: "sqlite:////Users/josh/.local/share/mcp-agent-mail-rust-live/storage.sqlite3" })).toBe("/Users/josh/.local/share/mcp-agent-mail-rust-live");
+		expect(storageRootFromEnvironment({ database_url: "postgres://localhost/db" })).toBeUndefined();
 	});
 });

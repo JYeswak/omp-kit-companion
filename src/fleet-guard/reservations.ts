@@ -108,6 +108,45 @@ function mcpText(payload: unknown): unknown {
 	return payload;
 }
 
+export let AGENT_MAIL_STORAGE_ROOT: string | undefined;
+
+export function storageRootFromEnvironment(environment: unknown): string | undefined {
+	if (!environment || typeof environment !== "object") return undefined;
+	const databaseUrl = (environment as Record<string, unknown>).database_url;
+	if (typeof databaseUrl !== "string" || !databaseUrl.startsWith("sqlite:")) return undefined;
+	const databasePath = databaseUrl.slice("sqlite:".length).replace(/^\/+/, "/");
+	return databasePath.startsWith("/") ? dirname(databasePath) : undefined;
+}
+
+async function callAgentMailResource(uri: string): Promise<unknown> {
+	const token = process.env.AGENTMAIL_HTTP_BEARER_TOKEN ?? process.env.AGENT_MAIL_TOKEN;
+	if (!token) throw new Error("Agent Mail bearer token is unavailable");
+	const response = await fetch(process.env.AGENTMAIL_HTTP_URL ?? "http://127.0.0.1:8765/api", {
+		method: "POST",
+		headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+		body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "resources/read", params: { uri } }),
+	});
+	if (!response.ok) throw new Error("Agent Mail HTTP " + response.status);
+	const body = await response.json() as { error?: { message?: string }; result?: { contents?: unknown[] } };
+	if (body.error) throw new Error(body.error.message ?? "Agent Mail resource request failed");
+	const content = body.result?.contents?.find((entry) => entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).text === "string");
+	if (!content) throw new Error("Agent Mail environment resource is empty");
+	const text = (content as Record<string, unknown>).text as string;
+	try { return JSON.parse(text); } catch { throw new Error("Agent Mail environment resource is not JSON"); }
+}
+
+export async function resolveAgentMailStorageRoot(): Promise<string | undefined> {
+	const environment = await callAgentMailResource("resource://config/environment");
+	return storageRootFromEnvironment(environment);
+}
+
+export async function exportAgentMailStorageRoot(): Promise<string | undefined> {
+	const root = await resolveAgentMailStorageRoot();
+	if (root) AGENT_MAIL_STORAGE_ROOT = root;
+	if (AGENT_MAIL_STORAGE_ROOT) process.env.AGENT_MAIL_STORAGE_ROOT = AGENT_MAIL_STORAGE_ROOT;
+	return AGENT_MAIL_STORAGE_ROOT;
+}
+
 async function callAgentMail(toolName: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
 	const token = process.env.AGENTMAIL_HTTP_BEARER_TOKEN ?? process.env.AGENT_MAIL_TOKEN;
 	if (!token) throw new Error("Agent Mail bearer token is unavailable");
