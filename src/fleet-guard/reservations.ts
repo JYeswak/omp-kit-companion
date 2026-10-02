@@ -108,6 +108,45 @@ function mcpText(payload: unknown): unknown {
 	return payload;
 }
 
+export let AGENT_MAIL_STORAGE_ROOT: string | undefined;
+
+export function storageRootFromEnvironment(environment: unknown): string | undefined {
+	if (!environment || typeof environment !== "object") return undefined;
+	const databaseUrl = (environment as Record<string, unknown>).database_url;
+	if (typeof databaseUrl !== "string" || !databaseUrl.startsWith("sqlite:")) return undefined;
+	const databasePath = databaseUrl.slice("sqlite:".length).replace(/^\/+/, "/");
+	return databasePath.startsWith("/") ? dirname(databasePath) : undefined;
+}
+
+async function callAgentMailResource(uri: string): Promise<unknown> {
+	const token = process.env.AGENTMAIL_HTTP_BEARER_TOKEN ?? process.env.AGENT_MAIL_TOKEN;
+	if (!token) throw new Error("Agent Mail bearer token is unavailable");
+	const response = await fetch(process.env.AGENTMAIL_HTTP_URL ?? "http://127.0.0.1:8765/api", {
+		method: "POST",
+		headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+		body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "resources/read", params: { uri } }),
+	});
+	if (!response.ok) throw new Error("Agent Mail HTTP " + response.status);
+	const body = await response.json() as { error?: { message?: string }; result?: { contents?: unknown[] } };
+	if (body.error) throw new Error(body.error.message ?? "Agent Mail resource request failed");
+	const content = body.result?.contents?.find((entry) => entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).text === "string");
+	if (!content) throw new Error("Agent Mail environment resource is empty");
+	const text = (content as Record<string, unknown>).text as string;
+	try { return JSON.parse(text); } catch { throw new Error("Agent Mail environment resource is not JSON"); }
+}
+
+export async function resolveAgentMailStorageRoot(): Promise<string | undefined> {
+	const environment = await callAgentMailResource("resource://config/environment");
+	return storageRootFromEnvironment(environment);
+}
+
+export async function exportAgentMailStorageRoot(): Promise<string | undefined> {
+	const root = await resolveAgentMailStorageRoot();
+	if (root) AGENT_MAIL_STORAGE_ROOT = root;
+	if (AGENT_MAIL_STORAGE_ROOT) process.env.AGENT_MAIL_STORAGE_ROOT = AGENT_MAIL_STORAGE_ROOT;
+	return AGENT_MAIL_STORAGE_ROOT;
+}
+
 async function callAgentMail(toolName: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
 	const token = process.env.AGENTMAIL_HTTP_BEARER_TOKEN ?? process.env.AGENT_MAIL_TOKEN;
 	if (!token) throw new Error("Agent Mail bearer token is unavailable");
@@ -134,23 +173,57 @@ async function resolveAgentName(context: ReservationCheckContext, projectKey: st
 	return typeof name === "string" && name ? name : undefined;
 }
 
+function normalizeReservationPath(value: string): string {
+	return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+}
+
+function reservationPatternCovers(pattern: string, requestedPath: string): boolean {
+	const normalizedPattern = normalizeReservationPath(pattern);
+	const normalizedPath = normalizeReservationPath(requestedPath);
+	if (normalizedPattern === normalizedPath) return true;
+	const hasWildcard = normalizedPattern.includes("*") || normalizedPattern.includes("?") || normalizedPattern.includes("[");
+	if (!hasWildcard && normalizedPath.startsWith(normalizedPattern + "/")) return true;
+	let expression = "^";
+	for (let index = 0; index < normalizedPattern.length; index += 1) {
+		const character = normalizedPattern[index]!;
+		if (character === "*" && normalizedPattern[index + 1] === "*") {
+			expression += ".*";
+			index += 1;
+		} else if (character === "*") {
+			expression += "[^/]*";
+		} else if (character === "?") {
+			expression += "[^/]";
+		} else {
+			if ("\\^$+{}().|".includes(character)) expression += "\\";
+			expression += character;
+		}
+	}
+	return new RegExp(expression + "$").test(normalizedPath);
+}
+
+export function reservationLookupFromResponse(response: unknown, requestedPath: string): ReservationLookupResult {
+	if (!response || typeof response !== "object") throw new Error("Agent Mail returned no reservation result");
+	const record = response as Record<string, unknown>;
+	const active = record.own_active ?? record.own_reservations ?? record.ownReservations;
+	const ownActive = Array.isArray(active) ? active : [];
+	const covered = record.covered === true || ownActive.some((entry) => {
+		if (!entry || typeof entry !== "object") return false;
+		const reservation = entry as Record<string, unknown>;
+		return reservation.exclusive !== false && typeof reservation.path_pattern === "string" && reservationPatternCovers(reservation.path_pattern, requestedPath);
+	});
+	const conflicts = record.conflicts;
+	return { covered, conflicts: Array.isArray(conflicts) ? conflicts : [] };
+}
+
 async function lookupReservations(input: ReservationLookupInput, context: ReservationCheckContext): Promise<ReservationLookupResult> {
 	if (context.lookupReservations) return context.lookupReservations(input);
-	const result = await callAgentMail("check_file_reservation_conflicts", {
+	const response = await callAgentMail("check_file_reservation_conflicts", {
 		project_key: input.projectKey,
 		agent_name: input.agentName,
 		paths: [input.path],
 	});
-	if (!result || typeof result !== "object") throw new Error("Agent Mail returned no reservation result");
-	const record = result as Record<string, unknown>;
-	const own = record.own_reservations ?? record.ownReservations;
-	const conflicts = record.conflicts;
-	return {
-		covered: record.covered === true || (Array.isArray(own) && own.length > 0),
-		conflicts: Array.isArray(conflicts) ? conflicts : [],
-	};
+	return reservationLookupFromResponse(response, input.path);
 }
-
 function cachedLookup(key: string, now: number): ReservationLookupResult | undefined {
 	const entry = cache.get(key);
 	if (!entry) return undefined;
