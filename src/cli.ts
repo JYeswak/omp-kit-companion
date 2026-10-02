@@ -27,6 +27,7 @@ import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, renderOmpWatch, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
+import { runMetamorphicReport } from "./metamorphic.ts";
 import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
@@ -1184,10 +1185,44 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project"]) {
+		if (request.flags.has(flag)) {
+			return refusal("INVALID_FLAG", `test --metamorphic cannot be combined with ${flag}`,
+				"Run metamorphic relations on the bundled pack or one external --rules/--cases pair; nothing was measured.");
+		}
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !identity.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "METAMORPHIC_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME; no relations were measured.",
+		}], verification: "UNVERIFIED" };
+	}
+	const selected = (name: string): string | undefined => {
+		const value = request.flags.get(name);
+		return typeof value === "string" ? value : undefined;
+	};
+	const rules = selected("--rules");
+	const cases = selected("--cases");
+	for (const path of [rules, cases]) {
+		if (path !== undefined && (!isAbsolute(path) || resolve(path) !== path)) {
+			return refusal("INVALID_PATH", "Metamorphic selection requires canonical absolute paths",
+				"Pass absolute --rules and --cases paths; nothing was measured.");
+		}
+	}
+	const report = await runMetamorphicReport({ root: identity.release.root, executablePath: identity.release.executable,
+		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}) });
+	return { code: report.status === "FAIL" ? 1 : report.status === "PASS" ? 0 : 3,
+		data: { overall: report.status === "PASS" ? "OK" : report.status, metamorphic: report }, verification: "UNVERIFIED" };
+}
+
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (request.flags.has("--integrations")) return integrationsCommand(request);
+	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
 	if (external) return externalTestCommand(request);

@@ -425,3 +425,28 @@ test("dicklesworthstone scope reports installed vs latest with one source per to
 		rmSync(bindir, { recursive: true, force: true });
 	}
 });
+
+test("dual-config and policy-skipped profiles surface as not covered with named reasons", async () => {
+	const f = fixture(); installOmp(f);
+	mkdirSync(join(f.root, "policy")); mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "policy", "extensions.json"), '{"extensions":["kit-guard-optin.ts"],"skipProfiles":["work"]}');
+	writeFileSync(join(f.root, "extensions", "kit-guard-optin.ts"), "export const guard = true;\n");
+	const extension = join(f.home, ".omp", "omp-extensions", "kit-guard-optin.ts");
+	mkdirSync(join(f.home, ".omp", "omp-extensions"), { recursive: true });
+	writeFileSync(extension, "export const guard = true;\n");
+	const good = `extensions:\n  - ${extension}\n`;
+	for (const dir of [join(f.home, ".omp", "agent"), join(f.home, ".omp", "profiles", "work", "agent")]) {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "config.yml"), good);
+	}
+	const dual = join(f.home, ".omp", "profiles", "claude", "agent");
+	mkdirSync(dual, { recursive: true });
+	writeFileSync(join(dual, "config.yml"), good);
+	writeFileSync(join(dual, "settings.json"), "{}\n");
+	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+	const notCovered = finding(rows, "extensions").evidence?.not_covered_profiles as { profile: string; reason: string }[];
+	const reasons = Object.fromEntries(notCovered.map(entry => [entry.profile, entry.reason]));
+	expect(reasons.work).toMatch(/policy skipProfiles/);
+	expect(reasons.claude).toMatch(/^DUAL_CONFIG: config\.yml \+ settings\.json/);
+	expect(finding(rows, "extensions").evidence?.skipped_profiles).toEqual(["work"]);
+});

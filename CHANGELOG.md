@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `omp-kit test --metamorphic` checks every rule against its metamorphic variants (quoting, whitespace, env-prefix, path, chaining): any rule that fires inside quotes, or breaks under an invariant-preserving variant, fails the run with the exact breaking variants. Aggregate rules that legitimately fire inside quotes can declare `dataSchema: "quoted-aggregate"` and are then checked for the full quoted set instead.
+
 - `doctor --scope extensions` reports an `extension_imports` finding alongside the opt-in inventory: for every profile it enumerates the hook and extension files OMP would load and statically resolves each import specifier from the file's directory, naming file, line and specifier for anything unresolvable (the jev hardlinked-hook incident class). Bare `@oh-my-pi/*` (and sibling-scope) host packages resolve through OMP's bundle map, matching the loader; nothing is executed; type-only imports are skipped.
 
 ## 0.2.1 — 2026-10-01
