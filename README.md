@@ -17,10 +17,12 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
 installs OMP, models, profiles, or shell edits. v0.2.2 is the latest
-published release. To upgrade from any earlier version, reinstall with the
-commands above: the `update --apply` postcheck in v0.2.1 and earlier judges the
-new release against the running binary's own rule-case counts, so it refuses any
-release that adds cases. If an earlier attempt left a pending update,
+published release. To upgrade from any earlier version, set `KIT_VERSION` to
+the destination release and run the installer commands above. Binaries from
+v0.2.0 and v0.2.1 embed fixed test counts, so `update --apply` refuses a target
+release that adds cases; use the installer instead. From v0.1.x, reinstall with
+the commands above because those binaries cannot complete `update --apply` on a
+real HOME. If an earlier attempt left a pending update,
 `omp-kit undo RECEIPT --yes` (receipt from `omp-kit audit`) restores the
 previous release and clears it.
 

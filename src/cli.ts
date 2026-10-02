@@ -29,6 +29,7 @@ import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
+import { parseRepeatReceipt, repeatVerdict, type RepeatReceipt } from "./repeat-stats.ts";
 import { runMutants, MutantsInputError } from "./mutants.ts";
 import { runMetamorphicReport } from "./metamorphic.ts";
 import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
@@ -1185,7 +1186,7 @@ async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResul
 	}
 }
 async function mutantsCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project"]) {
+	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario", "--baseline"]) {
 		if (request.flags.has(flag)) {
 			return refusal("INVALID_FLAG", `test --mutants cannot be combined with ${flag}`,
 				"Run mutation adequacy on the bundled pack or one external --rules/--cases pair; nothing was measured.");
@@ -1276,8 +1277,97 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+export async function repeatTestCommand(request: ParsedCommand): Promise<CliResult> {
+	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project", "--integrations", "--profile", "--plan", "--out", "--metamorphic", "--mutants"] as const) {
+		if (request.flags.has(flag)) {
+			return refusal("INVALID_FLAG", `test --repeat cannot be combined with ${flag}`,
+				"Run repeat flake verdicts on live scenarios only; nothing was measured.");
+		}
+	}
+	const rawN = request.flags.get("--repeat");
+	if (typeof rawN !== "string" || !/^[1-9][0-9]*$/.test(rawN) || Number(rawN) > 1000) {
+		return refusal("INVALID_REPEAT", "test --repeat needs a run count 1-1000",
+			"Pass --repeat N with 1 <= N <= 1000; no scenario was run.");
+	}
+	const runs = Number(rawN);
+	const scenarioRaw = request.flags.get("--scenario");
+	if (scenarioRaw !== undefined && (typeof scenarioRaw !== "string" || scenarioRaw.trim() === "")) {
+		return refusal("INVALID_SCENARIO", "test --repeat --scenario needs a scenario id",
+			"Name a scenario from tests/live/scenarios.json or omit --scenario for the full live set.");
+	}
+	const baselineRaw = request.flags.get("--baseline");
+	if (baselineRaw !== undefined && (typeof baselineRaw !== "string" || !isAbsolute(baselineRaw))) {
+		return refusal("INVALID_BASELINE", "test --repeat --baseline needs an absolute receipt path",
+			"Pass an absolute --baseline JSON receipt path or omit it; nothing was measured.");
+	}
+	const identity = kitIdentity();
+	const home = process.env.HOME;
+	if (!identity.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run from an intact compiled release with an absolute HOME.",
+		}], verification: "UNVERIFIED" };
+	}
+	let omp: string;
+	try { omp = resolveOmpIdentity(process.env).launcher; } catch {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "OMP launcher could not be resolved for live repeats",
+			remediation: "Install OMP and put it on PATH; no scenario was run.",
+		}], verification: "UNVERIFIED" };
+	}
+	const scenario = typeof scenarioRaw === "string" ? scenarioRaw : undefined;
+	if (scenario) {
+		let ids: unknown;
+		try { ids = JSON.parse(readFileSync(join(identity.release.root, "tests", "live", "scenarios.json"), "utf8")); } catch {
+			return refusal("SCENARIO_INVENTORY_UNAVAILABLE", "The live scenario inventory could not be read",
+				"Run from an intact release; no scenario was run.");
+		}
+		const known = Array.isArray(ids) ? ids.filter((entry): entry is { id: string } => !!entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string").map((entry) => entry.id) : [];
+		if (!known.includes(scenario)) {
+			return refusal("UNKNOWN_SCENARIO", `Scenario ${scenario} is not in the live inventory`,
+				"Name a scenario from tests/live/scenarios.json or omit --scenario.");
+		}
+	}
+	let baseline: RepeatReceipt | undefined;
+	if (typeof baselineRaw === "string") {
+		try { baseline = parseRepeatReceipt(JSON.parse(readFileSync(baselineRaw, "utf8"))); } catch (error) {
+			return refusal("INVALID_BASELINE", error instanceof Error ? error.message : "Baseline receipt could not be read",
+				"Pass a repeat receipt (version 1 with integer runs/failures) or omit --baseline.");
+		}
+	}
+	if (baseline?.scenario && scenario && baseline.scenario !== scenario) {
+		return refusal("INVALID_BASELINE", `SCENARIO_MISMATCH: current ${scenario} vs baseline ${baseline.scenario}`,
+			"Compare a scenario only against its own baseline receipt; nothing was run.");
+	}
+	const script = join(identity.release.root, "scripts", "e2e-live.sh");
+	const perRunMs = (Number(process.env.TIMEOUT) > 0 ? Number(process.env.TIMEOUT) : 120) * 1000 + 30000;
+	const results: ("pass" | "fail")[] = [];
+	let failureExcerpt: string | null = null;
+	for (let index = 0; index < runs; index += 1) {
+		const child = Bun.spawnSync(["sh", script], {
+			cwd: identity.release.root,
+			env: { ...process.env, OMP: omp, ...(scenario ? { ONLY: scenario } : {}) },
+			timeout: perRunMs, stdout: "pipe", stderr: "pipe",
+		});
+		const output = `${child.stdout ?? ""}${child.stderr ?? ""}`;
+		if (child.exitCode === 0) results.push("pass");
+		else {
+			results.push("fail");
+			failureExcerpt = String(output).slice(-2000);
+		}
+	}
+	const failures = results.filter((entry) => entry === "fail").length;
+	const verdict = repeatVerdict({ version: 1, ...(scenario ? { scenario } : {}), runs, failures, results }, ...(baseline ? [{ baseline }] : []));
+	const code = verdict.kind === "above-target" || verdict.kind === "regressed" ? 1 : 0;
+	return { code, data: { overall: code ? "FAIL" : "OK",
+		repeat: { version: 1, ...(scenario ? { scenario } : {}), runs, failures, results,
+			verdict: verdict.kind, failure_rate: verdict.failure_rate, ci_lower: verdict.ci_lower, ci_upper: verdict.ci_upper,
+			p_value: verdict.p_value, effect_size_h: verdict.effect_size_h, n_needed_post_hoc: verdict.n_needed_post_hoc,
+			...(failureExcerpt === null ? {} : { failure_excerpt: failureExcerpt }) } }, verification: "UNVERIFIED" };
+}
+
 async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project"]) {
+	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario"]) {
 		if (request.flags.has(flag)) {
 			return refusal("INVALID_FLAG", `test --metamorphic cannot be combined with ${flag}`,
 				"Run metamorphic relations on the bundled pack or one external --rules/--cases pair; nothing was measured.");
@@ -1316,6 +1406,7 @@ async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	if (request.flags.has("--mutants")) return mutantsCommand(request);
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (request.flags.has("--integrations")) return integrationsCommand(request);
+	if (request.flags.has("--repeat")) return repeatTestCommand(request);
 	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
