@@ -7,53 +7,17 @@
   "counts": {
    "cases": 276,
    "variants": 1726,
+<<<<<<< HEAD
    "breaks": 61
+=======
+   "breaks": 135
+>>>>>>> origin/fix/mt3-q3-tool-rule-quoting
   }
  },
  "breaks": [
   {
-   "id": "bash-glob-silenced\t2\tquoting\techo \"grep -rl 'x' crates/*/Cargo.toml 2>/dev/null\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-glob-silenced\t2\tquoting\tprintf '%s\\n' \"grep -rl 'x' crates/*/Cargo.toml 2>/dev/null\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-pipe-exit\t5\tquoting\techo \"./scripts/lane-status.sh 2>&1 | tail -16; echo \\\"EXIT=\\$?\\\"\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "bash-pipe-exit\t5\tquoting\tprintf '%s\\n' \"./scripts/lane-status.sh 2>&1 | tail -16; echo \\\"EXIT=\\$?\\\"\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t10\tquoting\techo \"br close kit-x; br list\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t10\tquoting\tprintf '%s\\n' \"br close kit-x; br list\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t12\tquoting\techo \"br close kit-r --actor sample-worker 2>&1 | head -c 200\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t12\tquoting\tprintf '%s\\n' \"br close kit-r --actor sample-worker 2>&1 | head -c 200\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
    "id": "kit-close-needs-evidence\t12\twhitespace\tbr close kit-r \\\n--actor sample-worker 2>&1 | head -c 200",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-needs-evidence\t245\tquoting\techo \"br close x --reason\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t245\tquoting\tprintf '%s\\n' \"br close x --reason\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-close-needs-evidence\t245\twhitespace\tbr close x \\\n--reason",
@@ -62,14 +26,6 @@
   {
    "id": "kit-close-needs-evidence\t246\twhitespace\tbr close x \\\n--reason \"\"",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-needs-evidence\t9\tquoting\techo \"br close bd-42 && git push\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t9\tquoting\tprintf '%s\\n' \"br close bd-42 && git push\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-close-reason-no-evidence\t19\twhitespace\tbr close x \\\n--reason \"done\"",
@@ -104,32 +60,49 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
-   "id": "kit-gate-must-name-the-plant\t30\tquoting\techo \"cd /tmp/proj && bash ../starter-kit/scripts/init.sh\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-gate-must-name-the-plant\t30\tquoting\tprintf '%s\\n' \"cd /tmp/proj && bash ../starter-kit/scripts/init.sh\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t293\tquoting\techo \"git push --force origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t293\tquoting\tprintf '%s\\n' \"git push --force origin main\"",
-   "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
    "id": "kit-no-force-push\t293\twhitespace\tgit push \\\n--force origin main",
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
+<<<<<<< HEAD
    "id": "kit-no-force-push\t294\tquoting\techo \"git push -f origin main\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-no-force-push\t294\tquoting\tprintf '%s\\n' \"git push -f origin main\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
+=======
+   "id": "kit-no-verify\t105\tquoting\techo \"rg -n \\\"git commit '--no-verify'|git commit '-n'\\\" .\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t105\tquoting\tprintf '%s\\n' \"rg -n \\\"git commit '--no-verify'|git commit '-n'\\\" .\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t107\tquoting\techo \"rg -n \\\"\\\\\\$(git commit --no-verify)\\\" .\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t107\tquoting\tprintf '%s\\n' \"rg -n \\\"\\\\\\$(git commit --no-verify)\\\" .\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t109\tquoting\techo \"git '-c' 'CoRe.HoOkSpAtH=/dev/null' commit -m x\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t109\tquoting\tprintf '%s\\n' \"git '-c' 'CoRe.HoOkSpAtH=/dev/null' commit -m x\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t117\tquoting\techo \"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='CORE.HOOKSPATH' GIT_CONFIG_VALUE_0=/dev/null git commit -m x\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+  },
+  {
+   "id": "kit-no-verify\t117\tquoting\tprintf '%s\\n' \"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='CORE.HOOKSPATH' GIT_CONFIG_VALUE_0=/dev/null git commit -m x\"",
+   "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
+>>>>>>> origin/fix/mt3-q3-tool-rule-quoting
   },
   {
    "id": "kit-no-verify\t127\twhitespace\tgit config \\\n--file /tmp/--get-config core.hooksPath /dev/null",
@@ -216,6 +189,7 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
+<<<<<<< HEAD
    "id": "kit-relative-path-not-cwd\t145\tquoting\techo \"cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
@@ -238,6 +212,22 @@
   {
    "id": "kit-scratch-tmp\t282\tquoting\tprintf '%s\\n' \"cmd >> /tmp/log.txt 2>&1\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
+=======
+   "id": "kit-settings-mutation\t149\tquoting\techo \"omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t149\tquoting\tprintf '%s\\n' \"omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t150\tquoting\techo \"omp --profile sample-lab config set disabledProviders '[\\\"agents\\\"]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t150\tquoting\tprintf '%s\\n' \"omp --profile sample-lab config set disabledProviders '[\\\"agents\\\"]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+>>>>>>> origin/fix/mt3-q3-tool-rule-quoting
   },
   {
    "id": "kit-settings-mutation\t150\twhitespace\tomp \\\n--profile sample-lab config set disabledProviders '[\"agents\"]'",
@@ -248,12 +238,189 @@
    "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
+<<<<<<< HEAD
    "id": "zz-canary-scope-probe\t243\tquoting\techo \"echo zzzz_systemwide_canary_9c42\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "zz-canary-scope-probe\t243\tquoting\tprintf '%s\\n' \"echo zzzz_systemwide_canary_9c42\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
+=======
+   "id": "kit-settings-mutation\t153\tquoting\techo \"omp config set extensions '[]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t153\tquoting\tprintf '%s\\n' \"omp config set extensions '[]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t154\tquoting\techo \"HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t154\tquoting\tprintf '%s\\n' \"HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t155\tquoting\techo \"env -u OMP_PROFILE PI_CODING_AGENT_DIR=/tmp/omp-ext-test/agent omp config set extensions '[\\\"/a/one.ts\\\"]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t155\tquoting\tprintf '%s\\n' \"env -u OMP_PROFILE PI_CODING_AGENT_DIR=/tmp/omp-ext-test/agent omp config set extensions '[\\\"/a/one.ts\\\"]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t156\tquoting\techo \"PI_CODING_AGENT_DIR=/tmp/omp-probe/agent omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t156\tquoting\tprintf '%s\\n' \"PI_CODING_AGENT_DIR=/tmp/omp-probe/agent omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t157\tquoting\techo \"env -u OMP_PROFILE -u PI_PROFILE HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t157\tquoting\tprintf '%s\\n' \"env -u OMP_PROFILE -u PI_PROFILE HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t158\tquoting\techo \"HOME=/tmp/omp-home env -u PI_PROFILE -u OMP_PROFILE omp config set ttsr.disabledRules '[]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t158\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home env -u PI_PROFILE -u OMP_PROFILE omp config set ttsr.disabledRules '[]'\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t162\tquoting\techo \"HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t162\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t163\tquoting\techo \"HOME=/tmp/omp-home omp --profile claude config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t163\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home omp --profile claude config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t167\tquoting\techo \"HOME=/tmp/omp-home env -u HOME omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t167\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home env -u HOME omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t169\tquoting\techo \"HOME=/tmp/omp-home env HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t169\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home env HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t171\tquoting\techo \"HOME=/tmp/omp-home HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t171\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home HOME=/opt/omp-live-home omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t173\tquoting\techo \"omp config set 'ttsr.enabled' false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t173\tquoting\tprintf '%s\\n' \"omp config set 'ttsr.enabled' false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t177\tquoting\techo \"rg -q x \\\"\\$(omp config set ttsr.enabled false)\\\" /dev/null; true\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t177\tquoting\tprintf '%s\\n' \"rg -q x \\\"\\$(omp config set ttsr.enabled false)\\\" /dev/null; true\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t179\tquoting\techo \"rg -q x \\\"\\`omp config set 'disabledExtensions' '[]'\\`\\\" /dev/null; true\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t179\tquoting\tprintf '%s\\n' \"rg -q x \\\"\\`omp config set 'disabledExtensions' '[]'\\`\\\" /dev/null; true\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t180\tquoting\techo \"rg -n \\\"omp config set 'ttsr.enabled' false\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t180\tquoting\tprintf '%s\\n' \"rg -n \\\"omp config set 'ttsr.enabled' false\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t182\tquoting\techo \"rg -n \\\"\\\\\\$(omp config set ttsr.enabled false)\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t182\tquoting\tprintf '%s\\n' \"rg -n \\\"\\\\\\$(omp config set ttsr.enabled false)\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t183\tquoting\techo \"rg -n \\\"\\\\\\`omp config set ttsr.enabled false\\\\\\`\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t183\tquoting\tprintf '%s\\n' \"rg -n \\\"\\\\\\`omp config set ttsr.enabled false\\\\\\`\\\" .\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t189\tquoting\techo \"HOME=/tmp/omp-home; omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t189\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home; omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t190\tquoting\techo \"HOME=/tmp/omp-home env --unset=HOME omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t190\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home env --unset=HOME omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t191\tquoting\techo \"HOME=/tmp/omp-home env -i omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t191\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home env -i omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t192\tquoting\techo \"HOME=/tmp/omp-home omp config get ttsr.enabled; omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t192\tquoting\tprintf '%s\\n' \"HOME=/tmp/omp-home omp config get ttsr.enabled; omp config set ttsr.enabled false\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t276\tquoting\techo \"br update --description \\\"rollout note: run omp config set ttsr.enabled false on staging\\\"\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+  },
+  {
+   "id": "kit-settings-mutation\t276\tquoting\tprintf '%s\\n' \"br update --description \\\"rollout note: run omp config set ttsr.enabled false on staging\\\"\"",
+   "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
+>>>>>>> origin/fix/mt3-q3-tool-rule-quoting
   }
  ]
 }
