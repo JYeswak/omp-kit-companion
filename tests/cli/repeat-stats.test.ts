@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { repeatTestCommand } from "../../src/cli.ts";
+import { findCommand } from "../../src/commands.ts";
 import { clopperPearson, cohensH, fisherExact, repeatVerdict, sampleSize } from "../../src/repeat-stats.ts";
 
 test("Clopper-Pearson matches textbook bounds", () => {
@@ -54,4 +56,17 @@ test("baseline verdicts follow Fisher, not raw counts", () => {
 	const plain = repeatVerdict({ version: 1, runs: 20, failures: 2 });
 	expect(plain.kind).toBe("unjudged");
 	expect(plain.p_value).toBeNull();
+});
+
+test("repeat handler refuses bad counts, clashing flags, and bad selections before any run", async () => {
+	const command = findCommand("test");
+	if (!command) throw new Error("test command missing");
+	const call = (flags: [string, string | true][]) => repeatTestCommand({ command, flags: new Map(flags), json: true, robot: false });
+	for (const bad of ["0", "abc", "1001", ""]) {
+		const result = await call([["--repeat", bad]]);
+		expect(result.errors?.[0]?.code).toBe("INVALID_REPEAT");
+	}
+	expect((await call([["--repeat", "5"], ["--full", true]])).errors?.[0]?.code).toBe("INVALID_FLAG");
+	expect((await call([["--repeat", "5"], ["--scenario", ""]])).errors?.[0]?.code).toBe("INVALID_SCENARIO");
+	expect((await call([["--repeat", "5"], ["--baseline", "relative/path.json"]])).errors?.[0]?.code).toBe("INVALID_BASELINE");
 });

@@ -1,6 +1,6 @@
 /** Exact flake verdicts for `test --repeat`: Clopper-Pearson bounds on the failure rate, Fisher's exact test against a baseline receipt, and the sample size needed to detect the observed change. Zero dependencies; every number here recomputes from the receipt. */
 
-export interface RepeatReceipt { version: 1; scenario?: string; runs: number; failures: number }
+export interface RepeatReceipt { version: 1; scenario?: string; runs: number; failures: number; results?: readonly ("pass" | "fail")[] }
 export type RepeatVerdictKind = "improved" | "regressed" | "not-distinguishable" | "below-target" | "above-target" | "unjudged";
 export interface RepeatVerdict {
 	kind: RepeatVerdictKind;
@@ -144,6 +144,15 @@ function checkReceipt(receipt: RepeatReceipt, role: string): void {
 	if (!receipt || receipt.version !== 1 || !Number.isInteger(receipt.runs) || !Number.isInteger(receipt.failures) || receipt.runs <= 0 || receipt.failures < 0 || receipt.failures > receipt.runs) {
 		throw new Error(`INVALID_REPEAT_RECEIPT: ${role}`);
 	}
+	if (receipt.results !== undefined && (!Array.isArray(receipt.results) || receipt.results.length !== receipt.runs || receipt.results.some((entry) => entry !== "pass" && entry !== "fail"))) {
+		throw new Error(`INVALID_REPEAT_RECEIPT: ${role} results`);
+	}
+}
+
+/** Parse an untrusted baseline file value into a receipt; throws INVALID_REPEAT_RECEIPT. */
+export function parseRepeatReceipt(value: unknown): RepeatReceipt {
+	checkReceipt(value as RepeatReceipt, "baseline");
+	return value as RepeatReceipt;
 }
 
 /** Verdict from a repeat receipt, optionally against a baseline receipt or a fixed failure-rate target. n_needed is post-hoc from the observed effect. */
