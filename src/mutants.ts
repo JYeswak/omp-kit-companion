@@ -19,6 +19,7 @@ export interface MutantsInput {
 export interface MutantSurvivor {
 	kind: string;
 	edit: string;
+	condition_index: number;
 }
 
 export interface MutantRuleReport {

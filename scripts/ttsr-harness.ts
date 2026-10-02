@@ -1208,7 +1208,7 @@ interface MutantRuleReport {
 	score: number | null;
 	skipped_compile: number;
 	baseline_failures: number;
-	survivors: { kind: string; edit: string }[];
+	survivors: { kind: string; edit: string; condition_index: number }[];
 }
 
 /** Baseline G2 verdicts plus quiet-prefix fire flags for one rule over its cases. */
@@ -1270,7 +1270,7 @@ async function runMutants(rulesDir: string, casesFile: string, budgetSecs: numbe
 		}
 		let killed = 0;
 		let skippedCompile = 0;
-		const survivors: { kind: string; edit: string }[] = [];
+		const survivors: { kind: string; edit: string; condition_index: number }[] = [];
 		for (const mutant of mutants) {
 			if (expired()) {
 				truncated = true;
@@ -1313,7 +1313,7 @@ async function runMutants(rulesDir: string, casesFile: string, budgetSecs: numbe
 			if (killer.length > 0) {
 				killed++;
 			} else {
-				survivors.push({ kind: mutant.kind, edit: mutant.edit });
+				survivors.push({ kind: mutant.kind, edit: mutant.edit, condition_index: mutant.condition_index });
 			}
 		}
 		const evaluated = killed + survivors.length;
