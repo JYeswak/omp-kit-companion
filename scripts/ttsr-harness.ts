@@ -524,14 +524,18 @@ function variantsFor(c: Case): { variants: MetamorphicVariant[]; skipped: { rela
 	const skipped: { relation: MetamorphicRelation; reason: string }[] = [];
 	const bash = c.source === "tool" && c.tool === "bash";
 	const text = c.source === "text" || c.source === "thinking";
-	if (bash || text) {
+	if (text) {
+		skipped.push({ relation: "quoting", reason: "prose in quotes is the same claim; no shell quoting model for text scope" });
+		skipped.push({ relation: "whitespace", reason: "shell whitespace variants do not apply to prose" });
+		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
+		skipped.push({ relation: "path-form", reason: "path toggling is shell syntax, not prose" });
+		skipped.push({ relation: "chaining", reason: "chaining is shell syntax" });
+		return { variants, skipped };
+	}
+	if (bash) {
 		const quoted = quoteForDouble(c.snippet);
-		if (bash) {
-			variants.push({ relation: "quoting", snippet: `echo "${quoted}"` });
-			variants.push({ relation: "quoting", snippet: `printf '%s\\n' "${quoted}"` });
-		} else {
-			variants.push({ relation: "quoting", snippet: `"${quoted}"` });
-		}
+		variants.push({ relation: "quoting", snippet: `echo "${quoted}"` });
+		variants.push({ relation: "quoting", snippet: `printf '%s\\n' "${quoted}"` });
 	} else {
 		skipped.push({ relation: "quoting", reason: "file content is data, not an invocation" });
 	}
@@ -564,12 +568,56 @@ interface MetamorphicReport {
 	counts: { cases: number; variants: number; breaks: number; skipped: number };
 }
 
+/** Stable ratchet id for one break: rule, case line, relation, exact variant. */
+export function metamorphicBreakId(b: { rule: string; line: number; relation: MetamorphicRelation; variant: string }): string {
+	return `${b.rule}\t${b.line}\t${b.relation}\t${b.variant}`;
+}
+
+interface MetamorphicBaselineEntry { id: string; reason: string; }
+interface MetamorphicBaselineDoc { schema_version: 1; breaks: MetamorphicBaselineEntry[]; }
+
+function isBaselineDoc(value: unknown): value is MetamorphicBaselineDoc {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("schema_version" in value) || value.schema_version !== 1) return false;
+	if (!("breaks" in value) || !Array.isArray(value.breaks)) return false;
+	return value.breaks.every((entry: unknown) =>
+		typeof entry === "object" && entry !== null
+		&& "id" in entry && typeof entry.id === "string" && entry.id !== ""
+		&& "reason" in entry && typeof entry.reason === "string" && entry.reason !== "");
+}
+
+function loadBaseline(file: string): { ids: Set<string>; reasons: Record<string, string> } {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch (error) {
+		throw new Error(`metamorphic baseline unreadable: ${file} (${(error as Error).message})`);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error(`metamorphic baseline is not JSON: ${file}`);
+	}
+	if (!isBaselineDoc(parsed)) {
+		throw new Error(`metamorphic baseline schema mismatch (want schema_version 1 with breaks[{id, reason}]): ${file}`);
+	}
+	const ids = new Set<string>();
+	const reasons: Record<string, string> = {};
+	for (const entry of parsed.breaks) {
+		ids.add(entry.id);
+		reasons[entry.id] = entry.reason;
+	}
+	return { ids, reasons };
+}
+
 async function runMetamorphic(rulesDir: string, casesFile: string): Promise<MetamorphicReport> {
 	const rules = loadRules(rulesDir);
 	const byName = new Map(rules.map(r => [r.name, r]));
 	const { cases, errors } = loadCases(casesFile);
 	if (errors.length > 0) throw new Error(`metamorphic cases unreadable: ${errors[0]}`);
 	const breaks: MetamorphicBreak[] = [];
+	let evaluated = 0;
 	let variants = 0;
 	let skipped = 0;
 	for (const c of cases) {
@@ -577,6 +625,8 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 		if (!rule) continue;
 		const generated = variantsFor(c);
 		skipped += generated.skipped.length;
+		if (generated.variants.length === 0) continue;
+		evaluated += 1;
 		for (const [vi, v] of generated.variants.entries()) {
 			variants += 1;
 			// Each variant is an independent hypothetical stream: sharing the
@@ -589,7 +639,7 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 			}
 		}
 	}
-	return { breaks, counts: { cases: cases.length, variants, breaks: breaks.length, skipped } };
+	return { breaks, counts: { cases: evaluated, variants, breaks: breaks.length, skipped } };
 }
 
 // ---------------------------------------------------------------- selftest
@@ -1176,8 +1226,18 @@ switch (mode) {
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
 		const rep = await runMetamorphic(rulesDir, casesFile);
-		console.log(JSON.stringify({ schema_version: 1, status: rep.breaks.length === 0 ? "PASS" : "FAIL", counts: rep.counts, breaks: rep.breaks }));
-		code = rep.breaks.length === 0 ? 0 : 1;
+		const baselinePath = flagValue("--baseline");
+		if (baselinePath === undefined) {
+			console.log(JSON.stringify({ schema_version: 1, status: rep.breaks.length === 0 ? "PASS" : "FAIL", counts: rep.counts, breaks: rep.breaks }));
+			code = rep.breaks.length === 0 ? 0 : 1;
+			break;
+		}
+		const baseline = loadBaseline(path.resolve(baselinePath));
+		const current = new Set(rep.breaks.map(metamorphicBreakId));
+		const fresh = rep.breaks.filter(b => !baseline.ids.has(metamorphicBreakId(b)));
+		const stale = [...baseline.ids].filter(id => !current.has(id));
+		console.log(JSON.stringify({ schema_version: 1, status: fresh.length === 0 ? "PASS" : "FAIL", mode: "ratchet", counts: { ...rep.counts, fresh: fresh.length, stale: stale.length }, breaks: rep.breaks, new_breaks: fresh, stale_baseline_ids: stale }));
+		code = fresh.length === 0 ? 0 : 1;
 		break;
 	}
 	default:

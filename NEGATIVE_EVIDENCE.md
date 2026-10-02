@@ -69,8 +69,9 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 
 - Hypothesis: the five MT3 relations hold for every rule case (quoting suppresses;
   whitespace, env prefix, path form and chaining preserve the verdict).
-- Measured result (`bun scripts/ttsr-harness.ts --metamorphic-json`, 295 cases,
-  1765 variants, OMP 18.4.9): 182 breaks. Quoting 138 (quoted payload still fires;
+- Measured result (`bun scripts/ttsr-harness.ts --metamorphic-json`, 276 tool
+  cases / 1726 variants after text-scope cases were excluded from shell
+  relations, OMP 18.4.10): 170 breaks. Quoting 126 (quoted payload still fires;
   rules deliberately match quoted shell words, e.g. `''commit''` forms, and a local
   regex cannot tell `echo "..."` from `bash -c "..."`); backslash-newline
   continuations 37 (wire-position anchors match at wire start or after shell
@@ -78,10 +79,23 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
   family, e.g. `FOO=1 pkill`) plus 3 quiet-fire where the prefix defeats the
   HOME=/tmp test-harness exemption; leading/trailing space, chaining and
   path-form hold everywhere (the one leading-space miss, kit-no-pattern-kill,
-  was fixed by allowing `\\s*` after wire starts).
+  was fixed by allowing `\s*` after wire starts). 19 text/thinking-scope prose
+  cases (kit-structure-not-truth, kit-unverified-done, kit-no-ask-rmrf and
+  7 more) take no shell relations: prose in quotes is the same claim, so the
+  harness skips all five relations for text scope rather than counting breaks.
 - Verdict: record, do not fix by loosening anchors here. Anchor and quoting
   semantics are recall/precision tradeoffs owned per rule; loosening them risks
-  the prose false-fires S4/R1 closed. The ladder does not run the metamorphic
-  step until these classes are fixed or formally exempted per rule.
+  the prose false-fires S4/R1 closed. Per-rule fixes go to fix beads (quoting
+  exclusions Q1/Q2/Q3, continuation matching W, env-prefix anchors E); this
+  entry keeps the measurement.
+- Ratchet adopted 2026-10-02: `scripts/ladder.sh` runs the metamorphic step
+  against `tests/cli/metamorphic-baseline.json` (170 known break ids, each
+  with a FIX-class reason; re-measured on OMP 18.4.10: quoting 126,
+  whitespace 37, env-prefix 7 over 276 tool cases / 1726 variants). 19
+  text/thinking-scope prose cases take no shell relations at all (prose in
+  quotes is the same claim); the harness skips all five relations for text
+  scope. A NEW break fails the ladder; a fixed break is removed
+  from the baseline by hand-edit (no auto-update, so the count can only
+  fall by review). Nothing is listed as known without its reason.
 - Retry condition: re-run the metamorphic report after any rule-condition edit;
-  a class reaching zero breaks is removed from this entry.
+  a class reaching zero breaks is removed from this entry and the baseline.
