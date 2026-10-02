@@ -1,5 +1,5 @@
 import { check as checkGit } from "../src/fleet-guard/git.ts";
-import { check as checkReservations } from "../src/fleet-guard/reservations.ts";
+import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
 import { applyScratchEnv, check as checkScratch, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 
 /**
@@ -32,6 +32,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	writeScratchOwner(dir, { pid, label: "omp", repo: dir.split("/var/agent-tmp/")[0] ?? cwd,
 		created: new Date().toISOString() });
 	applyScratchEnv(dir);
+	try { await exportAgentMailStorageRoot(); } catch { /* A failed export never blocks session load; doctor flags the fail-open guard. */ }
 	pi.setLabel("fleet-guard");
 	pi.on("tool_call", async event => handleToolCall(event, { cwd }));
 }

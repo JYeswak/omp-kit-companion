@@ -106,37 +106,25 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 	}
 }
 
-/** (rule, TSV line) pairs with at least one metamorphic break: appending a copy
- * of such a row would re-exhibit its breaks under a fresh line id and fail the
- * target postcheck ratchet. The N+2 controls must be metamorphic-clean. */
-function metamorphicBreakingPairs(sourceRoot: string, tmp: string): Set<string> {
-	const run = Bun.spawnSync([process.execPath, join(sourceRoot, "scripts", "ttsr-harness.ts"),
-		"--metamorphic-json", "--rules", join(sourceRoot, "rules"),
-		"--cases", join(sourceRoot, "cases", "cases.tsv")],
-		{ cwd: sourceRoot, env: { ...process.env, TMPDIR: tmp }, stdout: "pipe", stderr: "pipe" });
-	const out = run.stdout.toString();
-	if (!out.trim().startsWith("{")) throw new Error("metamorphic control scan failed: " + run.stderr.toString().slice(0, 300));
-	const report = JSON.parse(out) as { breaks?: { rule?: unknown; line?: unknown }[] };
-	return new Set((report.breaks ?? []).map(entry => `${String(entry.rule ?? "")}\t${Number(entry.line ?? 0)}`));
-}
-
- function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable: string; baseCases: number; baseQuiet: number; targetCases: number; targetQuiet: number } {
- 	const sourceRoot = join(ctx.root, "candidate-source");
- 	copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
- 	const casesPath = join(sourceRoot, "cases", "cases.tsv");
- 	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
- 	const caseLines = rawCases.split("\n");
- 	if (caseLines[0] !== "rule\texpect\tsource\ttool\tpath\tsnippet\tnote") throw new Error("candidate cases fixture has an unknown schema");
-	const numbered = caseLines.map((row, index) => ({ row, line: index + 1 })).slice(1)
-		.filter(entry => entry.row.trim() !== "" && !entry.row.startsWith("#"));
-	const rows = numbered.map(entry => entry.row);
-	const broken = metamorphicBreakingPairs(sourceRoot, ctx.root);
-	const pairKey = (rule: string, line: number): string => `${rule}\t${line}`;
-	const ruleOf = (row: string): string => row.split("\t")[0] ?? "";
-	const fireEntry = numbered.find(entry => entry.row.split("\t")[1] === "fire" && !broken.has(pairKey(ruleOf(entry.row), entry.line)));
-	const quietEntry = numbered.find(entry => entry.row.split("\t")[1] === "quiet" && !broken.has(pairKey(ruleOf(entry.row), entry.line)));
-	if (!fireEntry || !quietEntry) throw new Error("candidate cases fixture needs metamorphic-clean fire and quiet controls");
-	const fire = fireEntry.row, quiet = quietEntry.row;
+function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable: string; baseCases: number; baseQuiet: number; targetCases: number; targetQuiet: number } {
+	const sourceRoot = join(ctx.root, "candidate-source");
+	copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
+	const casesPath = join(sourceRoot, "cases", "cases.tsv");
+	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
+	const caseLines = rawCases.split("\n");
+	if (caseLines[0] !== "rule\texpect\tsource\ttool\tpath\tsnippet\tnote") throw new Error("candidate cases fixture has an unknown schema");
+	const rows = caseLines.slice(1).filter(row => row.trim() !== "" && !row.startsWith("#"));
+	// These existing controls have no known metamorphic breaks; N+2 tests case-count drift only.
+	const fire = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "fire" && columns[5] === "br close x";
+	});
+	const quiet = rows.find(row => {
+		const columns = row.split("\t");
+		return columns[0] === "kit-close-needs-evidence" && columns[1] === "quiet" &&
+			columns[5] === 'br close x --reason "cargo test -> 41 passed; commit a1b2c3d"';
+	});
+	if (!fire || !quiet) throw new Error("candidate cases fixture needs metamorphic-clean fire and quiet controls");
 	const annotate = (row: string, label: string): string => {
 		const columns = row.split("\t");
 		columns[6] = ((columns[6] ?? "") + " " + label).trim();

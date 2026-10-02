@@ -8,6 +8,7 @@ import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
+import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
@@ -35,6 +36,7 @@ import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -843,6 +845,53 @@ function rulesCommand(request: ParsedCommand): CliResult {
 
 registerCommandHandler("apply rules", rulesCommand);
 
+function migrateCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME;
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run the compiled kit release with an absolute HOME; no rule file was changed.",
+		}], verification: "UNVERIFIED" };
+	const xdgState = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
+		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
+	try {
+		const plan = planMigration({ root, home, stateRoot: join(xdgState, "omp-kit") });
+		const data = { overall: "UNVERIFIED", action: "PLAN", rows: plan.rows, pluginRules: plan.pluginRules,
+			pluginAbsent: plan.pluginAbsent, removable: plan.removable, keptCount: plan.kept, receipt_id: null as string | null };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		if (plan.pluginAbsent) return { code: 2, data, errors: [{
+			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
+			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
+		}], verification: "UNVERIFIED" };
+		planMigrationMutation(plan, { root, home, stateRoot: join(xdgState, "omp-kit") });
+		const result = applyMigration(plan, { root, home, stateRoot: join(xdgState, "omp-kit") }, { confirmed: true });
+		return { code: 0, data: { ...data, action: "APPLIED", receipt_id: result.receiptId, kept: result.kept,
+			backup_dir: result.backupDir, removed: result.removed, verified: result.verified }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "OMP_UNAVAILABLE") return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "OMP is not resolvable, so plugin sources cannot be read",
+			remediation: "Install OMP and re-run; no rule file was changed.",
+		}], verification: "UNVERIFIED" };
+		if (code === "PLUGIN_ABSENT") return { code: 2, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
+			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
+		}], verification: "UNVERIFIED" };
+		if (code === "MIGRATE_VERIFY_FAILED") return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "MIGRATE_VERIFY_FAILED", message: "Post-apply source check failed; backup copies were kept",
+			remediation: "Inspect the backup dir and ttsr list output; restore from backup or undo the receipt.",
+		}], verification: "UNVERIFIED" };
+		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "FRESH_PLAN", "INVALID_PLAN",
+			"PLUGIN_LIST_FAILED", "RULES_FAILED", "INSUFFICIENT_SPACE", "LOCK_BUSY", "PENDING_RECOVERY", "MUTATION_FAILED"];
+		return refusal(safe.includes(code) ? code : "MIGRATE_FAILED",
+			"Rule migration refused without claiming a completed change",
+			"Inspect the plugin install and exact rule bytes, then replan.");
+	}
+}
+
+registerCommandHandler("migrate", migrateCommand);
+
 function extensionCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
 	if (!root || !home || !isAbsolute(home))
@@ -1517,6 +1566,23 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; the job did not run." }], verification: "UNVERIFIED" };
 		}
+		if (job.name === "scratch-reaper") {
+			// The scheduled job reports; apply stays an explicit operator verb (needs coordinator go on real machines).
+			const started = new Date().toISOString();
+			const plan = planScratch(home, { liveness: defaultLiveness(), run: scratchRunner });
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null };
+			try {
+				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
+				writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+			} catch {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root, then rerun; nothing was reaped." }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "OK", job: job.name, receipt,
+				stats: { roots: plan.roots.length, sessions: plan.sessions.length, orphans: plan.orphans.length,
+					reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes } }, verification: "UNVERIFIED" };
+		}
 		const started = new Date().toISOString();
 		const child = Bun.spawnSync([launcher, "test", "--record", "--json"], { stdout: "pipe", stderr: "pipe", env: process.env });
 		const ompVersion = (() => { try { return ompIdentity().version; } catch { return null; } })();
@@ -1542,6 +1608,43 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
+
+async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
+	const sub = request.command.name;
+	let home: string;
+	try {
+		home = serviceHome();
+	} catch {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
+				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
+	}
+	const deps = { liveness: defaultLiveness(), run: scratchRunner,
+		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
+			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
+		} };
+	if (sub === "plan") {
+		const plan = planScratch(home, deps);
+		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
+			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes }, verification: "UNVERIFIED" };
+	}
+	if (sub === "apply") {
+		if (!request.flags.has("--apply")) {
+			return refusal("SCRATCH_REQUIRES_APPLY", "scratch apply deletes scratch and kills orphaned harness servers",
+				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
+		}
+		const result = applyScratch(home, { ...deps, home });
+		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+		return { code: failed > 0 ? 1 : 0,
+			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
+				orphans: result.orphans, killed: result.killed, expired: result.expired,
+				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
+			verification: "UNVERIFIED" };
+	}
+	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
+}
+
+for (const subcommand of ["plan", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
