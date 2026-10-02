@@ -429,16 +429,22 @@ def native(args):
                                "profile_template_unchanged", "fixture_project_unchanged", "protected_inputs_unchanged",
                                "lsp_mux_stopped", "mock_model_clean", "process_output_complete")
             calls = lsp_pass["calls"]
+            call_actions = [call.get("action") for call in calls]
+            reference_call = next((call for call in calls if call.get("action") == "references"), None)
+            absent_call = next((call for call in calls if call.get("action") == "symbols"), None)
+            status_calls = [call for call in calls if call.get("action") == "status"]
             if (any(lsp_pass["checks"].get(key) is not True for key in positive_checks)
                     or lsp_pass["checks"].get("has_failed_checks") is not False
                     or lsp_pass["timed_out"] is not False or lsp_pass["omp_rc"] != 0
-                    or len(calls) != 5
+                    or len(calls) < 5 or not call_actions or call_actions[0] != "status"
+                    or call_actions.count("capabilities") != 1 or len(status_calls) < 2
+                    or reference_call is None or absent_call is None
                     or any(type(call.get("elapsed_ms")) not in (int, float)
                            or not 0 <= call["elapsed_ms"] <= 180_000 for call in calls)
-                    or calls[2].get("symbol") != "lspProbeKnownSymbol"
-                    or "Found " not in calls[2].get("result", "")
-                    or not calls[3].get("query", "").startswith("LspProbeAbsentSymbol_")
-                    or "No symbols matching" not in calls[3].get("result", "")
+                    or reference_call.get("symbol") != "lspProbeKnownSymbol"
+                    or "Found " not in reference_call.get("result", "")
+                    or not absent_call.get("query", "").startswith("LspProbeAbsentSymbol_")
+                    or "No symbols matching" not in absent_call.get("result", "")
                     or lsp_pass["protected_input_snapshots"].get("unchanged") is not True
                     or lsp_pass["profile_template_unchanged"] is not True
                     or lsp_pass["fixture_project_unchanged"] is not True
