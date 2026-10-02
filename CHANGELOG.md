@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-02
+
+- Extension installs skip per-profile with named reasons instead of refusing the whole plan: profiles with no config (`NO_CONFIG`), dual `config.yml`+`settings.json` (`DUAL_CONFIG` naming both files), and unreadable or unparseable configs stay untouched and listed; `doctor --scope extensions` reports them as `not_covered_profiles` rather than silently uncovering them.
+- Fleet-guard sessions export the live Agent Mail storage root at load so the pre-commit guard resolves reservations; `doctor` adds an `agent_mail_guard` finding that reports `UNVERIFIED` when the variable is unset, since bare shells without it fail open.
+- `doctor --scope dicklesworthstone` reports installed-vs-latest for the Dicklesworthstone tool stack with one install source per tool (tap formula preferred, otherwise undecided pending approval), failing honest `DEGRADED`/`UNVERIFIED` instead of claiming currency.
+- The cold-start LSP probe cleans up after itself and drops the unproven reference retry, keeping failure-only JSON-RPC receipts for diagnosis.
+
 - `test --mutants` measures mutation adequacy of rule conditions against their cases through the real matcher, with per-rule scores, survivor edits, compile-failure counts, and a bounding `--mutant-budget-secs` flag; works on external packs too.
 - Test runs no longer touch real local model providers: `scripts/e2e-live.sh` disables implicit socket discovery (`ollama`, `llama.cpp`, `lm-studio`) in the isolated test config, so a release check cannot hold the machine's Ollama port. The per-scenario mock provider is unaffected. `e2e-live.sh` also traps TERM/INT now: it kills every descendant, reaps bounded with KILL escalation, and exits 143/130 instead of spawning the next scenario.
 - `migrate --plan` rows for edited copies now carry the unified diff against the shipped rule, the proposed native destination (`.omp/agent/rules/<name>.md`, which outranks the plugin), and an `unlisted` flag for manifest-known rules nothing serves. `kit-standing-law` is alwaysApply (never plugin-listed), so it stays unlisted with and without a native copy: its migration needs a human decision, recorded for C4.

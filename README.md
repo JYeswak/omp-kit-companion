@@ -6,7 +6,7 @@ Test OMP rules, preview every change, apply with receipts.
 ## Installation
 
 ```sh
-KIT_VERSION=0.2.1
+KIT_VERSION=0.2.2
 KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
 git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git
 cd omp-kit-companion
@@ -16,7 +16,7 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
-installs OMP, models, profiles, or shell edits. v0.2.1 is the latest
+installs OMP, models, profiles, or shell edits. v0.2.2 is the latest
 published release. To upgrade from any earlier version, reinstall with the
 commands above: the `update --apply` postcheck in v0.2.1 and earlier judges the
 new release against the running binary's own rule-case counts, so it refuses any
@@ -25,7 +25,7 @@ release that adds cases. If an earlier attempt left a pending update,
 previous release and clears it.
 
 The rules themselves can also come straight through OMP's plugin loader:
-`omp plugin install github:JYeswak/omp-kit-companion#v0.2.1`. See
+`omp plugin install github:JYeswak/omp-kit-companion#v0.2.2`. See
 [docs/usage.md](docs/usage.md) for how plugin rules rank against native and
 `~/.agents/rules` copies. An automated move off existing copies is still to come.
 
