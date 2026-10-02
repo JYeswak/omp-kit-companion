@@ -1167,6 +1167,317 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 	}
 }
 
+// ---------------------------------------------------------------- mutants (H3)
+
+interface MutantEdit {
+	kind: string;
+	condition_index: number;
+	edit: string;
+	source: string;
+}
+
+interface CharInfo {
+	escaped: boolean;
+	inClass: boolean;
+	classFirst: boolean;
+	depth: number;
+	inFlags: boolean;
+}
+
+/** Per-character regex structure: escapes, classes (with negation/first), paren depth, (?...) flags. */
+function scanPattern(src: string): CharInfo[] {
+	const out: CharInfo[] = src.split("").map(() => ({ escaped: false, inClass: false, classFirst: false, depth: 0, inFlags: false }));
+	let inClass = false;
+	let classFirst = false;
+	let depth = 0;
+	let i = 0;
+	while (i < src.length) {
+		const ch = src[i];
+		if (ch === "\\" && i + 1 < src.length) {
+			out[i] = { escaped: false, inClass, classFirst: false, depth, inFlags: false };
+			out[i + 1] = { escaped: true, inClass, classFirst, depth, inFlags: false };
+			if (inClass) classFirst = false;
+			i += 2;
+			continue;
+		}
+		if (!inClass && ch === "(" && src[i + 1] === "?") {
+			let j = i + 2;
+			while (j < src.length && /[a-zA-Z]/.test(src[j] ?? "")) j++;
+			if (src[j] === ")") {
+				for (let k = i; k <= j; k++) out[k] = { ...out[k], inFlags: true };
+				i = j + 1;
+				continue;
+			}
+		}
+		if (!inClass && ch === "[") {
+			inClass = true;
+			classFirst = true;
+			i++;
+			continue;
+		}
+		if (inClass && ch === "]" && !classFirst) {
+			inClass = false;
+			i++;
+			continue;
+		}
+		out[i] = { ...out[i], inClass, classFirst, depth };
+		if (inClass) classFirst = false;
+		if (!inClass && ch === "(") depth++;
+		if (!inClass && ch === ")" && depth > 0) depth--;
+		i++;
+	}
+	return out;
+}
+
+// Widening probes: a private-use char no authored case can contain first, then
+// printable fallbacks. Built by code point so no invisible literal sits in source.
+const CLASS_WIDEN_PROBES: readonly string[] = [String.fromCodePoint(0xe000), "~", "_", " ", "0", "é"];
+
+/** Token-level mutants of one condition source. Skips nothing; callers dedupe and compile-check. */
+function mutateCondition(src: string, index: number): MutantEdit[] {
+	const edits: MutantEdit[] = [];
+	const info = scanPattern(src);
+	const drop = (kind: string, edit: string, from: number, to: number): void => {
+		edits.push({ kind, condition_index: index, edit, source: src.slice(0, from) + src.slice(to) });
+	};
+	const replace = (kind: string, edit: string, from: number, to: number, text: string): void => {
+		edits.push({ kind, condition_index: index, edit, source: src.slice(0, from) + text + src.slice(to) });
+	};
+	const pipes: number[] = [];
+	for (let i = 0; i < src.length; i++) {
+		if (src[i] === "|" && !info[i]?.escaped && !info[i]?.inClass && (info[i]?.depth ?? 0) === 0) pipes.push(i);
+	}
+	if (pipes.length > 0) {
+		const bounds = [-1, ...pipes, src.length];
+		const segments: string[] = [];
+		for (let b = 0; b + 1 < bounds.length; b++) segments.push(src.slice((bounds[b] ?? -1) + 1, bounds[b + 1]));
+		for (let b = 0; b < segments.length; b++) {
+			edits.push({ kind: "drop-alternation-branch", condition_index: index,
+				edit: `drop alternation branch ${b + 1}/${segments.length}`,
+				source: segments.filter((_, k) => k !== b).join("|") });
+		}
+	}
+	for (let i = 0; i < src.length; i++) {
+		const inf = info[i];
+		if (!inf || inf.escaped || inf.inClass || inf.inFlags) continue;
+		const ch = src[i];
+		if (ch === "^") drop("drop-anchor", `drop ^ at ${i}`, i, i + 1);
+		else if (ch === "$") drop("drop-anchor", `drop $ at ${i}`, i, i + 1);
+		else if (ch === "+" ) replace("weaken-quantifier", `+ at ${i} to *`, i, i + 1, "*");
+		else if (/[A-Za-z0-9]/.test(ch ?? "") && src[i - 1] !== "\\") replace("drop-literal", `drop literal ${ch} at ${i}`, i, i + 1, "");
+		if (ch === "\\" && src[i + 1] === "b") drop("drop-word-boundary", `drop \\b at ${i}`, i, i + 2);
+	}
+	const brace = /\\?\{(\d+)\}/g;
+	let m: RegExpExecArray | null;
+	while ((m = brace.exec(src)) !== null) {
+		const pos = m.index + (m[0].startsWith("\\") ? 1 : 0);
+		const inf = info[pos];
+		if (!inf || inf.escaped || inf.inClass || inf.inFlags) continue;
+		if (m[0].startsWith("\\")) continue;
+		const n = Number(m[1]);
+		if (n >= 1) replace("shrink-quantifier", `{${n}} at ${pos} to {${n - 1}}`, pos, pos + m[0].length, `{${n - 1}}`);
+	}
+	if (!info.some(inf => inf.inFlags)) {
+		edits.push({ kind: "toggle-case-flag", condition_index: index, edit: "prepend (?i)", source: `(?i)${src}` });
+	} else {
+		let i = 0;
+		while (i < src.length) {
+			if (src.startsWith("(?i)", i) && !info[i]?.escaped && !info[i]?.inClass) {
+				drop("toggle-case-flag", `drop (?i) at ${i}`, i, i + 4);
+				i += 4;
+			} else i++;
+		}
+	}
+	for (let i = 0; i < src.length; i++) {
+		if (src[i] !== "[") continue;
+		const inf = info[i];
+		if (!inf || inf.escaped || inf.inClass) continue;
+		let j = i + 1;
+		let negated = false;
+		if (src[j] === "^") {
+			negated = true;
+			j++;
+		}
+		let k = j;
+		while (k < src.length) {
+			if (src[k] === "\\") {
+				k += 2;
+				continue;
+			}
+			if (src[k] === "]" && k > j) break;
+			k++;
+		}
+		if (k >= src.length) continue;
+		const inner = src.slice(j, k);
+		if (negated) {
+			for (let p = 0; p < inner.length; p++) {
+				const c = inner[p];
+				if (c === "\\" || !/[A-Za-z0-9]/.test(c ?? "")) continue;
+				if (p > 0 && inner[p - 1] === "\\") continue;
+				edits.push({ kind: "widen-negated-class", condition_index: index,
+					edit: `remove ${c} from [^...] at ${j + p} (widens)`,
+					source: src.slice(0, j + p) + src.slice(j + p + 1) });
+			}
+		} else {
+			const probe = CLASS_WIDEN_PROBES.find(c => !inner.includes(c));
+			if (probe !== undefined) {
+				edits.push({ kind: "widen-class", condition_index: index,
+					edit: `add U+${probe.codePointAt(0)?.toString(16).toUpperCase()} to [...] at ${k} (widens)`,
+					source: `${src.slice(0, k)}${probe}${src.slice(k)}` });
+			}
+			for (let p = 0; p < inner.length; p++) {
+				const c = inner[p];
+				if (!/[A-Za-z0-9]/.test(c ?? "")) continue;
+				if (p > 0 && inner[p - 1] === "\\") continue;
+				if (c === "-" || inner[p + 1] === "-") continue;
+				edits.push({ kind: "narrow-class", condition_index: index,
+					edit: `remove ${c} from [...] at ${j + p} (narrows)`,
+					source: src.slice(0, j + p) + src.slice(j + p + 1) });
+			}
+		}
+		i = k;
+	}
+	return edits;
+}
+
+interface MutantRuleReport {
+	rule: string;
+	cases: number;
+	mutants: number;
+	killed: number;
+	score: number | null;
+	skipped_compile: number;
+	baseline_failures: number;
+	survivors: { kind: string; edit: string; condition_index: number }[];
+}
+
+/** Baseline G2 verdicts plus quiet-prefix fire flags for one rule over its cases. */
+async function baselineOutcomes(rule: Rule, cases: Case[]): Promise<{ g2: boolean[]; prefix: boolean[] }> {
+	const g2: boolean[] = [];
+	const prefix: boolean[] = [];
+	for (const c of cases) {
+		const fired = await g2Fires(rule, c);
+		g2.push(fired);
+		if (c.expect === "quiet" && !fired) {
+			const sweep = await g3Fires(rule, c);
+			prefix.push(sweep.fired.length > 0);
+		} else {
+			prefix.push(false);
+		}
+	}
+	return { g2, prefix };
+}
+
+/** H3: token mutants of every condition, evaluated against the rule's own cases
+ * through the real matcher. Killed means any case outcome differs from
+ * baseline (G2 verdict, plus G3 quiet-prefix sweep where G2 stays quiet). */
+async function runMutants(rulesDir: string, casesFile: string, budgetSecs: number, outFile: string | null): Promise<number> {
+	const started = Date.now();
+	const deadline = started + Math.max(1, budgetSecs) * 1000;
+	const expired = (): boolean => Date.now() >= deadline;
+	const { cases, errors } = loadCases(casesFile);
+	if (errors.length > 0 || cases.length === 0) {
+		console.error(`mutants: cases unusable: ${errors[0] ?? "no cases"}`);
+		return 2;
+	}
+	const rules = loadRules(rulesDir).filter(r => r.cls !== "always");
+	const byRule = new Map<string, Case[]>();
+	for (const c of cases) {
+		const list = byRule.get(c.rule) ?? [];
+		list.push(c);
+		byRule.set(c.rule, list);
+	}
+	const reports: MutantRuleReport[] = [];
+	let truncated = false;
+	for (const lr of rules) {
+		if (expired()) {
+			truncated = true;
+			break;
+		}
+		const mine = (byRule.get(lr.name) ?? []).slice().sort((a, b) => a.line - b.line);
+		const base = await baselineOutcomes(lr.rule, mine);
+		const baselineFailures = mine.filter((c, i) => (base.g2[i] ? "fire" : "quiet") !== c.expect).length;
+		const seen = new Set<string>();
+		const mutants: MutantEdit[] = [];
+		for (let ci = 0; ci < (lr.rule.condition ?? []).length; ci++) {
+			const original = lr.rule.condition?.[ci] ?? "";
+			for (const edit of mutateCondition(original, ci)) {
+				if (edit.source === original) continue;
+				if (seen.has(edit.source)) continue;
+				seen.add(edit.source);
+				mutants.push(edit);
+			}
+		}
+		let killed = 0;
+		let skippedCompile = 0;
+		const survivors: { kind: string; edit: string; condition_index: number }[] = [];
+		for (const mutant of mutants) {
+			if (expired()) {
+				truncated = true;
+				break;
+			}
+			const conds = [...(lr.rule.condition ?? [])];
+			conds[mutant.condition_index] = mutant.source;
+			const candidate: Rule = { ...lr.rule, condition: conds };
+			try {
+				compileRuleCondition(mutant.source);
+			} catch {
+				skippedCompile++;
+				continue;
+			}
+			const probe = new TtsrManager(SETTINGS);
+			if (!probe.addRule(candidate)) {
+				skippedCompile++;
+				continue;
+			}
+			const killer: string[] = [];
+			for (let i = 0; i < mine.length; i++) {
+				const c = mine[i];
+				const wasFiring = base.g2[i] ?? false;
+				const wasPrefix = base.prefix[i] ?? false;
+				if (!c) continue;
+				const fired = await g2Fires(candidate, c);
+				if (fired !== wasFiring) {
+					killer.push(`line ${c.line} G2 ${c.expect} ${fired ? "fired" : "quiet"}`);
+					break;
+				}
+				if (c.expect === "quiet" && !fired && !wasFiring) {
+					const sweep = await g3Fires(candidate, c);
+					const prefixFired = sweep.fired.length > 0;
+					if (prefixFired !== wasPrefix) {
+						killer.push(`line ${c.line} G3 prefix ${prefixFired ? "fired" : "quiet"}`);
+						break;
+					}
+				}
+			}
+			if (killer.length > 0) {
+				killed++;
+			} else {
+				survivors.push({ kind: mutant.kind, edit: mutant.edit, condition_index: mutant.condition_index });
+			}
+		}
+		const evaluated = killed + survivors.length;
+		reports.push({ rule: lr.name, cases: mine.length, mutants: evaluated, killed,
+			score: evaluated > 0 ? killed / evaluated : null, skipped_compile: skippedCompile,
+			baseline_failures: baselineFailures, survivors });
+	}
+	const evaluatedTotal = reports.reduce((n, r) => n + r.mutants, 0);
+	const killedTotal = reports.reduce((n, r) => n + r.killed, 0);
+	const report = { rules: reports,
+		totals: { rules: reports.length, mutants: evaluatedTotal, killed: killedTotal,
+			score: evaluatedTotal > 0 ? killedTotal / evaluatedTotal : null,
+			skipped_compile: reports.reduce((n, r) => n + r.skipped_compile, 0) },
+		truncated, budget_secs: budgetSecs };
+	const text = JSON.stringify(report);
+	if (outFile) {
+		fs.mkdirSync(path.dirname(outFile), { recursive: true });
+		fs.writeFileSync(outFile, `${text}\n`);
+	} else {
+		console.log(text);
+	}
+	console.error(`mutants: rules=${reports.length} mutants=${evaluatedTotal} killed=${killedTotal} truncated=${truncated}`);
+	return 0;
+}
 
 // ---------------------------------------------------------------- main
 
@@ -1177,7 +1488,7 @@ function flagValue(name: string): string | undefined {
 	return eq?.slice(name.length + 1);
 }
 
-const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus", "--metamorphic-json"].includes(a));
+const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus", "--mutants", "--metamorphic-json"].includes(a));
 let code: number;
 switch (mode) {
 	case "--observe": {
@@ -1220,6 +1531,19 @@ switch (mode) {
 			path.resolve(KIT, flagValue("--out") ?? "reports/corpus-fire-rate.tsv"),
 		);
 		break;
+	case "--mutants": {
+		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
+		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
+		const budget = Number(flagValue("--mutant-budget-secs") ?? 300);
+		if (!Number.isSafeInteger(budget) || budget < 1) {
+			console.error("mutants: --mutant-budget-secs needs a positive integer");
+			code = 2;
+			break;
+		}
+		const out = flagValue("--out");
+		code = await runMutants(rulesDir, casesFile, budget, out ? path.resolve(KIT, out) : null);
+		break;
+	}
 	case "--metamorphic-json": {
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
@@ -1239,7 +1563,7 @@ switch (mode) {
 		break;
 	}
 	default:
-		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE] | --metamorphic-json [--rules DIR] [--cases FILE]");
+		console.error("usage: bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] | --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE] | --selftest | --cli-crosscheck [--jobs N] | --corpus [--limit-files N] [--out FILE] | --mutants [--rules DIR] [--cases FILE] [--mutant-budget-secs N] [--out FILE] | --metamorphic-json [--rules DIR] [--cases FILE]");
 		code = 2;
 }
 process.exit(code);
