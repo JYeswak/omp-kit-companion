@@ -162,6 +162,23 @@ const repairData: DataSchema = { type: "object", required: ["overall", "action",
 	} } }, receipt_id: { type: ["string", "null"] }, backup_id: { type: ["string", "null"] },
 } };
 
+const migrateData: DataSchema = { type: "object", required: ["overall", "action"], properties: {
+	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED"] },
+	rows: { type: "array", items: { type: "object", required: ["name", "verdict"], properties: {
+		name: { type: "string" }, file: { type: "string" }, legacySha256: { type: "string" },
+		manifestSha256: { type: ["string", "null"] }, pluginSha256: { type: ["string", "null"] },
+		pluginPath: { type: ["string", "null"] }, verdict: { enum: ["identical-to-plugin", "identical-to-manifest", "edited", "unknown-keep"] },
+		overlay: { type: "boolean" }, firstDiffLine: { type: ["number", "null"] },
+	} } },
+	pluginRules: { type: "number" }, pluginAbsent: { type: "boolean" },
+	removable: { type: "number" }, keptCount: { type: "number" }, receipt_id: { type: ["string", "null"] },
+	backup_dir: { type: "string" }, removed: { type: "array", items: { type: "string" } },
+	kept: { type: "array", items: { type: "string" } },
+	verified: { type: "array", items: { type: "object", required: ["name"], properties: {
+		name: { type: "string" }, provider: { type: ["string", "null"] }, path: { type: ["string", "null"] },
+	} } },
+} };
+
 const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
 	overall: { enum: ["UNVERIFIED", "CONFLICTS", "DELTA", "NO_DELTA_IN_EXERCISED_WITNESSES"] },
 	status: { enum: ["COMPLETE", "UNAVAILABLE"] }, scope: { enum: ["MATCHER_PREFIX_ONLY"] },
@@ -249,6 +266,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
 		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,
 	], example: "omp-kit repair --scope rules --plan --json", runnable: false, mutation: true, dataSchema: repairData },
+	{ name: "migrate", description: "Move legacy ~/.agents/rules kit copies to native plugin layering; edited copies are kept and flagged for overlay", usage: "migrate [--plan|--apply --yes]", flags: planApply, example: "omp-kit migrate --plan --json", runnable: false, mutation: true, dataSchema: migrateData },
 	{ name: "undo", description: "Guardedly restore one verified receipt", usage: "undo RUN_ID [--yes]", argument: "RUN_ID", flags: [
 		{ name: "--yes", description: "Confirm restore after state verification" },
 	], example: "omp-kit undo RUN_ID --yes", runnable: false, mutation: true },

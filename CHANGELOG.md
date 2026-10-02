@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Legacy `~/.agents/rules` kit copies move to native plugin layering with `migrate --plan|--apply`: the read-only plan lists each file with its plugin equivalent and byte diff; apply backs everything up, removes only copies byte-identical to what the installed plugin serves, keeps edited copies in place flagged for overlay (C3) and unknown files untouched, then verifies with `omp ttsr list` that each removed rule still resolves from a non-legacy source. Without an installed plugin, apply refuses; undo restores removals byte-for-byte. Note: `kit-standing-law` is never plugin-listed (alwaysApply prompt), so it is kept and flagged even when byte-identical.
+
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.

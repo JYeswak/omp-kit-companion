@@ -6,6 +6,7 @@ import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
+import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
@@ -791,6 +792,53 @@ function rulesCommand(request: ParsedCommand): CliResult {
 }
 
 registerCommandHandler("apply rules", rulesCommand);
+
+function migrateCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME;
+	if (!root || !home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
+			remediation: "Run the compiled kit release with an absolute HOME; no rule file was changed.",
+		}], verification: "UNVERIFIED" };
+	const xdgState = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
+		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
+	try {
+		const plan = planMigration({ root, home, stateRoot: join(xdgState, "omp-kit") });
+		const data = { overall: "UNVERIFIED", action: "PLAN", rows: plan.rows, pluginRules: plan.pluginRules,
+			pluginAbsent: plan.pluginAbsent, removable: plan.removable, keptCount: plan.kept, receipt_id: null as string | null };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		if (plan.pluginAbsent) return { code: 2, data, errors: [{
+			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
+			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
+		}], verification: "UNVERIFIED" };
+		planMigrationMutation(plan, { root, home, stateRoot: join(xdgState, "omp-kit") });
+		const result = applyMigration(plan, { root, home, stateRoot: join(xdgState, "omp-kit") }, { confirmed: true });
+		return { code: 0, data: { ...data, action: "APPLIED", receipt_id: result.receiptId, kept: result.kept,
+			backup_dir: result.backupDir, removed: result.removed, verified: result.verified }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "OMP_UNAVAILABLE") return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "OMP_UNAVAILABLE", message: "OMP is not resolvable, so plugin sources cannot be read",
+			remediation: "Install OMP and re-run; no rule file was changed.",
+		}], verification: "UNVERIFIED" };
+		if (code === "PLUGIN_ABSENT") return { code: 2, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
+			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
+		}], verification: "UNVERIFIED" };
+		if (code === "MIGRATE_VERIFY_FAILED") return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "MIGRATE_VERIFY_FAILED", message: "Post-apply source check failed; backup copies were kept",
+			remediation: "Inspect the backup dir and ttsr list output; restore from backup or undo the receipt.",
+		}], verification: "UNVERIFIED" };
+		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "FRESH_PLAN", "INVALID_PLAN",
+			"PLUGIN_LIST_FAILED", "RULES_FAILED", "INSUFFICIENT_SPACE", "LOCK_BUSY", "PENDING_RECOVERY", "MUTATION_FAILED"];
+		return refusal(safe.includes(code) ? code : "MIGRATE_FAILED",
+			"Rule migration refused without claiming a completed change",
+			"Inspect the plugin install and exact rule bytes, then replan.");
+	}
+}
+
+registerCommandHandler("migrate", migrateCommand);
 
 function extensionCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
