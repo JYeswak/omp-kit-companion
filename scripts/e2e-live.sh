@@ -66,6 +66,8 @@ KEEP_WORK=0
 T=$(mktemp -d "$WORK_ROOT/e2e-live.XXXXXX") || { rm -rf "$WORK_ROOT"; exit 2; }
 H="$T/home"
 MP=""
+MOCK_PIDS=""
+DEFIANT_MOCK_SCENARIOS=""
 cleanup() {
   [ -n "$MP" ] && kill "$MP" 2>/dev/null
   if [ "$OWN_WORK_ROOT" = 1 ] && [ "$KEEP_WORK" != 1 ]; then rm -rf "$WORK_ROOT"; fi
@@ -155,6 +157,25 @@ select_rc=$?
 [ "$select_rc" -eq 0 ] || { KEEP_WORK=1; echo "scenario select producer_rc=$select_rc" >&2; exit "$select_rc"; }
 [ -n "$scenario_ids" ] || { KEEP_WORK=1; echo "scenario select returned no scenarios" >&2; exit 2; }
 printf 'scenario ids: %s\n' "$scenario_ids"
+# Bounded mock reap: TERM, short grace, then KILL and reap. A mock that ignores
+# SIGTERM is recorded by scenario; the exit check below fails loudly on it, so a
+# defiant mock can never hang the suite on `wait`.
+reap_mock() {
+  kill "$MP" 2>/dev/null
+  w=0
+  while kill -0 "$MP" 2>/dev/null && [ "$w" -lt 50 ]; do sleep 0.1; w=$((w+1)); done
+  if kill -0 "$MP" 2>/dev/null; then
+    kill -9 "$MP" 2>/dev/null
+    wait "$MP" 2>/dev/null
+    mock_cleanup_rc=137
+    DEFIANT_MOCK_SCENARIOS="$DEFIANT_MOCK_SCENARIOS $name"
+    echo "mock server ignored SIGTERM, killed -9: scenario=$name" >&2
+  else
+    wait "$MP" 2>/dev/null
+    mock_cleanup_rc=$?
+  fi
+  MP=""
+}
 for i in $scenario_ids; do
   name=$("$OMP_KIT_BUN" "$LIB" name "$i")
   name_rc=$?
@@ -168,6 +189,7 @@ for i in $scenario_ids; do
   "$OMP_KIT_BUN" "$LIB" prep "$i" "$SC" || { prep_rc=$?; KEEP_WORK=1; echo "scenario prep producer_rc=$prep_rc id=$i" >&2; exit "$prep_rc"; }
   "$OMP_KIT_BUN" --work-dir "$WORK_ROOT" --scenario "$SC" --log "$LOG" --port-file "$PF" "$MOCK" >"$T/mock-$name.txt" 2>&1 &
   MP=$!
+  MOCK_PIDS="$MOCK_PIDS $MP:$name"
   w=0; while [ ! -s "$PF" ] && [ "$w" -lt 100 ]; do sleep 0.1; w=$((w+1)); done
   if [ ! -s "$PF" ]; then
     kill "$MP" 2>/dev/null; wait "$MP" 2>/dev/null; mock_rc=$?; MP=""
@@ -178,7 +200,7 @@ for i in $scenario_ids; do
   "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
   (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1
   rc=$?
-  kill "$MP" 2>/dev/null; wait "$MP" 2>/dev/null; mock_cleanup_rc=$?; MP=""
+  reap_mock
   echo "mock server cleanup_rc=$mock_cleanup_rc log=$T/mock-$name.txt"
   cat "$T/mock-$name.txt"
   echo "OMP producer_rc=$rc output_log=$T/out-$name.txt transcript=$LOG"
@@ -206,6 +228,17 @@ if [ "$selected" -eq 0 ]; then
   echo "e2e-live ($MODE): no scenarios matched ONLY='${ONLY:-<unset>}'" >&2
   echo "private diagnostics retained: $T (work root $WORK_ROOT)" >&2
   exit 2
+fi
+# Exit check: no mock server started by this run may survive it. Report survivors
+# by scenario id (tracked pids plus any that defied SIGTERM) and fail.
+mock_leaked=""
+for entry in $MOCK_PIDS; do
+  pid=${entry%%:*}; scenario=${entry#*:}
+  if kill -0 "$pid" 2>/dev/null; then mock_leaked="$mock_leaked $scenario(pid=$pid)"; fi
+done
+if [ -n "$DEFIANT_MOCK_SCENARIOS" ] || [ -n "$mock_leaked" ]; then
+  echo "leaked mock servers: defiant scenarios:$DEFIANT_MOCK_SCENARIOS still-alive:$mock_leaked" >&2
+  fail=$((fail+1))
 fi
 echo "e2e-live ($MODE): $pass passed, $fail failed"
 plant_caught=0

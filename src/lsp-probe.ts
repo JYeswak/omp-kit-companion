@@ -4,6 +4,20 @@ import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep }
 import type { LspReadinessReport, LspServerReadiness } from "./lsp-readiness.ts";
 import { isRecord } from "./type-guards.ts";
 
+export interface LspJsonRpcTraceEntry {
+	method: string;
+	id: string;
+	elapsed_ms: number | null;
+	result_bytes: number;
+}
+
+const MAX_JSON_RPC_TRACE_ENTRIES = 64;
+
+export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspJsonRpcTraceEntry[] | undefined {
+	if (state === "PASS") return undefined;
+	const start = Math.max(0, calls.length - MAX_JSON_RPC_TRACE_ENTRIES);
+	return calls.slice(start).map((call, index) => ({ method: "lsp/" + call.action, id: String(start + index), elapsed_ms: call.elapsed_ms ?? null, result_bytes: Buffer.byteLength(call.result, "utf8") }));
+}
 export type LspProbeState = "PASS" | "MISSING" | "IMMEDIATE_EXIT" | "WRONG_MARKER" | "INCOMPLETE" | "TIMEOUT" | "UNVERIFIED";
 type ProbeTreeSnapshot = Record<string, [number, number, number, string | null]>;
 
@@ -48,6 +62,7 @@ export interface LspProbeReport {
 	runtime_state_outputs: string[];
 	mux_stop_rc: number | null;
 	temporary_workspace_removed: boolean;
+	json_rpc_trace?: LspJsonRpcTraceEntry[];
 	elapsed_ms: number;
 }
 
@@ -765,5 +780,5 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		fixture_project_unchanged: fixtureUnchanged,
 		fixture_project_snapshots: fixtureBefore && fixtureAfter ? { before: fixtureBefore, after: fixtureAfter, unchanged: fixtureUnchanged === true } : null,
 		runtime_home_omp_inventory: runtimeEntries, runtime_state_outputs: runtimeStateOutputs, mux_stop_rc: muxStopRc,
-		temporary_workspace_removed: tempRemoved, elapsed_ms: performance.now() - probeStartedAt };
+		temporary_workspace_removed: tempRemoved, json_rpc_trace: state === "PASS" ? undefined : buildLspJsonRpcReceipt(state, calls), elapsed_ms: performance.now() - probeStartedAt };
 }

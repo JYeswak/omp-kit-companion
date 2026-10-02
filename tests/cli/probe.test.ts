@@ -10,8 +10,9 @@ if (probeIndex < 0) throw new Error("probe scenario missing from scenarios.json"
 let scratch = "";
 function logFile(name: string, lines: unknown[]): string {
   if (!scratch) {
-    scratch = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "probe-"));
-    mkdirSync(scratch, { recursive: true });
+    const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
+    mkdirSync(scratchRoot, { recursive: true });
+    scratch = mkdtempSync(join(scratchRoot, "probe-"));
   }
   const file = join(scratch, name);
   writeFileSync(file, lines.map(l => JSON.stringify(l)).join("\n") + "\n");
