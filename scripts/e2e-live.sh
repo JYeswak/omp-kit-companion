@@ -116,6 +116,19 @@ trap cleanup EXIT
 trap 'on_signal 143' TERM
 trap 'on_signal 130' INT
 mkdir -p "$H/.agents/rules" "$H/.omp/agent" "$H/.config" "$H/.cache" "$H/.local/share" "$H/.local/state" "$H/.bun" "$T/bin" "$T/tmp"
+# Launchd-domain isolation: an isolated HOME does not isolate the per-uid launchd domain,
+# so the suite snapshots the production watcher's identity and fails if it moves.
+isolation_snapshot() {
+  if command -v launchctl >/dev/null 2>&1; then
+    out=$(launchctl print "gui/$(id -u)/com.omp-kit.omp-watch" 2>&1); rc=$?
+    printf 'rc=%s\n' "$rc"
+    printf '%s\n' "$out" | grep -a "[[:space:]]path = " || true
+  else
+    echo "launchctl-absent"
+  fi
+}
+ISOLATION_BEFORE="$T/isolation-before.txt"
+isolation_snapshot >"$ISOLATION_BEFORE" 2>&1
 KIT_PATH=
 if [ "$MODE" = full ]; then
   if [ -x "$HERE/bin/omp-kit" ]; then
@@ -281,6 +294,13 @@ for i in $scenario_ids; do
     fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $LOG)"
   fi
 done
+ISOLATION_AFTER="$T/isolation-after.txt"
+isolation_snapshot >"$ISOLATION_AFTER" 2>&1
+if ! cmp -s "$ISOLATION_BEFORE" "$ISOLATION_AFTER"; then
+  echo "launchd isolation broken: com.omp-kit.omp-watch changed during the suite" >&2
+  diff "$ISOLATION_BEFORE" "$ISOLATION_AFTER" >&2 || true
+  fail=$((fail+1))
+fi
 if [ "$selected" -eq 0 ]; then
   KEEP_WORK=1
   echo "e2e-live ($MODE): no scenarios matched ONLY='${ONLY:-<unset>}'" >&2
