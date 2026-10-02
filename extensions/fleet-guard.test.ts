@@ -5,6 +5,8 @@ import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import { planExtensions } from "../src/apply-extensions.ts";
 import type { FleetGuardBlock } from "../src/fleet-guard/scratch.ts";
+// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+mkdirSync(join(import.meta.dir, "../var/agent-tmp"), { recursive: true });
 
 const roots: string[] = [];
 afterEach(() => {
