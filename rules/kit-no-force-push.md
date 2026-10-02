@@ -3,8 +3,9 @@ condition:
   # A streaming prefix ending right after --force must not fire: the flag needs a
   # real delimiter (shell separator, JSON wire close, or escaped newline), and the
   # lease form is excluded. Short -f only counts after push.
-  - '(?<![\w''"\x60-])--force(?!-with-lease)(?=[\s;&|)"\x60]|\\n)'
-  - '\bpush\s+(?:\S+\s+)*?-f(?=[\s;&|)"\x60]|\\n)'
+  - '(?:(?<![\w''"\x60-])|(?<=\\{3}n))--force(?!-with-lease)(?=[\s;&|)"\x60]|\\n)'
+  - '\bpush(?:\s+|\\+n)+(?:\S+(?:\s+|\\+n)+)*?-f(?=[\s;&|)"\x60]|\\n)'
+  - '\\{3}n--force(?!-with-lease)(?=[\s;&|)"\x60]|\\n)'
 scope: tool:bash
 interruptMode: never
 ---

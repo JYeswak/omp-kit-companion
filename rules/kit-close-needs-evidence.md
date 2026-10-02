@@ -1,9 +1,9 @@
 ---
 description: "Kit B2 / forbidden pattern 7: close beads only with cited evidence"
 condition:
-  - '\b(?:br|bd)\s+close\b(?:(?!\s(?:\\?["''])?(?:--reason|-r|--help|-h)\b)[^;&|"\\])*(?:[";&|]|\\n)'
-  - '\b(?:br|bd)\s+close\b[^;&|]*?\s(?:\\?["''])?(?:--reason|-r)(?:\\?["''])?(?:\s+|=)(\\?["''])\1'
-  - '\b(?:br|bd)\s+close\b[^;&|]*?\s(?:\\?["''])?(?:--reason|-r)(?:\\?["''])?\s*(?:"\s*[,}]|[;&|]|\\n)'
+  - '\b(?:br|bd)(?:\s+|\\+n)+close\b(?:(?!(?:\s+|\\+n)+(?:\\?["''])?(?:--reason|-r|--help|-h)\b)(?:[^;&|"\\]|\\+n))*(?:[";&|]|\\n)'
+  - '\b(?:br|bd)(?:\s+|\\+n)+close\b[^;&|]*?(?:\s+|\\+n)+(?:\\?["''])?(?:--reason|-r)(?:\\?["''])?(?:(?:\s+|\\+n)+|=)(\\?["''])\1'
+  - '\b(?:br|bd)(?:\s+|\\+n)+close\b[^;&|]*?(?:\s+|\\+n)+(?:\\?["''])?(?:--reason|-r)(?:\\?["''])?\s*(?:"\s*[,}]|[;&|]|\\n)'
 scope: "tool:bash"
 interruptMode: always
 ---

@@ -7,7 +7,7 @@
   "counts": {
    "cases": 276,
    "variants": 1726,
-   "breaks": 170
+   "breaks": 133
   }
  },
  "breaks": [
@@ -44,24 +44,12 @@
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
-   "id": "kit-close-needs-evidence\t12\twhitespace\tbr close kit-r \\\n--actor sample-worker 2>&1 | head -c 200",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-close-needs-evidence\t245\tquoting\techo \"br close x --reason\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
    "id": "kit-close-needs-evidence\t245\tquoting\tprintf '%s\\n' \"br close x --reason\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-close-needs-evidence\t245\twhitespace\tbr close x \\\n--reason",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-needs-evidence\t246\twhitespace\tbr close x \\\n--reason \"\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-close-needs-evidence\t9\tquoting\techo \"br close bd-42 && git push\"",
@@ -72,56 +60,16 @@
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
   },
   {
-   "id": "kit-close-reason-no-evidence\t19\twhitespace\tbr close x \\\n--reason \"done\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t20\twhitespace\tbr close x \\\n--reason=\"done\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t21\twhitespace\tbr close x \\\n--reason \"resolved, tests pass\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-close-reason-no-evidence\t22\tenv-prefix\tFOO=1 br close x --reason done",
    "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t22\twhitespace\tbr close x \\\n--reason done",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t249\twhitespace\tbr close x \\\n--reason \"passed\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t250\twhitespace\tbr close x \\\n--reason \"done 20260925\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t251\twhitespace\tbr close x \\\n--reason \"ledger updated\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t252\twhitespace\tbr close x \\\n--reason \"done ->\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-close-reason-no-evidence\t262\tenv-prefix\tFOO=1 br close x --reason passed",
    "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
   },
   {
-   "id": "kit-close-reason-no-evidence\t262\twhitespace\tbr close x \\\n--reason passed",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-close-reason-no-evidence\t263\tenv-prefix\tFOO=1 br close x '--reason' done",
    "reason": "FIX class E: leading VAR= assignment flips an anchored verdict; rule anchors assume command starts at string start"
-  },
-  {
-   "id": "kit-close-reason-no-evidence\t274\twhitespace\tbr close \\\n--actor \"pane=2;agent=worker\" x --reason \"passed\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-gate-must-name-the-plant\t30\tquoting\techo \"cd /tmp/proj && bash ../starter-kit/scripts/init.sh\"",
@@ -138,10 +86,6 @@
   {
    "id": "kit-no-force-push\t293\tquoting\tprintf '%s\\n' \"git push --force origin main\"",
    "reason": "FIX class Q3: echo/printf-wrapped payload still fires on a tool:bash rule; needs quote-wrapper exclusion (same technique as Q1/Q2)"
-  },
-  {
-   "id": "kit-no-force-push\t293\twhitespace\tgit push \\\n--force origin main",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-force-push\t294\tquoting\techo \"git push -f origin main\"",
@@ -188,14 +132,6 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t127\twhitespace\tgit config \\\n--file /tmp/--get-config core.hooksPath /dev/null",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t128\twhitespace\tgit config \\\n--file '--list' core.hooksPath /dev/null",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t134\tquoting\techo \"git commit -m \\\"git -c core.hooksPath=/dev/null\\\"\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
@@ -212,40 +148,12 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t136\twhitespace\tgit commit -m \"$(git commit \\\n--no-verify)\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t139\twhitespace\tgrep -q x \"`git commit \\\n--no-verify`\" /dev/null",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t140\twhitespace\techo `git commit \\\n--no-verify`",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t141\twhitespace\tresult=`git commit \\\n--no-verify`",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t143\twhitespace\tprintf x\ngrep -q x \"`git commit \\\n--no-verify`\" /dev/null",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t41\tquoting\techo \"git commit --no-verify -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
    "id": "kit-no-verify\t41\tquoting\tprintf '%s\\n' \"git commit --no-verify -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t41\twhitespace\tgit commit \\\n--no-verify -m x",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t42\twhitespace\tgit commit -m \"wip\" \\\n--no-verify",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-verify\t43\tquoting\techo \"git commit -n -m x\"",
@@ -264,24 +172,12 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t45\twhitespace\tgit push \\\n--no-verify",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-no-verify\t46\twhitespace\tgit push origin main \\\n--no-verify",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t48\tquoting\techo \"git -c core.hooksPath=/dev/null commit -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
    "id": "kit-no-verify\t48\tquoting\tprintf '%s\\n' \"git -c core.hooksPath=/dev/null commit -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t49\twhitespace\tgit config \\\n--unset core.hooksPath",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-verify\t61\tquoting\techo \"rg -n x .omp/ && git commit -n -m x\"",
@@ -308,20 +204,12 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t66\twhitespace\techo use rg, it's fast > /tmp/m.txt && git add x && git commit \\\n--no-verify -F /tmp/m.txt",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t68\tquoting\techo \"git commit -q --no-verify -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
    "id": "kit-no-verify\t68\tquoting\tprintf '%s\\n' \"git commit -q --no-verify -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t68\twhitespace\tgit commit -q \\\n--no-verify -m x",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-verify\t69\tquoting\techo \"git commit -q '--no-verify' -m x\"",
@@ -338,10 +226,6 @@
   {
    "id": "kit-no-verify\t75\tquoting\tprintf '%s\\n' \"git commit -q --no-veri -m x\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t75\twhitespace\tgit commit -q \\\n--no-veri -m x",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-verify\t77\tquoting\techo \"git -c core.hookspath=/dev/null commit -q -m x\"",
@@ -376,10 +260,6 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t85\twhitespace\tgrep -q x \"$(git commit -q \\\n--no-verify -m x)\" /dev/null; true",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t87\tquoting\techo \"grep -q x \\\"\\`git commit -q --no-verify -m x\\`\\\" /dev/null; true\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
@@ -388,20 +268,12 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t87\twhitespace\tgrep -q x \"`git commit -q \\\n--no-verify -m x`\" /dev/null; true",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t90\tquoting\techo \"git commit --no-verify; echo done\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
    "id": "kit-no-verify\t90\tquoting\tprintf '%s\\n' \"git commit --no-verify; echo done\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t90\twhitespace\tgit commit \\\n--no-verify; echo done",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-no-verify\t91\tquoting\techo \"git push '--no-verif' origin main\"",
@@ -420,10 +292,6 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t92\twhitespace\tgit commit \\\n--no-verif -m x",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t93\tquoting\techo \"echo \\\"\\$(git commit --no-verify)\\\"\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
@@ -432,20 +300,12 @@
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
-   "id": "kit-no-verify\t93\twhitespace\techo \"$(git commit \\\n--no-verify)\"",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
    "id": "kit-no-verify\t94\tquoting\techo \"git commit --no-verify\nprintf done\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
   },
   {
    "id": "kit-no-verify\t94\tquoting\tprintf '%s\\n' \"git commit --no-verify\nprintf done\"",
    "reason": "FIX class Q1: echo/printf-wrapped git bypass payloads still fire; rule needs quote-wrapper exclusion lookbehinds alongside its existing -m/grep exclusions"
-  },
-  {
-   "id": "kit-no-verify\t94\twhitespace\tgit commit \\\n--no-verify\nprintf done",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-relative-path-not-cwd\t145\tquoting\techo \"cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md\"",
@@ -486,14 +346,6 @@
   {
    "id": "kit-settings-mutation\t150\tquoting\tprintf '%s\\n' \"omp --profile sample-lab config set disabledProviders '[\\\"agents\\\"]'\"",
    "reason": "FIX class Q2: echo/printf-wrapped settings-mutation payloads still fire; rule needs quote-wrapper exclusion lookbehinds"
-  },
-  {
-   "id": "kit-settings-mutation\t150\twhitespace\tomp \\\n--profile sample-lab config set disabledProviders '[\"agents\"]'",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
-  },
-  {
-   "id": "kit-settings-mutation\t152\twhitespace\tcd /tmp && omp \\\n--profile claude config unset ttsr.disabledRules",
-   "reason": "FIX class W: backslash-newline continuation variant goes quiet; matcher pattern does not span newlines, a real multi-line evasion"
   },
   {
    "id": "kit-settings-mutation\t153\tquoting\techo \"omp config set extensions '[]'\"",
