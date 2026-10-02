@@ -265,3 +265,37 @@ test("compiled opt-in plans without writes, receipts exact changes, and never ce
 	expect(readFileSync(f.destination, "utf8")).toBe("user-replaced extension\n");
 	expect(readFileSync(config)).toEqual(collisionBefore);
 });
+
+test("dual-config and empty profiles are skipped with named reasons while healthy profiles install", () => {
+	const f = fixture();
+	const good = f.profile("work");
+	const dualDir = join(f.home, ".omp", "profiles", "claude", "agent");
+	mkdirSync(dualDir, { recursive: true });
+	const dualBefore = "model: test\nextensions: []\n";
+	writeFileSync(join(dualDir, "config.yml"), dualBefore);
+	writeFileSync(join(dualDir, "settings.json"), '{"model":"test"}\n');
+	const emptyDir = join(f.home, ".omp", "profiles", "empty", "agent");
+	mkdirSync(emptyDir, { recursive: true });
+	const plan = planExtensions({ ...f.input, profiles: "all" });
+	expect(plan.skippedProfiles.sort()).toEqual(["claude", "empty"]);
+	const reasons = Object.fromEntries(plan.skippedReasons.map(entry => [entry.name, entry.reason]));
+	expect(reasons.claude).toMatch(/^DUAL_CONFIG: config\.yml \+ settings\.json/);
+	expect(reasons.empty).toMatch(/^NO_CONFIG/);
+	expect(plan.steps.map(step => step.path)).toContain(good);
+	applyExtensions(plan);
+	expect(readFileSync(good, "utf8")).toContain(f.destination);
+	expect(readFileSync(join(dualDir, "config.yml"), "utf8")).toBe(dualBefore);
+	expect(readdirSync(emptyDir)).toEqual([]);
+});
+
+test("corrupt config in one profile skips with reason instead of aborting the others", () => {
+	const f = fixture();
+	const good = f.profile("work"), corrupt = f.profile("broken");
+	writeFileSync(corrupt, "extensions: [broken\n");
+	const plan = planExtensions({ ...f.input, profiles: "all" });
+	expect(plan.skippedProfiles).toEqual(["broken"]);
+	expect(plan.skippedReasons[0]?.reason).toMatch(/^UNPARSEABLE/);
+	applyExtensions(plan);
+	expect(readFileSync(good, "utf8")).toContain(f.destination);
+	expect(readFileSync(corrupt, "utf8")).toBe("extensions: [broken\n");
+});
