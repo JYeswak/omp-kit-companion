@@ -117,24 +117,14 @@ test("test --metamorphic refuses incompatible flags without measuring", () => {
 	expect(envelope.errors?.[0]?.code).toBe("INVALID_FLAG");
 }, 120_000);
 
-test("a checked-in baseline ratchets: known breaks pass, a dropped entry fails", () => {
-	const first = metamorphic([]);
-	expect(first.exitCode).toBe(1);
-	const breaks = first.report?.breaks ?? [];
-	expect(breaks.length).toBeGreaterThan(0);
-	const ids = breaks.map(entry => `${entry.rule}\t${entry.line}\t${entry.relation}\t${entry.variant}`);
-	const baseline = join(pack, "baseline.json");
-	const doc = { schema_version: 1, generated: { commit: "test", omp: "test", date: "test", counts: { cases: 0, variants: 0, breaks: 0 } }, breaks: ids.map(id => ({ id, reason: "test ratchet" })) };
-	writeFileSync(baseline, JSON.stringify(doc));
-	const held = metamorphic(["--baseline", baseline]);
-	expect(held.exitCode).toBe(0);
-	expect(held.report?.status).toBe("PASS");
-	expect(held.report?.counts).toMatchObject({ fresh: 0, stale: 0 });
-	writeFileSync(baseline, JSON.stringify({ ...doc, breaks: doc.breaks.slice(1) }));
-	const red = metamorphic(["--baseline", baseline]);
-	expect(red.exitCode).toBe(1);
-	expect(red.report?.status).toBe("FAIL");
-	expect(red.report?.new_breaks?.length).toBe(1);
+test("strict zero-break gate fails on a planted fresh break", () => {
+	const planted = join(pack, "rules", "plant-fresh.md");
+	writeFileSync(planted, `---\ncondition:\n  - 'fresh-ratchet-token'\nscope: tool:bash\ninterruptMode: never\n---\nPlanted fresh break.\n`);
+	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER + "plant-fresh\tquiet\ttool\tbash\t-\techo fresh-ratchet-token\tplanted quiet case\n");
+	const { exitCode, report } = metamorphic([]);
+	expect(exitCode).toBe(1);
+	expect(report?.status).toBe("FAIL");
+	expect(report?.breaks.length).toBeGreaterThan(0);
 }, 120_000);
 
 test("text-scope cases have no shell relations: prose in quotes still fires, nothing counted", () => {

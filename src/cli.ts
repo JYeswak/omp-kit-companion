@@ -1387,16 +1387,14 @@ async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
 	};
 	const rules = selected("--rules");
 	const cases = selected("--cases");
-	const baseline = selected("--baseline");
-	for (const path of [rules, cases, baseline]) {
+	for (const path of [rules, cases]) {
 		if (path !== undefined && (!isAbsolute(path) || resolve(path) !== path)) {
 			return refusal("INVALID_PATH", "Metamorphic selection requires canonical absolute paths",
-				"Pass absolute --rules, --cases and --baseline paths; nothing was measured.");
+				"Pass absolute --rules and --cases paths; nothing was measured.");
 		}
 	}
 	const report = await runMetamorphicReport({ root: identity.release.root, executablePath: identity.release.executable,
-		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}),
-		...(baseline !== undefined ? { baseline } : {}) });
+		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}) });
 	return { code: report.status === "FAIL" ? 1 : report.status === "PASS" ? 0 : 3,
 		data: { overall: report.status === "PASS" ? "OK" : report.status, metamorphic: report }, verification: "UNVERIFIED" };
 }
