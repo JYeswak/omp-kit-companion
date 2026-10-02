@@ -37,12 +37,13 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 - Verdict: NO-SHIP.
 - Retry condition: a candidate separates executable shell input from quoted test/documentation input on a fresh authorized corpus and preserves every quiet streamed prefix, without a blanket heredoc exemption.
 
-## NE-6 (2026-09-24) — replace `kit-test-skip`'s regex with AST patterns
+## NE-6 (2026-09-24; retried 2026-10-01) — AST candidate for kit-test-skip
 
 - Hypothesis: AST patterns distinguish actual test-skip markers from text mentions without losing blocking behavior.
-- Historical result: a private candidate classified sampled edit/write payloads more precisely, but both live skip scenarios wrote the target file before the AST interrupt. On omp 18.3.0, `astCondition` was evaluated at `toolcall_end` after the write. Matching accuracy did not imply blocking. Those experiment logs are private; the public harness and live suite can be rerun against a new omp release.
-- Verdict: NO-SHIP for blocking rules. The regex remains; G1 rejects `astCondition` on tripwires.
-- Retry condition: on a newer omp, an AST-only tripwire passes the live `test-skip-ts-fire` scenario with `web/app.test.ts` absent. Only then reconsider the G1 restriction.
+- Historical result: on OMP 18.3.0, astCondition was evaluated after the write, so both private live skip scenarios wrote their target files. Verdict was NO-SHIP and G1 rejected blocking AST tripwires.
+- Retry result on OMP 18.4.9: the AST candidate with astLiveScenario test-skip-ts-fire blocked before execution; web/app.test.ts was absent. The same scenario with the AST plugin disabled wrote web/app.test.ts and named no rule (planted negative). G1/G2/G3 passed 278/278 cases with 0 quiet-prefix fires. The regex conditions remain as a compatibility fallback.
+- Verdict: SHIP candidate evidence is green on OMP 18.4.9; the kit gate accepts a blocking astCondition only when it names the pre-execution live scenario. This is not coverage of all test-skip forms or older OMP releases.
+- Retry condition: if a future OMP release fails the named live scenario or the AST candidate loses a required fire/quiet case, revert to the regex-only rule and reopen NE-6.
 
 ## NE-7 (2026-09-24) — replace `rs-unsafe-added-router`'s regex with AST patterns
 
@@ -69,8 +70,9 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
 
 - Hypothesis: the five MT3 relations hold for every rule case (quoting suppresses;
   whitespace, env prefix, path form and chaining preserve the verdict).
-- Measured result (`bun scripts/ttsr-harness.ts --metamorphic-json`, 295 cases,
-  1765 variants, OMP 18.4.9): 182 breaks. Quoting 138 (quoted payload still fires;
+- Measured result (`bun scripts/ttsr-harness.ts --metamorphic-json`, 276 tool
+  cases / 1726 variants after text-scope cases were excluded from shell
+  relations, OMP 18.4.10): 170 breaks. Quoting 126 (quoted payload still fires;
   rules deliberately match quoted shell words, e.g. `''commit''` forms, and a local
   regex cannot tell `echo "..."` from `bash -c "..."`); backslash-newline
   continuations 37 (wire-position anchors match at wire start or after shell
@@ -78,10 +80,23 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
   family, e.g. `FOO=1 pkill`) plus 3 quiet-fire where the prefix defeats the
   HOME=/tmp test-harness exemption; leading/trailing space, chaining and
   path-form hold everywhere (the one leading-space miss, kit-no-pattern-kill,
-  was fixed by allowing `\\s*` after wire starts).
+  was fixed by allowing `\s*` after wire starts). 19 text/thinking-scope prose
+  cases (kit-structure-not-truth, kit-unverified-done, kit-no-ask-rmrf and
+  7 more) take no shell relations: prose in quotes is the same claim, so the
+  harness skips all five relations for text scope rather than counting breaks.
 - Verdict: record, do not fix by loosening anchors here. Anchor and quoting
   semantics are recall/precision tradeoffs owned per rule; loosening them risks
-  the prose false-fires S4/R1 closed. The ladder does not run the metamorphic
-  step until these classes are fixed or formally exempted per rule.
+  the prose false-fires S4/R1 closed. Per-rule fixes go to fix beads (quoting
+  exclusions Q1/Q2/Q3, continuation matching W, env-prefix anchors E); this
+  entry keeps the measurement.
+- Ratchet adopted 2026-10-02: `scripts/ladder.sh` runs the metamorphic step
+  against `tests/cli/metamorphic-baseline.json` (170 known break ids, each
+  with a FIX-class reason; re-measured on OMP 18.4.10: quoting 126,
+  whitespace 37, env-prefix 7 over 276 tool cases / 1726 variants). 19
+  text/thinking-scope prose cases take no shell relations at all (prose in
+  quotes is the same claim); the harness skips all five relations for text
+  scope. A NEW break fails the ladder; a fixed break is removed
+  from the baseline by hand-edit (no auto-update, so the count can only
+  fall by review). Nothing is listed as known without its reason.
 - Retry condition: re-run the metamorphic report after any rule-condition edit;
-  a class reaching zero breaks is removed from this entry.
+  a class reaching zero breaks is removed from this entry and the baseline.

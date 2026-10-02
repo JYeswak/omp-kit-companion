@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
@@ -379,6 +380,104 @@ function inspectAgentMailGuard(): Finding {
 		"Point AGENT_MAIL_STORAGE_ROOT at the live Agent Mail root.", { storage_root: root });
 	return finding("agent_mail_guard", "OK", `Pre-commit guard resolves reservations against ${root}; bare shells without the variable still fail open`,
 		"None.", { storage_root: root });
+}
+
+/** Dicklesworthstone stack currency: binary to release repo plus the one chosen install source (tap formula preferred). Formula names follow the JS1 bead inventory; anything without a tap formula is undecided until Josh approves a source. */
+const STACK_SOURCE: Record<string, { repo: string; formula: string | null }> = {
+	ntm: { repo: "ntm", formula: "ntm" },
+	br: { repo: "beads_rust", formula: "br" },
+	bv: { repo: "beads_viewer", formula: "bv" },
+	am: { repo: "mcp_agent_mail_rust", formula: "mcp-agent-mail" },
+	dcg: { repo: "destructive_command_guard", formula: "dcg" },
+	slb: { repo: "slb", formula: "slb" },
+	ubs: { repo: "ultimate_bug_scanner", formula: "ubs" },
+	rch: { repo: "remote_compilation_helper", formula: "rch" },
+	dsr: { repo: "doodlestein_self_releaser", formula: null },
+	ru: { repo: "repo_updater", formula: "ru" },
+	cass: { repo: "coding_agent_session_search", formula: "cass" },
+	cm: { repo: "cass_memory_system", formula: "cm" },
+	caam: { repo: "coding_agent_account_manager", formula: "caam" },
+	sbh: { repo: "storage_ballast_helper", formula: null },
+	pt: { repo: "process_triage", formula: null },
+	rano: { repo: "rano", formula: null },
+	ms: { repo: "meta_skill", formula: null },
+	ee: { repo: "eidetic_engine_cli", formula: "ee" },
+	vc: { repo: "vibe_cockpit", formula: null },
+	ft: { repo: "frankenterm", formula: null },
+	fg: { repo: "frankengit", formula: null },
+	caut: { repo: "coding_agent_usage_tracker", formula: null },
+	acfs: { repo: "agentic_coding_flywheel_setup", formula: null },
+	apr: { repo: "automated_plan_reviser_pro", formula: null },
+	giil: { repo: "giil", formula: null },
+	xf: { repo: "xf", formula: "xf" },
+	skillranker: { repo: "skillranker", formula: null },
+	fad: { repo: "franken_agent_detection", formula: null },
+	tru: { repo: "toon_rust", formula: null },
+	csctf: { repo: "chat_shared_conversation_to_file", formula: "csctf" },
+};
+export interface StackToolReport { bin: string; repo: string; source: string; installed: boolean; install_path: string | null; installed_version: string | null; latest_release: string | null; state: "current" | "behind" | "ahead" | "absent" | "unknown" }
+/** Numeric-triplet ordering where a prerelease suffix on equal numbers counts as behind the release. */
+function compareVersions(installed: string, latest: string): "current" | "behind" | "ahead" | null {
+	const parse = (value: string): { numbers: number[]; suffix: string } | null => {
+		const match = /(\d+\.\d+(?:\.\d+)*)(.*)$/.exec(value);
+		if (!match?.[1]) return null;
+		return { numbers: match[1].split(".").map(Number), suffix: (match[2] ?? "").trim() };
+	};
+	const mine = parse(installed), theirs = parse(latest);
+	if (!mine || !theirs) return null;
+	const width = Math.max(mine.numbers.length, theirs.numbers.length);
+	for (let index = 0; index < width; index += 1) {
+		const left = mine.numbers[index] ?? 0, right = theirs.numbers[index] ?? 0;
+		if (left !== right) return left < right ? "behind" : "ahead";
+	}
+	if (mine.suffix && !theirs.suffix) return "behind";
+	return "current";
+}
+export async function inspectDicklesworthstone(): Promise<Finding> {
+	const firstLine = (command: string, args: readonly string[]): string | null => {
+		try {
+			const child = spawnSync(command, [...args], { encoding: "utf8", timeout: 15000 });
+			if (child.error) return null;
+			const line = String(child.stdout ?? "").split("\n")[0]?.trim() ?? "";
+			return line ? line.slice(0, 120) : null;
+		} catch { return null; }
+	};
+	const bins = Object.keys(STACK_SOURCE).sort();
+	const query = `query { ${bins.map((bin, index) => `r${index}: repository(owner: "Dicklesworthstone", name: "${STACK_SOURCE[bin]!.repo}") { latestRelease { tagName } }`).join(" ")} }`;
+	const latestTag = (lookup: Record<string, unknown>, alias: string): string | null => {
+		const entry = lookup[alias];
+		if (!record(entry) || !record(entry.latestRelease)) return null;
+		const tag = entry.latestRelease.tagName;
+		return typeof tag === "string" && tag.trim() ? tag.trim() : null;
+	};
+	let releases: Record<string, unknown> = {};
+	try {
+		const child = spawnSync("gh", ["api", "graphql", "-f", `query=${query}`], { encoding: "utf8", timeout: 20000 });
+		const parsed: unknown = JSON.parse(String(child.stdout ?? "{}"));
+		if (record(parsed) && record(parsed.data)) releases = parsed.data;
+	} catch { /* A failed release lookup leaves every latest unknown; the finding says so. */ }
+	const tools: StackToolReport[] = await Promise.all(bins.map(async (bin, index) => {
+		const spec = STACK_SOURCE[bin]!;
+		let installPath: string | null = null;
+		for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+			if (!dir) continue;
+			try { if (statSync(join(dir, bin)).isFile()) { installPath = join(dir, bin); break; } } catch { /* Not in this directory. */ }
+		}
+		const installedVersion = installPath ? firstLine(installPath, ["--version"]) : null;
+		const latestRelease = latestTag(releases, `r${index}`);
+		const source = spec.formula ? `homebrew dicklesworthstone/tap/${spec.formula}` : "undecided: no tap formula; install source needs approval";
+		const state = !installPath ? "absent" : !installedVersion || !latestRelease ? "unknown" : compareVersions(installedVersion, latestRelease) ?? "unknown";
+		return { bin, repo: spec.repo, source, installed: installPath !== null, install_path: installPath, installed_version: installedVersion, latest_release: latestRelease, state };
+	}));
+	const behind = tools.filter((tool) => tool.state === "behind").map((tool) => tool.bin);
+	const unknown = tools.filter((tool) => tool.state === "unknown").map((tool) => tool.bin);
+	const status = behind.length ? "DEGRADED" : unknown.length ? "UNVERIFIED" : "OK";
+	return finding("dicklesworthstone", status,
+		behind.length ? `${behind.length} installed tools are behind their latest release: ${behind.join(", ")}` :
+			unknown.length ? `No installed tool is provably behind, but latest or installed versions are unknown for: ${unknown.join(", ")}` :
+				"Every installed stack tool matches its latest release",
+		behind.length ? "Update through each tool's chosen source (tap formula preferred); never switch a real-machine install source without approval." : "None.",
+		{ tools, behind, unknown });
 }
 function inspectRouter(jsmPath?: string): Finding {
 	const paths = jsmPath ? [jsmPath] : (process.env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, "jsm"));
