@@ -16,7 +16,26 @@ exec /usr/bin/perl -MPOSIX=setsid -MErrno=EINTR -e '
     exec @ARGV;
     die "limit-process-tree: launch failed: $!\n";
   }
+  # The caller can signal only the parent subshell; the session group outlives
+  # it. Publish the group id so the caller can signal the group directly.
+  if (defined $ENV{LIMIT_PGID_FILE} && length $ENV{LIMIT_PGID_FILE}) {
+    open(my $pgid_fh, ">", $ENV{LIMIT_PGID_FILE}) or die "limit-process-tree: cannot write pgid file: $!\n";
+    print $pgid_fh "$child\n";
+    close($pgid_fh);
+  }
   my $timed_out = 0;
+  # L2: a TERM/INT to the wrapper must reach the session group. Without this
+  # the wrapper died and orphaned the group (e2e-live pid 93914 survived
+  # SIGTERM). Forward, reap bounded, and exit with the signal code.
+  $SIG{TERM} = $SIG{INT} = sub {
+    my $sig = $_[0];
+    kill $sig, -$child;
+    select undef, undef, undef, 0.5;
+    kill "KILL", -$child;
+    my $done;
+    do { $done = waitpid($child, 0) } while ($done == -1 && $! == EINTR);
+    exit $sig eq "TERM" ? 143 : 130;
+  };
   $SIG{ALRM} = sub {
     $timed_out = 1;
     kill "TERM", -$child;
