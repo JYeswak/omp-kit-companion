@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -390,4 +390,63 @@ test("omp_drift tracks the OMP of the last recorded test and clears only after a
 	expect((await drift()).status).toBe("DEGRADED");
 	record("FAIL");
 	expect(await drift()).toMatchObject({ status: "DEGRADED", reason: expect.stringContaining("did not pass (FAIL)") });
+});
+
+test("dicklesworthstone scope reports installed vs latest with one source per tool", async () => {
+	const bindir = mkdtempSync(join(tmpdir(), "omp-kit-js1-"));
+	const bin = (name: string, version: string) => {
+		writeFileSync(join(bindir, name), `#!/bin/sh\necho '${version}'\n`);
+		chmodSync(join(bindir, name), 0o755);
+	};
+	bin("br", "br 0.6.0");
+	bin("ntm", "ntm 1.36.1");
+	bin("dsr", "dsr 0.2.1");
+	bin("ms", "ms 0.1.0");
+	writeFileSync(join(bindir, "gh"), "#!/bin/sh\necho '{\"data\":{\"r3\":{\"latestRelease\":{\"tagName\":\"v0.7.4\"}},\"r18\":{\"latestRelease\":{\"tagName\":\"v1.36.1\"}},\"r11\":{\"latestRelease\":{\"tagName\":\"v0.2.1\"}}}}'\n");
+	chmodSync(join(bindir, "gh"), 0o755);
+	const savedPath = process.env.PATH;
+	process.env.PATH = bindir;
+	try {
+		const found = await inspectDicklesworthstone();
+		expect(found.component).toBe("dicklesworthstone");
+		expect(found.status).toBe("DEGRADED");
+		const tools = found.evidence?.tools as { bin: string; source: string; installed_version: string | null; latest_release: string | null; state: string }[];
+		const byBin = Object.fromEntries(tools.map((tool) => [tool.bin, tool]));
+		expect(byBin.br?.state).toBe("behind");
+		expect(byBin.ntm?.state).toBe("current");
+		expect(byBin.dsr?.state).toBe("current");
+		expect(byBin.dsr?.source).toContain("undecided");
+		expect(byBin.br?.source).toBe("homebrew dicklesworthstone/tap/br");
+		expect(byBin.ms?.state).toBe("unknown");
+		expect(byBin.xf?.state).toBe("absent");
+		expect(found.evidence?.behind).toEqual(["br"]);
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+		rmSync(bindir, { recursive: true, force: true });
+	}
+});
+
+test("dual-config and policy-skipped profiles surface as not covered with named reasons", async () => {
+	const f = fixture(); installOmp(f);
+	mkdirSync(join(f.root, "policy")); mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "policy", "extensions.json"), '{"extensions":["kit-guard-optin.ts"],"skipProfiles":["work"]}');
+	writeFileSync(join(f.root, "extensions", "kit-guard-optin.ts"), "export const guard = true;\n");
+	const extension = join(f.home, ".omp", "omp-extensions", "kit-guard-optin.ts");
+	mkdirSync(join(f.home, ".omp", "omp-extensions"), { recursive: true });
+	writeFileSync(extension, "export const guard = true;\n");
+	const good = `extensions:\n  - ${extension}\n`;
+	for (const dir of [join(f.home, ".omp", "agent"), join(f.home, ".omp", "profiles", "work", "agent")]) {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "config.yml"), good);
+	}
+	const dual = join(f.home, ".omp", "profiles", "claude", "agent");
+	mkdirSync(dual, { recursive: true });
+	writeFileSync(join(dual, "config.yml"), good);
+	writeFileSync(join(dual, "settings.json"), "{}\n");
+	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+	const notCovered = finding(rows, "extensions").evidence?.not_covered_profiles as { profile: string; reason: string }[];
+	const reasons = Object.fromEntries(notCovered.map(entry => [entry.profile, entry.reason]));
+	expect(reasons.work).toMatch(/policy skipProfiles/);
+	expect(reasons.claude).toMatch(/^DUAL_CONFIG: config\.yml \+ settings\.json/);
+	expect(finding(rows, "extensions").evidence?.skipped_profiles).toEqual(["work"]);
 });
