@@ -46,8 +46,11 @@ private_owner_mode() {
 }
 
 new_workdir() {
-	base="$ROOT/var/agent-tmp"
-	/bin/mkdir -p "$base" || die "cannot create repo scratch root $base"
+	# System temp, not repo scratch: the --work-dir validation below requires
+	# containment in the system temporary roots (and non-overlap with the
+	# release/HOME), and the release snapshot fails on any leftover under the
+	# release tree. Callers trap-remove the work root; nothing leaks.
+	base=$(system_tmp_root) || die "no supported private temporary root"
 	umask 077
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
