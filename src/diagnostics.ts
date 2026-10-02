@@ -6,6 +6,7 @@ import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot } from "./state-root.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
+import { checkExtensionImports } from "./extensions.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
 export interface Finding {
@@ -341,6 +342,15 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 			skipped_profiles: skipped, ...(shadow.override ? { project_override: shadow.override } : {}),
 			...(shadow.issue ? { project_issue: shadow.issue } : {}), ...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}) });
 }
+function inspectExtensionImports(home: string): Finding {
+	const report = checkExtensionImports({ home });
+	return finding("extension_imports", report.status, report.status === "OK" ?
+		`${report.reason}; OMP reports unloadable extensions only at session start` : report.reason,
+	report.status === "DEGRADED" ? "Fix or remove the unresolvable import before restarting sessions; OMP reports it only at session start." :
+		"Extension and hook files are read as text and resolved without execution.",
+		{ files_checked: report.files_checked, profiles_checked: report.profiles_checked,
+			plugin_packages: report.plugin_packages, findings: report.findings });
+}
 function inspectRouter(jsmPath?: string): Finding {
 	const paths = jsmPath ? [jsmPath] : (process.env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, "jsm"));
 	const available = paths.some((path) => {
@@ -457,6 +467,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const projectConfig = inspectProjectConfig(project);
 	rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));
 	rows.push(inspectExtensions(root, home, profiles.profiles, projectConfig, profiles.issue));
+	rows.push(inspectExtensionImports(home));
 	rows.push(inspectRouter(input.jsmPath));
 	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	const stateIssue = inspectStateRoot(stateRoot);
