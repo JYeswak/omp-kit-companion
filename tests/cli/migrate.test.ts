@@ -53,6 +53,7 @@ test("child PATH carries the bun binary dir for the omp launcher shim", () => {
 	expect(path.split(":")[0]).toBe(dirname(process.execPath));
 });
 
+
 function omp(args: string[], home: string, ompDir: string) {
 	const child = Bun.spawnSync(["omp", ...args], {
 		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
