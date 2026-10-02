@@ -68,8 +68,9 @@ afterAll(() => {
 type MetamorphicEnvelope = {
 	data?: {
 		overall?: string;
-		metamorphic?: { status?: string; counts?: { cases?: number; variants?: number; breaks?: number };
-			breaks?: { rule?: string; line?: number; relation?: string; variant?: string; expected?: string; observed?: string }[] };
+		metamorphic?: { status?: string; counts?: { cases?: number; variants?: number; breaks?: number; fresh?: number; stale?: number };
+			breaks?: { rule?: string; line?: number; relation?: string; variant?: string; expected?: string; observed?: string }[];
+			new_breaks?: { rule?: string; line?: number; relation?: string; variant?: string }[] };
 	};
 	errors?: { code?: string }[];
 };
@@ -114,4 +115,24 @@ test("test --metamorphic refuses incompatible flags without measuring", () => {
 	const { exitCode, envelope } = runCli(["test", "--metamorphic", "--project", "/absent", "--json"]);
 	expect(exitCode).toBe(2);
 	expect(envelope.errors?.[0]?.code).toBe("INVALID_FLAG");
+}, 120_000);
+
+test("a checked-in baseline ratchets: known breaks pass, a dropped entry fails", () => {
+	const first = metamorphic([]);
+	expect(first.exitCode).toBe(1);
+	const breaks = first.report?.breaks ?? [];
+	expect(breaks.length).toBeGreaterThan(0);
+	const ids = breaks.map(entry => `${entry.rule}\t${entry.line}\t${entry.relation}\t${entry.variant}`);
+	const baseline = join(pack, "baseline.json");
+	const doc = { schema_version: 1, generated: { commit: "test", omp: "test", date: "test", counts: { cases: 0, variants: 0, breaks: 0 } }, breaks: ids.map(id => ({ id, reason: "test ratchet" })) };
+	writeFileSync(baseline, JSON.stringify(doc));
+	const held = metamorphic(["--baseline", baseline]);
+	expect(held.exitCode).toBe(0);
+	expect(held.report?.status).toBe("PASS");
+	expect(held.report?.counts).toMatchObject({ fresh: 0, stale: 0 });
+	writeFileSync(baseline, JSON.stringify({ ...doc, breaks: doc.breaks.slice(1) }));
+	const red = metamorphic(["--baseline", baseline]);
+	expect(red.exitCode).toBe(1);
+	expect(red.report?.status).toBe("FAIL");
+	expect(red.report?.new_breaks?.length).toBe(1);
 }, 120_000);

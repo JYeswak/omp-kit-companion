@@ -81,7 +81,17 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
   was fixed by allowing `\\s*` after wire starts).
 - Verdict: record, do not fix by loosening anchors here. Anchor and quoting
   semantics are recall/precision tradeoffs owned per rule; loosening them risks
-  the prose false-fires S4/R1 closed. The ladder does not run the metamorphic
-  step until these classes are fixed or formally exempted per rule.
+  the prose false-fires S4/R1 closed. Per-rule fixes go to fix beads (quoting
+  exclusions Q1/Q2/Q3, continuation matching W, env-prefix anchors E); this
+  entry keeps the measurement.
+- Ratchet adopted 2026-10-02: `scripts/ladder.sh` runs the metamorphic step
+  against `tests/cli/metamorphic-baseline.json` (170 known break ids, each
+  with a FIX-class reason; re-measured on OMP 18.4.10: quoting 126,
+  whitespace 37, env-prefix 7 over 295 cases / 1746 variants). 12 of the
+  original 182 were text/thinking-scope prose-in-quotes where firing is
+  correct; the harness now skips the quoting relation there instead of
+  counting breaks. A NEW break fails the ladder; a fixed break is removed
+  from the baseline by hand-edit (no auto-update, so the count can only
+  fall by review). Nothing is listed as known without its reason.
 - Retry condition: re-run the metamorphic report after any rule-condition edit;
-  a class reaching zero breaks is removed from this entry.
+  a class reaching zero breaks is removed from this entry and the baseline.
