@@ -181,14 +181,12 @@ function g1(lr: LoadedRule): G1Result {
 	// omp's ~/.agents/rules discovery drops a file whose frontmatter says `enabled: false`
 	// (discoverRuleFromMarkdown); every other kit gate would still grade it GREEN.
 	if (lr.frontmatter.enabled === false) problems.push("enabled: false: omp's discovery skips this file, so it never loads");
-	// omp 18.3.0 matches astCondition asynchronously at toolcall_end and does not hold the tool for
-	// the verdict. Measured live (e2e-live test-skip-ts-fire, 2026-09-24): the write landed, then
-	// the interrupt told the model "Blocked before it was written". An interrupting rule needs a
-	// regex condition; an AST match that interrupts reports a block that did not happen, even beside
-	// a regex. prose-only is exempt: omp never interrupts a tool-source match under it.
-	// Retire this check when e2e-live shows an astCondition tripwire leave its file unwritten.
+	// Blocking AST rules are accepted only when they name a live pre-execution scenario; the G4 live run is the independent pass gate.
+	const astLiveScenario = lr.frontmatter.astLiveScenario;
 	if (lr.cls === "tripwire" && lr.rule.interruptMode !== "prose-only" && (lr.rule.astCondition?.length ?? 0) > 0) {
-		problems.push("astCondition on a blocking rule cannot block: omp runs it after the tool has executed (interruptMode never, or a regex condition)");
+		if (typeof astLiveScenario !== "string" || astLiveScenario.length === 0) {
+			problems.push("astCondition on a blocking rule requires astLiveScenario evidence from a passing pre-execution live scenario");
+		}
 	}
 	let how: string;
 	if (lr.cls === "always") {
@@ -738,7 +736,7 @@ async function selftest(): Promise<number> {
 			cases:
 				'plant-ast-tripwire\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tplanted\nplant-ast-tripwire\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tplanted\n',
 			// Correct matches, wrong mechanism: a blocking rule that omp cannot run before the tool.
-			wantRed: /^G1 plant-ast-tripwire: astCondition on a blocking rule cannot block/,
+			wantRed: /^G1 plant-ast-tripwire: astCondition on a blocking rule requires astLiveScenario evidence/,
 		},
 		{
 			id: "g",
