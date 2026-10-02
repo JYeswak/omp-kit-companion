@@ -20,6 +20,8 @@
 #        (planted-negative runs: the live scenario must then NOT block)
 #        OMP_KIT_DEFAULT_TTSR=1 runs omp under its own default TTSR settings instead of
 #        installing the kit policy, so a second run reports policy-sensitive differences.
+#        OMP_KIT_TEST_NO_PROVIDER_PIN=1 skips the disabledProviders isolation so a test
+#        can prove OMP would otherwise probe OLLAMA_HOST (test-only).
 set -u
 MODE=full
 case "${1:-}" in
@@ -166,7 +168,13 @@ fi
 # discovers implicit socket providers (ollama/llama.cpp/lm-studio). Disable
 # them in the isolated config; the per-scenario mock provider is configured
 # explicitly in models.yml and is unaffected, as is on-device Apple FM.
-printf 'disabledProviders:\n- ollama\n- "llama.cpp"\n- lm-studio\n' >>"$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "provider isolation producer_rc=$config_rc" >&2; exit "$config_rc"; }
+# OMP_KIT_TEST_NO_PROVIDER_PIN=1 skips the append so tests can prove OMP would
+# otherwise probe OLLAMA_HOST (test-only; production runs never set it).
+if [ -z "${OMP_KIT_TEST_NO_PROVIDER_PIN:-}" ]; then
+  printf 'disabledProviders:\n- ollama\n- "llama.cpp"\n- lm-studio\n' >>"$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "provider isolation producer_rc=$config_rc" >&2; exit "$config_rc"; }
+else
+  echo "provider isolation skipped by OMP_KIT_TEST_NO_PROVIDER_PIN (test-only)" >&2
+fi
 printf '[user]\n\temail = e2e@example.invalid\n\tname = e2e\n[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
 # br/bd stubs: a close that gets past the rules must not touch any real beads database.
 for b in br bd; do printf '#!/bin/sh\nexit 0\n' >"$T/bin/$b"; chmod +x "$T/bin/$b"; done
