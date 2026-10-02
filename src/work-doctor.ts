@@ -22,6 +22,17 @@ const DEFAULT_REPO_TIMEOUT_MS = 2_000;
 const UNTRACKED_FILE_CAP = 1_000;
 const DISCOVERY_MAX_DEPTH = 10;
 
+function hasGitConfig(repo: string): boolean {
+	try {
+		const dotGit = join(repo, ".git");
+		const dotGitStat = lstatSync(dotGit);
+		if (!dotGitStat.isDirectory()) return false;
+		const commonDirFile = join(dotGit, "commondir");
+		const commonDir = existsSync(commonDirFile) ? resolve(dotGit, readFileSync(commonDirFile, "utf8").trim()) : dotGit;
+		return existsSync(join(commonDir, "config"));
+	} catch { return false; }
+}
+
 export function resolveWorkRoots(rootFlag: string | undefined, env: Record<string, string | undefined> = process.env): string[] {
 	const home = env.HOME;
 	const configured = rootFlag ?? env.OMP_KIT_WORK_ROOTS ?? (home ? join(home, "Developer") : "");
@@ -132,7 +143,7 @@ function discover(root: string): { root: WorkRootReport; repos: string[] } {
 		const current = pending.pop()!; let entries;
 		try { entries = readdirSync(current.path, { withFileTypes: true }); } catch { continue; }
 		const gitEntry = entries.find((entry) => entry.name === ".git");
-		if (gitEntry) { if (gitEntry.isDirectory()) repos.push(current.path); continue; }
+		if (gitEntry) { if (gitEntry.isDirectory() && hasGitConfig(current.path)) repos.push(current.path); continue; }
 		const names = new Set(entries.map((entry) => entry.name));
 		if (names.has("HEAD") && names.has("objects") && names.has("refs")) continue;
 		if (current.depth >= DISCOVERY_MAX_DEPTH) { skippedDepth += 1; continue; }

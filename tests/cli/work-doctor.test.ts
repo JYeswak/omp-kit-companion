@@ -28,6 +28,7 @@ function repo(root: string, name: string): string {
 function fixture(): { root: string; repos: Record<string, string> } {
 	const root = mkdtempSync(join(runtimeTempRoot(), "omp-kit-work-doctor-"));
 	fixtures.push(root);
+	mkdirSync(join(root, "not-a-repo", ".git"), { recursive: true });
 	const clean = repo(root, "clean");
 	const dirty = repo(root, "dirty");
 	writeFileSync(join(dirty, "untracked.txt"), "dirty\n");
