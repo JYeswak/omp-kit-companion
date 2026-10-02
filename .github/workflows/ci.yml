@@ -71,7 +71,22 @@ jobs:
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Fetch reviewed OMP memory source fixture (18.4.9)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/omp-reviewed"
+          mkdir -p "$source_dir"
+          npm pack --quiet --ignore-scripts --pack-destination "$source_dir" "@oh-my-pi/pi-coding-agent@18.4.9"
+          tar -xzf "$source_dir/oh-my-pi-pi-coding-agent-18.4.9.tgz" -C "$source_dir" \
+            package/package.json package/dist/cli.js \
+            package/src/memory-backend/redact.ts \
+            package/src/memory-backend/settings.ts \
+            package/src/memory-backend/resolve.ts \
+            package/src/config/settings.ts
       - name: Exercise self-contained CLI and native matcher consumer contracts
+        env:
+          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test tests/cli tests/fleet-guard
       - name: Validate minimum/latest detached native receipts
         run: python3 tests/cli/native_candidate_test.py

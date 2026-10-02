@@ -41,7 +41,7 @@ const MEMORY_SOURCE_FILES = [
 	"src/config/settings.ts",
 ] as const;
 function copyReviewedMemorySources(ompPackage: string): void {
-	const launcher = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+	const launcher = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 	if (!launcher) throw new Error("memory doctor fixture requires an installed OMP source package");
 	const root = dirname(dirname(realpathSync(launcher)));
 	for (const relative of MEMORY_SOURCE_FILES) {

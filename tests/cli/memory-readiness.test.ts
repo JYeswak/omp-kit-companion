@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
 
 const fixtures: string[] = [];
-const INSTALLED_OMP_PATH = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+const INSTALLED_OMP_PATH = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 if (!INSTALLED_OMP_PATH) throw new Error("memory-readiness tests require an installed OMP on PATH");
 const INSTALLED_OMP_ROOT = dirname(dirname(realpathSync(INSTALLED_OMP_PATH)));
 const INSTALLED_OMP_VERSION = JSON.parse(readFileSync(join(INSTALLED_OMP_ROOT, "package.json"), "utf8")).version as string;
