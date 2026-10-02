@@ -475,17 +475,32 @@ test("service uninstall reports already_absent through the CLI wire", () => {
   expect("alreadyAbsent" in result.envelope.data).toBe(false);
 });
 
-test("service uninstall moves a stale plist to backup through the CLI wire", () => {
+test("service uninstall moves a stale install to backup through the CLI wire", () => {
   const { home } = fixture();
-  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
-  const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
-  writeFileSync(dest, "stale-bytes\n");
+  if (process.platform === "darwin") {
+    mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+    const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
+    writeFileSync(dest, "stale-bytes\n");
+    const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
+    expect(result.code).toBe(0);
+    expect(result.envelope.data.label).toBe(testLabel);
+    expect(result.envelope.data.backup).toContain("service-backups");
+    expect(() => readFileSync(dest, "utf8")).toThrow();
+    expect(readFileSync(result.envelope.data.backup, "utf8")).toBe("stale-bytes\n");
+    return;
+  }
+  const dir = join(home, ".config", "systemd", "user");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "omp-kit-omp-watch.service"), "stale-service\n");
+  writeFileSync(join(dir, "omp-kit-omp-watch.path"), "stale-path\n");
   const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
   expect(result.code).toBe(0);
   expect(result.envelope.data.label).toBe(testLabel);
   expect(result.envelope.data.backup).toContain("service-backups");
-  expect(() => readFileSync(dest, "utf8")).toThrow();
-  expect(readFileSync(result.envelope.data.backup, "utf8")).toBe("stale-bytes\n");
+  expect(() => readFileSync(join(dir, "omp-kit-omp-watch.service"), "utf8")).toThrow();
+  expect(() => readFileSync(join(dir, "omp-kit-omp-watch.path"), "utf8")).toThrow();
+  expect(readFileSync(join(result.envelope.data.backup, "omp-kit-omp-watch.service"), "utf8")).toBe("stale-service\n");
+  expect(readFileSync(join(result.envelope.data.backup, "omp-kit-omp-watch.path"), "utf8")).toBe("stale-path\n");
 });
 
 test("systemd install addresses real unit names and backs up replaced bytes", () => {
