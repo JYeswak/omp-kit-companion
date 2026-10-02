@@ -173,23 +173,57 @@ async function resolveAgentName(context: ReservationCheckContext, projectKey: st
 	return typeof name === "string" && name ? name : undefined;
 }
 
+function normalizeReservationPath(value: string): string {
+	return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+}
+
+function reservationPatternCovers(pattern: string, requestedPath: string): boolean {
+	const normalizedPattern = normalizeReservationPath(pattern);
+	const normalizedPath = normalizeReservationPath(requestedPath);
+	if (normalizedPattern === normalizedPath) return true;
+	const hasWildcard = normalizedPattern.includes("*") || normalizedPattern.includes("?") || normalizedPattern.includes("[");
+	if (!hasWildcard && normalizedPath.startsWith(normalizedPattern + "/")) return true;
+	let expression = "^";
+	for (let index = 0; index < normalizedPattern.length; index += 1) {
+		const character = normalizedPattern[index]!;
+		if (character === "*" && normalizedPattern[index + 1] === "*") {
+			expression += ".*";
+			index += 1;
+		} else if (character === "*") {
+			expression += "[^/]*";
+		} else if (character === "?") {
+			expression += "[^/]";
+		} else {
+			if ("\\^$+{}().|".includes(character)) expression += "\\";
+			expression += character;
+		}
+	}
+	return new RegExp(expression + "$").test(normalizedPath);
+}
+
+export function reservationLookupFromResponse(response: unknown, requestedPath: string): ReservationLookupResult {
+	if (!response || typeof response !== "object") throw new Error("Agent Mail returned no reservation result");
+	const record = response as Record<string, unknown>;
+	const active = record.own_active ?? record.own_reservations ?? record.ownReservations;
+	const ownActive = Array.isArray(active) ? active : [];
+	const covered = record.covered === true || ownActive.some((entry) => {
+		if (!entry || typeof entry !== "object") return false;
+		const reservation = entry as Record<string, unknown>;
+		return reservation.exclusive !== false && typeof reservation.path_pattern === "string" && reservationPatternCovers(reservation.path_pattern, requestedPath);
+	});
+	const conflicts = record.conflicts;
+	return { covered, conflicts: Array.isArray(conflicts) ? conflicts : [] };
+}
+
 async function lookupReservations(input: ReservationLookupInput, context: ReservationCheckContext): Promise<ReservationLookupResult> {
 	if (context.lookupReservations) return context.lookupReservations(input);
-	const result = await callAgentMail("check_file_reservation_conflicts", {
+	const response = await callAgentMail("check_file_reservation_conflicts", {
 		project_key: input.projectKey,
 		agent_name: input.agentName,
 		paths: [input.path],
 	});
-	if (!result || typeof result !== "object") throw new Error("Agent Mail returned no reservation result");
-	const record = result as Record<string, unknown>;
-	const own = record.own_reservations ?? record.ownReservations;
-	const conflicts = record.conflicts;
-	return {
-		covered: record.covered === true || (Array.isArray(own) && own.length > 0),
-		conflicts: Array.isArray(conflicts) ? conflicts : [],
-	};
+	return reservationLookupFromResponse(response, input.path);
 }
-
 function cachedLookup(key: string, now: number): ReservationLookupResult | undefined {
 	const entry = cache.get(key);
 	if (!entry) return undefined;
