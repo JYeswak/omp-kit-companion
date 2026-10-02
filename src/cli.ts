@@ -10,7 +10,7 @@ import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
-import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -307,6 +307,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	profile: ["effective_profile"],
 	settings: ["policy"],
 	extensions: ["extensions", "extension_imports"],
+	dicklesworthstone: ["dicklesworthstone"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
@@ -362,7 +363,9 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	let findings = allFindings;
 	if (request.command.name === "doctor") {
 		const scope = request.flags.get("--scope");
-		if (typeof scope === "string") {
+		if (scope === "dicklesworthstone") {
+			findings = [await inspectDicklesworthstone()];
+		} else if (typeof scope === "string") {
 			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
 			findings = scoped.length ? scoped : [{
@@ -1293,14 +1296,16 @@ async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
 	};
 	const rules = selected("--rules");
 	const cases = selected("--cases");
-	for (const path of [rules, cases]) {
+	const baseline = selected("--baseline");
+	for (const path of [rules, cases, baseline]) {
 		if (path !== undefined && (!isAbsolute(path) || resolve(path) !== path)) {
 			return refusal("INVALID_PATH", "Metamorphic selection requires canonical absolute paths",
-				"Pass absolute --rules and --cases paths; nothing was measured.");
+				"Pass absolute --rules, --cases and --baseline paths; nothing was measured.");
 		}
 	}
 	const report = await runMetamorphicReport({ root: identity.release.root, executablePath: identity.release.executable,
-		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}) });
+		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}),
+		...(baseline !== undefined ? { baseline } : {}) });
 	return { code: report.status === "FAIL" ? 1 : report.status === "PASS" ? 0 : 3,
 		data: { overall: report.status === "PASS" ? "OK" : report.status, metamorphic: report }, verification: "UNVERIFIED" };
 }
