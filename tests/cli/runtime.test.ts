@@ -308,3 +308,27 @@ describe("OMP installation identity", () => {
 		expect(() => resolveOmpIdentity({ PATH: dirname(launcher) })).toThrow(/source|matcher/i);
 	});
 });
+
+test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () => {
+	const adapter = join(REPO_ROOT, "scripts", "runtime-adapter.sh");
+	const nested = join(REPO_ROOT, "var", "agent-tmp");
+	mkdirSync(nested, { recursive: true });
+	const planted = Bun.spawnSync(["/bin/sh", adapter, "--workdir"], {
+		stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: nested },
+	});
+	expect(planted.exitCode).toBe(0);
+	const fallback = planted.stdout.toString().trim();
+	expect(realpathSync(fallback)).toBe(fallback);
+	expect(fallback.startsWith(nested)).toBe(false);
+	expect(planted.stderr.toString()).toContain("falling back to /tmp");
+	rmSync(fallback, { recursive: true, force: true });
+	const normalBase = mkdtempSync(join(tmpdir(), "omp-kit-workdir-"));
+	fixtures.push(normalBase);
+	const normal = Bun.spawnSync(["/bin/sh", adapter, "--workdir"], {
+		stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: normalBase },
+	});
+	expect(normal.exitCode).toBe(0);
+	const normalDir = normal.stdout.toString().trim();
+	expect(normalDir.startsWith(realpathSync(normalBase))).toBe(true);
+	expect(realpathSync(normalDir)).toBe(normalDir);
+});

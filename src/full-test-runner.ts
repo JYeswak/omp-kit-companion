@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runIsolatedShell, type BundledRunResult } from "./runtime.ts";
-import { runFastTest, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
+import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
@@ -104,14 +104,14 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
 }
 
 /** Actual OMP live calls run in a private HOME; never claim the operator's effective profile was certified. */
-export async function runFullTest(input: FullTestInput): Promise<FullTestReport> {
+export async function runFullTest(input: FullTestInput, expectedCounts?: FastTestExpectations): Promise<FullTestReport> {
  if (![input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])].every(isAbsolute))
   throw new Error("full-test release, executable, HOME, and project paths must be absolute");
  const watchedPaths = operatorWatchedPaths(input.home, input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit"));
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
  const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
- const fast = await runFastTest(input);
+	const fast = expectedCounts ? await runFastTest(input, expectedCounts) : await runFastTest(input);
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null }])) as Record<FullStageName, FullStage>;
  const empty = { producer_rc: null, stdout: "", stderr: "" };
  if (fast.status !== "PASS") {

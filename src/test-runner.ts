@@ -5,10 +5,11 @@ import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
 
 const HARNESS = "scripts/ttsr-harness.ts";
-const EXPECTED = { rules: 22, ttsrRules: 21, cases: 295, quietCases: 150 } as const;
+const EXPECTED = { rules: 22, ttsrRules: 21, cases: 331, quietCases: 177 } as const;
 const SEEDED_PREFIX_PLANT = /^ok\s+plant \(b\) RED as intended: G3 plant-prefix-close quiet tool:bash line 3: fired on prefix/m;
 const SELFTEST_GREEN = /^SELFTEST: all seven plants RED and named; controls GREEN$/m;
 
+export type FastTestExpectations = Readonly<{ rules: number; ttsrRules: number; cases: number; quietCases: number }>;
 export interface FastTestInput {
 	/** Absolute release root containing rules/, cases/, and scripts/ttsr-harness.ts. */
 	root: string;
@@ -168,7 +169,7 @@ function readGateCheck(value: unknown): GateCheck | null {
 	return { total: value.total, passed: value.passed };
 }
 
-function parseStructuredGate(stdout: string, producerCode: number): ParsedGate | null {
+function parseStructuredGate(stdout: string, producerCode: number, expected: FastTestExpectations): ParsedGate | null {
 	let value: unknown;
 	try {
 		value = JSON.parse(stdout);
@@ -212,18 +213,18 @@ function parseStructuredGate(stdout: string, producerCode: number): ParsedGate |
 		quietPrefixFires: counts.quiet_prefix_fires,
 		failures: failures.length,
 	};
-	const g1Ok = summary.rules === EXPECTED.rules
-		&& summary.ttsrRules === EXPECTED.ttsrRules
-		&& registration.total === EXPECTED.rules && registration.passed === EXPECTED.rules
-		&& coverage.total === EXPECTED.ttsrRules && coverage.passed === EXPECTED.ttsrRules
+	const g1Ok = summary.rules === expected.rules
+		&& summary.ttsrRules === expected.ttsrRules
+		&& registration.total === expected.rules && registration.passed === expected.rules
+		&& coverage.total === expected.ttsrRules && coverage.passed === expected.ttsrRules
 		&& !failures.some((failure) => /^(?:G1 |COVERAGE |CASES )/.test(failure));
-	const g2Ok = summary.cases === EXPECTED.cases
-		&& payload.total === EXPECTED.cases && payload.passed === EXPECTED.cases
+	const g2Ok = summary.cases === expected.cases
+		&& payload.total === expected.cases && payload.passed === expected.cases
 		&& !failures.some((failure) => /^(?:G2 |CASES )/.test(failure));
-	const g3Ok = summary.cases === EXPECTED.cases
-		&& prefix.total === EXPECTED.cases && prefix.passed === EXPECTED.cases
-		&& summary.quietCases === EXPECTED.quietCases
-		&& prefixEvidence.quiet_passed === EXPECTED.quietCases
+	const g3Ok = summary.cases === expected.cases
+		&& prefix.total === expected.cases && prefix.passed === expected.cases
+		&& summary.quietCases === expected.quietCases
+		&& prefixEvidence.quiet_passed === expected.quietCases
 		&& summary.quietPrefixFires === 0
 		&& !failures.some((failure) => /^(?:G3 |CASES )/.test(failure));
 	const g1Failures = failures.filter((failure) => /^(?:G1 |COVERAGE |CASES )/.test(failure));
@@ -234,22 +235,22 @@ function parseStructuredGate(stdout: string, producerCode: number): ParsedGate |
 		summary,
 		g1Registration: {
 			status: g1Ok ? "PASS" : "FAIL",
-			expected_rules: EXPECTED.rules,
-			expected_ttsr_rules: EXPECTED.ttsrRules,
+			expected_rules: expected.rules,
+			expected_ttsr_rules: expected.ttsrRules,
 			observed_rules: summary.rules,
 			observed_ttsr_rules: summary.ttsrRules,
 			failures: g1Failures.length ? g1Failures : g1Ok ? [] : ["G1 registration or coverage counts did not match the shipped contract"],
 		},
 		g2Payload: {
 			status: g2Ok ? "PASS" : "FAIL",
-			expected_cases: EXPECTED.cases,
+			expected_cases: expected.cases,
 			observed_cases: summary.cases,
 			failures: g2Failures.length ? g2Failures : g2Ok ? [] : ["G2 full-payload case count or output did not match the shipped contract"],
 		},
 		g3Prefix: {
 			status: g3Ok ? "PASS" : "FAIL",
-			expected_cases: EXPECTED.cases,
-			expected_quiet_cases: EXPECTED.quietCases,
+			expected_cases: expected.cases,
+			expected_quiet_cases: expected.quietCases,
 			observed_cases: summary.cases,
 			observed_quiet_cases: summary.quietCases,
 			quiet_prefix_fires: summary.quietPrefixFires,
@@ -295,6 +296,7 @@ function blockedReport(
 	diagnostics: FastTestReport["diagnostics"],
 	blocker: FastTestReport["blocker"],
 	redact: (text: string) => string,
+	expected: FastTestExpectations,
 	gate?: BundledRunResult,
 	selftest?: BundledRunResult,
 ): FastTestReport {
@@ -304,9 +306,9 @@ function blockedReport(
 		status: "BLOCKED",
 		exitCode: 3,
 		proofs: {
-			G1_registration: { status: "NOT_RUN", expected_rules: EXPECTED.rules, expected_ttsr_rules: EXPECTED.ttsrRules, observed_rules: null, observed_ttsr_rules: null, failures: [] },
-			G2_payload: { status: "NOT_RUN", expected_cases: EXPECTED.cases, observed_cases: null, failures: [] },
-			G3_quiet_prefix: { status: "NOT_RUN", expected_cases: EXPECTED.cases, expected_quiet_cases: EXPECTED.quietCases, observed_cases: null, observed_quiet_cases: null, quiet_prefix_fires: null, seeded_plant: "NOT_RUN", failures: [] },
+			G1_registration: { status: "NOT_RUN", expected_rules: expected.rules, expected_ttsr_rules: expected.ttsrRules, observed_rules: null, observed_ttsr_rules: null, failures: [] },
+			G2_payload: { status: "NOT_RUN", expected_cases: expected.cases, observed_cases: null, failures: [] },
+			G3_quiet_prefix: { status: "NOT_RUN", expected_cases: expected.cases, expected_quiet_cases: expected.quietCases, observed_cases: null, observed_quiet_cases: null, quiet_prefix_fires: null, seeded_plant: "NOT_RUN", failures: [] },
 			G4_live: { status: "NOT_RUN", reason: "Fast test runs only the matcher; run omp-kit test --full for isolated live scenarios." },
 		},
 		diagnostics,
@@ -319,7 +321,7 @@ function blockedReport(
 const NATIVE_LOAD_FAILURE = /@oh-my-pi\/pi-natives|native (?:module|package|matcher|binding)|cannot find (?:module|package)|failed to load/i;
 
 /** Run the shipped fast matcher through the compiled release runtime; never run project code or live model calls. */
-export async function runFastTest(input: FastTestInput): Promise<FastTestReport> {
+export async function runFastTest(input: FastTestInput, expected: FastTestExpectations = EXPECTED): Promise<FastTestReport> {
 	const paths = [input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])];
 	if (!paths.every(isAbsolute)) throw new Error("fast-test release, executable, HOME, and project paths must be absolute");
 
@@ -342,7 +344,7 @@ export async function runFastTest(input: FastTestInput): Promise<FastTestReport>
 	} catch (error) {
 		const kind = blockerKind(error);
 		const redact = redactor(input);
-		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact);
+		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected);
 	}
 	const redact = redactor(input, identity);
 	let gate: BundledRunResult;
@@ -350,16 +352,16 @@ export async function runFastTest(input: FastTestInput): Promise<FastTestReport>
 		gate = await runBundled(HARNESS, ["--gate-json"], input.root, input.executablePath);
 	} catch (error) {
 		const kind = blockerKind(error);
-		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact);
+		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected);
 	}
-	const parsed = parseStructuredGate(gate.stdout, gate.code);
+	const parsed = parseStructuredGate(gate.stdout, gate.code, expected);
 	if (!parsed && NATIVE_LOAD_FAILURE.test(`${gate.stderr}\n${gate.stdout}`)) {
 		const kind: FastTestBlockerKind = "NATIVE_MATCHER_UNAVAILABLE";
-		return blockedReport(diagnostics, { kind, message: gate.stderr || gate.stdout || "OMP matcher did not load", remedy: remedyFor(kind) }, redact, gate);
+		return blockedReport(diagnostics, { kind, message: gate.stderr || gate.stdout || "OMP matcher did not load", remedy: remedyFor(kind) }, redact, expected, gate);
 	}
 	if (!parsed) {
 		const kind: FastTestBlockerKind = "BUNDLED_RUNTIME_UNAVAILABLE";
-		return blockedReport(diagnostics, { kind, message: gate.stderr || gate.stdout || "harness emitted invalid structured gate evidence", remedy: remedyFor(kind) }, redact, gate);
+		return blockedReport(diagnostics, { kind, message: gate.stderr || gate.stdout || "harness emitted invalid structured gate evidence", remedy: remedyFor(kind) }, redact, expected, gate);
 	}
 
 	let selftest: BundledRunResult;
@@ -367,11 +369,11 @@ export async function runFastTest(input: FastTestInput): Promise<FastTestReport>
 		selftest = await runBundled(HARNESS, ["--selftest"], input.root, input.executablePath);
 	} catch (error) {
 		const kind = blockerKind(error);
-		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, gate);
+		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected, gate);
 	}
 	if (!/^SELFTEST:/m.test(selftest.stdout) && NATIVE_LOAD_FAILURE.test(`${selftest.stderr}\n${selftest.stdout}`)) {
 		const kind: FastTestBlockerKind = "NATIVE_MATCHER_UNAVAILABLE";
-		return blockedReport(diagnostics, { kind, message: selftest.stderr || selftest.stdout || "OMP matcher selftest did not load", remedy: remedyFor(kind) }, redact, gate, selftest);
+		return blockedReport(diagnostics, { kind, message: selftest.stderr || selftest.stdout || "OMP matcher selftest did not load", remedy: remedyFor(kind) }, redact, expected, gate, selftest);
 	}
 
 	const gateCapture = capture(gate, redact);
