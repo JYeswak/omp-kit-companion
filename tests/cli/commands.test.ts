@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
@@ -33,6 +33,22 @@ function installedOmp(root: string): string {
 	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(pkg, "src", file), "export {};\n");
 	symlinkSync(join(pkg, "dist", "cli.js"), join(bin, "omp"));
 	return bin;
+}
+const MEMORY_SOURCE_FILES = [
+	"src/memory-backend/redact.ts",
+	"src/memory-backend/settings.ts",
+	"src/memory-backend/resolve.ts",
+	"src/config/settings.ts",
+] as const;
+function copyReviewedMemorySources(ompPackage: string): void {
+	const launcher = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+	if (!launcher) throw new Error("memory doctor fixture requires an installed OMP source package");
+	const root = dirname(dirname(realpathSync(launcher)));
+	for (const relative of MEMORY_SOURCE_FILES) {
+		const target = join(ompPackage, relative);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, readFileSync(join(root, relative)));
+	}
 }
 
 function run(args: string[], root: string, path = "/usr/bin:/bin") {
@@ -132,6 +148,10 @@ function compiledDiagnosticFixture() {
 		return { code: result.exitCode, envelope: JSON.parse(stdout), realOmp };
 	};
 	return { release, home, project, otherProject, ompPackage, invoke: (...args: string[]) => invoke(args), invokeWithEnv: invoke };
+}
+
+function compiledTest(name: string, run: () => void): void {
+	test(name, run, 30_000);
 }
 
 type SchemaShape = {
@@ -281,7 +301,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(result.data.data.omp.status).toBe("UNAVAILABLE");
 	});
 
-	test("compiled status, health and doctor inventory on a supported OMP-layout fixture never invokes OMP or changes HOME/project", () => {
+	compiledTest("compiled status, health and doctor inventory on a supported OMP-layout fixture never invokes OMP or changes HOME/project", () => {
 		const { invoke } = compiledDiagnosticFixture();
 		const status = invoke("status");
 		expect(status.code).toBe(0);
@@ -318,7 +338,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(capabilities.envelope.data.commands.map((command: { name: string }) => command.name)).toEqual(expect.arrayContaining(["status", "health", "doctor"]));
 	});
 
-	test("compiled inventory exposes manifest failure, installed drift, retired/unknown rules and project shadow without modifying either tree", () => {
+	compiledTest("compiled inventory exposes manifest failure, installed drift, retired/unknown rules and project shadow without modifying either tree", () => {
 		const { release, home, project, invoke } = compiledDiagnosticFixture();
 		const shipped = join(release, "rules", "rule-a.md");
 		writeFileSync(shipped, "tampered release\n");
@@ -343,7 +363,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(shadow.envelope.data.findings.find((row: { component: string }) => row.component === "retired_rules").evidence.present).toEqual(["old-rule"]);
 		expect(shadow.envelope.data.findings.find((row: { component: string }) => row.component === "unknown_rules").evidence.names).toEqual(["other"]);
 	});
-	test("compiled LSP doctor and setup use the selected project cwd, keep out-of-cwd files distinct, and never invoke binaries", () => {
+	compiledTest("compiled LSP doctor and setup use the selected project cwd, keep out-of-cwd files distinct, and never invoke binaries", () => {
 		const { project, otherProject, invoke } = compiledDiagnosticFixture();
 		writeFileSync(join(project, "package.json"), "{\"private\":true}\n");
 		const target = join(project, "src", "index.ts");
@@ -378,7 +398,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(plan.envelope.data, schemas["lsp setup"])).toBe(true);
 	});
 
-	test("LSP grammar advertises only read-only routes and missing OMP remains an environment refusal", () => {
+	compiledTest("LSP grammar advertises only read-only routes and missing OMP remains an environment refusal", () => {
 		const { invoke, invokeWithEnv, otherProject } = compiledDiagnosticFixture();
 		const capabilities = invoke("capabilities").envelope.data.commands;
 		expect(capabilities.find((row: { name: string }) => row.name === "lsp")?.subcommands.map((row: { name: string }) => row.name)).toEqual(["setup"]);
@@ -407,7 +427,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(nonexistentProject.code).toBe(2);
 		expect(nonexistentProject.envelope.errors[0].code).toBe("INVALID_PROJECT");
 	});
-	test("compiled project-loading doctor inventories clone startup inputs without running code, disclosing checkout paths, or granting trust", () => {
+	compiledTest("compiled project-loading doctor inventories clone startup inputs without running code, disclosing checkout paths, or granting trust", () => {
 		const { project, otherProject, ompPackage, invoke } = compiledDiagnosticFixture();
 		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.3.1" }));
 		const clean = invoke("doctor", "--scope", "project-loading");
@@ -442,7 +462,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(hazard.envelope.data, schema)).toBe(true);
 	});
 
-	test("compiled project-loading doctor leaves unsafe clone paths opaque, including a symlinked selected root", () => {
+	compiledTest("compiled project-loading doctor leaves unsafe clone paths opaque, including a symlinked selected root", () => {
 		const { project, otherProject, ompPackage, invoke } = compiledDiagnosticFixture();
 		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.3.1" }));
 		mkdirSync(join(otherProject, ".claude"), { recursive: true });
@@ -464,7 +484,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(help).toContain("project-loading");
 		expect(invoke("completion", "bash").envelope.data.text).toContain("project-loading");
 	});
-	test("compiled examples renders each release-bundled profile recipe without touching HOME or activating a profile", () => {
+	compiledTest("compiled examples renders each release-bundled profile recipe without touching HOME or activating a profile", () => {
 		const { invoke } = compiledDiagnosticFixture();
 		const schemas = invoke("schema").envelope.data.command_data;
 		const expectedSettings = {
@@ -494,9 +514,10 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(unknown.code).toBe(2);
 		expect(unknown.envelope.errors[0].code).toBe("UNKNOWN_SUBCOMMAND");
 	});
-	test("compiled memory doctor reports observed default OFF and named Mnemopi settings without reading rows or invoking OMP", () => {
+	compiledTest("compiled memory doctor reports reviewed on-disk settings without reading rows or invoking OMP", () => {
 		const { home, ompPackage, invoke } = compiledDiagnosticFixture();
-		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.2" }));
+		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
+		copyReviewedMemorySources(ompPackage);
 		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
 		writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory:\n  backend: off\n");
 		const off = invoke("doctor", "--scope", "memory");
@@ -505,6 +526,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(off.envelope.data.findings[0]).toEqual(expect.objectContaining({
 			component: "memory", status: "DEGRADED", evidence: expect.objectContaining({
 				backend: "off", store: "NOT_APPLICABLE", runtime: "NOT_PROBED",
+				redactor: expect.objectContaining({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY", missed: expect.arrayContaining(["pem_private_key"]) }),
 				profile_observation: { selected: "default", source: "DEFAULT_ON_DISK", effective_active_profile: "UNVERIFIED" },
 			}),
 		}));
@@ -513,10 +535,11 @@ describe("omp-kit CLI grammar and refusal", () => {
 			"memory:\n  backend: mnemopi\nmnemopi:\n  autoRetain: false\n  autoRecall: false\n  scoping: per-project\n  noEmbeddings: true\n  llmMode: none\n");
 		const manual = invoke("doctor", "--scope", "memory", "--profile", "manual");
 		expect(manual.code).toBe(0);
-		expect(manual.envelope.data.overall).toBe("UNVERIFIED");
+		expect(manual.envelope.data.overall).toBe("DEGRADED");
 		expect(manual.envelope.data.findings[0].evidence).toEqual(expect.objectContaining({
 			backend: "mnemopi", configured: true, store: "NOT_CREATED", auto_retain: false, auto_recall: false,
 			scoping: "per-project", model: "DISABLED", embedding: "DISABLED_FTS_ONLY", runtime: "NOT_PROBED",
+			redactor: expect.objectContaining({ status: "MISSES", version: "18.4.9", missed: expect.arrayContaining(["pem_private_key"]) }),
 			profile_observation: { selected: "manual", source: "NAMED_ON_DISK", effective_active_profile: "UNVERIFIED" },
 		}));
 		expect(JSON.stringify(manual.envelope)).not.toContain(["ghp_", "SyntheticLettersAndDigits"].join(""));
@@ -525,24 +548,28 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(manual.envelope.data, invoke("schema").envelope.data.command_data.doctor)).toBe(true);
 	});
 
-	test("memory doctor leaves unknown config/version unverified and missing OMP unavailable", () => {
+	compiledTest("memory doctor leaves malformed config and changed source bytes unverified and missing OMP unavailable", () => {
 		const { home, ompPackage, otherProject, invoke, invokeWithEnv } = compiledDiagnosticFixture();
-		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.2" }));
+		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
+		copyReviewedMemorySources(ompPackage);
 		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
 		writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory: [\n");
 		const opaque = invoke("doctor", "--scope", "memory");
 		expect(opaque.envelope.data.overall).toBe("UNVERIFIED");
 		expect(opaque.envelope.data.findings[0].evidence.backend).toBe("UNVERIFIED");
-		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.5.0" }));
-		const unknownVersion = invoke("doctor", "--scope", "memory");
-		expect(unknownVersion.envelope.data.overall).toBe("UNVERIFIED");
-		expect(unknownVersion.envelope.data.findings[0].reason).toContain("version");
+		const settingsPath = join(ompPackage, "src/memory-backend/settings.ts");
+		const settingsBytes = Buffer.from(readFileSync(settingsPath));
+		settingsBytes[0] = (settingsBytes[0] ?? 0) ^ 1;
+		writeFileSync(settingsPath, settingsBytes);
+		const changedSource = invoke("doctor", "--scope", "memory");
+		expect(changedSource.envelope.data.overall).toBe("UNVERIFIED");
+		expect(changedSource.envelope.data.findings[0].reason).toContain("source hashes");
 		const missingOmp = invokeWithEnv(["doctor", "--scope", "memory"], { PATH: otherProject });
 		expect(missingOmp.code).toBe(3);
 		expect(missingOmp.envelope.errors[0].code).toBe("OMP_UNAVAILABLE");
 		expect(invoke("doctor", "--scope", "lsp", "--profile", "manual").code).toBe(2);
 	});
-	test("compiled named-profile MCP doctor inventories candidates and disabled servers without starting them or disclosing env tokens", () => {
+	compiledTest("compiled named-profile MCP doctor inventories candidates and disabled servers without starting them or disclosing env tokens", () => {
 		const { home, ompPackage, project, invoke } = compiledDiagnosticFixture();
 		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.2" }));
 		const agent = join(home, ".omp", "profiles", "named", "agent");
@@ -578,7 +605,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(denied.envelope.data, invoke("schema").envelope.data.command_data.doctor)).toBe(true);
 	});
 
-	test("MCP grammar requires an existing named profile and examples mcp remains a static manual template", () => {
+	compiledTest("MCP grammar requires an existing named profile and examples mcp remains a static manual template", () => {
 		const { home, otherProject, invoke, invokeWithEnv } = compiledDiagnosticFixture();
 		expect(invoke("doctor", "--scope", "mcp").code).toBe(2);
 		expect(invoke("doctor", "--scope", "mcp", "--profile", "default").code).toBe(2);

@@ -11,6 +11,8 @@
 - `scripts/omp-compat.json` is the only checked-in OMP minimum; CI runs the ladder and native certification on that floor and the run-resolved npm latest, recording both versions per advertised platform.
 - Memory readiness trusts only reviewed source hashes for OMP memory settings and the redactor. OMP 18.4.9 reports the known synthetic PEM redaction miss; runtime stays NOT_PROBED and changed source bytes stay UNVERIFIED.
 
+- Private at-rest memory audits trust reviewed OMP/Mnemopi source-hash sets rather than release labels; exact reviewed bytes remain covered under newer labels while changes to pinned sources stay UNVERIFIED.
+
 ## 0.2.0 — 2026-10-01
 
 - A real-HOME journey (52,000-file HOME, edited rules, legacy 0755 state root, a concurrent writer) runs the install-to-update path on macOS and Linux CI with a JSONL step log. It would have caught every real-machine failure fixed in this release.
