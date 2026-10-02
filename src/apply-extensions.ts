@@ -10,6 +10,7 @@ export type ExtensionPlan = {
 	readonly destination: string;
 	readonly stateRoot: string;
 	readonly steps: readonly ExtensionStep[];
+	readonly skippedReasons: readonly ProfileSkip[];
 	readonly skippedProfiles: readonly string[];
 	readonly alreadyListedProfiles: readonly string[];
 	readonly guard: GuardInspection;
@@ -65,13 +66,21 @@ function readOptional(path: string): { bytes: Buffer; image: Image } | null {
 function required(path: string): { bytes: Buffer; image: Image } { return readOptional(path) ?? stop("MISSING_EXTENSION_INPUT"); }
 
 type ProfileConfig = { name: string; path: string; source: { bytes: Buffer; image: Image } | null; data: Record<string, unknown> };
-function profiles(home: string, skip: readonly string[], requested: "all" | readonly string[] = "all", includeDefault = false): { selected: ProfileConfig[]; skipped: string[] } {
+export interface ProfileSkip { name: string; reason: string }
+function profiles(home: string, skip: readonly string[], requested: "all" | readonly string[] = "all", includeDefault = false): { selected: ProfileConfig[]; skipped: ProfileSkip[] } {
+	const skipped: ProfileSkip[] = [];
 	const paths: { name: string; dir: string }[] = [{ name: "default", dir: join(home, ".omp", "agent") }];
 	const named = join(home, ".omp", "profiles");
 	if (inspectDirectory(named, true)) for (const name of readdirSync(named).sort()) {
-		if (!validProfile.test(name) || name === "default" || name.endsWith(".")) stop("UNRECOGNIZED_PROFILE");
+		if (!validProfile.test(name) || name === "default" || name.endsWith(".")) {
+			skipped.push({ name, reason: "UNREADABLE: profile directory name is not addressable" });
+			continue;
+		}
 		const dir = join(named, name, "agent");
-		if (!inspectDirectory(dir, true)) stop("UNRECOGNIZED_PROFILE");
+		if (!inspectDirectory(dir, true)) {
+			skipped.push({ name, reason: "UNREADABLE: profile agent directory is missing or unsafe" });
+			continue;
+		}
 		paths.push({ name, dir });
 	}
 	let names: Set<string>;
@@ -84,22 +93,42 @@ function profiles(home: string, skip: readonly string[], requested: "all" | read
 		for (const name of names) if (!paths.some(profile => profile.name === name)) stop("MISSING_PROFILE");
 	}
 	const chosen = paths.filter(({ name }) => names.has(name));
-	const skipped = chosen.filter(({ name }) => skip.includes(name)).map(({ name }) => name);
+	for (const { name } of chosen.filter(({ name }) => skip.includes(name))) {
+		skipped.push({ name, reason: "policy skipProfiles: profile opted out of extension installs" });
+	}
 	const selected = chosen.filter(({ name }) => !skip.includes(name)).map(({ name, dir }) => {
 		if (!inspectDirectory(dir, true)) {
 			if (name === "default") return { name, path: join(dir, "config.yml"), source: null, data: {} };
-			stop("UNRECOGNIZED_PROFILE");
+			skipped.push({ name, reason: "UNREADABLE: profile agent directory is missing or unsafe" });
+			return null;
 		}
 		const present = configNames.filter(file => readOptional(join(dir, file)) !== null);
-		if (!present.length && name === "default") return { name, path: join(dir, "config.yml"), source: null, data: {} };
-		if (present.length !== 1 || !["config.yml", "config.yaml"].includes(present[0]!)) stop("UNRECOGNIZED_PROFILE_CONFIG");
+		if (!present.length) {
+			if (name === "default") return { name, path: join(dir, "config.yml"), source: null, data: {} };
+			skipped.push({ name, reason: "NO_CONFIG: no config.yml/yaml present; the kit creates nothing unasked" });
+			return null;
+		}
+		if (present.length !== 1 || !["config.yml", "config.yaml"].includes(present[0]!)) {
+			skipped.push({ name, reason: `DUAL_CONFIG: ${present.join(" + ")} present; OMP loads config.yml first and merges settings.json separately, so a single-file edit cannot be proven effective` });
+			return null;
+		}
 		const path = join(dir, present[0]!);
-		const source = required(path);
+		const source = readOptional(path);
+		if (!source) {
+			skipped.push({ name, reason: "UNREADABLE: config file vanished or is unsafe" });
+			return null;
+		}
 		let data: unknown;
-		try { data = YAML.parse(source.bytes.toString("utf8")); } catch { stop("UNRECOGNIZED_PROFILE_CONFIG"); }
-		if (!record(data) || (Object.hasOwn(data, "extensions") && !stringArray(data.extensions))) stop("UNRECOGNIZED_PROFILE_CONFIG");
+		try { data = YAML.parse(source.bytes.toString("utf8")); } catch {
+			skipped.push({ name, reason: "UNPARSEABLE: config YAML does not parse; left untouched for operator review" });
+			return null;
+		}
+		if (!record(data) || (Object.hasOwn(data, "extensions") && !stringArray(data.extensions))) {
+			skipped.push({ name, reason: "UNPARSEABLE: config root is not a mapping with a string extensions list" });
+			return null;
+		}
 		return { name, path, source, data };
-	});
+	}).filter((entry): entry is ProfileConfig => entry !== null);
 	return { selected, skipped };
 }
 
@@ -142,33 +171,46 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	let manifest: unknown;
 	try { manifest = JSON.parse(policy.bytes.toString("utf8")); } catch { stop("INVALID_EXTENSION_POLICY"); }
 	if (!record(manifest) || !stringArray(manifest.extensions) || !stringArray(manifest.skipProfiles) ||
-		Object.keys(manifest).length !== 2 || manifest.extensions.length !== 1 || manifest.extensions[0] !== "kit-guard-optin.ts" ||
-		!manifest.extensions.every(name => validName.test(name)) || !manifest.skipProfiles.every(name => name === "default" || validProfile.test(name))) stop("INVALID_EXTENSION_POLICY");
-	const name = manifest.extensions[0]!;
-	const source = required(join(root, "extensions", name));
-	const destinationDir = join(home, ".omp", "omp-extensions");
-	inspectDirectory(destinationDir, true);
-	const destination = join(destinationDir, name);
-	const existing = readOptional(destination);
-	if (existing && !existing.bytes.equals(source.bytes)) stop("UNMANAGED_EXTENSION_COLLISION");
+		Object.keys(manifest).length !== 2 || manifest.extensions.length < 1 || !manifest.extensions.every(name => validName.test(name)) || !manifest.skipProfiles.every(name => name === "default" || validProfile.test(name))) stop("INVALID_EXTENSION_POLICY");
+	const names = [...new Set(manifest.extensions)];
+	if (names.length !== manifest.extensions.length) stop("INVALID_EXTENSION_POLICY");
 	const { selected, skipped } = profiles(home, manifest.skipProfiles, input.profiles, input.includeDefault);
-	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: destinationDir }];
-	if (!existing) {
-		files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
-		steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
+	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: join(home, ".omp", "omp-extensions") }];
+	const seen = new Set<string>();
+	for (const name of names) {
+		const source = required(join(root, "extensions", name));
+		const destinationDir = join(home, ".omp", "omp-extensions");
+		inspectDirectory(destinationDir, true);
+		const destination = join(destinationDir, name);
+		const existing = readOptional(destination);
+		if (existing && !existing.bytes.equals(source.bytes)) stop("UNMANAGED_EXTENSION_COLLISION");
+		if (seen.has(destination)) stop("INVALID_EXTENSION_POLICY");
+		seen.add(destination);
+		if (!existing) {
+			files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
+			steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
+		}
 	}
-	const skippedProfiles = skipped, alreadyListedProfiles: string[] = [];
+	const skippedProfiles = skipped.map(entry => entry.name), alreadyListedProfiles: string[] = [];
+	const destinations = names.map(name => join(home, ".omp", "omp-extensions", name));
 	for (const profile of selected) {
-		const decision = planExtensionChanges(destination, profile.name, stringArray(profile.data.extensions) ? profile.data.extensions : [], manifest.skipProfiles);
-		if (decision.action === "already-listed") { alreadyListedProfiles.push(profile.name); continue; }
-		const next = Buffer.from(YAML.stringify({ ...profile.data, extensions: decision.extensions }));
+		let current: readonly string[] = stringArray(profile.data.extensions) ? profile.data.extensions as string[] : [];
+		let listed = true;
+		for (const destination of destinations) {
+			const decision = planExtensionChanges(destination, profile.name, current, manifest.skipProfiles);
+			if (decision.action === "skip") { listed = false; break; }
+			if (decision.action !== "already-listed") listed = false;
+			current = decision.extensions;
+		}
+		if (listed) { alreadyListedProfiles.push(profile.name); continue; }
+		const next = Buffer.from(YAML.stringify({ ...profile.data, extensions: current }));
 		const rootId = `profile-${steps.length}`;
 		roots.push({ id: rootId, path: resolve(profile.path, "..") });
 		files.push({ root: rootId, relativePath: basename(profile.path), expectedBefore: profile.source?.image ?? null,
 			after: { bytes: next, mode: profile.source?.image.mode ?? 0o600, ...(profile.source ? { uid: profile.source.image.uid, gid: profile.source.image.gid } : {}) } });
 		steps.push({ kind: "profile", path: profile.path, profile: profile.name, beforeSha256: profile.source?.image.sha256 ?? null, afterSha256: hash(next) });
 	}
-	return { destination, stateRoot, steps, skippedProfiles, alreadyListedProfiles, guard: inspectExtensionGuard(input),
+	return { destination: destinations[0]!, stateRoot, steps, skippedProfiles, skippedReasons: skipped, alreadyListedProfiles, guard: inspectExtensionGuard(input),
 		mutation: files.length ? planMutation({ stateRoot, roots, files }) : null };
 }
 
