@@ -14,6 +14,7 @@
 #                                          exit 0 iff the streamed evidenced close goes RED
 # Env:   OMP=/path/to/omp  TIMEOUT=120 (seconds per scenario)  KEEP=1 (keep the temp dir)
 #        ONLY="id id ..." (run just these scenario ids)
+#        OMP_KIT_TEST_WORK_ROOT=/repo/var/agent-tmp/<dir> (optional; requires .owner)
 #        OMP_KIT_PLUGIN_SOURCE=/abs/dir  link that package (needs package.json with an omp
 #        field) instead of building a temp one; plant mode refuses this to protect the checkout
 #        OMP_KIT_PLUGIN_DISABLE_AFTER_LINK=name  disable that plugin right after linking
@@ -60,12 +61,24 @@ unset OMP_PROFILE PI_PROFILE PI_CODING_AGENT_DIR
 LIMIT="$HERE/scripts/limit-process-tree.sh"
 [ -x "$LIMIT" ] || { echo "process-tree limiter missing: $LIMIT" >&2; exit 2; }
 
-WORK_ROOT=$("$HERE/scripts/runtime-adapter.sh" --workdir) || exit 2
+# Policy-constrained contributors can provide an existing marked scratch root.
+# Otherwise runtime-adapter creates a private system-temp root.
+if [ -n "${OMP_KIT_TEST_WORK_ROOT:-}" ]; then
+  case "$OMP_KIT_TEST_WORK_ROOT" in /*) ;; *) echo "OMP_KIT_TEST_WORK_ROOT must be absolute" >&2; exit 2 ;; esac
+  [ ! -L "$OMP_KIT_TEST_WORK_ROOT" ] || { echo "OMP_KIT_TEST_WORK_ROOT must not be a symlink" >&2; exit 2; }
+  scratch_root=$(CDPATH='' cd -- "$HERE/var/agent-tmp" 2>/dev/null && pwd -P) || { echo "repo scratch root is unavailable" >&2; exit 2; }
+  WORK_ROOT=$(CDPATH='' cd -- "$OMP_KIT_TEST_WORK_ROOT" 2>/dev/null && pwd -P) || { echo "OMP_KIT_TEST_WORK_ROOT is unavailable" >&2; exit 2; }
+  case "$WORK_ROOT" in "$scratch_root"/*) ;; *) echo "OMP_KIT_TEST_WORK_ROOT must resolve under $scratch_root" >&2; exit 2 ;; esac
+  [ -f "$WORK_ROOT/.owner" ] || { echo "OMP_KIT_TEST_WORK_ROOT needs an .owner marker" >&2; exit 2; }
+  OWN_WORK_ROOT=0
+else
+  WORK_ROOT=$("$HERE/scripts/runtime-adapter.sh" --workdir) || exit 2
+  OWN_WORK_ROOT=1
+fi
 OMP_KIT_WORK_DIR="$WORK_ROOT"
 export OMP_KIT_WORK_DIR
-OWN_WORK_ROOT=1
 KEEP_WORK=0
-T=$(mktemp -d "$WORK_ROOT/e2e-live.XXXXXX") || { rm -rf "$WORK_ROOT"; exit 2; }
+T=$(mktemp -d "$WORK_ROOT/e2e-live.XXXXXX") || { echo "cannot create e2e-live work directory under $WORK_ROOT" >&2; exit 2; }
 H="$T/home"
 MP=""
 OP=""
