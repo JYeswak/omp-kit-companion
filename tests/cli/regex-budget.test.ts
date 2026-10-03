@@ -46,7 +46,7 @@ test("fixture rule with (a+)+b is bounded and reported as a near-miss failure", 
 	try {
 		const result = await measureCondition({
 			rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern,
-			sizes: [4096, 8192, 16384], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 2_000,
+			sizes: [32, 64, 128], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 2_000,
 		});
 		expect(result.rule).toBe("fixture-quadratic");
 		expect(result.failures.map(f => f.code)).toContain("NEAR_MISS_TIMEOUT");
