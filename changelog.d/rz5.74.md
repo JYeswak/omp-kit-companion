@@ -1,1 +1,1 @@
-- Case denominators now come from manifest-verified `cases.tsv`, shared parsing drives update expectations, and native counts come from the installed corpus.
+- Update expectations share parsing with manifest-verified `cases.tsv`, and native case counts come from the installed corpus.
