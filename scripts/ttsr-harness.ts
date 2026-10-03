@@ -293,6 +293,8 @@ function hit(matches: Rule[], name: string): boolean {
 }
 
 const G2_CHUNK = 7;
+// Bound selected long-positive observations; the full G3 gate remains exhaustive.
+const OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH = 8 * 1024;
 
 /**
  * G2: full payload through the live-shaped path. Returns the verdict at the end of the stream.
@@ -1170,9 +1172,25 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 		if (lr.rule.question?.trim()) return unavailable("JUDGE_REQUIRED");
 		const validity = g1(lr);
 		if (!validity.ok) return unavailable("INVALID_RULE", validity.detail);
-		if (lr.cls === "always" || !new TtsrManager(SETTINGS).addRule(lr.rule)) return unavailable("RULE_NOT_REGISTERED");
-		const whole = await g2Fires(lr.rule, selected);
-		const { fired, length } = await g3Fires(lr.rule, selected);
+		const matcher = new TtsrManager(SETTINGS);
+		if (lr.cls === "always" || !matcher.addRule(lr.rule)) return unavailable("RULE_NOT_REGISTERED");
+		let fastFinalWitness = false;
+		let finalWitnessLength = 0;
+		if (selected.source === "tool" && selected.tool === "bash"
+			&& selected.snippet.length >= OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH) {
+			const wire = wirePayload(selected);
+			if (wire.length > OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH
+				&& hit(matcher.checkSnapshot(wire, contextFor(selected)), lr.name)) {
+				fastFinalWitness = true;
+				finalWitnessLength = wire.length;
+			}
+		}
+		// A final hit is a valid terminal witness; do not replay every byte in this selected long observation.
+		// runGate keeps the exhaustive G3 prefix sweep unchanged.
+		const whole = fastFinalWitness || await g2Fires(lr.rule, selected);
+		const { fired, length } = fastFinalWitness
+			? { fired: [finalWitnessLength + 1], length: finalWitnessLength }
+			: await g3Fires(lr.rule, selected);
 		const first = fired[0];
 		return {
 			status: "OK", rule: lr.name, case_line: selected.line, registration: "REGISTERED",
