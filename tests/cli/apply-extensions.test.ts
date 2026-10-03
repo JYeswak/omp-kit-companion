@@ -23,13 +23,19 @@ function fixture() {
 }
 afterEach(() => { for (const path of fixtures.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-test("a differing unowned destination blocks every config mutation and preserves bytes", () => {
+test("an unmanaged kit guard collision is skipped while fleet-guard still installs", () => {
 	const f = fixture(), config = f.profile("default");
 	writeFileSync(f.destination, "user extension\n");
-	expect(() => planExtensions(f.input)).toThrow(/UNMANAGED_EXTENSION_COLLISION/);
-	expect(readFileSync(config, "utf8")).toContain("extensions: []");
+	writeFileSync(join(f.release, "policy", "extensions.json"), JSON.stringify({ extensions: ["kit-guard-optin.ts", "fleet-guard.ts"], skipProfiles: ["ignored"] }));
+	writeFileSync(join(f.release, "extensions", "fleet-guard.ts"), "export default function fleet() {}\n");
+	const fleetDestination = join(f.home, ".omp", "omp-extensions", "fleet-guard.ts");
+	const plan = planExtensions(f.input);
+	expect(plan.skippedReasons).toContainEqual({ name: "kit-guard-optin.ts", reason: "SKIPPED_UNMANAGED" });
+	expect(plan.steps.map(step => step.path)).toContain(fleetDestination);
 	expect(readFileSync(f.destination, "utf8")).toBe("user extension\n");
-	expect(readdirSync(f.workspace).sort()).toEqual(["home", "release"]);
+	applyExtensions(plan);
+	expect(readFileSync(fleetDestination, "utf8")).toBe("export default function fleet() {}\n");
+	expect(readFileSync(config, "utf8")).toContain(fleetDestination);
 });
 
 test("skipProfiles excludes named profile while install and default config share one receipt", () => {
@@ -260,8 +266,8 @@ test("compiled opt-in plans without writes, receipts exact changes, and never ce
 	const collisionBefore = readFileSync(config);
 	writeFileSync(f.destination, "user-replaced extension\n");
 	const collision = run(["--plan"]);
-	expect(collision.code).toBe(2);
-	expect(collision.output.errors[0].code).toBe("UNMANAGED_EXTENSION_COLLISION");
+	expect(collision.code).toBe(1);
+	expect(collision.output.data.skipped_reasons).toContainEqual({ name: "kit-guard-optin.ts", reason: "SKIPPED_UNMANAGED" });
 	expect(readFileSync(f.destination, "utf8")).toBe("user-replaced extension\n");
 	expect(readFileSync(config)).toEqual(collisionBefore);
 });

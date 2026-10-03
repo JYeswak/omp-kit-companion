@@ -64,6 +64,13 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: sh tests/cli/installer.test.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: ladder-reports-${{ matrix.os }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
 
   build-candidates:
     if: github.event_name != 'push'
