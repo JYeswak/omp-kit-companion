@@ -50,6 +50,22 @@ def case_counts(release_root):
     return cases, quiet_cases
 
 
+def live_scenario_ids(release_root):
+    scenarios_path = release_root / "tests" / "live" / "scenarios.json"
+    scenarios = load(scenarios_path)
+    if not isinstance(scenarios, list):
+        raise ValueError("native live scenario fixture is not a JSON array")
+    ids = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict) or not isinstance(scenario.get("id"), str) or not scenario["id"]:
+            raise ValueError("native live scenario fixture contains an invalid id")
+        if not scenario.get("plant"):
+            ids.append(scenario["id"])
+    if len(ids) != len(set(ids)):
+        raise ValueError("native live scenario fixture contains duplicate full-ladder ids")
+    return ids
+
+
 def valid_omp_version(value):
     return isinstance(value, str) and re.fullmatch(r"\d+\.\d+\.\d+", value) is not None
 
@@ -196,6 +212,8 @@ def native(args):
             if not binary.is_file() or binary.resolve() != (release_root / "bin" / "omp-kit").resolve():
                 raise ValueError("native installer did not activate the selected release binary")
             expected_cases, expected_quiet_cases = case_counts(release_root)
+            expected_live_ids = live_scenario_ids(release_root)
+            expected_live_scenarios = len(expected_live_ids)
             agent = home / ".omp" / "agent"
             agent.mkdir(parents=True)
             (agent / "config.yml").write_text("memory:\n  backend: off\n", encoding="utf-8")
@@ -286,16 +304,16 @@ def native(args):
                         snapshots = test["snapshots"]
                         if (test["status"] != "PASS" or test["proof_scope"] != "ISOLATED_FIXTURE_ONLY"
                                 or test["omp_version"] != omp_version or live["plant"] != "PASS"
-                                or live["expected_scenarios"] != 78 or live["observed_scenarios"] != 78
+                                or live["expected_scenarios"] != expected_live_scenarios or live["observed_scenarios"] != expected_live_scenarios
                                 or scenarios["status"] != "PASS"
-                                or len(scenarios["expected_ids"]) != 78
-                                or len(set(scenarios["expected_ids"])) != 78
+                                or scenarios["expected_ids"] != expected_live_ids
+                                or len(scenarios["expected_ids"]) != expected_live_scenarios
                                 or "settings-no-checkout-remedy" not in scenarios["expected_ids"]
                                 or scenarios["observed_ids"] != scenarios["expected_ids"]
                                 or any(snapshots[part]["complete"] is not True or snapshots[part]["unchanged"] is not True
                                        for part in ("release", "home"))):
                             receipt["refusal_detail"] = refusal_detail(name, child)
-                            raise ValueError("native full ladder lacks 78 live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
+                            raise ValueError(f"native full ladder lacks {expected_live_scenarios} live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
                 elif name == "memory_off":
                     if data.get("kind") != "memory-off" or "backend: off" not in data.get("content", ""):
                         raise ValueError("packaged memory-off recipe is unavailable")
