@@ -332,3 +332,18 @@ test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () =
 	expect(normalDir.startsWith(realpathSync(normalBase))).toBe(true);
 	expect(realpathSync(normalDir)).toBe(normalDir);
 });
+test("runtime temp root follows TMPDIR and returns its canonical path", () => {
+	const base = fixtureRoot();
+	const target = join(base, "tmp-target");
+	const alias = join(base, "tmp-alias");
+	mkdirSync(target);
+	symlinkSync(target, alias);
+	const previous = process.env.TMPDIR;
+	process.env.TMPDIR = alias;
+	try {
+		expect(runtimeTempRoot()).toBe(realpathSync(target));
+	} finally {
+		if (previous === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previous;
+	}
+});

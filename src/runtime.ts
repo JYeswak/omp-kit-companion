@@ -1,4 +1,5 @@
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 
@@ -12,21 +13,7 @@ const CHILD_ENV_KEYS = ["CI", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "
 const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"] as const;
 
 export function runtimeTempRoot(): string {
-	if (process.platform === "darwin") {
-		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { PATH: "/usr/bin:/bin" },
-		});
-		if (result.exitCode !== 0) {
-			throw new Error(`cannot locate macOS private temp root: ${result.stderr.toString().trim()}`);
-		}
-		const root = result.stdout.toString().trim();
-		if (!isAbsolute(root)) throw new Error(`getconf returned a non-absolute temp root: ${root}`);
-		return realpathSync(root);
-	}
-	if (process.platform === "linux") return realpathSync("/tmp");
-	throw new Error(`unsupported platform for isolated runtime scratch: ${process.platform}`);
+	return realpathSync(tmpdir());
 }
 
 function sanitizedEnv(
