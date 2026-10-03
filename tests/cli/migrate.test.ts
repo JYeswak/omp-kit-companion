@@ -2,8 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-
-import { applyMigration, planMigration, unifiedDiff } from "../../src/migrate.ts";
+import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const repoRules = resolve(import.meta.dir, "../../rules");
 const fixtures: string[] = [];
@@ -187,6 +186,28 @@ test("a file one byte off the release is never treated as identical", () => {
 	const plan = cli(["migrate", "--plan"], home, realOmpDir());
 	expect(rowByName(plan.envelope.data.rows, target).verdict).toBe("edited");
 // Chains link and two plan CLI spawns; Bun's 5s default kills it on loaded runners.
+}, 30000);
+test("a released historical copy is stale-removable, but a one-byte edit stays overlay-edited", () => {
+	const { home, pluginDir } = pluginFixture(0);
+	const path = join(home, ".agents", "rules", "kit-test-skip.md");
+	const historical = readFileSync(resolve(import.meta.dir, "../fixtures/migrate/v0.1.0-kit-test-skip.md"));
+	writeFileSync(path, historical);
+	const pluginPath = join(pluginDir, "rules", "kit-test-skip.md");
+	const run = () => ({ code: 0, stdout: JSON.stringify({ rules: [{ name: "kit-test-skip", path: pluginPath, provider: "omp-plugins" }] }), stderr: "" });
+	const input = { root: resolve(import.meta.dir, "../.."), home, ompLauncher: "omp", run };
+	const stale = planMigration(input);
+	const staleRow = rowByName(stale.rows as { name: string }[], "kit-test-skip");
+	expect(staleRow.verdict).toBe("stale-kit-version");
+	expect(staleRow.overlay).toBe(false);
+	planMigrationMutation(stale, input);
+	const applied = applyMigration(stale, input, { confirmed: true });
+	expect(applied.removed).toContain("kit-test-skip");
+	expect(existsSync(join(applied.backupDir, "kit-test-skip.md"))).toBe(true);
+	writeFileSync(path, Buffer.concat([historical, Buffer.from("x")]));
+	const edited = planMigration(input);
+	const editedRow = rowByName(edited.rows as { name: string }[], "kit-test-skip");
+	expect(editedRow.verdict).toBe("edited");
+	expect(editedRow.overlay).toBe(true);
 }, 30000);
 
 test("a symlinked rules directory is refused without touching anything", () => {

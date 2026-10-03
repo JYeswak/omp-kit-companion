@@ -17,7 +17,7 @@ import { resolveOmpIdentity } from "./paths.ts";
  * the legacy copies would orphan the rules.
  */
 
-export type MigrateVerdict = "identical-to-plugin" | "identical-to-manifest" | "edited" | "unknown-keep";
+export type MigrateVerdict = "identical-to-plugin" | "identical-to-manifest" | "stale-kit-version" | "edited" | "unknown-keep";
 export type OmpRunner = (args: readonly string[]) => OmpRunResult;
 
 export interface PluginRule { name: string; path: string; sha256: string }
@@ -56,6 +56,31 @@ function readBytesNoFollow(path: string): Buffer | null {
 	} catch {
 		return null;
 	}
+}
+
+function releasedRuleHashes(root: string): Map<string, Set<string>> {
+	const result = new Map<string, Set<string>>();
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(join(root, "rules", "released-sha256.json"), "utf8"));
+		const releases = parsed && typeof parsed === "object" && "releases" in parsed ? parsed.releases : null;
+		if (!releases || typeof releases !== "object") return result;
+		for (const rules of Object.values(releases as Record<string, unknown>)) {
+			if (!rules || typeof rules !== "object") continue;
+			for (const [name, value] of Object.entries(rules as Record<string, unknown>)) {
+				if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) continue;
+				const hashes = result.get(name) ?? new Set<string>();
+				hashes.add(value);
+				result.set(name, hashes);
+			}
+		}
+	} catch {
+		// Older source trees have no history artifact; they remain fail-closed.
+	}
+	return result;
+}
+
+function isRemovable(row: Pick<MigrateRow, "verdict">): boolean {
+	return row.verdict === "identical-to-plugin" || row.verdict === "stale-kit-version";
 }
 
 export function defaultOmpRunner(args: readonly string[]): OmpRunResult {
@@ -184,6 +209,7 @@ export function planMigration(input: MigrateInput): MigratePlan {
 	const manifest = readManifest(input.root);
 	if (manifest.sourceUnverified) fail("SOURCE_INVALID");
 	const manifestByName = new Map(manifest.rules.map(rule => [rule.name, rule.sha256]));
+	const releasedByName = releasedRuleHashes(input.root);
 	const rulesDir = legacyDir(input.home);
 	let legacyFiles: string[];
 	try {
@@ -208,24 +234,27 @@ export function planMigration(input: MigrateInput): MigratePlan {
 		let pluginBytes: Buffer | null = null;
 		if (plugin) pluginBytes = readBytesNoFollow(plugin.path);
 		const pluginSha256 = pluginBytes === null ? null : hex(pluginBytes);
-		const base = { name, file: `.agents/rules/${file}`, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null };
+		const base = { name, file: ".agents/rules/" + file, legacySha256, manifestSha256, pluginSha256, pluginPath: plugin?.path ?? null };
 		const unlisted = manifestSha256 !== null && pluginSha256 === null && pluginRules.length > 0;
-		if (manifestSha256 === null) {
-			rows.push({ ...base, verdict: "unknown-keep", overlay: false, overlayPath: null, unlisted: false, firstDiffLine: null, diff: null });
-		} else if (pluginSha256 !== null && legacySha256 === pluginSha256) {
+		const staleKitVersion = pluginSha256 !== null && (releasedByName.get(name)?.has(legacySha256) ?? false);
+		if (pluginSha256 !== null && legacySha256 === pluginSha256) {
 			rows.push({ ...base, verdict: "identical-to-plugin", overlay: false, overlayPath: null, unlisted: false, firstDiffLine: null, diff: null });
-		} else if (legacySha256 === manifestSha256) {
+		} else if (staleKitVersion) {
+			rows.push({ ...base, verdict: "stale-kit-version", overlay: false, overlayPath: null, unlisted, firstDiffLine: firstDiffLine(bytes, pluginBytes!), diff: null });
+		} else if (manifestSha256 === null && pluginSha256 === null) {
+			rows.push({ ...base, verdict: "unknown-keep", overlay: false, overlayPath: null, unlisted: false, firstDiffLine: null, diff: null });
+		} else if (manifestSha256 !== null && legacySha256 === manifestSha256) {
 			rows.push({ ...base, verdict: "identical-to-manifest", overlay: false, overlayPath: null, unlisted, firstDiffLine: null, diff: null });
 		} else {
-			const manifestBytes = readBytesNoFollow(join(input.root, "rules", `${name}.md`));
+			const manifestBytes = readBytesNoFollow(join(input.root, "rules", name + ".md"));
 			const shipped = pluginBytes ?? manifestBytes;
-			rows.push({ ...base, verdict: "edited", overlay: true, overlayPath: `.omp/agent/rules/${name}.md`, unlisted,
+			rows.push({ ...base, verdict: "edited", overlay: true, overlayPath: ".omp/agent/rules/" + name + ".md", unlisted,
 				firstDiffLine: pluginBytes === null ? null : firstDiffLine(bytes, pluginBytes),
 				diff: shipped === null ? null : unifiedDiff(bytes.toString("utf8"), shipped.toString("utf8"),
-					`a/.agents/rules/${file} (legacy)`, pluginBytes !== null ? `b/plugin/${name}.md` : `b/manifest/${name}.md`) });
+					"a/.agents/rules/" + file + " (legacy)", pluginBytes !== null ? "b/plugin/" + name + ".md" : "b/manifest/" + name + ".md") });
 		}
 	}
-	const removable = rows.filter(row => row.verdict === "identical-to-plugin").length;
+	const removable = rows.filter(isRemovable).length;
 	return { rows: Object.freeze(rows), pluginRules: pluginRules.length,
 		pluginAbsent: pluginRules.length === 0, backupDir: null, removable,
 		kept: rows.length - removable };
@@ -238,7 +267,7 @@ export function planMigrationMutation(plan: MigratePlan, input: MigrateInput): v
 	const stateRoot = input.stateRoot ?? join(input.home, ".local", "state", "omp-kit");
 	const mutations: FileMutation[] = [];
 	for (const row of plan.rows) {
-		if (row.verdict !== "identical-to-plugin") continue;
+		if (!isRemovable(row)) continue;
 		const bytes = readBytesNoFollow(join(input.home, row.file));
 		if (bytes === null || hex(bytes) !== row.legacySha256) fail("FRESH_PLAN");
 		mutations.push({ root: "home", relativePath: row.file,
@@ -270,7 +299,7 @@ export function applyMigration(plan: MigratePlan, input: MigrateInput, options: 
 		}
 		const receipt = applyMutation(prepared);
 		receiptId = receipt.id;
-		removed.push(...plan.rows.filter(row => row.verdict === "identical-to-plugin").map(row => row.name));
+		removed.push(...plan.rows.filter(isRemovable).map(row => row.name));
 	}
 	const verifyOut = run([launcher, "ttsr", "list", "--json"]);
 	if (verifyOut.code !== 0) fail("MIGRATE_VERIFY_FAILED");
@@ -293,6 +322,6 @@ export function applyMigration(plan: MigratePlan, input: MigrateInput, options: 
 		verified.push({ name, provider: typeof winner.provider === "string" ? winner.provider : null,
 			path: typeof winner.path === "string" ? winner.path : null });
 	}
-	const kept = plan.rows.filter(row => row.verdict !== "identical-to-plugin").map(row => row.name);
+	const kept = plan.rows.filter(row => !isRemovable(row)).map(row => row.name);
 	return { receiptId, backupDir, removed, kept, verified };
 }
