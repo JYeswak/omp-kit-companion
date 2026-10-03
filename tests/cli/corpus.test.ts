@@ -158,6 +158,23 @@ test("CORPUS_SCHEMA_PLANT: an unknown session schema version refuses with no cou
 	expect(envelope.data).not.toHaveProperty("corpus");
 }, 300_000);
 
+test("corpus producer errors keep kit-relative module paths", () => {
+	const harness = join(release, "scripts", "ttsr-harness.ts");
+	const original = readFileSync(harness, "utf8");
+	try {
+		writeFileSync(harness, `await import(${JSON.stringify(join(release, "scripts", "missing-module.ts"))});\n`);
+		const { exitCode, envelope } = runCli(["corpus", "--sessions", sessions, "--json"]);
+		const error = (envelope.errors as { message?: string }[] | undefined)?.[0]?.message ?? "";
+		expect(exitCode, JSON.stringify(envelope.errors)).toBe(2);
+		expect(error).toContain("producer_rc=1");
+		expect(error).toContain("./scripts/missing-module.ts");
+		expect(error).toContain("./scripts/ttsr-harness.ts");
+		expect(error).not.toContain(base);
+	} finally {
+		writeFileSync(harness, original);
+	}
+}, 300_000);
+
 test("corpus refuses a relative sessions dir", () => {
 	const { exitCode, envelope } = runCli(["corpus", "--sessions", "relative/path", "--json"]);
 	expect(exitCode).toBe(2);

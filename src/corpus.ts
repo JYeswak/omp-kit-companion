@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { resolveOmpIdentity } from "./paths.ts";
 import { runBundled } from "./runtime.ts";
 
 const HARNESS = "scripts/ttsr-harness.ts";
@@ -79,8 +80,22 @@ export function ruleOfThreeUpper(scanned: number): number | null {
 	return 3 / scanned;
 }
 
-function redactedStderrTail(stderr: string): string {
-	return stderr.trim().split(/\r?\n/).slice(-5).join("\n")
+function redactedStderrTail(stderr: string, root: string): string {
+	let redacted = stderr.trim().split(/\r?\n/).slice(-5).join("\n");
+	const identity = resolveOmpIdentity(process.env);
+	const pathRoots: Array<[string, string]> = [
+		[identity.source, "<omp-source>"],
+		[identity.packageRoot, "<omp-package>"],
+		[identity.nativeRoot, "<omp-native>"],
+		[root, "."],
+	].sort(([left], [right]) => right.length - left.length);
+	for (const [path, label] of pathRoots) {
+		redacted = redacted.split(path).join(label);
+		if (process.platform === "darwin" && path.startsWith("/private/")) {
+			redacted = redacted.split(path.slice("/private".length)).join(label);
+		}
+	}
+	return redacted
 		.replace(/(^|[\s"'(=:])\/[^\s"'<>)]*/g, "$1<path>")
 		.replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
 		.replace(/\b((?:api[_-]?key|token|password)\s*[:=]\s*)\S+/gi, "$1<redacted>")
@@ -156,7 +171,7 @@ export async function runCorpus(input: CorpusInput): Promise<CorpusReport> {
 					`Session transcripts use an unknown schema version; no counts were written: ${result.stderr.trim().split("\n").pop() ?? ""}`);
 			}
 			throw new CorpusInputError("CORPUS_UNAVAILABLE",
-				`Session scan failed (producer_rc=${result.code}): ${redactedStderrTail(result.stderr) || "<empty stderr>"}`);
+				`Session scan failed (producer_rc=${result.code}): ${redactedStderrTail(result.stderr, input.root) || "<empty stderr>"}`);
 		}
 		const summary = parseSummary(result.stdout);
 		if (!summary) {
