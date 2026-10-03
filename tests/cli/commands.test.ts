@@ -563,7 +563,8 @@ describe("omp-kit CLI grammar and refusal", () => {
 		writeFileSync(settingsPath, settingsBytes);
 		const changedSource = invoke("doctor", "--scope", "memory");
 		expect(changedSource.envelope.data.overall).toBe("UNVERIFIED");
-		expect(changedSource.envelope.data.findings[0].reason).toContain("source hashes");
+		const sourceSha256 = createHash("sha256").update(settingsBytes).digest("hex");
+		expect(changedSource.envelope.data.findings[0].reason).toContain(`src/memory-backend/settings.ts sha256=${sourceSha256}`);
 		const missingOmp = invokeWithEnv(["doctor", "--scope", "memory"], { PATH: otherProject });
 		expect(missingOmp.code).toBe(3);
 		expect(missingOmp.envelope.errors[0].code).toBe("OMP_UNAVAILABLE");
