@@ -103,6 +103,40 @@ append_changed() {
 	CHANGED="$CHANGED
 $1"
 }
+run_bun_suite() {
+	suite=$1
+	budget="${FRESH_GATE_SUITE_BUDGET_SECS:-60}"
+	python3 - "$ARCHIVE_DIR" "$suite" "$budget" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
+proc = subprocess.Popen(
+    ["bun", "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    cwd=archive,
+    start_new_session=True,
+)
+try:
+    rc = proc.wait(timeout=budget)
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    print("deferred to CI: " + suite)
+    raise SystemExit(124)
+raise SystemExit(rc)
+PY
+	rc=$?
+	if [ "$rc" -eq 124 ]; then
+		return 0
+	fi
+	return "$rc"
+}
 
 gate_focused() {
 	focus_tests=
@@ -112,8 +146,14 @@ gate_focused() {
 	for file in $CHANGED; do
 		[ -n "$file" ] || continue
 		case "$file" in
-			tests/cli/*.test.ts|tests/fleet-guard/*.test.ts)
+			tests/cli/migrate.test.ts)
+				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
+			tests/cli/migrate-history.test.ts|tests/cli/*.test.ts|tests/fleet-guard/*.test.ts)
 				focus_tests="$focus_tests $file" ;;
+			src/migrate.ts)
+				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
+			src/kit-update.ts)
+				focus_tests="$focus_tests tests/cli/kit-update.test.ts" ;;
 			src/*|extensions/*)
 				needs_cli=1 ;;
 			scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
@@ -152,19 +192,15 @@ gate_focused() {
 		echo "focused manifest generation: OK"
 	fi
 	if [ -n "$focus_tests" ]; then
-		# The archive has no stale scratch copies, but keep the ignore explicit for future packs.
+		# Each suite has an independent budget; a timeout is a visible CI deferral, never a silent skip.
 		# Intentional word splitting turns newline-separated test paths into argv entries.
 		# shellcheck disable=SC2086
 		set -- $focus_tests
-		(
-			cd "$ARCHIVE_DIR"
-			bun test --path-ignore-patterns 'var/agent-tmp/**' "$@"
-		)
+		for suite in "$@"; do
+			run_bun_suite "$suite" || return $?
+		done
 	elif [ "$needs_cli" = 1 ]; then
-		(
-			cd "$ARCHIVE_DIR"
-			bun test --path-ignore-patterns 'var/agent-tmp/**' tests/cli
-		)
+		run_bun_suite tests/cli || return $?
 	else
 		echo "focused suites: none selected for changed paths"
 	fi
