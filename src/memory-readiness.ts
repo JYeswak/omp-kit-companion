@@ -42,13 +42,15 @@ const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:24df81c28f1610924e3e26330db04c22508bb40c60f9dee3ce94acaf550f6584",
 	// OMP 18.4.10/18.4.11 share these reviewed source hashes: default off, no-op fallback, legacy false -> off.
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:d7929e81066485010e65740f79b4cf13c6375acd52952018dc321aa0e979d023",
+	// OMP 18.5.0: default off, no-op fallback, and legacy false -> off.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:f6e978edd59e67e596cb47adfcca821aceb25c735258ca51c1cf4b141a45fa09",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [
 	"src/memory-backend/settings.ts",
 	"src/memory-backend/resolve.ts",
 	"src/config/settings.ts",
 ] as const;
-// Content hash, not an OMP version string, is the redactor trust boundary.
+// OMP 18.5.0 memory-backend/redact.ts has this same reviewed digest; trust remains content-based.
 const REDACTOR_SOURCE_SHA256 = "bec8892217e1b7a3ea577b25ff52631883fc41646351ea1f5a7b5e3359564270";
 const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
@@ -131,16 +133,28 @@ function installedPackage(ompPath?: string): { root: string; version: string } |
 		return record(manifest) && manifest.name === PACKAGE_NAME && typeof manifest.version === "string" ? { root, version: manifest.version } : null;
 	} catch { return null; }
 }
-function memoryConfigSourcesReviewed(root: string): boolean {
-	if (!safeDirectories(root, ["src", "memory-backend"]) || !safeDirectories(root, ["src", "config"])) return false;
-	try {
-		const fingerprint = MEMORY_CONFIG_SOURCE_FILES
-			.map(path => createHash("sha256").update(fileBytes(join(root, path))).digest("hex"))
-			.join(":");
-		return MEMORY_CONFIG_SOURCE_FINGERPRINTS.has(fingerprint);
-	} catch { return false; }
+type MemoryConfigSourceReview = { reviewed: true } | { reviewed: false; reason: string };
+function memoryConfigSourcesReviewed(root: string, version: string): MemoryConfigSourceReview {
+	for (const directory of ["src/memory-backend", "src/config"] as const) {
+		if (!safeDirectories(root, directory.split("/")))
+			return { reviewed: false, reason: `OMP ${version} memory source directory ${directory} is missing or unsafe` };
+	}
+	const hashes: string[] = [];
+	for (const source of MEMORY_CONFIG_SOURCE_FILES) {
+		try { hashes.push(createHash("sha256").update(fileBytes(join(root, source))).digest("hex")); }
+		catch { return { reviewed: false, reason: `OMP ${version} memory config source hash unavailable: ${source}` }; }
+	}
+	const fingerprint = hashes.join(":");
+	if (MEMORY_CONFIG_SOURCE_FINGERPRINTS.has(fingerprint)) return { reviewed: true };
+	const reviewedTuples = Array.from(MEMORY_CONFIG_SOURCE_FINGERPRINTS, value => value.split(":"));
+	const unknown = hashes.flatMap((sha, index) => reviewedTuples.some(tuple => tuple[index] === sha)
+		? [] : [`${MEMORY_CONFIG_SOURCE_FILES[index]} sha256=${sha}`]);
+	const detail = unknown.length
+		? `unreviewed file hash: ${unknown.join(", ")}`
+		: `unreviewed source fingerprint combination: ${MEMORY_CONFIG_SOURCE_FILES.map((source, index) => `${source} sha256=${hashes[index]}`).join(", ")}`;
+	return { reviewed: false, reason: `OMP ${version} memory config ${detail}` };
 }
-function installedRedactor(ompPath?: string): { bytes: Buffer; version: string } | null {
+function installedRedactor(ompPath?: string): { bytes: Buffer; version: string; source: string; sha256: string } | null {
 	const pkg = installedPackage(ompPath);
 	if (!pkg) return null;
 	try {
@@ -148,12 +162,14 @@ function installedRedactor(ompPath?: string): { bytes: Buffer; version: string }
 		if (!safeDirectories(pkg.root, ["src", "memory-backend"]) || state(source) !== "file") return null;
 		const bytes = fileBytes(source);
 		const sha = createHash("sha256").update(bytes).digest("hex");
-		return sha === REDACTOR_SOURCE_SHA256 ? { bytes, version: pkg.version } : null;
+		return { bytes, version: pkg.version, source: "src/memory-backend/redact.ts", sha256: sha };
 	} catch { return null; }
 }
 async function probeRedactor(ompPath?: string): Promise<MemoryRedactorReport> {
 	const pinned = installedRedactor(ompPath);
-	if (!pinned) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: "Installed OMP redactor source hash is unreviewed or unavailable" };
+	if (!pinned) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: "Installed OMP redactor source unavailable: src/memory-backend/redact.ts (SHA-256 unavailable)" };
+	if (pinned.sha256 !== REDACTOR_SOURCE_SHA256) return { status: "UNVERIFIED", version: pinned.version, coverage: "NOT_PROBED", missed: [],
+		reason: `OMP ${pinned.version} redactor source hash is unreviewed: ${pinned.source} sha256=${pinned.sha256}` };
 	try {
 		// Evaluate only the hash-pinned, import-free installed module in memory. A
 		// dynamic import (even a data URL) writes Bun's transpiler cache to XDG_CACHE_HOME.
@@ -187,8 +203,9 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 	const unknown = (reason: string, action: string): MemoryReadinessReport => ({ ...base, status: "UNVERIFIED", backend: "UNVERIFIED", configured: false,
 		store: "UNVERIFIED", reason, recommended_action: action });
 	const ompPackage = installedPackage(input.ompPath);
-	if (!ompPackage || !memoryConfigSourcesReviewed(ompPackage.root))
-		return unknown("Installed OMP memory config source hashes are unreviewed or unavailable", "Review the installed OMP memory backend settings and resolver sources before relying on this report.");
+	if (!ompPackage) return unknown("Installed OMP package is unavailable", "Verify the installed OMP package path before relying on this report.");
+	const sourceReview = memoryConfigSourcesReviewed(ompPackage.root, ompPackage.version);
+	if (!sourceReview.reviewed) return unknown(sourceReview.reason, "Review the exact OMP source path and SHA-256 named in this report.");
 	const home = resolve(input.home);
 	const name = input.profile ?? "default";
 	if (name !== "default" && (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith("."))) return unknown("Profile name is unsupported", "Select an existing safe named profile.");

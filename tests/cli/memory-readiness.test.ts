@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -66,15 +67,18 @@ test("one changed redactor source byte refuses the synthetic probe", async () =>
 	const f = fixture(INSTALLED_OMP_VERSION);
 	const accepted = await f.inspect();
 	expect(accepted.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
-	const path = join(f.ompRoot, "src/memory-backend/redact.ts");
+	const relativePath = "src/memory-backend/redact.ts";
+	const path = join(f.ompRoot, relativePath);
 	const bytes = Buffer.from(readFileSync(path));
 	bytes[0] = (bytes[0] ?? 0) ^ 1;
 	writeFileSync(path, bytes);
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
 	const report = await f.inspect();
-	expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [] });
+	expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: INSTALLED_OMP_VERSION, coverage: "NOT_PROBED", missed: [] });
+	expect(report.redactor.reason).toContain(`${relativePath} sha256=${sha256}`);
 });
 
-test("one changed memory settings source byte refuses config semantics", async () => {
+test("one changed memory settings source byte names the exact path and hash", async () => {
 	for (const source of OMP_SOURCE_FILES.filter(path => path !== "src/memory-backend/redact.ts")) {
 		const f = fixture(INSTALLED_OMP_VERSION);
 		writeFileSync(f.config, "memory:\n  backend: off\n");
@@ -84,9 +88,11 @@ test("one changed memory settings source byte refuses config semantics", async (
 		const bytes = Buffer.from(readFileSync(path));
 		bytes[0] = (bytes[0] ?? 0) ^ 1;
 		writeFileSync(path, bytes);
+		const sha256 = createHash("sha256").update(bytes).digest("hex");
 		const report = await f.inspect();
 		expect(report.backend).toBe("UNVERIFIED");
 		expect(report.status).toBe("UNVERIFIED");
+		expect(report.reason).toContain(`${source} sha256=${sha256}`);
 	}
 });
 
