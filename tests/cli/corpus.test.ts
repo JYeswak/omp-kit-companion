@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
@@ -53,6 +53,10 @@ beforeAll(() => {
 		toolCall("c1", "bash", { command: "echo zzzz_systemwide_canary_9c42" }),
 		toolCall("c2", "bash", { command: "grep -rl 'x' crates/*/Cargo.toml 2>/dev/null" }),
 		toolCall("c3", "bash", { command: "echo hello" }),
+		...["c1", "c2", "c3"].map((toolCallId, index) => JSON.stringify({
+			type: "message", id: `r${index + 1}`, timestamp: "2026-09-30T10:01:00.000Z",
+			message: { role: "toolResult", toolCallId, content: [{ type: "text", text: "fixture result" }] },
+		})),
 	].join("\n") + "\n");
 	const build = Bun.spawnSync([
 		process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
@@ -153,10 +157,12 @@ test("CORPUS_SCHEMA_PLANT: an unknown session schema version refuses with no cou
 		`{"type":"session","version":99,"id":"s9","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,
 		toolCall("c9", "bash", { command: "echo zzzz_systemwide_canary_9c42" }),
 	].join("\n") + "\n");
-	const { exitCode, envelope } = runCli(["corpus", "--sessions", badDir, "--json"]);
+	const out = join(base, "unknown-schema-report.json");
+	const { exitCode, envelope } = runCli(["corpus", "--sessions", badDir, "--out", out, "--json"]);
 	expect(exitCode).toBe(2);
 	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("UNKNOWN_SESSION_SCHEMA");
 	expect(envelope.data).not.toHaveProperty("corpus");
+	expect(existsSync(out)).toBe(false);
 }, 300_000);
 
 test("corpus producer errors keep kit-relative module paths", () => {
@@ -186,4 +192,13 @@ test("corpus refuses a relative sessions dir", () => {
 	const { exitCode, envelope } = runCli(["corpus", "--sessions", "relative/path", "--json"]);
 	expect(exitCode).toBe(2);
 	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code).toBe("INVALID_CORPUS_SELECTION");
+}, 120_000);
+
+test("corpus refuses a file as the sessions directory", () => {
+	const sessionsFile = join(base, "not-a-sessions-directory");
+	writeFileSync(sessionsFile, "not a directory\n");
+	const { exitCode, envelope } = runCli(["corpus", "--sessions", sessionsFile, "--json"]);
+	expect(exitCode).toBe(2);
+	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("INVALID_CORPUS_SELECTION");
+	expect(envelope.data).not.toHaveProperty("corpus");
 }, 120_000);

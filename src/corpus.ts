@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -163,6 +163,15 @@ function parseTsv(text: string): TsvRow[] {
 export async function runCorpus(input: CorpusInput): Promise<CorpusReport> {
 	if (typeof input.sessionsDir !== "string" || !isAbsolute(input.sessionsDir)) {
 		throw new CorpusInputError("INVALID_CORPUS_SELECTION", "Session transcripts need an absolute directory");
+	}
+	let sessionsIsDirectory = false;
+	try {
+		sessionsIsDirectory = statSync(input.sessionsDir).isDirectory();
+	} catch {
+		// Missing and unstatable paths cannot be valid session roots.
+	}
+	if (!sessionsIsDirectory) {
+		throw new CorpusInputError("INVALID_CORPUS_SELECTION", "Session transcripts path must be an existing directory");
 	}
 	if (input.out !== undefined && (typeof input.out !== "string" || !isAbsolute(input.out))) {
 		throw new CorpusInputError("INVALID_CORPUS_SELECTION", "The report path must be absolute");
