@@ -229,7 +229,7 @@ const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|memory|mcp|context|services|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },

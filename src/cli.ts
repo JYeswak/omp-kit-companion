@@ -14,8 +14,9 @@ import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInve
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
-import { diagnose, health, inspectDicklesworthstone, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
+import { collectBrowserProcesses, inspectBrowserProcesses } from "./browser-doctor.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -317,7 +318,8 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	profile: ["effective_profile"],
 	settings: ["policy"],
 	extensions: ["extensions", "extension_imports"],
-	dicklesworthstone: ["dicklesworthstone"],
+	browsers: ["browsers"],
+	"regex-tools": ["regex-tools"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
@@ -372,6 +374,26 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			code: report.refusal.code, message: report.refusal.reason,
 			remediation: "Use read-only omp-kit doctor --json; no migratory probe was run or backup created.",
 		}], verification: "UNVERIFIED" };
+	}
+	if (request.command.name === "doctor" && request.flags.get("--scope") === "browsers") {
+		const collected = collectBrowserProcesses();
+		const report = inspectBrowserProcesses(collected.processes, collected.sessions);
+		return { code: 0, data: { overall: report.status === "OK" ? "OK" : "WARN", scope: "browsers", ...report }, commands: ["omp-kit doctor --scope browsers --json"], verification: "PERFORMED" };
+	}
+	if (request.command.name === "doctor" && request.flags.get("--scope") === "regex-tools") {
+		const toolFinding = inspectRegexTools();
+		const data = {
+			overall: health([toolFinding]),
+			kit: kitIdentity(),
+			omp: { status: "UNVERIFIED", location: null, version: null, reason: "OMP was not inspected for regex-tools scope" },
+			findings: [toolFinding],
+			evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+			recommended_actions: toolFinding.status === "OK" ? [] : [toolFinding.recommended_action],
+		};
+		return {
+			code: 0, data, commands: ["omp-kit doctor --scope regex-tools --json"],
+			verification: toolFinding.status === "OK" ? "PERFORMED" : "UNVERIFIED",
+		};
 	}
 	const kit = kitIdentity();
 	const root = kit.release.root;
