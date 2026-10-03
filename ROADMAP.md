@@ -40,14 +40,14 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
 | A kit test run leaves no processes behind (2,395 orphaned mock servers found on one machine) | #23 |
 | **Released v0.2.1:** the plugin route, settings drift, capability context, skill-set recipe and the leak guard | #26 |
-| **Release v0.2.2 (in cut):** service lifecycle, scratch reaper, migration/overlays, metamorphic ratchet, mutants, extension skip-reasons, agent-mail guard, stack currency, B10 cold-start, AST-grep candidates, e2e provider isolation, session-save guard | — |
+| **Released v0.2.2:** service lifecycle, scratch reaper, migration/overlays, metamorphic ratchet, mutants, extension skip-reasons, agent-mail guard, stack currency, B10 cold-start, AST-grep candidates, e2e provider isolation, session-save guard | #54 |
+| **Release v0.2.3 (in cut):** min+latest OMP certification, fleet work doctor, zero-break metamorphic invariant, derived case/scenario counts, changelog fragments, live Go `t.Skip` edit fix, rule scope parity, npm-installed OMP corpus fix, OMP 18.5.0 memory review | — |
 
 ## In review
 
 | Item | PR |
 |---|---|
-| `doctor --scope services`: launchd/systemd inventory plus a declared set of required jobs | #24 |
-| Certify releases on the minimum AND the latest OMP | #25 |
+| — | — |
 
 ## Next
 

@@ -1,19 +1,48 @@
 # Changelog
 
 ## Unreleased
+
+<!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
+
+## 0.2.3 — 2026-10-03
+
 - doctor --scope work inventories configured developer repositories read-only: dirty files, upstream/ahead state, stashes, detached worktrees, last-commit age, active worktrees, bounded per-repo timeouts, risk sorting, JSON envelopes and human tables. It never fetches or writes. (PR #57)
 - Packaged test isolation falls back to OS-approved temporary roots when `TMPDIR` points outside them, keeping stage adapters within their system-temp boundary.
-
 - The metamorphic ratchet baseline is deleted: `test --metamorphic` and the ladder now fail on any break, with no checked-in allowance (L1). (PR #55)
-
 - Memory readiness recognizes the shared OMP 18.4.10/18.4.11 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
 - `scripts/omp-compat.json` is the only checked-in OMP minimum; CI runs the ladder and native certification on that floor and the run-resolved npm latest, recording both versions per advertised platform. (PR #25)
 - Memory readiness trusts only reviewed source hashes for OMP memory settings and the redactor. OMP 18.4.9 reports the known synthetic PEM redaction miss; runtime stays NOT_PROBED and changed source bytes stay UNVERIFIED.
 - Private at-rest memory audits trust reviewed OMP/Mnemopi source-hash sets rather than release labels; exact reviewed bytes remain covered under newer labels while changes to pinned sources stay UNVERIFIED.
-
 - Fast-test case denominators now derive from the release-manifest-verified `cases/cases.tsv`, removing manually synchronized count pins.
 
-<!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
+- `doctor --scope extensions` resolves hook imports from the extension's real path, avoiding false unresolvable-import findings for symlinked hooks. (PR #52)
+
+- CI uploads ladder reports as a seven-day artifact on failure and uploads nothing on successful runs. (PR #51)
+
+- Fleet-guard installation plans skip unmanaged extension collisions with `SKIPPED_UNMANAGED`, preserve operator-owned bytes, and still install `fleet-guard.ts`. (PR #56)
+
+- `kit-test-skip` now blocks a Go `t.Skip` inserted by an `edit` in a live session. OMP matches edit arguments as JSON, where tab indentation becomes `\t`, and the rule's word boundary missed it; live scenarios now cover both `write` and `edit`. Native certification derives its expected live-scenario set from `tests/live/scenarios.json` instead of a fixed count.
+
+- Metamorphic validation now respects each rule's declared source scope, so prose-only rules no longer falsely block tool actions; generated native-vs-kit checks report only explicitly tracked runtime mismatches.
+
+- `omp-kit corpus` works when OMP was installed with npm: native edit inspection resolves `@oh-my-pi/pi-natives` from the installed OMP package instead of assuming a hoisted sibling. Corpus scan failures name the harness exit code and a bounded stderr tail with kit- and OMP-relative module paths, redacting other paths. (commit 2f404c3) (commit 7d9da7e) (commit 62e99d3) (commit 34938fc)
+
+- Bash rules prefilter the command boundary before long quoted-argument lookbehinds. Large positive Bash `--observe` probes report the verified terminal match without replaying every prefix; full G2/G3 gate sweeps remain exhaustive.
+
+- Runtime scratch roots resolve through the canonicalized system temp directory; a `TMPDIR` that is missing, outside the platform temp root, or nested under the caller's `HOME` falls back to the platform root (Darwin `getconf DARWIN_USER_TEMP_DIR`, else `/tmp`). (commit ea63cdf) (commit ccac6bb) (commit e955ada) (commit 1343517) (commit 428a16f)
+
+- Memory readiness recognizes the reviewed OMP 18.5.0 memory sources; an unreviewed source is reported with its exact file and sha256 and stays UNVERIFIED.
+
+- Add a calibrated rule doctor report.
+
+- Update expectations share parsing with manifest-verified `cases.tsv`, and native case counts come from the installed corpus.
+
+- Release assembly preserves merge-safe per-bead fragments, prints previews by default, requires `--write` for in-place updates, and reports each merged PR's fragment or tagged Unreleased-line coverage; uncovered PRs fail the check.
+- The release check now covers direct main commits by their `Bead:` trailer and requires a reason for `[no-changelog]` waivers.
+
+- Bun tests preload the shared test scratch setup.
+
+- Gate native differential fuzzing on live wire parity.
 
 ## 0.2.2 — 2026-10-02
 
