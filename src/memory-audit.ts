@@ -38,9 +38,9 @@ export interface MemoryAuditReport {
 type CredentialCategory = "provider_token" | "bearer_token" | "private_key" | "password_assignment" | "credential_url";
 type PackageName = "agent" | "mnemopi";
 type SourcePin = readonly [PackageName, string, string];
-const PINNED_FILES_BY_VERSION: Record<string, readonly SourcePin[]> = {
-	"18.4.2": [
-		// Inspected @oh-my-pi/pi-coding-agent and @oh-my-pi/pi-mnemopi 18.4.2.
+const REVIEWED_SOURCE_PIN_SETS: readonly (readonly SourcePin[])[] = [
+	[
+		// OMP and pi-mnemopi 18.4.2 source tuple, reviewed for the covered schema.
 		["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
 		["agent", "src/mnemopi/state.ts", "5977f6855b7cbca1d68dda1328d5554b63f7581b0778b3f533e6a394e81ab3e4"],
 		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
@@ -53,8 +53,8 @@ const PINNED_FILES_BY_VERSION: Record<string, readonly SourcePin[]> = {
 		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
 		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
 	],
-	"18.4.4": [
-		// Inspected Studio @oh-my-pi/pi-coding-agent and @oh-my-pi/pi-mnemopi 18.4.4.
+	[
+		// Studio OMP and pi-mnemopi 18.4.4 source tuple; newer release labels may match these exact bytes.
 		["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
 		["agent", "src/mnemopi/state.ts", "bcfae4f87015f8dd0cc6ba5c15a0cff7099e17fcabdc6c01df820a3d7f6dc7c7"],
 		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
@@ -67,7 +67,7 @@ const PINNED_FILES_BY_VERSION: Record<string, readonly SourcePin[]> = {
 		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
 		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
 	],
-};
+];
 const CONTENT_FIELDS = ["working_memory.content", "episodic_memory.content"] as const;
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0");
 const NOFOLLOW = constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -134,6 +134,19 @@ function validateRoots(home: string, project: string, storeRoot: string): void {
 		safeDirectory(path);
 	}
 }
+function matchesReviewedSourcePins(agent: string, mnemopi: string): boolean {
+	const referencePins = REVIEWED_SOURCE_PIN_SETS[0];
+	if (!referencePins) return false;
+	const hashes = new Map<string, string>();
+	for (const [pkg, source] of referencePins) {
+		const bytes = safeFile(join(pkg === "agent" ? agent : mnemopi, source));
+		hashes.set(pkg + ":" + source, createHash("sha256").update(bytes).digest("hex"));
+	}
+	if (hashes.size !== referencePins.length) return false;
+	return REVIEWED_SOURCE_PIN_SETS.some(pins => pins.length === referencePins.length &&
+		pins.every(([pkg, source, sha]) => hashes.get(pkg + ":" + source) === sha));
+}
+
 function sourceVersion(ompPath: string): string | null {
 	try {
 		if (!isAbsolute(ompPath)) return null;
@@ -151,15 +164,9 @@ function sourceVersion(ompPath: string): string | null {
 		}
 		const manifest = JSON.parse(safeFile(join(agent, "package.json")).toString("utf8"));
 		const engine = JSON.parse(safeFile(join(mnemopi, "package.json")).toString("utf8"));
-		const pins = PINNED_FILES_BY_VERSION[manifest.version];
-		if (manifest.name !== "@oh-my-pi/pi-coding-agent" || !pins ||
-			engine.name !== "@oh-my-pi/pi-mnemopi" || engine.version !== manifest.version ||
-			!lstatSync(launcher).isFile()) return null;
-		if (!pins.every(([pkg, source, sha]) => {
-			const bytes = safeFile(join(pkg === "agent" ? agent : mnemopi, source));
-			return createHash("sha256").update(bytes).digest("hex") === sha;
-		})) return null;
-		return manifest.version;
+		if (manifest.name !== "@oh-my-pi/pi-coding-agent" || typeof manifest.version !== "string" || !manifest.version ||
+			engine.name !== "@oh-my-pi/pi-mnemopi" || engine.version !== manifest.version || !lstatSync(launcher).isFile()) return null;
+		return matchesReviewedSourcePins(agent, mnemopi) ? manifest.version : null;
 	} catch { return null; }
 }
 function stores(root: string): { paths: string[]; banks: string[] } {
@@ -236,7 +243,7 @@ export async function auditMemoryAtRest(input: MemoryAuditInput): Promise<Memory
 	if (!version) return denied("UNSUPPORTED_SOURCE", null);
 	try { validateRoots(input.home, input.project, input.storeRoot); }
 	catch { return denied("UNSAFE_STORE", version); }
-	// Keep the readiness helper's independent redactor trust gate; 18.4.4 stays UNVERIFIED there until separately pinned.
+	// Readiness keeps an independent content-hash gate; its redactor result does not certify historical rows.
 	let redactor: MemoryRedactorReport | undefined;
 	try {
 		redactor = (await inspectMemoryReadiness({ home: input.home, project: input.project, ompPath: input.ompPath })).redactor;

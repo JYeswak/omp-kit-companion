@@ -5,6 +5,11 @@
 
 - The metamorphic ratchet baseline is deleted: `test --metamorphic` and the ladder now fail on any break, with no checked-in allowance (L1).
 
+- Memory readiness recognizes the shared OMP 18.4.10/18.4.11 memory-settings/resolver/config-source fingerprint for on-disk OFF; unknown source stays UNVERIFIED and runtime stays NOT_PROBED.
+- `scripts/omp-compat.json` is the only checked-in OMP minimum; CI runs the ladder and native certification on that floor and the run-resolved npm latest, recording both versions per advertised platform.
+- Memory readiness trusts only reviewed source hashes for OMP memory settings and the redactor. OMP 18.4.9 reports the known synthetic PEM redaction miss; runtime stays NOT_PROBED and changed source bytes stay UNVERIFIED.
+- Private at-rest memory audits trust reviewed OMP/Mnemopi source-hash sets rather than release labels; exact reviewed bytes remain covered under newer labels while changes to pinned sources stay UNVERIFIED.
+
 ## 0.2.2 — 2026-10-02
 
 - `doctor --scope services` inventories launchd jobs and validates declared required jobs without loading or writing services. (PR #24)
