@@ -6,7 +6,6 @@ import { applyExtensions, inspectExtensionGuard, planExtensions } from "../../sr
 const fixtures: string[] = [];
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(base, { recursive: true });
 	const workspace = mkdtempSync(join(base, "p13-extension-"));
 	fixtures.push(workspace);
 	const release = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state");

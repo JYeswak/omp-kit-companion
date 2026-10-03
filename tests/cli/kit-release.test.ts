@@ -95,7 +95,6 @@ describe("versioned release contract", () => {
  });
  test("stages verified bytes only in a disposable root and checks the staged executable --info", async () => {
   const base = join(import.meta.dir, "..", "..", "var", "agent-tmp");
-  mkdirSync(base, { recursive: true });
   const stagingParent = mkdtempSync(join(base, "kit-release-test-"));
   try {
    const plan = await fixturePlan();

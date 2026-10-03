@@ -12,7 +12,6 @@ interface Healthy { home: string; project: string; release: string; ompBin: stri
 
 function sculpt(): Healthy {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const base = mkdtempSync(join(scratch, "health-"));
 	bases.push(base);
 	const release = join(base, "release");

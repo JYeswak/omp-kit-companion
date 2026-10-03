@@ -15,7 +15,6 @@ function snapshot(root: string): string[] {
 }
 
 test("rendering the memory-off recipe never touches an operator profile or project", () => {
-	mkdirSync(scratch, { recursive: true });
 	const isolated = mkdtempSync(join(scratch, "profile-recipes-"));
 	try {
 		mkdirSync(join(isolated, "home"));
@@ -66,7 +65,6 @@ test("profile name validation refuses default, invalid and already-owned names w
 });
 
 test("rendering a recipe refuses a symlinked asset directory rather than disclosing its target", () => {
-	mkdirSync(scratch, { recursive: true });
 	const isolated = mkdtempSync(join(scratch, "profile-recipes-link-"));
 	try {
 		const release = join(isolated, "release");

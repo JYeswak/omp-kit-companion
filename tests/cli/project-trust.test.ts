@@ -7,7 +7,6 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(base, { recursive: true });
 	const root = mkdtempSync(join(base, "project-trust-"));
 	roots.push(root);
 	const project = join(root, "project");

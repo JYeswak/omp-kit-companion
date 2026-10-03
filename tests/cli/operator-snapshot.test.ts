@@ -8,7 +8,6 @@ afterEach(() => { for (const root of roots.splice(0)) { chmodSync(root, 0o700); 
 
 function operatorHome() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const home = mkdtempSync(join(scratch, "operator-snapshot-"));
 	roots.push(home);
 	mkdirSync(join(home, ".omp", "agent", "rules"), { recursive: true });

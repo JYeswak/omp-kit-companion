@@ -6,7 +6,6 @@ import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, applyMutation, 
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 function fixture(run: (root: string, state: string, target: string) => void): void {
-	mkdirSync(scratch, { recursive: true });
 	const isolated = mkdtempSync(join(scratch, "mutation-"));
 	const target = join(isolated, "managed");
 	const state = join(isolated, "state");

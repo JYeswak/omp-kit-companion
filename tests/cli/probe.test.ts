@@ -11,7 +11,6 @@ let scratch = "";
 function logFile(name: string, lines: unknown[]): string {
   if (!scratch) {
     const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
-    mkdirSync(scratchRoot, { recursive: true });
     scratch = mkdtempSync(join(scratchRoot, "probe-"));
   }
   const file = join(scratch, name);

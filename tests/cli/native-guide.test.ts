@@ -33,7 +33,6 @@ interface NativeFixture {
 
 function fixture(): NativeFixture {
 	const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const root = mkdtempSync(join(scratch, "native-guide-"));
 	roots.push(root);
 	const project = join(root, "project");

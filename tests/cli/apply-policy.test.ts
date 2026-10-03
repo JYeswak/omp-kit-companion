@@ -51,7 +51,6 @@ function seedProfile(home: string, name: string, values: Record<string, unknown>
 const policyValues = { enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] };
 function fixture(options: { legacyRules?: boolean } = {}) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(base, { recursive: true });
 	const workspace = mkdtempSync(join(base, "p12-policy-native-"));
 	fixtures.push(workspace);
 	const root = join(workspace, "release"), home = join(workspace, "home"), project = join(workspace, "project");

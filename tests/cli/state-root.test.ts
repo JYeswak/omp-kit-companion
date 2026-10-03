@@ -9,7 +9,6 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 /** A legacy install: ~/.local/state/omp-kit created 0755 by the pre-CLI scripts, holding legacy files. */
 function legacyHome() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const home = mkdtempSync(join(scratch, "state-root-"));
 	roots.push(home);
 	const stateRoot = join(home, ".local", "state", "omp-kit");

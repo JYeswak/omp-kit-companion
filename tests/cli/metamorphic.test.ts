@@ -24,7 +24,6 @@ const CASES_HEADER = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "omp-kit-metamorphic-"));
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");

@@ -21,7 +21,6 @@ interface Fixture {
 
 function workspace(): string {
 	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
-	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	// Repo scratch, not tmpdir(): /var is a symlink on macOS and the mutation
 	// guards refuse symlinked path components.
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-"));
@@ -237,7 +236,6 @@ test("without an installed plugin the plan reports absence and apply refuses", (
 });
 
 test("applyMigration refuses without a plugin even when called directly", () => {
-	mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-unit-"));
 	fixtures.push(root);
 	const home = join(root, "home");

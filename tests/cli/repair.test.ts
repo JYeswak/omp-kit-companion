@@ -21,7 +21,6 @@ function nativeConfigValue(home: string, key: string): unknown {
 const fixtures: string[] = [];
 function fixture() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const workspace = mkdtempSync(join(scratch, "p15-repair-"));
 	fixtures.push(workspace);
 	const root = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state"), project = join(workspace, "project");

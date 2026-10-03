@@ -9,7 +9,6 @@ const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 function fixture(base = scratch) {
-	mkdirSync(base, { recursive: true });
 	const root = mkdtempSync(join(base, "lsp-readiness-"));
 	fixtures.push(root);
 	const home = join(root, "home");

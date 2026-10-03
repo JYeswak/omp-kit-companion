@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { check } from "../../src/fleet-guard/git.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
-mkdirSync(scratchRoot, { recursive: true });
 const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-git-"));
 const repo = join(scratch, "repo");
 mkdirSync(join(repo, ".git"), { recursive: true });

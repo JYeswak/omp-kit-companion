@@ -39,7 +39,6 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 function fixture() {
 	const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-	mkdirSync(scratch, { recursive: true });
 	const root = mkdtempSync(join(scratch, "p29-audit-")); roots.push(root);
 	const home = join(root, "home"), project = join(root, "project"), storeRoot = join(home, ".omp", "agent", "memories", "mnemopi");
 	mkdirSync(storeRoot, { recursive: true }); mkdirSync(project);

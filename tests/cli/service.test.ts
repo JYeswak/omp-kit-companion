@@ -3,7 +3,6 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { join, resolve } from "node:path";
 import { checkService, checkServiceLinux, installService, installSystemd, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
-mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
 
 // Every CLI spawn below inherits this namespace, so even real launchctl calls address
 // test-only labels: an isolated HOME does not isolate the per-uid launchd domain.

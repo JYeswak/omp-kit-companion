@@ -8,7 +8,6 @@ import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 function fixture(run: (f: { root: string; home: string; rules: string; state: string; installed: string }) => void): void {
-	mkdirSync(scratch, { recursive: true });
 	const dir = mkdtempSync(join(scratch, "apply-rules-"));
 	const root = join(dir, "release"), home = join(dir, "home"), rules = join(root, "rules"), installed = join(home, ".agents", "rules"), state = join(home, ".local", "state", "omp-kit");
 	mkdirSync(rules, { recursive: true });
@@ -267,7 +266,6 @@ test("compiled rules plan and consented apply establish verifiable ownership wit
 }));
 
 test("doctor distinguishes kit-owned postimage from identical unowned bytes and drift", async () => {
-	mkdirSync(scratch, { recursive: true });
 	const dir = mkdtempSync(join(scratch, "doctor-rules-"));
 	const root = join(dir, "release"), home = join(dir, "home"), rules = join(root, "rules");
 	const installed = join(home, ".agents", "rules"), ownership = join(home, ".agents", "omp-kit-ownership.json");

@@ -7,7 +7,6 @@ const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
  const base = join(import.meta.dir, "../../var/agent-tmp");
- mkdirSync(base, { recursive: true });
  const root = mkdtempSync(join(base, "mcp-readiness-"));
  fixtures.push(root);
  const home = join(root, "home");

@@ -8,7 +8,6 @@ import { applyMutation, planMutation, recoverMutation } from "../../src/mutation
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 function fixture(run: (f: { home: string; source: string; state: string; rules: string; directory: string }) => void): void {
-	mkdirSync(scratch, { recursive: true });
 	const directory = mkdtempSync(join(scratch, "audit-"));
 	const home = join(directory, "home"), source = join(directory, "source"), rules = join(home, ".agents", "rules");
 	const state = join(home, ".local", "state", "omp-kit");

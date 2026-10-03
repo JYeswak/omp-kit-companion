@@ -6,7 +6,6 @@ import { PROFILE_RECIPE_KINDS } from "../../src/profile-recipes.ts";
 
 const cli = resolve(import.meta.dir, "../../src/cli.ts");
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
-mkdirSync(scratch, { recursive: true });
 const home = mkdtempSync(join(scratch, "output-ids-"));
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
