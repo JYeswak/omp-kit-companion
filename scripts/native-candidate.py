@@ -59,11 +59,55 @@ def live_scenario_ids(release_root):
     for scenario in scenarios:
         if not isinstance(scenario, dict) or not isinstance(scenario.get("id"), str) or not scenario["id"]:
             raise ValueError("native live scenario fixture contains an invalid id")
-        if not scenario.get("plant"):
+        # Match full-test-runner: planted and report-only probe scenarios are not full-ladder runs.
+        if not scenario.get("plant") and scenario.get("kind") != "probe":
             ids.append(scenario["id"])
     if len(ids) != len(set(ids)):
         raise ValueError("native live scenario fixture contains duplicate full-ladder ids")
     return ids
+
+
+def full_live_condition_report(test, expected_live_ids, omp_version):
+    proofs = test.get("proofs") if isinstance(test, dict) else {}
+    live = proofs.get("G4_live") if isinstance(proofs, dict) else {}
+    scenarios = test.get("live_scenarios") if isinstance(test, dict) else {}
+    snapshots = test.get("snapshots") if isinstance(test, dict) else {}
+    if not isinstance(live, dict):
+        live = {}
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    expected_ids = scenarios.get("expected_ids") if isinstance(scenarios.get("expected_ids"), list) else []
+    observed_ids = scenarios.get("observed_ids") if isinstance(scenarios.get("observed_ids"), list) else []
+    expected_count = len(expected_live_ids)
+    checks = {
+        "test_status": test.get("status") == "PASS",
+        "proof_scope": test.get("proof_scope") == "ISOLATED_FIXTURE_ONLY",
+        "omp_version": test.get("omp_version") == omp_version,
+        "live_plant": live.get("plant") == "PASS",
+        "live_expected_scenarios": live.get("expected_scenarios") == expected_count,
+        "live_observed_scenarios": live.get("observed_scenarios") == expected_count,
+        "scenarios_status": scenarios.get("status") == "PASS",
+        "expected_ids_match": expected_ids == expected_live_ids,
+        "expected_ids_count": len(expected_ids) == expected_count,
+        "required_scenario": "settings-no-checkout-remedy" in expected_ids,
+        "observed_ids_match": observed_ids == expected_ids,
+        "release_snapshot": (snapshots.get("release") or {}).get("complete") is True and (snapshots.get("release") or {}).get("unchanged") is True,
+        "home_snapshot": (snapshots.get("home") or {}).get("complete") is True and (snapshots.get("home") or {}).get("unchanged") is True,
+    }
+    return {
+        "failed": [name for name, passed in checks.items() if not passed],
+        "checks": checks,
+        "observed": {
+            "derived_count": expected_count,
+            "live_expected_scenarios": live.get("expected_scenarios"),
+            "live_observed_scenarios": live.get("observed_scenarios"),
+            "expected_ids": expected_ids,
+            "derived_ids": expected_live_ids,
+            "observed_ids": observed_ids,
+        },
+    }
 
 
 def valid_omp_version(value):
@@ -95,7 +139,7 @@ def finding(data, component):
     return matches[0]
 
 
-def refusal_detail(name, child):
+def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
     """Bounded, kit-redacted cause of a refused native command, so a CI receipt names the failing stage and scenarios."""
     detail = {"command": name, "rc": child.returncode, "stderr_tail": child.stderr.decode(errors="replace")[-2000:]}
     try:
@@ -111,6 +155,8 @@ def refusal_detail(name, child):
                       failed_stages=[stage for stage, value in (test.get("stages") or {}).items() if value.get("status") == "FAIL"],
                       failures=(test.get("failures") or [])[:20],
                       missing_scenarios=sorted(set(scenarios.get("expected_ids") or []) - set(scenarios.get("observed_ids") or [])))
+        if expected_live_ids is not None and omp_version is not None:
+            detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail
 
 
@@ -300,20 +346,12 @@ def native(args):
                     if live["status"] != ("PASS" if name == "full" else "NOT_RUN"):
                         raise ValueError(f"native {name} live class differs from expected proof")
                     if name == "full":
-                        scenarios = test["live_scenarios"]
-                        snapshots = test["snapshots"]
-                        if (test["status"] != "PASS" or test["proof_scope"] != "ISOLATED_FIXTURE_ONLY"
-                                or test["omp_version"] != omp_version or live["plant"] != "PASS"
-                                or live["expected_scenarios"] != expected_live_scenarios or live["observed_scenarios"] != expected_live_scenarios
-                                or scenarios["status"] != "PASS"
-                                or scenarios["expected_ids"] != expected_live_ids
-                                or len(scenarios["expected_ids"]) != expected_live_scenarios
-                                or "settings-no-checkout-remedy" not in scenarios["expected_ids"]
-                                or scenarios["observed_ids"] != scenarios["expected_ids"]
-                                or any(snapshots[part]["complete"] is not True or snapshots[part]["unchanged"] is not True
-                                       for part in ("release", "home"))):
-                            receipt["refusal_detail"] = refusal_detail(name, child)
-                            raise ValueError(f"native full ladder lacks {expected_live_scenarios} live scenarios including installed-remedy, planted control, stock OMP, or complete unchanged release/HOME snapshots")
+                        condition_report = full_live_condition_report(test, expected_live_ids, omp_version)
+                        if not all(condition_report["checks"].values()):
+                            receipt["refusal_detail"] = refusal_detail(name, child, expected_live_ids, omp_version)
+                            raise ValueError(
+                                f"native full ladder live condition(s) failed: {', '.join(condition_report['failed'])}"
+                            )
                 elif name == "memory_off":
                     if data.get("kind") != "memory-off" or "backend: off" not in data.get("content", ""):
                         raise ValueError("packaged memory-off recipe is unavailable")
