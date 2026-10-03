@@ -246,6 +246,9 @@ ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: 'grep[^|;&]*
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	the docs say (?i) is invalid here	regression: prose
 zz-canary-scope-probe	fire	tool	bash	-	echo zzzz_systemwide_canary_9c42	the canary token
 zz-canary-scope-probe	quiet	tool	bash	-	echo zzzz_systemwide_canary_9c43	near token
+zz-canary-scope-probe	fire	tool	bash	-	printf x\nprintf zzzz_systemwide_canary_9c42	newline-delimited canary argument
+zz-canary-scope-probe	fire	tool	bash	-	printf x\tzzzz_systemwide_canary_9c42	tab-delimited canary argument
+zz-canary-scope-probe	quiet	tool	bash	-	printf '%s' 'zzzz_systemwide_canary_9c42'	quoted printf data remains quiet
 kit-close-needs-evidence	fire	tool	bash	-	br close x --reason	E4 reason flag without a value
 kit-close-needs-evidence	fire	tool	bash	-	br close x --reason ""	E4 empty reason
 kit-close-needs-evidence	quiet	tool	bash	-	br close x '--reason' 'cargo test -> 41 passed'	E4 quoted option is still a reason
