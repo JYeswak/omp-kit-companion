@@ -151,16 +151,58 @@ test("docs: every verified block in the usage guide passes on this OMP", () => {
 	expect(blocks).toBeGreaterThan(0);
 }, 600_000);
 
-test("docs: no hand-typed OMP version outside the generated footer", () => {
-	const file = "docs/native-omp.md";
-	const markdown = readFileSync(join(REPO_ROOT, file), "utf8");
-	const start = markdown.indexOf(FOOTER_START);
-	const end = markdown.indexOf(FOOTER_END);
-	expect(start).toBeGreaterThan(-1);
-	expect(end).toBeGreaterThan(start);
-	const outside = markdown.slice(0, start) + markdown.slice(end + FOOTER_END.length);
-	const found = VERSION_OUTSIDE_FOOTER.exec(outside);
-	expect(found, found ? `hand-typed OMP version outside the generated footer: ${found[0]}` : "clean").toBeNull();
+test("docs: README and native guide footers use the shared OMP minimum", () => {
+	const compat = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/omp-compat.json"), "utf8")) as { minimum?: unknown };
+	if (typeof compat.minimum !== "string" || !/^\d+\.\d+\.\d+$/.test(compat.minimum)) {
+		throw new Error("scripts/omp-compat.json must contain a stable minimum OMP version");
+	}
+	for (const file of ["README.md", "docs/native-omp.md"]) {
+		const markdown = readFileSync(join(REPO_ROOT, file), "utf8");
+		const start = markdown.indexOf(FOOTER_START);
+		const end = markdown.indexOf(FOOTER_END);
+		expect(start, file + " is missing the generated footer start marker").toBeGreaterThan(-1);
+		expect(end, file + " is missing the generated footer end marker").toBeGreaterThan(start);
+		const footer = markdown.slice(start, end + FOOTER_END.length);
+		expect(footer).toContain("Minimum supported OMP: " + compat.minimum + ".");
+		const outside = markdown.slice(0, start) + markdown.slice(end + FOOTER_END.length);
+		const found = VERSION_OUTSIDE_FOOTER.exec(outside);
+		expect(found, found ? file + " has a hand-typed OMP version outside the generated footer: " + found[0] : "clean").toBeNull();
+	}
+});
+
+test("docs: footer generator reads omp-compat.json for both documents", () => {
+	const root = join(fixtureBase, "footer-generation");
+	const scripts = join(root, "scripts");
+	const docs = join(root, "docs");
+	const bin = join(root, "bin");
+	mkdirSync(scripts, { recursive: true });
+	mkdirSync(docs, { recursive: true });
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(scripts, "docs-footer.sh"), readFileSync(join(REPO_ROOT, "scripts/docs-footer.sh")));
+	writeFileSync(join(scripts, "omp-compat.json"), JSON.stringify({ minimum: "19.7.3" }));
+	const staleFooter = FOOTER_START + "\nOld footer\n" + FOOTER_END + "\n";
+	writeFileSync(join(root, "README.md"), "# Fixture README\n\n" + staleFooter);
+	writeFileSync(join(docs, "native-omp.md"), "# Fixture guide\n\n" + staleFooter);
+	const omp = join(bin, "omp");
+	writeFileSync(omp, "#!/bin/sh\nprintf omp/19.7.5\n");
+	chmodSync(omp, 0o755);
+	const child = Bun.spawnSync(["sh", join(scripts, "docs-footer.sh")], {
+		cwd: root,
+		env: { ...process.env, PATH: bin + ":" + (process.env.PATH ?? "/usr/bin:/bin") },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const stdout = child.stdout.toString();
+	const stderr = child.stderr.toString();
+	expect(child.exitCode, stdout + stderr).toBe(0);
+	for (const file of ["README.md", "docs/native-omp.md"]) {
+		const markdown = readFileSync(join(root, file), "utf8");
+		const start = markdown.indexOf(FOOTER_START);
+		const end = markdown.indexOf(FOOTER_END);
+		const footer = markdown.slice(start, end + FOOTER_END.length);
+		expect(footer).toContain("Minimum supported OMP: 19.7.3.");
+		expect(footer).toContain("Last verified against OMP 19.7.5");
+	}
 });
 
 test("docs: a bad flag in a verified block fails loudly and names the block", () => {

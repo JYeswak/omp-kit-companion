@@ -36,8 +36,20 @@ export interface MemoryReadinessReport {
 }
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
-// This narrowly pins the inspected, import-free 18.4.2 source. Newer versions need their own review.
-const REDACTOR_SHA_18_4_2 = "bec8892217e1b7a3ea577b25ff52631883fc41646351ea1f5a7b5e3359564270";
+// Hash order: memory-backend/settings.ts, memory-backend/resolve.ts, config/settings.ts.
+const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:a8d31351ac47afac206af4a1555842074c12199f41f26a1343d71368c2f2bb2f",
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:24df81c28f1610924e3e26330db04c22508bb40c60f9dee3ce94acaf550f6584",
+	// OMP 18.4.10/18.4.11 share these reviewed source hashes: default off, no-op fallback, legacy false -> off.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:d7929e81066485010e65740f79b4cf13c6375acd52952018dc321aa0e979d023",
+]);
+const MEMORY_CONFIG_SOURCE_FILES = [
+	"src/memory-backend/settings.ts",
+	"src/memory-backend/resolve.ts",
+	"src/config/settings.ts",
+] as const;
+// Content hash, not an OMP version string, is the redactor trust boundary.
+const REDACTOR_SOURCE_SHA256 = "bec8892217e1b7a3ea577b25ff52631883fc41646351ea1f5a7b5e3359564270";
 const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function state(path: string): "missing" | "directory" | "file" | "unsafe" {
@@ -119,20 +131,29 @@ function installedPackage(ompPath?: string): { root: string; version: string } |
 		return record(manifest) && manifest.name === PACKAGE_NAME && typeof manifest.version === "string" ? { root, version: manifest.version } : null;
 	} catch { return null; }
 }
+function memoryConfigSourcesReviewed(root: string): boolean {
+	if (!safeDirectories(root, ["src", "memory-backend"]) || !safeDirectories(root, ["src", "config"])) return false;
+	try {
+		const fingerprint = MEMORY_CONFIG_SOURCE_FILES
+			.map(path => createHash("sha256").update(fileBytes(join(root, path))).digest("hex"))
+			.join(":");
+		return MEMORY_CONFIG_SOURCE_FINGERPRINTS.has(fingerprint);
+	} catch { return false; }
+}
 function installedRedactor(ompPath?: string): { bytes: Buffer; version: string } | null {
 	const pkg = installedPackage(ompPath);
-	if (!pkg || pkg.version !== "18.4.2") return null;
+	if (!pkg) return null;
 	try {
 		const source = join(pkg.root, "src", "memory-backend", "redact.ts");
 		if (!safeDirectories(pkg.root, ["src", "memory-backend"]) || state(source) !== "file") return null;
 		const bytes = fileBytes(source);
 		const sha = createHash("sha256").update(bytes).digest("hex");
-		return sha === REDACTOR_SHA_18_4_2 ? { bytes, version: pkg.version } : null;
+		return sha === REDACTOR_SOURCE_SHA256 ? { bytes, version: pkg.version } : null;
 	} catch { return null; }
 }
 async function probeRedactor(ompPath?: string): Promise<MemoryRedactorReport> {
 	const pinned = installedRedactor(ompPath);
-	if (!pinned) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: "Installed OMP redactor source/version is not pinned and inspectable" };
+	if (!pinned) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: "Installed OMP redactor source hash is unreviewed or unavailable" };
 	try {
 		// Evaluate only the hash-pinned, import-free installed module in memory. A
 		// dynamic import (even a data URL) writes Bun's transpiler cache to XDG_CACHE_HOME.
@@ -165,8 +186,9 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 		embedding: "UNVERIFIED" as const, runtime: "NOT_PROBED" as const, redactor };
 	const unknown = (reason: string, action: string): MemoryReadinessReport => ({ ...base, status: "UNVERIFIED", backend: "UNVERIFIED", configured: false,
 		store: "UNVERIFIED", reason, recommended_action: action });
-	if (installedPackage(input.ompPath)?.version !== "18.4.2")
-		return unknown("Installed OMP version has unverified memory config semantics", "Inspect the installed OMP version and its memory settings schema before relying on this report.");
+	const ompPackage = installedPackage(input.ompPath);
+	if (!ompPackage || !memoryConfigSourcesReviewed(ompPackage.root))
+		return unknown("Installed OMP memory config source hashes are unreviewed or unavailable", "Review the installed OMP memory backend settings and resolver sources before relying on this report.");
 	const home = resolve(input.home);
 	const name = input.profile ?? "default";
 	if (name !== "default" && (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith("."))) return unknown("Profile name is unsupported", "Select an existing safe named profile.");

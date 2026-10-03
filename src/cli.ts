@@ -13,6 +13,7 @@ import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { diagnose, health, inspectDicklesworthstone, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
+import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -321,6 +322,16 @@ const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
 };
 
 interface NotJudgedComponent { component: string; status: DiagnosticStatus; reason: string }
+
+async function workDoctor(request: ParsedCommand): Promise<CliResult> {
+	const rootFlag = request.flags.get("--root");
+	const timeoutFlag = request.flags.get("--timeout-ms");
+	const jobsFlag = request.flags.get("--jobs");
+	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;
+	const concurrency = typeof jobsFlag === "string" && Number.isFinite(Number(jobsFlag)) ? Number(jobsFlag) : undefined;
+	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }) });
+	return { code: 0, data: report, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
+}
 
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.has("--deep")) {
@@ -1387,16 +1398,14 @@ async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
 	};
 	const rules = selected("--rules");
 	const cases = selected("--cases");
-	const baseline = selected("--baseline");
-	for (const path of [rules, cases, baseline]) {
+	for (const path of [rules, cases]) {
 		if (path !== undefined && (!isAbsolute(path) || resolve(path) !== path)) {
 			return refusal("INVALID_PATH", "Metamorphic selection requires canonical absolute paths",
-				"Pass absolute --rules, --cases and --baseline paths; nothing was measured.");
+				"Pass absolute --rules and --cases paths; nothing was measured.");
 		}
 	}
 	const report = await runMetamorphicReport({ root: identity.release.root, executablePath: identity.release.executable,
-		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}),
-		...(baseline !== undefined ? { baseline } : {}) });
+		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}) });
 	return { code: report.status === "FAIL" ? 1 : report.status === "PASS" ? 0 : 3,
 		data: { overall: report.status === "PASS" ? "OK" : report.status, metamorphic: report }, verification: "UNVERIFIED" };
 }
@@ -1855,6 +1864,7 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
+	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");

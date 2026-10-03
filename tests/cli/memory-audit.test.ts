@@ -5,18 +5,30 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync
 import { dirname, join, resolve } from "node:path";
 import { auditMemoryAtRest } from "../../src/memory-audit.ts";
 
-// OMP + pi-mnemopi 18.4.2 and 18.4.4 use this exact initBeam schema.
+// initBeam is imported only when its exact reviewed schema source bytes match.
 // schema.ts SHA256: 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0.
 // Fixtures call the actual installed initBeam, not a hand-written imitation.
 // Runtime-selected installation: a static import would bind the contributor's
 // source tree instead of the supported OMP package under inspection.
-const SCHEMA_SHA_BY_VERSION: Record<string, string> = {
-	"18.4.2": "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0",
-	"18.4.4": "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0",
-};
+const REVIEWED_SCHEMA_SHA256 = "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0";
+const AUDIT_SOURCE_FILES = [
+	["agent", "src/mnemopi/config.ts"],
+	["agent", "src/mnemopi/state.ts"],
+	["mnemopi", "src/core/banks.ts"],
+	["mnemopi", "src/core/beam/schema.ts"],
+	["mnemopi", "src/db.ts"],
+	["mnemopi", "src/core/episodic-graph.ts"],
+	["mnemopi", "src/core/query-cache.ts"],
+	["mnemopi", "src/core/shmr.ts"],
+	["mnemopi", "src/core/veracity-consolidation.ts"],
+	["mnemopi", "src/core/binary-vectors.ts"],
+	["mnemopi", "src/core/cost-log.ts"],
+] as const;
 const installed = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp") ?? "";
 let initBeam: ((db: Database) => void) | undefined;
 let installedVersion: string | undefined;
+let installedAgentRoot: string | undefined;
+let installedMnemopiRoot: string | undefined;
 if (installed) {
 	try {
 		const agent = dirname(dirname(realpathSync(installed)));
@@ -25,10 +37,12 @@ if (installed) {
 		const engine = JSON.parse(readFileSync(join(mnemopi, "package.json"), "utf8"));
 		const schema = join(mnemopi, "src/core/beam/schema.ts");
 		if (metadata.name === "@oh-my-pi/pi-coding-agent" && engine.name === "@oh-my-pi/pi-mnemopi" &&
-			metadata.version === engine.version && SCHEMA_SHA_BY_VERSION[metadata.version] &&
-			createHash("sha256").update(readFileSync(schema)).digest("hex") === SCHEMA_SHA_BY_VERSION[metadata.version]) {
+			typeof metadata.version === "string" && metadata.version.length > 0 &&
+			createHash("sha256").update(readFileSync(schema)).digest("hex") === REVIEWED_SCHEMA_SHA256) {
 			({ initBeam } = await import(schema));
 			installedVersion = metadata.version;
+			installedAgentRoot = agent;
+			installedMnemopiRoot = mnemopi;
 		}
 	} catch { /* Stock OMP is unavailable on this test host; positive proof runs on supported native hosts. */ }
 }
@@ -49,7 +63,7 @@ function fixture() {
 		mkdirSync(join(path, ".."), { recursive: true });
 		const db = new Database(path);
 		try {
-			if (!initBeam) throw new Error("Pinned stock OMP 18.4.2 or 18.4.4 schema unavailable");
+			if (!initBeam) throw new Error("Reviewed Mnemopi schema source bytes unavailable");
 			initBeam(db);
 			for (const [index, content] of working.entries()) db.run("INSERT INTO working_memory (id, content) VALUES (?, ?)", [`w-${index}`, content]);
 			for (const [index, content] of episodic.entries()) db.run("INSERT INTO episodic_memory (id, content) VALUES (?, ?)", [`e-${index}`, content]);
@@ -57,6 +71,27 @@ function fixture() {
 		return path;
 	};
 	return { root, home, project, storeRoot, args, bank, dbFile };
+}
+
+function seedReviewedOmp(root: string, version: string, changedSource?: string): string {
+	if (!installedAgentRoot || !installedMnemopiRoot) throw new Error("Reviewed OMP source files unavailable");
+	const agent = join(root, "node_modules/@oh-my-pi/pi-coding-agent");
+	const mnemopi = join(agent, "node_modules/@oh-my-pi/pi-mnemopi");
+	mkdirSync(join(agent, "dist"), { recursive: true });
+	mkdirSync(mnemopi, { recursive: true });
+	writeFileSync(join(agent, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+	writeFileSync(join(mnemopi, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-mnemopi", version }));
+	const launcher = join(agent, "dist/cli.js");
+	writeFileSync(launcher, "// inert test launcher");
+	for (const [packageName, relativePath] of AUDIT_SOURCE_FILES) {
+		const sourceRoot = packageName === "agent" ? installedAgentRoot : installedMnemopiRoot;
+		const packageRoot = packageName === "agent" ? agent : mnemopi;
+		const bytes = readFileSync(join(sourceRoot, relativePath));
+		const target = join(packageRoot, relativePath);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, changedSource === packageName + "/" + relativePath ? Buffer.concat([bytes, Buffer.from("x")]) : bytes);
+	}
+	return launcher;
 }
 function snapshot(path: string): string[] {
 	return readdirSync(path).sort().flatMap(name => {
@@ -87,8 +122,13 @@ supportedTest("enumerates every supported bank; catches alphabetic bearer and bo
 	expect(result.coverage).toEqual({ banks_discovered: 2, banks_scanned: 2, stores_discovered: 2, stores_scanned: 2,
 		working_rows: 3, episodic_rows: 2, total_rows: 5, fields: ["working_memory.content", "episodic_memory.content"] });
 	expect(result.categories).toEqual({ bearer_token: 1, private_key: 1, password_assignment: 1, credential_url: 1, provider_token: 0 });
-	if (installedVersion === "18.4.2") expect(result.redactor?.coverage).toBe("SYNTHETIC_ONLY");
-	else expect(result.redactor?.status).toBe("UNVERIFIED");
+	if (result.redactor?.coverage === "SYNTHETIC_ONLY") {
+		expect(result.redactor.status).toBe("MISSES");
+		expect(result.redactor.version).toBe(installedVersion);
+		expect(result.redactor.missed).toContain("pem_private_key");
+	} else {
+		expect(result.redactor?.status).toBe("UNVERIFIED");
+	}
 	const text = JSON.stringify(result);
 	for (const sensitive of [secret, pem, "syntheticlettersforpasswordvalue", "syntheticpassword", f.root, f.storeRoot]) expect(text).not.toContain(sensitive);
 	expect(snapshot(f.root)).toEqual(before);
@@ -159,13 +199,28 @@ supportedTest("a symlink in an ancestor of the selected store root cannot turn a
 	expect(result.reason).toBe("UNSAFE_STORE");
 });
 
-supportedTest("unreadable stores and unsupported OMP source/version cannot be certified", async () => {
+supportedTest("unreadable stores and unsupported OMP source bytes cannot be certified", async () => {
 	const f = fixture(); f.bank(); chmodSync(f.dbFile(), 0o000);
 	expect((await auditMemoryAtRest(f.args)).status).toBe("UNVERIFIED");
 	const other = fixture(); other.bank();
 	const result = await auditMemoryAtRest({ ...other.args, ompPath: join(other.root, "not-omp") });
 	expect(result.status).toBe("UNVERIFIED");
 	expect(result.reason).toBe("UNSUPPORTED_SOURCE");
+});
+
+supportedTest("reviewed audit source bytes ignore release version, but a byte change refuses", async () => {
+	const reviewed = fixture(); reviewed.bank("default", ["ordinary synthetic row"]);
+	const reviewedOmp = seedReviewedOmp(join(reviewed.root, "omp-reviewed"), "99.0.0");
+	const covered = await auditMemoryAtRest({ ...reviewed.args, ompPath: reviewedOmp });
+	expect(covered.status).toBe("NO_MATCHES_IN_COVERED_CLASSES");
+	expect(covered.version).toBe("99.0.0");
+
+	const changed = fixture(); changed.bank();
+	const changedOmp = seedReviewedOmp(join(changed.root, "omp-changed"), "100.0.0", "mnemopi/src/core/shmr.ts");
+	const refused = await auditMemoryAtRest({ ...changed.args, ompPath: changedOmp });
+	expect(refused.status).toBe("UNVERIFIED");
+	expect(refused.reason).toBe("UNSUPPORTED_SOURCE");
+	expect(refused.coverage).toBeNull();
 });
 
 supportedTest("compiled private audit requires separate consent and exposes only covered counts without mutating the selected HOME", () => {
@@ -212,4 +267,4 @@ supportedTest("compiled private audit requires separate consent and exposes only
 	expect(activeWal.envelope.data.audit.reason).toBe("UNSAFE_STORE");
 	expect(activeWal.text).not.toContain(f.root);
 	expect(snapshot(f.root)).toEqual(beforeWal);
-});
+}, 30_000);

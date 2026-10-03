@@ -99,7 +99,7 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
-	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json", "tests/cli/metamorphic-baseline.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);

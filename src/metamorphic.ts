@@ -14,11 +14,8 @@ export interface MetamorphicBreak {
 
 export interface MetamorphicCliReport {
 	status: "PASS" | "FAIL" | "UNVERIFIED";
-	mode?: "ratchet";
-	counts?: { cases: number; variants: number; breaks: number; skipped: number; fresh?: number; stale?: number };
+	counts?: { cases: number; variants: number; breaks: number; skipped: number };
 	breaks: MetamorphicBreak[];
-	new_breaks?: MetamorphicBreak[];
-	stale_baseline_ids?: string[];
 	producer?: BundledRunResult;
 	detail?: string;
 }
@@ -28,7 +25,6 @@ export interface MetamorphicInput {
 	executablePath: string;
 	rules?: string;
 	cases?: string;
-	baseline?: string;
 }
 
 function isReport(value: unknown): value is { status?: unknown; counts?: unknown; breaks?: unknown; mode?: unknown; new_breaks?: unknown; stale_baseline_ids?: unknown } {
@@ -50,22 +46,13 @@ function asBreaks(value: unknown): MetamorphicBreak[] | undefined {
 	return value;
 }
 
-function asIdList(value: unknown): string[] | undefined {
-	if (!Array.isArray(value) || !value.every((entry: unknown) => typeof entry === "string")) return undefined;
-	return value;
-}
-
 function asCounts(value: unknown): MetamorphicCliReport["counts"] {
 	if (!!value && typeof value === "object" && !Array.isArray(value)
 		&& "cases" in value && typeof value.cases === "number"
 		&& "variants" in value && typeof value.variants === "number"
 		&& "breaks" in value && typeof value.breaks === "number"
 		&& "skipped" in value && typeof value.skipped === "number") {
-		const counts: { cases: number; variants: number; breaks: number; skipped: number; fresh?: number; stale?: number } = {
-			cases: value.cases, variants: value.variants, breaks: value.breaks, skipped: value.skipped };
-		if ("fresh" in value && typeof value.fresh === "number") counts.fresh = value.fresh;
-		if ("stale" in value && typeof value.stale === "number") counts.stale = value.stale;
-		return counts;
+		return { cases: value.cases, variants: value.variants, breaks: value.breaks, skipped: value.skipped };
 	}
 	return undefined;
 }
@@ -92,10 +79,6 @@ export async function runMetamorphicReport(input: MetamorphicInput): Promise<Met
 		if (!isAbsolute(input.cases)) return unverified("non-absolute cases file");
 		args.push("--cases", input.cases);
 	}
-	if (input.baseline !== undefined) {
-		if (!isAbsolute(input.baseline)) return unverified("non-absolute baseline file");
-		args.push("--baseline", input.baseline);
-	}
 	let result: BundledRunResult;
 	try {
 		result = await runBundled(HARNESS, args, input.root, input.executablePath);
@@ -113,17 +96,10 @@ export async function runMetamorphicReport(input: MetamorphicInput): Promise<Met
 	if (counts === undefined) return { status: "UNVERIFIED", breaks: [], producer: result, counts: undefined };
 	const breaks = asBreaks(parsed.breaks);
 	if (breaks === undefined) return { status: "UNVERIFIED", breaks: [], producer: result, counts };
-	const ratchet = parsed.mode === "ratchet";
-	const fresh = ratchet ? asBreaks(parsed.new_breaks) : [];
-	const stale = ratchet ? asIdList(parsed.stale_baseline_ids) : [];
-	if (fresh === undefined || stale === undefined) {
-		return { status: "UNVERIFIED", breaks, producer: result, counts };
-	}
-	const status = parsed.status === "PASS" && (breaks.length === 0 || (ratchet && fresh.length === 0)) ? "PASS"
+	const status = parsed.status === "PASS" && breaks.length === 0 ? "PASS"
 		: parsed.status === "FAIL" ? "FAIL" : "UNVERIFIED";
 	if ((status === "PASS") !== (result.code === 0)) {
 		return { status: "UNVERIFIED", breaks, producer: result, counts };
 	}
-	return { status, breaks, producer: result, counts,
-		...(ratchet ? { mode: "ratchet" as const, new_breaks: fresh, stale_baseline_ids: stale } : {}) };
+	return { status, breaks, producer: result, counts };
 }
