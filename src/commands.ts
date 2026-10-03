@@ -35,7 +35,7 @@ export const REFUSAL_DATA_SCHEMA: DataSchema = { type: "object", required: ["ove
 	overall: { enum: ["NOT_RUN", "UNVERIFIED"] },
 } };
 const testData: DataSchema = { type: "object", required: ["overall"], properties: {
-	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN"] },
+	overall: { enum: ["PASS", "FAIL", "BLOCKED", "UNVERIFIED", "NOT_RUN", "OK"] },
 	recorded: { type: "boolean" },
 	test: { type: "object", required: ["status"], properties: {
 		status: { enum: ["PASS", "FAIL", "BLOCKED"] },
@@ -49,6 +49,10 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 				status: { enum: ["RESOLVED", "HIDDEN_BUT_READABLE", "MISSING"] }, detail: { type: "string" } } } },
 	} },
 	live: { type: "object" },
+	mutants: { type: "object" },
+	integrations: { type: "object" },
+	repeat: { type: "object" },
+	metamorphic: { type: "object" },
 } };
 
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
@@ -103,6 +107,9 @@ const lspProbeData = { type: "object", required: ["status", "scope", "requested_
 	fixture_project_unchanged: { type: ["boolean", "null"] }, fixture_project_snapshots: { type: ["object", "null"], properties: { before: { type: "object" }, after: { type: "object" }, unchanged: { type: "boolean" } } },
 	runtime_home_omp_inventory: { type: "array", items: { type: "string" } }, runtime_state_outputs: { type: "array", items: { type: "string" } },
 	mux_stop_rc: { type: ["number", "null"] }, temporary_workspace_removed: { type: "boolean" },
+} };
+const workData: DataSchema = { type: "object", required: ["scope", "overall", "roots", "repos", "concurrency", "per_repo_timeout_ms", "elapsed_ms", "timed_out_repos", "text"], properties: {
+	scope: { enum: ["work"] }, overall: { enum: ["REPORT"] }, roots: { type: "array" }, repos: { type: "array" }, concurrency: { type: "number" }, per_repo_timeout_ms: { type: "number" }, elapsed_ms: { type: "number" }, timed_out_repos: { type: "number" }, text: { type: "string" },
 } };
 const calibrationData: DataSchema = { type: "object", required: ["overall", "scope", "status", "calibration"], properties: { overall: { enum: ["OK"] }, scope: { enum: ["rules"] }, status: { enum: ["OK"] }, calibration: { type: "object" } } };
 const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
@@ -163,6 +170,24 @@ const repairData: DataSchema = { type: "object", required: ["overall", "action",
 	} } }, receipt_id: { type: ["string", "null"] }, backup_id: { type: ["string", "null"] },
 } };
 
+const migrateData: DataSchema = { type: "object", required: ["overall", "action"], properties: {
+	overall: { enum: ["UNVERIFIED"] }, action: { enum: ["PLAN", "APPLIED"] },
+	rows: { type: "array", items: { type: "object", required: ["name", "verdict"], properties: {
+		name: { type: "string" }, file: { type: "string" }, legacySha256: { type: "string" },
+		manifestSha256: { type: ["string", "null"] }, pluginSha256: { type: ["string", "null"] },
+		pluginPath: { type: ["string", "null"] }, verdict: { enum: ["identical-to-plugin", "identical-to-manifest", "edited", "unknown-keep"] },
+		overlay: { type: "boolean" }, overlayPath: { type: ["string", "null"] }, unlisted: { type: "boolean" },
+		firstDiffLine: { type: ["number", "null"] }, diff: { type: ["string", "null"] },
+	} } },
+	pluginRules: { type: "number" }, pluginAbsent: { type: "boolean" },
+	removable: { type: "number" }, keptCount: { type: "number" }, receipt_id: { type: ["string", "null"] },
+	backup_dir: { type: "string" }, removed: { type: "array", items: { type: "string" } },
+	kept: { type: "array", items: { type: "string" } },
+	verified: { type: "array", items: { type: "object", required: ["name"], properties: {
+		name: { type: "string" }, provider: { type: ["string", "null"] }, path: { type: ["string", "null"] },
+	} } },
+} };
+
 const ruleReviewData: DataSchema = { type: "object", required: ["overall", "status", "scope", "review"], properties: {
 	overall: { enum: ["UNVERIFIED", "CONFLICTS", "DELTA", "NO_DELTA_IN_EXERCISED_WITNESSES"] },
 	status: { enum: ["COMPLETE", "UNAVAILABLE"] }, scope: { enum: ["MATCHER_PREFIX_ONLY"] },
@@ -176,19 +201,44 @@ const falseFireData: DataSchema = { type: "object", required: ["overall", "scope
 	attempts: { type: "number" }, original_bytes: { type: "number" }, candidate_bytes: { type: ["number", "null"] },
 	replay_fixture: { type: ["object", "null"] },
 } };
+const serviceData: DataSchema = { type: "object", required: ["overall", "job"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	job: { type: "string" }, label: { type: ["string", "null"] }, changed: { type: "boolean" },
+	backup: { type: ["string", "null"] }, dry_run: { type: "boolean" }, already_absent: { type: "boolean" },
+	checks: { type: "array", items: { type: "object", required: ["id", "status", "message", "remediation"], properties: {
+		id: { type: "string" }, status: { enum: ["PASS", "WARN", "FAIL"] }, message: { type: "string" }, remediation: { type: "string" },
+	} } },
+	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
+} };
+const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	roots: { type: "array", items: { type: "string" } },
+	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
+		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
+		reason: { type: "string" }, sizeBytes: { type: "number" },
+	} } },
+	orphans: { type: "array", items: { type: "object" } },
+	killed: { type: "array", items: { type: "object" } },
+	expired: { type: "array", items: { type: "object" } },
+	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
-	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|memory|mcp|context|services|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
 		{ name: "--sample-size", value: "N", description: "Rules calibration maximum labels per rule" },
 		{ name: "--noisy-lower-bound", value: "P", description: "Rules calibration noisy-rule lower-bound threshold" },
 		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
+		{ name: "--root", value: "PATHS", description: "Work scope root list separated by the platform path delimiter; defaults to OMP_KIT_WORK_ROOTS or ~/Developer" },
+		{ name: "--timeout-ms", value: "N", description: "Work scope per-repository git command timeout in milliseconds" },
+		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
+		{ name: "--services", value: "PATH", description: "Services only: validate a declared required-jobs JSON file against launchd inventory" },
 		{ name: "--deep", available: true, description: "With --scope lsp, probe the built-in TypeScript route in a private fixture; other deep scopes remain unavailable" },
 		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
 	], example: "omp-kit doctor --scope lsp --json", runnable: true, dataSchema: doctorData },
@@ -218,8 +268,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, or a required-capability check",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -227,6 +277,16 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--cases", value: "ABS_FILE", description: "Seven-column TSV cases file for the external rules" },
 		{ name: "--live-fixture", value: "ABS_JSON", description: "Run one strict public-synthetic external G4 fixture after its selected G1-G3 pass" },
 		{ name: "--capabilities", value: "ABS_JSON", description: "Check a declared required-capability set (skills, tools, rules, LSP) through OMP discovery; exit 1 on MISSING" },
+		{ name: "--mutants", description: "Measure mutation adequacy of rule conditions against their cases through the real matcher" },
+		{ name: "--mutant-budget-secs", value: "N", description: "Wall-clock budget bounding mutant evaluation; the report marks early stops truncated" },
+		{ name: "--integrations", description: "Prove per-profile integrations live with a scripted mock model; never uploads" },
+		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
+		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
+		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
+		{ name: "--repeat", value: "N", description: "Run live scenarios N times (1-1000) and judge the failure rate with exact binomial bounds plus Fisher against --baseline" },
+		{ name: "--scenario", value: "ID", description: "Repeat only: run just this live scenario id from tests/live/scenarios.json" },
+		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break" },
+		{ name: "--baseline", value: "ABS_JSON", description: "Repeat only: absolute repeat receipt for Fisher comparison" },
 	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
 	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",
@@ -265,6 +325,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
 		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,
 	], example: "omp-kit repair --scope rules --plan --json", runnable: false, mutation: true, dataSchema: repairData },
+	{ name: "migrate", description: "Move legacy ~/.agents/rules kit copies to native plugin layering; edited copies are kept and flagged for overlay", usage: "migrate [--plan|--apply --yes]", flags: planApply, example: "omp-kit migrate --plan --json", runnable: false, mutation: true, dataSchema: migrateData },
 	{ name: "undo", description: "Guardedly restore one verified receipt", usage: "undo RUN_ID [--yes]", argument: "RUN_ID", flags: [
 		{ name: "--yes", description: "Confirm restore after state verification" },
 	], example: "omp-kit undo RUN_ID --yes", runnable: false, mutation: true },
@@ -288,13 +349,48 @@ export const COMMANDS: readonly Command[] = [
 						overall: { enum: ["OK", "DEGRADED"] },
 						skill_set: { type: "object", required: ["candidate_skills", "reads", "explicit", "history", "bytes_before", "bytes_after", "capability_check", "recipe", "guidance"] },
 					} } },
-			{ name: "omp-watch", description: "Render a launchd/systemd watcher that re-tests the kit whenever OMP is updated; never installs it",
+			{ name: "omp-watch", description: "Render the managed omp-watch launchd/systemd job exactly as service install would write it; never installs it",
 				usage: "examples omp-watch", flags: [], example: "omp-kit examples omp-watch --json", runnable: true, dataSchema: { type: "object",
-					required: ["label", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "install", "uninstall", "guidance"], properties: {
-						label: { type: "string" }, launchd_plist: { type: "string" }, systemd_path_unit: { type: "string" },
-						systemd_service_unit: { type: "string" }, install: { type: "object" }, uninstall: { type: "object" }, guidance: { type: "string" },
+					required: ["label", "watch_path", "launchd_plist", "systemd_path_unit", "systemd_service_unit", "guidance"], properties: {
+						label: { type: "string" }, watch_path: { type: "string" }, launchd_plist: { type: "string" },
+						systemd_path_unit: { type: "string" }, systemd_service_unit: { type: "string" }, guidance: { type: "string" },
 					} } },
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
+	{ name: "service", description: "Manage operator service jobs (launchd/systemd); reads foreign jobs, never rewrites them", usage: "service list|install|uninstall|status|doctor|logs|run", flags: [], subcommands: [
+		{ name: "list", description: "List known jobs with installed and loaded state", usage: "service list", flags: [], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--apply --yes] [--replace]", argument: "JOB", flags: [
+			{ name: "--dry-run", description: "Render the plist, diff and commands without changing anything" },
+			{ name: "--apply", description: "Request guarded install" },
+			{ name: "--yes", description: "Confirm the install in noninteractive mode" },
+			{ name: "--replace", description: "Take over a label already loaded from a different plist (a backup is kept)" },
+		], example: "omp-kit service install omp-watch --dry-run --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "uninstall", description: "Bootout a job and move its plist to the backup dir (logs kept unless --purge-logs)", usage: "service uninstall JOB [--purge-logs] [--apply --yes]", argument: "JOB", flags: [
+			{ name: "--purge-logs", description: "Delete the job's logs as well as moving the plist" },
+			{ name: "--apply", description: "Request guarded uninstall" },
+			{ name: "--yes", description: "Confirm the uninstall in noninteractive mode" },
+		], example: "omp-kit service uninstall omp-watch --apply --yes --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "status", description: "Read-only loaded state for one job or --all", usage: "service status [JOB|--all]", argument: "JOB", flags: [
+			{ name: "--all", description: "Report every known job" },
+		], example: "omp-kit service status omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "doctor", description: "Read-only checks for one job or --all; --fix reinstalls and rotates own logs", usage: "service doctor [JOB|--all] [--fix --apply --yes]", argument: "JOB", flags: [
+			{ name: "--all", description: "Check every known job" },
+			{ name: "--fix", description: "Reinstall drifted jobs and rotate oversized own logs" },
+			{ name: "--apply", description: "Request guarded fixes" },
+			{ name: "--yes", description: "Confirm fixes in noninteractive mode" },
+		], example: "omp-kit service doctor omp-watch --json", runnable: false, mutation: true, dataSchema: serviceData },
+		{ name: "logs", description: "Print a job's out/err logs", usage: "service logs JOB [--errors] [-n N]", argument: "JOB", flags: [
+			{ name: "--errors", description: "Show the error log instead of the output log" },
+			{ name: "-n", value: "N", description: "Print the last N lines" },
+		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt (omp-watch notifies on failure, scratch-reaper reports)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+	{ name: "scratch", description: "Reap dead operator scratch: owned+dead+lsof-clear sessions, idle unowned quarantine, expired quarantine delete", usage: "scratch plan|apply [--apply --yes]", flags: [], subcommands: [
+		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "--apply", description: "Request guarded apply" },
+			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
+	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },
