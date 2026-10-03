@@ -1,0 +1,1 @@
+- Releases assemble per-bead notes from `changelog.d/` and fail the candidate check when a merged PR has no fragment.

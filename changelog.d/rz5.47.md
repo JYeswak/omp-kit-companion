@@ -1,0 +1,1 @@
+- `doctor --scope extensions` resolves hook imports from the extension's real path, avoiding false unresolvable-import findings for symlinked hooks. (PR #52)

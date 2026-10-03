@@ -12,6 +12,8 @@
 
 - Fast-test case denominators now derive from the release-manifest-verified `cases/cases.tsv`, removing manually synchronized count pins.
 
+<!-- Add one fragment per merged PR under changelog.d/. -->
+
 ## 0.2.2 — 2026-10-02
 
 - `doctor --scope services` inventories launchd jobs and validates declared required jobs without loading or writing services. (PR #24)

@@ -14,9 +14,15 @@ Every push to `main` runs the fast Linux gate (CLI contracts and the rule ladder
 
 ## Releases
 
-The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days. A release is:
+The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days.
 
-1. A commit on `main` that moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
+Each merged PR adds one Markdown bullet to `changelog.d/<bead>.md`, ending in `(PR #NN)`. Keep PR notes in separate files rather than editing `CHANGELOG.md`; the release workflow requires a fragment for every merged PR since the previous tag.
+
+Before the release commit, run `sh scripts/release-notes.sh assemble --base-tag v<previous-version> --head HEAD --version <release-version> --date YYYY-MM-DD`. This moves the current "Unreleased" entries and new fragments into the version section while preserving the fragments; add `--output PATH` to preview into a separate file. Check completeness locally with `sh scripts/release-notes.sh check --base-tag v<previous-version> --head HEAD`.
+
+A release is:
+
+1. A commit on `main` that runs the fragment assembler, moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
 2. A `vX.Y.Z` tag on that commit.
 3. The "Unpublished release candidate" workflow (`release.yml`) run against the tag. It builds the four native archives and certifies each one on its own runner.
 4. Publication of the certified archives and `release-index.json` as a GitHub release, then a fresh-HOME install from the published index.
