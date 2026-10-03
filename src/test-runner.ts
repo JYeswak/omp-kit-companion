@@ -5,7 +5,7 @@ import { diagnose, type Finding } from "./diagnostics.ts";
 import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
-
+import { isSha256Hex } from "./regex-guards.ts";
 const HARNESS = "scripts/ttsr-harness.ts";
 const RULE_EXPECTATIONS = { rules: 22, ttsrRules: 21 } as const;
 const CASES_PATH = "cases/cases.tsv";
@@ -559,7 +559,7 @@ export async function runMatcherObservation(input: MatcherObservationInput): Pro
 	if (![input.root, input.executablePath, input.rules, input.cases].every(path => typeof path === "string" && isAbsolute(path))
 		|| typeof input.rule !== "string" || !/^[a-z0-9][a-z0-9_-]*$/i.test(input.rule)
 		|| !Number.isSafeInteger(input.caseLine) || input.caseLine < 2
-		|| typeof input.expectedRuleSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.expectedRuleSha256)) {
+		|| !isSha256Hex(input.expectedRuleSha256)) {
 		return unavailable("INVALID_SELECTION", "Absolute paths, a rule name, a case line >= 2, and an independently supplied lowercase rule SHA256 are required");
 	}
 	if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 120_000)) {

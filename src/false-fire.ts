@@ -6,6 +6,7 @@ import { reduceCandidate, type EvaluationContext, type PredicateOutcome } from "
 import { runtimeTempRoot } from "./runtime.ts";
 import { runMatcherObservation, type MatcherObservation, type MatcherObservationReport } from "./test-runner.ts";
 import { isRecord } from "./type-guards.ts";
+import { isSha256Hex } from "./regex-guards.ts";
 
 export const FALSE_FIRE_SCHEMA_VERSION = 1 as const;
 export const FALSE_FIRE_APPROVED_FIELDS = ["rule", "expect", "source", "tool", "path", "snippet"] as const;
@@ -107,7 +108,7 @@ function decodeFixture(bytes: Uint8Array): FalseFireFixture {
 	}
 	if (value.identity_pins !== undefined) {
 		if (!isRecord(value.identity_pins) || !exactKeys(value.identity_pins, HASH_FIELDS)
-			|| Object.values(value.identity_pins).some(digest => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))) {
+			|| Object.values(value.identity_pins).some(digest => !isSha256Hex(digest))) {
 			throw new FalseFireInputError("FIXTURE_IDENTITY_PINS_INVALID");
 		}
 	}

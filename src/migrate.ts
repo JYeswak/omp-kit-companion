@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { readManifest } from "./diagnostics.ts";
 import { applyMutation, planMutation, type FileMutation, type MutationPlan } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
-
+import { isSha256Hex } from "./regex-guards.ts";
 /**
  * B3: migrate legacy kit rule installs (~/.agents/rules) to native plugin layering.
  *
@@ -67,7 +67,7 @@ function releasedRuleHashes(root: string): Map<string, Set<string>> {
 		for (const rules of Object.values(releases as Record<string, unknown>)) {
 			if (!rules || typeof rules !== "object") continue;
 			for (const [name, value] of Object.entries(rules as Record<string, unknown>)) {
-				if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) continue;
+				if (!isSha256Hex(value)) continue;
 				const hashes = result.get(name) ?? new Set<string>();
 				hashes.add(value);
 				result.set(name, hashes);

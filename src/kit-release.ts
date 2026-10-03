@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
-
+import { isSha256Hex } from "./regex-guards.ts";
 export const RELEASE_SCHEMA_VERSION = 1;
 export const RELEASE_MANIFEST_NAME = "release-manifest.json";
 export const RELEASE_BINARY_NAME = "bin/omp-kit";
@@ -30,7 +30,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const hash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value, (_key, item: unknown) => record(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item)));
 const fail = (reason: string): never => { throw new Error(reason); };
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+const digest = (value: unknown): value is string => isSha256Hex(value);
 const version = (value: unknown): value is string => {
  if (typeof value !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(value)) return false;
  const suffix = value.indexOf("-");

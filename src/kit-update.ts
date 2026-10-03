@@ -8,7 +8,7 @@ import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
 import { parseRuleManifest } from "./diagnostics.ts";
 import { countCaseRows, type FastTestExpectations } from "./test-runner.ts";
-
+import { isSha256Hex } from "./regex-guards.ts";
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
 function shaFile(path: string): string {
  const digest = createHash("sha256");
@@ -196,7 +196,7 @@ function readReceipt(stateRoot: string, id: string): ActivationReceipt {
  const receipt = value as ActivationReceipt;
  if (receipt.schema_version !== 1 || receipt.id !== id || !["READY", "UNDO_PENDING", "RESTORED"].includes(receipt.state) ||
   !receipt.before || !receipt.after || !VERSION.test(receipt.before.version) || !VERSION.test(receipt.after.version) ||
-  ![receipt.before.sha256, receipt.after.sha256].every(hash => /^[a-f0-9]{64}$/.test(hash))) throw new Error("KIT_RECEIPT_INVALID");
+  ![receipt.before.sha256, receipt.after.sha256].every(hash => isSha256Hex(hash))) throw new Error("KIT_RECEIPT_INVALID");
  return receipt;
 }
 function switchLink(prefix: string, version: string): void {

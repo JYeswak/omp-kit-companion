@@ -5,7 +5,7 @@ import {
 	type BigIntStats, type Stats,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-
+import { isSha256Hex } from "./regex-guards.ts";
 /** This module only changes explicitly listed kit-owned files. It does not update OMP. */
 export type Image = { sha256: string; size: number; mode: number; uid: number; gid: number };
 export type FileMutation = {
@@ -322,7 +322,7 @@ export type PendingKitUpdate = KitUpdateStart & { id: string; state: "PENDING" }
 function updatePendingPath(stateRoot: string): string { return join(stateRoot, "kit-update.pending.json"); }
 function isUpdateMetadata(value: unknown): value is KitUpdateStart {
 	if (!value || typeof value !== "object" || !("scope" in value) || !["kit", "omp", "all"].includes(String(value.scope)) ||
-		!("identitySha256" in value) || typeof value.identitySha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.identitySha256)) return false;
+		!("identitySha256" in value) || !isSha256Hex(value.identitySha256)) return false;
 	return ["kitVersion", "ompVersion", "channel"].every(key => {
 		if (!(key in value)) return false;
 		const part = value[key];
