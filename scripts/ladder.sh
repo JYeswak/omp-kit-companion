@@ -1,6 +1,6 @@
 #!/bin/sh
 # ladder.sh — run every gate the pack must pass before install, in order, and stop at the first RED.
-# G1-G3 harness gate, harness selftest (plants must go RED), checker selftests under /bin/sh,
+# G1-G3 harness gate, regex budget, harness selftest, checker selftests under /bin/sh,
 # manifest check, G4 live suite, G4 plant (must go RED). Prints each complete producer log and rc.
 set -u
 HERE=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
@@ -39,6 +39,7 @@ if [ -e "$HERE/.git" ]; then
 else
   step manifest /bin/sh scripts/build-manifest.sh --check
 fi
+step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" --gate
 step harness-gate "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --gate
 step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest

@@ -1,0 +1,1 @@
+- Add a bounded Bun/JSC regex budget gate for every kit rule condition, with 4/8/16 KiB near-miss probes, 16-byte streamed shell-argument checks, Bash structural lint, load-average reporting, and full-ladder wiring.
