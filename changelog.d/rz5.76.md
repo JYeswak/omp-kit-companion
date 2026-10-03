@@ -1,0 +1,1 @@
+- Release packaging derives MANIFEST.tsv from rules at package time; source checkouts regenerate it in the ladder, installed archives verify the bundled manifest without mutation, and installer verification covers the archive hash.

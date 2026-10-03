@@ -12,10 +12,10 @@ const platformTargets: Record<string, string> = {
 	"linux-x64-gnu": "bun-linux-x64",
 };
 const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers"];
-const files = ["LICENSE", "MANIFEST.tsv", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
+const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
-	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs"] ;
+	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs"];
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fail = (reason: string): never => { throw new Error(reason); };
 const octal = (header: Buffer, offset: number, width: number, value: number) => {
@@ -82,6 +82,12 @@ function run(): void {
 	}
 	const directory = mkdtempSync(join(out, "kit-package-"));
 	try {
+		const manifestBuild = Bun.spawnSync(["/bin/sh", join(root, "scripts/build-manifest.sh"), "--stdout"], {
+			cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: process.env.TMPDIR ?? out },
+		});
+		if (manifestBuild.exitCode !== 0) fail(`MANIFEST_GENERATION_FAILED (${manifestBuild.exitCode}): ${manifestBuild.stdout.toString()} ${manifestBuild.stderr.toString()}`);
+		const ruleManifest = manifestBuild.stdout;
+		if (ruleManifest.length === 0) fail("EMPTY_GENERATED_MANIFEST");
 		const binary = join(directory, RELEASE_BINARY_NAME);
 		mkdirSync(dirname(binary), { recursive: true, mode: 0o700 });
 		const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
@@ -91,10 +97,11 @@ function run(): void {
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files];
 		for (const path of roots) expand(path, names);
-		names.push(RELEASE_BINARY_NAME);
+		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv");
 		names.sort();
 		if (new Set(names).size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
-		const content = new Map(names.map(name => [name, name === RELEASE_BINARY_NAME ? safeCompiled(binary) : safeSource(name)]));
+		const content = new Map(names.map(name => [name, name === RELEASE_BINARY_NAME ? safeCompiled(binary) :
+			name === "MANIFEST.tsv" ? ruleManifest : safeSource(name)]));
 		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);
 		validateReleaseManifest(JSON.parse(manifest.toString("utf8")));

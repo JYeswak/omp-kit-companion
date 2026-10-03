@@ -19,14 +19,14 @@ tools. Command behavior, release limits, and safe first commands live in `README
    wraps them as the `{"command": ...}` JSON that omp matches live.
 2. Edit `rules/<name>.md` until the cases hold:
    `bun scripts/ttsr-harness.ts --gate` (G1 compile, G2 wire cases, G3 streamed-prefix sweep).
-3. `sh scripts/e2e-live.sh` (G4: real omp binary, mock model, isolated HOME). Against an installed local archive, also run `omp-kit test --json` and `omp-kit test --full --json` from an unrelated working directory.
-4. `sh scripts/build-manifest.sh` to refresh `MANIFEST.tsv`; `--check` must pass.
-5. Only for explicit source-rule deployment, `sh scripts/install.sh --dry-run`, read the plan, then `sh scripts/install.sh`. This does not install the compiled CLI.
+3. Run `sh scripts/ladder.sh`: in a checkout with `.git`, it derives ignored `MANIFEST.tsv` before the gates; in an installed release, it checks the bundled manifest without mutation. Then it runs G1-G4 and the planted negative. A rule edit needs no paired manifest update. Against an installed local archive, also run `omp-kit test --json` and `omp-kit test --full --json` from an unrelated working directory.
+4. Release packaging generates a fresh `MANIFEST.tsv` from `rules/` and includes it in the archive's hashed file set. Never commit `MANIFEST.tsv`.
+5. Only for explicit source-rule deployment, if no generated file exists, run `sh scripts/build-manifest.sh`; then run `sh scripts/install.sh --dry-run`, read the plan, then `sh scripts/install.sh`. This does not install the compiled CLI.
 6. `sh scripts/doctor.sh` must exit 0 before claiming the local source deployment is ready.
    It checks the rule pack, TTSR policy, router skills, checkers, and extensions; model/provider routing is outside its scope.
 
-Retiring a rule: move it to `retired/`, add a `retired/REASONS.tsv` row with evidence, rebuild the
-manifest, install (the installer backs up and removes it from the target).
+Retiring a rule: move it to `retired/`, add a `retired/REASONS.tsv` row with evidence, then run
+`sh scripts/ladder.sh` to regenerate the checkout's ignored manifest and validate the pack before installation.
 
 Policy change: edit `policy/ttsr.json`, then `sh scripts/apply-policy.sh --dry-run --include-default`,
 then without `--dry-run`, then the doctor.
@@ -37,7 +37,7 @@ then without `--dry-run`, then the doctor.
 |---|---|---|
 | `scripts/ttsr-harness.ts --gate` | G1 compile, G2 wire cases, G3 prefix sweep through omp's own `TtsrManager` | `reports/` |
 | `scripts/e2e-live.sh` | G4 live: real omp, mock model, isolated HOME | temp dirs, `reports/` |
-| `scripts/build-manifest.sh [--check]` | `MANIFEST.tsv`: name, sha256, class, pack; `--check` exits 1 when stale | `MANIFEST.tsv` |
+| `scripts/build-manifest.sh [--check|--stdout]` | Derives the rule TSV; default writes ignored `MANIFEST.tsv`, `--check` compares it with `rules/`, and `--stdout` supplies package-time bytes without touching the checkout | `MANIFEST.tsv` (default) |
 | `scripts/rule-class.ts <rule.md>...` | Prints `name<TAB>class` from omp's own rule parse; the one classifier the harness, `tests/live/lib.mjs coverage` and the manifest use | nothing |
 | `scripts/install.sh [--dry-run] [--target DIR] [--state DIR]` | Refuses a stale manifest; backs up the target to `STATE/backups/<UTC>/`; installs atomically; removes retired rules; lists unmanaged files; idempotent | target, `~/.local/state/omp-kit/` |
 | `scripts/apply-policy.sh [--dry-run] [--profiles all\|p1,p2] [--include-default] [--target DIR]` | Sets `ttsr.enabled`, `repeatMode`, `repeatGap`, `disabledRules` in each profile to `policy/ttsr.json` and reads them back; refuses a profile whose cleared disable would re-enable a rule file still in the target | profile `config.yml` |

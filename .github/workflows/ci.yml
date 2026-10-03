@@ -71,6 +71,8 @@ jobs:
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Generate ignored source manifest for CLI contracts
+        run: sh scripts/build-manifest.sh
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
         shell: bash
         run: |

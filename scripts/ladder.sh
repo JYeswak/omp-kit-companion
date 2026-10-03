@@ -34,7 +34,11 @@ step() { # step <label> <cmd...>
   cat "$log"
   if [ "$rc" -eq 0 ]; then echo "GREEN $label producer_rc=$rc"; else echo "RED   $label producer_rc=$rc (private log $log)"; KEEP_WORK=1; exit 1; fi
 }
-step manifest /bin/sh scripts/build-manifest.sh --check
+if [ -e "$HERE/.git" ]; then
+  step manifest /bin/sh scripts/build-manifest.sh
+else
+  step manifest /bin/sh scripts/build-manifest.sh --check
+fi
 step harness-gate "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --gate
 step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest

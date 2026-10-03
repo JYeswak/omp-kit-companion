@@ -75,6 +75,40 @@ import sys
 assert 'archive SHA-256 mismatch' in open(sys.argv[1]).read()
 PY
 [ "$(readlink "$WORK/prefix/bin/omp-kit")" = "../releases/1.2.3/bin/omp-kit" ]
+mkdir -m 700 "$WORK/badmanifest"
+python3 - "$ARCHIVE" "$WORK/badmanifest/$(basename "$ARCHIVE")" "$WORK/assets/release-index.json" "$WORK/badmanifest/index.json" <<'PY'
+import hashlib,json,sys
+content=bytearray(open(sys.argv[1],'rb').read())
+cursor=0
+found=False
+while cursor + 512 <= len(content):
+  header=content[cursor:cursor+512]
+  if header == bytes(512): break
+  name=header[:100].split(b'\0',1)[0].decode()
+  prefix=header[345:500].split(b'\0',1)[0].decode()
+  path=(prefix + '/' if prefix else '') + name
+  size=int(header[124:136].split(b'\0',1)[0].strip(),8)
+  start=cursor+512
+  if path == 'MANIFEST.tsv':
+    assert size > 0
+    content[start] ^= 1
+    found=True
+    break
+  cursor=start+((size+511)//512)*512
+assert found, 'packaged MANIFEST.tsv missing'
+with open(sys.argv[2],'wb') as out: out.write(content)
+index=json.load(open(sys.argv[3])); asset=next(iter(index['assets'].values()))
+asset['sha256']=hashlib.sha256(content).hexdigest()
+with open(sys.argv[4],'w') as out: json.dump(index,out)
+PY
+if HOME="$WORK/home" "$INSTALL" --offline "$WORK/badmanifest/$(basename "$ARCHIVE")" --index "$WORK/badmanifest/index.json" --version 1.2.3 --prefix "$WORK/badmanifest-prefix" > "$WORK/badmanifest.log" 2>&1; then
+  printf 'archive with a rehashed but stale MANIFEST.tsv accepted\n' >&2; exit 1
+fi
+python3 - "$WORK/badmanifest.log" <<'PY'
+import sys
+assert 'internal file SHA-256 mismatch: MANIFEST.tsv' in open(sys.argv[1]).read()
+PY
+[ ! -e "$WORK/badmanifest-prefix/bin/omp-kit" ]
 mkdir -m 700 "$WORK/badlink"
 python3 - "$ARCHIVE" "$WORK/badlink/$(basename "$ARCHIVE")" "$WORK/assets/release-index.json" "$WORK/badlink/index.json" <<'PY'
 import hashlib,json,sys

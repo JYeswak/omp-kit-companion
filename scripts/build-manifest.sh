@@ -1,5 +1,5 @@
 #!/bin/sh
-# build-manifest.sh [--check]
+# build-manifest.sh [--check|--stdout]
 #
 # Writes MANIFEST.tsv from rules/*.md: name, sha256, class, pack.
 #   class  from omp's own parse of each rule (scripts/rule-class.ts, README contract):
@@ -11,8 +11,8 @@
 #   pack   short git SHA of HEAD when a commit exists, else uncommitted-<UTC date>.
 #
 # --check  exit 1 unless MANIFEST.tsv matches rules/ on name, sha256 and class.
-#          The pack column is ignored: a committed manifest can never carry the SHA
-#          of the commit that contains it.
+#          The pack column is ignored because it describes provenance, not rule identity.
+# --stdout write the generated TSV to stdout without touching MANIFEST.tsv (packaging).
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -21,10 +21,13 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MANIFEST="$ROOT/MANIFEST.tsv"
 
 check=0
+stdout=0
+[ "$#" -le 1 ] || { echo "build-manifest: accepts at most one option" >&2; exit 2; }
 case "${1:-}" in
   --check) check=1 ;;
+  --stdout) stdout=1 ;;
   '') ;;
-  -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
   *) echo "build-manifest: unknown argument: $1" >&2; exit 2 ;;
 esac
 
@@ -32,7 +35,6 @@ sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
 OMP_KIT_BUN="$ROOT/scripts/runtime-adapter.sh"
 [ -x "$OMP_KIT_BUN" ] || { echo "build-manifest: runtime adapter missing: $OMP_KIT_BUN" >&2; exit 2; }
-
 pack=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)
 [ -n "$pack" ] || pack="uncommitted-$(date -u +%Y-%m-%d)"
 
@@ -50,7 +52,16 @@ found=0
 for f in "$ROOT"/rules/*.md; do if [ -f "$f" ]; then found=1; fi; done
 [ "$found" = 1 ] || { echo "build-manifest: no rules in $ROOT/rules" >&2; exit 1; }
 # One process for every rule: name TAB class, from the rule object omp itself builds.
-if classes=$("$OMP_KIT_BUN" "$ROOT/scripts/rule-class.ts" "$ROOT"/rules/*.md); then
+classify_rules() {
+  if [ "$stdout" = 1 ]; then
+    command -v bun >/dev/null 2>&1 || { echo "build-manifest --stdout: Bun is required" >&2; return 127; }
+    bun run --no-env-file --config=/dev/null "$ROOT/scripts/rule-class.ts" "$@"
+  else
+    "$OMP_KIT_BUN" "$ROOT/scripts/rule-class.ts" "$@"
+  fi
+}
+
+if classes=$(classify_rules "$ROOT"/rules/*.md); then
   :
 else
   class_rc=$?
@@ -85,6 +96,10 @@ if [ "$check" = 1 ]; then
   exit 1
 fi
 
-cp "$tmp" "$MANIFEST.tmp.$$"
-mv -f "$MANIFEST.tmp.$$" "$MANIFEST"
-echo "build-manifest: wrote $MANIFEST ($(($(wc -l < "$MANIFEST") - 1)) rules, pack $pack)"
+if [ "$stdout" = 1 ]; then
+  cat "$tmp"
+else
+  cp "$tmp" "$MANIFEST.tmp.$$"
+  mv -f "$MANIFEST.tmp.$$" "$MANIFEST"
+  echo "build-manifest: wrote $MANIFEST ($(($(wc -l < "$MANIFEST") - 1)) rules, pack $pack)"
+fi

@@ -63,7 +63,7 @@ Clean cutover: when a command or format changes, migrate every caller, test and 
 
 ## Compiler Checks
 
-Before committing: `bun test tests/cli`, `sh scripts/build-manifest.sh --check`, `shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh`, and `actionlint` for workflow changes. Capture the producer's complete output and exit code before filtering it.
+Before committing: `sh scripts/build-manifest.sh` (materialize the ignored source-test artifact), `bun test tests/cli`, `sh scripts/build-manifest.sh --check`, `shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh`, and `actionlint` for workflow changes. Capture the producer's complete output and exit code before filtering it.
 
 ## Testing
 
@@ -93,7 +93,7 @@ The kit is an installable companion for an existing OMP: a tested rule pack, a p
 - `src/mutations.ts`, `src/apply*.ts`, `src/repair.ts`, `src/audit.ts`: guarded writes with receipts and undo; `src/state-root.ts` guards the private state root.
 - `src/kit-update.ts`, `src/kit-release.ts`, `installer/`, `scripts/package-release.*`: versioned native archives, install and kit-only update.
 - `src/diagnostics.ts` and the `*-readiness.ts` modules: read-only doctor findings.
-- `rules/`, `cases/cases.tsv`, `MANIFEST.tsv`, `tests/live/scenarios.json`: the shipped pack, its fire/near-miss corpus and live scenarios.
+- `rules/`, `cases/cases.tsv`, generated `MANIFEST.tsv`, `tests/live/scenarios.json`: the shipped pack, its fire/near-miss corpus and live scenarios.
 
 ## Landing the Plane
 

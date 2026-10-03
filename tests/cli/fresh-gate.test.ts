@@ -12,7 +12,7 @@ function fixture(): string {
 	for (const name of ["rules", "scripts", "checkers", "cases", "policy", "retired", "extensions", "examples"]) {
 		cpSync(join(root, name), join(dir, name), { recursive: true });
 	}
-	for (const name of ["MANIFEST.tsv", "package.json"]) writeFileSync(join(dir, name), readFileSync(join(root, name)));
+	writeFileSync(join(dir, "package.json"), readFileSync(join(root, "package.json")));
 	return dir;
 }
 
@@ -23,12 +23,27 @@ function run(script: string, args: string[]) {
 test("fresh gate refuses an edited rule with a stale manifest", () => {
 	const dir = fixture();
 	try {
+		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		const rule = join(dir, "rules/bash-glob-silenced.md");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nStale manifest plant.\n");
 		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).not.toBe(0);
 		expect(output).toContain("build-manifest --check: FAIL");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("fresh gate accepts rule-only edits without a committed manifest", () => {
+	const dir = fixture();
+	try {
+		const rule = join(dir, "rules/bash-glob-silenced.md");
+		writeFileSync(rule, readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n");
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
+		const output = result.stdout.toString() + result.stderr.toString();
+		expect(result.exitCode).toBe(0);
+		expect(output).toContain("FRESH-GATE: GREEN");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

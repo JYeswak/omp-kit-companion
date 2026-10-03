@@ -68,11 +68,15 @@ gate_manifest() {
 		for file in rules/*.md; do
 			name=$(basename "$file" .md)
 			class=$(awk -F '\t' -v n="$name" '$1 == n { print $2 }' "$classes")
+			case "$class" in
+				always|tripwire|reminder|canary|router) ;;
+				*) echo "manifest generation: FAIL: no valid class for $name (got '$class')" >&2; return 1 ;;
+			esac
 			printf '%s\t%s\t%s\tarchive\n' "$name" "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$class" >>"$want"
 		done
 		if [ ! -f MANIFEST.tsv ]; then
-			echo 'build-manifest --check: FAIL: MANIFEST.tsv missing' >&2
-			return 1
+			echo "manifest generation: OK ($(($(wc -l < "$want") - 1)) rules; no committed MANIFEST.tsv)"
+			return 0
 		fi
 		have="$WORK/manifest.have"
 		cut -f1-3 MANIFEST.tsv >"$have"

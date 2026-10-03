@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
@@ -14,12 +14,27 @@ const indexPath = join(output, "release-index.json");
 let asset: ReleaseAsset;
 let bytes: Buffer;
 let index: { schema_version: number; version: string; source_tag: string; assets: Record<string, ReleaseAsset> };
+function copyReleaseSource(destination: string): void {
+	mkdirSync(destination);
+	for (const directory of ["src", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "scripts", "tests/live"]) {
+		cpSync(join(repo, directory), join(destination, directory), { recursive: true });
+	}
+	for (const file of ["LICENSE", "package.json", "tsconfig.json"]) {
+		const source = join(repo, file);
+		if (existsSync(source)) cpSync(source, join(destination, file));
+	}
+	writeFileSync(join(destination, "MANIFEST.tsv"), "stale generated manifest sentinel\n");
+	appendFileSync(join(destination, "rules", "kit-close-needs-evidence.md"), "\n<!-- package-time manifest fixture -->\n");
+}
 
 beforeAll(() => {
-	const built = Bun.spawnSync(["sh", join(repo, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
-		cwd: repo, env: { ...process.env, TMPDIR: scratch }, stdout: "pipe", stderr: "pipe",
+	const source = join(output, "source");
+	copyReleaseSource(source);
+	const built = Bun.spawnSync(["sh", join(source, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
+		cwd: source, env: { ...process.env, TMPDIR: scratch }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
+	expect(readFileSync(join(source, "MANIFEST.tsv"), "utf8")).toBe("stale generated manifest sentinel\n");
 	asset = JSON.parse(built.stdout.toString()) as ReleaseAsset;
 	bytes = readFileSync(join(output, asset.filename));
 	expect(createHash("sha256").update(bytes).digest("hex")).toBe(asset.sha256);
@@ -28,7 +43,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(output, { recursive: true, force: true }));
 
-test("native release contains only declared regular files, runs relocated binary, and refuses one corrupted archive byte", async () => {
+test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
 	expect(plan.exitCode).toBe(0);
 	const staged = await stageKitRelease({ archive: bytes, plan, stagingParent: output, probeBinaryInfo: async (binary) => {
@@ -37,6 +52,13 @@ test("native release contains only declared regular files, runs relocated binary
 		const info = JSON.parse(child.stdout.toString()).data;
 		return { version: info.version, source_tag: info.release.source_tag, platform: info.platform };
 	} });
+	const shippedRule = readFileSync(join(staged.root, "rules", "kit-close-needs-evidence.md"));
+	const generatedRuleManifest = readFileSync(join(staged.root, "MANIFEST.tsv"), "utf8");
+	const ruleRow = generatedRuleManifest.split("\n").find(row => row.startsWith("kit-close-needs-evidence\t"));
+	expect(generatedRuleManifest).not.toContain("stale generated manifest sentinel");
+	expect(ruleRow?.split("\t")[1]).toBe(createHash("sha256").update(shippedRule).digest("hex"));
+	expect(staged.manifest.files.find(file => file.path === "MANIFEST.tsv")?.sha256)
+		.toBe(createHash("sha256").update(generatedRuleManifest).digest("hex"));
 	expect(staged.executable).toBe(join(staged.root, "bin", "omp-kit"));
 	expect(staged.manifest.files.map(file => file.path)).toEqual([...staged.manifest.files.map(file => file.path)].sort());
 	expect(lstatSync(join(staged.root, "scripts", "runtime-adapter.sh")).mode & 0o111).toBeGreaterThan(0);
