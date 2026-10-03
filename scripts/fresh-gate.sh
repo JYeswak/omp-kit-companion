@@ -208,6 +208,9 @@ gate_focused() {
 		echo "focused manifest generation: OK"
 	fi
 	if [ -n "$focus_tests" ]; then
+		# CI tests a source checkout; contributor-only paths (the Bun fallback in
+		# runtime-adapter.sh) require .git, so the focused suites get one too.
+		[ -e "$ARCHIVE_DIR/.git" ] || git -C "$ARCHIVE_DIR" init -q
 		# Each suite has an independent budget; a timeout is a visible CI deferral, never a silent skip.
 		# Intentional word splitting turns newline-separated test paths into argv entries.
 		# shellcheck disable=SC2086
