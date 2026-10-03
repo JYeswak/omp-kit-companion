@@ -113,19 +113,27 @@ import subprocess
 import sys
 
 archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
+env = os.environ.copy()
+env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
 proc = subprocess.Popen(
-    ["bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    ["bun", "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
     cwd=archive,
-    start_new_session=True,
+    env=env,
 )
 try:
     rc = proc.wait(timeout=budget)
 except subprocess.TimeoutExpired:
-    os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.wait()
     print("deferred to CI: " + suite)
     raise SystemExit(124)
