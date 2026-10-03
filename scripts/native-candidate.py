@@ -50,6 +50,17 @@ def case_counts(release_root):
     return cases, quiet_cases
 
 
+def rule_count(release_root):
+    manifest = load(release_root / "release-manifest.json")
+    rules = [row["path"] for row in manifest.get("files", [])
+             if isinstance(row, dict) and isinstance(row.get("path"), str)
+             and row["path"].startswith("rules/") and row["path"].endswith(".md")
+             and row["path"].count("/") == 1]
+    if not rules:
+        raise ValueError("native release manifest declares no rules")
+    return len(rules)
+
+
 def live_scenario_ids(release_root):
     scenarios_path = release_root / "tests" / "live" / "scenarios.json"
     scenarios = load(scenarios_path)
@@ -258,6 +269,7 @@ def native(args):
             if not binary.is_file() or binary.resolve() != (release_root / "bin" / "omp-kit").resolve():
                 raise ValueError("native installer did not activate the selected release binary")
             expected_cases, expected_quiet_cases = case_counts(release_root)
+            expected_rules = rule_count(release_root)
             expected_live_ids = live_scenario_ids(release_root)
             expected_live_scenarios = len(expected_live_ids)
             agent = home / ".omp" / "agent"
@@ -329,7 +341,7 @@ def native(args):
                     if fast_report["status"] != "PASS":
                         raise ValueError(f"native {name} fast matcher did not pass")
                     for gate, observed_count, expected_count in (
-                            ("G1_registration", "observed_rules", 22),
+                            ("G1_registration", "observed_rules", expected_rules),
                             ("G2_payload", "observed_cases", expected_cases),
                             ("G3_quiet_prefix", "quiet_prefix_fires", 0)):
                         proof = fast[gate]

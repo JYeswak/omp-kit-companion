@@ -1966,7 +1966,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
-		if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
+	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
+	if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
