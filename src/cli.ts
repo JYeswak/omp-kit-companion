@@ -23,6 +23,7 @@ import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./s
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
+import { runKitUpdateJob } from "./kit-update-job.ts";
 import type { PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
@@ -39,9 +40,10 @@ import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integra
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
+import { matchesBounded } from "./regex-guards.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -947,7 +949,7 @@ function extensionCommand(request: ParsedCommand): CliResult {
 	let profiles: "all" | string[] = "all";
 	if (typeof selected === "string" && selected !== "all") {
 		profiles = selected.split(",");
-		if (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+		if (profiles.some(name => !matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name.endsWith(".") || name === "default") ||
 			new Set(profiles).size !== profiles.length)
 			return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
 				"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
@@ -1000,7 +1002,7 @@ function policyCommand(request: ParsedCommand): CliResult {
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset.");
 	const selected = request.flags.get("--profiles");
 	const profiles: "all" | string[] | undefined = typeof selected === "string" ? selected === "all" ? "all" : selected.split(",") : undefined;
-	if (profiles !== undefined && profiles !== "all" && (profiles.some(name => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith(".") || name === "default") ||
+	if (profiles !== undefined && profiles !== "all" && (profiles.some(name => !matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name.endsWith(".") || name === "default") ||
 		new Set(profiles).size !== profiles.length))
 		return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles",
 			"Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
@@ -1734,22 +1736,40 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; the job did not run." }], verification: "UNVERIFIED" };
 		}
+		if (job.name === "kit-update") {
+			const enabled = process.env.OMP_KIT_UPDATE_ENABLED === "1";
+			const indexPath = process.env.OMP_KIT_UPDATE_INDEX, archivePath = process.env.OMP_KIT_UPDATE_ARCHIVE;
+			const version = process.env.OMP_KIT_UPDATE_VERSION, sourceTag = process.env.OMP_KIT_UPDATE_SOURCE_TAG;
+			if (!indexPath || !archivePath || !version || !sourceTag) return refusal("KIT_UPDATE_JOB_CONFIG", "kit-update needs OMP_KIT_UPDATE_INDEX, ARCHIVE, VERSION and SOURCE_TAG", "Set the certified local release inputs or leave the job disabled.");
+			const identity = kitIdentity();
+			if (!identity.release.root) return refusal("KIT_UPDATE_JOB_UNAVAILABLE", "An installed kit release is required for kit-update", "Install a certified kit release before enabling the job.");
+			const platform = { os: process.platform === "darwin" ? "darwin" as const : "linux" as const, arch: process.arch === "arm64" ? "arm64" as const : "x64" as const, libc: process.platform === "darwin" ? "none" as const : "gnu" as const };
+			const result = await runKitUpdateJob({ enabled, prefix: dirname(dirname(identity.release.root)), stateRoot: receiptStateRoot() ?? "", home: process.env.HOME ?? "", project: process.cwd(), platform, indexPath, archivePath, version, sourceTag, pollRelease: async () => ({ indexPath, archivePath, version, sourceTag }) }, { notify: message => notifyJobFailure({ title: "omp-kit update", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
+			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
+		}
 		if (job.name === "scratch-reaper") {
-			// The scheduled job reports; apply stays an explicit operator verb (needs coordinator go on real machines).
 			const started = new Date().toISOString();
-			const plan = planScratch(home, { liveness: defaultLiveness(), run: scratchRunner });
-			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null };
+			const result = applyScratch(home, { liveness: defaultLiveness(), run: scratchRunner, home });
+			const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: failed > 0 ? 1 : 0, omp_version: null };
 			try {
 				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
 				writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
 			} catch {
 				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
-						remediation: "Repair the state root, then rerun; nothing was reaped." }], verification: "UNVERIFIED" };
+						remediation: "Repair the state root; the scratch apply may already have run." }], verification: "UNVERIFIED" };
 			}
-			return { code: 0, data: { overall: "OK", job: job.name, receipt,
-				stats: { roots: plan.roots.length, sessions: plan.sessions.length, orphans: plan.orphans.length,
-					reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes } }, verification: "UNVERIFIED" };
+			return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: job.name, receipt,
+				stats: { roots: result.roots.length, sessions: result.applied.length, orphans: result.orphans.length,
+					reaped: result.applied.filter(v => v.action === "REAP").length,
+					quarantined: result.applied.filter(v => v.action === "QUARANTINE").length,
+					deleted: result.expired.length, failures: failed,
+					reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
+				sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired },
+			errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)`,
+				remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
+			verification: "UNVERIFIED" };
 		}
 		const started = new Date().toISOString();
 		const child = Bun.spawnSync([launcher, "test", "--record", "--json"], { stdout: "pipe", stderr: "pipe", env: process.env });
@@ -1791,6 +1811,15 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
 			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
 		} };
+	if (sub === "release") {
+		if (!request.argument) return refusal("SCRATCH_RELEASE_PATH_REQUIRED", "scratch release needs a directory path",
+			"Run omp-kit scratch release ABSOLUTE_DIR from the owning session or one of its child processes.");
+		const released = releaseScratch(request.argument, home, deps);
+		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED", `Scratch release refused: ${released.reason}`,
+			"Use the exact owned task directory from its owner process; no directory was quarantined.");
+		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
+			dir: released.dir, changed: released.changed }, verification: "UNVERIFIED" };
+	}
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);
 		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
@@ -1812,7 +1841,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
 
-for (const subcommand of ["plan", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
