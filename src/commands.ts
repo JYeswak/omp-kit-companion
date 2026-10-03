@@ -108,6 +108,9 @@ const lspProbeData = { type: "object", required: ["status", "scope", "requested_
 	runtime_home_omp_inventory: { type: "array", items: { type: "string" } }, runtime_state_outputs: { type: "array", items: { type: "string" } },
 	mux_stop_rc: { type: ["number", "null"] }, temporary_workspace_removed: { type: "boolean" },
 } };
+const workData: DataSchema = { type: "object", required: ["scope", "overall", "roots", "repos", "concurrency", "per_repo_timeout_ms", "elapsed_ms", "timed_out_repos", "text"], properties: {
+	scope: { enum: ["work"] }, overall: { enum: ["REPORT"] }, roots: { type: "array" }, repos: { type: "array" }, concurrency: { type: "number" }, per_repo_timeout_ms: { type: "number" }, elapsed_ms: { type: "number" }, timed_out_repos: { type: "number" }, text: { type: "string" },
+} };
 const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
@@ -222,8 +225,11 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|memory|mcp|context|services|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|memory|mcp|context|services|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
+		{ name: "--root", value: "PATHS", description: "Work scope root list separated by the platform path delimiter; defaults to OMP_KIT_WORK_ROOTS or ~/Developer" },
+		{ name: "--timeout-ms", value: "N", description: "Work scope per-repository git command timeout in milliseconds" },
+		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
 		{ name: "--services", value: "PATH", description: "Services only: validate a declared required-jobs JSON file against launchd inventory" },

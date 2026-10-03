@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- doctor --scope work inventories configured developer repositories read-only: dirty files, upstream/ahead state, stashes, detached worktrees, last-commit age, active worktrees, bounded per-repo timeouts, risk sorting, JSON envelopes and human tables. It never fetches or writes.
 
 - The metamorphic ratchet baseline is deleted: `test --metamorphic` and the ladder now fail on any break, with no checked-in allowance (L1).
 
@@ -29,7 +30,6 @@
 - The cold-start LSP probe removes an unproven reference retry and cleans up while retaining failure-only diagnostics. (PR #49)
 - The metamorphic corpus now covers seven env-prefix anchors; the corresponding rule fixes and baseline updates ship together. (PR #50)
 - Quoting and line-continuation false-fire fixes bring the metamorphic ratchet baseline from 161 to 0. (PR #53)
-
 ## 0.2.1 — 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
