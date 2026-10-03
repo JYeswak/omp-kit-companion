@@ -105,7 +105,7 @@ $1"
 }
 run_bun_suite() {
 	suite=$1
-	budget="${FRESH_GATE_SUITE_BUDGET_SECS:-60}"
+	budget="${FRESH_GATE_SUITE_BUDGET_SECS:-25}"
 	python3 - "$ARCHIVE_DIR" "$suite" "$budget" <<'PY'
 import os
 import signal
