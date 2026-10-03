@@ -27,6 +27,7 @@ jobs:
           test "$GITHUB_REF" = "refs/tags/v$VERSION"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse "refs/tags/v$VERSION^{commit}")" = "$GITHUB_SHA"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Require a changelog fragment for every merged PR
         run: |
           previous_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^")"
