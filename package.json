@@ -10,7 +10,8 @@
     "extensions": [
       "extensions/kit-guard-optin.ts",
       "extensions/kit-save-guard.ts",
-      "extensions/fleet-guard.ts"
+      "extensions/fleet-guard.ts",
+      "extensions/kit-callback.ts"
     ]
   }
 }
