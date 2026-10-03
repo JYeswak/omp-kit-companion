@@ -32,6 +32,8 @@ kit-gate-must-name-the-plant	fire	tool	bash	-	./starter-kit/scripts/check-claim-
 kit-gate-must-name-the-plant	quiet	tool	bash	-	cat starter-kit/scripts/init.sh	reads the script, does not run it
 kit-gate-must-name-the-plant	quiet	tool	bash	-	sh checkers/check-claim-discipline.sh --selftest	the fixed checker run from the kit checkout
 kit-gate-must-name-the-plant	quiet	tool	bash	-	grep -n IFS starter-kit/scripts/check-claim-discipline.sh	greps the script
+kit-gate-must-name-the-plant	fire	tool	bash	-	cd /tmp\nsh starter-kit/scripts/check-claim-discipline.sh claims.tsv	newline command boundary
+kit-gate-must-name-the-plant	fire	tool	bash	-	\tsh starter-kit/scripts/check-claim-discipline.sh claims.tsv	escaped tab command prefix
 kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","closed_at":"2026-09-22T00:00:00Z"}	baseline: closed, no close_reason
 kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","close_reason":"done"}	baseline: short close_reason
 kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"kit-a0","status":"open"}\n{"id":"kit-a1","status": "closed"}\n	write, second line closed without reason
