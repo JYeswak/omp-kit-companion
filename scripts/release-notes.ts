@@ -18,7 +18,11 @@ type ReleaseHistory = {
 	fragments: Fragment[];
 	byPr: Map<string, Fragment>;
 	unreleasedByPr: Map<string, UnreleasedLine>;
+	directCommits: DirectCommitCoverage[];
 };
+type DirectCommitCoverage =
+	| { hash: string; bead: string; fragment: Fragment }
+	| { hash: string; noChangelogReason: string };
 type Git = (args: string[]) => string;
 
 const fail = (reason: string): never => { throw new Error(reason); };
@@ -52,7 +56,7 @@ function run(): void {
 	if (git(["merge-base", base, head]) !== base) fail(`base tag ${options.baseTag} is not an ancestor of ${options.head}`);
 	const history = collectHistory(git, gitRaw, base, head, options.baseTag, options.head);
 	if (options.mode === "check") {
-		console.log(`OK: ${history.mergedPrs.length} merged PRs have release-note coverage in ${options.baseTag}..${options.head}`);
+		console.log(`OK: ${history.mergedPrs.length} merged PRs and ${history.directCommits.length} direct commits have release-note coverage in ${options.baseTag}..${options.head}`);
 		for (const pr of history.mergedPrs) {
 			const fragment = history.byPr.get(pr);
 			if (fragment) {
@@ -60,6 +64,13 @@ function run(): void {
 			} else {
 				const line = history.unreleasedByPr.get(pr)!;
 				console.log(`PR #${pr} covered by CHANGELOG.md:${line.lineNumber} (Unreleased): ${line.text.trim()}`);
+			}
+		}
+		for (const commit of history.directCommits) {
+			if ("noChangelogReason" in commit) {
+				console.log(`Direct commit ${commit.hash} covered by [no-changelog]: ${commit.noChangelogReason}`);
+			} else {
+				console.log(`Direct commit ${commit.hash} (Bead: ${commit.bead}) covered by ${commit.fragment.path}`);
 			}
 		}
 		return;
@@ -189,7 +200,53 @@ function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseT
 		if (fragment.pr && !seenPrs.has(fragment.pr))
 			fail(`fragment ${fragment.path} references PR #${fragment.pr}, absent from ${baseTag}..${headRef}`);
 	}
-	return { mergedPrs, fragments, byPr, unreleasedByPr };
+	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, fragments);
+	return { mergedPrs, fragments, byPr, unreleasedByPr, directCommits };
+}
+function collectDirectCommitCoverage(
+	git: Git,
+	gitRaw: Git,
+	base: string,
+	head: string,
+	fragments: Fragment[],
+): DirectCommitCoverage[] {
+	const fields = gitRaw([
+		"log", "--first-parent", "--reverse", "--format=%H%x00%P%x00%B%x00", `${base}..${head}`,
+	]).split("\0");
+	const coverages: DirectCommitCoverage[] = [];
+	for (let index = 0; index + 2 < fields.length; index += 3) {
+		const hash = fields[index]!.trim();
+		const parents = fields[index + 1]!.trim().split(/\s+/).filter(Boolean);
+		const body = fields[index + 2]!;
+		if (!hash || parents.length !== 1) continue;
+		const changedPaths = git([
+			"diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", hash,
+		]).split(/\r?\n/).filter(Boolean);
+		if (!changedPaths.some(path => /^(?:src|rules|scripts|extensions|installer)\//.test(path))) continue;
+
+		const shortHash = hash.slice(0, 7);
+		const waivers = [...body.matchAll(/^[ \t]*\[no-changelog\][ \t]*(.*)$/gm)];
+		if (waivers.length > 1) fail(`direct commit ${shortHash} has multiple [no-changelog] reasons`);
+		if (waivers.length === 1) {
+			const reason = waivers[0]![1]!.trim();
+			if (!reason) fail(`direct commit ${shortHash} has an empty [no-changelog] reason`);
+			coverages.push({ hash: shortHash, noChangelogReason: reason });
+			continue;
+		}
+
+		const beads = [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
+		if (beads.length !== 1)
+			fail(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer or a [no-changelog] reason`);
+		const bead = beads[0]!;
+		const slug = bead.split("-").at(-1)!;
+		if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(slug))
+			fail(`direct commit ${shortHash} has an invalid Bead: trailer: ${bead}`);
+		const path = `changelog.d/${slug}.md`;
+		const fragment = fragments.find(candidate => candidate.path === path);
+		if (!fragment) fail(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${path}`);
+		coverages.push({ hash: shortHash, bead, fragment });
+	}
+	return coverages;
 }
 
 function readUnreleasedSection(changelog: string): UnreleasedSection {

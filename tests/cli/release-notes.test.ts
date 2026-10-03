@@ -7,10 +7,11 @@ const scratch = join(repo, "var", "agent-tmp");
 const workspace = join(scratch, `release-notes.${process.pid}`);
 const fixture = join(workspace, "repo");
 const bead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.75";
-const pointer = "<!-- Add one fragment per merged PR under changelog.d/. -->";
+const pointer = "<!-- Add one fragment per release-note change under changelog.d/. -->";
 let indexNumber = 0;
 let assembledChangelog = "";
 let headChangelog = "";
+let releaseHead = "";
 
 afterAll(() => {
 	if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true });
@@ -99,7 +100,7 @@ ${pointer}
 	const releaseTree = treeWithFiles(originMainMerge, {
 		"changelog.d/rz5.75.md": "- Release notes use per-bead fragments, a merge-safe assembler, and a release check for every merged PR.\n",
 	});
-	const releaseHead = commitTree(releaseTree, [originMainMerge], "L3 release fragment [test]");
+	releaseHead = commitTree(releaseTree, [originMainMerge], "L3 release fragment [test]");
 	git("update-ref", "refs/heads/main", releaseHead);
 });
 
@@ -110,7 +111,7 @@ test("release check reports merged PRs and their fragment or legacy-line coverag
 		.split("\n").map(subject => subject.match(/^Merge pull request #(\d+)\b/)?.[1])
 		.filter((number): number is string => number !== undefined);
 	expect(mergedPullRequests.sort()).toEqual(["25", "51", "52", "55", "56", "57"]);
-	expect(check.output).toContain("OK: 6 merged PRs have release-note coverage");
+	expect(check.output).toContain("OK: 6 merged PRs and 0 direct commits have release-note coverage");
 	for (const pr of mergedPullRequests) expect(check.output).toContain(`PR #${pr} covered by`);
 	expect(check.output).toContain("PR #25 covered by CHANGELOG.md");
 	expect(check.output).toContain("PR #55 covered by CHANGELOG.md");
@@ -194,6 +195,49 @@ test("release check rejects a merged PR without a fragment or tagged Unreleased 
 	expect(missing.output).toContain("merged PR #58 has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased");
 });
 
+test("release check requires direct main-commit fragments or a reasoned waiver", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+
+	const directBead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.99";
+	const missingTree = treeWithFiles(releaseHead, { "src/direct-feature.ts": "direct main change\n" });
+	const missingCommit = commitTree(missingTree, [releaseHead], "Direct source change [test]", [
+		`Bead: ${directBead}`,
+		"Verified: fixture direct source commit lacks a release fragment",
+	]);
+	git("update-ref", "refs/heads/main", missingCommit);
+	const missing = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(missing.exitCode).toBe(1);
+	expect(missing.output).toContain(
+		`direct commit ${missingCommit.slice(0, 7)} (Bead: ${directBead}) has no changelog fragment: changelog.d/rz5.99.md`,
+	);
+
+	const fragmentTree = treeWithFiles(missingCommit, {
+		"changelog.d/rz5.99.md": "- A direct source change is documented.\n",
+	});
+	const fragmentCommit = commitTree(fragmentTree, [missingCommit], "Add direct source fragment [test]");
+	git("update-ref", "refs/heads/main", fragmentCommit);
+	const waiverTree = treeWithFiles(fragmentCommit, { "scripts/test-setup.ts": "fixture-only setup\n" });
+	const waiverReason = "Test-only fixture setup; no shipped behavior changes.";
+	const waiverCommit = commitTree(waiverTree, [fragmentCommit], "Test-only scripts change [test]", [
+		`[no-changelog] ${waiverReason}`,
+	]);
+	git("update-ref", "refs/heads/main", waiverCommit);
+	const covered = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(covered.exitCode, covered.output).toBe(0);
+	expect(covered.output).toContain(
+		`Direct commit ${missingCommit.slice(0, 7)} (Bead: ${directBead}) covered by changelog.d/rz5.99.md`,
+	);
+	expect(covered.output).toContain(`Direct commit ${waiverCommit.slice(0, 7)} covered by [no-changelog]: ${waiverReason}`);
+	expect(covered.output).toContain("OK: 6 merged PRs and 2 direct commits have release-note coverage");
+	const emptyReasonTree = treeWithFiles(waiverCommit, { "rules/no-reason.md": "fixture rule change\n" });
+	const emptyReasonCommit = commitTree(emptyReasonTree, [waiverCommit], "Reasonless waiver [test]", ["[no-changelog]"]);
+	git("update-ref", "refs/heads/main", emptyReasonCommit);
+	const emptyReason = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(emptyReason.exitCode).toBe(1);
+	expect(emptyReason.output).toContain(`direct commit ${emptyReasonCommit.slice(0, 7)} has an empty [no-changelog] reason`);
+});
+
 
 function commitWithFiles(parent: string, label: string, files: Record<string, string>): string {
 	const tree = treeWithFiles(parent, files);
@@ -212,10 +256,16 @@ function treeWithFiles(parent: string, files: Record<string, string>): string {
 	return gitWithEnv({ GIT_INDEX_FILE: index }, "write-tree");
 }
 
-function commitTree(tree: string, parents: string[], subject: string): string {
+function commitTree(
+	tree: string,
+	parents: string[],
+	subject: string,
+	body = [`Bead: ${bead}`, "Verified: fixture Git graph -> committed tree contains declared change"],
+): string {
 	const args = ["commit-tree", tree];
 	for (const parent of parents) args.push("-p", parent);
-	args.push("-m", subject, "-m", `Bead: ${bead}`, "-m", "Verified: fixture Git graph -> committed tree contains declared change");
+	args.push("-m", subject);
+	for (const paragraph of body) args.push("-m", paragraph);
 	return git(...args);
 }
 

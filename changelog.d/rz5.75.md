@@ -1,1 +1,2 @@
 - Release assembly preserves merge-safe per-bead fragments, prints previews by default, requires `--write` for in-place updates, and reports each merged PR's fragment or tagged Unreleased-line coverage; uncovered PRs fail the check.
+- The release check now covers direct main commits by their `Bead:` trailer and requires a reason for `[no-changelog]` waivers.
