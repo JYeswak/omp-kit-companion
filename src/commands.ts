@@ -246,8 +246,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, metamorphic relation report with an optional known-break ratchet, mutation adequacy, or repeat flake verdicts",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE [--baseline ABS_JSON]]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -263,8 +263,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
 		{ name: "--repeat", value: "N", description: "Run live scenarios N times (1-1000) and judge the failure rate with exact binomial bounds plus Fisher against --baseline" },
 		{ name: "--scenario", value: "ID", description: "Repeat only: run just this live scenario id from tests/live/scenarios.json" },
-		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break, or only on NEW breaks with --baseline" },
-		{ name: "--baseline", value: "ABS_JSON", description: "Repeat only: absolute repeat receipt for Fisher comparison; metamorphic only: checked-in JSON baseline of known break IDs, failing only on NEW breaks" },
+		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break" },
+		{ name: "--baseline", value: "ABS_JSON", description: "Repeat only: absolute repeat receipt for Fisher comparison" },
 	], example: "omp-kit test --rules /absolute/rules --cases /absolute/cases.tsv --live-fixture /absolute/live.json --json", runnable: false, dataSchema: testData },
 	{ name: "review", description: "Compare authored rules or reduce a public-synthetic native false fire", usage: "review rules|reduce", flags: [], subcommands: [
 		{ name: "rules", description: "Observe both rule versions on the frozen union of authored witnesses",

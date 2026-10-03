@@ -40,10 +40,8 @@ step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8
-# Metamorphic ratchet: no NEW relation break beyond tests/cli/metamorphic-baseline.json.
-# The baseline lists known breaks with per-class fix reasons; fixed breaks are removed by
-# hand-editing the baseline (no auto-update: the count can only fall by review).
-step metamorphic-ratchet "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --metamorphic-json --baseline "$HERE/tests/cli/metamorphic-baseline.json"
+# Metamorphic strict invariant: every relation break fails the ladder.
+step metamorphic-ratchet "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --metamorphic-json
 step readiness-selftest /bin/sh checkers/check-readiness.sh --selftest
 step e2e-live /bin/sh "$HERE/scripts/e2e-live.sh"
 step e2e-plant /bin/sh "$HERE/scripts/e2e-live.sh" --plant

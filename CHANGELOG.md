@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The metamorphic ratchet baseline is deleted: `test --metamorphic` and the ladder now fail on any break, with no checked-in allowance (L1).
+
 ## 0.2.2 — 2026-10-02
 
 - `doctor --scope services` inventories launchd jobs and validates declared required jobs without loading or writing services. (PR #24)
