@@ -1,23 +1,19 @@
 #!/usr/bin/env bun
-import { readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
-import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
-import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
-import { diagnose, health, inspectDicklesworthstone, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
-import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
+import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
+import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
+import { diagnose, health, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
-import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./services.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
@@ -27,19 +23,13 @@ import { inspectProjectTrust } from "./project-trust.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
-import { ompFingerprint, recordTestReceipt, type OmpFingerprint } from "./omp-watch.ts";
+import { ompFingerprint, recordTestReceipt, renderOmpWatch, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
-import { parseRepeatReceipt, repeatVerdict, type RepeatReceipt } from "./repeat-stats.ts";
-import { runMutants, MutantsInputError } from "./mutants.ts";
-import { runMetamorphicReport } from "./metamorphic.ts";
-import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -312,8 +302,6 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	rules: ["installed_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
 	settings: ["policy"],
-	extensions: ["extensions", "extension_imports"],
-	dicklesworthstone: ["dicklesworthstone"],
 };
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
@@ -323,14 +311,30 @@ const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
 
 interface NotJudgedComponent { component: string; status: DiagnosticStatus; reason: string }
 
-async function workDoctor(request: ParsedCommand): Promise<CliResult> {
-	const rootFlag = request.flags.get("--root");
-	const timeoutFlag = request.flags.get("--timeout-ms");
-	const jobsFlag = request.flags.get("--jobs");
-	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;
-	const concurrency = typeof jobsFlag === "string" && Number.isFinite(Number(jobsFlag)) ? Number(jobsFlag) : undefined;
-	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }) });
-	return { code: 0, data: report, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
+function readJsonFile(path: string, label: string): unknown {
+	try { return JSON.parse(readFileSync(path, "utf8")); } catch (error) { throw new Error(label + " is not valid JSON: " + (error instanceof Error ? error.message : String(error))); }
+}
+
+async function ruleCalibrationDoctor(request: ParsedCommand): Promise<CliResult> {
+	const corpusRaw = request.flags.get("--corpus-report") ?? process.env.OMP_KIT_CORPUS_REPORT;
+	const labelsRaw = request.flags.get("--labels") ?? process.env.OMP_KIT_FALSE_FIRE_LABELS;
+	if (typeof corpusRaw !== "string" || typeof labelsRaw !== "string" || !isAbsolute(corpusRaw) || !isAbsolute(labelsRaw)) {
+		return refusal("CALIBRATION_INPUT_REQUIRED", "doctor --scope rules calibration needs absolute --corpus-report and --labels paths", "Provide an F2 corpus JSON report and a deterministic false-fire label JSON file; no sessions were read.");
+	}
+	try {
+		const corpusEnvelope = readJsonFile(corpusRaw, "corpus report") as Record<string, unknown>;
+		const corpus = (corpusEnvelope.data && typeof corpusEnvelope.data === "object" ? (corpusEnvelope.data as Record<string, unknown>).corpus : corpusEnvelope.corpus) ?? corpusEnvelope;
+		const labelEnvelope = readJsonFile(labelsRaw, "false-fire labels");
+		const labels = Array.isArray(labelEnvelope) ? labelEnvelope : (labelEnvelope && typeof labelEnvelope === "object" && Array.isArray((labelEnvelope as Record<string, unknown>).labels) ? (labelEnvelope as Record<string, unknown>).labels : []);
+		const seedRaw = request.flags.get("--seed");
+		const sampleRaw = request.flags.get("--sample-size");
+		const thresholdRaw = request.flags.get("--noisy-lower-bound");
+		const input: CalibrationInput = { corpus: corpus as CalibrationInput["corpus"], labels: labels as FireLabel[], seed: seedRaw === undefined ? 1 : Number(seedRaw), sample_size: sampleRaw === undefined ? 64 : Number(sampleRaw), noisy_lower_bound: thresholdRaw === undefined ? 0.05 : Number(thresholdRaw) };
+		const calibration = calibrateCorpus(input);
+		return { code: 0, data: { overall: "OK", scope: "rules", status: "OK", calibration }, verification: "PERFORMED" };
+	} catch (error) {
+		return refusal("CALIBRATION_INPUT_INVALID", error instanceof Error ? error.message : String(error), "Fix the report or label JSON; no writes or session reads were performed.");
+	}
 }
 
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
@@ -379,9 +383,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	let findings = allFindings;
 	if (request.command.name === "doctor") {
 		const scope = request.flags.get("--scope");
-		if (scope === "dicklesworthstone") {
-			findings = [await inspectDicklesworthstone()];
-		} else if (typeof scope === "string") {
+		if (typeof scope === "string") {
 			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
 			findings = scoped.length ? scoped : [{
@@ -677,46 +679,6 @@ async function contextInventory(request: ParsedCommand): Promise<CliResult> {
 		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
 }
 
-async function servicesInventory(request: ParsedCommand): Promise<CliResult> {
-	const kit = kitIdentity();
-	const home = process.env.HOME;
-	if (!kit.release.root || !home || !isAbsolute(home)) {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
-			remediation: "Run an installed omp-kit executable with an absolute HOME; no service was inspected.",
-		}], verification: "UNVERIFIED" };
-	}
-	const services = request.flags.get("--services");
-	if (typeof services === "string" && !isAbsolute(services)) {
-		return refusal("INVALID_SERVICES", "Declared services file requires an absolute path",
-			"Pass an absolute schema_version 1 declared-jobs JSON file; no service was changed.");
-	}
-	const omp = ompIdentity();
-	const dirsOverride = process.env.OMP_KIT_SERVICES_DIRS;
-	let report;
-	try {
-		report = inventoryServices(
-			{ home, ...(typeof services === "string" ? { servicesPath: services } : {}) },
-			defaultInventoryDeps(home, process.env.PATH ?? "/usr/bin:/bin",
-				typeof dirsOverride === "string" && dirsOverride ? dirsOverride.split(":") : undefined));
-	} catch (error) {
-		if (error instanceof ServicesInputError) {
-			return refusal(error.code, error.message, "Correct the declared services file; no service was changed.");
-		}
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "SERVICES_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
-			remediation: "Check launchd availability; no service was changed.",
-		}], verification: "UNVERIFIED" };
-	}
-	const finding: Finding = { component: "services", status: report.status, reason: report.reason,
-		recommended_action: report.status === "OK" ? "No action required."
-			: "Inspect flagged jobs with launchctl; this command never loads, unloads, or writes.",
-		evidence: { ...report } };
-	return { code: 0, data: { overall: report.status, kit, omp, findings: [finding],
-		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
-		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
-}
-
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--yes"))
 		return refusal("CONSENT_REQUIRED", "Private memory audit needs separate explicit consent; no store was inspected",
@@ -757,7 +719,6 @@ function receiptStateRoot(): string | null {
 const STATE_ROOT_COMMANDS: Record<string, true> = {
 	audit: true, why: true, undo: true, repair: true, update: true,
 	"apply rules": true, "apply policy": true, "apply extensions": true,
-	"service install": true, "service uninstall": true, "service run": true,
 };
 
 function stateRootRefusal(issue: StateRootIssue): CliResult {
@@ -858,53 +819,6 @@ function rulesCommand(request: ParsedCommand): CliResult {
 
 registerCommandHandler("apply rules", rulesCommand);
 
-function migrateCommand(request: ParsedCommand): CliResult {
-	const root = kitIdentity().release.root, home = process.env.HOME;
-	if (!root || !home || !isAbsolute(home))
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
-			remediation: "Run the compiled kit release with an absolute HOME; no rule file was changed.",
-		}], verification: "UNVERIFIED" };
-	const xdgState = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
-	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
-		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
-	try {
-		const plan = planMigration({ root, home, stateRoot: join(xdgState, "omp-kit") });
-		const data = { overall: "UNVERIFIED", action: "PLAN", rows: plan.rows, pluginRules: plan.pluginRules,
-			pluginAbsent: plan.pluginAbsent, removable: plan.removable, keptCount: plan.kept, receipt_id: null as string | null };
-		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
-		if (plan.pluginAbsent) return { code: 2, data, errors: [{
-			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
-			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
-		}], verification: "UNVERIFIED" };
-		planMigrationMutation(plan, { root, home, stateRoot: join(xdgState, "omp-kit") });
-		const result = applyMigration(plan, { root, home, stateRoot: join(xdgState, "omp-kit") }, { confirmed: true });
-		return { code: 0, data: { ...data, action: "APPLIED", receipt_id: result.receiptId, kept: result.kept,
-			backup_dir: result.backupDir, removed: result.removed, verified: result.verified }, verification: "UNVERIFIED" };
-	} catch (error) {
-		const code = error instanceof Error ? error.message : "";
-		if (code === "OMP_UNAVAILABLE") return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "OMP_UNAVAILABLE", message: "OMP is not resolvable, so plugin sources cannot be read",
-			remediation: "Install OMP and re-run; no rule file was changed.",
-		}], verification: "UNVERIFIED" };
-		if (code === "PLUGIN_ABSENT") return { code: 2, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "PLUGIN_ABSENT", message: "No installed plugin serves kit rules; removing legacy copies would orphan them",
-			remediation: "Install the kit plugin first, then re-run migrate --apply --yes; nothing was changed.",
-		}], verification: "UNVERIFIED" };
-		if (code === "MIGRATE_VERIFY_FAILED") return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "MIGRATE_VERIFY_FAILED", message: "Post-apply source check failed; backup copies were kept",
-			remediation: "Inspect the backup dir and ttsr list output; restore from backup or undo the receipt.",
-		}], verification: "UNVERIFIED" };
-		const safe = ["SOURCE_INVALID", "STATE_UNSAFE", "UNSAFE_PATH", "FRESH_PLAN", "INVALID_PLAN",
-			"PLUGIN_LIST_FAILED", "RULES_FAILED", "INSUFFICIENT_SPACE", "LOCK_BUSY", "PENDING_RECOVERY", "MUTATION_FAILED"];
-		return refusal(safe.includes(code) ? code : "MIGRATE_FAILED",
-			"Rule migration refused without claiming a completed change",
-			"Inspect the plugin install and exact rule bytes, then replan.");
-	}
-}
-
-registerCommandHandler("migrate", migrateCommand);
-
 function extensionCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
 	if (!root || !home || !isAbsolute(home))
@@ -933,12 +847,12 @@ function extensionCommand(request: ParsedCommand): CliResult {
 		if (!request.flags.has("--apply"))
 			return { code: guard.status === "FAIL" ? 1 : 0,
 				data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: "PLAN", guard,
-					steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
+					steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
 					receipt_id: null }, verification: "UNVERIFIED" };
 		const applied = applyExtensions(plan);
 		return { code: guard.status === "FAIL" ? 1 : 0,
 			data: { overall: guard.status === "FAIL" ? "FAIL" : "UNVERIFIED", action: applied.receiptId ? "APPLIED" : "NO_CHANGE",
-				guard, steps, skipped_profiles: plan.skippedProfiles, skipped_reasons: plan.skippedReasons, already_listed_profiles: plan.alreadyListedProfiles,
+				guard, steps, skipped_profiles: plan.skippedProfiles, already_listed_profiles: plan.alreadyListedProfiles,
 				receipt_id: applied.receiptId }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
@@ -1196,227 +1110,10 @@ async function capabilitiesTestCommand(request: ParsedCommand): Promise<CliResul
 		}], verification: "UNVERIFIED" };
 	}
 }
-async function mutantsCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario", "--baseline"]) {
-		if (request.flags.has(flag)) {
-			return refusal("INVALID_FLAG", `test --mutants cannot be combined with ${flag}`,
-				"Run mutation adequacy on the bundled pack or one external --rules/--cases pair; nothing was measured.");
-		}
-	}
-	const identity = kitIdentity();
-	const home = process.env.HOME;
-	if (!identity.release.root || !identity.release.executable || !home || !isAbsolute(home)) {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "MUTANTS_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
-			remediation: "Run from an intact compiled release with an absolute HOME; no rules were mutated.",
-		}], verification: "UNVERIFIED" };
-	}
-	const selected = (name: string): string | undefined => {
-		const value = request.flags.get(name);
-		return typeof value === "string" ? value : undefined;
-	};
-	const rules = selected("--rules");
-	const cases = selected("--cases");
-	const budgetRaw = selected("--mutant-budget-secs");
-	try {
-		const report = await runMutants({ root: identity.release.root, executablePath: identity.release.executable,
-			...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}),
-			...(budgetRaw !== undefined ? { budgetSecs: Number(budgetRaw) } : {}) });
-		return { code: 0, data: { overall: "OK", mutants: report }, verification: "UNVERIFIED" };
-	} catch (error) {
-		if (error instanceof MutantsInputError) {
-			return refusal(error.code, error.message, "Correct the selection; no rules were mutated and nothing was written.");
-		}
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "MUTANTS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
-			remediation: "Check the installed release and OMP native matcher; no rules were mutated.",
-		}], verification: "UNVERIFIED" };
-	}
-}
-
-
-async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project"]) {
-		if (request.flags.has(flag)) {
-			return refusal("INVALID_FLAG", `test --integrations cannot be combined with ${flag}`,
-				"Run integration proof on named profiles; nothing was measured.");
-		}
-	}
-	const identity = kitIdentity();
-	const home = process.env.HOME;
-	if (!identity.release.root || !home || !isAbsolute(home)) {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "INTEGRATIONS_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
-			remediation: "Run from an intact compiled release with an absolute HOME; no profile was read.",
-		}], verification: "UNVERIFIED" };
-	}
-	if (request.flags.has("--plan")) {
-		return { code: 0, data: { overall: "OK", integrations_plan: {
-			reads: ["agent/config.yml extensions list", "agent/mcp.json servers", "agent/hooks tree"],
-			integrations: [...INTEGRATIONS],
-			writes: "isolated HOME under the work dir plus the optional --out report; the real profile is never written",
-		} }, verification: "UNVERIFIED" };
-	}
-	const profileRaw = request.flags.get("--profile");
-	if (typeof profileRaw !== "string" || profileRaw.trim() === "") {
-		return refusal("PROFILE_REQUIRED", "test --integrations needs --profile NAME[,NAME...]",
-			"Name the profiles to prove; the default profile is never assumed.");
-	}
-	const profiles = profileRaw.split(",").map(part => part.trim()).filter(part => part.length > 0);
-	if (profiles.some(name => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name))) {
-		return refusal("INVALID_PROFILE", "Profile names must be simple directory names",
-			"Use the profile directory name under .omp/profiles.");
-	}
-	const outRaw = request.flags.get("--out");
-	if (outRaw !== undefined && (typeof outRaw !== "string" || !isAbsolute(outRaw))) {
-		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
-			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
-	}
-	try {
-		const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
-		const report = await runIntegrations({ root: identity.release.root, home,
-			profiles, workDir, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
-		return { code: 0, data: { overall: "OK", integrations: report }, verification: "UNVERIFIED" };
-	} catch (error) {
-		if (error instanceof IntegrationsInputError) {
-			return refusal(error.code, error.message, "Correct the selection; no profile was read and nothing was written.");
-		}
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "INTEGRATIONS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
-			remediation: "Check the installed release and OMP installation; no profile was changed.",
-		}], verification: "UNVERIFIED" };
-	}
-}
-
-export async function repeatTestCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project", "--integrations", "--profile", "--plan", "--out", "--metamorphic", "--mutants"] as const) {
-		if (request.flags.has(flag)) {
-			return refusal("INVALID_FLAG", `test --repeat cannot be combined with ${flag}`,
-				"Run repeat flake verdicts on live scenarios only; nothing was measured.");
-		}
-	}
-	const rawN = request.flags.get("--repeat");
-	if (typeof rawN !== "string" || !/^[1-9][0-9]*$/.test(rawN) || Number(rawN) > 1000) {
-		return refusal("INVALID_REPEAT", "test --repeat needs a run count 1-1000",
-			"Pass --repeat N with 1 <= N <= 1000; no scenario was run.");
-	}
-	const runs = Number(rawN);
-	const scenarioRaw = request.flags.get("--scenario");
-	if (scenarioRaw !== undefined && (typeof scenarioRaw !== "string" || scenarioRaw.trim() === "")) {
-		return refusal("INVALID_SCENARIO", "test --repeat --scenario needs a scenario id",
-			"Name a scenario from tests/live/scenarios.json or omit --scenario for the full live set.");
-	}
-	const baselineRaw = request.flags.get("--baseline");
-	if (baselineRaw !== undefined && (typeof baselineRaw !== "string" || !isAbsolute(baselineRaw))) {
-		return refusal("INVALID_BASELINE", "test --repeat --baseline needs an absolute receipt path",
-			"Pass an absolute --baseline JSON receipt path or omit it; nothing was measured.");
-	}
-	const identity = kitIdentity();
-	const home = process.env.HOME;
-	if (!identity.release.root || !home || !isAbsolute(home)) {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
-			remediation: "Run from an intact compiled release with an absolute HOME.",
-		}], verification: "UNVERIFIED" };
-	}
-	let omp: string;
-	try { omp = resolveOmpIdentity(process.env).launcher; } catch {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "OMP_UNAVAILABLE", message: "OMP launcher could not be resolved for live repeats",
-			remediation: "Install OMP and put it on PATH; no scenario was run.",
-		}], verification: "UNVERIFIED" };
-	}
-	const scenario = typeof scenarioRaw === "string" ? scenarioRaw : undefined;
-	if (scenario) {
-		let ids: unknown;
-		try { ids = JSON.parse(readFileSync(join(identity.release.root, "tests", "live", "scenarios.json"), "utf8")); } catch {
-			return refusal("SCENARIO_INVENTORY_UNAVAILABLE", "The live scenario inventory could not be read",
-				"Run from an intact release; no scenario was run.");
-		}
-		const known = Array.isArray(ids) ? ids.filter((entry): entry is { id: string } => !!entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string").map((entry) => entry.id) : [];
-		if (!known.includes(scenario)) {
-			return refusal("UNKNOWN_SCENARIO", `Scenario ${scenario} is not in the live inventory`,
-				"Name a scenario from tests/live/scenarios.json or omit --scenario.");
-		}
-	}
-	let baseline: RepeatReceipt | undefined;
-	if (typeof baselineRaw === "string") {
-		try { baseline = parseRepeatReceipt(JSON.parse(readFileSync(baselineRaw, "utf8"))); } catch (error) {
-			return refusal("INVALID_BASELINE", error instanceof Error ? error.message : "Baseline receipt could not be read",
-				"Pass a repeat receipt (version 1 with integer runs/failures) or omit --baseline.");
-		}
-	}
-	if (baseline?.scenario && scenario && baseline.scenario !== scenario) {
-		return refusal("INVALID_BASELINE", `SCENARIO_MISMATCH: current ${scenario} vs baseline ${baseline.scenario}`,
-			"Compare a scenario only against its own baseline receipt; nothing was run.");
-	}
-	const script = join(identity.release.root, "scripts", "e2e-live.sh");
-	const perRunMs = (Number(process.env.TIMEOUT) > 0 ? Number(process.env.TIMEOUT) : 120) * 1000 + 30000;
-	const results: ("pass" | "fail")[] = [];
-	let failureExcerpt: string | null = null;
-	for (let index = 0; index < runs; index += 1) {
-		const child = Bun.spawnSync(["sh", script], {
-			cwd: identity.release.root,
-			env: { ...process.env, OMP: omp, ...(scenario ? { ONLY: scenario } : {}) },
-			timeout: perRunMs, stdout: "pipe", stderr: "pipe",
-		});
-		const output = `${child.stdout ?? ""}${child.stderr ?? ""}`;
-		if (child.exitCode === 0) results.push("pass");
-		else {
-			results.push("fail");
-			failureExcerpt = String(output).slice(-2000);
-		}
-	}
-	const failures = results.filter((entry) => entry === "fail").length;
-	const verdict = repeatVerdict({ version: 1, ...(scenario ? { scenario } : {}), runs, failures, results }, ...(baseline ? [{ baseline }] : []));
-	const code = verdict.kind === "above-target" || verdict.kind === "regressed" ? 1 : 0;
-	return { code, data: { overall: code ? "FAIL" : "OK",
-		repeat: { version: 1, ...(scenario ? { scenario } : {}), runs, failures, results,
-			verdict: verdict.kind, failure_rate: verdict.failure_rate, ci_lower: verdict.ci_lower, ci_upper: verdict.ci_upper,
-			p_value: verdict.p_value, effect_size_h: verdict.effect_size_h, n_needed_post_hoc: verdict.n_needed_post_hoc,
-			...(failureExcerpt === null ? {} : { failure_excerpt: failureExcerpt }) } }, verification: "UNVERIFIED" };
-}
-
-async function metamorphicCommand(request: ParsedCommand): Promise<CliResult> {
-	for (const flag of ["--full", "--record", "--capabilities", "--live-fixture", "--project", "--repeat", "--scenario"]) {
-		if (request.flags.has(flag)) {
-			return refusal("INVALID_FLAG", `test --metamorphic cannot be combined with ${flag}`,
-				"Run metamorphic relations on the bundled pack or one external --rules/--cases pair; nothing was measured.");
-		}
-	}
-	const identity = kitIdentity();
-	const home = process.env.HOME;
-	if (!identity.release.root || !identity.release.executable || !home || !isAbsolute(home)) {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "METAMORPHIC_UNAVAILABLE", message: "Installed kit release or absolute HOME is unavailable",
-			remediation: "Run from an intact compiled release with an absolute HOME; no relations were measured.",
-		}], verification: "UNVERIFIED" };
-	}
-	const selected = (name: string): string | undefined => {
-		const value = request.flags.get(name);
-		return typeof value === "string" ? value : undefined;
-	};
-	const rules = selected("--rules");
-	const cases = selected("--cases");
-	for (const path of [rules, cases]) {
-		if (path !== undefined && (!isAbsolute(path) || resolve(path) !== path)) {
-			return refusal("INVALID_PATH", "Metamorphic selection requires canonical absolute paths",
-				"Pass absolute --rules and --cases paths; nothing was measured.");
-		}
-	}
-	const report = await runMetamorphicReport({ root: identity.release.root, executablePath: identity.release.executable,
-		...(rules !== undefined ? { rules } : {}), ...(cases !== undefined ? { cases } : {}) });
-	return { code: report.status === "FAIL" ? 1 : report.status === "PASS" ? 0 : 3,
-		data: { overall: report.status === "PASS" ? "OK" : report.status, metamorphic: report }, verification: "UNVERIFIED" };
-}
 
 async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const external = request.flags.has("--rules") || request.flags.has("--cases") || request.flags.has("--live-fixture");
-	if (request.flags.has("--mutants")) return mutantsCommand(request);
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
-	if (request.flags.has("--integrations")) return integrationsCommand(request);
-	if (request.flags.has("--repeat")) return repeatTestCommand(request);
-	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);
 	if (external && request.flags.has("--record"))
 		return refusal("INVALID_FLAG", "--record applies to the bundled test only", "Drop --record, or run omp-kit test --record without external packs.");
 	if (external) return externalTestCommand(request);
@@ -1522,269 +1219,6 @@ async function reviewReduceCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 registerCommandHandler("review reduce", reviewReduceCommand);
-async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
-	const sub = request.command.name;
-	const platform = process.platform;
-	let home: string;
-	try {
-		home = serviceHome();
-	} catch {
-		return { code: 3, data: { overall: "UNAVAILABLE", job: request.argument ?? "" },
-			errors: [{ code: "HOME_UNAVAILABLE", message: "Service commands need an absolute HOME",
-				remediation: "Run with an absolute HOME; no service was changed." }], verification: "UNVERIFIED" };
-	}
-	const all = request.flags.has("--all");
-	const names = sub === "list" || all ? Object.keys(KNOWN_JOBS) : [request.argument?.trim() ?? ""];
-	if (names.length === 0 || names.some(name => !KNOWN_JOBS[name])) {
-		return refusal("UNKNOWN_JOB", `Unknown service job: ${request.argument ?? "(none)"}`,
-			`Known jobs: ${Object.keys(KNOWN_JOBS).join(", ")}.`);
-	}
-	if (platform !== "darwin" && platform !== "linux") {
-		return { code: 3, data: { overall: "UNAVAILABLE", job: names.join(",") },
-			errors: [{ code: "UNSUPPORTED_PLATFORM", message: `Service lifecycle supports macOS launchd and Linux systemd, not ${platform}`,
-				remediation: "Run service commands on macOS or Linux; nothing was changed." }], verification: "UNVERIFIED" };
-	}
-	const linux = platform === "linux";
-	const scoped: Record<string, ServiceJobDef> = {};
-	try {
-		for (const name of names) scoped[name] = { ...KNOWN_JOBS[name]!, label: serviceLabel(name) };
-	} catch {
-		return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
-			"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
-	}
- const resolveJob = (name: string) => {
-		const job = scoped[name]!;
-		const launcher = stableLauncher(home);
-		const watch = job.kind === "watch" ? resolveWatchTarget() : null;
-		return { job, launcher, watch };
-	};
-	if (sub === "list") {
-		return { code: 0, data: { overall: "OK", job: names.join(","), jobs: names.map(name => {
-			const { job, launcher } = resolveJob(name);
-			const installed = platform === "darwin" ? readInstalledPlist(home, job.label) : null;
-			return { name, label: job.label, kind: job.kind, launcher, installed: installed !== null };
-		}) }, verification: "UNVERIFIED" };
-	}
-	if (sub === "install") {
-		const dry = request.flags.has("--dry-run");
-		if (!dry && !request.flags.has("--apply")) {
-			return refusal("INSTALL_REQUIRES_APPLY", `service install ${names[0]} replaces the plist and bootstraps it`,
-				"Re-run with --apply --yes, or add --dry-run to preview the render without changing anything.");
-		}
-		const [name] = names;
-		const { job, launcher, watch } = resolveJob(name!);
-		if (!executableFile(launcher)) {
-			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
-					remediation: "Install the kit at the stable path first; no service was changed." }], verification: "UNVERIFIED" };
-		}
-		if (job.kind === "watch" && !watch) {
-			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "WATCH_TARGET_UNAVAILABLE", message: "OMP package is not resolvable, so there is nothing for the watcher to watch",
-					remediation: "Install OMP, then reinstall the job; no service was changed." }], verification: "UNVERIFIED" };
-		}
-		if (platform === "linux") {
-			const units = renderSystemdUnits(home, job, launcher, watch);
-			if (dry) return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true, service: units.service, timer: units.timer, path: units.path }, verification: "UNVERIFIED" };
-			const result = installSystemd(home, job, units, defaultRunner, request.flags.has("--replace"));
-			return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, ...result }, verification: "UNVERIFIED",
-				errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check systemctl output and rerun." }] };
-		}
-		const installed = readInstalledPlist(home, job.label);
-		if (dry) {
-			const plan = planInstall(home, job, launcher, watch, installed);
-			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, dry_run: true, changed: !plan.alreadyInstalled, backup: plan.backup, diff: plan.diff, plist: plan.plist }, verification: "UNVERIFIED" };
-		}
-		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
-		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
-		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, label: job.label, ...result }, verification: "UNVERIFIED",
-			errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check launchctl output and rerun; a backup was kept when a plist was replaced." }] };
-	}
-	if (sub === "uninstall") {
-		if (!request.flags.has("--dry-run") && !request.flags.has("--apply")) {
-			return refusal("UNINSTALL_REQUIRES_APPLY", `service uninstall ${names[0]} boots out the job and moves its plist to backup`,
-				"Re-run with --apply --yes, or add --dry-run to preview without changing anything.");
-		}
-		const [name] = names;
-		const job = scoped[name!]!;
-		if (linux) {
-			if (request.flags.has("--dry-run")) {
-				return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true }, verification: "UNVERIFIED" };
-			}
-		const result = uninstallSystemd(home, job, defaultRunner);
-		return { code: 0, data: { overall: result.changed ? "CHANGED" : "OK", job: job.name, label: job.label, changed: result.changed, backup: result.backup, detail: result.detail, already_absent: result.alreadyAbsent }, verification: "UNVERIFIED" };
-		}
-		if (request.flags.has("--dry-run")) {
-			const installed = readInstalledPlist(home, job.label);
-			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, dry_run: true, already_absent: installed === null }, verification: "UNVERIFIED" };
-		}
-		const result = uninstallService(home, job, defaultRunner, request.flags.has("--purge-logs"));
-		return { code: 0, data: { overall: result.changed ? "CHANGED" : "OK", job: job.name, label: job.label, changed: result.changed, backup: result.backup, detail: result.detail, already_absent: result.alreadyAbsent }, verification: "UNVERIFIED" };
-	}
-	if (sub === "status") {
-		const rows = names.map(name => {
-			const job = scoped[name!]!;
-			if (linux) {
-				const state = systemctlState(job.name, defaultRunner);
-				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath };
-			}
-			const installed = readInstalledPlist(home, job.label);
-			const print = queryPrint(job.label);
-			return { name, label: job.label, installed: installed !== null, loaded: print.loaded, state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit };
-		});
-		const down = rows.some(row => !row.loaded);
-		return { code: down ? 1 : 0, data: { overall: down ? "FINDINGS" : "OK", job: names.join(","), status: rows }, verification: "UNVERIFIED" };
-	}
-	if (sub === "doctor") {
-		if (request.flags.has("--fix") && !request.flags.has("--apply")) {
-			return refusal("FIX_REQUIRES_APPLY", "doctor --fix changes plists and logs",
-				"Re-run with --fix --apply --yes; without --apply this is a read-only report.");
-		}
-		if (request.flags.has("--fix")) {
-			const stateRoot = receiptStateRoot();
-			const issue = stateRoot ? inspectStateRoot(stateRoot) : null;
-			if (issue) return stateRootRefusal(issue);
-		}
-		const allChecks: ServiceCheck[] = [];
-		let fixed = 0;
-		for (const name of names) {
-			const job = scoped[name!]!;
-			const launcher = stableLauncher(home);
-			const watch = job.kind === "watch" ? resolveWatchTarget() : null;
-			const checks = linux
-				? checkServiceLinux({ home, job, launcher, unit: `omp-kit-${name}.service`, timer: null, pathUnit: null,
-					renderedService: renderSystemdUnits(home, job, launcher, watch).service, ...systemctlState(job.name, defaultRunner) })
-				: checkService({ home, job, launcher, watch, installed: readInstalledPlist(home, job.label), print: queryPrint(job.label),
-					rendered: renderLaunchdPlist(home, job, launcher, watch).text });
-			if (request.flags.has("--fix")) {
-				const drifted = checks.find(check => check.id === "plist-matches-renderer" || check.id === "unit-matches-renderer");
-				const missing = checks.find(check => (check.id === "plist-present" || check.id === "unit-present") && check.status === "FAIL");
-				const unloaded = checks.find(check => check.id === "loaded" && check.status === "FAIL");
-				if ((drifted && drifted.status !== "PASS") || missing || unloaded) {
-					const installed = linux ? null : readInstalledPlist(home, job.label);
-					const result = linux
-						? installSystemd(home, job, renderSystemdUnits(home, job, launcher, watch), defaultRunner)
-						: installService(home, job, launcher, watch, installed, queryPrint(job.label), defaultRunner);
-					if (result.ok) fixed++;
-				}
-				for (const path of oversizedOwnLogs(home, job)) {
-					try {
-						renameSync(path, `${path}.1`);
-						fixed++;
-					} catch { /* rotation failure stays a finding */ }
-				}
-			}
-			allChecks.push(...checks.map(check => ({ ...check, job: name })));
-		}
-		const failed = allChecks.filter(check => check.status === "FAIL").length;
-		const warned = allChecks.filter(check => check.status === "WARN").length;
-		return { code: failed > 0 || warned > 0 ? 1 : 0,
-			data: { overall: failed > 0 || warned > 0 ? "FINDINGS" : "OK", job: names.join(","), fixed, checks: allChecks }, verification: "UNVERIFIED" };
-	}
-	if (sub === "logs") {
-		const [name] = names;
-		const job = scoped[name!]!;
-		const count = Number(request.flags.get("-n") ?? 50);
-		const file = join(home, "Library", "Logs", "omp-kit", request.flags.has("--errors") ? `${job.name}.err.log` : `${job.name}.out.log`);
-		let text: string;
-		try {
-			const lines = readFileSync(file, "utf8").split("\n");
-			text = (Number.isSafeInteger(count) && count > 0 ? lines.slice(-count) : lines).join("\n");
-		} catch {
-			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "LOGS_UNAVAILABLE", message: `Log file ${file} is absent or unreadable`,
-					remediation: "Install and run the job first; nothing was changed." }], verification: "UNVERIFIED" };
-		}
-		return { code: 0, data: { overall: "OK", job: job.name, text }, verification: "UNVERIFIED" };
-	}
-	if (sub === "run") {
-		const [name] = names;
-		const job = scoped[name!]!;
-		const launcher = stableLauncher(home);
-		if (!executableFile(launcher)) {
-			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
-					remediation: "Install the kit at the stable path first; the job did not run." }], verification: "UNVERIFIED" };
-		}
-		if (job.name === "scratch-reaper") {
-			// The scheduled job reports; apply stays an explicit operator verb (needs coordinator go on real machines).
-			const started = new Date().toISOString();
-			const plan = planScratch(home, { liveness: defaultLiveness(), run: scratchRunner });
-			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null };
-			try {
-				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
-				writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-			} catch {
-				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
-						remediation: "Repair the state root, then rerun; nothing was reaped." }], verification: "UNVERIFIED" };
-			}
-			return { code: 0, data: { overall: "OK", job: job.name, receipt,
-				stats: { roots: plan.roots.length, sessions: plan.sessions.length, orphans: plan.orphans.length,
-					reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes } }, verification: "UNVERIFIED" };
-		}
-		const started = new Date().toISOString();
-		const child = Bun.spawnSync([launcher, "test", "--record", "--json"], { stdout: "pipe", stderr: "pipe", env: process.env });
-		const ompVersion = (() => { try { return ompIdentity().version; } catch { return null; } })();
-		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: child.exitCode, omp_version: ompVersion };
-		try {
-			mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
-			writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-		} catch {
-			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
-					remediation: "Repair the state root, then rerun; the test itself may have passed." }], verification: "UNVERIFIED" };
-		}
-		// The watcher exists to be seen when the post-update test fails: notify in-process, best-effort.
-		const notification = child.exitCode !== 0 && job.name === "omp-watch"
-			? notifyJobFailure({ title: "omp-kit", message: "omp-kit test did not pass after an OMP update. Run: omp-kit test --json",
-				platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null })
-			: { attempted: false, method: "none" as const };
-		return { code: child.exitCode === 0 ? 0 : 1, data: { overall: child.exitCode === 0 ? "OK" : "FINDINGS", job: job.name, receipt, notification }, verification: "UNVERIFIED",
-			errors: child.exitCode === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${child.exitCode}: ${child.stderr.toString().trim().slice(0, 300) || child.stdout.toString().trim().slice(0, 300)}`,
-				remediation: "Run the recorded command manually with --json and read its failures." }] };
-	}
-	return refusal("UNKNOWN_SERVICE_COMMAND", `Unknown service subcommand: ${sub}`, "Run omp-kit help service for exact grammar.");
-}
-
-for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
-
-async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
-	const sub = request.command.name;
-	let home: string;
-	try {
-		home = serviceHome();
-	} catch {
-		return { code: 3, data: { overall: "UNAVAILABLE" },
-			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
-				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
-	}
-	const deps = { liveness: defaultLiveness(), run: scratchRunner,
-		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
-			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
-		} };
-	if (sub === "plan") {
-		const plan = planScratch(home, deps);
-		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
-			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes }, verification: "UNVERIFIED" };
-	}
-	if (sub === "apply") {
-		if (!request.flags.has("--apply")) {
-			return refusal("SCRATCH_REQUIRES_APPLY", "scratch apply deletes scratch and kills orphaned harness servers",
-				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
-		}
-		const result = applyScratch(home, { ...deps, home });
-		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
-		return { code: failed > 0 ? 1 : 0,
-			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
-				orphans: result.orphans, killed: result.killed, expired: result.expired,
-				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
-			verification: "UNVERIFIED" };
-	}
-	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
-}
-
-for (const subcommand of ["plan", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
@@ -1864,14 +1298,11 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
-	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
 	}
-	if (command.name === "doctor" && flags.has("--services") && flags.get("--scope") !== "services") {
-		return refusal("INVALID_FLAG", "--services is only valid for doctor --scope services", "Use omp-kit doctor --scope services --services ABS_FILE.");
-	}
+	if (command.name === "doctor" && flags.get("--scope") === "rules" && (flags.has("--corpus-report") || flags.has("--labels"))) return ruleCalibrationDoctor(request);
 	if (command.name === "doctor" && flags.get("--scope") === "lsp") return lspReadiness(request);
 	if (command.name === "doctor" && flags.get("--scope") === "project-loading") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope project-loading --project PATH.");
@@ -1884,10 +1315,6 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "mcp") {
 		if (flags.has("--project") || flags.has("--file")) return refusal("INVALID_FLAG", "MCP scope inspects the actual session cwd and cannot accept --project or --file", "Use omp-kit doctor --scope mcp --profile NAME.");
 		return mcpInventory(request);
-	}
-	if (command.name === "doctor" && flags.get("--scope") === "services") {
-		if (flags.has("--project") || flags.has("--file") || flags.has("--profile")) return refusal("INVALID_FLAG", "services scope inspects machine launchd state and cannot accept --project, --file or --profile", "Use omp-kit doctor --scope services [--services ABS_FILE].");
-		return servicesInventory(request);
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "context") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope context [--profile NAME] [--project PATH].");
@@ -1941,30 +1368,55 @@ async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+async function corpusReport(request: ParsedCommand): Promise<CliResult> {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !kit.release.executable || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CORPUS_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no history was read.",
+		}], verification: "UNVERIFIED" };
+	}
+	if (request.flags.has("--plan")) {
+		return { code: 0, data: { overall: "OK", corpus_plan: CORPUS_PLAN }, verification: "UNVERIFIED" };
+	}
+	const sessionsRaw = request.flags.get("--sessions");
+	if (typeof sessionsRaw !== "string" || !isAbsolute(sessionsRaw)) {
+		return refusal("INVALID_CORPUS_SELECTION", "corpus needs --sessions ABS_DIR",
+			"Point --sessions at an absolute session transcripts directory; it is only read, never written.");
+	}
+	const outRaw = request.flags.get("--out");
+	if (outRaw !== undefined && (typeof outRaw !== "string" || !isAbsolute(outRaw))) {
+		return refusal("INVALID_CORPUS_SELECTION", "corpus --out needs an absolute file path",
+			"Pass an absolute --out path or omit it; the JSON still returns on stdout.");
+	}
+	try {
+		const report = await runCorpus({ root: kit.release.root, executablePath: kit.release.executable,
+			sessionsDir: sessionsRaw, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
+		return { code: 0, data: { overall: "OK", corpus: report }, verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof CorpusInputError) {
+			return refusal(error.code, error.message, "Correct the selection; session transcripts are only read, never written, and never leave the machine.");
+		}
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "CORPUS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
+			remediation: "Check the installed release and session transcripts; no profile was changed.",
+		}], verification: "UNVERIFIED" };
+	}
+}
+
 	if (parent?.name === "examples") {
 		if (command.name === "mcp") return { code: 0, data: { text: mcpExample() }, verification: "UNVERIFIED" };
 		if (command.name === "skill-set") return skillSetExample(request);
 		if (command.name === "omp-watch") {
-			// Render-only: shows what `service install omp-watch` would write; installs nothing.
-			const home = process.env.HOME ?? "";
-			const launcher = stableLauncher(home);
+			// The job calls the stable launcher on PATH (a symlink that update re-points), never a versioned release binary.
+			const kitLauncher = Bun.which("omp-kit");
 			let ompPackageJson: string | null = null;
 			try { ompPackageJson = join(resolveOmpIdentity(process.env).packageRoot, "package.json"); } catch { /* refused below */ }
-			if (!isAbsolute(home) || !ompPackageJson) return refusal("WATCH_UNAVAILABLE",
-				`${isAbsolute(home) ? "OMP" : "HOME and OMP"} ${isAbsolute(home) ? "is" : "are"} not resolvable, so there is nothing for the watcher to run or watch`,
-				"Set a canonical absolute HOME, install OMP, then re-run omp-kit examples omp-watch.");
-			let job: ServiceJobDef;
-			try {
-				job = { ...KNOWN_JOBS["omp-watch"]!, label: serviceLabel("omp-watch") };
-			} catch {
-				return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
-					"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
-			}
-			const units = renderSystemdUnits(home, job, launcher, ompPackageJson);
-			return { code: 0, data: { label: job.label, watch_path: ompPackageJson,
-				launchd_plist: renderLaunchdPlist(home, job, launcher, ompPackageJson).text,
-				systemd_path_unit: units.path, systemd_service_unit: units.service,
-				guidance: "Render-only: installs nothing. Run omp-kit service install omp-watch --dry-run to preview the managed install, then --apply --yes to install it." }, verification: "UNVERIFIED" };
+			if (!kitLauncher || !ompPackageJson) return refusal("WATCH_UNAVAILABLE",
+				`${kitLauncher ? "OMP" : "omp-kit"} is not resolvable on PATH, so there is nothing for the watcher to run or watch`,
+				"Put the installed omp-kit and omp on PATH (the job copies this PATH), then re-run omp-kit examples omp-watch.");
+			return { code: 0, data: renderOmpWatch({ kitLauncher, ompPackageJson, path: process.env.PATH ?? "" }), verification: "UNVERIFIED" };
 		}
 		const kind = PROFILE_RECIPE_KINDS.find((entry) => entry === command.name);
 		if (!kind) return refusal("UNKNOWN_RECIPE", "Unknown profile recipe", "Run omp-kit help examples for supported recipes.");
@@ -1983,6 +1435,7 @@ async function skillSetExample(request: ParsedCommand): Promise<CliResult> {
 		}
 	}
 	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
+	if (command.name === "corpus") return corpusReport(request);
 	if (command.name === "schema") return { code: 0, data: schema(version), verification: "PERFORMED" };
 	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
