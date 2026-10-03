@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
@@ -54,7 +54,16 @@ test("child PATH carries the bun binary dir for the omp launcher shim", () => {
 });
 
 
+function profileSpan<T>(span: string, run: () => T): T {
+	const started = performance.now();
+	try { return run(); } finally {
+		const path = process.env.OMP_KIT_TEST_PROFILE_OUT;
+		if (process.env.OMP_KIT_TEST_PROFILE === "1" && path) appendFileSync(path, JSON.stringify({ span, ms: performance.now() - started }) + "\n");
+	}
+}
+
 function omp(args: string[], home: string, ompDir: string) {
+	return profileSpan("omp:" + args.join(" "), () => {
 	const started = Date.now();
 	const child = Bun.spawnSync(["omp", ...args], {
 		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
@@ -63,13 +72,16 @@ function omp(args: string[], home: string, ompDir: string) {
 		throw new Error(`omp ${args.join(" ")} failed: exit=${child.exitCode} signal=${child.signalCode ?? "none"} elapsed_ms=${Date.now() - started} stdout=${child.stdout.toString().slice(-500)} stderr=${child.stderr.toString().slice(-500)}`);
 	}
 	return child.stdout.toString();
+	});
 }
 
 function cli(args: string[], home: string, ompDir: string) {
+	return profileSpan("cli:" + args.join(" "), () => {
 	const child = Bun.spawnSync([process.execPath, entry, ...args, "--json"], {
 		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
 	});
 	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
+	});
 }
 
 /** Isolated HOME with a linked fixture plugin serving copies of the repo rules. */
