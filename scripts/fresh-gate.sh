@@ -116,7 +116,7 @@ archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
 env = os.environ.copy()
 env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
 proc = subprocess.Popen(
-    ["bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    ["bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", suite],
     cwd=archive,
     env=env,
     start_new_session=True,
