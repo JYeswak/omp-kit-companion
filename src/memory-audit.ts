@@ -67,6 +67,22 @@ const REVIEWED_SOURCE_PIN_SETS: readonly (readonly SourcePin[])[] = [
 		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
 		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
 	],
+	[
+		// OMP and pi-mnemopi 18.5.1 source tuple. The sole changed audited pin is
+		// query-cache: derived in-memory word sets and stricter tier-4 matching;
+		// the query_cache SQL schema and persisted row format are unchanged.
+		["agent", "src/mnemopi/config.ts", "d2a82faea2c60a1ace7f5ace41fb467ee3287b567bda309de66804c594d9be6c"],
+		["agent", "src/mnemopi/state.ts", "bcfae4f87015f8dd0cc6ba5c15a0cff7099e17fcabdc6c01df820a3d7f6dc7c7"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
+		["mnemopi", "src/core/episodic-graph.ts", "d7d3df0530b059e85505a5d380cdfbaaaa3b5b97af7e15b2ae0d85baf0994418"],
+		["mnemopi", "src/core/query-cache.ts", "df46d468b2ba5dca9fe475702baf2d9511f9e9e2a5f86e108eb291261e091c22"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "6aad4bc4a847879a612a34a3f7768326a873c979b2d0ad5616c2d61aca49e088"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
 ];
 const CONTENT_FIELDS = ["working_memory.content", "episodic_memory.content"] as const;
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0");

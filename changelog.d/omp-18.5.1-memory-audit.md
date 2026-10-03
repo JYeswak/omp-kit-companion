@@ -1,0 +1,1 @@
+- Private memory audits recognize the reviewed OMP 18.5.1 source tuple; the exact two-bank row-count and credential-category canary remains unchanged.

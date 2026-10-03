@@ -216,7 +216,7 @@ supportedTest("reviewed audit source bytes ignore release version, but a byte ch
 	expect(covered.version).toBe("99.0.0");
 
 	const changed = fixture(); changed.bank();
-	const changedOmp = seedReviewedOmp(join(changed.root, "omp-changed"), "100.0.0", "mnemopi/src/core/shmr.ts");
+	const changedOmp = seedReviewedOmp(join(changed.root, "omp-changed"), "100.0.0", "mnemopi/src/core/query-cache.ts");
 	const refused = await auditMemoryAtRest({ ...changed.args, ompPath: changedOmp });
 	expect(refused.status).toBe("UNVERIFIED");
 	expect(refused.reason).toBe("UNSUPPORTED_SOURCE");
