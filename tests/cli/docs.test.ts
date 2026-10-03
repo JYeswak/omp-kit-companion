@@ -3,6 +3,9 @@ import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeF
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
+
+const OMP_IDENTITY = resolveOmpIdentity();
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const FOOTER_START = "<!-- verified-ttsr-docs:start -->";
@@ -57,11 +60,17 @@ function stageRelease(): string {
 	for (const directory of ["rules", "retired", "cases", "policy", "extensions", "examples"]) {
 		cpSync(join(REPO_ROOT, directory), join(root, directory), { recursive: true });
 	}
-	writeFileSync(join(root, "MANIFEST.tsv"), readFileSync(join(REPO_ROOT, "MANIFEST.tsv")));
 	mkdirSync(join(root, "scripts"), { recursive: true });
 	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(root, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	const manifest = Bun.spawnSync(["sh", join(REPO_ROOT, "scripts/build-manifest.sh"), "--stdout"], {
+		cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe",
+	});
+	if (manifest.exitCode !== 0) {
+		throw new Error("docs fixture manifest failed (" + manifest.exitCode + "): " + manifest.stdout.toString() + manifest.stderr.toString());
+	}
+	writeFileSync(join(root, "MANIFEST.tsv"), manifest.stdout);
 	const executable = join(root, "bin", "omp-kit");
 	const build = Bun.spawnSync([process.execPath, "build", join(REPO_ROOT, "src/cli.ts"),
 		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
@@ -92,6 +101,8 @@ afterAll(() => {
 
 function isolatedEnv(home: string, kit: string): Record<string, string> {
 	mkdirSync(home, { recursive: true });
+	const agentMailRoot = process.env.AGENT_MAIL_STORAGE_ROOT ?? join(process.env.HOME ?? home, ".local", "share", "mcp-agent-mail-rust-live");
+	mkdirSync(agentMailRoot, { recursive: true });
 	return {
 		HOME: home,
 		TMPDIR: join(home, "tmp"),
@@ -99,7 +110,12 @@ function isolatedEnv(home: string, kit: string): Record<string, string> {
 		XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"),
 		XDG_STATE_HOME: join(home, "state"),
-		PATH: `${dirname(kit)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+		AGENT_MAIL_STORAGE_ROOT: agentMailRoot,
+		OMP: OMP_IDENTITY.launcher,
+		OMP_BIN: OMP_IDENTITY.launcher,
+		OMP_PATH: OMP_IDENTITY.launcher,
+		OMP_SRC: OMP_IDENTITY.source,
+		PATH: dirname(kit) + ":" + dirname(OMP_IDENTITY.launcher) + ":" + (process.env.PATH ?? "/usr/bin:/bin"),
 		KIT: kit,
 		WT: REPO_ROOT,
 	};
