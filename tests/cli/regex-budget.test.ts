@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
 import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition } from "../../scripts/regex-budget.ts";
@@ -8,6 +8,7 @@ const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
 
 function fixtureRule(name: string, condition: string): { dir: string; name: string; pattern: string } {
+	mkdirSync(scratchRoot, { recursive: true });
 	const dir = mkdtempSync(join(scratchRoot, "regex-budget-test-"));
 	writeFileSync(join(dir, ".owner"), "pid=" + process.pid + "\nlabel=regex-budget-test\nrepo=" + root + "\ncreated=" + new Date().toISOString() + "\n");
 	const file = join(dir, name + ".md");
@@ -41,15 +42,20 @@ test("literal probe skips exclusion lookbehind and finds the trigger", () => {
 	expect(literalProbe("(?<!echo)\\b(?:br|bd)\\s+close\\b")).toBe("close");
 });
 
-test("fixture rule with (a+)+b is bounded and reported as a near-miss failure", async () => {
-	const fixture = fixtureRule("fixture-quadratic", "(a+)+b");
+test("overlapping-alternative fixture fails the measured doubling ratio", async () => {
+	const fixture = fixtureRule("fixture-quadratic", "a(a|aa)+b");
 	try {
 		const result = await measureCondition({
 			rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern,
-			sizes: [32, 64, 128], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 2_000,
+			sizes: [8, 16, 32], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 20_000,
 		});
 		expect(result.rule).toBe("fixture-quadratic");
-		expect(result.failures.map(f => f.code)).toContain("NEAR_MISS_TIMEOUT");
+		expect(result.status).toBe("MEASURED");
+		expect(result.samples.length).toBe(1);
+		const sample = result.samples[0];
+		if (!sample) throw new Error("literal near-miss sample missing");
+		expect(sample.ms[2] / Math.max(sample.ms[1], 0.01)).toBeGreaterThan(2.6);
+		expect(result.failures.map(f => f.code)).toContain("NEAR_MISS_SUPERQUADRATIC");
 	} finally { cleanup(fixture.dir); }
 });
 
