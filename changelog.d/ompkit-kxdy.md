@@ -1,1 +1,2 @@
 - Add a bounded Bun/JSC regex budget instrument for rule-condition near misses, Bash structural lint, and streamed shell-argument timing.
+- Put the readiness-script literal first in the matcher and recognize escaped-tab command prefixes; existing fire/quiet cases retain parity.
