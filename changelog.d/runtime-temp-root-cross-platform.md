@@ -1,1 +1,1 @@
-- Resolve runtime scratch roots through `os.tmpdir()` and canonicalize the result, honoring `TMPDIR` across supported platforms.
+- Resolve and canonicalize runtime scratch roots through `os.tmpdir()`, with a platform-root fallback when `TMPDIR` is not a directory.

@@ -347,3 +347,20 @@ test("runtime temp root follows TMPDIR and returns its canonical path", () => {
 		else process.env.TMPDIR = previous;
 	}
 });
+
+test("runtime temp root falls back when TMPDIR is not a directory", () => {
+	const base = fixtureRoot();
+	const marker = join(base, "TMPDIR-marker");
+	writeFileSync(marker, "not a directory\n");
+	const previous = process.env.TMPDIR;
+	process.env.TMPDIR = marker;
+	try {
+		const root = runtimeTempRoot();
+		expect(root).not.toBe(realpathSync(marker));
+		expect(realpathSync(root)).toBe(root);
+		expect(lstatSync(root).isDirectory()).toBe(true);
+	} finally {
+		if (previous === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previous;
+	}
+});
