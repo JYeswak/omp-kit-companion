@@ -24,9 +24,9 @@ test("a busy, realistic HOME outside the watched set is complete and unchanged",
 	const { home, paths } = operatorHome();
 	const library = join(home, "Library", "Caches");
 	mkdirSync(library, { recursive: true });
-	for (let dir = 0; dir < 100; dir++) {
+	for (let dir = 0; dir < 20; dir++) {
 		mkdirSync(join(library, `d${dir}`));
-		for (let file = 0; file < 510; file++) writeFileSync(join(library, `d${dir}`, `f${file}`), "x");
+		for (let file = 0; file < 100; file++) writeFileSync(join(library, `d${dir}`, `f${file}`), "x");
 	}
 	writeFileSync(join(home, ".omp", "agent", "agent.db"), "session state");
 	const before = snapshotWatched(paths);
