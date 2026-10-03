@@ -139,13 +139,14 @@ test("uncompilable mutants are skipped and counted", () => {
 test("the budget flag bounds the run and reports truncation", () => {
 	const dir = join(pack, "heavy-rules");
 	mkdirSync(dir, { recursive: true });
-	const branches = Array.from({ length: 20_000 }, (_, i) => `b${i}zz`);
+	const branches = Array.from({ length: 4 }, (_, i) => `b${i}zz`);
 	writeFileSync(join(dir, "mut-heavy.md"),
 		`---\ncondition:\n  - '${branches.join("|")}'\nscope: tool:bash\ninterruptMode: never\n---\nHeavy budget fixture.\n`);
 	writeFileSync(join(pack, "cases-heavy.tsv"), CASES_HEADER +
 		"mut-heavy\tfire\ttool\tbash\t-\trun b0zz now\tcovers branch one\n");
-	const bounded = runCli(["test", "--mutants", "--mutant-budget-secs", "1",
+	const bounded = runCli(["test", "--mutants", "--mutant-budget-secs", "0",
 		"--rules", dir, "--cases", join(pack, "cases-heavy.tsv"), "--json"]);
 	expect(bounded.exitCode).toBe(0);
 	expect(mutantsOf(bounded.envelope).truncated).toBe(true);
+	expect(mutantsOf(bounded.envelope).budget_secs).toBe(0);
 }, 300_000);

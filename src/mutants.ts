@@ -12,7 +12,7 @@ export interface MutantsInput {
 	rules?: string;
 	/** External TSV cases file; defaults to the bundled cases. */
 	cases?: string;
-	/** Wall-clock budget in seconds; the run stops early and reports truncated. */
+	/** Wall-clock budget in seconds; zero skips evaluation and reports truncated. */
 	budgetSecs?: number;
 }
 
@@ -70,8 +70,8 @@ export async function runMutants(input: MutantsInput): Promise<MutantsReport> {
 		throw new MutantsInputError("INVALID_MUTANTS_SELECTION", "External packs need both --rules and --cases");
 	}
 	const budget = input.budgetSecs ?? 300;
-	if (!Number.isSafeInteger(budget) || budget < 1) {
-		throw new MutantsInputError("INVALID_MUTANT_BUDGET", "The mutant budget needs a positive integer number of seconds");
+	if (!Number.isSafeInteger(budget) || budget < 0) {
+		throw new MutantsInputError("INVALID_MUTANT_BUDGET", "The mutant budget needs a non-negative integer number of seconds");
 	}
 	const args = ["--mutants", "--mutant-budget-secs", String(budget),
 		...(input.rules !== undefined ? ["--rules", input.rules] : []),

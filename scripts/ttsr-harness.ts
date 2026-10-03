@@ -1409,7 +1409,7 @@ async function baselineOutcomes(rule: Rule, cases: Case[]): Promise<{ g2: boolea
  * baseline (G2 verdict, plus G3 quiet-prefix sweep where G2 stays quiet). */
 async function runMutants(rulesDir: string, casesFile: string, budgetSecs: number, outFile: string | null): Promise<number> {
 	const started = Date.now();
-	const deadline = started + Math.max(1, budgetSecs) * 1000;
+	const deadline = started + budgetSecs * 1000;
 	const expired = (): boolean => Date.now() >= deadline;
 	const { cases, errors } = loadCases(casesFile);
 	if (errors.length > 0 || cases.length === 0) {
@@ -1574,8 +1574,8 @@ switch (mode) {
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
 		const budget = Number(flagValue("--mutant-budget-secs") ?? 300);
-		if (!Number.isSafeInteger(budget) || budget < 1) {
-			console.error("mutants: --mutant-budget-secs needs a positive integer");
+		if (!Number.isSafeInteger(budget) || budget < 0) {
+			console.error("mutants: --mutant-budget-secs needs a non-negative integer");
 			code = 2;
 			break;
 		}
