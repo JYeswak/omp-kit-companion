@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import type { FastTestInput, FastTestReport, MatcherObservationInput, MatcherObservationReport } from "../../src/test-runner.ts";
+import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -128,6 +129,7 @@ function createPlantedRelease(): { root: string; stable: string; executable: str
 	const executable = join(root, "bin", "omp-kit");
 	cpSync(join(releaseRoot, "bin", "omp-kit"), executable);
 	chmodSync(executable, 0o755);
+	writeReleaseManifest(root);
 	const stable = join(prefix, "bin", "omp-kit");
 	mkdirSync(dirname(stable), { recursive: true });
 	symlinkSync(executable, stable);
@@ -137,6 +139,31 @@ function createPlantedRelease(): { root: string; stable: string; executable: str
 	const planted = original.replace(/^condition:\r?\n(?:[ \t].*\r?\n)+(?=scope:)/m, "condition:\n  - '.'\n");
 	if (planted === original) throw new Error("quiet-prefix fixture could not replace the temporary rule condition");
 	writeFileSync(rulePath, planted);
+	return { root, stable, executable };
+}
+
+function createCountMismatchRelease(name: string): { root: string; stable: string; executable: string } {
+	const prefix = join(fixtureBase, name);
+	const root = join(prefix, "releases", "v1.0.0");
+	mkdirSync(join(root, "bin"), { recursive: true });
+	copyPackResources(root);
+	const executable = join(root, "bin", "omp-kit");
+	cpSync(join(releaseRoot, "bin", "omp-kit"), executable);
+	chmodSync(executable, 0o755);
+	const casesPath = join(root, "cases", "cases.tsv");
+	const raw = readFileSync(casesPath, "utf8");
+	const quiet = raw.split(/\r?\n/).find(row => {
+		const columns = row.split("\t");
+		return row.trim() !== "" && !row.startsWith("#") && columns.length >= 6 && columns[1] === "quiet";
+	});
+	if (!quiet) throw new Error("case-count fixture needs a quiet corpus row");
+	const columns = quiet.split("\t");
+	columns[6] = `${columns[6] ?? ""} planted denominator mismatch`.trim();
+	writeFileSync(casesPath, `${raw}${raw.endsWith("\n") ? "" : "\n"}${columns.join("\t")}\n`);
+	writeReleaseManifest(root);
+	const stable = join(prefix, "bin", "omp-kit");
+	mkdirSync(dirname(stable), { recursive: true });
+	symlinkSync(executable, stable);
 	return { root, stable, executable };
 }
 
@@ -174,6 +201,7 @@ beforeAll(() => {
 	], { cwd: REPO_ROOT, env: { ...buildEnv, TMP: buildEnv.TMPDIR, TEMP: buildEnv.TMPDIR }, stdout: "pipe", stderr: "pipe" });
 	if (build.exitCode !== 0) throw new Error(`fixture compile failed (${build.exitCode}): ${build.stdout.toString()}\n${build.stderr.toString()}`);
 	chmodSync(executable, 0o755);
+	writeReleaseManifest(releaseRoot);
 	stableExecutable = join(prefix, "bin", "omp-kit");
 	mkdirSync(dirname(stableExecutable), { recursive: true });
 	symlinkSync(executable, stableExecutable);
@@ -193,6 +221,7 @@ beforeAll(() => {
 	], { cwd: REPO_ROOT, env: { ...buildEnv, TMP: buildEnv.TMPDIR, TEMP: buildEnv.TMPDIR }, stdout: "pipe", stderr: "pipe" });
 	if (matcherBuild.exitCode !== 0) throw new Error(`matcher CLI compile failed (${matcherBuild.exitCode}): ${matcherBuild.stdout.toString()}\n${matcherBuild.stderr.toString()}`);
 	chmodSync(matcherBinary, 0o755);
+	writeReleaseManifest(matcherRoot);
 	matcherExecutable = join(fixtureBase, "matcher-kit", "bin", "omp-kit");
 	mkdirSync(dirname(matcherExecutable), { recursive: true });
 	symlinkSync(matcherBinary, matcherExecutable);
@@ -241,6 +270,7 @@ describe("runFastTest", () => {
 		const releaseBefore = snapshotTree(dirname(dirname(stableExecutable)));
 
 		const { result, report } = invoke(input, env);
+		const corpus = countCaseRows(readFileSync(join(releaseRoot, "cases", "cases.tsv"), "utf8"));
 
 		expect(result.exitCode).toBe(0);
 		expect(report.exitCode).toBe(0);
@@ -249,10 +279,13 @@ describe("runFastTest", () => {
 		expect(report.proofs.G1_registration.expected_rules).toBe(22);
 		expect(report.proofs.G1_registration.observed_rules).toBe(22);
 		expect(report.proofs.G2_payload.status).toBe("PASS");
-		expect(report.proofs.G2_payload.expected_cases).toBe(331);
-		expect(report.proofs.G2_payload.observed_cases).toBe(331);
+		expect(report.proofs.G2_payload.expected_cases).toBe(corpus.cases);
+		expect(report.proofs.G2_payload.observed_cases).toBe(corpus.cases);
 		expect(report.proofs.G3_quiet_prefix.status).toBe("PASS");
-		expect(report.proofs.G3_quiet_prefix.expected_quiet_cases).toBe(177);
+		expect(report.proofs.G3_quiet_prefix.expected_cases).toBe(corpus.cases);
+		expect(report.proofs.G3_quiet_prefix.observed_cases).toBe(corpus.cases);
+		expect(report.proofs.G3_quiet_prefix.observed_quiet_cases).toBe(corpus.quietCases);
+		expect(report.proofs.G3_quiet_prefix.expected_quiet_cases).toBe(corpus.quietCases);
 		expect(report.proofs.G3_quiet_prefix.quiet_prefix_fires).toBe(0);
 		expect(report.proofs.G3_quiet_prefix.seeded_plant).toBe("PASS");
 		expect(report.proofs.G4_live.status).toBe("NOT_RUN");
@@ -264,7 +297,7 @@ describe("runFastTest", () => {
 		expect(report.diagnostics.effective_profile.status).toBe("UNVERIFIED");
 		expect(report.producers.gate.producer_rc).toBe(0);
 		const gate = JSON.parse(report.producers.gate.stdout);
-		expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: 22, ttsr_rules: 21, cases: 331, quiet_cases: 177, quiet_prefix_fires: 0 } });
+		expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: 22, ttsr_rules: 21, cases: corpus.cases, quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 } });
 		expect(gate.failures).toEqual([]);
 		expect(report.producers.selftest.producer_rc).toBe(0);
 		expect(report.producers.selftest.stdout).toContain("plant (b) RED as intended");
@@ -275,6 +308,44 @@ describe("runFastTest", () => {
 		expect(snapshotTree(dirname(dirname(stableExecutable)))).toBe(releaseBefore);
 		expect(existsSync(projectMarker)).toBe(false);
 		expect(existsSync(join(home, ".agents", "rules"))).toBe(false);
+	});
+
+	test("fails when the matcher observes a different case corpus than the manifest-bound expectation", async () => {
+		const planted = createCountMismatchRelease("count-mismatch-kit");
+		const baseBytes = readFileSync(join(releaseRoot, "cases", "cases.tsv"));
+		const manifest = JSON.parse(readFileSync(join(releaseRoot, "release-manifest.json"), "utf8")) as { files: { path: string; sha256: string }[] };
+		const entry = manifest.files.find(file => file.path === "cases/cases.tsv");
+		expect(entry?.sha256).toBe(createHash("sha256").update(baseBytes).digest("hex"));
+		const baseline = countCaseRows(baseBytes.toString("utf8"));
+		const report = await runFastTest(
+			{ root: planted.root, executablePath: planted.stable, home: makeTestHome("count-mismatch-home") },
+			{ rules: 22, ttsrRules: 21, ...baseline },
+		);
+		expect(report.status).toBe("FAIL");
+		expect(report.diagnostics.manifest.status).not.toBe("FAIL");
+		expect(report.proofs.G2_payload).toMatchObject({
+			status: "FAIL", expected_cases: baseline.cases, observed_cases: baseline.cases + 1,
+		});
+		expect(report.proofs.G3_quiet_prefix).toMatchObject({
+			status: "FAIL", expected_cases: baseline.cases, expected_quiet_cases: baseline.quietCases,
+			observed_cases: baseline.cases + 1, observed_quiet_cases: baseline.quietCases + 1,
+		});
+	});
+
+	test("fails fast when the case corpus no longer matches its release manifest", async () => {
+		const planted = createCountMismatchRelease("stale-case-manifest-kit");
+		writeFileSync(
+			join(planted.root, "release-manifest.json"),
+			readFileSync(join(releaseRoot, "release-manifest.json")),
+		);
+		const report = await runFastTest({
+			root: planted.root, executablePath: planted.stable, home: makeTestHome("stale-case-manifest-home"),
+		});
+		expect(report.status).toBe("FAIL");
+		expect(report.diagnostics.manifest.status).toBe("FAIL");
+		expect(report.proofs.G2_payload.status).toBe("PASS");
+		expect(report.proofs.G3_quiet_prefix.status).toBe("PASS");
+		expect(report.failures).toContain("cases/cases.tsv is missing from, or does not match, release-manifest.json");
 	});
 
 	test("returns exit 3 without launching the matcher when OMP is absent or has no native matcher", () => {
@@ -304,7 +375,7 @@ describe("runFastTest", () => {
 		expect(native.report.producers.gate.producer_rc).toBe(null);
 	});
 
-	test("returns exit 1 and G3 evidence for a quiet-prefix plant in the unchanged 331-case corpus", () => {
+	test("returns exit 1 and G3 evidence for a quiet-prefix plant in the unchanged case corpus", () => {
 		const plant = createPlantedRelease();
 		const identity = resolveOmpIdentity(process.env);
 		const home = makeTestHome("plant-home");
@@ -741,7 +812,7 @@ describe("runMatcherObservation", () => {
 		]);
 	});
 
-	test("compiled installed CLI keeps bundled default denominators and seeded prefix plant", () => {
+	test("compiled installed CLI derives denominators from the manifest-bound case TSV and runs the seeded prefix plant", () => {
 		const identity = resolveOmpIdentity(process.env);
 		const home = makeTestHome("bundled-cli-home");
 		const project = join(fixtureBase, "bundled-cli-cwd");
@@ -755,13 +826,15 @@ describe("runMatcherObservation", () => {
 		if (!stdout.trim()) throw new Error(`Bundled CLI returned no JSON (rc=${child.exitCode}): ${stderr}`);
 		const envelope = JSON.parse(stdout) as { data?: { overall?: string; test?: FastTestReport } };
 		const report = envelope.data?.test;
+		const corpus = countCaseRows(readFileSync(join(matcherRoot, "cases", "cases.tsv"), "utf8"));
 		expect(child.exitCode).toBe(0);
 		expect(envelope.data?.overall).toBe("UNVERIFIED");
 		expect(report?.status).toBe("PASS");
 		expect(report?.proofs.G1_registration).toMatchObject({ expected_rules: 22, observed_rules: 22, status: "PASS" });
-		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: 331, observed_cases: 331, status: "PASS" });
+		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: corpus.cases, observed_cases: corpus.cases, status: "PASS" });
 		expect(report?.proofs.G3_quiet_prefix).toMatchObject({
-			expected_cases: 331, expected_quiet_cases: 177, observed_cases: 331, observed_quiet_cases: 177,
+			expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,
+			observed_cases: corpus.cases, observed_quiet_cases: corpus.quietCases,
 			quiet_prefix_fires: 0, seeded_plant: "PASS", status: "PASS",
 		});
 		expect(report?.proofs.G4_live.status).toBe("NOT_RUN");

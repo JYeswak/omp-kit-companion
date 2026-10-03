@@ -2,11 +2,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
+import { countCaseRows } from "../../src/test-runner.ts";
 import { previewKitRelease, stageKitRelease, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-mkdirSync(scratch, { recursive: true });
 const output = mkdtempSync(join(scratch, "p21-release-"));
 const platform: ReleasePlatform = { os: process.platform as "darwin" | "linux", arch: process.arch as "arm64" | "x64", libc: process.platform === "darwin" ? "none" : "gnu" };
 const key = `${platform.os}-${platform.arch}-${platform.libc}`;
@@ -78,10 +78,12 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 		stdout: "pipe", stderr: "pipe",
 	});
 	expect(fast.exitCode, fast.stdout.toString() + fast.stderr.toString()).toBe(0);
+	const corpus = countCaseRows(readFileSync(join(installedRoot, "cases", "cases.tsv"), "utf8"));
 	expect(JSON.parse(fast.stdout.toString()).data.test.proofs).toMatchObject({
 		G1_registration: { status: "PASS", observed_rules: 22 },
-		G2_payload: { status: "PASS", observed_cases: 331 },
-		G3_quiet_prefix: { status: "PASS", observed_quiet_cases: 177, quiet_prefix_fires: 0 },
+		G2_payload: { status: "PASS", expected_cases: corpus.cases, observed_cases: corpus.cases },
+		G3_quiet_prefix: { status: "PASS", expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,
+			observed_cases: corpus.cases, observed_quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 },
 		G4_live: { status: "NOT_RUN" },
 	});
 	appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");

@@ -1,17 +1,53 @@
-import { realpathSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { diagnose, type Finding } from "./diagnostics.ts";
+import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
 
 const HARNESS = "scripts/ttsr-harness.ts";
-const EXPECTED = { rules: 22, ttsrRules: 21, cases: 331, quietCases: 177 } as const;
+const RULE_EXPECTATIONS = { rules: 22, ttsrRules: 21 } as const;
+const CASES_PATH = "cases/cases.tsv";
+
+export function countCaseRows(raw: string): Pick<FastTestExpectations, "cases" | "quietCases"> {
+	let cases = 0, quietCases = 0;
+	for (const line of raw.split("\n").slice(1)) {
+		const row = line.replace(/\r$/, "");
+		if (row.trim() === "" || row.startsWith("#")) continue;
+		const columns = row.split("\t");
+		if (columns.length < 6) continue;
+		cases++;
+		if (columns[1] === "quiet") quietCases++;
+	}
+	return { cases, quietCases };
+}
+
+function readCaseCorpus(root: string): { cases: number; quietCases: number; verified: boolean } {
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(join(root, CASES_PATH));
+	} catch {
+		return { cases: 0, quietCases: 0, verified: false };
+	}
+	const counts = countCaseRows(bytes.toString("utf8"));
+	let verified = false;
+	try {
+		const manifest = validateReleaseManifest(JSON.parse(readFileSync(join(root, RELEASE_MANIFEST_NAME), "utf8")));
+		const entry = manifest.files.find(file => file.path === CASES_PATH);
+		verified = !!entry && createHash("sha256").update(bytes).digest("hex") === entry.sha256;
+	} catch {
+		// An unavailable or invalid release manifest cannot authorize a denominator.
+	}
+	return { ...counts, verified };
+}
+
 const SEEDED_PREFIX_PLANT = /^ok\s+plant \(b\) RED as intended: G3 plant-prefix-close quiet tool:bash line 3: fired on prefix/m;
 const SELFTEST_GREEN = /^SELFTEST: all seven plants RED and named; controls GREEN$/m;
 
 export type FastTestExpectations = Readonly<{ rules: number; ttsrRules: number; cases: number; quietCases: number }>;
 export interface FastTestInput {
-	/** Absolute release root containing rules/, cases/, and scripts/ttsr-harness.ts. */
+	/** Absolute release root containing release-manifest.json, rules/, cases/, and scripts/ttsr-harness.ts. */
 	root: string;
 	/** Absolute installed stable executable symlink whose target is inside root's prefix. */
 	executablePath: string;
@@ -321,9 +357,11 @@ function blockedReport(
 const NATIVE_LOAD_FAILURE = /@oh-my-pi\/pi-natives|native (?:module|package|matcher|binding)|cannot find (?:module|package)|failed to load/i;
 
 /** Run the shipped fast matcher through the compiled release runtime; never run project code or live model calls. */
-export async function runFastTest(input: FastTestInput, expected: FastTestExpectations = EXPECTED): Promise<FastTestReport> {
+export async function runFastTest(input: FastTestInput, requestedExpected?: FastTestExpectations): Promise<FastTestReport> {
 	const paths = [input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])];
 	if (!paths.every(isAbsolute)) throw new Error("fast-test release, executable, HOME, and project paths must be absolute");
+	const caseCorpus = readCaseCorpus(input.root);
+	const expected = requestedExpected ?? { ...RULE_EXPECTATIONS, cases: caseCorpus.cases, quietCases: caseCorpus.quietCases };
 
 	const fallbackRedact = redactor(input);
 	let rawFindings: Finding[] = [];
@@ -334,6 +372,14 @@ export async function runFastTest(input: FastTestInput, expected: FastTestExpect
 		diagnosticFailure = fallbackRedact(errorText(error));
 	}
 	const diagnostics = diagnosticsFor(rawFindings);
+	if (!caseCorpus.verified) {
+		diagnostics.manifest = {
+			...diagnostics.manifest,
+			status: "FAIL",
+			reason: "cases/cases.tsv is missing from, or does not match, release-manifest.json",
+			recommended_action: "Restore the declared case corpus from the release and rerun the test.",
+		};
+	}
 	if (diagnosticFailure) {
 		diagnostics.kit = { ...diagnostics.kit, reason: diagnosticFailure };
 	}

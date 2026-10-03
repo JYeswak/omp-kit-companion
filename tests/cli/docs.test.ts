@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { writeReleaseManifest } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const FOOTER_START = "<!-- verified-ttsr-docs:start -->";
@@ -70,6 +71,7 @@ function stageRelease(): string {
 		throw new Error(`docs fixture CLI failed to compile (${build.exitCode}): ${build.stdout.toString()}${build.stderr.toString()}`);
 	}
 	chmodSync(executable, 0o755);
+	writeReleaseManifest(root);
 	const stable = join(prefix, "bin", "omp-kit");
 	mkdirSync(dirname(stable), { recursive: true });
 	symlinkSync(executable, stable);

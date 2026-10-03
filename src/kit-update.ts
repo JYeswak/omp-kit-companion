@@ -7,7 +7,7 @@ import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations,
 import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
 import { parseRuleManifest } from "./diagnostics.ts";
-import type { FastTestExpectations } from "./test-runner.ts";
+import { countCaseRows, type FastTestExpectations } from "./test-runner.ts";
 
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
 function shaFile(path: string): string {
@@ -80,15 +80,9 @@ function releaseTestExpectations(staged: StagedKitRelease): FastTestExpectations
 			return bytes;
 		};
 		const rules = parseRuleManifest(readVerified("MANIFEST.tsv").toString("utf8"));
-		const caseLines = readVerified("cases/cases.tsv").toString("utf8").split("\n");
-		let cases = 0, quietCases = 0, ttsrRules = 0;
+		const { cases, quietCases } = countCaseRows(readVerified("cases/cases.tsv").toString("utf8"));
+		let ttsrRules = 0;
 		for (const rule of rules) if (rule.ruleClass !== "always") ttsrRules++;
-		for (let index = 1; index < caseLines.length; index++) {
-			const row = caseLines[index]!.replace(/\r$/, "");
-			if (row.trim() === "" || row.startsWith("#")) continue;
-			cases++;
-			if (row.split("\t")[1] === "quiet") quietCases++;
-		}
 		return { rules: rules.length, ttsrRules, cases, quietCases };
 	} catch {
 		rmSync(staged.root, { recursive: true, force: true });

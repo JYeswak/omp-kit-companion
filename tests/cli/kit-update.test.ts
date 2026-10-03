@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { runFullTest } from "../../src/full-test-runner.ts";
+import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate } from "../../src/kit-update.ts";
@@ -60,7 +61,6 @@ function fixtureContractFiles(): FixtureFile[] {
 	return [{ name: "MANIFEST.tsv", bytes: manifestFile }, { name: "cases/cases.tsv", bytes: cases }, { name: "rules/rule-a.md", bytes: rule }];
 }
 async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
-	mkdirSync(scratch, { recursive: true });
 	const root = mkdtempSync(join(scratch, "kit-update-"));
 	const prefix = join(root, "prefix"), stateRoot = join(root, "state"), home = join(root, "home"), source = join(root, "source");
 	const selectedPlatform = options.platform ?? platform;
@@ -131,19 +131,10 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable
 		return columns.join("\t");
 	};
 	const baseCases = rows.length, baseQuiet = rows.filter(row => row.split("\t")[1] === "quiet").length;
-	writeFileSync(casesPath, rawCases + "\n" + annotate(fire, "U1-N-plus-two-fire") + "\n" + annotate(quiet, "U1-N-plus-two-quiet") + "\n");
-	const ruleLines = readFileSync(join(sourceRoot, "MANIFEST.tsv"), "utf8").trimEnd().split(/\r?\n/).slice(1);
-	const rules = ruleLines.length, ttsrRules = ruleLines.filter(row => row.split("\t")[2] !== "always").length;
-	const runnerPath = join(sourceRoot, "src", "test-runner.ts");
-	const runner = readFileSync(runnerPath, "utf8");
-	const expectedPattern = /const EXPECTED = \{ rules: (\d+), ttsrRules: (\d+), cases: (\d+), quietCases: (\d+) \} as const;/;
-	const old = expectedPattern.exec(runner);
-	if (!old || Number(old[1]) !== rules || Number(old[2]) !== ttsrRules || Number(old[3]) !== baseCases || Number(old[4]) !== baseQuiet)
-		throw new Error("candidate source counts do not match its shipped MANIFEST.tsv/cases.tsv");
-	const targetCases = baseCases + 2, targetQuiet = baseQuiet + 1;
-	const nextExpected = "const EXPECTED = { rules: " + rules + ", ttsrRules: " + ttsrRules +
-		", cases: " + targetCases + ", quietCases: " + targetQuiet + " } as const;";
-	writeFileSync(runnerPath, runner.replace(expectedPattern, nextExpected));
+	const additions = [annotate(fire, "U1-N-plus-two-fire"), annotate(quiet, "U1-N-plus-two-quiet")];
+	const targetCases = baseCases + additions.length;
+	const targetQuiet = baseQuiet + additions.filter(row => row.split("\t")[1] === "quiet").length;
+	writeFileSync(casesPath, rawCases + "\n" + additions.join("\n") + "\n");
 	const output = join(ctx.root, "candidate-package");
 	mkdirSync(output);
 	const key = [ctx.platform.os, ctx.platform.arch, ctx.platform.libc].join("-");
@@ -388,19 +379,17 @@ test("already-current version does not create a pending receipt or re-switch the
 // Full N to N+2 journey: two package builds plus fast, matcher, ratchet and the
 // complete e2e-live suite in postcheck. Per-scenario timeouts bound hangs; the
 // 900 s budget fits the suite on slow disks.
-test("update completes from an N-case build to an N+2-case release; the legacy in-process contract is RED", async () => fixture(async ctx => {
+test("update derives the N+2 fast denominator from the manifest-bound case corpus", async () => fixture(async ctx => {
 	const candidate = buildNPlusTwoCandidate(ctx);
 	const plan = await planKitUpdate(input(ctx));
 	if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
 
-	// Mutant control: the old updater's in-process test runner still expects N.
-	const legacy = await runFullTest({ root: candidate.root, executablePath: candidate.executable,
-		home: ctx.home, stateRoot: ctx.stateRoot });
-	expect(legacy.fast.status).toBe("FAIL");
-	expect(legacy.fast.proofs.G2_payload).toMatchObject({ status: "FAIL",
-		expected_cases: candidate.baseCases, observed_cases: candidate.targetCases });
-	expect(legacy.fast.proofs.G3_quiet_prefix).toMatchObject({ status: "FAIL",
-		expected_cases: candidate.baseCases, expected_quiet_cases: candidate.baseQuiet,
+	const baseline = await runFastTest({ root: candidate.root, executablePath: candidate.executable, home: ctx.home });
+	expect(baseline.status).toBe("PASS");
+	expect(baseline.proofs.G2_payload).toMatchObject({ status: "PASS",
+		expected_cases: candidate.targetCases, observed_cases: candidate.targetCases });
+	expect(baseline.proofs.G3_quiet_prefix).toMatchObject({ status: "PASS",
+		expected_cases: candidate.targetCases, expected_quiet_cases: candidate.targetQuiet,
 		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
 
 	const updated = await applyKitUpdate(plan);

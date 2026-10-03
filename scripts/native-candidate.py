@@ -30,6 +30,28 @@ def load(path):
         return json.load(source)
 
 
+
+def case_counts(release_root):
+    manifest = load(release_root / "release-manifest.json")
+    entries = [row for row in manifest.get("files", [])
+               if isinstance(row, dict) and row.get("path") == "cases/cases.tsv"]
+    cases_path = release_root / "cases" / "cases.tsv"
+    if len(entries) != 1 or not cases_path.is_file() or digest(cases_path) != entries[0].get("sha256"):
+        raise ValueError("native case corpus is absent from or differs from the release manifest")
+    cases = quiet_cases = 0
+    for row in cases_path.read_text(encoding="utf-8").split("\n")[1:]:
+        row = row.removesuffix("\r")
+        if row.strip() == "" or row.startswith("#"):
+            continue
+        columns = row.split("\t")
+        if len(columns) < 6:
+            continue
+        cases += 1
+        if columns[1] == "quiet":
+            quiet_cases += 1
+    return cases, quiet_cases
+
+
 def save(path, value):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +175,7 @@ def native(args):
             release_root = prefix / "releases" / args.version
             if not binary.is_file() or binary.resolve() != (release_root / "bin" / "omp-kit").resolve():
                 raise ValueError("native installer did not activate the selected release binary")
+            expected_cases, expected_quiet_cases = case_counts(release_root)
             agent = home / ".omp" / "agent"
             agent.mkdir(parents=True)
             (agent / "config.yml").write_text("memory:\n  backend: off\n", encoding="utf-8")
@@ -221,11 +244,20 @@ def native(args):
                     fast = fast_report["proofs"]
                     if fast_report["status"] != "PASS":
                         raise ValueError(f"native {name} fast matcher did not pass")
-                    for gate, observed_count in (("G1_registration", "observed_rules"),
-                                                 ("G2_payload", "observed_cases"), ("G3_quiet_prefix", "quiet_prefix_fires")):
+                    for gate, observed_count, expected_count in (
+                            ("G1_registration", "observed_rules", 22),
+                            ("G2_payload", "observed_cases", expected_cases),
+                            ("G3_quiet_prefix", "quiet_prefix_fires", 0)):
                         proof = fast[gate]
-                        if proof["status"] != "PASS" or proof[observed_count] != (0 if gate == "G3_quiet_prefix" else 22 if gate == "G1_registration" else 331):
-                            raise ValueError(f"native {name} {gate} is not the pinned passing corpus")
+                        if proof["status"] != "PASS" or proof[observed_count] != expected_count:
+                            raise ValueError(f"native {name} {gate} differs from the manifest-bound passing corpus")
+                    payload, quiet = fast["G2_payload"], fast["G3_quiet_prefix"]
+                    if (payload["expected_cases"] != expected_cases
+                            or quiet["expected_cases"] != expected_cases
+                            or quiet["expected_quiet_cases"] != expected_quiet_cases
+                            or quiet["observed_cases"] != expected_cases
+                            or quiet["observed_quiet_cases"] != expected_quiet_cases):
+                        raise ValueError(f"native {name} fast case counts differ from the manifest-bound corpus")
                     live = test["proofs"]["G4_live"] if name == "full" else fast["G4_live"]
                     if live["status"] != ("PASS" if name == "full" else "NOT_RUN"):
                         raise ValueError(f"native {name} live class differs from expected proof")
