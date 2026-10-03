@@ -283,9 +283,8 @@ function contextFor(c: Case): MatchContext {
 	return ctx;
 }
 
-/** The buffer omp matches for this case at toolcall_end / end of text. */
+/** Native `omp ttsr test` receives the command argument, not the serialized JSON transport envelope. */
 function wirePayload(c: Case): string {
-	if (c.source === "tool" && c.tool === "bash") return JSON.stringify({ command: c.snippet });
 	return c.snippet;
 }
 

@@ -17,11 +17,8 @@ for await (const line of input) {
 		const source = request.source ?? "tool";
 		const toolName = request.tool ?? "bash";
 		const context = { source, toolName, streamKey: `toolcall:l9:${request.path ?? "-"}`, ...(request.path && request.path !== "-" ? { filePaths: [request.path, join(process.cwd(), request.path)] } : {}) };
-		const wire = source === "tool" && toolName === "bash" ? JSON.stringify({ command: request.snippet }) : request.snippet;
+		const wire = request.snippet;
 		let matches: unknown[] = [];
-		if (registered && source === "tool" && toolName === "bash") {
-			for (let offset = 0; offset < wire.length; offset += 7) { const delta = manager.checkDelta(wire.slice(offset, offset + 7), context); if (Array.isArray(delta)) matches = matches.concat(delta); }
-		}
 		const final = registered ? await manager.checkSnapshot(wire, context) : [];
 		if (Array.isArray(final)) matches = matches.concat(final);
 		const ast = registered && source === "tool" && toolName !== "bash" ? await manager.checkAstSnapshot?.(wire, context) : [];
