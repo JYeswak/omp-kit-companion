@@ -79,7 +79,8 @@ export function collectBrowserProcesses(run: (args: readonly string[]) => { exit
 
 /** Build a recorded-PID-only reap plan; no pattern matching or kill occurs here. */
 export function planBrowserReap(report: BrowserDoctorReport): { pid: number; clones: string[] }[] {
-	return report.orphaned.map(browser => ({ pid: browser.pid, clones: browser.codeSignClones }));
+	const liveClones = new Set(report.browsers.filter(browser => browser.status === "LIVE").flatMap(browser => browser.codeSignClones));
+	return report.orphaned.map(browser => ({ pid: browser.pid, clones: browser.codeSignClones.filter(clone => !liveClones.has(clone)) }));
 }
 
 export type BrowserReapDeps = { kill: (pid: number) => boolean; quarantine: (path: string) => boolean };
