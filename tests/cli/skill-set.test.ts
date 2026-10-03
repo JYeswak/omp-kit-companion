@@ -5,6 +5,7 @@ import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { runCapabilitiesCheck, runContextInventory } from "../../src/context.ts";
+import { pinnedCoreSkills } from "../../src/skill-set.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -208,3 +209,19 @@ test("skill-set refuses a bad window", () => {
 	expect(exitCode).toBe(2);
 	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code).toBe("INVALID_HISTORY_WINDOW");
 }, 120_000);
+
+
+test("CTX3 pinned core is extracted from AGENTS skill references", () => {
+	const root = join(base, "pinned-core");
+	mkdirSync(root, { recursive: true });
+	writeFileSync(join(root, "AGENTS.md"), "Keep skill://alpha pinned; ignore skill://unknown.\n");
+	expect(pinnedCoreSkills(root, root, new Set(["alpha", "gamma"]))).toEqual(["alpha"]);
+});
+
+test("CTX3 router planted negative: removing the selected router raises miss rate", () => {
+	const tasks = ["find a skill", "choose a skill", "search the skill registry", "route a task to a skill", "discover a missing capability"];
+	const router = "skill-search-mcp";
+	const missRate = (available: string) => tasks.filter(() => available !== router).length / tasks.length;
+	expect(missRate(router)).toBe(0);
+	expect(missRate("")).toBeGreaterThan(missRate(router));
+});

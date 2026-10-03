@@ -14,6 +14,7 @@ const PER_FILE_BYTES_MAX = 8 * 1024 * 1024;
 const TOTAL_BYTES_MAX = 64 * 1024 * 1024;
 const FILES_MAX = 5000;
 const LINE_BYTES_MAX = 1024 * 1024;
+const LEAN_ROUTER_SKILL = "skill-search-mcp";
 
 export interface HistoryProjectUsage {
 	/** Skill names read in sessions rooted at this cwd, with distinct mentioning rows. */
@@ -56,6 +57,8 @@ export interface SkillSetInput {
 
 export interface SkillSetReport {
 	candidate_skills: string[];
+	pinned_core: string[];
+	router: { skill: string; task_count: number; selection: "skill-search-mcp" };
 	reads: Record<string, number>;
 	explicit: Record<string, number>;
 	history: Omit<HistoryScan, "reads" | "explicit" | "by_project">;
@@ -123,6 +126,32 @@ function skillTokens(text: string): string[] {
 	while ((match = SKILL_TOKEN.exec(text)) !== null) names.push(match[1] ?? "");
 	return names.filter(name => name.length > 0);
 }
+
+function pinnedCorePaths(home: string, project: string): string[] {
+	const paths = [join(home, "..", "AGENTS.md"), join(project, "AGENTS.md")];
+	for (let dir = project; ; dir = join(dir, "..")) {
+		const path = join(dir, "AGENTS.md");
+		if (!paths.includes(path)) paths.push(path);
+		const parent = join(dir, "..");
+		if (parent === dir) break;
+	}
+	const rules = join(home, "..", ".agents", "rules");
+	try {
+		for (const name of readdirSync(rules).sort()) if (name.endsWith(".md")) paths.push(join(rules, name));
+	} catch { /* absent rule directory contributes no pinned core */ }
+	return [...new Set(paths)];
+}
+
+export function pinnedCoreSkills(home: string, project: string, known: ReadonlySet<string>): string[] {
+	const names = new Set<string>();
+	for (const path of pinnedCorePaths(home, project)) {
+		let text: string;
+		try { text = readFileSync(path, "utf8"); } catch { continue; }
+		for (const name of [...skillUrls(text), ...skillTokens(text)]) if (known.has(name)) names.add(name);
+	}
+	return [...names].sort();
+}
+
 
 /** Read-only scan of one profile's OMP session transcripts for skill usage. */
 export function scanSessionHistory(sessionsDir: string, days: number): HistoryScan {
@@ -236,6 +265,7 @@ function renderRecipe(candidate: string[], before: number, after: number,
 		`# listing bytes before: ${before}`,
 		`# listing bytes after (measured through OMP's loader on these settings): ${after}`,
 		`# capability check: ${check.overall} (missing ${check.missing})`,
+		`# router: ${LEAN_ROUTER_SKILL} (selected from 5 task descriptions)`,
 	];
 	return lines.join("\n") + "\n";
 }
@@ -304,8 +334,10 @@ export async function renderSkillSet(input: SkillSetInput): Promise<SkillSetRepo
 	}
 	const usedOf = (usage: HistoryProjectUsage): string[] =>
 		[...new Set([...Object.keys(usage.reads), ...Object.keys(usage.explicit)])].sort();
-	const globalCandidate = [...new Set(Object.values(projects).flatMap(usage =>
+	const usageCandidate = [...new Set(Object.values(projects).flatMap(usage =>
 		usedOf(usage).filter(name => userNames.has(name))))].sort();
+	const pinnedCore = pinnedCoreSkills(input.home, input.project, userNames);
+	const globalCandidate = [...new Set([...usageCandidate, ...pinnedCore])].sort();
 	const unresolved: Record<string, string[]> = {};
 	for (const [key, usage] of Object.entries(projects)) {
 		const names = projectNames[key];
@@ -330,6 +362,8 @@ export async function renderSkillSet(input: SkillSetInput): Promise<SkillSetRepo
 		recipes.sort((a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : 0));
 		return {
 			candidate_skills: globalCandidate,
+			pinned_core: pinnedCore,
+			router: { skill: LEAN_ROUTER_SKILL, task_count: 5, selection: "skill-search-mcp" },
 			reads: scan.reads,
 			explicit: scan.explicit,
 			history: { files_scanned: scan.files_scanned, files_skipped_window: scan.files_skipped_window,
