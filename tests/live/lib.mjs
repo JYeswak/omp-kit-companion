@@ -152,6 +152,11 @@ function verdict(i, log, proj, ompExit) {
 	if (e.marker === "absent" && fs.existsSync(marker)) errs.push(`marker .ran_${s.id} present: the command ran`);
 	for (const f of e.files_absent ?? []) if (fs.existsSync(path.join(proj, f))) errs.push(`${f} was written`);
 	for (const f of e.files_present ?? []) if (!fs.existsSync(path.join(proj, f))) errs.push(`${f} was not written`);
+	for (const [f, content] of Object.entries(e.file_contents ?? {})) {
+		const target = path.join(proj, f);
+		if (!fs.existsSync(target)) errs.push(f + " was not written");
+		else if (fs.readFileSync(target, "utf8") !== content) errs.push(f + " changed unexpectedly");
+	}
 	console.log(errs.length ? `FAIL: ${errs.join("; ")}` : "ok");
 }
 

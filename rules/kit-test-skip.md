@@ -7,6 +7,7 @@ condition:
   - '@pytest\.mark\.(skip(?:if)?|xfail)\b'
   - '@unittest\.skip'
   - '\bt\.Skip(Now|f)?\('
+  - '\\tt\.Skip(Now|f)?\('
 astLiveScenario: test-skip-ts-fire
 astCondition:
   - "#[ignore]"
