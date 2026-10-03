@@ -155,7 +155,36 @@ test("inspect keeps live owners, reaps dead ones, and skips missing or legacy ow
   expect(inspectSession(naked, root, deps).reason).toBe("no-owner-file");
   expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
 });
+test("runtime omp-kit-work dirs with dead owners are reaped from system temp", () => {
+	const home = useState();
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "runtime-work-root-"));
+	roots.push(root);
+	delete process.env.OMP_KIT_SCRATCH_ROOTS;
+	process.env.TMPDIR = root;
+	const work = join(root, "omp-kit-work.dead");
+	mkdirSync(work, { recursive: true });
+	const dead = deadPid();
+	writeFileSync(join(work, ".owner"), ownerText({ pid: String(dead), process_start: "Thu Jan  1 00:00:00 1970", label: "omp-kit-work", repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "runtime-adapter" }));
+	writeFileSync(join(work, "payload"), "runtime work\n");
+	const deps: ApplyDeps = { ...depsFor(), home };
+	const plan = planScratch(home, deps);
+	expect(plan.sessions.find(session => session.dir === work)?.action).toBe("REAP");
+	const applied = applyScratch(home, deps);
+	expect(applied.applied.find(session => session.dir === work)?.action).toBe("REAP");
+	expect(existsSync(work)).toBe(false);
+});
 
+test("runtime adapter TERM leaves its workdir for no later reaper", async () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "runtime-term-root-"));
+	roots.push(root);
+	const adapter = resolve(import.meta.dir, "../../scripts/runtime-adapter.sh");
+	const child = Bun.spawn(["sh", "-c", "work=$(TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], { stdout: "ignore", stderr: "ignore" });
+	for (let attempt = 0; attempt < 100 && !existsSync(join(root, "workdir")); attempt++) await Bun.sleep(10);
+	expect(existsSync(join(root, "workdir"))).toBe(true);
+	await child.exited;
+	const workdir = readFileSync(join(root, "workdir"), "utf8");
+	expect(existsSync(workdir)).toBe(false);
+}, 30_000);
 test("inspect refuses a dead owner with open descriptors and a name that mismatches", () => {
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
   roots.push(root);

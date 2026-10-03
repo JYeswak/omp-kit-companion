@@ -298,6 +298,22 @@ export function quarantineTimeOf(entryName: string): number | null {
 	return Number.isFinite(time) ? time : null;
 }
 
+export function resolveSystemWorkDirs(): string[] {
+	if (process.env.OMP_KIT_SCRATCH_ROOTS !== undefined && process.env.OMP_KIT_SCRATCH_ROOTS !== "") return [];
+	const roots: string[] = [];
+	for (const base of new Set([process.env.TMPDIR ?? "/tmp", "/tmp"])) {
+		let entries: string[];
+		try { entries = readdirSync(base); } catch { continue; }
+		for (const entry of entries) {
+			if (!entry.startsWith("omp-kit-work.")) continue;
+			const dir = join(base, entry);
+			try {
+				if (statSync(dir).isDirectory() && !isSymlink(dir)) roots.push(dir);
+			} catch { /* concurrent deletion */ }
+		}
+	}
+	return [...new Set(roots)];
+}
 export function resolveScratchRoots(home: string): string[] {
 	const override = process.env.OMP_KIT_SCRATCH_ROOTS;
 	if (override !== undefined && override !== "") return override.split(delimiter).map(part => part.trim()).filter(part => part !== "");
@@ -756,7 +772,7 @@ export function killOrphan(pid: number, deps: ApplyDeps): boolean {
 export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number }
 
 /** One directory through the full plan verdict (owner release, live/dead identity and unowned age). */
-export function inspectOne(dir: string, root: string, deps: InspectDeps): ScratchVerdict | null {
+export function inspectOne(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict | null {
 	try {
 		if (!statSync(dir).isDirectory() || isSymlink(dir)) return null;
 	} catch {
@@ -768,7 +784,7 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps): Scratc
 		return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine",
 			owner: released.owner, sizeBytes: dirSize(dir) };
 	}
-	const verdict = inspectSession(dir, root, deps);
+	const verdict = inspectSession(dir, root, deps, nameRequired);
 	if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
 		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete")) {
 		const freshest = idleSince(dir, deps.now ?? Date.now());
@@ -795,17 +811,19 @@ function eachSessionDir(root: string, visit: (dir: string) => void): void {
 
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = resolveScratchRoots(home);
+	const systemWorkDirs = resolveSystemWorkDirs();
 	const sessions: ScratchVerdict[] = [];
-	for (const root of roots) {
-		eachSessionDir(root, dir => {
-			const verdict = inspectOne(dir, root, deps);
-			if (verdict === null) return;
-			sessions.push(verdict);
-			deps.onProgress?.(verdict);
-		});
-	}
+	const visit = (dir: string, root: string, nameRequired = true) => {
+		const verdict = inspectOne(dir, root, deps, nameRequired);
+		if (verdict === null) return;
+		sessions.push(verdict);
+		deps.onProgress?.(verdict);
+	};
+	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
+	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
+	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
-	return { roots, sessions, orphans,
+	return { roots: allRoots, sessions, orphans,
 		reapableBytes: sessions.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: sessions.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }
@@ -814,25 +832,27 @@ export interface ScratchApplyResult extends ScratchPlan { applied: ScratchVerdic
 
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
 	const roots = resolveScratchRoots(home);
+	const systemWorkDirs = resolveSystemWorkDirs();
 	const sessions: ScratchVerdict[] = [];
 	const applied: ScratchVerdict[] = [];
-	const rootOf = (dir: string): string => roots.find(r => dir.startsWith(`${r}/`)) ?? dirname(dir);
-	for (const root of roots) {
-		eachSessionDir(root, dir => {
-			const verdict = inspectOne(dir, root, deps);
-			if (verdict === null) return;
-			sessions.push(verdict);
-			let terminal = verdict;
-			if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, deps);
-			else if (verdict.action === "QUARANTINE") {
-				terminal = verdict.reason === "owner-released-would-quarantine"
-					? applyReleased(verdict.dir, root, verdict, deps)
-					: applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
-			}
-			applied.push(terminal);
-			deps.onProgress?.(terminal);
-		});
-	}
+	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
+	const rootOf = (dir: string): string => allRoots.find(r => dir.startsWith(r + "/")) ?? dirname(dir);
+	const visit = (dir: string, root: string, nameRequired = true) => {
+		const verdict = inspectOne(dir, root, deps, nameRequired);
+		if (verdict === null) return;
+		sessions.push(verdict);
+		let terminal = verdict;
+		if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, deps);
+		else if (verdict.action === "QUARANTINE") {
+			terminal = verdict.reason === "owner-released-would-quarantine"
+				? applyReleased(verdict.dir, root, verdict, deps)
+				: applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
+		}
+		applied.push(terminal);
+		deps.onProgress?.(terminal);
+	};
+	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
+	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	const killed = orphans.map(proc => {
 		const ok = killOrphan(proc.pid, deps);
@@ -840,7 +860,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		return { pid: proc.pid, command: proc.command, ok };
 	});
 	const expired = applyQuarantineExpiry(home, deps);
-	return { roots, sessions, orphans, applied, killed, expired,
+	return { roots: allRoots, sessions, orphans, applied, killed, expired,
 		reapableBytes: applied.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: applied.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }

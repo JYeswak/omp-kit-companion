@@ -68,6 +68,16 @@ new_workdir() {
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
 	work=$(CDPATH='' cd -- "$work" && pwd -P) || die "cannot resolve private work directory"
+	owner_pid="${OMP_KIT_WORK_OWNER_PID:-$PPID}"
+	process_start=$(/usr/bin/ps -p "$owner_pid" -o lstart= 2>/dev/null || true)
+	argv0=$(/usr/bin/ps -p "$owner_pid" -o comm= 2>/dev/null || true)
+	if [ -n "$process_start" ] && [ -n "$argv0" ]; then
+		printf 'pid=%s\\nprocess_start=%s\\nlabel=omp-kit-work\\nrepo=%s\\ncreated_at=%s\\nargv0=%s\\n' \\
+			"$owner_pid" "$process_start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
+	else
+		printf 'pid=%s\\nlabel=omp-kit-work\\nrepo=%s\\ncreated=%s\\n' \\
+			"$owner_pid" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.owner"
+	fi
 	printf '%s\n' "$work"
 }
 
