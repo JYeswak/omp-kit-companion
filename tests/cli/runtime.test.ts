@@ -332,20 +332,41 @@ test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () =
 	expect(normalDir.startsWith(realpathSync(normalBase))).toBe(true);
 	expect(realpathSync(normalDir)).toBe(normalDir);
 });
-test("runtime temp root follows TMPDIR and returns its canonical path", () => {
+function systemTempRoot(): string {
+	if (process.platform === "darwin") {
+		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]);
+		if (result.exitCode !== 0) throw new Error("cannot locate macOS private temp root");
+		return realpathSync(result.stdout.toString().trim());
+	}
+	return realpathSync("/tmp");
+}
+
+test("runtime temp root rejects TMPDIR outside system temporary roots", () => {
 	const base = fixtureRoot();
-	const target = join(base, "tmp-target");
-	const alias = join(base, "tmp-alias");
+	const outsideSystemTemp = REPO_ROOT;
 	const home = join(base, "home");
-	mkdirSync(target);
 	mkdirSync(home);
-	symlinkSync(target, alias);
 	const previousHome = process.env.HOME;
 	const previousTmpdir = process.env.TMPDIR;
 	process.env.HOME = home;
-	process.env.TMPDIR = alias;
+	process.env.TMPDIR = outsideSystemTemp;
 	try {
-		expect(runtimeTempRoot()).toBe(realpathSync(target));
+		expect(runtimeTempRoot()).toBe(systemTempRoot());
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previousTmpdir;
+	}
+});
+
+test("runtime temp root accepts the operating-system temporary root", () => {
+	const previousHome = process.env.HOME;
+	const previousTmpdir = process.env.TMPDIR;
+	process.env.HOME = process.cwd();
+	process.env.TMPDIR = systemTempRoot();
+	try {
+		expect(runtimeTempRoot()).toBe(systemTempRoot());
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;

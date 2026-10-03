@@ -2,6 +2,7 @@
 
 ## Unreleased
 - doctor --scope work inventories configured developer repositories read-only: dirty files, upstream/ahead state, stashes, detached worktrees, last-commit age, active worktrees, bounded per-repo timeouts, risk sorting, JSON envelopes and human tables. It never fetches or writes. (PR #57)
+- Packaged test isolation falls back to OS-approved temporary roots when `TMPDIR` points outside them, keeping stage adapters within their system-temp boundary.
 
 - The metamorphic ratchet baseline is deleted: `test --metamorphic` and the ladder now fail on any break, with no checked-in allowance (L1). (PR #55)
 

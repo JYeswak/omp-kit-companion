@@ -12,10 +12,40 @@ export interface BundledRunResult {
 const CHILD_ENV_KEYS = ["CI", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER"] as const;
 const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"] as const;
 
+let cachedSystemTempRoots: readonly string[] | undefined;
+
+function systemTempRoots(): readonly string[] {
+	if (cachedSystemTempRoots) return cachedSystemTempRoots;
+	if (process.platform === "darwin") {
+		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { PATH: "/usr/bin:/bin" },
+		});
+		if (result.exitCode !== 0) {
+			throw new Error(`cannot locate macOS private temp root: ${result.stderr.toString().trim()}`);
+		}
+		const configuredRoot = result.stdout.toString().trim();
+		if (!isAbsolute(configuredRoot)) throw new Error(`getconf returned a non-absolute temp root: ${configuredRoot}`);
+		const roots = [realpathSync(configuredRoot)];
+		try { roots.push(realpathSync("/private/tmp")); } catch {}
+		cachedSystemTempRoots = roots;
+		return roots;
+	}
+	if (process.platform === "linux") return cachedSystemTempRoots = [realpathSync("/tmp")];
+	throw new Error(`unsupported platform for isolated runtime scratch: ${process.platform}`);
+}
+
+
 export function runtimeTempRoot(): string {
+	const roots = systemTempRoots();
 	try {
 		const root = realpathSync(tmpdir());
-		if (statSync(root).isDirectory()) {
+		const rootWithinSystemTemp = roots.some(systemRoot => {
+			const fromSystemRoot = relative(systemRoot, root);
+			return fromSystemRoot === "" || (fromSystemRoot !== ".." && !fromSystemRoot.startsWith(`..${sep}`) && !isAbsolute(fromSystemRoot));
+		});
+		if (statSync(root).isDirectory() && rootWithinSystemTemp) {
 			const home = process.env.HOME;
 			if (!home || !isAbsolute(home)) return root;
 			try {
@@ -26,21 +56,7 @@ export function runtimeTempRoot(): string {
 			}
 		}
 	} catch {}
-	if (process.platform === "darwin") {
-		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { PATH: "/usr/bin:/bin" },
-		});
-		if (result.exitCode !== 0) {
-			throw new Error(`cannot locate macOS private temp root: ${result.stderr.toString().trim()}`);
-		}
-		const root = result.stdout.toString().trim();
-		if (!isAbsolute(root)) throw new Error(`getconf returned a non-absolute temp root: ${root}`);
-		return realpathSync(root);
-	}
-	if (process.platform === "linux") return realpathSync("/tmp");
-	throw new Error(`unsupported platform for isolated runtime scratch: ${process.platform}`);
+	return roots[0]!;
 }
 
 function sanitizedEnv(
