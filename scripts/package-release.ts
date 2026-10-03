@@ -73,7 +73,7 @@ function argumentsOf(args: string[]) {
 	if (!isAbsolute(out) || resolve(out) !== out || !lstatSync(out).isDirectory() || lstatSync(out).isSymbolicLink()) fail("UNSAFE_OUTPUT_DIRECTORY");
 	return { version, key, out };
 }
-function run(): void {
+async function run(): Promise<void> {
 	const { version, key, out } = argumentsOf(process.argv.slice(2));
 	const filename = `omp-kit-v${version}-${key}.tar`;
 	const output = join(out, filename);
@@ -100,8 +100,16 @@ function run(): void {
 		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv");
 		names.sort();
 		if (new Set(names).size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
-		const content = new Map(names.map(name => [name, name === RELEASE_BINARY_NAME ? safeCompiled(binary) :
-			name === "MANIFEST.tsv" ? ruleManifest : safeSource(name)]));
+		const content = new Map<string, Buffer>();
+		for (const name of names) {
+			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
+			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
+			else if (name === "extensions/fleet-guard.ts") {
+				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
+				if (!bundled.success || bundled.outputs.length !== 1) fail("FLEET_GUARD_BUNDLE_FAILED");
+				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
+			} else content.set(name, safeSource(name));
+		}
 		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);
 		validateReleaseManifest(JSON.parse(manifest.toString("utf8")));
@@ -140,7 +148,7 @@ function safeCompiled(binary: string): Buffer {
 	if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail("UNSAFE_COMPILED_BINARY");
 	return readFileSync(binary);
 }
-try { run(); } catch (error) {
+try { await run(); } catch (error) {
 	process.stderr.write(`package-release: ${error instanceof Error ? error.message : String(error)}\n`);
 	process.exitCode = 1;
 }

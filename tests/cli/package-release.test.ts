@@ -40,7 +40,7 @@ beforeAll(() => {
 	expect(createHash("sha256").update(bytes).digest("hex")).toBe(asset.sha256);
 	index = { schema_version: 1, version: "1.2.3", source_tag: "v1.2.3", assets: { [key]: asset } };
 	writeFileSync(indexPath, `${JSON.stringify(index)}\n`);
-});
+}, 30_000);
 afterAll(() => rmSync(output, { recursive: true, force: true }));
 
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
@@ -68,6 +68,9 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
 		expect(staged.files).toContain(essential);
+	const shippedFleetGuard = readFileSync(join(staged.root, "extensions", "fleet-guard.ts"), "utf8");
+	expect(shippedFleetGuard).not.toContain("../src/fleet-guard/");
+	expect(shippedFleetGuard).toContain("export");
 	expect(staged.files).not.toContain("scripts/role-check.ts");
 	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output }, stdout: "pipe", stderr: "pipe" });
 	expect(compiled.exitCode).toBe(0);

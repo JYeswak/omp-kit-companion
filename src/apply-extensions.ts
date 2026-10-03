@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, type Stats } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
-import { applyMutation, inspectPendingMutations, planMutation, type ApplyOptions, type FileMutation, type Image, type MutationPlan, type PendingInspection } from "./mutations.ts";
-
+import { applyMutation, inspectPendingMutations, planMutation, undoMutation, type ApplyOptions, type FileMutation, type Image, type MutationPlan, type PendingInspection } from "./mutations.ts";
+import { checkExtensionImports } from "./extensions.ts";
 export type ExtensionInput = { root: string; home: string; stateRoot: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean };
 export type ExtensionStep = { kind: "extension" | "profile"; path: string; profile?: string; beforeSha256: string | null; afterSha256: string };
 export type ExtensionPlan = {
@@ -226,6 +226,11 @@ export function applyExtensions(plan: ExtensionPlan, options?: ApplyOptions): Ex
 		return { receiptId: null, files: 0 };
 	}
 	const receipt = applyMutation(plan.mutation, options);
+	const imports = checkExtensionImports({ home: resolve(plan.destination, "..", "..", "..") });
+	if (imports.status === "DEGRADED") {
+		undoMutation(plan.stateRoot, receipt.id, { confirmed: true });
+		stop("EXTENSION_IMPORTS_UNRESOLVED");
+	}
 	return { receiptId: receipt.id, files: receipt.files };
 }
 export function inspectPendingExtensions(stateRoot: string): PendingInspection[] { return inspectPendingMutations(stateRoot); }

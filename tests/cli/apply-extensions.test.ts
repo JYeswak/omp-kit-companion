@@ -37,6 +37,17 @@ test("an unmanaged kit guard collision is skipped while fleet-guard still instal
 	expect(readFileSync(config, "utf8")).toContain(fleetDestination);
 });
 
+test("unresolvable fleet-guard import refuses and rolls back the complete receipt", () => {
+	const f = fixture(), config = f.profile("default");
+	writeFileSync(join(f.release, "policy", "extensions.json"), JSON.stringify({ extensions: ["fleet-guard.ts"], skipProfiles: [] }));
+	writeFileSync(join(f.release, "extensions", "fleet-guard.ts"), "import \"./missing-fleet-dependency.ts\";\nexport default function fleet() {}\n");
+	const beforeConfig = readFileSync(config);
+	const plan = planExtensions(f.input);
+	expect(() => applyExtensions(plan)).toThrow("EXTENSION_IMPORTS_UNRESOLVED");
+	expect(existsSync(join(f.home, ".omp", "omp-extensions", "fleet-guard.ts"))).toBe(false);
+	expect(readFileSync(config)).toEqual(beforeConfig);
+});
+
 test("skipProfiles excludes named profile while install and default config share one receipt", () => {
 	const f = fixture(), defaultConfig = f.profile("default"), ignoredConfig = f.profile("ignored");
 	const plan = planExtensions({ ...f.input, includeDefault: true });
