@@ -1,3 +1,5 @@
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 export type BrowserProcess = {
 	pid: number;
@@ -9,6 +11,7 @@ export type BrowserProcess = {
 };
 export type BrowserSession = { pid: number; alive: boolean };
 export type BrowserFinding = BrowserProcess & { status: "ORPHAN" | "LIVE"; reason: string; ageMs: number };
+export type BrowserInventory = { processes: BrowserProcess[]; sessions: BrowserSession[]; clones: string[] };
 export type BrowserDoctorReport = { status: "OK" | "WARN"; browsers: BrowserFinding[]; orphaned: BrowserFinding[]; clones: string[] };
 
 const CHROME = /(?:^|\/)(?:Google Chrome|Chromium|chrome|chromium)(?:$|\s)/i;
@@ -17,20 +20,31 @@ const USER_DATA = /--user-data-dir=([^\s"']+)/;
 const CLONE = /(?:^|\s)(\/[^\s]*code_sign_clone[^\s]*)/g;
 
 /** Pure classification: only headless Chrome descendants of OMP broker processes qualify. */
-export function inspectBrowserProcesses(processes: readonly BrowserProcess[], sessions: readonly BrowserSession[], now = Date.now()): BrowserDoctorReport {
+export function inspectBrowserProcesses(processes: readonly BrowserProcess[], sessions: readonly BrowserSession[], now = Date.now(), extraClones: readonly string[] = []): BrowserDoctorReport {
 	const byPid = new Map(processes.map(process => [process.pid, process]));
 	const liveSessions = new Set(sessions.filter(session => session.alive).map(session => session.pid));
 	const browsers = processes.filter(process => CHROME.test(process.command) && /--headless(?:=|\s|$)/i.test(process.command)
-		&& isBrokerDescendant(process, byPid));
+		&& (process.ppid === 1 || isBrokerDescendant(process, byPid)));
 	const classified = browsers.map(browser => {
 		const sessionAlive = liveSessions.has(browser.ppid) || liveSessions.has(byPid.get(browser.ppid)?.ppid ?? -1);
 		return { ...browser, status: sessionAlive ? "LIVE" as const : "ORPHAN" as const,
-			reason: sessionAlive ? "owning OMP session is live" : "owning OMP session is absent", ageMs: Math.max(0, now - browser.startedAt) };
+			reason: sessionAlive ? "owning OMP session is live" : browser.ppid === 1 ? "broker was reparented to launchd" : "owning OMP session is absent", ageMs: Math.max(0, now - browser.startedAt) };
 	});
 	const orphaned = classified.filter(browser => browser.status === "ORPHAN");
-	const clones = [...new Set(orphaned.flatMap(browser => browser.codeSignClones))];
+	const clones = [...new Set([...orphaned.flatMap(browser => browser.codeSignClones), ...extraClones])];
 	return { status: orphaned.length ? "WARN" : "OK", browsers: classified, orphaned, clones };
 }
+function discoverCodeSignClones(): string[] {
+	const found: string[] = [];
+	try {
+		for (const first of readdirSync("/var/folders")) for (const second of readdirSync(join("/var/folders", first))) {
+			const root = join("/var/folders", first, second, "X", "com.google.Chrome.code_sign_clone");
+			try { for (const name of readdirSync(root)) found.push(join(root, name)); } catch { /* bounded root absent */ }
+		}
+	} catch { /* inaccessible temp roots remain unverified */ }
+	return found;
+}
+
 function isBrokerDescendant(process: BrowserProcess, byPid: ReadonlyMap<number, BrowserProcess>): boolean {
 	const seen = new Set<number>();
 	for (let pid = process.ppid; pid > 0 && !seen.has(pid); pid = byPid.get(pid)?.ppid ?? 0) {
@@ -42,7 +56,7 @@ function isBrokerDescendant(process: BrowserProcess, byPid: ReadonlyMap<number, 
 
 
 /** Read the local process table; no process is killed or mutated. */
-export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString() }; }): { processes: BrowserProcess[]; sessions: BrowserSession[] } {
+export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString() }; }): BrowserInventory {
 	let result = run(["/bin/ps", "-axo", "pid=,ppid=,etimes=,command="]);
 	const rows: BrowserProcess[] = [];
 	if (result.exitCode !== 0) result = run(["/bin/ps", "-axo", "pid=,ppid=,lstart=,command="]);
@@ -60,7 +74,7 @@ export function collectBrowserProcesses(run: (args: readonly string[]) => { exit
 		}
 	}
 	const pids = new Set(rows.map(row => row.pid));
-	return { processes: rows, sessions: rows.filter(row => BROKER.test(row.command)).map(row => ({ pid: row.pid, alive: pids.has(row.pid) })) };
+	return { processes: rows, sessions: rows.filter(row => BROKER.test(row.command)).map(row => ({ pid: row.pid, alive: pids.has(row.pid) })), clones: arguments.length === 0 ? discoverCodeSignClones() : [] };
 }
 
 /** Build a recorded-PID-only reap plan; no pattern matching or kill occurs here. */
