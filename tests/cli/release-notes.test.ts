@@ -184,6 +184,15 @@ test("only --write updates CHANGELOG.md and it refuses local edits", () => {
 	writeFileSync(changelogPath, headChangelog);
 });
 
+test("the tag-time check passes on the assembled release commit, as release.yml runs it", () => {
+	const releaseCommit = commitWithFiles(git("rev-parse", "HEAD"), "release v0.2.3", { "CHANGELOG.md": assembledChangelog });
+	git("update-ref", "refs/heads/main", releaseCommit);
+	const atRelease = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(atRelease.exitCode, atRelease.output).toBe(0);
+	expect(atRelease.output).toContain("covered by the release section in CHANGELOG.md");
+	git("update-ref", "refs/heads/main", releaseHead);
+});
+
 test("release check rejects a merged PR without a fragment or tagged Unreleased line", () => {
 	const currentHead = git("rev-parse", "HEAD");
 	const missingTree = treeWithFiles(currentHead, { "fixture-change.txt": "merged change without a release note\n" });

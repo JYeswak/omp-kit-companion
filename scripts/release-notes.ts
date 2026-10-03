@@ -62,8 +62,10 @@ function run(): void {
 			if (fragment) {
 				console.log(`PR #${pr} covered by ${fragment.path}: ${fragment.content}`);
 			} else {
-				const line = history.unreleasedByPr.get(pr)!;
-				console.log(`PR #${pr} covered by CHANGELOG.md:${line.lineNumber} (Unreleased): ${line.text.trim()}`);
+				const line = history.unreleasedByPr.get(pr);
+				console.log(line
+					? `PR #${pr} covered by CHANGELOG.md:${line.lineNumber} (Unreleased): ${line.text.trim()}`
+					: `PR #${pr} covered by the release section in CHANGELOG.md`);
 			}
 		}
 		for (const commit of history.directCommits) {
@@ -189,11 +191,20 @@ function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseT
 		unreleasedByPr.set(pr, { ...line, pr });
 	}
 
+	// At the release commit, assembly has moved legacy Unreleased lines into the new version section.
+	const releasedPrs = new Set<string>();
+	const releaseHeading = unreleased.lines[unreleased.nextHeadingIndex]!;
+	if (releaseHeading.trim() !== `## ${baseTag.replace(/^v/, "")}` && !releaseHeading.startsWith(`## ${baseTag.replace(/^v/, "")} `)) {
+		const end = unreleased.lines.findIndex((line, index) => index > unreleased.nextHeadingIndex && /^##\s+/.test(line));
+		for (const line of unreleased.lines.slice(unreleased.nextHeadingIndex + 1, end < 0 ? undefined : end)) {
+			for (const match of line.matchAll(/\(PR #(\d+)\)/g)) releasedPrs.add(match[1]!);
+		}
+	}
 	for (const pr of mergedPrs) {
 		const fragment = byPr.get(pr);
 		const line = unreleasedByPr.get(pr);
 		if (fragment && line) fail(`merged PR #${pr} has both a changelog.d fragment and a tagged line in CHANGELOG.md ## Unreleased`);
-		if (!fragment && !line)
+		if (!fragment && !line && !releasedPrs.has(pr))
 			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased`);
 	}
 	for (const fragment of fragments) {

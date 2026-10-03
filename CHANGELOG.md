@@ -44,6 +44,10 @@
 
 - Gate native differential fuzzing on live wire parity.
 
+- Contributors get a pre-push gate: the manifest check, the harness gate and changed-area focused suites run against a `git archive` of the pushed commit, refusing stale manifests and deleted gate functions.
+
+- The release-notes check passes on the assembled release commit, where legacy Unreleased lines have moved into the new version section.
+
 ## 0.2.2 — 2026-10-02
 
 - `doctor --scope services` inventories launchd jobs and validates declared required jobs without loading or writing services. (PR #24)
