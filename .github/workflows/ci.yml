@@ -132,6 +132,7 @@ jobs:
           retention-days: 7
 
   build-candidates:
+    needs: resolve-omp-versions
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -144,6 +145,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install the minimum OMP (package-time manifest classification parses rules with OMP)
+        env:
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.minimum }}
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Compile one provisional target and record its immutable archive hash
         env:
           TARGET: ${{ matrix.platform }}
