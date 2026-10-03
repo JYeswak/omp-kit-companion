@@ -84,6 +84,32 @@ renders the plist, the diff and the install plan without changing
 anything; add `--apply --yes` to install it for real. Install refuses a
 label already loaded from a different plist unless `--replace` is given.
 
+## Scratch lifecycle
+
+`omp-kit scratch plan` previews recognized scratch roots and sessions without
+changing them. `omp-kit scratch apply --apply` reaps eligible dead-owner
+directories, quarantines unowned scratch idle for 72 hours or owner-released
+scratch, expires quarantine after seven days, and stops identified abandoned
+harness-server processes. A task owner can run `omp-kit scratch release DIR`
+from the owner process or one of its descendants to attest that a direct
+child of a scratch root is finished. The release does not immediately move
+the directory; the next scratch-reaper run quarantines it only when no open
+file descriptors remain. Released quarantine is retained for seven days,
+then expires. Unreleased live sessions stay in place. Existing four-field
+`.owner` markers from the fleet guard are recognized conservatively: a
+currently live PID is kept because that format has no process-start identity.
+
+Preview the service schedule with
+`omp-kit service install scratch-reaper --dry-run`; on macOS this manages a
+per-user LaunchAgent and on Linux systemd units. Install or update it with
+`omp-kit service install scratch-reaper --apply --yes`. The LaunchAgent runs
+at load and every six hours; the systemd timer starts at boot and repeats
+every six hours.
+`omp-kit service run scratch-reaper` applies those actions and records the run
+receipt. Directory cleanup is limited to recognized scratch roots, not
+unrelated cache directories; eligible abandoned harness-server processes are
+also stopped.
+
 ## Update the kit, not OMP
 
 `update` needs an explicit newer version with absolute local index and
@@ -123,12 +149,27 @@ omp plugin link "$WT" && omp plugin list
 omp ttsr list --json
 ```
 
-Native `~/.omp/agent/rules` shadows a same-name plugin rule;
-`omp plugin disable` reactivates a same-name legacy copy under
-`~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves the precedence
-matrix, one live block, the disabled-plugin negative, and clean
-uninstall in an isolated HOME. `apply rules`/`apply extensions` stay
-until the cutover is independently verified.
+Observed with OMP/18.5.1 and `omp-kit-companion@0.2.3` in an isolated
+HOME, with `ttsr test` run from that HOME. It reports the winning
+`triggered[].sourceProvider`:
+
+| Isolated HOME state | Observed `sourceProvider` |
+| --- | --- |
+| Plugin enabled; no same-name copies | `omp-plugins` |
+| Plugin enabled; same-name legacy copy under `~/.agents/rules` | `omp-plugins` |
+| Plugin enabled; legacy copy plus same-name `~/.omp/agent/rules` overlay | `native` |
+| Plugin disabled; native overlay still present | `native` |
+| Plugin disabled; overlay moved away, legacy copy remains | `agents` |
+
+The earlier `omp-plugins` result for the final row came from running `ttsr test`
+with the repository as its working directory: it resolved
+`~/.omp/plugins/node_modules/omp-kit-companion/rules/bash-pipe-exit.md`
+despite the isolated HOME's disabled plugin state. Running from the isolated
+HOME reports the legacy provider as expected. `scripts/plugin-lifecycle.sh`
+also runs its steps from the isolated HOME and exercises these precedence
+rows, the live block, disabled-plugin fallback, and uninstall.
+`apply rules`/`apply extensions` stay until the cutover is independently
+verified.
 
 ## Measure prompt listing cost
 

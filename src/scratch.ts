@@ -1,26 +1,29 @@
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 
 /**
  * Scratch reaper (S2): plan/apply over operator scratch, ported from
  * zeststream-cast/scripts/lib/agent_tmp_reap.sh.
  *
- * A session directory is reapable ONLY when its recorded owner identity is gone
+ * A session directory is reapable ONLY when its six-field owner identity is gone
  * (or its PID was demonstrably reused) AND lsof reports no open descriptor.
- * Apply first atomically renames the entry into a central quarantine, revalidates
- * inode identity, owner snapshot and lsof state, then removes it. Dirs with no
- * (or malformed) owner file — including the legacy 3-field omp format — are never
- * reaped outright: past 72 h idle they move to quarantine, past 7 d quarantined
- * they are deleted after the same rechecks. Orphan kill targets ONLY kit harness
- * servers (ppid 1, older than 1 h, mock-model.mjs / external-live.mjs argv).
+ * Entries without that process identity (including the fleet guard's four-field
+ * marker and the legacy three-field format) use idle quarantine: past 72 h they
+ * move to quarantine, past 7 d quarantined they are deleted after lsof rechecks.
+ * Orphan kill targets ONLY kit harness servers (ppid 1, older than 1 h,
+ * mock-model.mjs / external-live.mjs argv).
  */
 
 export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
 export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number }) => ScratchRunResult;
 
-export interface ScratchOwner { pid: number; processStart: string; label: string; repo: string; createdAt: string; argv0: string }
+export interface ScratchOwner { pid: number; processStart: string | null; label: string; repo: string; createdAt: string; argv0: string | null }
 
 const OWNER_FIELDS = ["pid", "process_start", "label", "repo", "created_at", "argv0"] as const;
+const LEGACY_OWNER_FIELDS = ["pid", "label", "repo", "created"] as const;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS];
+const RELEASE_FILE = ".omp-kit-release";
 const QUARANTINE_IDLE_MS = 72 * 3600 * 1000;
 const QUARANTINE_TTL_MS = 7 * 24 * 3600 * 1000;
 const ORPHAN_MIN_AGE_S = 3600;
@@ -34,15 +37,22 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 		if (eq < 0) return null;
 		const key = line.slice(0, eq);
 		const value = line.slice(eq + 1);
-		if (!(OWNER_FIELDS as readonly string[]).includes(key)) return null;
+		if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
 		if (value === "" || /[\t\r\n]/.test(value)) return null;
 		if (seen[key] !== undefined) return null;
 		seen[key] = value;
 	}
-	for (const field of OWNER_FIELDS) if (seen[field] === undefined) return null;
+	const complete = OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === OWNER_FIELDS.length;
+	const legacy = LEGACY_OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === LEGACY_OWNER_FIELDS.length;
+	if (!complete && !legacy) return null;
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!)) return null;
-	return { pid: Number(seen.pid), processStart: seen.process_start!, label: seen.label!, repo: seen.repo!, createdAt: seen.created_at!, argv0: seen.argv0! };
+	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
+		repo: seen.repo!, createdAt: seen.created_at ?? seen.created!, argv0: seen.argv0 ?? null };
 }
+function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
+	return owner.processStart !== null && owner.argv0 !== null;
+}
+
 
 export type OwnerState = "live" | "reused" | "dead" | "live-unreachable" | "unknown";
 
@@ -145,7 +155,8 @@ export type ScratchAction = "REAP" | "QUARANTINE" | "DELETE" | "LIVE" | "SKIP";
 export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number }
 
 const APPLY_FAILURE_REASONS: Record<string, true> = {
-	"owner-changed-after-initial-check": true, "inode-proof-unavailable": true,
+	"owner-changed-after-initial-check": true, "owner-release-changed-after-initial-check": true,
+	"inode-proof-unavailable": true, "lsof-evidence-unavailable": true, "owner-released-but-open-fds-present": true,
 	"quarantine-create-failed": true, "atomic-quarantine-failed": true,
 	"final-recheck-refused": true, "delete-quarantine-failed": true,
 	"final-delete-recheck-failed": true, "delete-failed": true,
@@ -213,6 +224,11 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 	}
 	const name = dir.slice(root.length + 1);
 	if (nameRequired && name !== `${owner.label}.${owner.pid}`) return verdict("SKIP", "session-name-owner-mismatch", owner);
+	if (!hasProcessIdentity(owner)) {
+		if (deps.liveness.signalAlive(owner.pid) || deps.liveness.psVisible(owner.pid))
+			return verdict("LIVE", "owner-alive-start-unverified", owner);
+		return verdict("SKIP", "owner-identity-incomplete", owner);
+	}
 	const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 	if (state === "live" || state === "live-unreachable") return verdict("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
 	if (state === "unknown") return verdict("SKIP", "owner-liveness-unproven", owner);
@@ -386,9 +402,166 @@ function appendLog(home: string, event: ReapEvent): void {
 		/* logging never blocks the verdict */
 	}
 }
+interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string }
+
+function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerText"> & { ownerHash: string; device: string; inode: string } | null {
+	const seen: Record<string, string> = {};
+	for (const line of text.split("\n")) {
+		if (line === "") continue;
+		const eq = line.indexOf("=");
+		if (eq < 0) return null;
+		const key = line.slice(0, eq);
+		const value = line.slice(eq + 1);
+		if (!["version", "owner_sha256", "device", "inode", "released_at"].includes(key) ||
+			value === "" || /[\t\r\n]/.test(value) || seen[key] !== undefined) return null;
+		seen[key] = value;
+	}
+	if (Object.keys(seen).length !== 5 || seen.version !== "1" ||
+		!/^[0-9a-f]{64}$/.test(seen.owner_sha256!) || !/^\d+$/.test(seen.device!) ||
+		!/^\d+$/.test(seen.inode!) || !Number.isFinite(Date.parse(seen.released_at!))) return null;
+	return { markerText: text, releasedAt: seen.released_at!, ownerHash: seen.owner_sha256!, device: seen.device!, inode: seen.inode! };
+}
+
+function readReleaseRecord(dir: string): ReleaseRecord | null {
+	if (isSymlink(dir)) return null;
+	const ownerPath = join(dir, ".owner");
+	const markerPath = join(dir, RELEASE_FILE);
+	if (isSymlink(markerPath)) return null;
+	const markerText = readText(markerPath);
+	if (markerText === null || isSymlink(ownerPath)) return null;
+	const ownerText = readText(ownerPath);
+	if (ownerText === null) return null;
+	const owner = parseOwnerFile(ownerText);
+	const marker = parseReleaseMarker(markerText);
+	if (!owner || !marker) return null;
+	let stat;
+	try {
+		stat = lstatSync(dir);
+	} catch {
+		return null;
+	}
+	if (!stat.isDirectory() || stat.isSymbolicLink() ||
+		createHash("sha256").update(ownerText).digest("hex") !== marker.ownerHash ||
+		String(stat.dev) !== marker.device || String(stat.ino) !== marker.inode) return null;
+	return { owner, ownerText, markerText, releasedAt: marker.releasedAt };
+}
+
+function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
+	if (ownerPid === callerPid) return true;
+	const out = run(["ps", "-axo", "pid=,ppid="]);
+	if (out.code !== 0) return false;
+	const parents = new Map<number, number>();
+	for (const line of out.stdout.split("\n")) {
+		const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+		if (!match) continue;
+		parents.set(Number(match[1]), Number(match[2]));
+	}
+	const seen = new Set<number>([callerPid]);
+	let current = callerPid;
+	for (let depth = 0; depth < 256; depth++) {
+		const parent = parents.get(current);
+		if (parent === undefined || parent <= 0 || seen.has(parent)) return false;
+		if (parent === ownerPid) return true;
+		seen.add(parent);
+		current = parent;
+	}
+	return false;
+}
+
+export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
+
+export function releaseScratch(path: string, home: string, deps: InspectDeps): ScratchReleaseResult {
+	let dir: string;
+	try {
+		dir = resolve(path);
+	} catch {
+		return { ok: false, changed: false, dir: path, reason: "path-invalid", ownerPid: null };
+	}
+	const roots = resolveScratchRoots(home).map(root => resolve(root));
+	const root = roots.find(candidate => dirname(dir) === candidate);
+	if (!root || isSymlink(root)) return { ok: false, changed: false, dir, reason: "outside-scratch-root", ownerPid: null };
+	let stat;
+	try {
+		stat = lstatSync(dir);
+	} catch {
+		return { ok: false, changed: false, dir, reason: "directory-unavailable", ownerPid: null };
+	}
+	if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, changed: false, dir, reason: "not-a-directory", ownerPid: null };
+	const ownerPath = join(dir, ".owner");
+	if (isSymlink(ownerPath)) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };
+	const ownerText = readText(ownerPath);
+	const owner = ownerText === null ? null : parseOwnerFile(ownerText);
+	if (!owner) return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
+	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") ||
+		owner.label.startsWith(".") || basename(dir) !== `${owner.label}.${owner.pid}`)
+		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
+	if (!callerIsOwnedBy(owner.pid, process.pid, deps.run))
+		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
+	const markerPath = join(dir, RELEASE_FILE);
+	if (existsSync(markerPath)) {
+		const prior = readReleaseRecord(dir);
+		if (prior && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: owner.pid };
+	}
+	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
+	const markerText = `version=1\nowner_sha256=${createHash("sha256").update(ownerText).digest("hex")}\ndevice=${stat.dev}\ninode=${stat.ino}\nreleased_at=${releasedAt}\n`;
+	try {
+		writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+	} catch {
+		const prior = readReleaseRecord(dir);
+		if (prior && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		return { ok: false, changed: false, dir, reason: "release-marker-write-failed", ownerPid: owner.pid };
+	}
+	const released = readReleaseRecord(dir);
+	if (!released || released.markerText !== markerText || released.ownerText !== ownerText ||
+		`${stat.dev}:${stat.ino}` !== inodeOf(dir))
+		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: owner.pid };
+	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid });
+	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
+}
+
+/** Move an owner-released session to quarantine without requiring its process to exit. */
+function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
+	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
+	const released = readReleaseRecord(dir);
+	if (!released || dirname(dir) !== root || basename(dir) !== `${released.owner.label}.${released.owner.pid}`)
+		return fail("owner-release-changed-after-initial-check");
+	const identity = inodeOf(dir);
+	if (identity === null) return fail("inode-proof-unavailable");
+	const clearBefore = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	if (clearBefore !== true) return fail(clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present");
+	const at = new Date(deps.now ?? Date.now()).toISOString();
+	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
+	const qt = quarantineDir(deps.home);
+	try {
+		mkdirSync(qt, { recursive: true, mode: 0o700 });
+	} catch {
+		return fail("quarantine-create-failed");
+	}
+	const moved = join(qt, entry);
+	try {
+		renameSync(dir, moved);
+	} catch {
+		return fail("atomic-quarantine-failed");
+	}
+	const afterMove = readReleaseRecord(moved);
+	const clearAfter = lsofClear(moved, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	if (inodeOf(moved) !== identity || !afterMove || afterMove.markerText !== released.markerText ||
+		afterMove.ownerText !== released.ownerText || clearAfter !== true) {
+		try {
+			renameSync(moved, dir);
+		} catch {
+			return { ...verdict, dir: moved, action: "SKIP", reason: "final-recheck-refused" };
+		}
+		return fail("final-recheck-refused");
+	}
+	appendLog(deps.home, { event: "quarantine", dir, at, entry, owner: released.owner.pid, reason: "owner-released", sizeBytes: verdict.sizeBytes });
+	return { ...verdict, dir: moved, action: "QUARANTINE", reason: "owner-released-quarantined" };
+}
+
 
 function ownerSnapshot(owner: ScratchOwner): string {
-	return [owner.pid, owner.processStart, owner.label, owner.repo, owner.createdAt, owner.argv0].join("\n");
+	return [owner.pid, owner.processStart ?? "", owner.label, owner.repo, owner.createdAt, owner.argv0 ?? ""].join("\n");
 }
 
 /** Atomic quarantine + full recheck, then delete. Returns the terminal action. */
@@ -481,7 +654,7 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps): Scratc
 	return { ...base, dir: moved, action: "QUARANTINE", reason: "unowned-idle-72h-quarantined", sizeBytes: dirSize(moved) };
 }
 
-/** Expired quarantine entries (>7d) are deleted after owner + lsof rechecks. */
+/** Expired quarantine entries (>7d) are deleted after owner-release or lsof rechecks. */
 export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVerdict[] {
 	const done: ScratchVerdict[] = [];
 	const now = deps.now ?? Date.now();
@@ -499,8 +672,26 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		if (quarantinedAt === null || now - quarantinedAt < QUARANTINE_TTL_MS) continue;
 		const path = join(qt, entry);
 		if (isSymlink(path)) continue;
+		const released = readReleaseRecord(path);
+		if (released) {
+			const identity = inodeOf(path);
+			if (identity === null || lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+			const rechecked = readReleaseRecord(path);
+			if (!rechecked || rechecked.markerText !== released.markerText || rechecked.ownerText !== released.ownerText ||
+				inodeOf(path) !== identity || lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+			try {
+				rmSync(path, { recursive: true, force: true });
+			} catch {
+				continue;
+			}
+			if (!existsSync(path)) {
+				done.push({ dir: path, action: "DELETE", reason: "quarantine-expired-7d-owner-released", owner: released.owner, sizeBytes: 0 });
+				appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: released.owner.pid, reason: "owner-released" });
+			}
+			continue;
+		}
 		const { owner, malformed } = readOwner(path);
-	 if (!owner || malformed) {
+		if (!owner || malformed || !hasProcessIdentity(owner)) {
 			if (lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
 			try {
 				rmSync(path, { recursive: true, force: true });
@@ -564,15 +755,22 @@ export function killOrphan(pid: number, deps: ApplyDeps): boolean {
 
 export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number }
 
-/** One directory through the full plan verdict (owned gates + unowned idle mapping). */
+/** One directory through the full plan verdict (owner release, live/dead identity and unowned age). */
 export function inspectOne(dir: string, root: string, deps: InspectDeps): ScratchVerdict | null {
 	try {
 		if (!statSync(dir).isDirectory() || isSymlink(dir)) return null;
 	} catch {
 		return null;
 	}
+	const released = readReleaseRecord(dir);
+	if (released && dirname(dir) === root && resolve(dir) === dir &&
+		basename(dir) === `${released.owner.label}.${released.owner.pid}`) {
+		return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine",
+			owner: released.owner, sizeBytes: dirSize(dir) };
+	}
 	const verdict = inspectSession(dir, root, deps);
- if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" || verdict.reason === "malformed-owner-file")) {
+	if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
+		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete")) {
 		const freshest = idleSince(dir, deps.now ?? Date.now());
 		if (freshest !== null && freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS) {
 			return { ...verdict, action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine", sizeBytes: dirSize(dir) };
@@ -626,7 +824,11 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			sessions.push(verdict);
 			let terminal = verdict;
 			if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, deps);
-			else if (verdict.action === "QUARANTINE") terminal = applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
+			else if (verdict.action === "QUARANTINE") {
+				terminal = verdict.reason === "owner-released-would-quarantine"
+					? applyReleased(verdict.dir, root, verdict, deps)
+					: applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
+			}
 			applied.push(terminal);
 			deps.onProgress?.(terminal);
 		});

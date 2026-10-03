@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkService, checkServiceLinux, installService, installSystemd, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 
 // Every CLI spawn below inherits this namespace, so even real launchctl calls address
@@ -11,7 +11,7 @@ process.env.OMP_KIT_TEST_LABEL_NAMESPACE = testNamespace;
 const testLabel = `${testNamespace}.omp-watch`;
 
 const job: ServiceJobDef = { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 };
-const intervalJob: ServiceJobDef = { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 86400 };
+const intervalJob = KNOWN_JOBS["scratch-reaper"]!;
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
@@ -79,12 +79,20 @@ test("rendered plist escapes XML metacharacters in paths", () => {
   expect(text).not.toContain("a&b.json");
 });
 
-test("interval jobs render StartInterval instead of WatchPaths", () => {
+test("interval jobs render their configured cadence and load trigger", () => {
   const { home, launcher } = fixture();
   const text = renderLaunchdPlist(home, intervalJob, launcher, null).text;
   expect(text).toContain("<key>StartInterval</key>");
-  expect(text).toContain("<integer>86400</integer>");
+  expect(text).toContain("<integer>21600</integer>");
+  expect(text).toContain("<key>RunAtLoad</key>\n\t<true/>");
   expect(text).not.toContain("WatchPaths");
+});
+
+test("systemd scratch timer starts at boot and repeats at the configured interval", () => {
+  const timer = systemdTimer(intervalJob);
+  expect(timer).toContain("OnBootSec=0");
+  expect(timer).toContain("OnUnitActiveSec=21600s");
+  expect(timer).not.toContain("OnCalendar=daily");
 });
 
 test("rendered plist passes plutil -lint on macOS", () => {

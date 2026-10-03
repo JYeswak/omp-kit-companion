@@ -13,10 +13,10 @@ export interface ServiceCheck { id: string; status: ServiceCheckStatus; message:
 export interface ServiceRunResult { code: number; stdout: string; stderr: string }
 export type ServiceRunner = (args: readonly string[]) => ServiceRunResult;
 
-export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number }
+export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number; runAtLoad?: boolean }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
-	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 86400 },
+	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: true },
 };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -107,7 +107,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t<string>${xml(join(home, "Library", "Logs", "omp-kit", `${job.name}.err.log`))}</string>`,
 		...(job.kind === "watch" && watchPath
 			? ["\t<key>WatchPaths</key>", "\t<array>", `\t\t<string>${xml(watchPath)}</string>`, "\t</array>", "\t<key>RunAtLoad</key>", "\t<false/>"]
-			: ["\t<key>StartInterval</key>", `\t<integer>${job.intervalSeconds}</integer>`, "\t<key>RunAtLoad</key>", "\t<false/>"]),
+			: ["\t<key>StartInterval</key>", `\t<integer>${job.intervalSeconds}</integer>`, "\t<key>RunAtLoad</key>", job.runAtLoad ? "\t<true/>" : "\t<false/>"]),
 		"\t<key>ThrottleInterval</key>",
 		"\t<integer>60</integer>",
 		"\t<key>ProcessType</key>",
@@ -154,7 +154,12 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 }
 
 export function systemdTimer(job: ServiceJobDef): string {
-	return ["[Unit]", `Description=omp-kit ${job.name} schedule`, "", "[Timer]", "OnCalendar=daily", "Persistent=true", "RandomizedDelaySec=180", "", "[Install]", "WantedBy=default.target", ""].join("\n");
+	if (job.intervalSeconds <= 0) {
+		return ["[Unit]", `Description=omp-kit ${job.name} schedule`, "", "[Timer]", "OnCalendar=daily", "Persistent=true", "RandomizedDelaySec=180", "", "[Install]", "WantedBy=default.target", ""].join("\n");
+	}
+	return ["[Unit]", `Description=omp-kit ${job.name} schedule`, "", "[Timer]",
+		...(job.runAtLoad ? ["OnBootSec=0"] : []), `OnUnitActiveSec=${job.intervalSeconds}s`,
+		"Persistent=true", "RandomizedDelaySec=180", "", "[Install]", "WantedBy=default.target", ""].join("\n");
 }
 
 export interface LaunchctlPrint { loaded: boolean; path: string | null; state: string | null; pid: number | null; runs: number | null; lastExit: number | null }

@@ -1,0 +1,1 @@
+- Owners can mark finished task scratch with `omp-kit scratch release DIR`; the owner-only release is quarantined at the next run and expires after seven days. The scratch-reaper now applies its plan, records the run result, and runs at load and every six hours.

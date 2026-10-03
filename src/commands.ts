@@ -222,6 +222,9 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 	expired: { type: "array", items: { type: "object" } },
 	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
 } };
+const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
+	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
@@ -382,10 +385,11 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--errors", description: "Show the error log instead of the output log" },
 			{ name: "-n", value: "N", description: "Print the last N lines" },
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
-		{ name: "run", description: "Execute one job now (what launchd runs); writes a job receipt (omp-watch notifies on failure, scratch-reaper reports)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-	{ name: "scratch", description: "Reap dead operator scratch: owned+dead+lsof-clear sessions, idle unowned quarantine, expired quarantine delete", usage: "scratch plan|apply [--apply --yes]", flags: [], subcommands: [
+	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
 		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
