@@ -104,8 +104,10 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	});
 	expect(fast.exitCode, fast.stdout.toString() + fast.stderr.toString()).toBe(0);
 	const corpus = countCaseRows(readFileSync(join(installedRoot, "cases", "cases.tsv"), "utf8"));
+	const ruleCount = readdirSync(join(installedRoot, "rules")).filter((name) => name.endsWith(".md")).length;
+	expect(ruleCount).toBeGreaterThan(0);
 	expect(JSON.parse(fast.stdout.toString()).data.test.proofs).toMatchObject({
-		G1_registration: { status: "PASS", observed_rules: 22 },
+		G1_registration: { status: "PASS", observed_rules: ruleCount },
 		G2_payload: { status: "PASS", expected_cases: corpus.cases, observed_cases: corpus.cases },
 		G3_quiet_prefix: { status: "PASS", expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,
 			observed_cases: corpus.cases, observed_quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 },

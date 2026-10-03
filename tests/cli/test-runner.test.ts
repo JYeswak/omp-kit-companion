@@ -16,6 +16,11 @@ let stableExecutable = "";
 let matcherRoot = "";
 let matcherExecutable = "";
 let matcherCaller = "";
+function countRuleRows(root: string): { rules: number; ttsrRules: number } {
+	const rules = readdirSync(join(root, "rules")).filter((name) => name.endsWith(".md"));
+	const ttsrRules = readFileSync(join(root, "MANIFEST.tsv"), "utf8").split("\n").slice(1).filter((row) => row.trim() !== "" && row.split("\t")[2] !== "always").length;
+	return { rules: rules.length, ttsrRules };
+}
 function copyPackResources(destination: string): void {
 	for (const directory of ["rules", "retired", "cases", "policy", "extensions"]) {
 		cpSync(join(REPO_ROOT, directory), join(destination, directory), { recursive: true });
@@ -270,14 +275,15 @@ describe("runFastTest", () => {
 		const releaseBefore = snapshotTree(dirname(dirname(stableExecutable)));
 
 		const { result, report } = invoke(input, env);
-		const corpus = countCaseRows(readFileSync(join(releaseRoot, "cases", "cases.tsv"), "utf8"));
+			const corpus = countCaseRows(readFileSync(join(releaseRoot, "cases", "cases.tsv"), "utf8"));
+			const ruleCounts = countRuleRows(releaseRoot);
 
 		expect(result.exitCode).toBe(0);
 		expect(report.exitCode).toBe(0);
 		expect(report.status).toBe("PASS");
 		expect(report.proofs.G1_registration.status).toBe("PASS");
-		expect(report.proofs.G1_registration.expected_rules).toBe(22);
-		expect(report.proofs.G1_registration.observed_rules).toBe(22);
+			expect(report.proofs.G1_registration.expected_rules).toBe(ruleCounts.rules);
+			expect(report.proofs.G1_registration.observed_rules).toBe(ruleCounts.rules);
 		expect(report.proofs.G2_payload.status).toBe("PASS");
 		expect(report.proofs.G2_payload.expected_cases).toBe(corpus.cases);
 		expect(report.proofs.G2_payload.observed_cases).toBe(corpus.cases);
@@ -291,13 +297,13 @@ describe("runFastTest", () => {
 		expect(report.proofs.G4_live.status).toBe("NOT_RUN");
 		expect(report.diagnostics.installed_rules.status).toBe("DEGRADED");
 		expect(report.diagnostics.installed_rules.evidence?.ownership).toBe("UNVERIFIED");
-		expect(report.diagnostics.installed_rules.evidence?.missing).toHaveLength(22);
+			expect(report.diagnostics.installed_rules.evidence?.missing).toHaveLength(ruleCounts.rules);
 		expect(report.diagnostics.project_rules.status).toBe("DEGRADED");
 		expect(report.diagnostics.project_rules.evidence?.mismatched_shadows).toContain("kit-close-reason-no-evidence");
 		expect(report.diagnostics.effective_profile.status).toBe("UNVERIFIED");
 		expect(report.producers.gate.producer_rc).toBe(0);
 		const gate = JSON.parse(report.producers.gate.stdout);
-		expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: 22, ttsr_rules: 21, cases: corpus.cases, quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 } });
+			expect(gate).toMatchObject({ schema_version: 1, status: "PASS", counts: { rules: ruleCounts.rules, ttsr_rules: ruleCounts.ttsrRules, cases: corpus.cases, quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 } });
 		expect(gate.failures).toEqual([]);
 		expect(report.producers.selftest.producer_rc).toBe(0);
 		expect(report.producers.selftest.stdout).toContain("plant (b) RED as intended");
@@ -317,10 +323,11 @@ describe("runFastTest", () => {
 		const entry = manifest.files.find(file => file.path === "cases/cases.tsv");
 		expect(entry?.sha256).toBe(createHash("sha256").update(baseBytes).digest("hex"));
 		const baseline = countCaseRows(baseBytes.toString("utf8"));
-		const report = await runFastTest(
-			{ root: planted.root, executablePath: planted.stable, home: makeTestHome("count-mismatch-home") },
-			{ rules: 22, ttsrRules: 21, ...baseline },
-		);
+			const plantedRuleCounts = countRuleRows(planted.root);
+			const report = await runFastTest(
+				{ root: planted.root, executablePath: planted.stable, home: makeTestHome("count-mismatch-home") },
+				{ rules: plantedRuleCounts.rules, ttsrRules: plantedRuleCounts.ttsrRules, ...baseline },
+			);
 		expect(report.status).toBe("FAIL");
 		expect(report.diagnostics.manifest.status).not.toBe("FAIL");
 		expect(report.proofs.G2_payload).toMatchObject({
@@ -855,10 +862,11 @@ describe("runMatcherObservation", () => {
 		const envelope = JSON.parse(stdout) as { data?: { overall?: string; test?: FastTestReport } };
 		const report = envelope.data?.test;
 		const corpus = countCaseRows(readFileSync(join(matcherRoot, "cases", "cases.tsv"), "utf8"));
+		const matcherRuleCounts = countRuleRows(matcherRoot);
 		expect(child.exitCode).toBe(0);
 		expect(envelope.data?.overall).toBe("UNVERIFIED");
 		expect(report?.status).toBe("PASS");
-		expect(report?.proofs.G1_registration).toMatchObject({ expected_rules: 22, observed_rules: 22, status: "PASS" });
+		expect(report?.proofs.G1_registration).toMatchObject({ expected_rules: matcherRuleCounts.rules, observed_rules: matcherRuleCounts.rules, status: "PASS" });
 		expect(report?.proofs.G2_payload).toMatchObject({ expected_cases: corpus.cases, observed_cases: corpus.cases, status: "PASS" });
 		expect(report?.proofs.G3_quiet_prefix).toMatchObject({
 			expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,

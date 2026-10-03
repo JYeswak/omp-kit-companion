@@ -1,14 +1,23 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { diagnose, type Finding } from "./diagnostics.ts";
+import { diagnose, readManifest, type Finding } from "./diagnostics.ts";
 import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
 import { isSha256Hex } from "./regex-guards.ts";
 const HARNESS = "scripts/ttsr-harness.ts";
-const RULE_EXPECTATIONS = { rules: 22, ttsrRules: 21 } as const;
 const CASES_PATH = "cases/cases.tsv";
+
+function ruleExpectations(root: string): Pick<FastTestExpectations, "rules" | "ttsrRules"> {
+	const manifest = readManifest(root);
+	const ruleCount = (() => {
+		try { return readdirSync(join(root, "rules")).filter((name) => name.endsWith(".md")).length; }
+		catch { return 0; }
+	})();
+	if (ruleCount === 0 || manifest.rules.length === 0) return { rules: ruleCount, ttsrRules: 0 };
+	return { rules: ruleCount, ttsrRules: manifest.rules.filter((rule) => rule.ruleClass !== "always").length };
+}
 
 export function countCaseRows(raw: string): Pick<FastTestExpectations, "cases" | "quietCases"> {
 	let cases = 0, quietCases = 0;
@@ -361,7 +370,7 @@ export async function runFastTest(input: FastTestInput, requestedExpected?: Fast
 	const paths = [input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])];
 	if (!paths.every(isAbsolute)) throw new Error("fast-test release, executable, HOME, and project paths must be absolute");
 	const caseCorpus = readCaseCorpus(input.root);
-	const expected = requestedExpected ?? { ...RULE_EXPECTATIONS, cases: caseCorpus.cases, quietCases: caseCorpus.quietCases };
+	const expected = requestedExpected ?? { ...ruleExpectations(input.root), cases: caseCorpus.cases, quietCases: caseCorpus.quietCases };
 
 	const fallbackRedact = redactor(input);
 	let rawFindings: Finding[] = [];
