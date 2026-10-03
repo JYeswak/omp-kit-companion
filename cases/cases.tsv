@@ -145,6 +145,8 @@ kit-relative-path-not-cwd	fire	tool	bash	-	sh starter-kit/scripts/check-readines
 kit-relative-path-not-cwd	fire	tool	bash	-	cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md	the measured cwd bug shape
 kit-relative-path-not-cwd	quiet	tool	bash	-	sh checkers/check-readiness.sh notes/packet.md	fixed checker run from the kit checkout
 kit-relative-path-not-cwd	quiet	tool	bash	-	sed -n 1,40p starter-kit/scripts/check-readiness.sh	reads the script
+kit-relative-path-not-cwd	fire	tool	bash	-	cd /tmp\nsh starter-kit/scripts/check-readiness.sh notes/packet.md	multiline command boundary
+kit-relative-path-not-cwd	fire	tool	bash	-	\tsh starter-kit/scripts/check-readiness.sh notes/packet.md	escaped tab command boundary
 kit-relative-path-not-cwd	quiet	tool	bash	-	cat docs/planning/packet.md	old condition fired on any packet path
 kit-settings-mutation	fire	tool	bash	-	omp config set ttsr.enabled false	P3 spec: live on 18.3.0, no dialog
 kit-settings-mutation	fire	tool	bash	-	omp --profile sample-lab config set disabledProviders '["agents"]'	removes the ~/.agents/rules source; --profile before config
