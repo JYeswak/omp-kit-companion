@@ -94,6 +94,35 @@ jobs:
         run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/latest detached native receipts
         run: python3 tests/cli/native_candidate_test.py
+      - name: Run differential native-vs-kit oracle
+        if: runner.os == 'Linux'
+        run: bun scripts/differential-oracle.ts
+      - name: Verify differential oracle rejects a planted mismatch
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          planted="$RUNNER_TEMP/differential-mismatch.tsv"
+          cp cases/cases.tsv "$planted"
+          python3 - "$planted" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          rows = path.read_text().splitlines()
+          for index in range(1, len(rows)):
+              fields = rows[index].split("\t")
+              if len(fields) >= 6:
+                  fields[1] = "quiet" if fields[1] == "fire" else "fire"
+                  rows[index] = "\t".join(fields)
+                  break
+          else:
+              raise SystemExit("no case row available for planted mismatch")
+          path.write_text("\n".join(rows) + "\n")
+          PY
+          if bun scripts/differential-oracle.ts "$planted"; then
+              echo "differential oracle accepted planted mismatch" >&2
+              exit 1
+          fi
   ladder:
     needs: resolve-omp-versions
     strategy:
