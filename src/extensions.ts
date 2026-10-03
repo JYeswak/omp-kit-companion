@@ -1,5 +1,5 @@
-import { lstatSync, readdirSync, readFileSync, type Stats } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { lstatSync, readdirSync, readFileSync, realpathSync, type Stats } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 
 /** Kinds of files OMP loads as extensions or hooks, mirroring OMP's own discovery. */
@@ -117,10 +117,14 @@ export function listExtensionFiles(home: string): ExtensionFile[] {
 	const files: ExtensionFile[] = [];
 	const seen = new Set<string>();
 	const push = (candidate: ExtensionFile) => {
-		const key = resolve(candidate.file);
+		const absolute = resolve(candidate.file);
+		let key = absolute;
+		try {
+			key = realpathSync(absolute);
+		} catch { /* Dangling links keep their lexical path. */ }
 		if (seen.has(key)) return;
 		seen.add(key);
-		files.push({ ...candidate, file: key });
+		files.push({ ...candidate, file: absolute });
 	};
 	for (const { profile, agentDir } of profileAgentDirs(home)) {
 		for (const file of childFiles(join(agentDir, "hooks", "pre"), (name) => name.endsWith(".ts") || name.endsWith(".js"))) {
@@ -219,10 +223,25 @@ function isOmpHostSpecifier(specifier: string): boolean {
 	return false;
 }
 
-function resolveSpecifier(specifier: string, fromFile: string): string | null {
+/**
+ * Directory imports resolve from. OMP loads the file through dynamic import,
+ * which resolves the module to its real path first, so relative specifiers in
+ * a symlinked file resolve from the link target's directory, not the link's.
+ * Bun.resolveSync uses its parent argument literally (verified: a symlink path
+ * parent misses, the realpath directory hits), so realpath here explicitly.
+ */
+function importBaseDir(file: string): string {
+	try {
+		return dirname(realpathSync(file));
+	} catch {
+		return dirname(file);
+	}
+}
+
+function resolveSpecifier(specifier: string, fromDir: string): string | null {
 	if (isOmpHostSpecifier(specifier)) return specifier;
 	try {
-		return Bun.resolveSync(specifier, fromFile);
+		return Bun.resolveSync(specifier, fromDir);
 	} catch {
 		return null;
 	}
@@ -266,7 +285,7 @@ export function checkExtensionImports(input: CheckExtensionImportsInput): Extens
 		}
 		checked += 1;
 		for (const { specifier, line } of extractImportSpecifiers(source)) {
-			if (resolveSpecifier(specifier, candidate.file) === null) {
+			if (resolveSpecifier(specifier, importBaseDir(candidate.file)) === null) {
 				findings.push({ profile: candidate.profile, kind: candidate.kind, file: candidate.file, line, specifier, detail: "unresolvable from the file's directory" });
 			}
 		}
