@@ -226,10 +226,12 @@ export function applyExtensions(plan: ExtensionPlan, options?: ApplyOptions): Ex
 		return { receiptId: null, files: 0 };
 	}
 	const receipt = applyMutation(plan.mutation, options);
-	const imports = checkExtensionImports({ home: resolve(plan.destination, "..", "..", "..") });
-	if (imports.status === "DEGRADED") {
-		undoMutation(plan.stateRoot, receipt.id, { confirmed: true });
-		stop("EXTENSION_IMPORTS_UNRESOLVED");
+	if (plan.steps.some(step => step.kind === "extension")) {
+		const imports = checkExtensionImports({ home: resolve(plan.destination, "..", "..", "..") });
+		if (imports.status === "DEGRADED") {
+			undoMutation(plan.stateRoot, receipt.id, { confirmed: true });
+			stop("EXTENSION_IMPORTS_UNRESOLVED");
+		}
 	}
 	return { receiptId: receipt.id, files: receipt.files };
 }
