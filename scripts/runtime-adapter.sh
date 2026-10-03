@@ -72,10 +72,10 @@ new_workdir() {
 	process_start=$(/usr/bin/ps -p "$owner_pid" -o lstart= 2>/dev/null || true)
 	argv0=$(/usr/bin/ps -p "$owner_pid" -o comm= 2>/dev/null || true)
 	if [ -n "$process_start" ] && [ -n "$argv0" ]; then
-		printf 'pid=%s\\nprocess_start=%s\\nlabel=omp-kit-work\\nrepo=%s\\ncreated_at=%s\\nargv0=%s\\n' \\
+		printf 'pid=%s\nprocess_start=%s\nlabel=omp-kit-work\nrepo=%s\ncreated_at=%s\nargv0=%s\n' \
 			"$owner_pid" "$process_start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
 	else
-		printf 'pid=%s\\nlabel=omp-kit-work\\nrepo=%s\\ncreated=%s\\n' \\
+		printf 'pid=%s\nlabel=omp-kit-work\nrepo=%s\ncreated=%s\n' \
 			"$owner_pid" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.owner"
 	fi
 	printf '%s\n' "$work"
