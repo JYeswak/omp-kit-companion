@@ -10,14 +10,21 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of input) {
 	if (!line.trim()) continue;
 	try {
-		const request = JSON.parse(line) as { rulePath: string; snippet: string };
+		const request = JSON.parse(line) as { rulePath: string; snippet: string; source?: string; tool?: string; path?: string };
 		const loaded = loadRuleFile(request.rulePath);
 		const manager = new TtsrManager(settings);
 		const registered = manager.addRule(loaded.rule);
-		const context = { source: "tool", toolName: "bash", streamKey: "toolcall:l9", command: request.snippet };
-		let matches: unknown = registered ? manager.checkDelta(JSON.stringify({ command: request.snippet }), context) : [];
-		matches = registered ? manager.checkSnapshot(JSON.stringify({ command: request.snippet }), context) : matches;
-		const fired = Array.isArray(matches) && matches.some((entry) => typeof entry === "object" && entry !== null && "name" in entry && entry.name === loaded.name);
+		const source = request.source ?? "tool";
+		const toolName = request.tool ?? "bash";
+		const context = { source, toolName, streamKey: `toolcall:l9:${request.path ?? "-"}`, ...(request.path && request.path !== "-" ? { filePaths: [request.path] } : {}) };
+		const wire = source === "tool" && toolName === "bash" ? JSON.stringify({ command: request.snippet }) : request.snippet;
+		let matches: unknown[] = [];
+		if (registered && source === "tool" && toolName === "bash") {
+			for (let offset = 0; offset < wire.length; offset += 7) { const delta = manager.checkDelta(wire.slice(offset, offset + 7), context); if (Array.isArray(delta)) matches = matches.concat(delta); }
+		}
+		const final = registered ? manager.checkSnapshot(wire, context) : [];
+		if (Array.isArray(final)) matches = matches.concat(final);
+		const fired = matches.some((entry) => typeof entry === "object" && entry !== null && "name" in entry && entry.name === loaded.name);
 		process.stdout.write(JSON.stringify({ fired }) + "\n");
 	} catch (error) { process.stdout.write(JSON.stringify({ error: String(error) }) + "\n"); }
 }
