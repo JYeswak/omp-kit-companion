@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { cpSync, chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "../..");
-const scratchRoot = resolve(root, "var/agent-tmp");
+const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
 const gate = join(root, "scripts/fresh-gate.sh");
 
 function fixture(): string {
@@ -14,6 +14,14 @@ function fixture(): string {
 	}
 	writeFileSync(join(dir, "package.json"), readFileSync(join(root, "package.json")));
 	return dir;
+}
+function singleRule(dir: string, condition: string): string {
+	const rules = join(dir, "rules");
+	rmSync(rules, { recursive: true, force: true });
+	mkdirSync(rules, { recursive: true });
+	const rule = join(rules, "bash-glob-silenced.md");
+	writeFileSync(rule, "---\ncondition: " + JSON.stringify(condition) + "\nscope: tool:bash\ninterruptMode: never\n---\nfixture rule\n");
+	return rule;
 }
 
 function run(script: string, args: string[]) {
@@ -38,12 +46,27 @@ test("fresh gate refuses an edited rule with a stale manifest", () => {
 test("fresh gate accepts rule-only edits without a committed manifest", () => {
 	const dir = fixture();
 	try {
-		const rule = join(dir, "rules/bash-glob-silenced.md");
+		const rule = singleRule(dir, "^rx1safe$");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n");
 		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("FRESH-GATE: GREEN");
+		expect(output).toContain("REGEX-BUDGET: PASS");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("fresh gate rejects a changed Bash rule with a leading lookbehind", () => {
+	const dir = fixture();
+	try {
+		singleRule(dir, "(?<!x)needle");
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
+		const output = result.stdout.toString() + result.stderr.toString();
+		expect(result.exitCode).not.toBe(0);
+		expect(output).toContain("REGEX-BUDGET: FAIL");
+		expect(output).toContain("bash-glob-silenced#0 | LEADING_LOOKAROUND");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
