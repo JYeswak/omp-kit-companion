@@ -1,6 +1,6 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 
 export interface BundledRunResult {
@@ -15,7 +15,16 @@ const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg
 export function runtimeTempRoot(): string {
 	try {
 		const root = realpathSync(tmpdir());
-		if (statSync(root).isDirectory()) return root;
+		if (statSync(root).isDirectory()) {
+			const home = process.env.HOME;
+			if (!home || !isAbsolute(home)) return root;
+			try {
+				const fromHome = relative(realpathSync(home), root);
+				if (fromHome === ".." || fromHome.startsWith(`..${sep}`) || isAbsolute(fromHome)) return root;
+			} catch {
+				return root;
+			}
+		}
 	} catch {}
 	if (process.platform === "darwin") {
 		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {

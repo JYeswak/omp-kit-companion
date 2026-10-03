@@ -336,15 +336,21 @@ test("runtime temp root follows TMPDIR and returns its canonical path", () => {
 	const base = fixtureRoot();
 	const target = join(base, "tmp-target");
 	const alias = join(base, "tmp-alias");
+	const home = join(base, "home");
 	mkdirSync(target);
+	mkdirSync(home);
 	symlinkSync(target, alias);
-	const previous = process.env.TMPDIR;
+	const previousHome = process.env.HOME;
+	const previousTmpdir = process.env.TMPDIR;
+	process.env.HOME = home;
 	process.env.TMPDIR = alias;
 	try {
 		expect(runtimeTempRoot()).toBe(realpathSync(target));
 	} finally {
-		if (previous === undefined) delete process.env.TMPDIR;
-		else process.env.TMPDIR = previous;
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previousTmpdir;
 	}
 });
 
@@ -362,5 +368,27 @@ test("runtime temp root falls back when TMPDIR is not a directory", () => {
 	} finally {
 		if (previous === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previous;
+	}
+});
+
+test("runtime temp root avoids caller HOME when TMPDIR is nested there", () => {
+	const base = fixtureRoot();
+	const home = join(base, "home");
+	const nested = join(home, "tmp");
+	mkdirSync(nested, { recursive: true });
+	const previousHome = process.env.HOME;
+	const previousTmpdir = process.env.TMPDIR;
+	process.env.HOME = home;
+	process.env.TMPDIR = nested;
+	try {
+		const root = runtimeTempRoot();
+		expect(root).not.toBe(realpathSync(nested));
+		expect(realpathSync(root)).toBe(root);
+		expect(lstatSync(root).isDirectory()).toBe(true);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previousTmpdir;
 	}
 });
