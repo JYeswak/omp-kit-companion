@@ -296,6 +296,8 @@ kit-no-force-push	fire	tool	bash	-	git push --force origin main	bare force push
 kit-no-force-push	fire	tool	bash	-	git push -f origin main	short force flag after push
 kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanctioned lease form stays quiet
 kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
+kit-no-force-push	fire	tool	bash	-	git push\t--force origin main	tab-separated force flag
+kit-no-force-push	fire	tool	bash	-	git push origin main \\n--force	line-continuation before force flag
 bash-glob-silenced	quiet	tool	bash	-	GREP -RL 'X' CRATES/*/CARGO.TOML 2>/DEV/NULL	H3: uppercase stays quiet, (?i) fires
 bash-pipe-exit	quiet	tool	bash	-	./SCRIPTS/LANE-STATUS.SH 2>&1 | TAIL -16; ECHO "EXIT=$?"	H3: uppercase stays quiet
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet
