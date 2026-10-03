@@ -23,6 +23,8 @@
 #        installing the kit policy, so a second run reports policy-sensitive differences.
 #        OMP_KIT_TEST_NO_PROVIDER_PIN=1 skips the disabledProviders isolation so a test
 #        can prove OMP would otherwise probe OLLAMA_HOST (test-only).
+#        OMP_KIT_TEST_NO_COVERAGE=1 skips the unrelated rule-coverage preflight for
+#        provider-contract tests only; scenario verdicts still run.
 set -u
 MODE=full
 case "${1:-}" in
@@ -190,7 +192,7 @@ if [ "$MODE" = plant ]; then
   echo "plant: kit-close-needs-evidence condition ->"
   grep '^condition:' "$RULES_DIR/kit-close-needs-evidence.md"
 else
-  "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }
+  if [ -z "${OMP_KIT_TEST_NO_COVERAGE:-}" ]; then "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }; else echo "coverage skipped by OMP_KIT_TEST_NO_COVERAGE (test-only)" >&2; fi
 fi
 if [ -z "${OMP_KIT_DEFAULT_TTSR:-}" ]; then
   "$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }

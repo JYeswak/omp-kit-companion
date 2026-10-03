@@ -41,7 +41,7 @@ async function startRecorder(): Promise<Recorder> {
 async function runE2e(extraEnv: Record<string, string>): Promise<{ code: number | null; stderr: string }> {
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, ONLY: "canary-fire", ...extraEnv },
+		env: { ...process.env, ONLY: "canary-fire", OMP_KIT_TEST_NO_COVERAGE: "1", ...extraEnv },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
