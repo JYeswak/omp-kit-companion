@@ -1,0 +1,1 @@
+- Metamorphic validation now respects each rule's declared source scope, so prose-only rules no longer falsely block tool actions; generated native-vs-kit checks report only explicitly tracked runtime mismatches.
