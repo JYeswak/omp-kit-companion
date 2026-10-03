@@ -1,3 +1,5 @@
+import { appendFileSync, readFileSync } from "node:fs";
+
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
 
 export type FleetWatchSession = {
@@ -44,4 +46,24 @@ export class FleetWatcher {
 		if (actions.length) this.lastDecision.set(key, this.now());
 		return { busy, checks, actions };
 	}
+}
+
+export function loadFleetWatchConfig(path: string): FleetWatchConfig {
+	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).sessions)) throw new Error("FLEET_WATCH_CONFIG_INVALID");
+	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions: (value as Record<string, unknown>).sessions as FleetWatchSession[] };
+}
+
+export type FleetWatchOnceDeps = { capture: (session: string, pane: string) => string; send: (session: string, pane: string, text: string) => void; logPath: string; now?: () => number };
+export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher = new FleetWatcher(config, deps.now)): FleetWatchAction[] {
+	if (!config.enabled) return [];
+	const actions: FleetWatchAction[] = [];
+	for (const session of config.sessions) for (const pane of session.workerPanes) {
+		for (const action of watcher.poll(session, pane, deps.capture(session.session, pane)).actions) {
+			deps.send(action.kind === "NUDGED" ? session.session : session.coordinatorSession, action.kind === "NUDGED" ? pane : session.coordinatorPane, action.text);
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
+			actions.push(action);
+		}
+	}
+	return actions;
 }

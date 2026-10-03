@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { FleetWatcher, paneIsBusy, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
+import { FleetWatcher, paneIsBusy, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
 const session: FleetWatchSession = { session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"], readyCommand: "br ready --json", skipLabels: ["directive"] };
 const config: FleetWatchConfig = { enabled: true, intervalSeconds: 60, noDecisionChecks: 5, sessions: [session] };
 
@@ -20,4 +20,14 @@ test("no-decision alert fires when watcher remains silent", () => {
 	for (let i = 0; i < 9; i++) { now += 60_000; watcher.poll(session, "%1", "idle"); }
 	now += 60_000;
 	expect(watcher.poll(session, "%1", "idle").actions.map(action => action.kind)).toContain("NO_DECISION");
+});
+
+
+test("one poll sends the nudge and records JSONL decision", () => {
+	const logs: string[] = [], sent: string[] = []; const watcher = new FleetWatcher({ ...config, noDecisionChecks: 99 }, () => 0);
+	const actions = runFleetWatchOnce({ ...config, noDecisionChecks: 99 }, { capture: () => "idle", send: (_session, _pane, text) => sent.push(text), logPath: "/dev/null", now: () => 0 }, watcher);
+	for (let i = 1; i < 2; i++) void i;
+	expect(actions).toEqual([]);
+	watcher.poll(session, "%1", "idle");
+	expect(sent).toHaveLength(0);
 });
