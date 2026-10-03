@@ -238,6 +238,23 @@ test("release check requires direct main-commit fragments or a reasoned waiver",
 	expect(emptyReason.output).toContain(`direct commit ${emptyReasonCommit.slice(0, 7)} has an empty [no-changelog] reason`);
 });
 
+test("a trailer-less direct commit is covered only by a fragment naming that commit", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+	const bare = commitTree(treeWithFiles(releaseHead, { "src/bare.ts": "bare\n" }), [releaseHead], "Bare source change [test]", []);
+	const short = bare.slice(0, 7);
+	const wrongRef = commitTree(treeWithFiles(bare, { "changelog.d/bare.md": "- Bare change. (commit 0000000)\n" }), [bare], "Fragment naming another commit [test]");
+	git("update-ref", "refs/heads/main", wrongRef);
+	const missing = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(missing.exitCode).toBe(1);
+	expect(missing.output).toContain(`direct commit ${short} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason, or a fragment naming (commit ${short})`);
+	const named = commitTree(treeWithFiles(wrongRef, { "changelog.d/bare.md": `- Bare change. (commit ${short})\n` }), [wrongRef], "Fragment naming the commit [test]");
+	git("update-ref", "refs/heads/main", named);
+	const covered = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(covered.exitCode, covered.output).toBe(0);
+	expect(covered.output).toContain(`Direct commit ${short} (Bead: -) covered by changelog.d/bare.md`);
+});
+
 
 function commitWithFiles(parent: string, label: string, files: Record<string, string>): string {
 	const tree = treeWithFiles(parent, files);
