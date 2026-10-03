@@ -93,6 +93,9 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
   if (match[1] === "RED") { failures.push(`Stage ${expected} returned producer_rc=${match[3]}`); break; }
  }
  const ordinary = lines.filter(line => line.startsWith("ok    ")).map(line => line.slice(6));
+ const observed = new Set(ordinary);
+ const missing = ids.filter(id => !observed.has(id));
+ if (stages["e2e-live"].status !== "NOT_RUN" && missing.length) failures.unshift("Live scenario rows missing: " + missing.join(", "));
  const livePassed = stages["e2e-live"].status === "PASS" && ordinary.length === ids.length && ordinary.every((id, index) => id === ids[index]);
  if (stages["e2e-live"].status === "PASS" && !livePassed) failures.push("Live scenario rows did not match the exact shipped ordered scenario IDs");
  const plantPassed = stages["e2e-plant"].status === "PASS" && result.stdout.includes("plant RED as required: baseline kit-close-needs-evidence fires on the streamed prefix of an evidenced close");
