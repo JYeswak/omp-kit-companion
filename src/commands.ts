@@ -112,7 +112,13 @@ const workData: DataSchema = { type: "object", required: ["scope", "overall", "r
 	scope: { enum: ["work"] }, overall: { enum: ["REPORT"] }, roots: { type: "array" }, repos: { type: "array" }, concurrency: { type: "number" }, per_repo_timeout_ms: { type: "number" }, elapsed_ms: { type: "number" }, timed_out_repos: { type: "number" }, text: { type: "string" },
 } };
 const calibrationData: DataSchema = { type: "object", required: ["overall", "scope", "status", "calibration"], properties: { overall: { enum: ["OK"] }, scope: { enum: ["rules"] }, status: { enum: ["OK"] }, calibration: { type: "object" } } };
-const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
+const sessionData: DataSchema = { type: "object", required: ["scope", "overall", "checked_at_epoch_ms", "components", "sessions", "text"], properties: {
+	scope: { enum: ["sessions"] }, overall: { enum: ["REPORT"] }, checked_at_epoch_ms: { type: "number" },
+	components: { type: "array", items: { type: "object", required: ["label", "path", "version", "installed_at_epoch_ms"], properties: { label: { type: "string" }, path: { type: "string" }, version: { type: ["string", "null"] }, installed_at_epoch_ms: { type: ["number", "null"] } } } },
+	sessions: { type: "array", items: { type: "object", required: ["pid", "ppid", "command", "start_epoch_ms", "start_time", "pane", "pane_pid", "pane_start_command", "verdict", "predates"], properties: { pid: { type: "number" }, ppid: { type: "number" }, command: { type: "string" }, start_epoch_ms: { type: ["number", "null"] }, start_time: { type: ["string", "null"] }, pane: { type: ["string", "null"] }, pane_pid: { type: ["number", "null"] }, pane_start_command: { type: ["string", "null"] }, verdict: { enum: ["CURRENT", "STALE", "UNVERIFIED"] }, predates: { type: "array", items: { type: "string" } }, reason: { type: "string" } } } },
+	text: { type: "string" },
+} };
+const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
 	instructions: { type: "array", items: { type: "object", required: ["server", "status", "command", "note"], properties: {
@@ -229,7 +235,7 @@ const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
-		{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },

@@ -17,6 +17,7 @@ import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-c
 import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
+import { inspectOmpSessions } from "./session-doctor.ts";
 import { loadFleetWatchConfig, runFleetWatchOnce } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -339,7 +340,10 @@ async function workDoctor(request: ParsedCommand): Promise<CliResult> {
 	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }) });
 	return { code: 0, data: report, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
 }
-
+function sessionDoctor(): CliResult {
+	const report = inspectOmpSessions();
+	return { code: 0, data: report, commands: ["omp-kit doctor --scope sessions --json"], verification: "PERFORMED" };
+}
 function readJsonFile(path: string, label: string): unknown {
 	try { return JSON.parse(readFileSync(path, "utf8")); } catch (error) { throw new Error(label + " is not valid JSON: " + (error instanceof Error ? error.message : String(error))); }
 }
@@ -1962,7 +1966,7 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
-	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
+		if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");
