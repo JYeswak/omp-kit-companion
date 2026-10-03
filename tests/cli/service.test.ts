@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 
@@ -70,6 +71,12 @@ test("rendered plist calls the stable launcher directly with fixed env and watch
   expect(text).toContain("~/.local/bin:~/.bun/bin:~/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
   expect(text).toContain(`<string>${watch}</string>`);
   expect(text).toContain("<integer>60</integer>");
+});
+
+test("rendered plist sets TMPDIR to the system temp directory", () => {
+  const { home, launcher, watch } = fixture();
+  const text = renderLaunchdPlist(home, job, launcher, watch).text;
+  expect(text).toContain(`<key>TMPDIR</key>\n\t\t<string>${tmpdir()}</string>`);
 });
 
 test("rendered plist escapes XML metacharacters in paths", () => {
@@ -223,7 +230,7 @@ test("a healthy install passes every doctor check", () => {
   const { home, launcher, watch } = fixture();
   const input = healthyInput(home, launcher, watch);
   const byId = Object.fromEntries(checkService(input).map(check => [check.id, check]));
-  for (const id of ["plist-present", "plist-valid", "plist-matches-renderer", "binary-resolves", "loaded",
+  for (const id of ["plist-present", "plist-valid", "plist-matches-renderer", "binary-resolves", "loaded", "tmpdir-present",
     "last-exit", "crash-loop", "duplicate-jobs", "log-dir-logs", "trigger-target-exists", "scope-sanity"]) {
     expect(byId[id]?.status, id).toBe("PASS");
   }
@@ -359,6 +366,20 @@ test("planted: unknown watch target fails trigger-target-exists", () => {
   expect(found?.status).toBe("FAIL");
 });
 
+test("planted: a matching launchd plist without TMPDIR fails tmpdir-present", () => {
+  const { home, launcher, watch } = fixture();
+  const rendered = renderLaunchdPlist(home, job, launcher, watch).text
+    .replace(/\t<key>TMPDIR<\/key>\n\t\t<string>[^<]*<\/string>\n/, "");
+  const plistPath = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(plistPath, rendered);
+  const checks = checkService({ home, job, launcher, watch, rendered,
+    installed: { path: plistPath, text: rendered },
+    print: parseLaunchctlPrint(healthyPrint(plistPath)) });
+  expect(checks.find(check => check.id === "plist-matches-renderer")?.status).toBe("PASS");
+  expect(checks.find(check => check.id === "tmpdir-present")?.status).toBe("FAIL");
+});
+
 test("linux units render service plus path trigger with fixed env", () => {
   const { home, launcher, watch } = fixture();
   const units = renderSystemdUnits(home, job, launcher, watch);
@@ -366,6 +387,12 @@ test("linux units render service plus path trigger with fixed env", () => {
   expect(units.service).toContain("Environment=PATH=");
   expect(units.path).toContain(`PathChanged=${watch}`);
   expect(units.path).toContain("WantedBy=default.target");
+});
+
+test("linux service exports TMPDIR to locate system scratch roots", () => {
+  const { home, launcher, watch } = fixture();
+  const units = renderSystemdUnits(home, job, launcher, watch);
+  expect(units.service).toContain(`Environment=TMPDIR="${tmpdir()}"`);
 });
 
 test("linux install is a no-op when bytes match and the trigger is enabled", () => {
@@ -480,7 +507,21 @@ test("linux doctor flags a missing unit and a stopped trigger", () => {
   const units = renderSystemdUnits(home, job, launcher, watch);
   const found = checkServiceLinux({ home, job, launcher, unit: `omp-kit-${job.name}.service`, timer: null, pathUnit: null,
     renderedService: units.service, enabled: false, active: false, fragmentPath: null }).filter(check => check.status !== "PASS").map(check => check.id).sort();
-  expect(found).toEqual(["loaded", "unit-matches-renderer", "unit-present"]);
+  expect(found).toEqual(["loaded", "tmpdir-present", "unit-matches-renderer", "unit-present"]);
+});
+
+test("planted: a matching systemd unit without TMPDIR fails tmpdir-present", () => {
+  const { home, launcher, watch } = fixture();
+  const units = renderSystemdUnits(home, job, launcher, watch);
+  const rendered = units.service.replace(/^Environment=TMPDIR=.*\n/m, "");
+  const unitDir = join(home, ".config", "systemd", "user");
+  mkdirSync(unitDir, { recursive: true });
+  const serviceFile = join(unitDir, `omp-kit-${job.name}.service`);
+  writeFileSync(serviceFile, rendered);
+  const checks = checkServiceLinux({ home, job, launcher, unit: `omp-kit-${job.name}.service`, timer: null, pathUnit: null,
+    renderedService: rendered, enabled: true, active: true, fragmentPath: serviceFile });
+  expect(checks.find(check => check.id === "unit-matches-renderer")?.status).toBe("PASS");
+  expect(checks.find(check => check.id === "tmpdir-present")?.status).toBe("FAIL");
 });
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {

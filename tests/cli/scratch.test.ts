@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 
 const roots: string[] = [];
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -93,6 +93,23 @@ test("modern and fleet-guard owner files parse strictly", () => {
   expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=1234567"))).toBeNull();
   expect(parseOwnerFile("owner=x\npurpose=y\ncreated=z\n")).toBeNull();
   expect(parseOwnerFile(good.split("\n").slice(0, 5).join("\n"))).toBeNull();
+});
+
+test("releaseScratch refuses a reused owner PID before marking release", () => {
+  const { home } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-reused-pid-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const dir = sessionDir(root, "omp", process.pid);
+  writeFileSync(join(dir, ".owner"), ownerText({
+    pid: String(process.pid), process_start: "stale-process-start", label: "omp", repo: home,
+    created_at: new Date().toISOString(), argv0: "test",
+  }));
+  const result = releaseScratch(dir, home, depsFor({
+    liveness: { signalAlive: () => true, psVisible: () => true, processStart: () => "current-process-start" },
+  }));
+  expect(result).toMatchObject({ ok: false, changed: false, reason: "owner-process-reused", ownerPid: process.pid });
+  expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
 });
 
 test("probeOwner maps live, reused, dead, unreachable and unknown", () => {

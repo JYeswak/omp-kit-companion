@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 
@@ -98,6 +99,8 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		"\t<dict>",
 		`\t\t<key>HOME</key>`,
 		`\t\t<string>${xml(home)}</string>`,
+		"\t\t<key>TMPDIR</key>",
+		`\t\t<string>${xml(tmpdir())}</string>`,
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(FIXED_PATH)}</string>`,
 		"\t\t<key>OMP_KIT_JOB</key>",
@@ -134,7 +137,12 @@ function systemdQuote(value: string): string {
 }
 
 export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedSystemd {
-	const env = [`Environment=HOME=${systemdQuote(home)}`, `Environment=PATH=${systemdQuote(FIXED_PATH.replaceAll("~", home))}`, `Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`];
+	const env = [
+		`Environment=HOME=${systemdQuote(home)}`,
+		`Environment=PATH=${systemdQuote(FIXED_PATH.replaceAll("~", home))}`,
+		`Environment=TMPDIR=${systemdQuote(tmpdir())}`,
+		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
+	];
 	const service = [
 		"[Unit]",
 		`Description=omp-kit ${job.name}`,
@@ -310,6 +318,10 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 			? { id: "plist-matches-renderer", status: "PASS", message: "Installed plist matches the renderer", remediation: "None." }
 			: { id: "plist-matches-renderer", status: "WARN", message: `Installed plist drifts by ${diff.length} normalized line(s): ${diff.slice(0, 3).join(" | ")}`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
 	}
+	const hasTmpdir = input.installed !== null && /<key>TMPDIR<\/key>\s*<string>[^<]+<\/string>/.test(input.installed.text);
+	checks.push(hasTmpdir
+		? { id: "tmpdir-present", status: "PASS", message: "Installed plist sets TMPDIR", remediation: "None." }
+		: { id: "tmpdir-present", status: "FAIL", message: "Installed plist is missing TMPDIR", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {
@@ -437,6 +449,10 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 			? { id: "unit-matches-renderer", status: "PASS", message: "Installed unit matches the renderer", remediation: "None." }
 			: { id: "unit-matches-renderer", status: "WARN", message: `Installed unit drifts by ${diff.length} normalized line(s)`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
 	}
+	const hasTmpdir = installed !== null && /^Environment=TMPDIR="[^"]+.*"$/m.test(installed);
+	checks.push(hasTmpdir
+		? { id: "tmpdir-present", status: "PASS", message: "Installed unit sets TMPDIR", remediation: "None." }
+		: { id: "tmpdir-present", status: "FAIL", message: "Installed unit is missing TMPDIR", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {

@@ -513,6 +513,13 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps): S
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
 	if (!callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
+	if (owner.processStart !== null) {
+		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
+		if (state !== "live") {
+			return { ok: false, changed: false, dir,
+				reason: state === "reused" ? "owner-process-reused" : "owner-process-identity-unverified", ownerPid: owner.pid };
+		}
+	}
 	const markerPath = join(dir, RELEASE_FILE);
 	if (existsSync(markerPath)) {
 		const prior = readReleaseRecord(dir);
