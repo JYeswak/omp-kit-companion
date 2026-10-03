@@ -40,6 +40,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Usage-derived skill set and render-only pruned-profile recipe, gated by `test --capabilities` | #22 |
 | A kit test run leaves no processes behind (2,395 orphaned mock servers found on one machine) | #23 |
 | **Released v0.2.1:** the plugin route, settings drift, capability context, skill-set recipe and the leak guard | #26 |
+| **Release v0.2.2 (in cut):** service lifecycle, scratch reaper, migration/overlays, metamorphic ratchet, mutants, extension skip-reasons, agent-mail guard, stack currency, B10 cold-start, AST-grep candidates, e2e provider isolation, session-save guard | — |
 
 ## In review
 
