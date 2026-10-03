@@ -62,8 +62,9 @@ gate_manifest() {
 	(
 		cd "$ARCHIVE_DIR"
 		want="$WORK/manifest.want"
+		pack="uncommitted-$(date -u +%Y-%m-%d)"
+		printf 'name\tsha256\tclass\tpack\n' >"$want"
 		classes="$WORK/manifest.classes"
-		printf 'name\tsha256\tclass\tarchive\n' >"$want"
 		bun run --no-env-file --config=/dev/null scripts/rule-class.ts rules/*.md >"$classes"
 		for file in rules/*.md; do
 			name=$(basename "$file" .md)
@@ -72,11 +73,11 @@ gate_manifest() {
 				always|tripwire|reminder|canary|router) ;;
 				*) echo "manifest generation: FAIL: no valid class for $name (got '$class')" >&2; return 1 ;;
 			esac
-			printf '%s\t%s\t%s\tarchive\n' "$name" "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$class" >>"$want"
+			printf '%s\t%s\t%s\t%s\n' "$name" "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$class" "$pack" >>"$want"
 		done
 		if [ ! -f MANIFEST.tsv ]; then
-			echo "manifest generation: OK ($(($(wc -l < "$want") - 1)) rules; no committed MANIFEST.tsv)"
-			return 0
+			cp "$want" MANIFEST.tsv
+			echo "manifest generation: OK ($(($(wc -l < "$want") - 1)) rules; generated MANIFEST.tsv)"
 		fi
 		have="$WORK/manifest.have"
 		cut -f1-3 MANIFEST.tsv >"$have"
