@@ -29,7 +29,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_harness gate_focused; do
+	for name in gate_manifest gate_cli_compile gate_harness gate_focused; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -96,6 +96,12 @@ gate_harness() {
 	(
 		cd "$ARCHIVE_DIR"
 		bun scripts/ttsr-harness.ts --gate
+	)
+}
+gate_cli_compile() {
+	(
+		cd "$ARCHIVE_DIR"
+		bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
 	)
 }
 
@@ -217,7 +223,7 @@ gate_focused() {
 
 cleanup() {
 	if [ "$OWN_WORK" = 1 ] && [ -n "$WORK" ]; then
-		rm -rf "$WORK"
+		rm -rf "$WORK" 2>/dev/null || true
 	fi
 }
 make_work() {
@@ -294,6 +300,7 @@ elif [ -z "$CHANGED" ]; then
 fi
 started=$(date +%s)
 run_step manifest gate_manifest || exit 1
+run_step cli-compile gate_cli_compile || exit 1
 run_step harness-gate gate_harness || exit 1
 run_step focused gate_focused || exit 1
 elapsed=$(($(date +%s) - started))
