@@ -283,11 +283,11 @@ function contextFor(c: Case): MatchContext {
 	return ctx;
 }
 
-/** Native `omp ttsr test` receives the command argument, not the serialized JSON transport envelope. */
+/** The live coordinator streams JSON-encoded tool arguments; snapshot is reserved for content tools. */
 function wirePayload(c: Case): string {
+	if (c.source === "tool" && c.tool === "bash") return JSON.stringify({ command: c.snippet });
 	return c.snippet;
 }
-
 function hit(matches: Rule[], name: string): boolean {
 	return matches.some(r => r.name === name);
 }
