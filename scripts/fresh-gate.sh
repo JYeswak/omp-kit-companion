@@ -114,7 +114,7 @@ import sys
 
 archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
 proc = subprocess.Popen(
-    ["bun", "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    ["bun", "test", "--config=" + os.path.join(archive, "bunfig.toml"), "--path-ignore-patterns", "var/agent-tmp/**", suite],
     cwd=archive,
     start_new_session=True,
 )
