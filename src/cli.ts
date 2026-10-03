@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -17,6 +17,7 @@ import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-c
 import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
+import { loadFleetWatchConfig, runFleetWatchOnce } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -1768,6 +1769,18 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const platform = { os: process.platform === "darwin" ? "darwin" as const : "linux" as const, arch: process.arch === "arm64" ? "arm64" as const : "x64" as const, libc: process.platform === "darwin" ? "none" as const : "gnu" as const };
 			const result = await runKitUpdateJob({ enabled, prefix: dirname(dirname(identity.release.root)), stateRoot: receiptStateRoot() ?? "", home: process.env.HOME ?? "", project: process.cwd(), platform, indexPath, archivePath, version, sourceTag, pollRelease: async () => ({ indexPath, archivePath, version, sourceTag }) }, { notify: message => notifyJobFailure({ title: "omp-kit update", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
 			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
+		}
+		if (job.name === "fleet-watch") {
+			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+			const offPath = join(home, ".local", "state", "omp-kit", "fleet-watch.off");
+			if (existsSync(offPath)) return { code: 0, data: { overall: "OK", job: job.name, status: "OFF" }, verification: "UNVERIFIED" };
+			if (!existsSync(configPath)) return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled.");
+			try {
+				const config = loadFleetWatchConfig(configPath);
+				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
+				const result = runFleetWatchOnce(config, { capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", session + ":" + pane]).stdout, send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); }, logPath });
+				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
+			} catch (error) { return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
 		}
 		if (job.name === "scratch-reaper") {
 			const started = new Date().toISOString();
