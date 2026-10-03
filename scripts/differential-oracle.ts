@@ -9,7 +9,8 @@ for (const row of rows) worker.stdin.write(JSON.stringify({ rulePath: join(repo,
 const native = (await new Response(worker.stdout).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { fired?: boolean; error?: string }); await new Response(worker.stderr).text(); await worker.exited;
 const kitProc = Bun.spawnSync([process.execPath, join(repo, "scripts", "ttsr-harness.ts"), "--gate-json", "--rules", join(repo, "rules"), "--cases", caseFile], { cwd: repo, stdout: "pipe", stderr: "pipe" });
 const kit = JSON.parse(kitProc.stdout.toString()) as { cases?: { rule: string; g2: "fire" | "quiet" }[] };
-const known = new Map([[214, { bead: "ompkit-7ez", reason: "PI3: kit-test-skip native AST edit-path mismatch" }]]);
+// Named exceptions only for open, tracked live-vs-kit gaps; PI3 (row 214) was fixed live in e1fe957.
+const known = new Map<number, { bead: string; reason: string }>();
 const allMismatches = (kit.cases ?? []).flatMap((row, index) => { const nativeResult = native[index]?.fired ? "fire" : "quiet"; const expected = rows[index]?.expected; return row.g2 !== nativeResult || nativeResult !== expected ? [{ index, rule: rows[index]?.rule, source: rows[index]?.source, tool: rows[index]?.tool, path: rows[index]?.path, snippet: rows[index]?.snippet, expected, native: nativeResult, kit: row.g2 }] : []; });
 const knownMismatches = allMismatches.flatMap(m => known.has(m.index) ? [{ ...m, ...known.get(m.index)! }] : []);
 const unexpectedMismatches = allMismatches.filter(m => !known.has(m.index));
