@@ -289,10 +289,15 @@ function wirePayload(c: Case): string {
 	if (c.source === "tool" && c.tool === "bash") return JSON.stringify({ command: c.snippet });
 	return c.snippet;
 }
+function scopeApplies(rule: Rule, c: Case): boolean {
+	const scopes = rule.scope ?? [];
+	if (!scopes.length) return true;
+	if (c.source === "text" || c.source === "thinking") return scopes.includes(c.source);
+	return scopes.some(token => token.startsWith("tool"));
+}
 function hit(matches: Rule[], name: string): boolean {
 	return matches.some(r => r.name === name);
 }
-
 const G2_CHUNK = 7;
 // Bound selected long-positive observations; the full G3 gate remains exhaustive.
 const OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH = 8 * 1024;
@@ -303,6 +308,7 @@ const OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH = 8 * 1024;
  * (ttsr-coordinator.ts: `toolcall_end` -> #checkAstStream), so the verdict includes them.
  */
 async function g2Fires(rule: Rule, c: Case): Promise<boolean> {
+	if (!scopeApplies(rule, c)) return false;
 	const m = new TtsrManager(SETTINGS);
 	if (!m.addRule(rule)) return false;
 	const ctx = contextFor(c);
@@ -321,6 +327,7 @@ async function g2Fires(rule: Rule, c: Case): Promise<boolean> {
  * call, so they can fire only at the final snapshot.
  */
 async function g3Fires(rule: Rule, c: Case): Promise<{ fired: number[]; length: number }> {
+	if (!scopeApplies(rule, c)) return { fired: [], length: 0 };
 	const m = new TtsrManager(SETTINGS);
 	const fired: number[] = [];
 	const wire = wirePayload(c);
