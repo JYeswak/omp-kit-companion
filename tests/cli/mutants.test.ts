@@ -139,7 +139,7 @@ test("uncompilable mutants are skipped and counted", () => {
 test("the budget flag bounds the run and reports truncation", () => {
 	const dir = join(pack, "heavy-rules");
 	mkdirSync(dir, { recursive: true });
-	const branches = Array.from({ length: 400 }, (_, i) => `b${i}zz`);
+	const branches = Array.from({ length: 20_000 }, (_, i) => `b${i}zz`);
 	writeFileSync(join(dir, "mut-heavy.md"),
 		`---\ncondition:\n  - '${branches.join("|")}'\nscope: tool:bash\ninterruptMode: never\n---\nHeavy budget fixture.\n`);
 	writeFileSync(join(pack, "cases-heavy.tsv"), CASES_HEADER +
