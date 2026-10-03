@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
+import { matchesBounded } from "./regex-guards.ts";
 
 /** Kinds of files OMP loads as extensions or hooks, mirroring OMP's own discovery. */
 export type ExtensionFileKind = "hook-pre" | "hook-post" | "extension" | "plugin-extension";
@@ -54,7 +55,7 @@ export function profileAgentDirs(home: string): { profile: string; agentDir: str
 		return found;
 	}
 	for (const name of names) {
-		if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name === "default" || name.endsWith(".")) continue;
+		if (!matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name === "default" || name.endsWith(".")) continue;
 		append(name, join(home, ".omp", "profiles", name, "agent"));
 	}
 	return found;

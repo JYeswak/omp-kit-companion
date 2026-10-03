@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { applyMutation, inspectPendingMutations, planMutation, undoMutation, type ApplyOptions, type FileMutation, type Image, type MutationPlan, type PendingInspection } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
+import { matchesBounded } from "./regex-guards.ts";
 export type ExtensionInput = { root: string; home: string; stateRoot: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean };
 export type ExtensionStep = { kind: "extension" | "profile"; path: string; profile?: string; beforeSha256: string | null; afterSha256: string };
 export type ExtensionPlan = {
@@ -72,7 +73,7 @@ function profiles(home: string, skip: readonly string[], requested: "all" | read
 	const paths: { name: string; dir: string }[] = [{ name: "default", dir: join(home, ".omp", "agent") }];
 	const named = join(home, ".omp", "profiles");
 	if (inspectDirectory(named, true)) for (const name of readdirSync(named).sort()) {
-		if (!validProfile.test(name) || name === "default" || name.endsWith(".")) {
+		if (!matchesBounded(name, 128, validProfile) || name === "default" || name.endsWith(".")) {
 			skipped.push({ name, reason: "UNREADABLE: profile directory name is not addressable" });
 			continue;
 		}
@@ -87,7 +88,7 @@ function profiles(home: string, skip: readonly string[], requested: "all" | read
 	if (requested === "all") {
 		names = new Set(paths.length === 1 || includeDefault ? paths.map(({ name }) => name) : paths.slice(1).map(({ name }) => name));
 	} else {
-		if (!Array.isArray(requested) || !requested.length || requested.some(name => name !== "default" && !validProfile.test(name))) stop("INVALID_PROFILE_SELECTION");
+		if (!Array.isArray(requested) || !requested.length || requested.some(name => name !== "default" && !matchesBounded(name, 128, validProfile))) stop("INVALID_PROFILE_SELECTION");
 		names = new Set(requested);
 		if (includeDefault) names.add("default");
 		for (const name of names) if (!paths.some(profile => profile.name === name)) stop("MISSING_PROFILE");
@@ -171,7 +172,7 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	let manifest: unknown;
 	try { manifest = JSON.parse(policy.bytes.toString("utf8")); } catch { stop("INVALID_EXTENSION_POLICY"); }
 	if (!record(manifest) || !stringArray(manifest.extensions) || !stringArray(manifest.skipProfiles) ||
-		Object.keys(manifest).length !== 2 || manifest.extensions.length < 1 || !manifest.extensions.every(name => validName.test(name)) || !manifest.skipProfiles.every(name => name === "default" || validProfile.test(name))) stop("INVALID_EXTENSION_POLICY");
+		Object.keys(manifest).length !== 2 || manifest.extensions.length < 1 || !manifest.extensions.every(name => matchesBounded(name, 256, validName)) || !manifest.skipProfiles.every(name => name === "default" || matchesBounded(name, 128, validProfile))) stop("INVALID_EXTENSION_POLICY");
 	const names = [...new Set(manifest.extensions)];
 	if (names.length !== manifest.extensions.length) stop("INVALID_EXTENSION_POLICY");
 	const { selected, skipped } = profiles(home, manifest.skipProfiles, input.profiles, input.includeDefault);

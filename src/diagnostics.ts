@@ -5,6 +5,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot } from "./state-root.ts";
+import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
@@ -58,7 +59,7 @@ export function parseRuleOwnership(bytes: Uint8Array): RuleOwnershipRecord {
 		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || !value || typeof value !== "object" || Array.isArray(value)) throw new Error("STATE_UNSAFE");
 		const image = value as Record<string, unknown>;
 		if (Object.keys(image).sort().join(",") !== "gid,mode,sha256,size,uid" ||
-			typeof image.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(image.sha256) ||
+			typeof image.sha256 !== "string" || !isSha256Hex(image.sha256) ||
 			![image.size, image.mode, image.uid, image.gid].every(item => typeof item === "number" && Number.isSafeInteger(item) && item >= 0) ||
 			(image.mode as number) > 0o7777) throw new Error("STATE_UNSAFE");
 	}
@@ -130,7 +131,7 @@ export function parseRuleManifest(manifest: string): ManifestRule[] {
 		const fields = row.split("\t");
 		if (fields.length !== 4) throw new Error("manifest row " + (index + 2) + " must have four tab-separated fields");
 		const [name, sha256, ruleClass, pack] = fields as [string, string, string, string];
-		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || seen.has(name) || !/^[a-f0-9]{64}$/.test(sha256) || !Object.hasOwn(CLASSES, ruleClass) || !/^(?:[a-f0-9]{7,64}|uncommitted-\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))$/.test(pack)) {
+		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || seen.has(name) || !isSha256Hex(sha256) || !Object.hasOwn(CLASSES, ruleClass) || !/^(?:[a-f0-9]{7,64}|uncommitted-\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))$/.test(pack)) {
 			throw new Error("invalid or duplicate manifest row " + (index + 2));
 		}
 		seen.add(name);
@@ -231,7 +232,7 @@ function inspectProfiles(home: string): { profiles: ConfigInspection[]; issue?: 
 	let issue: string | undefined;
 	try {
 		for (const name of readdirSync(join(home, ".omp", "profiles")).sort()) {
-			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name === "default" || name.endsWith(".")) continue;
+			if (!matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name === "default" || name.endsWith(".")) continue;
 			const agent = join(home, ".omp", "profiles", name, "agent");
 			const status = directoryPath(home, [".omp", "profiles", name, "agent"]);
 			if (status === "directory") profiles.push(readProfile(name, agent, home));
