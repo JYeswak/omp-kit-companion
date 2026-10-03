@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkService, checkServiceLinux, installService, installSystemd, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { checkService, checkServiceLinux, installService, installSystemd, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 
 // Every CLI spawn below inherits this namespace, so even real launchctl calls address
@@ -376,6 +376,83 @@ test("linux install is a no-op when bytes match and the trigger is enabled", () 
   const result = installSystemd(home, job, units, run);
   expect(result).toMatchObject({ ok: true, changed: false });
   expect(calls.some(call => call.includes("daemon-reload"))).toBe(false);
+});
+test("linux interval lifecycle state uses the timer trigger", () => {
+  const { home, launcher } = fixture();
+  const units = renderSystemdUnits(home, intervalJob, launcher, null);
+  const serviceFile = join(home, ".config", "systemd", "user", `omp-kit-${intervalJob.name}.service`);
+  const timerUnit = `omp-kit-${intervalJob.name}.timer`;
+  const calls: string[][] = [];
+  const run = runner(calls, args => {
+    if (args[2] === "is-enabled" || args[2] === "is-active") {
+      return args[3] === timerUnit
+        ? { code: 0, stdout: args[2] === "is-enabled" ? "enabled" : "active", stderr: "" }
+        : { code: 1, stdout: "", stderr: "trigger absent" };
+    }
+    if (args[2] === "show") return { code: 0, stdout: `${serviceFile}\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const installed = installSystemd(home, intervalJob, units, run);
+  expect(installed.ok).toBe(true);
+  const state = systemctlState(intervalJob, run);
+  expect(state).toEqual({ enabled: true, active: true, fragmentPath: serviceFile });
+  const triggerQueries = calls.filter(call => call[2] === "is-enabled" || call[2] === "is-active").map(call => call[3]);
+  expect(triggerQueries.length).toBeGreaterThan(0);
+  expect(triggerQueries.every(trigger => trigger === timerUnit)).toBe(true);
+  const doctorChecks = checkServiceLinux({
+    home, job: intervalJob, launcher, unit: `omp-kit-${intervalJob.name}.service`,
+    timer: timerUnit, pathUnit: null, renderedService: units.service, ...state,
+  });
+  expect(doctorChecks.find(check => check.id === "loaded")?.status).toBe("PASS");
+  const watchCalls: string[][] = [];
+  systemctlState(job, runner(watchCalls));
+  expect(watchCalls.filter(call => call[2] === "is-enabled" || call[2] === "is-active").map(call => call[3]))
+    .toEqual([`omp-kit-${job.name}.path`, `omp-kit-${job.name}.path`]);
+  expect(readFileSync(join(home, ".config", "systemd", "user", `omp-kit-${intervalJob.name}.timer`), "utf8"))
+    .toBe(systemdTimer(intervalJob));
+});
+
+test("Linux service status and doctor read interval timer state", () => {
+  if (process.platform !== "linux") {
+    console.info("skip: systemd CLI integration requires Linux; timer state is covered by the runner test");
+    return;
+  }
+  const { home, launcher } = fixture();
+  const units = renderSystemdUnits(home, intervalJob, launcher, null);
+  const unitDir = join(home, ".config", "systemd", "user");
+  const serviceFile = join(unitDir, `omp-kit-${intervalJob.name}.service`);
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(serviceFile, units.service);
+  writeFileSync(join(unitDir, `omp-kit-${intervalJob.name}.timer`), systemdTimer(intervalJob));
+  const fakeBin = join(home, "fake-bin");
+  mkdirSync(fakeBin);
+  writeFileSync(join(fakeBin, "systemctl"), [
+    "#!/bin/sh",
+    'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"',
+    'case "$2" in',
+    '  is-enabled|is-active) [ "$3" = "omp-kit-scratch-reaper.timer" ] || exit 1; echo "$2"; exit 0 ;;',
+    '  show) printf "%s\\n" "$SYSTEMD_SERVICE_FILE"; exit 0 ;;',
+    '  *) exit 0 ;;',
+    "esac",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  chmodSync(join(fakeBin, "systemctl"), 0o755);
+  const log = join(home, "systemctl.log");
+  const env = {
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+    SYSTEMCTL_LOG: log,
+    SYSTEMD_SERVICE_FILE: serviceFile,
+  };
+  const status = cli(["service", "status", intervalJob.name], home, env);
+  expect(status.code).toBe(0);
+  expect(status.envelope.data.status[0]).toMatchObject({ installed: true, loaded: true, state: "active" });
+  const doctor = cli(["service", "doctor", intervalJob.name], home, env);
+  expect(doctor.code).toBe(0);
+  expect(doctor.envelope.data.checks.find((check: { id: string }) => check.id === "loaded")?.status).toBe("PASS");
+  const triggerCalls = readFileSync(log, "utf8").trim().split("\n").map(call => call.split(" "));
+  const stateQueries = triggerCalls.filter(call => call[1] === "is-enabled" || call[1] === "is-active");
+  expect(stateQueries.length).toBeGreaterThan(0);
+  expect(stateQueries.every(call => call[2] === `omp-kit-${intervalJob.name}.timer`)).toBe(true);
 });
 
 test("linux uninstall moves units to the backup dir", () => {

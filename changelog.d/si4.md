@@ -1,0 +1,1 @@
+- Fix Linux systemd interval-job install, status, and doctor checks to read the `.timer` trigger while preserving watch-job `.path` state.

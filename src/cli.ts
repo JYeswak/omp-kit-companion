@@ -1653,7 +1653,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const rows = names.map(name => {
 			const job = scoped[name!]!;
 			if (linux) {
-				const state = systemctlState(job.name, defaultRunner);
+				const state = systemctlState(job, defaultRunner);
 				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath };
 			}
 			const installed = readInstalledPlist(home, job.label);
@@ -1681,7 +1681,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 			const checks = linux
 				? checkServiceLinux({ home, job, launcher, unit: `omp-kit-${name}.service`, timer: null, pathUnit: null,
-					renderedService: renderSystemdUnits(home, job, launcher, watch).service, ...systemctlState(job.name, defaultRunner) })
+					renderedService: renderSystemdUnits(home, job, launcher, watch).service, ...systemctlState(job, defaultRunner) })
 				: checkService({ home, job, launcher, watch, installed: readInstalledPlist(home, job.label), print: queryPrint(job.label),
 					rendered: renderLaunchdPlist(home, job, launcher, watch).text });
 			if (request.flags.has("--fix")) {

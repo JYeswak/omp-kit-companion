@@ -447,11 +447,11 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 }
 export interface SystemdState { enabled: boolean; active: boolean; fragmentPath: string | null }
 
-export function systemctlState(job: string, run: ServiceRunner): SystemdState {
-	const trigger = `omp-kit-${job}.path`;
+export function systemctlState(job: ServiceJobDef, run: ServiceRunner): SystemdState {
+	const trigger = `omp-kit-${job.name}.${job.kind === "watch" ? "path" : "timer"}`;
 	const enabled = run(["systemctl", "--user", "is-enabled", trigger]);
 	const active = run(["systemctl", "--user", "is-active", trigger]);
-	const show = run(["systemctl", "--user", "show", `omp-kit-${job}.service`, "-p", "FragmentPath", "--value"]);
+	const show = run(["systemctl", "--user", "show", `omp-kit-${job.name}.service`, "-p", "FragmentPath", "--value"]);
 	const fragment = show.code === 0 && show.stdout.trim() ? show.stdout.trim() : null;
 	return { enabled: enabled.code === 0, active: active.code === 0, fragmentPath: fragment };
 }
@@ -462,7 +462,7 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 	const triggerFile = units.path ? join(dir, `omp-kit-${job.name}.path`) : join(dir, `omp-kit-${job.name}.timer`);
 	const triggerUnit = units.path ? `omp-kit-${job.name}.path` : `omp-kit-${job.name}.timer`;
 	const have = readText(serviceFile);
-	const loaded = systemctlState(job.name, run);
+	const loaded = systemctlState(job, run);
 	if (loaded.fragmentPath !== null && loaded.fragmentPath !== serviceFile && !replace) {
 		// Same shared-domain hazard as launchd: systemctl --user is per user, not per HOME.
 		return { ok: false, changed: false, backup: null,
@@ -499,7 +499,7 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 	if (enable.code !== 0) return { ok: false, changed: true, backup, detail: `enable failed: ${enable.stderr.trim() || enable.stdout.trim()}` };
 	const restart = run(["systemctl", "--user", "restart", triggerUnit]);
 	if (restart.code !== 0) return { ok: false, changed: true, backup, detail: `restart failed: ${restart.stderr.trim() || restart.stdout.trim()}` };
-	const state = systemctlState(job.name, run);
+	const state = systemctlState(job, run);
 	if (!state.enabled) return { ok: false, changed: true, backup, detail: "enable did not stick." };
 	return { ok: true, changed: true, backup, detail: backup ? `Replaced with backup at ${backup}.` : "Installed and enabled." };
 }
