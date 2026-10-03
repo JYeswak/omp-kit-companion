@@ -16,7 +16,7 @@ import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
 import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
-import { collectBrowserProcesses, inspectBrowserProcesses } from "./browser-doctor.ts";
+import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -1772,6 +1772,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (job.name === "scratch-reaper") {
 			const started = new Date().toISOString();
 			const result = applyScratch(home, { liveness: defaultLiveness(), run: scratchRunner, home });
+			const browserInventory = collectBrowserProcesses();
+			const browserPlan = planBrowserReap(inspectBrowserProcesses(browserInventory.processes, browserInventory.sessions));
+			const browserResult = applyBrowserReap(browserPlan, {
+				kill: pid => defaultRunner(["kill", "-TERM", String(pid)]).code === 0,
+				quarantine: path => { try { const root = join(home, ".local", "state", "omp-kit", "browser-quarantine"); mkdirSync(root, { recursive: true, mode: 0o700 }); renameSync(path, join(root, `${Date.now()}-${path.split("/").pop() ?? "clone"}`)); return true; } catch { return false; } },
+			});
 			const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
 			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: failed > 0 ? 1 : 0, omp_version: null };
 			try {
@@ -1783,7 +1789,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 						remediation: "Repair the state root; the scratch apply may already have run." }], verification: "UNVERIFIED" };
 			}
 			return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: job.name, receipt,
-				stats: { roots: result.roots.length, sessions: result.applied.length, orphans: result.orphans.length,
+				stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
 					reaped: result.applied.filter(v => v.action === "REAP").length,
 					quarantined: result.applied.filter(v => v.action === "QUARANTINE").length,
 					deleted: result.expired.length, failures: failed,
