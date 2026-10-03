@@ -14,6 +14,8 @@ kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "cargo test -> 41
 kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "fixed: cargo test -p parser -> 41 passed; commit a1b2c3d"	session regression: evidence reason with a ; inside the quotes
 kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason "done"	has a reason: this rule is quiet, kit-close-reason-no-evidence owns it
 kit-close-needs-evidence	quiet	tool	bash	-	br close x --reason="done"	has a reason in = form
+kit-close-needs-evidence	fire	tool	bash	-	br close x\nbr list	newline command after reasonless close
+kit-close-needs-evidence	fire	tool	bash	-	br\tclose x\t&&\tbr list	tab-separated command boundary
 kit-close-needs-evidence	quiet	tool	bash	-	br list --status open	br without close
 kit-close-needs-evidence	quiet	tool	bash	-	br close --help 2>&1 | head -n 40	corpus false positive: help is not a close
 kit-close-reason-no-evidence	fire	tool	bash	-	br close x --reason "done"	session regression: bare word reason

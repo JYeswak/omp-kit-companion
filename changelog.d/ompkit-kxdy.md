@@ -2,3 +2,4 @@
 - Put the readiness-script literal first in the matcher and recognize escaped-tab command prefixes; existing fire/quiet cases retain parity.
 - Put the claim-discipline checker literal first and recognize escaped-tab command starts while retaining quiet mention cases.
 - Put the canary token first and recognize newline/tab command payloads while quoted printf data stays quiet.
+- Put the close-evidence literal first and recognize escaped tab/newline command boundaries while preserving reasoned closes.
