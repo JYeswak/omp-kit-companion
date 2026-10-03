@@ -1,0 +1,1 @@
+- Added a config-driven fleet watcher service job that polls worker activity, decides when the fleet is idle, and writes its decisions as JSONL (commit c808d26) (commit d0aaa46) (commit 22892cd).

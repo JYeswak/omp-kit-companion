@@ -1,0 +1,1 @@
+- Release archives now include `scripts/regex-budget.ts`, and the regex budget gate is no longer part of the default readiness ladder while rule conditions are still being made linear (commit def2cff) (commit 07d477d) (commit e47d338).

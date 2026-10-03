@@ -1,0 +1,1 @@
+- Scheduled scratch reaping, scratch release, and service TMPDIR pinning shipped as one change set: service units export a private TMPDIR under the omp-kit state root, and scratch release rejects a reused owner PID (commit fdae176) (commit 8e2e4c3) (commit aa3c31d).

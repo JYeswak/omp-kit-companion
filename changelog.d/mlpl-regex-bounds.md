@@ -1,0 +1,1 @@
+- Digest validation, CLI profile input, and the remaining regexes that read external input now check input length before matching, so oversized input cannot cause slow regex backtracking (commit 00d731e) (commit ebfb905) (commit ffc6881).

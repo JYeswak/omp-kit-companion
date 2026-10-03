@@ -1,0 +1,1 @@
+- The live end-to-end script runs the provider contract test without the unrelated rule-coverage preflight (commit 09dff00).

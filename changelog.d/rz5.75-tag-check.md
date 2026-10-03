@@ -1,0 +1,1 @@
+- The release-notes check run on a tagged release commit now accepts merged-PR lines already moved into the new version section by assembly, so tag-time release checks no longer fail on PRs that are already noted (commit 94581af).

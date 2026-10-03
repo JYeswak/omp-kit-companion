@@ -1,0 +1,1 @@
+- The Agent Mail pre-commit storage-root gate and its installer now match the project by its canonical Git root (commit bf0cced).

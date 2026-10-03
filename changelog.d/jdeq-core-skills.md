@@ -1,0 +1,1 @@
+- Skill-set selection now pins the core skills and chooses the lean router for lean profiles (commit ffa5c23).

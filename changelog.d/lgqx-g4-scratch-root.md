@@ -1,0 +1,1 @@
+- The live end-to-end script keeps the G4 scenario's scratch files under a bounded, repo-owned scratch root (commit ea92347).

@@ -1,0 +1,1 @@
+- Added an opt-in `kit-update` service job that runs kit updates on a schedule and reports an explicit outcome, including runs that were undone (commit 7d8aade) (commit d666d88) (commit 2d7126d).
