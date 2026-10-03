@@ -1,0 +1,1 @@
+- Memory readiness recognizes the reviewed OMP 18.5.0 memory sources; an unreviewed source is reported with its exact file and sha256 and stays UNVERIFIED.

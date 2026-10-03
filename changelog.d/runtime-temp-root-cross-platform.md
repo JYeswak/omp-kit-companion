@@ -1,1 +1,1 @@
-- Resolve and canonicalize runtime scratch roots through `os.tmpdir()`, with a platform-root fallback when `TMPDIR` is not a directory or is nested under caller `HOME`.
+- Runtime scratch roots resolve through the canonicalized system temp directory; a `TMPDIR` that is missing, outside the platform temp root, or nested under the caller's `HOME` falls back to the platform root (Darwin `getconf DARWIN_USER_TEMP_DIR`, else `/tmp`). (commit ea63cdf) (commit ccac6bb) (commit e955ada) (commit 1343517) (commit 428a16f)

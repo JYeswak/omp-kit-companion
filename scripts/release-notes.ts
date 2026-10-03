@@ -234,16 +234,21 @@ function collectDirectCommitCoverage(
 			continue;
 		}
 
+		const referenced = fragments.find(candidate => candidate.content.includes(`(commit ${shortHash})`));
 		const beads = [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
+		if (referenced) {
+			coverages.push({ hash: shortHash, bead: beads[0] ?? "-", fragment: referenced });
+			continue;
+		}
 		if (beads.length !== 1)
-			fail(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer or a [no-changelog] reason`);
+			fail(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason, or a fragment naming (commit ${shortHash})`);
 		const bead = beads[0]!;
 		const slug = bead.split("-").at(-1)!;
 		if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(slug))
 			fail(`direct commit ${shortHash} has an invalid Bead: trailer: ${bead}`);
-		const path = `changelog.d/${slug}.md`;
-		const fragment = fragments.find(candidate => candidate.path === path);
-		if (!fragment) fail(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${path}`);
+		const paths = [`changelog.d/${slug}.md`, `changelog.d/${bead}.md`];
+		const fragment = fragments.find(candidate => paths.includes(candidate.path));
+		if (!fragment) fail(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${paths[0]}`);
 		coverages.push({ hash: shortHash, bead, fragment });
 	}
 	return coverages;

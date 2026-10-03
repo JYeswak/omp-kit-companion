@@ -1,0 +1,1 @@
+- `kit-test-skip` now blocks a Go `t.Skip` inserted by an `edit` in a live session. OMP matches edit arguments as JSON, where tab indentation becomes `\t`, and the rule's word boundary missed it; live scenarios now cover both `write` and `edit`. Native certification derives its expected live-scenario set from `tests/live/scenarios.json` instead of a fixed count.
