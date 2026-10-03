@@ -377,7 +377,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "browsers") {
 		const collected = collectBrowserProcesses();
-		const report = inspectBrowserProcesses(collected.processes, collected.sessions);
+		const report = inspectBrowserProcesses(collected.processes, collected.sessions, Date.now(), collected.clones);
 		return { code: 0, data: { overall: report.status === "OK" ? "OK" : "WARN", scope: "browsers", ...report }, commands: ["omp-kit doctor --scope browsers --json"], verification: "PERFORMED" };
 	}
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "regex-tools") {
