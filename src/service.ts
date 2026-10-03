@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
+import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -65,13 +65,78 @@ export function plistPath(home: string, label: string): string {
 }
 
 export function backupDir(home: string): string {
-	const root = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	const root = stateHome(home);
 	return join(root, "omp-kit", "service-backups");
 }
 
 export function jobsDir(home: string): string {
-	const root = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	const root = stateHome(home);
 	return join(root, "omp-kit", "jobs");
+}
+
+function stateHome(home: string): string {
+	return process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+}
+
+function serviceTmpDir(home: string): string {
+	return join(stateHome(home), "omp-kit", "service-tmp");
+}
+
+const SERVICE_TMP_OWNER = "owner=omp-kit\npurpose=service-tmp\nversion=1\n";
+
+function serviceTmpIsSafe(home: string): boolean {
+	const dir = serviceTmpDir(home);
+	const uid = process.getuid?.();
+	try {
+		const dirStat = lstatSync(dir);
+		const ownerPath = join(dir, ".owner");
+		const ownerStat = lstatSync(ownerPath);
+		return uid !== undefined &&
+			dirStat.isDirectory() && !dirStat.isSymbolicLink() && dirStat.uid === uid && (dirStat.mode & 0o777) === 0o700 &&
+			ownerStat.isFile() && !ownerStat.isSymbolicLink() && ownerStat.uid === uid && (ownerStat.mode & 0o777) === 0o600 &&
+			readFileSync(ownerPath, "utf8") === SERVICE_TMP_OWNER;
+	} catch {
+		return false;
+	}
+}
+
+function ensureServiceTmp(home: string): void {
+	const stateRoot = join(stateHome(home), "omp-kit");
+	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+	let rootIssue = inspectStateRoot(stateRoot);
+	if (rootIssue?.problem === "MODE") {
+		repairStateRootMode(stateRoot);
+		rootIssue = inspectStateRoot(stateRoot);
+	}
+	if (rootIssue) throw new Error(`unsafe omp-kit state root ${stateRoot}: ${rootIssue.problem}`);
+
+	const dir = serviceTmpDir(home);
+	let created = false;
+	try {
+		mkdirSync(dir, { mode: 0o700 });
+		created = true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+	const dirStat = lstatSync(dir);
+	const uid = process.getuid?.();
+	if (uid === undefined || !dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== uid || (dirStat.mode & 0o077) !== 0) {
+		throw new Error(`unsafe omp-kit service TMPDIR ${dir}`);
+	}
+	if (created && (dirStat.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
+	if (!created && (dirStat.mode & 0o777) !== 0o700) throw new Error(`omp-kit service TMPDIR must be mode 0700: ${dir}`);
+
+	const ownerPath = join(dir, ".owner");
+	if (!existsSync(ownerPath)) {
+		if (readdirSync(dir).length !== 0) throw new Error(`omp-kit service TMPDIR has no owner marker: ${dir}`);
+		writeFileSync(ownerPath, SERVICE_TMP_OWNER, { flag: "wx", mode: 0o600 });
+		const ownerStat = lstatSync(ownerPath);
+		if (!ownerStat.isFile() || ownerStat.isSymbolicLink() || ownerStat.uid !== uid) {
+			throw new Error(`unsafe omp-kit service TMPDIR owner marker: ${ownerPath}`);
+		}
+		chmodSync(ownerPath, 0o600);
+	}
+	if (!serviceTmpIsSafe(home)) throw new Error(`omp-kit service TMPDIR owner marker or permissions are invalid: ${dir}`);
 }
 
 function xml(value: string): string {
@@ -99,8 +164,10 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		"\t<dict>",
 		`\t\t<key>HOME</key>`,
 		`\t\t<string>${xml(home)}</string>`,
+		"\t\t<key>XDG_STATE_HOME</key>",
+		`\t\t<string>${xml(stateHome(home))}</string>`,
 		"\t\t<key>TMPDIR</key>",
-		`\t\t<string>${xml(tmpdir())}</string>`,
+		`\t\t<string>${xml(serviceTmpDir(home))}</string>`,
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(FIXED_PATH)}</string>`,
 		"\t\t<key>OMP_KIT_JOB</key>",
@@ -139,8 +206,9 @@ function systemdQuote(value: string): string {
 export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedSystemd {
 	const env = [
 		`Environment=HOME=${systemdQuote(home)}`,
+		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
 		`Environment=PATH=${systemdQuote(FIXED_PATH.replaceAll("~", home))}`,
-		`Environment=TMPDIR=${systemdQuote(tmpdir())}`,
+		`Environment=TMPDIR=${systemdQuote(serviceTmpDir(home))}`,
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
 	const service = [
@@ -318,10 +386,11 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 			? { id: "plist-matches-renderer", status: "PASS", message: "Installed plist matches the renderer", remediation: "None." }
 			: { id: "plist-matches-renderer", status: "WARN", message: `Installed plist drifts by ${diff.length} normalized line(s): ${diff.slice(0, 3).join(" | ")}`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
 	}
-	const hasTmpdir = input.installed !== null && /<key>TMPDIR<\/key>\s*<string>[^<]+<\/string>/.test(input.installed.text);
-	checks.push(hasTmpdir
-		? { id: "tmpdir-present", status: "PASS", message: "Installed plist sets TMPDIR", remediation: "None." }
-		: { id: "tmpdir-present", status: "FAIL", message: "Installed plist is missing TMPDIR", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
+	const tmpdirEntry = input.installed?.text.match(/<key>TMPDIR<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+	const hasPrivateTmpdir = tmpdirEntry === xml(serviceTmpDir(input.home)) && serviceTmpIsSafe(input.home);
+	checks.push(hasPrivateTmpdir
+		? { id: "tmpdir-present", status: "PASS", message: `Installed plist uses private service TMPDIR ${serviceTmpDir(input.home)}`, remediation: "None." }
+		: { id: "tmpdir-present", status: "FAIL", message: "Installed plist does not use the private service TMPDIR or its owner marker and permissions are unsafe", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {
@@ -449,10 +518,11 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 			? { id: "unit-matches-renderer", status: "PASS", message: "Installed unit matches the renderer", remediation: "None." }
 			: { id: "unit-matches-renderer", status: "WARN", message: `Installed unit drifts by ${diff.length} normalized line(s)`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
 	}
-	const hasTmpdir = installed !== null && /^Environment=TMPDIR="[^"]+.*"$/m.test(installed);
-	checks.push(hasTmpdir
-		? { id: "tmpdir-present", status: "PASS", message: "Installed unit sets TMPDIR", remediation: "None." }
-		: { id: "tmpdir-present", status: "FAIL", message: "Installed unit is missing TMPDIR", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
+	const tmpdirEntry = installed?.match(/^Environment=TMPDIR="([^"]+)"$/m)?.[1];
+	const hasPrivateTmpdir = tmpdirEntry === systemdQuote(serviceTmpDir(input.home)).slice(1, -1) && serviceTmpIsSafe(input.home);
+	checks.push(hasPrivateTmpdir
+		? { id: "tmpdir-present", status: "PASS", message: `Installed unit uses private service TMPDIR ${serviceTmpDir(input.home)}`, remediation: "None." }
+		: { id: "tmpdir-present", status: "FAIL", message: "Installed unit does not use the private service TMPDIR or its owner marker and permissions are unsafe", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {
@@ -491,6 +561,12 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 		return { ok: false, changed: false, backup: null,
 			detail: `Unit omp-kit-${job.name}.service is already enabled from ${loaded.fragmentPath}, not ${serviceFile}. Re-run with --replace to take it over (a backup is kept).`,
 			error: "LABEL_LOADED_ELSEWHERE" };
+	}
+	try {
+		ensureServiceTmp(home);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return { ok: false, changed: false, backup: null, detail: `Cannot prepare private service TMPDIR: ${detail}`, error: "TMPDIR_SETUP_FAILED" };
 	}
 	if (have !== null && have === units.service && loaded.enabled && loaded.fragmentPath === serviceFile) {
 		return { ok: true, changed: false, backup: null, detail: "Identical bytes and enabled; no-op." };
@@ -579,6 +655,12 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 		return { ok: false, changed: false, backup: null,
 			detail: `Label ${job.label} is already loaded from ${print.path ?? "an unknown plist"}, not ${dest}. Re-run with --replace to take it over (a backup is kept).`,
 			error: "LABEL_LOADED_ELSEWHERE" };
+	}
+	try {
+		ensureServiceTmp(home);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return { ok: false, changed: false, backup: null, detail: `Cannot prepare private service TMPDIR: ${detail}`, error: "TMPDIR_SETUP_FAILED" };
 	}
 	const plan = planInstall(home, job, launcher, watchPath, installed);
 	if (plan.alreadyInstalled && print.loaded && print.path === dest) {

@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 
@@ -13,12 +12,42 @@ const testLabel = `${testNamespace}.omp-watch`;
 
 const job: ServiceJobDef = { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 };
 const intervalJob = KNOWN_JOBS["scratch-reaper"]!;
+const savedXdgStateHome = process.env.XDG_STATE_HOME;
+const SERVICE_TMP_OWNER = "owner=omp-kit\npurpose=service-tmp\nversion=1\n";
+function serviceTmpDir(home: string): string {
+  return join(home, ".local", "state", "omp-kit", "service-tmp");
+}
+function seedServiceTmp(home: string): void {
+  const dir = serviceTmpDir(home);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const owner = join(dir, ".owner");
+  writeFileSync(owner, SERVICE_TMP_OWNER, { mode: 0o600 });
+  chmodSync(owner, 0o600);
+}
+function expectPrivateServiceTmp(home: string): void {
+  const dir = serviceTmpDir(home);
+  expect(existsSync(dir)).toBe(true);
+  if (!existsSync(dir)) return;
+  expect(statSync(dir).isDirectory()).toBe(true);
+  expect(statSync(dir).mode & 0o777).toBe(0o700);
+  const owner = join(dir, ".owner");
+  expect(existsSync(owner)).toBe(true);
+  if (!existsSync(owner)) return;
+  expect(statSync(owner).mode & 0o777).toBe(0o600);
+  expect(readFileSync(owner, "utf8")).toBe(SERVICE_TMP_OWNER);
+}
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  if (savedXdgStateHome === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = savedXdgStateHome;
+});
 
 function fixture(): { home: string; launcher: string; watch: string } {
   const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-"));
   roots.push(home);
+  process.env.XDG_STATE_HOME = join(home, ".local", "state");
   const launcher = join(home, ".local", "bin", "omp-kit");
   mkdirSync(join(home, ".local", "bin"), { recursive: true });
   writeFileSync(launcher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -44,6 +73,7 @@ function healthyPrint(plist: string): string {
   return ["path = " + plist, "state = running", "pid = 123", "runs = 5", "last exit code = 0", ""].join("\n");
 }
 function healthyInput(home: string, launcher: string, watch: string) {
+  seedServiceTmp(home);
   const rendered = renderLaunchdPlist(home, job, launcher, watch).text;
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
   writeFileSync(join(home, "Library", "LaunchAgents", `${job.label}.plist`), rendered);
@@ -73,10 +103,23 @@ test("rendered plist calls the stable launcher directly with fixed env and watch
   expect(text).toContain("<integer>60</integer>");
 });
 
-test("rendered plist sets TMPDIR to the system temp directory", () => {
+test("rendered plist uses private service scratch under the XDG state root", () => {
   const { home, launcher, watch } = fixture();
   const text = renderLaunchdPlist(home, job, launcher, watch).text;
-  expect(text).toContain(`<key>TMPDIR</key>\n\t\t<string>${tmpdir()}</string>`);
+  expect(text).toContain(`<key>TMPDIR</key>\n\t\t<string>${serviceTmpDir(home)}</string>`);
+  expect(text).toContain(`<key>XDG_STATE_HOME</key>\n\t\t<string>${join(home, ".local", "state")}</string>`);
+});
+
+test("launchd no-op install provisions private service scratch with an owner marker", () => {
+  const { home, launcher, watch } = fixture();
+  const rendered = renderLaunchdPlist(home, job, launcher, watch).text;
+  const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(dest, rendered);
+  const result = installService(home, job, launcher, watch, { path: dest, text: rendered },
+    { loaded: true, path: dest, state: "running", pid: 1, runs: 1, lastExit: 0 }, runner([]));
+  expect(result).toMatchObject({ ok: true, changed: false });
+  expectPrivateServiceTmp(home);
 });
 
 test("rendered plist escapes XML metacharacters in paths", () => {
@@ -379,6 +422,15 @@ test("planted: a matching launchd plist without TMPDIR fails tmpdir-present", ()
   expect(checks.find(check => check.id === "plist-matches-renderer")?.status).toBe("PASS");
   expect(checks.find(check => check.id === "tmpdir-present")?.status).toBe("FAIL");
 });
+test("planted: launchd doctor rejects TMPDIR outside private state scratch", () => {
+  const { home, launcher, watch } = fixture();
+  const input = healthyInput(home, launcher, watch);
+  for (const wrong of ["/var/folders/aa/bb/T/omp-kit", "/tmp"]) {
+    const installed = { ...input.installed!, text: input.installed!.text.replace(serviceTmpDir(home), wrong) };
+    const check = checkService({ ...input, installed }).find(row => row.id === "tmpdir-present");
+    expect(check?.status, wrong).toBe("FAIL");
+  }
+});
 
 test("linux units render service plus path trigger with fixed env", () => {
   const { home, launcher, watch } = fixture();
@@ -389,10 +441,11 @@ test("linux units render service plus path trigger with fixed env", () => {
   expect(units.path).toContain("WantedBy=default.target");
 });
 
-test("linux service exports TMPDIR to locate system scratch roots", () => {
+test("linux service uses private service scratch under the XDG state root", () => {
   const { home, launcher, watch } = fixture();
   const units = renderSystemdUnits(home, job, launcher, watch);
-  expect(units.service).toContain(`Environment=TMPDIR="${tmpdir()}"`);
+  expect(units.service).toContain(`Environment=TMPDIR="${serviceTmpDir(home)}"`);
+  expect(units.service).toContain(`Environment=XDG_STATE_HOME="${join(home, ".local", "state")}"`);
 });
 
 test("linux install is a no-op when bytes match and the trigger is enabled", () => {
@@ -410,6 +463,7 @@ test("linux install is a no-op when bytes match and the trigger is enabled", () 
   writeFileSync(join(dir, `omp-kit-${job.name}.service`), units.service);
   const result = installSystemd(home, job, units, run);
   expect(result).toMatchObject({ ok: true, changed: false });
+  expectPrivateServiceTmp(home);
   expect(calls.some(call => call.includes("daemon-reload"))).toBe(false);
 });
 test("linux interval lifecycle state uses the timer trigger", () => {
@@ -453,6 +507,7 @@ test("Linux service status and doctor read interval timer state", () => {
     return;
   }
   const { home, launcher } = fixture();
+  seedServiceTmp(home);
   const units = renderSystemdUnits(home, intervalJob, launcher, null);
   const unitDir = join(home, ".config", "systemd", "user");
   const serviceFile = join(unitDir, `omp-kit-${intervalJob.name}.service`);
@@ -523,10 +578,24 @@ test("planted: a matching systemd unit without TMPDIR fails tmpdir-present", () 
   expect(checks.find(check => check.id === "unit-matches-renderer")?.status).toBe("PASS");
   expect(checks.find(check => check.id === "tmpdir-present")?.status).toBe("FAIL");
 });
+test("planted: systemd doctor rejects TMPDIR outside private state scratch", () => {
+  const { home, launcher, watch } = fixture();
+  seedServiceTmp(home);
+  const units = renderSystemdUnits(home, job, launcher, watch);
+  const unitDir = join(home, ".config", "systemd", "user");
+  mkdirSync(unitDir, { recursive: true });
+  const serviceFile = join(unitDir, `omp-kit-${job.name}.service`);
+  for (const wrong of ["/var/folders/aa/bb/T/omp-kit", "/tmp"]) {
+    writeFileSync(serviceFile, units.service.replace(`Environment=TMPDIR="${serviceTmpDir(home)}"`, `Environment=TMPDIR="${wrong}"`));
+    const checks = checkServiceLinux({ home, job, launcher, unit: `omp-kit-${job.name}.service`, timer: null, pathUnit: null,
+      renderedService: units.service, enabled: true, active: true, fragmentPath: serviceFile });
+    expect(checks.find(check => check.id === "tmpdir-present")?.status, wrong).toBe("FAIL");
+  }
+});
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home, ...extraEnv }, stdout: "pipe", stderr: "pipe",
+    cwd: home, env: { ...process.env, HOME: home, XDG_STATE_HOME: extraEnv.XDG_STATE_HOME ?? join(home, ".local", "state"), ...extraEnv }, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }

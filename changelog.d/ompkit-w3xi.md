@@ -1,2 +1,2 @@
 - Owners can mark finished task scratch with `omp-kit scratch release DIR`; the owner-only release is quarantined at the next run and expires after seven days. The scratch-reaper now applies its plan, records the run result, and runs at load and every six hours.
-- Service renderers export the system `TMPDIR`, doctor flags installed plists and units missing it, and scratch release refuses a reused owner PID before writing its release marker.
+- Service launchers use a private TMPDIR under the omp-kit state root, provision its mode-0700 directory and `.owner` marker even on no-op installs, and have doctor verify that exact path and its permissions; scratch release refuses a reused owner PID before writing its release marker.
