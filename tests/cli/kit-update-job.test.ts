@@ -23,5 +23,5 @@ test("fake newer certified release becomes UPDATED and writes a run receipt", as
 
 test("postcheck failure reports UNDONE and notifies", async () => {
 	const value = config(); const notes: string[] = []; const result = await runKitUpdateJob(value, { plan: async () => ({ status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never), apply: async () => ({ status: "PARTIAL", exitCode: 1, receiptId: "r2", activeVersion: "1.2.3", postcheck: { status: "FAIL", matcher: "PASS", live: "FAIL" }, provenance: "INTEGRITY_ONLY" }), notify: message => { notes.push(message); } });
-	expect(result).toMatchObject({ status: "FAILED", receiptId: "r2", notification: true }); expect(notes[0]).toContain("automatic undo"); expect(existsSync(join(value.stateRoot, readdirSync(value.stateRoot)[0]!))).toBe(true);
+	expect(result).toMatchObject({ status: "UNDONE", receiptId: "r2", notification: true }); expect(notes[0]).toContain("automatic undo"); expect(existsSync(join(value.stateRoot, readdirSync(value.stateRoot)[0]!))).toBe(true);
 });

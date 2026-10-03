@@ -12,7 +12,7 @@ export type KitUpdateJobDependencies = {
 	apply?: (plan: KitUpdatePlan) => Promise<KitUpdateResult>;
 	notify?: (message: string) => Promise<void> | void;
 };
-export type KitUpdateJobResult = { status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string };
+export type KitUpdateJobResult = { status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "UNDONE" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string };
 
 /** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
 export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: KitUpdateJobDependencies = {}): Promise<KitUpdateJobResult> {
@@ -26,7 +26,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false });
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason }); }
 		const result = await apply(preview);
-		if (result.status === "PARTIAL") { await dependencies.notify?.("omp-kit update postcheck failed; automatic undo completed"); return record(config.stateRoot, runId, { status: "FAILED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true }); }
+		if (result.status === "PARTIAL") { await dependencies.notify?.("omp-kit update postcheck failed; automatic undo completed"); return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true }); }
 		return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
