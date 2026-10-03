@@ -176,6 +176,8 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	if (names.length !== manifest.extensions.length) stop("INVALID_EXTENSION_POLICY");
 	const { selected, skipped } = profiles(home, manifest.skipProfiles, input.profiles, input.includeDefault);
 	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: join(home, ".omp", "omp-extensions") }];
+	const skippedReasons: ProfileSkip[] = [...skipped];
+	const installableNames: string[] = [];
 	const seen = new Set<string>();
 	for (const name of names) {
 		const source = required(join(root, "extensions", name));
@@ -183,16 +185,20 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 		inspectDirectory(destinationDir, true);
 		const destination = join(destinationDir, name);
 		const existing = readOptional(destination);
-		if (existing && !existing.bytes.equals(source.bytes)) stop("UNMANAGED_EXTENSION_COLLISION");
+		if (existing && !existing.bytes.equals(source.bytes)) {
+			skippedReasons.push({ name, reason: "SKIPPED_UNMANAGED" });
+			continue;
+		}
 		if (seen.has(destination)) stop("INVALID_EXTENSION_POLICY");
 		seen.add(destination);
+		installableNames.push(name);
 		if (!existing) {
 			files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
 			steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
 		}
 	}
 	const skippedProfiles = skipped.map(entry => entry.name), alreadyListedProfiles: string[] = [];
-	const destinations = names.map(name => join(home, ".omp", "omp-extensions", name));
+	const destinations = installableNames.map(name => join(home, ".omp", "omp-extensions", name));
 	for (const profile of selected) {
 		let current: readonly string[] = stringArray(profile.data.extensions) ? profile.data.extensions as string[] : [];
 		let listed = true;
@@ -210,7 +216,7 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 			after: { bytes: next, mode: profile.source?.image.mode ?? 0o600, ...(profile.source ? { uid: profile.source.image.uid, gid: profile.source.image.gid } : {}) } });
 		steps.push({ kind: "profile", path: profile.path, profile: profile.name, beforeSha256: profile.source?.image.sha256 ?? null, afterSha256: hash(next) });
 	}
-	return { destination: destinations[0]!, stateRoot, steps, skippedProfiles, skippedReasons: skipped, alreadyListedProfiles, guard: inspectExtensionGuard(input),
+	return { destination: destinations[0] ?? join(home, ".omp", "omp-extensions"), stateRoot, steps, skippedProfiles, skippedReasons, alreadyListedProfiles, guard: inspectExtensionGuard(input),
 		mutation: files.length ? planMutation({ stateRoot, roots, files }) : null };
 }
 
