@@ -16,9 +16,9 @@ Every push to `main` runs the fast Linux gate (CLI contracts and the rule ladder
 
 The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days.
 
-Each merged PR adds one Markdown bullet to `changelog.d/<bead>.md`, ending in `(PR #NN)`. Keep PR notes in separate files rather than editing `CHANGELOG.md`; the release workflow requires a fragment for every merged PR since the previous tag.
+Each new merged PR adds one Markdown bullet to `changelog.d/<bead>.md`, ending in `(PR #NN)`. Keep PR notes in separate files rather than editing `CHANGELOG.md`. For legacy notes already in `CHANGELOG.md`'s `Unreleased` section, append `(PR #NN)` to the existing bullet. The check requires exactly one fragment or tagged legacy bullet for every merged PR and prints each PR's coverage source.
 
-Before the release commit, run `sh scripts/release-notes.sh assemble --base-tag v<previous-version> --head HEAD --version <release-version> --date YYYY-MM-DD`. This moves the current "Unreleased" entries and new fragments into the version section while preserving the fragments; add `--output PATH` to preview into a separate file. Check completeness locally with `sh scripts/release-notes.sh check --base-tag v<previous-version> --head HEAD`.
+Before the release commit, run `sh scripts/release-notes.sh assemble --base-tag v<previous-version> --head HEAD --version <release-version> --date YYYY-MM-DD` to print the generated changelog to stdout; assembly does not modify files by default. Add `--output PATH` to save a preview elsewhere. Use `--write` only when deliberately updating `CHANGELOG.md`; it refuses local edits that differ from `--head`. Check completeness locally with `sh scripts/release-notes.sh check --base-tag v<previous-version> --head HEAD`.
 
 A release is:
 

@@ -1,11 +1,24 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 type Options =
 	| { mode: "check"; baseTag: string; head: string }
-	| { mode: "assemble"; baseTag: string; head: string; version: string; date: string; output?: string };
+	| { mode: "assemble"; baseTag: string; head: string; version: string; date: string; output?: string; write: boolean };
 type Fragment = { path: string; content: string; pr?: string };
-type ReleaseHistory = { mergedPrs: string[]; fragments: Fragment[]; byPr: Map<string, Fragment> };
+type UnreleasedLine = { lineNumber: number; text: string; pr?: string };
+type UnreleasedSection = {
+	lines: string[];
+	unreleasedIndex: number;
+	nextHeadingIndex: number;
+	preservedComments: string[];
+	entries: UnreleasedLine[];
+};
+type ReleaseHistory = {
+	mergedPrs: string[];
+	fragments: Fragment[];
+	byPr: Map<string, Fragment>;
+	unreleasedByPr: Map<string, UnreleasedLine>;
+};
 type Git = (args: string[]) => string;
 
 const fail = (reason: string): never => { throw new Error(reason); };
@@ -37,26 +50,42 @@ function run(): void {
 	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseTag}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
 	if (git(["merge-base", base, head]) !== base) fail(`base tag ${options.baseTag} is not an ancestor of ${options.head}`);
-	const history = collectHistory(git, base, head, options.baseTag, options.head);
+	const history = collectHistory(git, gitRaw, base, head, options.baseTag, options.head);
 	if (options.mode === "check") {
-		console.log(`OK: ${history.mergedPrs.length} merged PRs have fragments in ${options.baseTag}..${options.head}`);
+		console.log(`OK: ${history.mergedPrs.length} merged PRs have release-note coverage in ${options.baseTag}..${options.head}`);
+		for (const pr of history.mergedPrs) {
+			const fragment = history.byPr.get(pr);
+			if (fragment) {
+				console.log(`PR #${pr} covered by ${fragment.path}: ${fragment.content}`);
+			} else {
+				const line = history.unreleasedByPr.get(pr)!;
+				console.log(`PR #${pr} covered by CHANGELOG.md:${line.lineNumber} (Unreleased): ${line.text.trim()}`);
+			}
+		}
 		return;
 	}
 	assemble(root, options, history, gitRaw, head);
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check --base-tag vX.Y.Z --head REF | assemble --base-tag vX.Y.Z --head REF --version X.Y.Z --date YYYY-MM-DD [--output PATH]";
+	const usage = "Usage: release-notes.sh check --base-tag vX.Y.Z --head REF | assemble --base-tag vX.Y.Z --head REF --version X.Y.Z --date YYYY-MM-DD [--output PATH | --write]";
 	const mode = args[0];
 	if (mode === "check") {
-		const values = parseFlags(args.slice(1), { "--base-tag": true, "--head": true }, usage);
+		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value" }, usage);
 		const baseTag = requiredValue(values, "--base-tag", usage);
 		const head = requiredValue(values, "--head", usage);
 		validateBaseTag(baseTag, usage);
 		return { mode, baseTag, head };
 	}
 	if (mode === "assemble") {
-		const values = parseFlags(args.slice(1), { "--base-tag": true, "--head": true, "--version": true, "--date": true, "--output": true }, usage);
+		const values = parseFlags(args.slice(1), {
+			"--base-tag": "value",
+			"--head": "value",
+			"--version": "value",
+			"--date": "value",
+			"--output": "value",
+			"--write": "boolean",
+		}, usage);
 		const baseTag = requiredValue(values, "--base-tag", usage);
 		const head = requiredValue(values, "--head", usage);
 		const version = requiredValue(values, "--version", usage);
@@ -66,41 +95,52 @@ function parseArguments(args: string[]): Options {
 		const parsedDate = new Date(`${date}T00:00:00.000Z`);
 		if (Number.isNaN(parsedDate.valueOf()) || parsedDate.toISOString().slice(0, 10) !== date) fail("release date must be a real YYYY-MM-DD date");
 		const output = values.get("--output");
-		return output === undefined ? { mode, baseTag, head, version, date } : { mode, baseTag, head, version, date, output };
+		const write = values.get("--write") === true;
+		if (write && output !== undefined) fail("--write and --output cannot be combined");
+		if (output !== undefined && typeof output !== "string") fail(usage);
+		const options: Extract<Options, { mode: "assemble" }> = { mode, baseTag, head, version, date, write };
+		if (typeof output === "string") options.output = output;
+		return options;
 	}
 	return fail(usage);
 }
 
-function parseFlags(args: string[], allowed: Record<string, true>, usage: string): Map<string, string> {
-	const values = new Map<string, string>();
-	for (let index = 0; index < args.length; index += 2) {
+function parseFlags(args: string[], allowed: Record<string, "value" | "boolean">, usage: string): Map<string, string | true> {
+	const values = new Map<string, string | true>();
+	for (let index = 0; index < args.length;) {
 		const flag = args[index]!;
+		if (!Object.prototype.hasOwnProperty.call(allowed, flag) || values.has(flag)) fail(usage);
+		if (allowed[flag] === "boolean") {
+			values.set(flag, true);
+			index++;
+			continue;
+		}
 		const value = args[index + 1];
-		if (!Object.prototype.hasOwnProperty.call(allowed, flag) || value === undefined || value.length === 0 || value.startsWith("--") || values.has(flag)) fail(usage);
+		if (value === undefined || value.length === 0 || value.startsWith("--")) fail(usage);
 		values.set(flag, value);
+		index += 2;
 	}
 	return values;
 }
 
-function requiredValue(values: Map<string, string>, flag: string, usage: string): string {
+function requiredValue(values: Map<string, string | true>, flag: string, usage: string): string {
 	const value = values.get(flag);
-	if (value === undefined || value.length === 0) fail(usage);
-	return value!;
+	if (typeof value !== "string" || value.length === 0) fail(usage);
+	return value;
 }
 
 function validateBaseTag(baseTag: string, usage: string): void {
 	if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(baseTag)) fail(usage);
 }
 
-function collectHistory(git: Git, base: string, head: string, baseTag: string, headRef: string): ReleaseHistory {
-	const log = git(["log", "--first-parent", "--reverse", "--format=%s", `${base}..${head}`]);
+function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseTag: string, headRef: string): ReleaseHistory {
+	const log = git(["log", "--reverse", "--format=%s", `${base}..${head}`]);
 	const mergedPrs: string[] = [];
 	const seenPrs = new Set<string>();
 	for (const subject of log.split(/\r?\n/).filter(Boolean)) {
 		const match = subject.match(/^Merge pull request #(\d+)\b/) ?? subject.match(/\(#(\d+)\)$/);
 		const pr = match?.[1];
-		if (!pr) continue;
-		if (seenPrs.has(pr)) fail(`PR #${pr} appears more than once in ${baseTag}..${headRef}`);
+		if (!pr || seenPrs.has(pr)) continue;
 		seenPrs.add(pr);
 		mergedPrs.push(pr);
 	}
@@ -125,21 +165,34 @@ function collectHistory(git: Git, base: string, head: string, baseTag: string, h
 		if (byPr.has(fragment.pr)) fail(`multiple changelog fragments name PR #${fragment.pr}`);
 		byPr.set(fragment.pr, fragment);
 	}
+
+	const unreleased = readUnreleasedSection(gitRaw(["show", `${head}:CHANGELOG.md`]));
+	const unreleasedByPr = new Map<string, UnreleasedLine>();
+	for (const line of unreleased.entries) {
+		const references = [...line.text.matchAll(/\(PR #(\d+)\)/g)].map(match => match[1]!);
+		if (references.length > 1) fail(`CHANGELOG.md:${line.lineNumber} names multiple PRs`);
+		const pr = references[0];
+		if (!pr) continue;
+		if (unreleasedByPr.has(pr)) fail(`CHANGELOG.md ## Unreleased has multiple lines naming PR #${pr}`);
+		if (!seenPrs.has(pr)) fail(`CHANGELOG.md:${line.lineNumber} references PR #${pr}, absent from ${baseTag}..${headRef}`);
+		unreleasedByPr.set(pr, { ...line, pr });
+	}
+
 	for (const pr of mergedPrs) {
-		if (!byPr.has(pr)) fail(`merged PR #${pr} has no changelog fragment in changelog.d/`);
+		const fragment = byPr.get(pr);
+		const line = unreleasedByPr.get(pr);
+		if (fragment && line) fail(`merged PR #${pr} has both a changelog.d fragment and a tagged line in CHANGELOG.md ## Unreleased`);
+		if (!fragment && !line)
+			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased`);
 	}
 	for (const fragment of fragments) {
 		if (fragment.pr && !seenPrs.has(fragment.pr))
 			fail(`fragment ${fragment.path} references PR #${fragment.pr}, absent from ${baseTag}..${headRef}`);
 	}
-	return { mergedPrs, fragments, byPr };
+	return { mergedPrs, fragments, byPr, unreleasedByPr };
 }
 
-function assemble(root: string, options: Extract<Options, { mode: "assemble" }>, history: ReleaseHistory, git: Git, head: string): void {
-	const changelogPath = join(root, "CHANGELOG.md");
-	const changelog: string = git(["show", `${head}:CHANGELOG.md`]);
-	const outputPath = options.output ? resolve(root, options.output) : changelogPath;
-	const currentChangelog: string = readFileSync(changelogPath, "utf8");
+function readUnreleasedSection(changelog: string): UnreleasedSection {
 	const lines = changelog.split(/\r?\n/);
 	const unreleasedHeadings: number[] = [];
 	for (let index = 0; index < lines.length; index++) {
@@ -149,13 +202,12 @@ function assemble(root: string, options: Extract<Options, { mode: "assemble" }>,
 	const unreleasedIndex = unreleasedHeadings[0]!;
 	const nextHeadingIndex = lines.findIndex((line, index) => index > unreleasedIndex && /^##\s+/.test(line));
 	if (nextHeadingIndex < 0) fail("CHANGELOG.md ## Unreleased section must precede a version section");
-	const versionHeading = `## ${options.version} — ${options.date}`;
-	if (lines.includes(versionHeading)) fail(`release section already exists: ${versionHeading}`);
 
 	const preservedComments: string[] = [];
-	const currentReleaseLines: string[] = [];
+	const entries: UnreleasedLine[] = [];
 	let inComment = false;
-	for (const line of lines.slice(unreleasedIndex + 1, nextHeadingIndex)) {
+	for (let index = unreleasedIndex + 1; index < nextHeadingIndex; index++) {
+		const line = lines[index]!;
 		if (inComment) {
 			preservedComments.push(line);
 			if (line.includes("-->")) inComment = false;
@@ -163,16 +215,26 @@ function assemble(root: string, options: Extract<Options, { mode: "assemble" }>,
 			preservedComments.push(line);
 			if (!line.includes("-->")) inComment = true;
 		} else if (line.trim()) {
-			currentReleaseLines.push(line);
+			entries.push({ lineNumber: index + 1, text: line });
 		}
 	}
 	if (inComment) fail("CHANGELOG.md has an unclosed comment in ## Unreleased");
+	return { lines, unreleasedIndex, nextHeadingIndex, preservedComments, entries };
+}
 
-	const releaseNotes = currentReleaseLines.join("\n").trim();
+function assemble(root: string, options: Extract<Options, { mode: "assemble" }>, history: ReleaseHistory, gitRaw: Git, head: string): void {
+	const changelogPath = join(root, "CHANGELOG.md");
+	const changelog = gitRaw(["show", `${head}:CHANGELOG.md`]);
+	const section = readUnreleasedSection(changelog);
+	const versionHeading = `## ${options.version} — ${options.date}`;
+	if (section.lines.includes(versionHeading)) fail(`release section already exists: ${versionHeading}`);
+
+	const releaseNotes = section.entries.map(line => line.text).join("\n").trim();
 	const notes = releaseNotes ? [releaseNotes] : [];
 	const emitted = new Set<string>();
 	for (const pr of history.mergedPrs) {
-		const fragment = history.byPr.get(pr)!;
+		const fragment = history.byPr.get(pr);
+		if (!fragment) continue;
 		notes.push(fragment.content);
 		emitted.add(fragment.path);
 	}
@@ -181,13 +243,34 @@ function assemble(root: string, options: Extract<Options, { mode: "assemble" }>,
 	}
 	if (notes.length === 0) fail("no Unreleased entries or changelog fragments to assemble");
 
-	const before = lines.slice(0, unreleasedIndex + 1).join("\n");
-	const after = lines.slice(nextHeadingIndex).join("\n").replace(/^\n+/, "");
-	const commentBlock = preservedComments.join("\n");
+	const before = section.lines.slice(0, section.unreleasedIndex + 1).join("\n");
+	const after = section.lines.slice(section.nextHeadingIndex).join("\n").replace(/^\n+/, "");
+	const commentBlock = section.preservedComments.join("\n");
 	const output = `${before}\n\n${commentBlock ? `${commentBlock}\n\n` : ""}${versionHeading}\n\n${notes.join("\n\n")}\n\n${after}`;
 	const generated = `${output.replace(/\n+$/, "")}\n`;
-	if (outputPath === changelogPath && currentChangelog !== changelog && currentChangelog !== generated)
-		fail("CHANGELOG.md differs from --head; refusing to overwrite local edits");
-	writeFileSync(outputPath, generated);
-	console.log(`Assembled ${options.version}: ${history.mergedPrs.length} merged PRs, ${history.fragments.length} fragments`);
+	if (options.write) {
+		const currentChangelog = readFileSync(changelogPath, "utf8");
+		if (currentChangelog !== changelog && currentChangelog !== generated)
+			fail("CHANGELOG.md differs from --head; refusing to overwrite local edits");
+		writeFileSync(changelogPath, generated);
+		console.error(`Assembled ${options.version}: ${history.mergedPrs.length} merged PRs, ${history.fragments.length} fragments -> CHANGELOG.md`);
+		return;
+	}
+	if (options.output) {
+		const outputPath = resolve(root, options.output);
+		if (outputResolvesToChangelog(outputPath, changelogPath))
+			fail("writing CHANGELOG.md requires --write");
+		writeFileSync(outputPath, generated);
+		console.error(`Assembled ${options.version}: ${history.mergedPrs.length} merged PRs, ${history.fragments.length} fragments -> ${options.output}`);
+		return;
+	}
+	process.stdout.write(generated);
+}
+
+function outputResolvesToChangelog(outputPath: string, changelogPath: string): boolean {
+	const canonicalChangelogPath = realpathSync(changelogPath);
+	const canonicalOutputPath = existsSync(outputPath)
+		? realpathSync(outputPath)
+		: join(realpathSync(dirname(outputPath)), basename(outputPath));
+	return canonicalOutputPath === canonicalChangelogPath;
 }

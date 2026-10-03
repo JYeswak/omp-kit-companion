@@ -10,6 +10,7 @@ const bead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.75";
 const pointer = "<!-- Add one fragment per merged PR under changelog.d/. -->";
 let indexNumber = 0;
 let assembledChangelog = "";
+let headChangelog = "";
 
 afterAll(() => {
 	if (existsSync(workspace)) rmSync(workspace, { recursive: true, force: true });
@@ -24,13 +25,54 @@ beforeAll(() => {
 	git("config", "user.name", "Release Notes Fixture");
 	git("config", "user.email", "release-notes@example.invalid");
 	git("config", "commit.gpgsign", "false");
-	writeFileSync(join(fixture, "CHANGELOG.md"), `# Changelog\n\n## Unreleased\n\n- Existing in-progress release note.\n\n${pointer}\n\n## 0.2.2 — 2026-10-02\n\n- Existing published note. (PR #50)\n`);
+	const baseChangelog = `# Changelog
+
+## Unreleased
+
+- Existing in-progress release note.
+
+${pointer}
+
+## 0.2.2 — 2026-10-02
+
+- Existing published note. (PR #50)
+`;
+	writeFileSync(join(fixture, "CHANGELOG.md"), baseChangelog);
 	git("add", "CHANGELOG.md");
 	git("commit", "-m", "release v0.2.2 [test]", "-m", `Bead: ${bead}`,
 		"-m", "Verified: fixture baseline -> v0.2.2 changelog and tag created");
 	git("tag", "v0.2.2");
 
 	const base = git("rev-parse", "v0.2.2");
+	const pr25Changelog = baseChangelog.replace(
+		`${pointer}\n\n## 0.2.2`,
+		`- OMP minimum and latest compatibility are certified. (PR #25)\n\n${pointer}\n\n## 0.2.2`,
+	);
+	const pr25 = commitWithFiles(base, "PR #25 legacy note", {
+		"CHANGELOG.md": pr25Changelog,
+		"legacy/pr25.txt": "merged through a nested origin/main history\n",
+	});
+	const merge25 = commitTree(git("rev-parse", `${pr25}^{tree}`), [base, pr25], "Merge pull request #25 from fixture/pr-25 [test]");
+	const pr55Changelog = pr25Changelog.replace(
+		`${pointer}\n\n## 0.2.2`,
+		`- The metamorphic ratchet fails on any break. (PR #55)\n\n${pointer}\n\n## 0.2.2`,
+	);
+	const pr55 = commitWithFiles(merge25, "PR #55 legacy note", {
+		"CHANGELOG.md": pr55Changelog,
+		"legacy/pr55.txt": "merged through a nested origin/main history\n",
+	});
+	const merge55 = commitTree(git("rev-parse", `${pr55}^{tree}`), [merge25, pr55], "Merge pull request #55 from fixture/pr-55 [test]");
+	const pr57Changelog = pr55Changelog.replace(
+		`${pointer}\n\n## 0.2.2`,
+		`- The work doctor inventories configured repositories. (PR #57)\n\n${pointer}\n\n## 0.2.2`,
+	);
+	const pr57 = commitWithFiles(merge55, "PR #57 legacy note", {
+		"CHANGELOG.md": pr57Changelog,
+		"legacy/pr57.txt": "merged through a nested origin/main history\n",
+	});
+	const merge57 = commitTree(git("rev-parse", `${pr57}^{tree}`), [merge55, pr57], "Merge pull request #57 from fixture/pr-57 [test]");
+	headChangelog = pr57Changelog;
+
 	const pr56 = commitWithFiles(base, "PR #56 fragment", {
 		"changelog.d/rz5.51.md": "- Fleet-guard installation skips unmanaged extension collisions, preserves operator bytes, and continues installing the guard. (PR #56)\n",
 	});
@@ -52,79 +94,106 @@ beforeAll(() => {
 	const merge51 = commitTree(merge51Tree, [merge56, pr51], "Merge pull request #51 from fixture/pr-51 [test]");
 	const merge52Tree = git("merge-tree", "--write-tree", merge51, pr52).split("\n")[0]!;
 	const merge52 = commitTree(merge52Tree, [merge51, pr52], "Merge pull request #52 from fixture/pr-52 [test]");
-	const releaseTree = treeWithFiles(merge52, {
+	const originMainTree = git("merge-tree", "--write-tree", merge52, merge57).split("\n")[0]!;
+	const originMainMerge = commitTree(originMainTree, [merge52, merge57], "Merge remote-tracking branch 'origin/main' [test]");
+	const releaseTree = treeWithFiles(originMainMerge, {
 		"changelog.d/rz5.75.md": "- Release notes use per-bead fragments, a merge-safe assembler, and a release check for every merged PR.\n",
 	});
-	const releaseHead = commitTree(releaseTree, [merge52], "L3 release fragment [test]");
+	const releaseHead = commitTree(releaseTree, [originMainMerge], "L3 release fragment [test]");
 	git("update-ref", "refs/heads/main", releaseHead);
 });
 
-test("release assembly matches merged PR history", () => {
+test("release check reports merged PRs and their fragment or legacy-line coverage", () => {
 	const check = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
 	expect(check.exitCode, check.output).toBe(0);
+	const mergedPullRequests = git("log", "--merges", "--reverse", "--format=%s", "v0.2.2..HEAD")
+		.split("\n").map(subject => subject.match(/^Merge pull request #(\d+)\b/)?.[1])
+		.filter((number): number is string => number !== undefined);
+	expect(mergedPullRequests.sort()).toEqual(["25", "51", "52", "55", "56", "57"]);
+	expect(check.output).toContain("OK: 6 merged PRs have release-note coverage");
+	for (const pr of mergedPullRequests) expect(check.output).toContain(`PR #${pr} covered by`);
+	expect(check.output).toContain("PR #25 covered by CHANGELOG.md");
+	expect(check.output).toContain("PR #55 covered by CHANGELOG.md");
+	expect(check.output).toContain("PR #57 covered by CHANGELOG.md");
+	expect(check.output).toContain("PR #51 covered by changelog.d/rz5.72.md");
+	expect(check.output).toContain("PR #52 covered by changelog.d/rz5.47.md");
+	expect(check.output).toContain("PR #56 covered by changelog.d/rz5.51.md");
+});
 
+test("default assembly prints a preview without changing CHANGELOG.md", () => {
+	const changelogPath = join(fixture, "CHANGELOG.md");
+	const sourceChangelog = readFileSync(changelogPath, "utf8");
 	const assembled = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
 		"--version", "0.2.3", "--date", "2026-10-03");
 	expect(assembled.exitCode, assembled.output).toBe(0);
-	const changelog = readFileSync(join(fixture, "CHANGELOG.md"), "utf8");
-	assembledChangelog = changelog;
+	expect(assembled.output).toContain("## 0.2.3 — 2026-10-03");
+	expect(readFileSync(changelogPath, "utf8")).toBe(sourceChangelog);
+	assembledChangelog = assembled.output;
 
 	const previewPath = join(workspace, "CHANGELOG.preview.md");
 	const preview = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
 		"--version", "0.2.3", "--date", "2026-10-03", "--output", previewPath);
 	expect(preview.exitCode, preview.output).toBe(0);
-	expect(readFileSync(previewPath, "utf8")).toBe(changelog);
-	expect(readFileSync(join(fixture, "CHANGELOG.md"), "utf8")).toBe(changelog);
+	expect(readFileSync(previewPath, "utf8")).toBe(assembledChangelog);
+	expect(readFileSync(changelogPath, "utf8")).toBe(sourceChangelog);
 
-	const section = changelog.match(/## 0\.2\.3 — 2026-10-03\n([\s\S]*?)(?=\n## |$)/)?.[1];
+	const section = assembledChangelog.match(/## 0\.2\.3 — 2026-10-03\n([\s\S]*?)(?=\n## |$)/)?.[1];
 	expect(section).toBeDefined();
 	expect(section).toContain("Existing in-progress release note.");
+	expect(section).toContain("OMP minimum and latest compatibility are certified. (PR #25)");
+	expect(section).toContain("The metamorphic ratchet fails on any break. (PR #55)");
+	expect(section).toContain("The work doctor inventories configured repositories. (PR #57)");
 	expect(section).toContain("Fleet-guard installation skips unmanaged extension collisions");
 	expect(section).toContain("CI retains ladder reports as artifacts on failure");
 	expect(section).toContain("resolves hook imports from the extension's real path");
 	expect(section).toContain("Release notes use per-bead fragments");
 	expect(section).not.toContain("<!--");
-	expect(changelog).toContain(`## Unreleased\n\n${pointer}`);
-	expect(changelog).toContain("## 0.2.2 — 2026-10-02");
+	expect(assembledChangelog).toContain(`## Unreleased\n\n${pointer}`);
+	expect(assembledChangelog).toContain("## 0.2.2 — 2026-10-02");
 
-	const mergedPullRequests = git("log", "--first-parent", "--merges", "--format=%s", "v0.2.2..HEAD")
-		.split("\n").map(subject => subject.match(/^Merge pull request #(\d+)\b/)?.[1])
-		.filter((number): number is string => number !== undefined).sort();
 	const notedPullRequests = [...section!.matchAll(/\(PR #(\d+)\)/g)].map(match => match[1]!).sort();
-	expect(notedPullRequests).toEqual(mergedPullRequests);
-	expect(section!.indexOf("Fleet-guard installation skips unmanaged extension collisions"))
-		.toBeLessThan(section!.indexOf("CI retains ladder reports as artifacts on failure"));
-	expect(section!.indexOf("CI retains ladder reports as artifacts on failure"))
-		.toBeLessThan(section!.indexOf("resolves hook imports from the extension's real path"));
-	expect(section!.indexOf("resolves hook imports from the extension's real path"))
-		.toBeLessThan(section!.indexOf("Release notes use per-bead fragments"));
+	expect(notedPullRequests).toEqual(["25", "51", "52", "55", "56", "57"]);
 });
 
-test("assembly is idempotent and refuses to overwrite local changelog edits", () => {
-	const repeated = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03");
-	expect(repeated.exitCode, repeated.output).toBe(0);
+test("only --write updates CHANGELOG.md and it refuses local edits", () => {
 	const changelogPath = join(fixture, "CHANGELOG.md");
+	const notWritten = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
+		"--version", "0.2.3", "--date", "2026-10-03", "--output", "CHANGELOG.md");
+	expect(notWritten.exitCode).toBe(1);
+	expect(notWritten.output).toContain("writing CHANGELOG.md requires --write");
+	expect(readFileSync(changelogPath, "utf8")).not.toContain("## 0.2.3 — 2026-10-03");
+	writeFileSync(changelogPath, headChangelog);
+
+	const written = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
+		"--version", "0.2.3", "--date", "2026-10-03", "--write");
+	expect(written.exitCode, written.output).toBe(0);
 	expect(readFileSync(changelogPath, "utf8")).toBe(assembledChangelog);
+
+	const repeated = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
+		"--version", "0.2.3", "--date", "2026-10-03", "--write");
+	expect(repeated.exitCode, repeated.output).toBe(0);
+	expect(readFileSync(changelogPath, "utf8")).toBe(assembledChangelog);
+
 	writeFileSync(changelogPath, `${assembledChangelog}\n- Local uncommitted note.\n`);
 	const refused = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03");
+		"--version", "0.2.3", "--date", "2026-10-03", "--write");
 	expect(refused.exitCode).toBe(1);
 	expect(refused.output).toContain("differs from --head; refusing to overwrite local edits");
 	expect(readFileSync(changelogPath, "utf8")).toContain("Local uncommitted note.");
-	writeFileSync(changelogPath, assembledChangelog);
+	writeFileSync(changelogPath, headChangelog);
 });
 
-test("release check rejects merged PRs without fragments", () => {
+test("release check rejects a merged PR without a fragment or tagged Unreleased line", () => {
 	const currentHead = git("rev-parse", "HEAD");
-	const missingTree = treeWithFiles(currentHead, { "fixture-change.txt": "merged change without a release fragment\n" });
-	const missingPr = commitTree(missingTree, [currentHead], "Change without release fragment [test]");
+	const missingTree = treeWithFiles(currentHead, { "fixture-change.txt": "merged change without a release note\n" });
+	const missingPr = commitTree(missingTree, [currentHead], "Change without release note [test]");
 	const missingMerge = commitTree(missingTree, [currentHead, missingPr], "Merge pull request #58 from fixture/pr-58 [test]");
 	git("update-ref", "refs/heads/main", missingMerge);
 	const missing = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
 	expect(missing.exitCode).toBe(1);
-	expect(missing.output).toContain("merged PR #58 has no changelog fragment");
+	expect(missing.output).toContain("merged PR #58 has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased");
 });
+
 
 function commitWithFiles(parent: string, label: string, files: Record<string, string>): string {
 	const tree = treeWithFiles(parent, files);
