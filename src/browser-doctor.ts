@@ -43,15 +43,21 @@ function isBrokerDescendant(process: BrowserProcess, byPid: ReadonlyMap<number, 
 
 /** Read the local process table; no process is killed or mutated. */
 export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString() }; }): { processes: BrowserProcess[]; sessions: BrowserSession[] } {
-	const result = run(["ps", "-axo", "pid=,ppid=,etimes=,command="]);
-	if (result.exitCode !== 0) return { processes: [], sessions: [] };
+	let result = run(["/bin/ps", "-axo", "pid=,ppid=,etimes=,command="]);
 	const rows: BrowserProcess[] = [];
+	if (result.exitCode !== 0) result = run(["/bin/ps", "-axo", "pid=,ppid=,lstart=,command="]);
 	for (const line of result.stdout.split("\n")) {
-		const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-		if (!match) continue;
-		const pid = Number(match[1]), ppid = Number(match[2]), elapsed = Number(match[3]);
-		if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isFinite(elapsed)) continue;
-		rows.push(parseBrowserCommand(pid, ppid, match[4]!, Date.now() - elapsed * 1000));
+		const fields = line.trim().split(/\s+/);
+		if (fields.length < 4) continue;
+		const pid = Number(fields[0]), ppid = Number(fields[1]);
+		if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
+		if (/^\d+$/.test(fields[2]!)) {
+			const seconds = Number(fields[2]);
+			if (Number.isFinite(seconds)) rows.push(parseBrowserCommand(pid, ppid, fields.slice(3).join(" "), Date.now() - seconds * 1000));
+		} else if (fields.length >= 8) {
+			const startedAt = Date.parse(fields.slice(2, 7).join(" "));
+			if (Number.isFinite(startedAt)) rows.push(parseBrowserCommand(pid, ppid, fields.slice(7).join(" "), startedAt));
+		}
 	}
 	const pids = new Set(rows.map(row => row.pid));
 	return { processes: rows, sessions: rows.filter(row => BROKER.test(row.command)).map(row => ({ pid: row.pid, alive: pids.has(row.pid) })) };
