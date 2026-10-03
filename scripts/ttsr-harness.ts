@@ -22,6 +22,7 @@
  * Env: OMP_SRC (omp TypeScript source dir), OMP_BIN (omp executable, default `omp`).
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -930,7 +931,9 @@ async function* jsonlLines(file: string): AsyncGenerator<string> {
 const APPROX_EDIT_FIELDS = /^(new_?text|new_?string|newText|newString|content|replacement|replace|patch|diff|input|text)$/i;
 
 async function corpus(limitFiles: number, outFile: string, sessionsRoot: string | null): Promise<number> {
-	const natives = await import(path.join(path.dirname(OMP_SRC), "..", "pi-natives"));
+	const ompPackageRequire = createRequire(path.join(OMP_SRC, "..", "package.json"));
+	const nativesPath = ompPackageRequire.resolve("@oh-my-pi/pi-natives");
+	const natives = await import(nativesPath);
 	const editInspect = natives.editInspect as (mode: string, json: string) => { entries: { path: string; digest: string }[] };
 	const rules = loadRules(path.join(KIT, "rules")).filter(r => r.cls !== "always");
 	const byName = new Map(rules.map(r => [r.name, r]));
