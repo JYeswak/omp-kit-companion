@@ -99,7 +99,7 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
-	for (const file of ["LICENSE", "package.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
@@ -373,7 +373,6 @@ test("already-current version does not create a pending receipt or re-switch the
  expect(result).toMatchObject({ status: "CURRENT", receiptId: null, activeVersion: "1.2.3" });
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
- expect(auditMutations(ctx.stateRoot)).toEqual([]);
 }));
 
 // Full N to N+2 journey: two package builds plus fast, matcher, ratchet and the

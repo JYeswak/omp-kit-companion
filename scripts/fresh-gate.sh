@@ -141,6 +141,16 @@ gate_focused() {
 			echo "focused actionlint: unavailable; no workflow files were executed"
 		fi
 	fi
+	if { [ -n "$focus_tests" ] || [ "$needs_cli" = 1 ]; } && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
+		if ! (
+			cd "$ARCHIVE_DIR"
+			sh scripts/build-manifest.sh --stdout >MANIFEST.tsv
+		); then
+			echo "focused manifest generation: FAIL" >&2
+			return 1
+		fi
+		echo "focused manifest generation: OK"
+	fi
 	if [ -n "$focus_tests" ]; then
 		# The archive has no stale scratch copies, but keep the ignore explicit for future packs.
 		# Intentional word splitting turns newline-separated test paths into argv entries.
