@@ -79,6 +79,14 @@ export function ruleOfThreeUpper(scanned: number): number | null {
 	return 3 / scanned;
 }
 
+function redactedStderrTail(stderr: string): string {
+	return stderr.trim().split(/\r?\n/).slice(-5).join("\n")
+		.replace(/(^|[\s"'(=:])\/[^\s"'<>)]*/g, "$1<path>")
+		.replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+		.replace(/\b((?:api[_-]?key|token|password)\s*[:=]\s*)\S+/gi, "$1<redacted>")
+		.slice(-600);
+}
+
 const SUMMARY = /corpus: files=(\d+)\/\d+ assistant_messages=(\d+) parse_errors=(\d+) versions=\[([^\]]*)\] events=(\{.*\}) secs=/;
 
 function parseSummary(stdout: string): { files: number; messages: number; errors: number; versions: string[]; events: Record<string, number> } | null {
@@ -148,7 +156,7 @@ export async function runCorpus(input: CorpusInput): Promise<CorpusReport> {
 					`Session transcripts use an unknown schema version; no counts were written: ${result.stderr.trim().split("\n").pop() ?? ""}`);
 			}
 			throw new CorpusInputError("CORPUS_UNAVAILABLE",
-				`Session scan failed (rc=${result.code}): ${(result.stderr.trim().split("\n").pop() ?? "").slice(0, 200)}`);
+				`Session scan failed (producer_rc=${result.code}): ${redactedStderrTail(result.stderr) || "<empty stderr>"}`);
 		}
 		const summary = parseSummary(result.stdout);
 		if (!summary) {

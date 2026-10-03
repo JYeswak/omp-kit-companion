@@ -1,0 +1,1 @@
+- Corpus scan failures now include the harness producer exit code and a bounded, redacted stderr tail; corpus contract assertions include the returned error envelope when they fail.

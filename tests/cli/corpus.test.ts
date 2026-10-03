@@ -100,7 +100,7 @@ function findRule(set: CorpusRule[] | undefined, rule: string, kind: string): Co
 
 test("corpus reports exact planted fire counts with Wilson intervals", () => {
 	const { exitCode, envelope } = runCli(["corpus", "--sessions", sessions, "--json"]);
-	expect(exitCode).toBe(0);
+	expect(exitCode, JSON.stringify(envelope.errors)).toBe(0);
 	const set = corpusOf(envelope);
 	expect(set.overall).toBe("OK");
 	expect(set.corpus?.files).toBe(1);
@@ -128,7 +128,7 @@ test("corpus redacts command text and writes only to the chosen path", () => {
 	const before = new Set(readdirSync(sessions));
 	const out = join(base, "corpus-report.json");
 	const { exitCode, envelope } = runCli(["corpus", "--sessions", sessions, "--out", out, "--json"]);
-	expect(exitCode).toBe(0);
+	expect(exitCode, JSON.stringify(envelope.errors)).toBe(0);
 	expect(JSON.parse(readFileSync(out, "utf8")).corpus.files).toBe(1);
 	expect(JSON.stringify(envelope)).not.toContain("crates/*/Cargo.toml");
 	expect(JSON.stringify(envelope)).not.toContain("sample_fire");
@@ -154,7 +154,7 @@ test("CORPUS_SCHEMA_PLANT: an unknown session schema version refuses with no cou
 	].join("\n") + "\n");
 	const { exitCode, envelope } = runCli(["corpus", "--sessions", badDir, "--json"]);
 	expect(exitCode).toBe(2);
-	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code).toBe("UNKNOWN_SESSION_SCHEMA");
+	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("UNKNOWN_SESSION_SCHEMA");
 	expect(envelope.data).not.toHaveProperty("corpus");
 }, 300_000);
 
