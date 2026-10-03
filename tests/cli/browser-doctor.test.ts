@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { applyBrowserReap, inspectBrowserProcesses, parseBrowserCommand, planBrowserReap } from "../../src/browser-doctor.ts";
+import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, parseBrowserCommand, planBrowserReap } from "../../src/browser-doctor.ts";
 
 test("orphan headless Chrome is found through the OMP broker and reaped by recorded PID", () => {
 	const chrome = parseBrowserCommand(20, 10, "/Applications/Google Chrome --headless --user-data-dir=/tmp/chrome /tmp/code_sign_clone/a", Date.now() - 86_400_000);
@@ -17,4 +17,15 @@ test("a Chrome whose owning OMP session is live is not flagged", () => {
 	const report = inspectBrowserProcesses([broker, chrome], [{ pid: 10, alive: true }]);
 	expect(report.orphaned).toEqual([]);
 	expect(report.browsers[0]?.status).toBe("LIVE");
+});
+
+
+test("process-table collector follows broker parent chain and records age", () => {
+	const table = "  10 1 3600 __omp_worker_daemon_broker --session-id=s1\n  20 10 1800 /Applications/Google Chrome --headless --user-data-dir=/tmp/u\n";
+	const collected = collectBrowserProcesses(() => ({ exitCode: 0, stdout: table }));
+	expect(collected.processes).toHaveLength(2);
+	expect(collected.sessions).toEqual([{ pid: 10, alive: true }]);
+	const report = inspectBrowserProcesses(collected.processes, collected.sessions);
+	expect(report.orphaned).toEqual([]);
+	expect(report.browsers[0]?.ageMs).toBeGreaterThanOrEqual(1_800_000);
 });

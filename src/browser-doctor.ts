@@ -40,6 +40,23 @@ function isBrokerDescendant(process: BrowserProcess, byPid: ReadonlyMap<number, 
 	return false;
 }
 
+
+/** Read the local process table; no process is killed or mutated. */
+export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString() }; }): { processes: BrowserProcess[]; sessions: BrowserSession[] } {
+	const result = run(["ps", "-axo", "pid=,ppid=,etimes=,command="]);
+	if (result.exitCode !== 0) return { processes: [], sessions: [] };
+	const rows: BrowserProcess[] = [];
+	for (const line of result.stdout.split("\n")) {
+		const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+		if (!match) continue;
+		const pid = Number(match[1]), ppid = Number(match[2]), elapsed = Number(match[3]);
+		if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isFinite(elapsed)) continue;
+		rows.push(parseBrowserCommand(pid, ppid, match[4]!, Date.now() - elapsed * 1000));
+	}
+	const pids = new Set(rows.map(row => row.pid));
+	return { processes: rows, sessions: rows.filter(row => BROKER.test(row.command)).map(row => ({ pid: row.pid, alive: pids.has(row.pid) })) };
+}
+
 /** Build a recorded-PID-only reap plan; no pattern matching or kill occurs here. */
 export function planBrowserReap(report: BrowserDoctorReport): { pid: number; clones: string[] }[] {
 	return report.orphaned.map(browser => ({ pid: browser.pid, clones: browser.codeSignClones }));
