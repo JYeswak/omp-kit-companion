@@ -119,6 +119,7 @@ proc = subprocess.Popen(
     ["bun", "test", "--path-ignore-patterns", "var/agent-tmp/**", suite],
     cwd=archive,
     env=env,
+    start_new_session=True,
 )
 try:
     rc = proc.wait(timeout=budget)
