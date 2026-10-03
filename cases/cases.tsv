@@ -330,3 +330,22 @@ kit-no-verify	quiet	tool	bash	-	GIT CONFIG --UNSET CORE.HOOKSPATH	H3: uppercase 
 kit-no-verify	quiet	tool	bash	-	GIT -C CORE.HOOKSPATH=/DEV/NULL COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/DEV/NULL GIT COMMIT -Q -M X	H3: uppercase stays quiet
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH'='/DEV/NULL'" GIT COMMIT -M X	H3: uppercase stays quiet
+kit-regex-engineering	fire	tool	write	src/regex.js	const re = new RegExp("a+");	JS RegExp constructor
+kit-regex-engineering	fire	tool	write	src/test.js	if (/a+/.test(input)) {}	JS test with regex literal
+kit-regex-engineering	fire	tool	write	src/match.js	const result = input.match(/a+/);	JS match with regex literal
+kit-regex-engineering	fire	tool	write	src/replace.js	const result = input.replace(/a+/, "b");	JS replace with regex literal
+kit-regex-engineering	fire	tool	write	src/split.js	const parts = input.split(/,/);	JS split with regex literal
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.compile("a+")	Python re.compile
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.search("a+", "aaa")	Python re.search
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.match("a+", "aaa")	Python re.match
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.sub("a+", "b", "aaa")	Python re.sub
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.findall("a+", "aaa")	Python re.findall
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; list(re.finditer("a+", "aaa"))	Python re.finditer
+kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.fullmatch("a+", "aaa")	Python re.fullmatch
+kit-regex-engineering	fire	tool	write	src/regex.rs	use regex::Regex; let _ = Regex::new("a+");	Rust Regex::new
+kit-regex-engineering	fire	tool	write	rules/example.md	condition: ["new RegExp"]	rule condition field
+kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	This guide discusses regular-expression design, backtracking, and safe input bounds.	quiet Markdown mention
+kit-regex-engineering	quiet	tool	write	src/regex_doc.py	"""Regular-expression guide: explain matching and bounded input without API examples."""	quiet Python docstring
+kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	The RegExp constructor can build patterns from strings.	quiet RegExp prose mention
+kit-regex-engineering	quiet	tool	write	src/regex_doc.py	# re.compile names the constructor; no call is present.	quiet API mention in Python comment
+kit-regex-engineering	quiet	tool	write	src/test_regex.ts	function testRegexConstruction() { return true; }	quiet test-name substring

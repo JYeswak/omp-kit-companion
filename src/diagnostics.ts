@@ -499,6 +499,28 @@ function inspectRouter(jsmPath?: string): Finding {
 			"Install JSM separately only if optional router skills are wanted.",
 		{ optional: true, availability: available ? "PRESENT" : "UNAVAILABLE", proof: "EXECUTABLE_ONLY" });
 }
+const REGEX_TOOL_BINS = ["grex", "pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"] as const;
+export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
+	const directories = pathValue === "" ? [] : pathValue.split(delimiter).map((directory) => directory || ".");
+	const tools = REGEX_TOOL_BINS.map((bin) => {
+		let installPath: string | null = null;
+		for (const directory of directories) {
+			const candidate = join(directory, bin);
+			try {
+				accessSync(candidate, constants.X_OK);
+				if (statSync(candidate).isFile()) { installPath = candidate; break; }
+			} catch { /* Continue through PATH; inaccessible entries are not installations. */ }
+		}
+		return { bin, installed: installPath !== null, install_path: installPath };
+	});
+	const missing = tools.filter((tool) => !tool.installed).map((tool) => tool.bin);
+	return finding("regex-tools", missing.length ? "DEGRADED" : "OK",
+		missing.length ? `Regex engineering tools are missing from PATH: ${missing.join(", ")}` :
+			"All required regex engineering tools are executable on PATH",
+		missing.length ? "Install the missing regex engineering tools and rerun omp-kit doctor --scope regex-tools." : "No action required.",
+		{ tools, missing, proof: "EXECUTABLE_ON_PATH" });
+}
+
 
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {

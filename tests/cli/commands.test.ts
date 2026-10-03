@@ -184,6 +184,35 @@ function conforms(value: unknown, shape: SchemaShape): boolean {
 
 describe("omp-kit CLI grammar and refusal", () => {
 
+	test("doctor regex-tools scope reports missing and executable PATH tools without requiring OMP", () => {
+		const root = workspace();
+		const bin = join(root, "bin");
+		mkdirSync(bin);
+		const names = ["grex", "pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"];
+		for (const name of names.filter((item) => item !== "grex")) {
+			const file = join(bin, name);
+			writeFileSync(file, "#!/bin/sh\nexit 0\n");
+			chmodSync(file, 0o755);
+		}
+		const missing = robot(["doctor", "--scope", "regex-tools", "--json"], root, bin);
+		expect(missing.code).toBe(0);
+		expect(missing.data.data.overall).toBe("DEGRADED");
+		expect(missing.data.data.omp.status).toBe("UNVERIFIED");
+		expect(missing.data.data.findings).toEqual([expect.objectContaining({
+			component: "regex-tools", status: "DEGRADED",
+		})]);
+		expect(missing.data.data.findings[0].evidence.missing).toEqual(["grex"]);
+
+		const grex = join(bin, "grex");
+		writeFileSync(grex, "#!/bin/sh\nexit 0\n");
+		chmodSync(grex, 0o755);
+		const installed = robot(["doctor", "--scope", "regex-tools", "--json"], root, bin);
+		expect(installed.data.data.overall).toBe("OK");
+		expect(installed.data.data.findings[0].status).toBe("OK");
+		expect(installed.data.data.findings[0].evidence.proof).toBe("EXECUTABLE_ON_PATH");
+		expect(installed.data.data.findings[0].evidence.tools).toHaveLength(names.length);
+	});
+
 	test("-h uses the help grammar before and after a verb, never treating it as an unknown mutation", () => {
 		const root = workspace();
 		const global = run(["-h"], root);

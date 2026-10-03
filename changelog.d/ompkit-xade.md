@@ -1,0 +1,1 @@
+- `kit-regex-engineering` reminds agents to apply the regex-engineering skill before adding patterns. `doctor --scope regex-tools` reports the six required executables on PATH; the L6 pre-push gate and CI scan commit-exact changed JS/TS/Python with regexploit, reject findings with file:line, and exercise a planted TypeScript ReDoS negative.

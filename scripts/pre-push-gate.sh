@@ -23,6 +23,8 @@ case "${remote_sha:-}" in
 	*) base_ref=$remote_sha ;;
 esac
 if [ -n "${base_ref:-}" ]; then
+	python3.11 "$ROOT/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 	exec "$ROOT/scripts/fresh-gate.sh" --commit "$local_sha" --base "$base_ref"
 fi
+python3.11 "$ROOT/scripts/regexploit-gate.py" --head "$local_sha"
 exec "$ROOT/scripts/fresh-gate.sh" --commit "$local_sha"
