@@ -95,11 +95,21 @@ function redactedStderrTail(stderr: string, root: string): string {
 			redacted = redacted.split(path.slice("/private".length)).join(label);
 		}
 	}
-	return redacted
+	// URI syntax places `//` after a colon, which the generic path scrubber
+	// mistakes for an absolute path and would erase even the source-relative
+	// label above. Hold only trusted root labels across that pass.
+	const rootLabels = new Map<string, string>();
+	redacted = redacted.replace(/file:\/\/<(?:omp-source|omp-package|omp-native)>/g, match => {
+		const token = `__OMP_ROOT_${rootLabels.size}__`;
+		rootLabels.set(token, match);
+		return token;
+	});
+	redacted = redacted
 		.replace(/(^|[\s"'(=:])\/[^\s"'<>)]*/g, "$1<path>")
 		.replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
-		.replace(/\b((?:api[_-]?key|token|password)\s*[:=]\s*)\S+/gi, "$1<redacted>")
-		.slice(-600);
+		.replace(/\b((?:api[_-]?key|token|password)\s*[:=]\s*)\S+/gi, "$1<redacted>");
+	for (const [token, label] of rootLabels) redacted = redacted.split(token).join(label);
+	return redacted.slice(-600);
 }
 
 const SUMMARY = /corpus: files=(\d+)\/\d+ assistant_messages=(\d+) parse_errors=(\d+) versions=\[([^\]]*)\] events=(\{.*\}) secs=/;

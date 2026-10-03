@@ -3,6 +3,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, r
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -162,7 +163,7 @@ test("corpus producer errors keep kit-relative module paths", () => {
 	const harness = join(release, "scripts", "ttsr-harness.ts");
 	const original = readFileSync(harness, "utf8");
 	try {
-		writeFileSync(harness, `await import(${JSON.stringify(join(release, "scripts", "missing-module.ts"))});\n`);
+		writeFileSync(harness, `await import(${JSON.stringify(pathToFileURL(join(release, "scripts", "missing-module.ts")).href)});\n`);
 		const { exitCode, envelope } = runCli(["corpus", "--sessions", sessions, "--json"]);
 		const error = (envelope.errors as { message?: string }[] | undefined)?.[0]?.message ?? "";
 		expect(exitCode, JSON.stringify(envelope.errors)).toBe(2);
@@ -170,6 +171,12 @@ test("corpus producer errors keep kit-relative module paths", () => {
 		expect(error).toContain("./scripts/missing-module.ts");
 		expect(error).toContain("./scripts/ttsr-harness.ts");
 		expect(error).not.toContain(base);
+		writeFileSync(harness, `await import(${JSON.stringify(pathToFileURL(join(resolveOmpIdentity(process.env).source, "export", "ci-missing-module.ts")).href)});\n`);
+		const ompFailure = runCli(["corpus", "--sessions", sessions, "--json"]);
+		const ompError = (ompFailure.envelope.errors as { message?: string }[] | undefined)?.[0]?.message ?? "";
+		expect(ompFailure.exitCode, JSON.stringify(ompFailure.envelope.errors)).toBe(2);
+		expect(ompError).toContain("<omp-source>/export/ci-missing-module.ts");
+		expect(ompError).not.toContain(resolveOmpIdentity(process.env).source);
 	} finally {
 		writeFileSync(harness, original);
 	}

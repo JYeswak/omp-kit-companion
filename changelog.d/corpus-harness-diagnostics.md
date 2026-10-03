@@ -1,1 +1,1 @@
-- Corpus scan failures now include the harness producer exit code and a bounded stderr tail with kit-relative module paths and other paths redacted; corpus contract assertions include the returned error envelope when they fail.
+- Corpus scan failures now include the harness producer exit code and a bounded stderr tail with kit-relative and OMP-source-relative module paths preserved, including `file://` imports, while other paths remain redacted; corpus contract assertions include the returned error envelope when they fail.
