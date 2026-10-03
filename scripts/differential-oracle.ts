@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 const repo = join(import.meta.dir, "..");
 const caseFile = process.argv[2] ?? join(repo, "cases", "cases.tsv");
-const rows = readFileSync(caseFile, "utf8").trimEnd().split("\n").slice(1).map(line => { const fields = line.split("\t"); return { rule: fields[0]!, expected: fields[1] === "fire" ? "fire" as const : "quiet" as const, source: fields[2]!, tool: fields[3]!, path: fields[4]!, snippet: fields[5]!.replaceAll("\\n", "\n") }; });
+const rows = readFileSync(caseFile, "utf8").trimEnd().split("\n").slice(1).map(line => { const fields = line.split("\t"); return { rule: fields[0]!, expected: fields[1] === "fire" ? "fire" as const : "quiet" as const, source: fields[2]!, tool: fields[3]!, path: fields[4]!, snippet: fields[5]!.replaceAll("\\n", "\n").replaceAll("\\t", "\t") }; });
 const worker = Bun.spawn([process.execPath, join(repo, "scripts", "native-ttsr-worker.ts")], { cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 for (const row of rows) worker.stdin.write(JSON.stringify({ rulePath: join(repo, "rules", `${row.rule}.md`), ...row }) + "\n"); await worker.stdin.end();
 const native = (await new Response(worker.stdout).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { fired?: boolean; error?: string }); await new Response(worker.stderr).text(); await worker.exited;
