@@ -1,13 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { censusLoad, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
+import { censusLoad, measureCpuMs, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
 
 test("maps process ancestry to pane and ledger job", () => {
-	const processes = parsePsSnapshot(" 42 10 60.0 1000 bun worker\n 10 1 2.0 100 tmux\n 77 1 30.0 500 tsserver");
+	const processes = parsePsSnapshot(" 42 10 60.0 1000 Sun Oct  4 00:00:00 2026 bun worker\n 10 1 2.0 100 Sun Oct  4 00:00:00 2026 tmux\n 77 1 30.0 500 Sun Oct  4 00:00:00 2026 tsserver");
 	const panes = parseTmuxSnapshot("omp-test|0.1|10\n");
 	const report = censusLoad({ processes, panes, jobs: [{ id: "j1", pid: 42, label: "build", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "omp-test 0.1", state: "running" }], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60, memory_pressure: { level: "normal", free_pct: 92 }, disk_iops: 1676 }, now: new Date("2026-10-03T00:00:00Z") });
 
+	expect(processes[0]?.start_time).toBe("Sun Oct  4 00:00:00 2026");
 	expect(report.verdict).toBe("OK");
 	expect(report.consumers[0]).toMatchObject({ session: "omp-test", pane: "omp-test 0.1", agent: "worker", repo: "/repo", pids: [42, 10] });
 	expect(report.lsp_counts).toEqual({ total: 1, by_session: { system: 1 } });
@@ -30,13 +31,14 @@ test("resolves pane agent profile and repository cwd without unknown placeholder
 	expect(report.sample_cost_ms).toBeLessThan(600);
 });
 
-test("marks low idle and high load contended", () => {
+
+test("census contention follows only the machine load rule", () => {
 	const processes = [{ pid: 1, ppid: 0, cpu_pct: 1, rss_bytes: 1, command: "WindowServer" }];
 
-	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 5 } }).verdict).toBe("CONTENDED");
-	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 12, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } }).verdict).toBe("CONTENDED");
+	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 1.6, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 5 } }).verdict).toBe("OK");
+	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 1.6, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } }).verdict).toBe("OK");
+	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 10.01, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } }).verdict).toBe("CONTENDED");
 });
-
 test("keeps system groups separate", () => {
 	const processes = parsePsSnapshot(" 42 10 60.0 1000 bun worker\n 10 1 2.0 100 tmux\n 99 1 80.0 200 WindowServer");
 	const report = censusLoad({ processes, panes: parseTmuxSnapshot("omp-test|0.1|10\n"), jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } });
@@ -52,7 +54,9 @@ test("reaps dead and process-reused ledger entries", () => {
 	writeFileSync(join(stateRoot, ".owner"), `pid=${process.pid} label=load2-fixture repo=${process.cwd()} created=${new Date().toISOString()}\n`);
 	writeFileSync(join(jobsRoot, "dead.json"), JSON.stringify({ id: "dead", pid: 999999, process_start: "old", label: "dead", repo: "/repo", cwd: "/repo", agent: "a", tmux_pane: "x", state: "running" }));
 	writeFileSync(join(jobsRoot, "reused.json"), JSON.stringify({ id: "reused", pid: process.pid, process_start: "old", label: "reused", repo: "/repo", cwd: "/repo", agent: "a", tmux_pane: "x", state: "queued" }));
-	const report = censusLoad({ stateRoot, processes: [{ pid: process.pid, ppid: 1, cpu_pct: 0, rss_bytes: 1, command: "bun test", start_time: "new" }], panes: [], machine: { load1: 0, load5: 0, load15: 0, ncpu: 4, cpu_idle_pct: 60 } });
+	const processes = parsePsSnapshot(` ${process.pid} 1 0.0 1 Sun Oct  4 00:00:00 2026 bun test`);
+	expect(processes[0]?.start_time).toBe("Sun Oct  4 00:00:00 2026");
+	const report = censusLoad({ stateRoot, processes, panes: [], machine: { load1: 0, load5: 0, load15: 0, ncpu: 4, cpu_idle_pct: 60 } });
 
 	expect(report.stale_jobs_reaped.sort()).toEqual(["dead", "reused"]);
 	expect(report.heavy_jobs).toEqual([]);
@@ -70,4 +74,14 @@ test("reports absent LOAD1 ledger and counts three contended samples", () => {
 
 	expect(reports[0]!.text).toContain("heavy jobs: none registered (LOAD1 not installed)");
 	expect(JSON.parse(readFileSync(join(stateRoot, "census.json"), "utf8")).contention_streak).toBe(3);
+});
+test("CPU cost excludes sleeping wall time", () => {
+	const wallStart = performance.now();
+	const cpuMs = measureCpuMs(() => {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+	});
+	const wallMs = performance.now() - wallStart;
+
+	expect(wallMs).toBeGreaterThanOrEqual(30);
+	expect(cpuMs).toBeLessThan(10);
 });

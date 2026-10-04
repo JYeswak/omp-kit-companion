@@ -24,11 +24,25 @@ function runText(args: readonly string[]): string {
 	}
 }
 
+function cpuTimeMs(started: NodeJS.CpuUsage): number {
+	const usage = process.cpuUsage(started);
+	return (usage.user + usage.system) / 1000;
+}
+
+export function measureCpuMs(work: () => void): number {
+	const started = process.cpuUsage();
+	work();
+	return cpuTimeMs(started);
+}
 export function parsePsSnapshot(output: string): LoadProcess[] {
 	const rows: LoadProcess[] = [];
 	for (const line of output.split("\n")) {
 		const match = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
-		if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), cpu_pct: Number(match[3]), rss_bytes: Number(match[4]) * 1024, command: match[5]! });
+		if (!match) continue;
+		const rest = match[5]!.trim();
+		const started = rest.match(/^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/);
+		rows.push({ pid: Number(match[1]), ppid: Number(match[2]), cpu_pct: Number(match[3]), rss_bytes: Number(match[4]) * 1024,
+			command: started?.[2] ?? rest, ...(started ? { start_time: started[1] } : {}) });
 	}
 	return rows;
 }
@@ -161,7 +175,7 @@ function readJobs(stateRoot: string, processes: readonly LoadProcess[]): { jobs:
 
 export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const startedCpu = process.cpuUsage();
-	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,command="])))];
+	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,lstart=,command="])))];
 	const panes = [...(input.panes ?? parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])))];
 	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot(), processes);
 	const parent = new Map(processes.map(item => [item.pid, item.ppid]));
@@ -210,15 +224,15 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	}
 	const machine: LoadMachine = input.machine ? { load1: input.machine.load1 ?? 0, load5: input.machine.load5 ?? 0, load15: input.machine.load15 ?? 0, ncpu: input.machine.ncpu ?? cpus().length, cpu_user_pct: input.machine.cpu_user_pct ?? null, cpu_sys_pct: input.machine.cpu_sys_pct ?? null, cpu_idle_pct: input.machine.cpu_idle_pct ?? null, memory_pressure: input.machine.memory_pressure ?? { level: "unknown", free_pct: null }, disk_iops: input.machine.disk_iops ?? null } : collectMachine();
 	const loadPerCore = machine.load1 / Math.max(1, machine.ncpu);
-	const reason = machine.cpu_idle_pct !== null && machine.cpu_idle_pct < 15 ? `cpu idle ${machine.cpu_idle_pct.toFixed(1)}%` : loadPerCore > 2.5 ? `load/core ${loadPerCore.toFixed(2)}` : "within configured thresholds";
+	const reason = loadPerCore > 2.5 ? `load/core ${loadPerCore.toFixed(2)} (>2.50)` : "within Machine load rule";
 	const ordered = [...consumers.values()].sort((a, b) => b.cpu_pct - a.cpu_pct);
 	const systemGroups = [...system.values()].sort((a, b) => b.cpu_pct - a.cpu_pct);
-	const verdict: LoadVerdict = reason === "within configured thresholds" ? "OK" : "CONTENDED";
+	const verdict: LoadVerdict = loadPerCore > 2.5 ? "CONTENDED" : "OK";
 	const heavyJobs = ledger.jobs.filter(job => job.state === "running" || job.state === "queued");
 	const heavyText = heavyJobs.length === 0 ? "heavy jobs: none registered (LOAD1 not installed)" : `heavy jobs: ${heavyJobs.length}`;
-	const cpu = process.cpuUsage(startedCpu);
+	const sampleCostMs = cpuTimeMs(startedCpu);
 	const causes = [...ordered.map(item => `${item.pane} ${item.cpu_pct.toFixed(1)}%`), ...systemGroups.map(item => `${item.group} ${item.cpu_pct.toFixed(1)}%`)].slice(0, 3).join(", ");
-	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: (cpu.user + cpu.system) / 1000, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
+	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: sampleCostMs, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
 }
 
 export function writeCensus(stateRoot: string, census: LoadCensus): void {
