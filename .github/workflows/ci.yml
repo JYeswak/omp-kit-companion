@@ -2,13 +2,13 @@ name: CI
 
 # Every push to main runs the fast Linux gate (CLI contracts, ladder); a newer push cancels the older run.
 # The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
-# (workflow_call from release.yml), daily, or on demand.
+# (workflow_call from release.yml) and daily. There is no manual dispatch: 99 manual full-native runs in
+# Oct 1-4 were most of the macOS minutes; dispatch release.yml for an intentional full run.
 on:
   push:
     branches: [main]
   schedule:
     - cron: "17 9 * * *"
-  workflow_dispatch:
   workflow_call:
     inputs:
       version:

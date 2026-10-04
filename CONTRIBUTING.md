@@ -13,7 +13,7 @@ A pull request is a proposal, not an automatic merge commitment. The maintainer 
 
 ## CI cadence
 
-Every push to `main` runs the fast Linux gate (CLI contracts and the rule ladder); a newer push cancels an older run. The full set (macOS, the four native archives, the real-HOME journey and native certification) runs on every release, daily, or on demand (`gh workflow run ci.yml`). The latest-OMP check runs every 3 hours but only when OMP or `main` changed since its last green run. A red `main` stops everyone until whoever broke it fixes or reverts it.
+Every push to `main` runs the fast Linux gate (CLI contracts and the rule ladder); a newer push cancels an older run. The full set (macOS, the four native archives, the real-HOME journey and native certification) runs on every release and daily; there is no manual dispatch of `ci.yml`. For an intentional full run, dispatch the release-candidate workflow (`release.yml`). The latest-OMP check runs once a day, and only when OMP or `main` changed since its last green run. A red `main` stops everyone until whoever broke it fixes or reverts it.
 
 ## Releases
 
