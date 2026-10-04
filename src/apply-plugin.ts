@@ -28,7 +28,7 @@ export function planPlugin(store: string, profiles: readonly PluginProfile[], sn
 			continue;
 		}
 		if (profile.writable === false) {
-			steps.push({ profile: profile.name, command: profileArgs(profile.name, "link", store), before: snapshots.get(profile.name) ?? null, refusal_reason: "PROFILE_UNWRITABLE" });
+			steps.push({ profile: profile.name, command: profileArgs(profile.name, "link", store), before: snapshots.get(profile.name) ?? null, refusal_reason: "PROFILE_UNWRITABLE:EACCES" });
 			continue;
 		}
 		steps.push({ profile: profile.name, command: profileArgs(profile.name, "link", store), before: snapshots.get(profile.name) ?? null });
