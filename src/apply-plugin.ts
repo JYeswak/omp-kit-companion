@@ -7,7 +7,7 @@ export interface PluginSnapshot { installed: boolean; target: string | null; lin
 export interface PluginStep { profile: string; command: readonly string[]; before: PluginSnapshot | null; refusal_reason?: string }
 export interface PluginPlan { store: string; steps: readonly PluginStep[]; skipped: readonly { profile: string; reason: string }[] }
 export interface PluginReceipt { schema_version: 1; id: string; store: string; created_at: string; rows: readonly { profile: string; status: "APPLIED" | "REFUSED" | "SKIPPED"; before: PluginSnapshot | null; after: PluginSnapshot | null; reason?: string }[] }
-export interface PluginRunner { snapshot(profile: string): PluginSnapshot; invoke(profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } }
+export interface PluginRunner { snapshot(profile: string): PluginSnapshot; invoke(profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string }; postcheck?: (profile: string) => { ok: boolean; reason?: string } }
 
 function profileArgs(profile: string, command: "link" | "unlink", target: string): readonly string[] {
 	return ["omp", ...(profile === "default" ? [] : ["--profile", profile]), "plugin", command, target];
@@ -47,6 +47,11 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 		const result = runner.invoke(step.profile, step.command.slice(1));
 		if (result.code !== 0) {
 			rows.push({ profile: step.profile, status: "REFUSED", before, after: runner.snapshot(step.profile), reason: result.stderr || `plugin link exited ${result.code}` });
+			continue;
+		}
+		const check = runner.postcheck?.(step.profile);
+		if (check && !check.ok) {
+			rows.push({ profile: step.profile, status: "REFUSED", before, after: runner.snapshot(step.profile), reason: check.reason ?? "POSTCHECK_FAILED" });
 			continue;
 		}
 		rows.push({ profile: step.profile, status: "APPLIED", before, after: runner.snapshot(step.profile) });

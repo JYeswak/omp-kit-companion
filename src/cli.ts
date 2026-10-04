@@ -988,6 +988,15 @@ function pluginCommand(request: ParsedCommand): CliResult {
 				return { installed: kit !== undefined, target: typeof kit?.path === "string" ? kit.path : null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null };
 			} catch { return { installed: false, target: null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null }; }
 		},
+		postcheck: profile => {
+			try {
+				const listed = JSON.parse(invoke(profile, ["plugin", "list", "--json"]).stdout) as Record<string, unknown>;
+				const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
+				const kit = entries.find(item => item && typeof item === "object" && /omp-kit-companion/i.test(String((item as Record<string, unknown>).name ?? ""))) as Record<string, unknown> | undefined;
+				const target = typeof kit?.path === "string" ? kit.path : "";
+				return target !== "" && existsSync(join(target, "rules")) ? { ok: true } : { ok: false, reason: "POSTCHECK_PARTIAL:PLUGIN_RULES_DIR_MISSING" };
+			} catch (error) { return { ok: false, reason: `POSTCHECK_PARTIAL:${error instanceof Error ? error.message : String(error)}` }; }
+		},
 	};
 	try {
 		const plan = planPlugin(store, pluginProfiles(home));
