@@ -255,6 +255,8 @@ test("apply removes a proven-dead session after quarantine and restores on an ow
   expect(restored.action).toBe("SKIP");
   expect(restored.reason).toBe("final-recheck-refused");
   expect(existsSync(raced)).toBe(true);
+  const failures = existsSync(reapLogPath(home)) ? readFileSync(reapLogPath(home), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.event === "failure") : [];
+  expect(failures.some(row => row.dir === raced && row.error === "final-recheck-refused")).toBe(true);
 });
 
 test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {

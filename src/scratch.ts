@@ -591,7 +591,7 @@ function ownerSnapshot(owner: ScratchOwner): string {
 export function applyReap(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
-	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
+	const fail = (reason: string): ScratchVerdict => { const failed = { ...verdict, action: "SKIP" as const, reason }; appendLog(deps.home, { event: "failure", dir: failed.dir, at, action: failed.action, error: reason }); return failed; };
 	if (!verdict.owner) return fail("owner-changed-after-initial-check");
 	const expected = ownerSnapshot(verdict.owner);
 	const identity = inodeOf(dir);
@@ -856,6 +856,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 				: applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
 		}
 		applied.push(terminal);
+			if (terminal.action === "SKIP") appendLog(home, { event: "failure", dir: terminal.dir, at: new Date(deps.now ?? Date.now()).toISOString(), action: terminal.action, error: terminal.reason });
 		deps.onProgress?.(terminal);
 	};
 	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
