@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-export interface PluginProfile { name: string; configFiles: readonly string[]; writable?: boolean }
+export interface PluginProfile { name: string; configFiles: readonly string[]; pluginDir?: string; writable?: boolean }
 export interface PluginSnapshot { installed: boolean; target: string | null; plugins_dir_hash: string | null; lock_hash: string | null }
 export interface PluginStep { profile: string; command: readonly string[]; before: PluginSnapshot | null }
 export interface PluginPlan { store: string; steps: readonly PluginStep[]; skipped: readonly { profile: string; reason: string }[] }
@@ -15,9 +15,14 @@ function profileArgs(profile: string, command: "link" | "unlink", target: string
 
 export function planPlugin(store: string, profiles: readonly PluginProfile[], snapshots: ReadonlyMap<string, PluginSnapshot> = new Map()): PluginPlan {
 	if (!store.startsWith("/") || store.endsWith("/")) throw new Error("plugin store must be an absolute directory");
+	const storePath = resolve(store);
 	const steps: PluginStep[] = [];
 	const skipped: { profile: string; reason: string }[] = [];
 	for (const profile of profiles) {
+		if (profile.pluginDir) {
+			const pluginDir = resolve(profile.pluginDir);
+			if (storePath === pluginDir || storePath.startsWith(`${pluginDir}/`)) throw new Error("STORE_INSIDE_PROFILE_PLUGIN_DIR");
+		}
 		if (profile.configFiles.includes("config.yml") && profile.configFiles.includes("config.yaml")) {
 			skipped.push({ profile: profile.name, reason: "DUAL_CONFIG" });
 			continue;
