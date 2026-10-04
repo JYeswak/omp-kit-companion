@@ -19,6 +19,15 @@ omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintai
 
 **Not in the mission:** fixing other repositories' bugs (we detect, mitigate and report); becoming an OMP installer, profile manager or dashboard; adopting research because it is impressive rather than because it measured better.
 
+### For later discussion: a learning loop over every interaction (not scheduled)
+
+The maintainer's long-term goal, recorded 2026-10-04 and not yet planned: every agent interaction is recorded and joined, so the fleet learns which prompts, skills and processes work. That means time to close, first-try review pass rate, reopen rate, and the blockers and gaps seen, each measured against a baseline and fed back into the next change. It is the long horizon of the Measured and Learning pillars.
+
+- **Sources.** OMP session files are the only required source, because every omp-kit user has them. A tracker (br), a dispatcher (ntm) and git are optional: used when present, and their absence is reported, not an error.
+- **Shape.** Probably a family of tools rather than one binary: a recorder (a plugin extension that tags each session with its work item, model and harness), a joiner (one private local table: work item, prompts, sessions, skills, outcome), a learner (comparisons with sample sizes and confidence intervals) and an applier (proposes a rule, skill or prompt change that a person approves).
+- **Constraints.** The reward is the real outcome (independently reviewed, proven live, stayed closed), never speed of closing. Small samples are reported as such. Mining stays on the user's machine.
+- **When.** After the current projects wrap up, possibly as separate projects, each with its own planning. Existing beads feed it: F2, MT2, SM1, LR1, MP5, MP7.
+
 **Done** means merged to `main` with CI green, and the acceptance checks re-run by someone other than the author, with output cited. Evidence from a synthetic HOME never closes a real-machine check.
 
 ## Why this round exists (reality check, 2026-10-01)
