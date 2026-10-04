@@ -4,6 +4,40 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.4 — 2026-10-04
+
+Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest).
+
+### New
+
+- Worker callbacks: the plugin's `kit-callback` extension reports a worker's terminal `DONE`/`BLOCKED` line, or a bounded `IDLE` excerpt, to its fleet coordinator when the agent stops. It skips continuations and coordinator panes, suppresses identical repeats, and stays silent when unconfigured or when sending fails.
+- A `fleet-watch` service job (`omp-kit service install fleet-watch`): a config-driven idle watcher that nudges idle worker panes, escalates panes that stay idle, records each decision as JSONL, and honors an off switch.
+- `omp-kit doctor --scope sessions` lists live OMP sessions and their tmux panes and names any session that predates the installed OMP, kit plugin, or `~/.agents/AGENTS.md`.
+- `omp-kit doctor --scope browsers` finds headless Chrome left behind by OMP's browser tool, including reparented processes and their code-sign clones; the scratch job reaps those orphans by recorded PID and never quarantines a clone that a live Chrome still uses.
+- `omp-kit scratch release DIR` marks finished task scratch for the reaper. The scratch reaper now applies its plan, records each run, and runs at load and every six hours.
+- `kit-regex-engineering` reminds agents to use the regex-engineering skill before adding patterns; `omp-kit doctor --scope regex-tools` reports the required regex tools, and the pre-push gate and CI scan changed JS/TS/Python for catastrophic-backtracking patterns.
+- An opt-in `kit-update` service job runs kit updates on a schedule and reports an explicit outcome, including undone runs.
+- Skill-set selection pins the core skills named in `AGENTS.md` and picks a router skill for lean profiles.
+
+### Fixed
+
+- Five Bash safety rules (`kit-relative-path-not-cwd`, `kit-no-force-push`, `kit-gate-must-name-the-plant`, `zz-canary-scope-probe`, `kit-close-needs-evidence`) match their literal first and recognize tab- and newline-separated commands. On long streamed commands they no longer cost quadratic time (for example 6,957 ms to under 0.01 ms on a 16 KB input).
+- Extension apply bundles the fleet guard with its imports, rolls back an extension whose imports do not resolve, and skips the import check for configuration-only applies.
+- Service jobs run with a private `TMPDIR` under the omp-kit state root, and `doctor` checks that exact path and its permissions. Scratch release refuses an owner PID that was reused by another process. Linux interval jobs install and report their `.timer` correctly.
+- Regexes that read external input (digests, profile names, CLI input) check input length before matching.
+- `omp-kit doctor --scope work` works again.
+- The Agent Mail hook installer matches the project by its canonical Git root, including from linked worktrees, so the pre-commit and pre-push guards find the project's reservations.
+- Migrate recognizes unedited copies of rules from earlier kit releases as removable and keeps edited copies as overlays.
+- Private memory audits recognize the reviewed OMP 18.5.1 sources.
+
+### Contributors and release
+
+- Native certification and package checks derive rule counts from the release manifest instead of fixed numbers; `MANIFEST.tsv` is generated at package time.
+- The pre-push gate tests an exact archive of the pushed commit as a source checkout, including a CLI compile, the harness gate, and focused suites for changed areas.
+- CI runs the differential oracle and checks that a planted mismatch fails it; `scripts/differential-fuzz.ts` compares native and reference rule matching over generated inputs.
+- The release-notes check accepts fragments that name commits, and covers tag-time release commits.
+- `omp-kit corpus` refuses missing `--sessions` roots and unknown schema versions with named errors.
+
 ## 0.2.3 — 2026-10-03
 
 - doctor --scope work inventories configured developer repositories read-only: dirty files, upstream/ahead state, stashes, detached worktrees, last-commit age, active worktrees, bounded per-repo timeouts, risk sorting, JSON envelopes and human tables. It never fetches or writes. (PR #57)
