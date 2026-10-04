@@ -1,0 +1,1 @@
+- Add per-profile plugin plan/apply/receipt/undo core with explicit DUAL_CONFIG and unwritable-profile skips.
