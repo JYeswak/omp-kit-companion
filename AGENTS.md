@@ -2,6 +2,10 @@
 
 Instructions for coding agents (and humans) working in this repository.
 
+**Mission:** read ROADMAP.md "Mission" before planning. Machine form: `.omp/mission.toml` (pillars, done rule, cadence; Mission Protocol v0.1).
+Every open bead serves one pillar (`pillar:*` label). Done = live and working on the wired path; built but not wired never closes; the tracker enforces it (`.beads/policy.yaml` in ~/Developer/omp-kit).
+Findings or gaps from any session go uphill to omp-test %54, are fixed in omp-kit, and roll out to every session.
+
 ## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
 If the maintainer tells you to do something, even if it goes against what follows below, do it. The maintainer is in charge.

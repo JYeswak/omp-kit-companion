@@ -1,0 +1,66 @@
+# omp-kit mission record (Mission Protocol v0.1 P1). Human text: ROADMAP.md "Mission" (b1d50e7b7d).
+# One file, edited in place. Each pillar check is repo code: it runs only after hash registration
+# (MP1 rz5.93); until then every check is status = "unregistered" and nothing executes it.
+
+identity = "omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintainer's own fleet is the proving ground."
+stage = "1: the fleet runs the kit (every profile loaded, rules within budget, done enforced)"
+stage_exit_bead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.28"
+tracker = "~/Developer/omp-kit/.beads/beads.db"
+approved_by = "Joshua"
+approved_at = "2026-10-04"
+approval_quote = "yes all of this sounds great"
+done_rule = "Live and working where it matters (the fleet / the maintainer's machine), shown on the wired path; built but not wired never closes; closing does not wait for the next release. Plus: testing ground passes, independent review, installs on a fresh machine."
+done_rule_quote = "done means they are proven live and working. we can close a bead before new version is built but it has to be proven tow ork and not built but not wired"
+not_in_mission = [
+  "fixing other repositories' bugs (we detect, mitigate and report)",
+  "becoming an OMP installer, profile manager or dashboard",
+  "adopting research because it is impressive rather than because it measured better",
+]
+product_paths = ["src/**", "rules/**", "extensions/**", "installer/**", "skills/**", "bin/**", "package.json"]
+uphill = "Every finding or gap from any session is reported to omp-test %54, fixed in omp-kit, and applied to all sessions (MP0 rz5.92)."
+
+[cadence]
+daily = "every profile runs the current kit; main green; no worker idle or stuck; new OMP releases checked; nothing closes without independent evidence"
+weekly = "certified release reaching every profile; measurement report vs last week; tracker re-graded; repeated gaps into rules/skills; one research item kept or dropped on measurements"
+exit = "stage_exit_bead closes under the strict policy after every pillar check is green for 7 consecutive daily rows"
+
+[blast_radius]
+binaries = ["omp-kit", "the kit OMP plugin (rules, extensions, skills) in every profile"]
+paths = ["~/.omp/plugins", "~/.omp/profiles/*/plugins", "~/.local/state/omp-kit", "~/.local/opt/omp-kit", "~/Library/LaunchAgents/com.omp-kit.*"]
+sessions = ["every OMP session on the machine, all profiles"]
+
+[[pillar]]
+id = "current"
+clause = "every OMP release re-certified within a day of publication"
+check = "omp-kit status --json  # last-test omp version == installed omp version"
+status = "unregistered"
+
+[[pillar]]
+id = "loaded"
+clause = "every agent in every profile runs the current rules, hooks, skills, commands and extensions"
+check = "omp-kit doctor --scope rules --json  # PROF2: every covered profile OK"
+status = "unregistered"
+
+[[pillar]]
+id = "proven"
+clause = "every rule, hook, skill and command ships with a testing ground: fire, near-miss, planted red, live"
+check = "omp-kit test --json && bun scripts/regex-budget.ts"
+status = "unregistered"
+
+[[pillar]]
+id = "measured"
+clause = "the local agentic environment is measurable end to end; every change judged against a baseline"
+check = "omp-kit doctor --scope load --json"
+status = "unregistered"
+
+[[pillar]]
+id = "learning"
+clause = "research and repeated gaps become tested rules, hooks or skills; adopted only if they measure better"
+check = "MISSING: no runnable check yet (LR1 ompkit-gbkj, MP7 rz5.99)"
+status = "missing"
+
+[[pillar]]
+id = "shareable"
+clause = "only what OMP lacks; native path taught; installs cleanly for a stranger on macOS and Linux"
+check = "bun test tests/cli/docs.test.ts"
+status = "unregistered"
