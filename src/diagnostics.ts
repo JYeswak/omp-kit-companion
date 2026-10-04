@@ -523,6 +523,61 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 
 
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
+type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
+export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
+
+function nativeProfileArgs(ompPath: string, profile: string, command: "ttsr" | "plugin"): readonly string[] {
+	return [ompPath, ...(profile === "default" ? [] : ["--profile", profile]), command, "list", "--json"];
+}
+
+function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
+	const result = spawnSync(nativeProfileArgs(ompPath, profile, command), { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 5000 });
+	if (result.status !== 0) throw new Error(`${command} exited ${result.status ?? "unknown"}`);
+	return JSON.parse(result.stdout);
+}
+
+function pluginEntries(value: unknown): Record<string, unknown>[] {
+	if (!record(value)) return [];
+	return ["npm", "marketplace"].flatMap(key => Array.isArray(value[key]) ? value[key].filter(record) : []);
+}
+
+function ruleSource(home: string, profile: string, item: Record<string, unknown>, pluginVersion: string | null): "kit_plugin" | "native_overlay" | "legacy" | "absent" {
+	const path = typeof item.path === "string" ? item.path : "";
+	if (!path) return "absent";
+	if (path.includes("omp-kit-companion") || item.provider === "plugin" || item.provider === "npm") return pluginVersion ? "kit_plugin" : "absent";
+	if (path.startsWith(join(home, ".agents", "rules"))) return "legacy";
+	if (path.startsWith(join(home, ".omp", "agent", "rules")) || path.startsWith(join(home, ".omp", "profiles", profile, "agent", "rules"))) return "native_overlay";
+	return "absent";
+}
+
+export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
+	const probe = input.probe ?? ((profile, command) => runEffectiveRuleProbe(input.ompPath, input.home, profile, command));
+	const profileRows: Record<string, unknown>[] = [];
+	let failed = false;
+	for (const profile of input.profiles) {
+		if (profile.issue) { profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: profile.issue }); failed = true; continue; }
+		try {
+			const rules = probe(profile.name, "ttsr");
+			const plugins = pluginEntries(probe(profile.name, "plugin"));
+			const kitPlugin = plugins.find(item => typeof item.name === "string" && /omp-kit-companion/i.test(item.name));
+			const pluginVersion = kitPlugin && typeof kitPlugin.version === "string" ? kitPlugin.version : null;
+			const ruleRows = Array.isArray(rules) ? rules.filter(record) : [];
+			const byName = new Map(ruleRows.map(item => [typeof item.name === "string" ? item.name : "", item]));
+			const missing = input.rules.filter(name => !byName.has(name));
+			const legacy = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "legacy");
+			const overlays = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "native_overlay");
+			const pluginRules = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "kit_plugin");
+			const versionMismatch = pluginRules.length > 0 && input.kitVersion !== null && pluginVersion !== input.kitVersion;
+			const status = missing.length || legacy.length || versionMismatch || !pluginRules.length && !overlays.length ? "DEGRADED" : "OK";
+			if (status !== "OK") failed = true;
+			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
+		} catch (error) {
+			failed = true;
+			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });
+		}
+	}
+	return finding("installed_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
+}
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
 	const rows: Finding[] = [inspectOmp(input.ompPath)];
@@ -621,6 +676,17 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		}
 	}
 	const profiles = inspectProfiles(home);
+	const effectiveOmpEvidence = rows.find(row => row.component === "omp")?.evidence;
+	let kitVersion: string | null = null;
+	try {
+		const packageValue = JSON.parse(fileBytes(join(root, "package.json")).toString("utf8"));
+		kitVersion = record(packageValue) && typeof packageValue.version === "string" ? packageValue.version : null;
+	} catch {}
+	const effectiveRules = input.ompPath && !manifest.error
+		? inspectEffectiveRules({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), profiles: profiles.profiles })
+		: finding("installed_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
+	const installedIndex = rows.findIndex(row => row.component === "installed_rules");
+	if (installedIndex >= 0) rows[installedIndex] = effectiveRules;
 	const project = input.project && resolve(input.project);
 	const projectConfig = inspectProjectConfig(project);
 	rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));
