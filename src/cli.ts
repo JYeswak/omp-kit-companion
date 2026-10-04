@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync, readdirSync } from "node:fs";
 import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
+import { applyPlugin, planPlugin, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner } from "./apply-plugin.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
@@ -833,7 +834,7 @@ function receiptStateRoot(): string | null {
 /** Commands whose receipts live in the private state root; checked before consent so the real cause is shown. */
 const STATE_ROOT_COMMANDS: Record<string, true> = {
 	audit: true, why: true, undo: true, repair: true, update: true,
-	"apply rules": true, "apply policy": true, "apply extensions": true,
+	"apply rules": true, "apply policy": true, "apply extensions": true, "apply plugin": true,
 	"service install": true, "service uninstall": true, "service run": true,
 };
 
@@ -855,6 +856,18 @@ function receiptCommand(request: ParsedCommand): CliResult {
 		if (!request.argument) return refusal("MISSING_ARGUMENT", "A receipt ID is required", "Pass a receipt ID reported by audit.");
 		if (request.command.name === "why")
 			return { code: 0, data: { overall: "UNVERIFIED", receipt: why(stateRoot, request.argument) }, verification: "UNVERIFIED" };
+		if (request.command.name === "undo") {
+			const pluginPath = join(stateRoot, `plugin-${request.argument}.json`);
+			if (existsSync(pluginPath)) {
+				const omp = resolveOmpIdentity(process.env).launcher;
+				const runner: PluginRunner = {
+					invoke: (profile, args) => { const result = defaultRunner([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args]); return { code: result.code, stdout: result.stdout, stderr: result.stderr }; },
+					snapshot: () => ({ installed: false, target: null, plugins_dir_hash: null, lock_hash: null }),
+				};
+				const rows = undoPlugin(readPluginReceipt(pluginPath), runner);
+				return { code: rows.some(row => row.status === "REFUSED") ? 1 : 0, data: { overall: "UNVERIFIED", status: rows.some(row => row.status === "REFUSED") ? "PARTIAL" : "RESTORED", receipt_id: request.argument, rows }, verification: "UNVERIFIED" };
+			}
+		}
 		const recorded = why(stateRoot, request.argument);
 		if (recorded.kind === "update") {
 			if (recorded.scope === "omp")
@@ -934,6 +947,55 @@ function rulesCommand(request: ParsedCommand): CliResult {
 }
 
 registerCommandHandler("apply rules", rulesCommand);
+function pluginProfiles(home: string): PluginProfile[] {
+	const profiles: PluginProfile[] = [];
+	const configFiles = (dir: string): string[] => {
+		try { return readdirSync(dir).filter(name => ["config.yml", "config.yaml"].includes(name)); } catch { return []; }
+	};
+	profiles.push({ name: "default", configFiles: configFiles(join(home, ".omp", "agent")) });
+	try {
+		for (const name of readdirSync(join(home, ".omp", "profiles")).sort()) {
+			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) continue;
+			profiles.push({ name, configFiles: configFiles(join(home, ".omp", "profiles", name, "agent")) });
+		}
+	} catch {}
+	return profiles;
+}
+
+function pluginCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
+	if (!root || !home || !isAbsolute(home) || !stateRoot) return refusal("INSTALL_UNAVAILABLE", "An installed kit, absolute HOME and private state root are required", "Run the compiled kit release with a canonical HOME; no plugin mutation was attempted.");
+	const storeFlag = request.flags.get("--store");
+	const store = typeof storeFlag === "string" ? storeFlag : join(root, "plugin");
+	if (!isAbsolute(store)) return refusal("INVALID_STORE", "Plugin store must be an absolute directory", "Pass --store ABSOLUTE_DIR from the installed kit release.");
+	const omp = resolveOmpIdentity(process.env).launcher;
+	const invoke = (profile: string, args: readonly string[]) => {
+		const result = defaultRunner([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args]);
+		return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+	};
+	const runner: PluginRunner = {
+		invoke,
+		snapshot: profile => {
+			try {
+				const result = invoke(profile, ["plugin", "list", "--json"]);
+				const listed = JSON.parse(result.stdout) as Record<string, unknown>;
+				const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
+				const kit = entries.find(item => item && typeof item === "object" && /omp-kit-companion/i.test(String((item as Record<string, unknown>).name ?? ""))) as Record<string, unknown> | undefined;
+				return { installed: kit !== undefined, target: typeof kit?.path === "string" ? kit.path : null, plugins_dir_hash: null, lock_hash: null };
+			} catch { return { installed: false, target: null, plugins_dir_hash: null, lock_hash: null }; }
+		},
+	};
+	try {
+		const plan = planPlugin(store, pluginProfiles(home));
+		const data = { overall: "UNVERIFIED", action: "PLAN", store, steps: plan.steps, skipped: plan.skipped, receipt_id: null as string | null };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		const receipt = applyPlugin(plan, runner, stateRoot);
+		const refused = receipt.rows.filter(row => row.status === "REFUSED");
+		return { code: refused.length ? 1 : 0, data: { ...data, action: refused.length ? "PARTIAL" : "APPLIED", receipt_id: receipt.id, rows: receipt.rows }, verification: "UNVERIFIED" };
+	} catch (error) { return refusal("PLUGIN_APPLY_FAILED", error instanceof Error ? error.message : String(error), "Inspect the profile plan and receipt; no unverified rollback was attempted."); }
+}
+
+registerCommandHandler("apply plugin", pluginCommand);
 
 function migrateCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
