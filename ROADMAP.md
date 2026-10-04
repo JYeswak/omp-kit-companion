@@ -84,9 +84,21 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 4. **OMP late-interrupt fix upstream:** reported as can1357/oh-my-pi#14018, fixed in PR #14020 (not yet released). When a release contains it, the report-only probe becomes a gate again.
 5. **After the plugin route has users:** remove `apply rules`/`apply extensions`.
 
+### Decided 2026-10-04 (maintainer), in the tracker, not yet built
+
+- **One kit store, every profile.** OMP keeps plugins per profile, and the kit plugin was enabled in only one of the maintainer's 17 profiles, so the other 16 loaded no kit rules or extensions and kit releases did not reach them. The fix: `omp-kit doctor` reports what each profile actually loads; one kit store is linked into every profile with a receipt and an undo; the copy routes (`apply rules`/`apply extensions`) are then retired. The real-machine rollout waits until the shipped rules pass the regex time budget, because linking puts that cost on every live session.
+- **A prompt library for every session.** Today prompts are applied by hand or copied into profiles one by one (89 prompt files copied into 7 profiles, none in 9). The kit will ship one library inside its plugin, so every profile gets it through OMP's own discovery. Each prompt is tagged with the process stage it serves (plan, dispatch, build, review, grade, close, learn), the skills it pairs with, its source and a version. Sources: the prompts sessions already use by hand, the jfp catalog, ntm palettes and public prompts, deduplicated and approved by the maintainer. Every prompt carries a line telling the session how to report a gap uphill to the kit's intake bead. Agreed with the jev and localbench sessions (uds ACK with conditions):
+  - No model grades a prompt until it has its own receipt against blind human labels and beats a constant-plus-keyword baseline. Until then any grade is advisory.
+  - A rubric score is a style check. Real grading is outcome-based, and each stage names its oracle first (for example closes per day for dispatch prompts, the false-PASS rate found later for grade prompts).
+  - Grading runs through jev's model-neutral classifier, called by the kit. localbench owns the GPU and the gateway; batch grading runs at low priority and only after its admission work lands. Prompt A/B tests that use a local model go through `localbench ab`.
+- **Mission Protocol.** Every session carries a stamped mission and pillars (`.omp/mission.toml`). Findings and gaps go uphill to omp-kit, are fixed here, and reach every session through a release. Closing a work item needs a reviewer from a different session, preferably a different model family. When none is free, a fresh-context reviewer with no build context may stand in, and it is labelled as such.
+- **Skill pruning is decision-first.** Before any profile changes, the maintainer gets a measured cut list (bytes, usage from his own sessions, keep or drop with a reason) and approves it.
+- **Release supply chain.** Signing, SBOM and SLSA provenance for release archives, checked by the installer, and a Homebrew formula. Both run on release only.
+- **CI cost (shipped in 537da5ed85 and eb60f06f85).** The full native matrix (macOS, four archives) runs on release and daily, not on demand. The latest-OMP check runs daily. Run artifacts are kept 2 days, release candidates 7.
+
 ## Parked
 
-Gate, pilot and speculative items without a named user are parked: signed provenance, a GitHub Action for rule authors, a foreign-hook importer, automata-based rule proofs, and pairwise settings matrices. Any of them reopens when someone names a concrete need.
+Gate, pilot and speculative items without a named user are parked: a GitHub Action for rule authors, a foreign-hook importer, automata-based rule proofs, and pairwise settings matrices. Any of them reopens when someone names a concrete need. Closed 2026-10-04: a standing review step (replaced by independent review on every close), a fleet dashboard, a UBS pre-commit hook, and replaying past tool calls against a rule change.
 
 ## How we work
 
