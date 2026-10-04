@@ -8,6 +8,8 @@ export type Flag = {
 	readonly value?: string;
 	/** Documented but not advertised as runnable by capabilities until its mode is wired. */
 	readonly available?: boolean;
+	/** Repeatable value flag; repeated values are joined with a newline. */
+	readonly repeatable?: boolean;
 };
 
 export type DataSchema = {
@@ -51,6 +53,7 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	live: { type: "object" },
 	mutants: { type: "object" },
 	integrations: { type: "object" },
+	mcp: { type: "object", required: ["receipt_id", "profiles"], properties: { receipt_id: { type: ["string", "null"] }, profiles: { type: "array" } } },
 	repeat: { type: "object" },
 	metamorphic: { type: "object" },
 } };
@@ -118,7 +121,7 @@ const sessionData: DataSchema = { type: "object", required: ["scope", "overall",
 	sessions: { type: "array", items: { type: "object", required: ["pid", "ppid", "command", "start_epoch_ms", "start_time", "pane", "pane_pid", "pane_start_command", "verdict", "predates"], properties: { pid: { type: "number" }, ppid: { type: "number" }, command: { type: "string" }, start_epoch_ms: { type: ["number", "null"] }, start_time: { type: ["string", "null"] }, pane: { type: ["string", "null"] }, pane_pid: { type: ["number", "null"] }, pane_start_command: { type: ["string", "null"] }, verdict: { enum: ["CURRENT", "STALE", "UNVERIFIED"] }, predates: { type: "array", items: { type: "string" } }, reason: { type: "string" } } } },
 	text: { type: "string" },
 } };
-const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] } } };
+const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] }, mcp_sources: { type: "object" } } };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
 	instructions: { type: "array", items: { type: "object", required: ["server", "status", "command", "note"], properties: {
@@ -240,7 +243,7 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
-	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
+	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--deep --yes]", flags: [
 			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
@@ -253,6 +256,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
+		{ name: "--sources", description: "MCP only: list MCP servers configured for other harnesses (~/.claude.json, ~/.claude/mcp.json, ~/.cursor/mcp.json, ~/.codex/config.toml, ./.mcp.json) and which OMP profiles have each; read-only, env as names only" },
 		{ name: "--services", value: "PATH", description: "Services only: validate a declared required-jobs JSON file against launchd inventory" },
 		{ name: "--deep", available: true, description: "With --scope lsp, probe the built-in TypeScript route in a private fixture; other deep scopes remain unavailable" },
 		{ name: "--yes", available: true, description: "Explicit consent for --scope lsp --deep; never implied by --robot" },
@@ -283,8 +287,8 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
-	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
+	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, per-profile MCP callable proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON]... [--startup-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -298,6 +302,11 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
 		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
 		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
+		{ name: "--mcp", description: "Per profile, start a fresh OMP rpc session on a private mirror of the profile's MCP config, list each server's tools and make each --call through OMP; exit 1 unless every selected server is CALLABLE" },
+		{ name: "--profiles", value: "NAMES|all", description: "MCP only: profiles to prove; all is the default profile plus every named profile" },
+		{ name: "--servers", value: "NAMES|all", description: "MCP only: servers to prove; default is every server in each profile's mcp.json" },
+		{ name: "--call", value: "SERVER:TOOL:JSON", repeatable: true, description: "MCP only: one tool call per server with a JSON object of arguments; repeat per server" },
+		{ name: "--startup-timeout-ms", value: "N", description: "MCP only: bound for OMP's initial MCP connections and each /mcp test (default 180000)" },
 		{ name: "--repeat", value: "N", description: "Run live scenarios N times (1-1000) and judge the failure rate with exact binomial bounds plus Fisher against --baseline" },
 		{ name: "--scenario", value: "ID", description: "Repeat only: run just this live scenario id from tests/live/scenarios.json" },
 		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break" },
@@ -326,7 +335,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--index", value: "PATH", description: "Absolute local release index carrying kit archive integrity hashes" },
 		{ name: "--archive", value: "PATH", description: "Absolute local release archive matching the selected index" },
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
-	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions [--plan|--apply]", flags: [], subcommands: [
+	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions|plugin|mcp [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
 		{ name: "plugin", description: "Link the kit plugin store into covered OMP profiles with a receipt and undo", usage: "apply plugin [--plan|--apply] --store PATH", flags: [...planApply,
 			{ name: "--store", value: "ABS_DIR", description: "Absolute installed kit plugin store" },
@@ -341,6 +350,15 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
 			{ name: "--include-default", description: "Include the default profile explicitly" },
 		], example: "omp-kit apply extensions --plan --json", runnable: false, mutation: true },
+		{ name: "mcp", description: "Import MCP servers from another harness config into OMP profiles' mcp.json with a receipt and undo; interactive on a terminal without --servers/--profiles",
+			usage: "apply mcp --from claude|cursor|codex|project|ABS_PATH --servers NAMES|all --profiles NAMES|all [--plan|--apply --yes] [--startup-timeout-ms N|NAME=N,...] [--override NAME=ABS_JSON]... [--env-literal NAMES]", flags: [...planApply,
+			{ name: "--from", value: "claude|cursor|codex|project|ABS_PATH", description: "Source harness config; claude reads ~/.claude.json and ~/.claude/mcp.json" },
+			{ name: "--servers", value: "NAMES|all", description: "Source servers to import" },
+			{ name: "--profiles", value: "NAMES|all", description: "Target OMP profiles; all is the default profile plus every named profile" },
+			{ name: "--startup-timeout-ms", value: "N|NAME=N,...", description: "Write OMP's per-server timeout (ms), which also bounds the connect handshake; omitted servers keep OMP's 30000 default" },
+			{ name: "--override", value: "NAME=ABS_JSON", repeatable: true, description: "Replace one source entry with a server entry from a JSON file, without editing the source config; recorded in the receipt" },
+			{ name: "--env-literal", value: "NAMES", description: "Copy these env values verbatim (secret-scanned, never printed); every other env value is written as an env-var reference" },
+		], example: "omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json", runnable: false, mutation: true },
 	], example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
 	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
 		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,

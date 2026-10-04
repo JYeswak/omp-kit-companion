@@ -52,6 +52,74 @@ carry the unified diff and the proposed native destination
 (`.omp/agent/rules/<name>.md`, which outranks the plugin); rules nothing
 serves are flagged unlisted.
 
+## Bring MCP servers over from other harnesses
+
+List the MCP servers configured for Claude, Cursor, Codex or the project
+`.mcp.json`, and which OMP profiles (enumerated at run time, default
+included) already have each. Env and header values are shown as names
+only; nothing is started or written:
+
+```sh verified rc=0 contains='"mcp_sources"'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" doctor --scope mcp --sources --json
+```
+
+Import with `apply mcp`. On a terminal, omitting `--servers` and
+`--profiles` walks you through source, servers and profiles, shows the
+per-profile diff and asks once. Without a terminal the selection must be
+explicit, and the command refuses naming the flags:
+
+```sh verified rc=2 contains_err='MCP_SELECTION_REQUIRED'
+KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
+"$KIT" apply mcp --from claude
+```
+
+A worked example, importing three math servers into every profile:
+
+    "$KIT" apply mcp --from claude --servers mathlas,z3-prover,wolfram-alpha \
+      --profiles all --startup-timeout-ms mathlas=180000 --plan
+    "$KIT" apply mcp --from claude --servers mathlas,z3-prover,wolfram-alpha \
+      --profiles all --startup-timeout-ms mathlas=180000 --apply --yes
+    "$KIT" test --mcp --profiles all --servers mathlas,z3-prover,wolfram-alpha \
+      --call 'z3-prover:solve:{}' \
+      --call 'wolfram-alpha:wolfram_llm:{"query":"integrate x^2 from 0 to 3"}' \
+      --call 'mathlas:verify_numeric:{"value":"1.6449340668482264","closed_form":"pi**2/6"}'
+    "$KIT" undo RUN_ID --yes
+
+What gets written: OMP's own `mcp.json` schema, validated against the
+installed OMP `src/config/mcp-schema.json` before any write. OMP's native
+`/mcp add` cannot carry env, cwd or timeout, so the kit writes the file
+itself, inserting new entries without moving a byte of the existing ones,
+with one receipt for every touched profile (`undo` restores them
+byte-for-byte). A server name already present is never overwritten; a
+differing one is reported as a conflict.
+
+- Env values become references: `"KEY": "KEY"` (or the variable named by a
+  `${VAR}` source value). OMP resolves an env value that names a set
+  variable; when the variable is unset it passes the name itself through,
+  so the plan marks those `UNSET NOW`. `--env-literal NAMES` copies chosen
+  non-secret values verbatim after a secret scan.
+- A likely literal credential anywhere in the rendered entry (args, URL,
+  headers, a literal env value) refuses the whole plan.
+- `--startup-timeout-ms N|NAME=N` writes OMP's per-server `timeout`, which
+  bounds the connect handshake as well as every request (OMP's default is
+  30000 ms; a cold `uvx` start that downloads torch needs more).
+- `--override NAME=ABS_JSON` replaces one source entry with a corrected
+  server entry, without editing the source config; the override path and
+  hash go into the receipt.
+
+`test --mcp` starts a fresh `omp --mode rpc` per profile against a private
+mirror of that profile's agent config (OMP needs a model to make a call,
+and `--profile` would need the mock model written into the real profile).
+OMP connects the servers with its own strict stdio client, from a decoy
+cwd; `/mcp test` reports each server's tools; a scripted mock model makes
+each `--call` through OMP's tool bridge. Per server: `CALLABLE`,
+`ZERO_TOOLS`, `START_TIMEOUT`, `START_FAILED`, `CALL_FAILED`, `NOT_CALLED`
+(tools listed, no `--call`) or `NOT_CONFIGURED`. Anything but `CALLABLE`
+exits 1. A receipt lands under the state root in `mcp-tests/`. `CALLABLE`
+means the server answered one call through OMP, not that the answer is
+right.
+
 ## Keep up with OMP
 
 Updaters install new OMP versions unattended. Record a passing test so

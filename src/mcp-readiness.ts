@@ -118,7 +118,7 @@ export function inspectMcpReadiness(input: McpReadinessInput): McpReadinessRepor
  const agent = join(home, ...segments);
  const filenames = ["mcp.json", ".mcp.json"];
  const files = filenames.filter(file => state(join(agent, file)) !== "missing");
- if (!files.length) return report(name, "DEGRADED", "No native MCP config in selected profile", "Configure a local MCP server manually in the named profile only.");
+ if (!files.length) return report(name, "DEGRADED", "No native MCP config in selected profile", `List importable servers with omp-kit doctor --scope mcp --sources, then omp-kit apply mcp --from SOURCE --servers NAMES --profiles ${name} --plan.`);
  const entries = new Map<string, { command: string; enabled: boolean; duplicate: boolean; invalid: boolean }>();
  const denied = new Set<string>();
  try {
@@ -146,9 +146,9 @@ export function inspectMcpReadiness(input: McpReadinessInput): McpReadinessRepor
   const shadow = projectShadow(input.project, serverName);
   const issue = config.duplicate ? "duplicate server name in profile MCP files" : config.invalid ? "invalid stdio server configuration" : denied.has(serverName) ? "server disabled by profile MCP denylist" : !config.enabled ? "server disabled in profile" : settings.disabled ? "native MCP discovery provider disabled in selected profile" : !found ? "configured executable absent or unresolved" : shadow === "shadow" ? "project MCP server overrides selected profile" : shadow === "opaque" ? "project MCP config cannot be resolved safely" : settings.issue ? "effective profile settings unverified" : !backed ? "installed OMP MCP discovery semantics unverified" : "native MCP config is a discovery candidate, not a connected or callable tool";
   const blocked = config.duplicate || config.invalid || denied.has(serverName) || !config.enabled || settings.disabled || !found || shadow === "shadow";
-  return { name: serverName, configured: true, discoverable: blocked ? "BLOCKED" : shadow === "opaque" || settings.issue || !backed ? "UNVERIFIED" : "CANDIDATE", executable_found: found, startup_ready: "NOT_PROBED", actually_callable: "NOT_PROBED", reason: issue, recommended_action: blocked || shadow === "opaque" ? "Resolve the named profile/provider/project conflict; never run untrusted configured commands as a diagnostic." : "Use an isolated opt-in fixture and an actual OMP-mediated tool call to prove reachability." };
+  return { name: serverName, configured: true, discoverable: blocked ? "BLOCKED" : shadow === "opaque" || settings.issue || !backed ? "UNVERIFIED" : "CANDIDATE", executable_found: found, startup_ready: "NOT_PROBED", actually_callable: "NOT_PROBED", reason: issue, recommended_action: blocked || shadow === "opaque" ? "Resolve the named profile/provider/project conflict; never run untrusted configured commands as a diagnostic." : `Prove startup and one call through OMP with omp-kit test --mcp --profiles ${name} --servers ${serverName} --call ${serverName}:TOOL:JSON.` };
  });
- return report(name, servers.some(server => server.discoverable === "BLOCKED") ? "DEGRADED" : "UNVERIFIED", "Read-only on-disk MCP inventory; no server was started or called", "Use an isolated opt-in fixture for startup and callable proof; no operator profile was modified.", servers);
+ return report(name, servers.some(server => server.discoverable === "BLOCKED") ? "DEGRADED" : "UNVERIFIED", "Read-only on-disk MCP inventory; no server was started or called", `Prove each server callable with omp-kit test --mcp --profiles ${name}; import more with omp-kit apply mcp --from SOURCE --servers NAMES --profiles ${name} --plan.`, servers);
 }
 
 /** Static, credential-free manual template. No defaults, installation, or config mutation. */
