@@ -984,8 +984,8 @@ function pluginCommand(request: ParsedCommand): CliResult {
 				const listed = JSON.parse(result.stdout) as Record<string, unknown>;
 				const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
 				const kit = entries.find(item => item && typeof item === "object" && /omp-kit-companion/i.test(String((item as Record<string, unknown>).name ?? ""))) as Record<string, unknown> | undefined;
-				return { installed: kit !== undefined, target: typeof kit?.path === "string" ? kit.path : null, plugins_dir_hash: null, lock_hash: null };
-			} catch { return { installed: false, target: null, plugins_dir_hash: null, lock_hash: null }; }
+				return { installed: kit !== undefined, target: typeof kit?.path === "string" ? kit.path : null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null };
+			} catch { return { installed: false, target: null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null }; }
 		},
 	};
 	try {

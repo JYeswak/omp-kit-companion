@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export interface PluginProfile { name: string; configFiles: readonly string[]; pluginDir?: string; writable?: boolean }
-export interface PluginSnapshot { installed: boolean; target: string | null; plugins_dir_hash: string | null; lock_hash: string | null }
+export interface PluginSnapshot { installed: boolean; target: string | null; link_path?: string | null; plugins_dir_hash: string | null; lock_hash: string | null }
 export interface PluginStep { profile: string; command: readonly string[]; before: PluginSnapshot | null }
 export interface PluginPlan { store: string; steps: readonly PluginStep[]; skipped: readonly { profile: string; reason: string }[] }
 export interface PluginReceipt { schema_version: 1; id: string; store: string; created_at: string; rows: readonly { profile: string; status: "APPLIED" | "REFUSED" | "SKIPPED"; before: PluginSnapshot | null; after: PluginSnapshot | null; reason?: string }[] }
@@ -63,7 +63,11 @@ export function undoPlugin(receipt: PluginReceipt, runner: PluginRunner): readon
 		const target = row.before?.target;
 		const args = profileArgs(row.profile, target ? "link" : "unlink", target ?? receipt.store).slice(1);
 		const result = runner.invoke(row.profile, args);
-		rows.push(result.code === 0 ? { profile: row.profile, status: "RESTORED" } : { profile: row.profile, status: "REFUSED", reason: result.stderr || `plugin undo exited ${result.code}` });
+		let reason = result.code === 0 ? undefined : result.stderr || `plugin undo exited ${result.code}`;
+		if (!reason && !target && row.before?.link_path) {
+			try { if (lstatSync(row.before.link_path).isSymbolicLink()) unlinkSync(row.before.link_path); } catch (error) { reason = error instanceof Error ? error.message : String(error); }
+		}
+		rows.push(reason ? { profile: row.profile, status: "REFUSED", reason } : { profile: row.profile, status: "RESTORED" });
 	}
 	return rows;
 }
