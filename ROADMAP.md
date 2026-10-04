@@ -2,6 +2,23 @@
 
 omp-kit is built in public. This file is the plan of record: what is done, what is in review, and what is next. Every pull request that changes the status of an item updates this file in the same change.
 
+## Mission (approved by the maintainer, 2026-10-04)
+
+omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintainer's own fleet is the proving ground.
+
+1. **Current:** we track every OMP release within a day of publication, re-certify against it and say plainly what changed.
+2. **Loaded:** every agent in every profile actually runs the current rules, hooks, skills, commands and extensions. Being on disk doesn't count.
+3. **Proven:** every rule, hook, skill and command ships with a testing ground: firing cases, near-miss cases that must stay quiet, a planted failure that must go red, and a live check on a real fleet.
+4. **Measured:** the local agentic environment is measurable end to end: rule fire and false-fire rates, latency, machine load, idle and stuck time, gate outcomes, skill use. Every change is judged against a baseline.
+5. **Learning:** we apply the strongest current research and practice on agent gates and tool use, and every repeated fleet gap becomes a tested rule, hook or skill. A new practice is adopted only after it beats the old one on our own measurements.
+6. **Native-first and shareable:** we build only what OMP lacks, teach the native path for the rest, and every feature installs cleanly for a stranger on macOS and Linux.
+
+**Done for a feature:** it works on the fleet, passes its testing ground, has independent review, and installs on a fresh machine.
+
+**Cadence.** Daily: every profile runs the current kit, main is green, no worker sits idle or stuck, new OMP releases are checked, and nothing closes without independent evidence. Weekly: a certified release that reaches every profile by itself, the measurement report compared with the previous week, the tracker re-graded, repeated gaps turned into rules or skills, and one research item tried and kept or dropped on the measurements. Long-term: a stranger gets the whole layer in one command, and their agents measurably follow their rules and use their tools well, proven on macOS and Linux and kept current as OMP moves.
+
+**Not in the mission:** fixing other repositories' bugs (we detect, mitigate and report); becoming an OMP installer, profile manager or dashboard; adopting research because it is impressive rather than because it measured better.
+
 **Done** means merged to `main` with CI green, and the acceptance checks re-run by someone other than the author, with output cited. Evidence from a synthetic HOME never closes a real-machine check.
 
 ## Why this round exists (reality check, 2026-10-01)
