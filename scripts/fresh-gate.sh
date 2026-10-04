@@ -96,13 +96,13 @@ gate_manifest() {
 gate_harness() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun scripts/ttsr-harness.ts --gate
+		bun run --no-env-file --config=/dev/null src/cli.ts heavy --label fresh-gate-harness -- bun scripts/ttsr-harness.ts --gate
 	)
 }
 gate_cli_compile() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
+		bun run --no-env-file --config=/dev/null src/cli.ts heavy --label fresh-gate-cli-compile -- bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
 	)
 }
 
@@ -123,7 +123,7 @@ archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
 env = os.environ.copy()
 env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
 proc = subprocess.Popen(
-    ["bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    ["bun", "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--label", "fresh-gate-" + suite, "--no-wait", "--", "bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", suite],
     cwd=archive,
     env=env,
     start_new_session=True,
@@ -144,6 +144,9 @@ except subprocess.TimeoutExpired:
             pass
         proc.wait()
     print("deferred to CI: " + suite)
+    raise SystemExit(124)
+if rc == 75:
+    print("deferred to CI: heavy-work admission: " + suite)
     raise SystemExit(124)
 raise SystemExit(rc)
 PY

@@ -26,10 +26,22 @@ cleanup() {
 }
 trap cleanup EXIT
 export OMP_KIT_WORK_DIR="$WORK"
+run_heavy() {
+  heavy_label=$1; shift
+  if [ -e "$HERE/.git" ]; then
+    bun run --no-env-file --config=/dev/null "$HERE/src/cli.ts" heavy --label "$heavy_label" -- "$@"
+  else
+    "$HERE/bin/omp-kit" heavy --label "$heavy_label" -- "$@"
+  fi
+}
 step() { # step <label> <cmd...>
   label=$1; shift
   log="$WORK/ladder-$label.txt"
-  "$@" > "$log" 2>&1
+  if [ "$label" = "manifest" ]; then
+    "$@" > "$log" 2>&1
+  else
+    run_heavy "$label" "$@" > "$log" 2>&1
+  fi
   rc=$?
   cat "$log"
   if [ "$rc" -eq 0 ]; then echo "GREEN $label producer_rc=$rc"; else echo "RED   $label producer_rc=$rc (private log $log)"; KEEP_WORK=1; exit 1; fi
