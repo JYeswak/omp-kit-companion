@@ -530,12 +530,16 @@ function nativeProfileArgs(ompPath: string, profile: string, command: "ttsr" | "
 	return [ompPath, ...(profile === "default" ? [] : ["--profile", profile]), command, "list", "--json"];
 }
 
-function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
-	const result = spawnSync(nativeProfileArgs(ompPath, profile, command), { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 5000 });
+
+export function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
+	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
+	const env = { ...process.env, HOME: home };
+	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
+	const result = spawnSync(executable!, args, { cwd: home, env, encoding: "utf8", timeout: 15000 });
+	if (result.error) throw result.error;
 	if (result.status !== 0) throw new Error(`${command} exited ${result.status ?? "unknown"}`);
 	return JSON.parse(result.stdout);
 }
-
 function pluginEntries(value: unknown): Record<string, unknown>[] {
 	if (!record(value)) return [];
 	return ["npm", "marketplace"].flatMap(key => Array.isArray(value[key]) ? value[key].filter(record) : []);

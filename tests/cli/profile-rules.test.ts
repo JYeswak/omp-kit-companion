@@ -1,5 +1,7 @@
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { inspectEffectiveRules, type EffectiveRulesInput } from "../../src/diagnostics.ts";
+import { inspectEffectiveRules, runEffectiveRuleProbe, type EffectiveRulesInput } from "../../src/diagnostics.ts";
 
 const home = "/fixture/home";
 const kitVersion = "0.2.5";
@@ -51,4 +53,15 @@ test("rejects legacy rules even when every legacy byte is present", () => {
 	const finding = inspectEffectiveRules(input({ default: { plugin: false }, codex: { plugin: false }, claude: { plugin: false } }));
 	expect(finding.status).toBe("DEGRADED");
 	expect(finding.recommended_action).toContain("apply plugin");
+});
+test("real native probe invokes the stub with cwd and clean profile environment", () => {
+	const root = join(process.cwd(), "var", "agent-tmp", "prof2-stub.77773");
+	const homeDir = join(root, "home");
+	const stub = join(root, "omp-stub.sh");
+	mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+	writeFileSync(stub, "#!/bin/sh\npwd > probe-cwd.txt\ncase \"$*\" in *ttsr*) printf \"[{\\\"name\\\":\\\"kit-a\\\",\\\"path\\\":\\\"%s/.omp/plugins/node_modules/omp-kit-companion/rules/kit-a.md\\\",\\\"provider\\\":\\\"plugin\\\"}]\" \"$PWD\" ;; *) printf \"{\\\"npm\\\":[{\\\"name\\\":\\\"omp-kit-companion\\\",\\\"version\\\":\\\"0.2.5\\\"}],\\\"marketplace\\\":[]}\" ;; esac\n");
+	chmodSync(stub, 0o755);
+	const result = runEffectiveRuleProbe(stub, homeDir, "default", "ttsr") as Array<{ name: string; path: string }>;
+	expect(result[0]?.name).toBe("kit-a");
+	expect(result[0]?.path).toContain(homeDir);
 });
