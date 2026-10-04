@@ -4,10 +4,12 @@ import process from "node:process";
 import { join } from "node:path";
 
 export type LoadVerdict = "OK" | "CONTENDED";
+export type MemoryPressureLevel = "normal" | "warn" | "critical" | "unknown";
+export interface MemoryPressure { level: MemoryPressureLevel; free_pct: number | null }
 export interface LoadProcess { pid: number; ppid: number; cpu_pct: number; rss_bytes: number; command: string; cwd?: string; start_time?: string }
 export interface LoadPane { session: string; pane: string; pid: number; cwd?: string }
 export interface LoadJob { id: string; pid: number; process_start?: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string }
-export interface LoadMachine { load1: number; load5: number; load15: number; ncpu: number; cpu_user_pct: number | null; cpu_sys_pct: number | null; cpu_idle_pct: number | null; memory_pressure: string | null; read_iops: number | null; write_iops: number | null }
+export interface LoadMachine { load1: number; load5: number; load15: number; ncpu: number; cpu_user_pct: number | null; cpu_sys_pct: number | null; cpu_idle_pct: number | null; memory_pressure: MemoryPressure; disk_iops: number | null }
 export interface LoadConsumer { session: string; pane: string; agent: string; repo: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadSystemGroup { group: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; contention_streak: number; sample_cost_ms: number; text: string }
@@ -42,6 +44,24 @@ export function parseTmuxSnapshot(output: string): LoadPane[] {
 	return panes;
 }
 
+export function parseMemoryPressure(output: string): MemoryPressure {
+	const freeMatch = output.match(/free percentage:\s*([\d.]+)%/i);
+	const free_pct = freeMatch ? Number(freeMatch[1]) : null;
+	const explicit = output.match(/\b(critical|warning|warn|normal)\b/i)?.[1]?.toLowerCase();
+	const level: MemoryPressureLevel = explicit === "critical" ? "critical" : explicit === "warning" || explicit === "warn" ? "warn" : explicit === "normal" ? "normal" : free_pct === null ? "unknown" : free_pct < 10 ? "critical" : free_pct < 20 ? "warn" : "normal";
+	return { level, free_pct: free_pct !== null && Number.isFinite(free_pct) ? free_pct : null };
+}
+
+export function parseDiskIops(output: string): number | null {
+	const line = output.split("\n").map(item => item.trim()).filter(Boolean).at(-1);
+	if (!line) return null;
+	const numbers = [...line.matchAll(/(?:^|\s)(\d+(?:\.\d+)?)(?=\s|$)/g)].map(match => Number(match[1]));
+	if (numbers.length < 2) return null;
+	let total = 0;
+	for (let index = 1; index < numbers.length; index += 3) total += numbers[index]!;
+	return Number.isFinite(total) ? total : null;
+}
+
 function systemGroup(command: string): string | null {
 	if (/Spotlight|mds|mdworker/i.test(command)) return "Spotlight";
 	if (/backupd|Time Machine/i.test(command)) return "Time Machine";
@@ -66,13 +86,47 @@ function alive(pid: number): boolean {
 	}
 }
 
+function agentFromCommand(command: string): string | null {
+	const profile = command.match(/(?:--profile\s+|--profile=)([^\s]+)/i)?.[1];
+	if (profile) return profile;
+	if (/\bcodex\b/i.test(command)) return "codex";
+	if (/\bgrok\b/i.test(command)) return "grok";
+	if (/\bclaude\b/i.test(command)) return "claude";
+	if (/\bgemini\b/i.test(command)) return "gemini";
+	if (/\bomp\b/i.test(command)) return "omp";
+	return null;
+}
+
+function isDescendantOf(pid: number, ancestor: number, parent: ReadonlyMap<number, number>): boolean {
+	let cursor = pid;
+	const seen = new Set<number>();
+	while (!seen.has(cursor)) {
+		if (cursor === ancestor) return true;
+		seen.add(cursor);
+		const next = parent.get(cursor);
+		if (!next || next === cursor) return false;
+		cursor = next;
+	}
+	return false;
+}
+
+function paneAgent(pane: LoadPane, processes: readonly LoadProcess[], parent: ReadonlyMap<number, number>, jobs: readonly LoadJob[]): string {
+	const commands = processes.filter(item => isDescendantOf(item.pid, pane.pid, parent)).map(item => item.command);
+	for (const command of commands) {
+		const agent = agentFromCommand(command);
+		if (agent) return agent;
+	}
+	const job = jobs.find(item => item.tmux_pane === pane.pane);
+	return job?.agent ?? "shell";
+}
+
 function collectMachine(): LoadMachine {
 	const loads = loadavg();
 	const top = runText(["top", "-l", "1", "-n", "0"]);
 	const cpu = top.match(/CPU usage:\s*([\d.]+)% user,\s*([\d.]+)% sys,\s*([\d.]+)% idle/i);
-	const pressure = runText(["memory_pressure", "-Q"]).trim();
-	const io = runText(["iostat", "-Id"]).trim().split("\n").filter(Boolean).at(-1)?.trim().split(/\s+/).map(Number) ?? [];
-	return { load1: loads[0] ?? 0, load5: loads[1] ?? 0, load15: loads[2] ?? 0, ncpu: cpus().length, cpu_user_pct: cpu ? Number(cpu[1]) : null, cpu_sys_pct: cpu ? Number(cpu[2]) : null, cpu_idle_pct: cpu ? Number(cpu[3]) : null, memory_pressure: pressure || null, read_iops: Number.isFinite(io[0]) ? io[0]! : null, write_iops: Number.isFinite(io[1]) ? io[1]! : null };
+	const pressure = parseMemoryPressure(runText(["memory_pressure", "-Q"]));
+	const disk_iops = parseDiskIops(runText(["iostat", "-d"]));
+	return { load1: loads[0] ?? 0, load5: loads[1] ?? 0, load15: loads[2] ?? 0, ncpu: cpus().length, cpu_user_pct: cpu ? Number(cpu[1]) : null, cpu_sys_pct: cpu ? Number(cpu[2]) : null, cpu_idle_pct: cpu ? Number(cpu[3]) : null, memory_pressure: pressure, disk_iops };
 }
 
 function defaultStateRoot(): string {
@@ -106,7 +160,7 @@ function readJobs(stateRoot: string, processes: readonly LoadProcess[]): { jobs:
 }
 
 export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
-	const started = performance.now();
+	const startedCpu = process.cpuUsage();
 	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,command="])))];
 	const panes = [...(input.panes ?? parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])))];
 	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot(), processes);
@@ -114,6 +168,7 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const paneByPid = new Map(panes.map(item => [item.pid, item]));
 	const paneByCwd = new Map(panes.filter(item => item.cwd).map(item => [item.cwd!, item]));
 	const jobByPid = new Map(ledger.jobs.map(job => [job.pid, job]));
+	const paneIdentity = new Map(panes.map(pane => [pane.pid, { agent: paneAgent(pane, processes, parent, ledger.jobs), repo: pane.cwd ?? ledger.jobs.find(job => job.tmux_pane === pane.pane)?.repo ?? "unattributed" }]));
 	const consumers = new Map<string, LoadConsumer>();
 	const system = new Map<string, LoadSystemGroup>();
 	const lsp: Record<string, number> = {};
@@ -145,13 +200,15 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 			continue;
 		}
 		const job = jobByPid.get(item.pid) ?? ledger.jobs.find(entry => entry.tmux_pane === pane!.pane);
-		const current = consumers.get(group) ?? { session: pane.session, pane: pane.pane, agent: job?.agent ?? "<unknown>", repo: job?.repo ?? item.cwd ?? "<unknown>", cpu_pct: 0, rss_bytes: 0, pids: [] };
+		const identity = paneIdentity.get(pane.pid)!;
+		const current = consumers.get(group) ?? { session: pane.session, pane: pane.pane, agent: identity.agent, repo: identity.repo, cpu_pct: 0, rss_bytes: 0, pids: [] };
 		current.cpu_pct += item.cpu_pct;
 		current.rss_bytes += item.rss_bytes;
 		current.pids.push(item.pid);
+		if (job && current.agent === "shell") current.agent = job.agent;
 		consumers.set(group, current);
 	}
-	const machine = input.machine ? { ...collectMachine(), ...input.machine } : collectMachine();
+	const machine: LoadMachine = input.machine ? { load1: input.machine.load1 ?? 0, load5: input.machine.load5 ?? 0, load15: input.machine.load15 ?? 0, ncpu: input.machine.ncpu ?? cpus().length, cpu_user_pct: input.machine.cpu_user_pct ?? null, cpu_sys_pct: input.machine.cpu_sys_pct ?? null, cpu_idle_pct: input.machine.cpu_idle_pct ?? null, memory_pressure: input.machine.memory_pressure ?? { level: "unknown", free_pct: null }, disk_iops: input.machine.disk_iops ?? null } : collectMachine();
 	const loadPerCore = machine.load1 / Math.max(1, machine.ncpu);
 	const reason = machine.cpu_idle_pct !== null && machine.cpu_idle_pct < 15 ? `cpu idle ${machine.cpu_idle_pct.toFixed(1)}%` : loadPerCore > 2.5 ? `load/core ${loadPerCore.toFixed(2)}` : "within configured thresholds";
 	const ordered = [...consumers.values()].sort((a, b) => b.cpu_pct - a.cpu_pct);
@@ -159,7 +216,9 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const verdict: LoadVerdict = reason === "within configured thresholds" ? "OK" : "CONTENDED";
 	const heavyJobs = ledger.jobs.filter(job => job.state === "running" || job.state === "queued");
 	const heavyText = heavyJobs.length === 0 ? "heavy jobs: none registered (LOAD1 not installed)" : `heavy jobs: ${heavyJobs.length}`;
-	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: performance.now() - started, text: `${verdict}: ${reason}; ${heavyText}; top=${ordered.slice(0, 3).map(item => `${item.pane} ${item.cpu_pct.toFixed(1)}%`).join(", ")}` };
+	const cpu = process.cpuUsage(startedCpu);
+	const causes = [...ordered.map(item => `${item.pane} ${item.cpu_pct.toFixed(1)}%`), ...systemGroups.map(item => `${item.group} ${item.cpu_pct.toFixed(1)}%`)].slice(0, 3).join(", ");
+	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: (cpu.user + cpu.system) / 1000, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
 }
 
 export function writeCensus(stateRoot: string, census: LoadCensus): void {

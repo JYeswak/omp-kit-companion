@@ -1,17 +1,33 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { censusLoad, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
+import { censusLoad, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
 
 test("maps process ancestry to pane and ledger job", () => {
 	const processes = parsePsSnapshot(" 42 10 60.0 1000 bun worker\n 10 1 2.0 100 tmux\n 77 1 30.0 500 tsserver");
 	const panes = parseTmuxSnapshot("omp-test|0.1|10\n");
-	const report = censusLoad({ processes, panes, jobs: [{ id: "j1", pid: 42, label: "build", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "omp-test 0.1", state: "running" }], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60, memory_pressure: "normal", read_iops: 1, write_iops: 2 }, now: new Date("2026-10-03T00:00:00Z") });
+	const report = censusLoad({ processes, panes, jobs: [{ id: "j1", pid: 42, label: "build", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "omp-test 0.1", state: "running" }], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60, memory_pressure: { level: "normal", free_pct: 92 }, disk_iops: 1676 }, now: new Date("2026-10-03T00:00:00Z") });
 
 	expect(report.verdict).toBe("OK");
 	expect(report.consumers[0]).toMatchObject({ session: "omp-test", pane: "omp-test 0.1", agent: "worker", repo: "/repo", pids: [42, 10] });
 	expect(report.lsp_counts).toEqual({ total: 1, by_session: { system: 1 } });
 	expect(report.heavy_jobs[0]?.id).toBe("j1");
+});
+
+test("parses memory pressure level/free percentage and disk transfers per second", () => {
+	expect(parseMemoryPressure("System-wide memory free percentage: 92%\n")).toEqual({ level: "normal", free_pct: 92 });
+	expect(parseMemoryPressure("System-wide memory free percentage: 8%\n")).toEqual({ level: "critical", free_pct: 8 });
+	expect(parseDiskIops("disk0 disk1\nKB/t tps MB/s KB/t tps MB/s\n17.94 1231 21.57 14.56 2 0.02\n")).toBe(1233);
+});
+
+test("resolves pane agent profile and repository cwd without unknown placeholders", () => {
+	const processes = [{ pid: 10, ppid: 1, cpu_pct: 1, rss_bytes: 1, command: "tmux" }, { pid: 20, ppid: 10, cpu_pct: 3, rss_bytes: 2, command: "bun /Users/josh/.bun/bin/omp --profile codex" }];
+	const report = censusLoad({ processes, panes: [{ session: "omp-test", pane: "omp-test 0.1", pid: 10, cwd: "/Users/josh/Developer/repo" }], jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } });
+
+	expect(report.consumers[0]).toMatchObject({ agent: "codex", repo: "/Users/josh/Developer/repo" });
+	expect(JSON.stringify(report.consumers)).not.toContain("unknown");
+	expect(report.sample_cost_ms).toBeGreaterThanOrEqual(0);
+	expect(report.sample_cost_ms).toBeLessThan(600);
 });
 
 test("marks low idle and high load contended", () => {
