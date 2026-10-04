@@ -328,6 +328,11 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
+		{ name: "plugin", description: "Link the kit plugin store into covered OMP profiles with a receipt and undo", usage: "apply plugin [--plan|--apply] --store PATH", flags: [...planApply,
+			{ name: "--store", value: "ABS_DIR", description: "Absolute installed kit plugin store" },
+			{ name: "--profiles", value: "NAMES|all", description: "Select existing profiles; default is all covered profiles" },
+			{ name: "--include-default", description: "Include the default profile explicitly" },
+		], example: "omp-kit apply plugin --plan --store /absolute/omp-kit/plugin --json", runnable: false, mutation: true },
 		{ name: "policy", description: "Per-profile TTSR policy via native OMP config get/set with durable profile backup", usage: "apply policy [--plan|--apply]", flags: [...planApply,
 			{ name: "--profiles", value: "NAMES|all", description: "Override optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json; absent file selects all named profiles or default if none exist" },
 			{ name: "--include-default", description: "Include the default profile in the operator list or named selection" },
