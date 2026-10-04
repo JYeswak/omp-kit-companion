@@ -861,7 +861,7 @@ function receiptCommand(request: ParsedCommand): CliResult {
 			if (existsSync(pluginPath)) {
 				const omp = resolveOmpIdentity(process.env).launcher;
 				const runner: PluginRunner = {
-					invoke: (profile, args) => { const result = defaultRunner([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args]); return { code: result.code, stdout: result.stdout, stderr: result.stderr }; },
+					invoke: (profile, args) => nativePluginInvoke(omp, process.env.HOME ?? "", profile, args),
 					snapshot: () => ({ installed: false, target: null, plugins_dir_hash: null, lock_hash: null }),
 				};
 				const rows = undoPlugin(readPluginReceipt(pluginPath), runner);
@@ -962,6 +962,12 @@ function pluginProfiles(home: string): PluginProfile[] {
 	return profiles;
 }
 
+function nativePluginInvoke(omp: string, home: string, profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } {
+	const env = { ...process.env, HOME: home };
+	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
+	const result = Bun.spawnSync([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args], { env, stdout: "pipe", stderr: "pipe" });
+	return { code: result.exitCode ?? 1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
 function pluginCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
 	if (!root || !home || !isAbsolute(home) || !stateRoot) return refusal("INSTALL_UNAVAILABLE", "An installed kit, absolute HOME and private state root are required", "Run the compiled kit release with a canonical HOME; no plugin mutation was attempted.");
@@ -969,10 +975,7 @@ function pluginCommand(request: ParsedCommand): CliResult {
 	const store = typeof storeFlag === "string" ? storeFlag : join(root, "plugin");
 	if (!isAbsolute(store)) return refusal("INVALID_STORE", "Plugin store must be an absolute directory", "Pass --store ABSOLUTE_DIR from the installed kit release.");
 	const omp = resolveOmpIdentity(process.env).launcher;
-	const invoke = (profile: string, args: readonly string[]) => {
-		const result = defaultRunner([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args]);
-		return { code: result.code, stdout: result.stdout, stderr: result.stderr };
-	};
+	const invoke = (profile: string, args: readonly string[]) => nativePluginInvoke(omp, home, profile, args);
 	const runner: PluginRunner = {
 		invoke,
 		snapshot: profile => {
