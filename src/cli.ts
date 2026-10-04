@@ -18,6 +18,7 @@ import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type Dia
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
 import { inspectOmpSessions } from "./session-doctor.ts";
+import { censusLoad } from "./load-doctor.ts";
 import { loadFleetWatchConfig, runFleetWatchOnce } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -45,7 +46,7 @@ import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { matchesBounded } from "./regex-guards.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
 
 const SCHEMA_VERSION = "1";
@@ -343,6 +344,15 @@ async function workDoctor(request: ParsedCommand): Promise<CliResult> {
 function sessionDoctor(): CliResult {
 	const report = inspectOmpSessions();
 	return { code: 0, data: report, commands: ["omp-kit doctor --scope sessions --json"], verification: "PERFORMED" };
+}
+function loadDoctor(): CliResult {
+	const report = censusLoad();
+	return { code: 0, data: { scope: "load", overall: report.verdict, ...report }, commands: ["omp-kit doctor --scope load --json"], verification: "PERFORMED" };
+}
+function loadWatchCommand(): CliResult {
+	const stateRoot = join(process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "", ".local", "state"), "omp-kit", "load");
+	const report = runLoadWatch(stateRoot);
+	return { code: 0, data: { scope: "load", overall: report.verdict, ...report }, commands: ["omp-kit load watch --json"], verification: "PERFORMED" };
 }
 function readJsonFile(path: string, label: string): unknown {
 	try { return JSON.parse(readFileSync(path, "utf8")); } catch (error) { throw new Error(label + " is not valid JSON: " + (error instanceof Error ? error.message : String(error))); }
@@ -1757,6 +1767,11 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "run") {
 		const [name] = names;
 		const job = scoped[name!]!;
+		if (job.name === "load-watch") {
+			const stateRoot = join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit", "load");
+			const report = runLoadWatch(stateRoot);
+			return { code: 0, data: { overall: report.verdict, job: job.name, ...report }, verification: "UNVERIFIED" };
+		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
@@ -1841,6 +1856,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
+registerCommandHandler("load watch", loadWatchCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
@@ -1968,6 +1984,7 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
 	if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
+	if (command.name === "doctor" && flags.get("--scope") === "load") return loadDoctor();
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
 		return refusal("INVALID_FLAG", "--profile is only valid for doctor --scope memory, mcp or context", "Use omp-kit doctor --scope context --profile NAME.");

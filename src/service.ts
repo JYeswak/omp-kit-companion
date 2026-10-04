@@ -2,6 +2,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { dirname, isAbsolute, join } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
+import { censusLoad, writeCensus } from "./load-doctor.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -20,11 +21,17 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: true },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: true },
+	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: true },
 };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 const FIXED_PATH = "~/.local/bin:~/.bun/bin:~/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const LOG_THRESHOLD_BYTES = 50 * 1024 * 1024;
+export function runLoadWatch(stateRoot: string) {
+	const census = censusLoad({ stateRoot });
+	writeCensus(stateRoot, census);
+	return census;
+}
 
 export function validateLabel(label: string): boolean {
 	return LABEL_PATTERN.test(label) && label.length > 0 && label.length <= 255;

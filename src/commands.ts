@@ -228,14 +228,16 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 	expired: { type: "array", items: { type: "object" } },
 	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
 } };
+const loadData: DataSchema = { type: "object", required: ["scope", "overall", "verdict", "sampled_at", "machine", "consumers", "system_groups", "lsp_counts", "heavy_jobs", "contention_streak", "sample_cost_ms", "text"], properties: { scope: { enum: ["load"] }, overall: { enum: ["OK", "CONTENDED"] }, verdict: { enum: ["OK", "CONTENDED"] }, sampled_at: { type: "string" }, machine: { type: "object" }, consumers: { type: "array" }, system_groups: { type: "array" }, lsp_counts: { type: "object" }, heavy_jobs: { type: "array" }, contention_streak: { type: "number" }, sample_cost_ms: { type: "number" }, text: { type: "string" } } };
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 } };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
+	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [
-			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
