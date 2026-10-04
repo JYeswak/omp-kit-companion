@@ -42,7 +42,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | **Released v0.2.1:** the plugin route, settings drift, capability context, skill-set recipe and the leak guard | #26 |
 | **Released v0.2.2:** service lifecycle, scratch reaper, migration/overlays, metamorphic ratchet, mutants, extension skip-reasons, agent-mail guard, stack currency, B10 cold-start, AST-grep candidates, e2e provider isolation, session-save guard | #54 |
 | **Released v0.2.3:** min+latest OMP certification, fleet work doctor, zero-break metamorphic invariant, derived case/scenario counts, changelog fragments, live Go `t.Skip` edit fix, rule scope parity, npm-installed OMP corpus fix, OMP 18.5.0 memory review | — |
-| **Release v0.2.4 (in cut):** worker callbacks, fleet-watch job, sessions and browsers doctor scopes, scratch release and scheduled reaper, five linear-time Bash rules, regex-engineering reminder and ReDoS gate, OMP 18.6.0 certification | — |
+| **Release v0.2.5 (in cut):** worker callbacks, fleet-watch job, sessions and browsers doctor scopes, scratch release and scheduled reaper, five linear-time Bash rules, regex-engineering reminder and ReDoS gate, OMP 18.6.0 certification (v0.2.4 tag unpublished) | — |
 
 ## In review
 

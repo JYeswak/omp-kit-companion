@@ -4,9 +4,9 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
-## 0.2.4 — 2026-10-04
+## 0.2.5 — 2026-10-04
 
-Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest).
+Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed its release-notes check before any build and was never published; this release carries everything since 0.2.3.
 
 ### New
 
