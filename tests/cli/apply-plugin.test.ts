@@ -38,3 +38,9 @@ test("undo restores an absent prior plugin", () => {
 test("refuses a store nested inside a profile plugin directory", () => {
 	expect(() => planPlugin("/fixture/home/.omp/plugins/node_modules/omp-kit-companion", [{ name: "default", configFiles: ["config.yml"], pluginDir: "/fixture/home/.omp/plugins" }])).toThrow("STORE_INSIDE_PROFILE_PLUGIN_DIR");
 });
+test("names a profile when postcheck loses its plugin rules", () => {
+	const fake = runner();
+	const receipt = applyPlugin(planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }, { name: "codex", configFiles: ["config.yml"] }]), { ...fake.runner, postcheck: profile => profile === "codex" ? { ok: false, reason: "POSTCHECK_PARTIAL:PLUGIN_RULES_DIR_MISSING" } : { ok: true } }, root);
+	expect(receipt.rows.find(row => row.profile === "default")?.status).toBe("APPLIED");
+	expect(receipt.rows.find(row => row.profile === "codex")).toMatchObject({ status: "REFUSED", reason: "POSTCHECK_PARTIAL:PLUGIN_RULES_DIR_MISSING" });
+});
