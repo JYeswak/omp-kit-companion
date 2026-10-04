@@ -2,6 +2,8 @@ rule	expect	source	tool	path	snippet	note
 bash-glob-silenced	fire	tool	bash	-	grep -rl 'x' crates/*/Cargo.toml 2>/dev/null	glob path with stderr silenced
 bash-glob-silenced	quiet	tool	bash	-	grep -rl 'x' crates/foo/Cargo.toml 2>/dev/null	concrete path, stderr hidden
 bash-glob-silenced	quiet	tool	bash	-	grep -rl 'x' crates/*/Cargo.toml	glob but stderr visible
+bash-glob-silenced	fire	tool	bash	-	printf x\ngrep -rl 'x' crates/*/Cargo.toml 2>/dev/null	newline-separated glob command
+bash-glob-silenced	fire	tool	bash	-	grep\t-rl 'x'\tcrates/*/Cargo.toml\t2>/dev/null	escaped-tab arguments and redirection
 bash-pipe-exit	fire	tool	bash	-	./scripts/lane-status.sh 2>&1 | tail -16; echo "EXIT=$?"	rc read after the pipe
 bash-pipe-exit	quiet	tool	bash	-	./scripts/lane-status.sh >/tmp/x 2>&1; echo "rc=$?"	rc read with no pipe
 bash-pipe-exit	quiet	tool	bash	-	grep -c foo bar | tail -1	piped, rc never read

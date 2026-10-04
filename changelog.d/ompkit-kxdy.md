@@ -3,3 +3,4 @@
 - Put the claim-discipline checker literal first and recognize escaped-tab command starts while retaining quiet mention cases.
 - Put the canary token first and recognize newline/tab command payloads while quoted printf data stays quiet.
 - Put the close-evidence literal first and recognize escaped tab/newline command boundaries while preserving reasoned closes.
+- Make bash-glob-silenced literal-first with a shell-separator-bounded glob and stderr-suppression suffix; cover newline and escaped-tab forms.
