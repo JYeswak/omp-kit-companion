@@ -12,7 +12,9 @@ const testLabel = `${testNamespace}.omp-watch`;
 
 const job: ServiceJobDef = { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 };
 const intervalJob = KNOWN_JOBS["scratch-reaper"]!;
+const fleetWatchJob = KNOWN_JOBS["fleet-watch"]!;
 const savedXdgStateHome = process.env.XDG_STATE_HOME;
+const savedTmuxTmpDir = process.env.TMUX_TMPDIR;
 const SERVICE_TMP_OWNER = "owner=omp-kit\npurpose=service-tmp\nversion=1\n";
 function serviceTmpDir(home: string): string {
   return join(home, ".local", "state", "omp-kit", "service-tmp");
@@ -42,6 +44,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   if (savedXdgStateHome === undefined) delete process.env.XDG_STATE_HOME;
   else process.env.XDG_STATE_HOME = savedXdgStateHome;
+  if (savedTmuxTmpDir === undefined) delete process.env.TMUX_TMPDIR;
+  else process.env.TMUX_TMPDIR = savedTmuxTmpDir;
 });
 
 function fixture(): { home: string; launcher: string; watch: string } {
@@ -98,9 +102,37 @@ test("rendered plist calls the stable launcher directly with fixed env and watch
   expect(text).toContain("<string>service</string>");
   expect(text).toContain("<string>run</string>");
   expect(text).not.toContain("/bin/sh -c");
-  expect(text).toContain("~/.local/bin:~/.bun/bin:~/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+  const expectedPath = [join(home, ".local", "bin"), join(home, ".bun", "bin"), join(home, ".cargo", "bin"),
+    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":");
+  expect(text).toContain(`<string>${expectedPath}</string>`);
   expect(text).toContain(`<string>${watch}</string>`);
   expect(text).toContain("<integer>60</integer>");
+});
+test("fleet-watch plist captures TMUX_TMPDIR from the install environment", () => {
+  const { home, launcher, watch } = fixture();
+  const tmuxTmpDir = join(home, "tmux-sockets");
+  mkdirSync(tmuxTmpDir);
+  process.env.TMUX_TMPDIR = tmuxTmpDir;
+  const text = renderLaunchdPlist(home, fleetWatchJob, launcher, watch).text;
+  expect(text).toContain(`<key>TMUX_TMPDIR</key>\n\t\t<string>${tmuxTmpDir}</string>`);
+});
+
+test("planted: fleet-watch doctor fails when the installed TMUX_TMPDIR is unresolved", () => {
+  const { home, launcher, watch } = fixture();
+  const tmuxTmpDir = join(home, "tmux-sockets");
+  mkdirSync(tmuxTmpDir);
+  process.env.TMUX_TMPDIR = tmuxTmpDir;
+  const rendered = renderLaunchdPlist(home, fleetWatchJob, launcher, watch).text;
+  const plistPath = join(home, "Library", "LaunchAgents", `${fleetWatchJob.label}.plist`);
+  const input = {
+    home, job: fleetWatchJob, launcher, watch, rendered,
+    installed: { path: plistPath, text: rendered },
+    print: parseLaunchctlPrint(healthyPrint(plistPath)),
+  };
+  expect(checkService(input).find(check => check.id === "tmux-tmpdir-resolves")?.status).toBe("PASS");
+  const broken = rendered.replace(`<string>${tmuxTmpDir}</string>`, `<string>${join(home, "missing-sockets")}</string>`);
+  expect(checkService({ ...input, installed: { path: plistPath, text: broken } })
+    .find(check => check.id === "tmux-tmpdir-resolves")?.status).toBe("FAIL");
 });
 
 test("rendered plist uses private service scratch under the XDG state root", () => {
@@ -652,6 +684,58 @@ test("service install without --apply refuses and writes no plist", () => {
   expect(() => readFileSync(join(home, "Library", "LaunchAgents", `${testLabel}.plist`), "utf8")).toThrow();
 });
 
+test("fleet-watch install refuses when its config is absent", () => {
+  const { home } = fixture();
+  const tmuxTmpDir = join(home, "tmux-sockets");
+  mkdirSync(tmuxTmpDir);
+  const result = cli(["service", "install", "fleet-watch", "--dry-run"], home, { TMUX_TMPDIR: tmuxTmpDir });
+  expect(result.code).toBe(2);
+  expect(result.envelope.errors?.[0]?.code).toBe("FLEET_WATCH_CONFIG_MISSING");
+});
+
+test("fleet-watch dry-run captures TMUX_TMPDIR into the plist", () => {
+  const { home } = fixture();
+  const tmuxTmpDir = join(home, "tmux-sockets");
+  mkdirSync(tmuxTmpDir);
+  const configDir = join(home, ".config", "omp-kit");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "fleet-watch.json"), JSON.stringify({
+    enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+    sessions: [{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: home, workerPanes: ["%1"] }],
+  }));
+  const result = cli(["service", "install", "fleet-watch", "--dry-run"], home, { TMUX_TMPDIR: tmuxTmpDir });
+  expect(result.code).toBe(0);
+  const renderedService = process.platform === "linux" ? result.envelope.data.service : result.envelope.data.plist;
+  expect(renderedService).toContain(process.platform === "linux"
+    ? `Environment=TMUX_TMPDIR="${tmuxTmpDir}"`
+    : `<key>TMUX_TMPDIR</key>\n\t\t<string>${tmuxTmpDir}</string>`);
+});
+
+test("fleet-watch install refuses when TMUX_TMPDIR is unset", () => {
+  const { home } = fixture();
+  const configDir = join(home, ".config", "omp-kit");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "fleet-watch.json"), "{}\n");
+  const result = cli(["service", "install", "fleet-watch", "--dry-run"], home, { TMUX_TMPDIR: "" });
+  expect(result.code).toBe(2);
+  expect(result.envelope.errors?.[0]?.code).toBe("FLEET_WATCH_TMUX_TMPDIR_MISSING");
+});
+
+test("fleet-watch install refuses relative and unresolved TMUX_TMPDIR values", () => {
+  const { home } = fixture();
+  const configDir = join(home, ".config", "omp-kit");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "fleet-watch.json"), JSON.stringify({
+    enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+    sessions: [{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: home, workerPanes: ["%1"] }],
+  }));
+  for (const tmuxTmpDir of ["relative-sockets", join(home, "missing-sockets")]) {
+    const result = cli(["service", "install", "fleet-watch", "--dry-run"], home, { TMUX_TMPDIR: tmuxTmpDir });
+    expect(result.code, tmuxTmpDir).toBe(2);
+    expect(result.envelope.errors?.[0]?.code, tmuxTmpDir).toBe("FLEET_WATCH_TMUX_TMPDIR_INVALID");
+  }
+});
+
 test("service uninstall without --apply refuses and keeps the plist", () => {
   const { home } = fixture();
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
@@ -719,6 +803,34 @@ test("systemd install addresses real unit names and backs up replaced bytes", ()
   expect(readFileSync(join(dir, `omp-kit-${job.name}.path`), "utf8")).toBe(units.path);
   for (const call of calls) for (const word of call) expect(word).not.toContain("[object Object]");
   expect(calls.some(call => call.at(-1) === `omp-kit-${job.name}.path`)).toBe(true);
+});
+
+test("fleet-watch systemd unit captures TMUX_TMPDIR and doctor rejects an unresolved directory", () => {
+  const { home, launcher, watch } = fixture();
+  const tmuxTmpDir = join(home, "tmux-sockets");
+  mkdirSync(tmuxTmpDir);
+  process.env.TMUX_TMPDIR = tmuxTmpDir;
+  const units = renderSystemdUnits(home, fleetWatchJob, launcher, watch);
+  const dir = join(home, ".config", "systemd", "user");
+  mkdirSync(dir, { recursive: true });
+  const serviceFile = join(dir, `omp-kit-${fleetWatchJob.name}.service`);
+  writeFileSync(serviceFile, units.service);
+  expect(units.service).toContain(`Environment=TMUX_TMPDIR="${tmuxTmpDir}"`);
+  const expectedPath = [join(home, ".local", "bin"), join(home, ".bun", "bin"), join(home, ".cargo", "bin"),
+    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":");
+  expect(units.service).toContain(`Environment=PATH="${expectedPath}"`);
+  const input = {
+    home, job: fleetWatchJob, launcher, unit: `omp-kit-${fleetWatchJob.name}.service`,
+    timer: null, pathUnit: null, renderedService: units.service,
+    enabled: true, active: true, fragmentPath: serviceFile,
+  };
+  expect(checkServiceLinux(input).find(check => check.id === "tmux-tmpdir-resolves")?.status).toBe("PASS");
+  const broken = units.service.replace(
+    `Environment=TMUX_TMPDIR="${tmuxTmpDir}"`,
+    `Environment=TMUX_TMPDIR="${join(home, "missing-sockets")}"`,
+  );
+  writeFileSync(serviceFile, broken);
+  expect(checkServiceLinux(input).find(check => check.id === "tmux-tmpdir-resolves")?.status).toBe("FAIL");
 });
 
 test("systemd uninstall disables both path and timer triggers", () => {

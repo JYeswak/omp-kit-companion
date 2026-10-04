@@ -1725,6 +1725,22 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const [name] = names;
 		const { job, launcher, watch } = resolveJob(name!);
+		if (job.name === "fleet-watch") {
+			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+			let configFile = false;
+			try { configFile = statSync(configPath).isFile(); } catch {}
+			if (!configFile) return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config file is absent or is not a regular file",
+				"Create fleet-watch.json or leave the opt-in service disabled.");
+			const tmuxTmpDir = process.env.TMUX_TMPDIR;
+			if (!tmuxTmpDir) return refusal("FLEET_WATCH_TMUX_TMPDIR_MISSING", "TMUX_TMPDIR is required for fleet-watch",
+				"Set TMUX_TMPDIR to the tmux server's socket directory and retry.");
+			let tmuxTmpDirValid = isAbsolute(tmuxTmpDir);
+			if (tmuxTmpDirValid) {
+				try { tmuxTmpDirValid = statSync(tmuxTmpDir).isDirectory(); } catch { tmuxTmpDirValid = false; }
+			}
+			if (!tmuxTmpDirValid) return refusal("FLEET_WATCH_TMUX_TMPDIR_INVALID", "TMUX_TMPDIR must be an absolute, existing directory",
+				"Set TMUX_TMPDIR to the absolute tmux server socket directory and retry.");
+		}
 		if (!executableFile(launcher)) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
@@ -1882,7 +1898,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			try {
 				const config = loadFleetWatchConfig(configPath);
 				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
-				const result = runFleetWatchOnce(config, { capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", session + ":" + pane]).stdout, send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); }, logPath });
+				const result = runFleetWatchOnce(config, {
+					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", session + ":" + pane]),
+					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
+					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", session + ":" + pane, ...keys]); },
+					logPath,
+				});
 				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
 			} catch (error) { return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
 		}
