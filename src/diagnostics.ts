@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -524,7 +524,7 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
-export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
+export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
 
 function nativeProfileArgs(ompPath: string, profile: string, command: "ttsr" | "plugin"): readonly string[] {
 	return [ompPath, ...(profile === "default" ? [] : ["--profile", profile]), command, "list", "--json"];
@@ -567,20 +567,50 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			const pluginVersion = kitPlugin && typeof kitPlugin.version === "string" ? kitPlugin.version : null;
 			const ruleRows = Array.isArray(rules) ? rules.filter(record) : [];
 			const byName = new Map(ruleRows.map(item => [typeof item.name === "string" ? item.name : "", item]));
-			const missing = input.rules.filter(name => !byName.has(name));
-			const legacy = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "legacy");
-			const overlays = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "native_overlay");
-			const pluginRules = input.rules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "kit_plugin");
+			const alwaysRules = new Set(input.always_rules ?? []);
+			const conditionalRules = input.rules.filter(name => !alwaysRules.has(name));
+			const missing = conditionalRules.filter(name => !byName.has(name));
+			const legacy = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "legacy");
+			const overlays = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "native_overlay");
+			const pluginRules = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "kit_plugin");
+			const pluginPath = kitPlugin && typeof kitPlugin.path === "string" ? kitPlugin.path : null;
+			const alwaysMissing = [...alwaysRules].filter(name => !pluginPath || !existsSync(join(pluginPath, "rules", `${name}.md`)));
 			const versionMismatch = pluginRules.length > 0 && input.kitVersion !== null && pluginVersion !== input.kitVersion;
-			const status = missing.length || legacy.length || versionMismatch || !pluginRules.length && !overlays.length ? "DEGRADED" : "OK";
+			const status = missing.length || legacy.length || versionMismatch || alwaysMissing.length || !pluginRules.length && !overlays.length ? "DEGRADED" : "OK";
 			if (status !== "OK") failed = true;
-			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
+			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing, always_apply: { rules: [...alwaysRules], missing: alwaysMissing, method: "plugin-rules-dir" } }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
 		} catch (error) {
 			failed = true;
 			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });
 		}
 	}
 	return finding("installed_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
+}
+async function runEffectiveRuleProbeAsync(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
+	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
+	const env = { ...process.env, HOME: home };
+	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
+	const child = Bun.spawn([executable!, ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+	const status = await child.exited;
+	if (status !== 0) throw new Error(`${command} exited ${status}`);
+	return JSON.parse(await new Response(child.stdout).text());
+}
+
+export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, concurrency = 6): Promise<Finding> {
+	const started = performance.now();
+	const outputs = new Map<string, { ttsr: unknown; plugin: unknown } | Error>();
+	let cursor = 0;
+	const workers = Array.from({ length: Math.min(concurrency, input.profiles.length) }, async () => {
+		while (cursor < input.profiles.length) {
+			const profile = input.profiles[cursor++]!;
+			if (profile.issue) continue;
+			try { const [ttsr, plugin] = await Promise.all([runEffectiveRuleProbeAsync(input.ompPath, input.home, profile.name, "ttsr"), runEffectiveRuleProbeAsync(input.ompPath, input.home, profile.name, "plugin")]); outputs.set(profile.name, { ttsr, plugin }); }
+			catch (error) { outputs.set(profile.name, error instanceof Error ? error : new Error(String(error))); }
+		}
+	});
+	await Promise.all(workers);
+	const finding = inspectEffectiveRules({ ...input, probe: (profile, command) => { const result = outputs.get(profile); if (result instanceof Error) throw result; if (!result) throw new Error("profile probe missing"); return result[command]; } });
+	return { ...finding, evidence: { ...(finding.evidence ?? {}), probe_method: "bounded_async_native_spawn", probe_concurrency: concurrency, probe_elapsed_ms: performance.now() - started } };
 }
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
@@ -686,8 +716,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		const packageValue = JSON.parse(fileBytes(join(root, "package.json")).toString("utf8"));
 		kitVersion = record(packageValue) && typeof packageValue.version === "string" ? packageValue.version : null;
 	} catch {}
+	const alwaysRules = manifest.rules.filter(rule => { try { return /^alwaysApply:\s*true/m.test(fileBytes(join(root, "rules", `${rule.name}.md`)).toString("utf8")); } catch { return false; } }).map(rule => rule.name);
 	const effectiveRules = input.ompPath && !manifest.error
-		? inspectEffectiveRules({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), profiles: profiles.profiles })
+		? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, profiles: profiles.profiles })
 		: finding("installed_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
 	const installedIndex = rows.findIndex(row => row.component === "installed_rules");
 	if (installedIndex >= 0) rows[installedIndex] = effectiveRules;

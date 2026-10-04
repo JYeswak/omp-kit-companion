@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { inspectEffectiveRules, runEffectiveRuleProbe, type EffectiveRulesInput } from "../../src/diagnostics.ts";
+import { inspectEffectiveRules, inspectEffectiveRulesAsync, runEffectiveRuleProbe, type EffectiveRulesInput } from "../../src/diagnostics.ts";
 
 const home = "/fixture/home";
 const kitVersion = "0.2.5";
@@ -64,4 +64,17 @@ test("real native probe invokes the stub with cwd and clean profile environment"
 	const result = runEffectiveRuleProbe(stub, homeDir, "default", "ttsr") as Array<{ name: string; path: string }>;
 	expect(result[0]?.name).toBe("kit-a");
 	expect(result[0]?.path).toContain(homeDir);
+});
+test("bounded async profile probes stay parallel", async () => {
+	const root = join(process.cwd(), "var", "agent-tmp", "prof2-stub.77773");
+	const homeDir = join(root, "home");
+	const stub = join(root, "omp-stub-sleep.sh");
+	mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+	writeFileSync(stub, "#!/bin/sh\nsleep 0.05\ncase \"$*\" in *ttsr*) printf \"[{\\\"name\\\":\\\"kit-a\\\",\\\"path\\\":\\\"%s/.omp/plugins/node_modules/omp-kit-companion/rules/kit-a.md\\\",\\\"provider\\\":\\\"plugin\\\"}]\" \"$PWD\" ;; *) printf \"{\\\"npm\\\":[{\\\"name\\\":\\\"omp-kit-companion\\\",\\\"version\\\":\\\"0.2.5\\\"}],\\\"marketplace\\\":[]}\" ;; esac\n");
+	chmodSync(stub, 0o755);
+	const profiles = Array.from({ length: 17 }, (_, index) => ({ name: index === 0 ? "default" : `p${index}` }));
+	const finding = await inspectEffectiveRulesAsync({ home: homeDir, ompPath: stub, kitVersion: "0.2.5", ompVersion: "18.6.0", rules: ["kit-a"], profiles });
+	expect(finding.status).toBe("OK");
+	expect(finding.evidence?.probe_concurrency).toBe(6);
+	expect(finding.evidence?.probe_elapsed_ms).toBeLessThan(2000);
 });
