@@ -34,7 +34,9 @@ No `git reset --hard`, `git clean`, force-push, branch deletion of unmerged work
 
 ## Git Branch
 
-`main` is the only long-lived branch. Work on a short-lived feature branch, open a pull request, and merge only with CI green. Commit early and push your branch; never hold finished work in a dirty tree or in agent scratch. Commit subjects state their verification level: `[test]`, `[selftest]`, `[live]` or `[pending]`.
+`main` is the only branch. Maintainers and agents work on `main` in the canonical checkout; Agent Mail file reservations are the isolation, not branches or worktrees. Reserve the exact paths before editing, commit only those paths (`git commit --only -m <msg> -- <paths>`; a new file needs `git add -- <file>` first), and push to `origin main` once the pre-push gate passes. A rejected push is fetched and merged (`git fetch origin && git merge --no-edit origin/main`), never rebased, stashed or forced. `origin/main` is the source of truth, not your local `main`.
+
+`--only` commits the whole working-tree file. When a reserved file also holds another agent's uncommitted hunk, commit only your hunk from a private `GIT_INDEX_FILE` built on fresh `origin/main`, and confirm the base has not moved before committing; otherwise the commit silently reverts newer work. Never hold finished work in a dirty tree or in agent scratch. External contributors without push access use a fork and a pull request ([CONTRIBUTING.md](CONTRIBUTING.md)). Commit subjects state their verification level: `[test]`, `[selftest]`, `[live]` or `[pending]`.
 
 ## Toolchain
 
@@ -97,7 +99,7 @@ The kit is an installable companion for an existing OMP: a tested rule pack, a p
 
 ## Landing the Plane
 
-A task is done when its change is merged to `main` with CI green and its acceptance re-run by someone other than the implementer, with the output cited at the exact commit. Any merged user-visible change ships in a release within 7 days. New research or decision-gate work needs a named user who asked for it. This project is built in public: a PR that changes an item's status updates [ROADMAP.md](ROADMAP.md) in the same change. Before ending a session: commit and push your branch, open or update the pull request, and leave no finished work uncommitted.
+A task is done when its change is on `main` with CI green and its acceptance re-run by someone other than the implementer, with the output cited at the exact commit. Any user-visible change on `main` ships in a release within 7 days. New research or decision-gate work needs a named user who asked for it. This project is built in public: a change that moves an item's status updates [ROADMAP.md](ROADMAP.md) in the same commit. Before ending a session: commit and push to `main`, release your reservations, and leave no finished work uncommitted.
 
 ## Note on Built-in TODO Functionality
 
