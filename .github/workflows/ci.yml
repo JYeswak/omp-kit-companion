@@ -191,7 +191,7 @@ jobs:
           name: ladder-reports-${{ matrix.os }}
           path: reports/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 2
 
   build-candidates:
     needs: resolve-omp-versions
@@ -223,7 +223,7 @@ jobs:
           name: candidate-${{ matrix.platform }}
           path: ${{ runner.temp }}/candidate/${{ matrix.platform }}/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: ${{ inputs.version && 7 || 2 }}
 
   real-home-journey:
     needs: [build-candidates, resolve-omp-versions]
@@ -279,7 +279,7 @@ jobs:
           name: real-home-journey-${{ matrix.platform }}
           path: ${{ runner.temp }}/journey/run/log/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 2
 
   native-certification:
     needs: [build-candidates, resolve-omp-versions]
@@ -332,7 +332,7 @@ jobs:
           name: native-receipt-${{ matrix.platform }}-${{ matrix.omp.track }}
           path: ${{ runner.temp }}/native-receipt/receipt.json
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: ${{ inputs.version && 7 || 2 }}
 
   candidate-index:
     needs: [build-candidates, native-certification, resolve-omp-versions]
@@ -366,4 +366,4 @@ jobs:
           name: unpublished-candidate-index
           path: ${{ runner.temp }}/candidate-index/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: ${{ inputs.version && 7 || 2 }}

@@ -135,7 +135,7 @@ jobs:
         with:
           name: first-fire-${{ env.OMP_VERSION }}.json
           path: first-fire-${{ env.OMP_VERSION }}.json
-          retention-days: 90
+          retention-days: 2
       - name: Default-policy G4 run (reported separately, never gates)
         if: success()
         run: |
