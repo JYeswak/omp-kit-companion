@@ -135,7 +135,9 @@ jobs:
         with:
           name: first-fire-${{ env.OMP_VERSION }}.json
           path: first-fire-${{ env.OMP_VERSION }}.json
-          retention-days: 2
+          # The next OMP version's run diffs against this file (step "Download previous first-fire baseline"),
+          # and OMP can go weeks between releases. 3 KB; keep it.
+          retention-days: 90
       - name: Default-policy G4 run (reported separately, never gates)
         if: success()
         run: |
