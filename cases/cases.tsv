@@ -307,6 +307,7 @@ kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanc
 kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
 kit-no-force-push	fire	tool	bash	-	git push\t--force origin main	tab-separated force flag
 kit-no-force-push	fire	tool	bash	-	git push origin main \\n--force	line-continuation before force flag
+kit-no-force-push	quiet	tool	bash	-	cd repo && git tag -a v0.2.4 -m "v0.2.4" <sha> && AGENT_NAME=YellowSalmon git push origin v0.2.4 2>&1 | tail -1; gh workflow run release.yml -R JYeswak/omp-kit-companion --ref v0.2.4 -f version=0.2.4 2>&1 | tail -1	gh -f after ; and pipe does not belong to git push
 bash-glob-silenced	quiet	tool	bash	-	GREP -RL 'X' CRATES/*/CARGO.TOML 2>/DEV/NULL	H3: uppercase stays quiet, (?i) fires
 bash-pipe-exit	quiet	tool	bash	-	./SCRIPTS/LANE-STATUS.SH 2>&1 | TAIL -16; ECHO "EXIT=$?"	H3: uppercase stays quiet
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet

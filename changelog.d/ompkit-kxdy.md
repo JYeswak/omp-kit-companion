@@ -4,3 +4,4 @@
 - Put the canary token first and recognize newline/tab command payloads while quoted printf data stays quiet.
 - Put the close-evidence literal first and recognize escaped tab/newline command boundaries while preserving reasoned closes.
 - Make bash-glob-silenced literal-first with a shell-separator-bounded glob and stderr-suppression suffix; cover newline and escaped-tab forms.
+- Keep short-force detection inside the same `git push` command; stop at shell separators so later `gh -f` options stay quiet.
