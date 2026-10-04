@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 export interface PluginProfile { name: string; configFiles: readonly string[]; pluginDir?: string; writable?: boolean }
 export interface PluginSnapshot { installed: boolean; target: string | null; link_path?: string | null; plugins_dir_hash: string | null; lock_hash: string | null }
-export interface PluginStep { profile: string; command: readonly string[]; before: PluginSnapshot | null }
+export interface PluginStep { profile: string; command: readonly string[]; before: PluginSnapshot | null; refusal_reason?: string }
 export interface PluginPlan { store: string; steps: readonly PluginStep[]; skipped: readonly { profile: string; reason: string }[] }
 export interface PluginReceipt { schema_version: 1; id: string; store: string; created_at: string; rows: readonly { profile: string; status: "APPLIED" | "REFUSED" | "SKIPPED"; before: PluginSnapshot | null; after: PluginSnapshot | null; reason?: string }[] }
 export interface PluginRunner { snapshot(profile: string): PluginSnapshot; invoke(profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } }
@@ -28,7 +28,7 @@ export function planPlugin(store: string, profiles: readonly PluginProfile[], sn
 			continue;
 		}
 		if (profile.writable === false) {
-			skipped.push({ profile: profile.name, reason: "PROFILE_UNWRITABLE" });
+			steps.push({ profile: profile.name, command: profileArgs(profile.name, "link", store), before: snapshots.get(profile.name) ?? null, refusal_reason: "PROFILE_UNWRITABLE" });
 			continue;
 		}
 		steps.push({ profile: profile.name, command: profileArgs(profile.name, "link", store), before: snapshots.get(profile.name) ?? null });
@@ -40,6 +40,10 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 	const rows: Array<PluginReceipt["rows"][number]> = [...plan.skipped.map(item => ({ profile: item.profile, status: "SKIPPED" as const, before: null, after: null, reason: item.reason }))];
 	for (const step of plan.steps) {
 		const before = step.before ?? runner.snapshot(step.profile);
+		if (step.refusal_reason) {
+			rows.push({ profile: step.profile, status: "REFUSED", before, after: runner.snapshot(step.profile), reason: step.refusal_reason });
+			continue;
+		}
 		const result = runner.invoke(step.profile, step.command.slice(1));
 		if (result.code !== 0) {
 			rows.push({ profile: step.profile, status: "REFUSED", before, after: runner.snapshot(step.profile), reason: result.stderr || `plugin link exited ${result.code}` });

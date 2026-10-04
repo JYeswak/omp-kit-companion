@@ -952,11 +952,12 @@ function pluginProfiles(home: string): PluginProfile[] {
 	const configFiles = (dir: string): string[] => {
 		try { return readdirSync(dir).filter(name => ["config.yml", "config.yaml"].includes(name)); } catch { return []; }
 	};
-	profiles.push({ name: "default", configFiles: configFiles(join(home, ".omp", "agent")), pluginDir: join(home, ".omp", "plugins") });
+	const writable = (dir: string): boolean => { try { return (statSync(dir).mode & 0o200) !== 0; } catch { return true; } };
+	profiles.push({ name: "default", configFiles: configFiles(join(home, ".omp", "agent")), pluginDir: join(home, ".omp", "plugins"), writable: writable(join(home, ".omp", "plugins")) });
 	try {
 		for (const name of readdirSync(join(home, ".omp", "profiles")).sort()) {
 			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) continue;
-			profiles.push({ name, configFiles: configFiles(join(home, ".omp", "profiles", name, "agent")), pluginDir: join(home, ".omp", "profiles", name, "plugins") });
+			profiles.push({ name, configFiles: configFiles(join(home, ".omp", "profiles", name, "agent")), pluginDir: join(home, ".omp", "profiles", name, "plugins"), writable: writable(join(home, ".omp", "profiles", name, "plugins")) });
 		}
 	} catch {}
 	return profiles;
