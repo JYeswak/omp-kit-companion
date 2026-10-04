@@ -234,6 +234,10 @@ const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "
 } };
 
 export const COMMANDS: readonly Command[] = [
+	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
+		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
+		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
+	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--services PATH] [--deep --yes]", flags: [

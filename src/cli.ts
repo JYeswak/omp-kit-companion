@@ -48,13 +48,14 @@ import { matchesBounded } from "./regex-guards.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
+import { runHeavy } from "./heavy.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
 const EXIT_CODES = { success: 0, finding: 1, usage_or_blocked: 2, unavailable: 3, retryable: 4 } as const;
 
 export type CliResult = PresentationResult;
-export type ParsedCommand = { command: Command; parent?: Command; flags: ReadonlyMap<string, string | true>; argument?: string; json: boolean; robot: boolean };
+export type ParsedCommand = { command: Command; parent?: Command; flags: ReadonlyMap<string, string | true>; argument?: string; commandArgs?: readonly string[]; json: boolean; robot: boolean };
 export type CommandHandler = (request: ParsedCommand) => CliResult | Promise<CliResult>;
 const handlers = new Map<string, CommandHandler>();
 
@@ -131,17 +132,20 @@ function refusal(code: string, message: string, remediation: string): CliResult 
 
 type ParseResult = { request: ParsedCommand } | { failure: CliResult; json: boolean };
 function parse(args: readonly string[]): ParseResult {
-	const json = args.includes("--json") || args.includes("--robot");
+	const separator = args.indexOf("--");
+	const outerArgs = separator < 0 ? args : args.slice(0, separator);
+	const childArgs = separator < 0 ? undefined : args.slice(separator + 1);
+	const json = outerArgs.includes("--json") || outerArgs.includes("--robot");
 	// A lone --version/-V is the conventional version query; `update --version X.Y.Z` keeps its meaning.
-	const lone = args.filter((arg) => arg !== "--json" && arg !== "--robot" && arg !== "--no-color");
+	const lone = outerArgs.filter((arg) => arg !== "--json" && arg !== "--robot" && arg !== "--no-color");
 	if (lone.length === 1 && (lone[0] === "--version" || lone[0] === "-V"))
-		return { request: { command: { name: "--version", usage: "--version", description: "Print the kit version", flags: [], example: "omp-kit --version", runnable: true }, flags: new Map(), json, robot: args.includes("--robot") } };
+		return { request: { command: { name: "--version", usage: "--version", description: "Print the kit version", flags: [], example: "omp-kit --version", runnable: true }, flags: new Map(), json, robot: outerArgs.includes("--robot") } };
 	const positional: string[] = [];
 	const flags = new Map<string, string | true>();
 	let command: Command | undefined;
 	let parent: Command | undefined;
-	for (let i = 0; i < args.length; i++) {
-		const token = args[i] ?? "";
+	for (let i = 0; i < outerArgs.length; i++) {
+		const token = outerArgs[i] ?? "";
 		if (!token.startsWith("-")) {
 			positional.push(token);
 			if (positional.length === 1) command = findCommand(token);
@@ -157,7 +161,7 @@ function parse(args: readonly string[]): ParseResult {
 			return { failure: refusal("UNKNOWN_FLAG", `Unknown flag: ${name}`, hint ? `Use ${hint} exactly; run omp-kit --help for grammar.` : "Run omp-kit --help for valid flags."), json };
 		}
 		if (flag.value) {
-			const value = attached ?? args[++i];
+			const value = attached ?? outerArgs[++i];
 			if (!value || value.startsWith("--")) return { failure: refusal("MISSING_VALUE", `${name} needs ${flag.value}`, `Use ${name} ${flag.value}.`), json };
 			flags.set(name ?? "", value);
 		} else {
@@ -174,13 +178,19 @@ function parse(args: readonly string[]): ParseResult {
 		const hint = nearest(bad, candidates.map((item) => item.name));
 		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
 	}
+	if (separator >= 0 && command.name !== "heavy") return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy", "Run omp-kit heavy [flags] -- COMMAND [ARG ...]; no child command was run."), json };
 	const allowedFlags = [...GLOBAL_FLAGS, ...(parent ? [...parent.flags, ...command.flags] : command.flags)].map((item) => item.name);
 	for (const flag of flags.keys()) if (!allowedFlags.includes(flag)) return { failure: refusal("INVALID_FLAG", `${flag} is not valid for ${command.name}`, `Run omp-kit help ${parent ? `${parent.name} ` : ""}${command.name}.`), json };
 	const consumed = parent ? 2 : (positional.length ? 1 : 0);
 	const rest = positional.slice(consumed);
-	if (command.subcommands && !command.subcommandOptional && !parent && !flags.has("--help")) return { failure: refusal("MISSING_SUBCOMMAND", `${command.name} needs a subcommand`, `Run omp-kit help ${command.name}.`), json };
-	if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
-	if (command.argument && !rest.length && command.name !== "help" && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
+	if (command.name === "heavy") {
+		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the child command after `--`", "Use omp-kit heavy [flags] -- COMMAND [ARG ...]; no child command was run."), json };
+		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "heavy needs `-- COMMAND [ARG ...]`", "Pass the child command after `--`; no command was run."), json };
+		if (!flags.has("--help") && json) return { failure: refusal("RAW_OUTPUT_MODE", "heavy preserves the child command's raw output", "Omit --json/--robot before `--`; pass child-specific flags after `--`."), json };
+	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) {
+		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
+	}
+	if (command.argument && !rest.length && command.name !== "help" && command.name !== "heavy" && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
 	const scope = flags.get("--scope");
 	if (typeof scope === "string") {
 		const grammar = (parent ? [...parent.flags, ...command.flags] : command.flags).find((flag) => flag.name === "--scope")?.value;
@@ -190,7 +200,7 @@ function parse(args: readonly string[]): ParseResult {
 	}
 	if (flags.has("--plan") && flags.has("--apply")) return { failure: refusal("CONFLICTING_FLAGS", "--plan and --apply cannot be combined", `Choose one mode for ${command.name}.`), json };
 	if (flags.has("--deep") && !flags.has("--yes")) return { failure: refusal("CONSENT_REQUIRED", "doctor --deep requires explicit --yes", "Review the guarded deep probe, then supply --yes."), json };
-	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, json, robot: flags.has("--robot") } };
+	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, ...(childArgs ? { commandArgs: childArgs } : {}), json, robot: flags.has("--robot") } };
 }
 
 function kitIdentity() {
@@ -2152,6 +2162,13 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 
 export async function runCli(args: readonly string[] = process.argv.slice(2)): Promise<number> {
 	const parsed = parse(args);
+	if ("request" in parsed && parsed.request.command.name === "heavy" && !parsed.request.flags.has("--help")) {
+		const label = parsed.request.flags.get("--label");
+		return runHeavy(parsed.request.commandArgs ?? [], {
+			...(typeof label === "string" ? { label } : {}),
+			noWait: parsed.request.flags.has("--no-wait"),
+		});
+	}
 	const json = "request" in parsed ? parsed.request.json : parsed.json;
 	const version = kitIdentity().version;
 	let result: CliResult;
