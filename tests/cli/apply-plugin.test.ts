@@ -33,7 +33,7 @@ test("undo restores an absent prior plugin", () => {
 	const receipt = applyPlugin(planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }]), fake.runner, root);
 	const rows = undoPlugin(receipt, fake.runner);
 	expect(rows).toEqual([{ profile: "default", status: "RESTORED" }]);
-	expect(fake.calls.at(-1)).toEqual(["default", "plugin", "unlink", store]);
+	expect(fake.calls).toEqual([["default", "plugin", "link", store]]);
 });
 test("refuses a store nested inside a profile plugin directory", () => {
 	expect(() => planPlugin("/fixture/home/.omp/plugins/node_modules/omp-kit-companion", [{ name: "default", configFiles: ["config.yml"], pluginDir: "/fixture/home/.omp/plugins" }])).toThrow("STORE_INSIDE_PROFILE_PLUGIN_DIR");

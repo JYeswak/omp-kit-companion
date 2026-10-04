@@ -62,7 +62,7 @@ export function undoPlugin(receipt: PluginReceipt, runner: PluginRunner): readon
 		if (row.status !== "APPLIED") continue;
 		const target = row.before?.target;
 		const args = profileArgs(row.profile, target ? "link" : "unlink", target ?? receipt.store).slice(1);
-		const result = runner.invoke(row.profile, args);
+		const result = target ? runner.invoke(row.profile, args) : { code: 0, stdout: "", stderr: "" };
 		let reason = result.code === 0 ? undefined : result.stderr || `plugin undo exited ${result.code}`;
 		if (!reason && !target && row.before?.link_path) {
 			try { if (lstatSync(row.before.link_path).isSymbolicLink()) unlinkSync(row.before.link_path); } catch (error) { reason = error instanceof Error ? error.message : String(error); }
