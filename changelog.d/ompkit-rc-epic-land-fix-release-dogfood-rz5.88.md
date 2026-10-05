@@ -1,1 +1,2 @@
 - GATE1 slice: the pre-push hook runs gate code from the base archive (authoritative), never the working tree or the pushed head; a head that deletes a gate step is still judged by the base gate, and a failing base gate refuses.
+- The base-authoritative pre-push chain now runs six checker contract suites; any failing or missing suite refuses the push.

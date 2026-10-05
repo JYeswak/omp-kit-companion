@@ -13,10 +13,24 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 pass=0
 fail=0
+create_checker_test_stubs() {
+	repo=$1
+	failing_test=${2:-}
+	mkdir -p "$repo/tests/cli"
+	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh; do
+		test_path="$repo/tests/cli/$checker_test"
+		if [ "$checker_test" = "$failing_test" ]; then
+			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
+		else
+			printf '#!/bin/sh\nprintf "CHECKER-PASS: %s\\n"\n' "$checker_test" > "$test_path"
+		fi
+	done
+}
 
 mkrepo() {
 	name=$1
 	base_body=$2
+	failing_test=${4:-}
 	head_body=$3
 	repo="$TMP/$name"
 	rm -rf "$repo"
@@ -26,6 +40,7 @@ mkrepo() {
 	git -C "$repo" config user.name "worker-1"
 	printf '#!/bin/sh\n%s\n' "$base_body" > "$repo/scripts/fresh-gate.sh"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
+	create_checker_test_stubs "$repo" "$failing_test"
 	git -C "$repo" add -A
 	git -C "$repo" commit -qm "[test] base gate"
 	printf '#!/bin/sh\n%s\n' "$head_body" > "$repo/scripts/fresh-gate.sh"
@@ -76,6 +91,7 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$stalerepo/scripts
 printf '#!/bin/sh\nexit 0\n' > "$stalerepo/scripts/fresh-gate.sh"
 chmod +x "$stalerepo/scripts/fresh-gate.sh"
 printf 'one\n' > "$stalerepo/f.ts"
+create_checker_test_stubs "$stalerepo"
 git -C "$stalerepo" add -A
 git -C "$stalerepo" commit -qm "[test] base B"
 base=$(git -C "$stalerepo" rev-parse HEAD)
@@ -110,5 +126,16 @@ else
 	fail=$((fail + 1)); printf 'FAIL fresh-passes: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
 fi
 
+# 5. every checker contract is invoked from the base archive and blocks on failure
+for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh; do
+	repo=$(mkrepo "checker-$checker_test" 'echo BASE-GATE' 'echo HEAD-GATE' "$checker_test")
+	rc=$(run_adapter "$repo")
+	out=$(cat "$TMP/out")
+	if [ "$rc" = "7" ] && printf '%s' "$out" | grep -q "CHECKER-FAIL: $checker_test"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL checker-contract-%s: rc=%s out<<<%s>>>\n' "$checker_test" "$rc" "$out"
+	fi
+done
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

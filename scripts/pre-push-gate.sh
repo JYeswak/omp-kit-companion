@@ -61,4 +61,28 @@ if [ -n "${base_ref:-}" ]; then
 else
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
 fi
+# Exercise the committed checker contracts before running the candidate tree's gate.
+mkdir -p "$gate_scripts/var/agent-tmp"
+for checker_test in \
+	publishability.test.sh \
+	doc-drift.test.sh \
+	derived-check.test.sh \
+	dispatch-check.test.sh \
+	br-shim.test.sh \
+	public-files.test.sh
+do
+	test_path="$gate_scripts/tests/cli/$checker_test"
+	if [ ! -f "$test_path" ]; then
+		printf 'pre-push-gate: missing checker contract %s\n' "$checker_test" >&2
+		exit 1
+	fi
+	printf '== checker-contract %s\n' "$checker_test"
+	if TMPDIR="$gate_scripts/var/agent-tmp" sh "$test_path"; then
+		printf 'GREEN checker-contract %s\n' "$checker_test"
+	else
+		rc=$?
+		printf 'RED checker-contract %s producer_rc=%s\n' "$checker_test" "$rc" >&2
+		exit "$rc"
+	fi
+done
 exec sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
