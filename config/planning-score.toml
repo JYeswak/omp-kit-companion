@@ -1,0 +1,46 @@
+version = 1
+
+[plan]
+default = "PLAN_{mission}.md"
+
+[targets]
+plan_present = true
+plan_rounds = 4
+plan_last_diff = 0.05
+converted_once = 1
+coverage_checks = 1
+polish_rounds = 6
+polish_last_changed = 0.05
+bead_self_contained_median_chars = 300
+bead_self_contained_test_share = 0.4
+bead_self_contained_deps_per_bead = 1.0
+plan_to_code_hours = 24
+# Middle of the protocol's 1-3 proposal range; repo owners can override it.
+plan_ship_ratio_7d = 2.0
+main_green = true
+
+[weights]
+plan_present = 1.0
+plan_rounds = 1.0
+plan_last_diff = 1.0
+converted_once = 1.0
+coverage_checks = 1.0
+polish_rounds = 1.0
+polish_last_changed = 1.0
+bead_self_contained = 1.0
+plan_to_code_hours = 1.0
+plan_ship_ratio_7d = 1.0
+main_green = 1.0
+
+[ci]
+mode = "hosted"
+branch = "main"
+
+[fleet]
+repos = [
+  { name = "omp-kit-companion", path = "~/Developer/omp-kit-companion", tracker = "~/Developer/omp-kit" },
+  { name = "uds", path = "~/Developer/uds" },
+  { name = "jev", path = "~/Developer/jev" },
+  { name = "localbench", path = "~/Developer/localbench" },
+  { name = "clutterfreespaces.ios", path = "~/Developer/clutterfreespaces.ios" },
+]

@@ -11,7 +11,7 @@ const platformTargets: Record<string, string> = {
 	"linux-arm64-gnu": "bun-linux-arm64",
 	"linux-x64-gnu": "bun-linux-x64",
 };
-const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers"];
+const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills"];
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",

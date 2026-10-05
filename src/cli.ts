@@ -55,6 +55,7 @@ import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from 
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
+import { runPlanningScore } from "./planning-score.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -331,7 +332,8 @@ ${scoped}
 }
 
 const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
-	kit: ["kit", "manifest"],
+	kit: ["kit", "manifest", "planning_skill"],
+	beads: ["beads"],
 	omp: ["omp"],
 	rules: ["installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
@@ -343,7 +345,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
 const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
-	kit: true, manifest: true, omp: true, state_root: true, installed_rules: true, omp_drift: true,
+	kit: true, manifest: true, omp: true, state_root: true, installed_rules: true, omp_drift: true, planning_skill: true, beads: true,
 };
 
 interface NotJudgedComponent { component: string; status: DiagnosticStatus; reason: string }
@@ -445,7 +447,10 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			} catch { /* The next PATH entry may contain the validated launcher. */ }
 		}
 	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
-	const diagnosedFindings = await diagnose({ root, home, project: process.cwd(), ...(ompPath ? { ompPath } : {}) });
+	const doctorScope = request.command.name === "doctor" && typeof request.flags.get("--scope") === "string" ? String(request.flags.get("--scope")) : undefined;
+	const projectFlag = request.flags.get("--project");
+	const diagnosticProject = doctorScope === "beads" && typeof projectFlag === "string" ? resolve(projectFlag) : process.cwd();
+	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
 	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
 		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
 	const allFindings = nativeSettings ? [...diagnosedFindings.filter(item => item.component !== "policy"), nativeSettings] : diagnosedFindings;
@@ -2265,6 +2270,14 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+function planningScoreCommand(request: ParsedCommand): CliResult {
+	const repoFlag = request.flags.get("--repo");
+	if (repoFlag !== undefined && (typeof repoFlag !== "string" || !repoFlag.trim()))
+		return refusal("INVALID_FLAG", "--repo requires a non-empty repository path", "Use omp-kit planning score --repo PATH or --fleet.");
+	const kitRoot = kitIdentity().release.root ?? resolve(import.meta.dir, "..");
+	return runPlanningScore({ kitRoot, ...(typeof repoFlag === "string" ? { repoPath: repoFlag } : {}), fleet: request.flags.has("--fleet"), cwd: process.cwd(), home: process.env.HOME });
+}
+registerCommandHandler("planning score", planningScoreCommand);
 registerCommandHandler("update", updateCommand);
 
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
@@ -2344,7 +2357,9 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		return contextInventory(request);
 	}
 	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
-		return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading", "Use omp-kit doctor --scope project-loading --project PATH or doctor --scope lsp --file PATH.");
+		const scope = flags.get("--scope");
+		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file"));
+		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads accepts only --project", "Use doctor --scope beads --project PATH for a tracker export.");
 	}
 	if (parent?.name === "memory" && command.name === "audit") return privateMemoryAudit(request);
 	if (parent?.name === "lsp" && command.name === "setup") {

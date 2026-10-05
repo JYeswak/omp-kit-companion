@@ -68,7 +68,7 @@ const statusData: DataSchema = { type: "object", required: ["overall", "kit", "o
 		location: { type: ["string", "null"] }, version: { type: ["string", "null"] },
 	} },
 	findings: { type: "array", items: { type: "object", required: ["component", "status", "reason", "recommended_action"], properties: {
-		component: { type: "string" }, status: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL", "NOT_RUN"] }, reason: { type: "string" }, recommended_action: { type: "string" },
+		component: { type: "string" }, status: { enum: ["OK", "DEGRADED", "DRIFT", "UNVERIFIED", "FAIL", "NOT_RUN"] }, reason: { type: "string" }, recommended_action: { type: "string" },
 	} } },
 	evidence: { type: "object", required: ["effective_profile", "installed_rules", "matcher"], properties: {
 		effective_profile: { enum: ["UNVERIFIED", "NOT_RUN"] },
@@ -122,6 +122,11 @@ const sessionData: DataSchema = { type: "object", required: ["scope", "overall",
 	text: { type: "string" },
 } };
 const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] }, mcp_sources: { type: "object" } } };
+const planningScoreData: DataSchema = { type: "object", required: ["kind", "status", "metrics"], properties: {
+	kind: { enum: ["mission", "overall"] }, repo: { type: "string" }, mission: { type: "string" },
+	status: { enum: ["PASS", "FAIL", "UNKNOWN", "NOT_APPLICABLE"] }, weighted_score: { type: ["number", "null"] },
+	metrics: { type: "object" }, repositories: { type: "array" }, mission_count: { type: "number" },
+} };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
 	instructions: { type: "array", items: { type: "object", required: ["server", "status", "command", "note"], properties: {
@@ -242,15 +247,21 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
+	{ name: "planning", description: "Score planning history, beads and CI evidence", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [], example: "omp-kit planning score --fleet --json", subcommands: [
+		{ name: "score", description: "Score mission planning evidence without writing repository state", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [
+			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },
+			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
+		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
+	], runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--deep --yes]", flags: [
-			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone", description: "Restrict diagnosis to a named component; settings reads native TTSR keys selected by optional XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json, or all profiles when absent" },
+			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
 		{ name: "--sample-size", value: "N", description: "Rules calibration maximum labels per rule" },
 		{ name: "--noisy-lower-bound", value: "P", description: "Rules calibration noisy-rule lower-bound threshold" },
-		{ name: "--project", value: "PATH", description: "LSP, project-loading or context: select session cwd instead of the current directory" },
+		{ name: "--project", value: "PATH", description: "LSP, project-loading, context or beads: select a repository path instead of the current directory" },
 		{ name: "--root", value: "PATHS", description: "Work scope root list separated by the platform path delimiter; defaults to OMP_KIT_WORK_ROOTS or ~/Developer" },
 		{ name: "--timeout-ms", value: "N", description: "Work scope per-repository git command timeout in milliseconds" },
 		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },

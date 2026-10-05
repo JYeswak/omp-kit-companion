@@ -9,8 +9,9 @@ import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
+import { record } from "./mcp-sources.ts";
 
-export type DiagnosticStatus = "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
+export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
 export interface Finding {
 	component: string;
 	status: DiagnosticStatus;
@@ -22,6 +23,7 @@ export interface DiagnoseInput {
 	root: string;
 	home: string;
 	project?: string;
+	scope?: string;
 	ompPath?: string;
 	jsmPath?: string;
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
@@ -612,11 +614,65 @@ export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, con
 	const finding = inspectEffectiveRules({ ...input, probe: (profile, command) => { const result = outputs.get(profile); if (result instanceof Error) throw result; if (!result) throw new Error("profile probe missing"); return result[command]; } });
 	return { ...finding, evidence: { ...(finding.evidence ?? {}), probe_method: "bounded_async_native_spawn", probe_concurrency: concurrency, probe_elapsed_ms: performance.now() - started } };
 }
+function inspectPlanningSkill(root: string, home: string): Finding {
+	const kitPath = join(root, "skills", "jeff-planning-enhanced", "SKILL.md");
+	const localPath = join(home, ".agents", "skills", "jeff-planning-enhanced", "SKILL.md");
+	if (pathState(kitPath) !== "file") return finding("planning_skill", "UNVERIFIED", "Kit planning skill is missing or unsafe", "Repair the kit release; doctor does not write either skill copy.", { kit_path: kitPath });
+	let kitBytes: Buffer;
+	try { kitBytes = fileBytes(kitPath); }
+	catch { return finding("planning_skill", "UNVERIFIED", "Kit planning skill cannot be read safely", "Inspect the kit-owned skill file without changing either copy.", { kit_path: kitPath }); }
+	const localState = pathState(localPath);
+	if (localState === "missing") return finding("planning_skill", "DRIFT", "Local planning skill copy is missing", "Review the kit-owned skill source and restore the local copy explicitly.", { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_status: "MISSING" });
+	if (localState !== "file") return finding("planning_skill", "UNVERIFIED", "Local planning skill path is unsafe or unreadable", "Inspect the local skill path; doctor never replaces or follows it.", { kit_path: kitPath, local_path: localPath, local_status: "UNSAFE" });
+	try {
+		const localBytes = fileBytes(localPath);
+		const matches = kitBytes.equals(localBytes);
+		return finding("planning_skill", matches ? "OK" : "DRIFT", matches ? "Local planning skill matches the kit-owned source" : "Local planning skill differs from the kit-owned source", matches ? "No action required." : "Review and synchronize the local copy from the kit-owned skill file.", { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_sha256: digest(localBytes) });
+	} catch {
+		return finding("planning_skill", "UNVERIFIED", "Local planning skill cannot be read safely", "Inspect the local skill path; doctor never writes either copy.", { kit_path: kitPath, local_path: localPath });
+	}
+}
+
+function descriptionHasAcceptanceSection(description: string): boolean {
+	for (const raw of description.split("\n")) {
+		let line = raw.trim().toLowerCase();
+		if (line.startsWith("#")) {
+			const space = line.indexOf(" ");
+			line = space < 0 ? line.slice(1).trim() : line.slice(space + 1).trim();
+		}
+		for (const section of ["acceptance", "tests"]) {
+			if (!line.startsWith(section)) continue;
+			const next = line.slice(section.length, section.length + 1);
+			if (next === "" || next === ":" || next === " " || next === "(") return true;
+		}
+	}
+	return false;
+}
+
+function inspectBeadAcceptance(project: string): Finding {
+	const trackerPath = join(project, ".beads", "issues.jsonl");
+	if (pathState(trackerPath) !== "file") return finding("beads", "UNVERIFIED", "Tracker issues export is missing or unsafe", "Run doctor --scope beads --project PATH on the tracker repository.", { tracker_path: trackerPath });
+	let rows: unknown[];
+	try { rows = fileBytes(trackerPath).toString("utf8").split("\n").filter(line => line.trim().length > 0).map(line => JSON.parse(line)); }
+	catch { return finding("beads", "UNVERIFIED", "Tracker issues export cannot be read as JSONL", "Repair the read-only tracker export before checking acceptance-field placement.", { tracker_path: trackerPath }); }
+	const missingAcceptance = rows.filter(record).flatMap((row) => {
+		const description = typeof row.description === "string" ? row.description : "";
+		const acceptance = typeof row.acceptance_criteria === "string" ? row.acceptance_criteria.trim() : "";
+		if (acceptance || !descriptionHasAcceptanceSection(description)) return [];
+		return [{ id: typeof row.id === "string" ? row.id : "UNKNOWN", title: typeof row.title === "string" ? row.title : "" }];
+	});
+	return missingAcceptance.length
+		? finding("beads", "FAIL", "Beads put acceptance in the description while the acceptance_criteria field is empty", "Move tests and acceptance into acceptance_criteria; do not restate them in the description.", { tracker_path: trackerPath, missing_acceptance: missingAcceptance })
+		: finding("beads", "OK", "No description acceptance section is missing its acceptance_criteria field", "No action required.", { tracker_path: trackerPath, checked_beads: rows.length });
+}
+
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
 	const rows: Finding[] = [inspectOmp(input.ompPath)];
 	const root = resolve(input.root);
 	const home = resolve(input.home);
+	rows.push(inspectPlanningSkill(root, home));
+	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
@@ -769,6 +825,6 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 export function health(findings: readonly Finding[]): "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" {
 	if (findings.some((item) => item.status === "FAIL")) return "FAIL";
 	if (findings.some((item) => item.status === "UNVERIFIED" || item.status === "NOT_RUN")) return "UNVERIFIED";
-	if (findings.some((item) => item.status === "DEGRADED")) return "DEGRADED";
+	if (findings.some((item) => item.status === "DEGRADED" || item.status === "DRIFT")) return "DEGRADED";
 	return findings.length ? "OK" : "UNVERIFIED";
 }

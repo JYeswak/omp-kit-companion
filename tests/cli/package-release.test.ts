@@ -19,6 +19,12 @@ function copyReleaseSource(destination: string): void {
 	for (const directory of ["src", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "scripts", "tests/live"]) {
 		cpSync(join(repo, directory), join(destination, directory), { recursive: true });
 	}
+	const skillDir = join(destination, "skills", "jeff-planning-enhanced");
+	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(join(skillDir, "SKILL.md"), "fixture skill\n");
+	const configDir = join(destination, "config");
+	mkdirSync(configDir, { recursive: true });
+	writeFileSync(join(configDir, "planning-score.toml"), "fixture configuration\n");
 	for (const file of ["LICENSE", "package.json", "tsconfig.json"]) {
 		const source = join(repo, file);
 		if (existsSync(source)) cpSync(source, join(destination, file));
@@ -52,6 +58,10 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		const info = JSON.parse(child.stdout.toString()).data;
 		return { version: info.version, source_tag: info.release.source_tag, platform: info.platform };
 	} });
+	expect(staged.files).toContain("skills/jeff-planning-enhanced/SKILL.md");
+	expect(readFileSync(join(staged.root, "skills", "jeff-planning-enhanced", "SKILL.md"), "utf8")).toBe("fixture skill\n");
+	expect(staged.files).toContain("config/planning-score.toml");
+	expect(readFileSync(join(staged.root, "config", "planning-score.toml"), "utf8")).toBe("fixture configuration\n");
 	const shippedRule = readFileSync(join(staged.root, "rules", "kit-close-needs-evidence.md"));
 	const generatedRuleManifest = readFileSync(join(staged.root, "MANIFEST.tsv"), "utf8");
 	const ruleRow = generatedRuleManifest.split("\n").find(row => row.startsWith("kit-close-needs-evidence\t"));

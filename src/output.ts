@@ -4,6 +4,7 @@ import { isatty } from "node:tty";
 export type PresentationResult = {
 	code: 0 | 1 | 2 | 3 | 4;
 	data: Record<string, unknown>;
+	jsonl?: readonly Record<string, unknown>[];
 	errors?: readonly { code: string; message: string; remediation: string }[];
 	warnings?: readonly string[];
 	commands?: readonly string[];
@@ -38,6 +39,18 @@ function stableData(value: unknown, key = ""): unknown {
 export function renderOutput(result: PresentationResult, options: PresentationOptions): { stdout: string; stderr: string; exitCode: PresentationResult["code"] } {
 	const errors = [...(result.errors ?? [])].sort((left, right) => compare(left.code, right.code) || compare(left.message, right.message) || compare(left.remediation, right.remediation));
 	if (options.json) {
+		if (result.jsonl) {
+			const rows = result.jsonl.map((data) => JSON.stringify({
+				ok: result.code === 0,
+				tool_version: options.toolVersion,
+				data: stableData(data),
+				meta: { schema_version: options.schemaVersion, verification: result.verification ?? "NOT_RUN" },
+				warnings: result.warnings ?? [],
+				commands: result.commands ?? [],
+				errors,
+			}));
+			return { stdout: rows.length ? `${rows.join("\n")}\n` : "", stderr: "", exitCode: result.code };
+		}
 		const envelope = {
 			ok: result.code === 0,
 			tool_version: options.toolVersion,
