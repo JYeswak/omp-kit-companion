@@ -1,6 +1,8 @@
 name: CI
 
-# Every push to main runs the fast Linux gate (CLI contracts, ladder); a newer push cancels the older run.
+# Every push to main runs the fast Linux gate (CLI contracts, ladder) to completion, one run per commit, so
+# every landed commit gets its own verdict (agents push after every commit). On other refs a newer push
+# cancels the older run.
 # The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
 # (workflow_call from release.yml) and daily. There is no manual dispatch: 99 manual full-native runs in
 # Oct 1-4 were most of the macOS minutes; dispatch release.yml for an intentional full run.
@@ -20,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   resolve-omp-versions:
