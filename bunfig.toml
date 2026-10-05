@@ -1,3 +1,7 @@
 [test]
 preload = ["./tests/test-preload.ts"]
 timeout = 120000
+# Scratch is per-session agent workspace, never test sources: peers vendor
+# repo copies (with *.test.ts files) under var/agent-tmp and bun test walks
+# them without this. node_modules is default-ignored; listed to pin it.
+pathIgnorePatterns = ["var/agent-tmp/**", "node_modules/**"]
