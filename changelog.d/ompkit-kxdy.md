@@ -5,3 +5,4 @@
 - Put the close-evidence literal first and recognize escaped tab/newline command boundaries while preserving reasoned closes.
 - Make bash-glob-silenced literal-first with a shell-separator-bounded glob and stderr-suppression suffix; cover newline and escaped-tab forms.
 - Keep short-force detection inside the same `git push` command; stop at shell separators so later `gh -f` options stay quiet.
+- Regex budget gate wired in (RX1): `ladder.sh` runs `scripts/regex-budget.ts`, and the pre-push gate runs it when `rules/*.md` changes (refuses on RED); mission Proven check already points at it. Live rules currently fail it; fixes ride RX2/RX5/RX6.

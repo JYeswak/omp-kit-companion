@@ -162,6 +162,7 @@ gate_focused() {
 	needs_cli=0
 	needs_shell=0
 	needs_actionlint=0
+	needs_regex=0
 	for file in $CHANGED; do
 		[ -n "$file" ] || continue
 		case "$file" in
@@ -179,6 +180,8 @@ gate_focused() {
 				needs_shell=1 ;;
 			.github/workflows/*.yml|.github/workflows/*.yaml)
 				needs_actionlint=1 ;;
+			rules/*.md)
+				needs_regex=1 ;;
 			esac
 	done
 	if [ "$needs_shell" = 1 ]; then
@@ -192,6 +195,11 @@ gate_focused() {
 		else
 			echo "focused shellcheck: unavailable; no shell files were executed"
 		fi
+	fi
+	if [ "$needs_regex" = 1 ]; then
+		# Regex cost gate (RX1): self-bounding (internal 57 s deadline); red names
+		# the rule, shape and encoding, and the push is refused.
+		(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null scripts/regex-budget.ts) || return $?
 	fi
 	if [ "$needs_actionlint" = 1 ]; then
 		if command -v actionlint >/dev/null 2>&1; then

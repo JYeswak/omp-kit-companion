@@ -54,6 +54,9 @@ fi
 
 step harness-gate "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --gate
 step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
+# Regex cost gate: every rule condition timed in Bun on near-miss shapes and a
+# realistic live stream (RX1). Red names the rule, shape and encoding.
+step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8
