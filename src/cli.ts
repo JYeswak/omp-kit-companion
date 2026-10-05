@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, realpathSync, statSync, mkdirSync, renameSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
@@ -8,7 +8,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
-import { applyPlugin, planPlugin, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner } from "./apply-plugin.ts";
+import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
@@ -870,11 +870,14 @@ function receiptCommand(request: ParsedCommand): CliResult {
 			const pluginPath = join(stateRoot, `plugin-${request.argument}.json`);
 			if (existsSync(pluginPath)) {
 				const omp = resolveOmpIdentity(process.env).launcher;
-				const runner: PluginRunner = {
-					invoke: (profile, args) => nativePluginInvoke(omp, process.env.HOME ?? "", profile, args),
-					snapshot: () => ({ installed: false, target: null, plugins_dir_hash: null, lock_hash: null }),
-				};
-				const rows = undoPlugin(readPluginReceipt(pluginPath), runner);
+				const home = process.env.HOME;
+				if (!home || !isAbsolute(home) || resolve(home) !== home || !isAbsolute(omp))
+					return refusal("OMP_UNAVAILABLE", "A canonical HOME and OMP launcher are required for plugin undo", "Restore the original profile paths and retry the recorded plugin undo.");
+				const receipt = readPluginReceipt(pluginPath);
+				const storeHash = receipt.rows.find(row => row.after?.package_hash)?.after?.package_hash ??
+					receipt.rows.find(row => row.before?.package_hash)?.before?.package_hash ?? "";
+				const runner = createPluginRunner(omp, home, pluginProfiles(home), receipt.store, storeHash);
+				const rows = undoPlugin(receipt, runner, stateRoot);
 				return { code: rows.some(row => row.status === "REFUSED") ? 1 : 0, data: { overall: "UNVERIFIED", status: rows.some(row => row.status === "REFUSED") ? "PARTIAL" : "RESTORED", receipt_id: request.argument, rows }, verification: "UNVERIFIED" };
 			}
 		}
@@ -976,46 +979,203 @@ function pluginProfiles(home: string): PluginProfile[] {
 function nativePluginInvoke(omp: string, home: string, profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } {
 	const env = { ...process.env, HOME: home };
 	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
-	const result = Bun.spawnSync([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args], { env, stdout: "pipe", stderr: "pipe" });
+	const result = Bun.spawnSync([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 	return { code: result.exitCode ?? 1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
-function pluginCommand(request: ParsedCommand): CliResult {
-	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
-	if (!root || !home || !isAbsolute(home) || !stateRoot) return refusal("INSTALL_UNAVAILABLE", "An installed kit, absolute HOME and private state root are required", "Run the compiled kit release with a canonical HOME; no plugin mutation was attempted.");
-	const storeFlag = request.flags.get("--store");
-	const store = typeof storeFlag === "string" ? storeFlag : join(root, "plugin");
-	if (!isAbsolute(store)) return refusal("INVALID_STORE", "Plugin store must be an absolute directory", "Pass --store ABSOLUTE_DIR from the installed kit release.");
-	const omp = resolveOmpIdentity(process.env).launcher;
-	const invoke = (profile: string, args: readonly string[]) => nativePluginInvoke(omp, home, profile, args);
-	const runner: PluginRunner = {
+
+function pluginFilesystemKind(path: string): "ABSENT" | "FILE" | "DIRECTORY" | "SYMLINK" | "OTHER" {
+	try {
+		const stat = lstatSync(path);
+		if (stat.isSymbolicLink()) return "SYMLINK";
+		if (stat.isFile()) return "FILE";
+		if (stat.isDirectory()) return "DIRECTORY";
+		return "OTHER";
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "ABSENT";
+		throw error;
+	}
+}
+
+function pluginPackageMetadata(root: string): { hash: string; version: string; rules: string[] } {
+	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as Record<string, unknown>;
+	if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || manifest.name !== "omp-kit-companion" ||
+		typeof manifest.version !== "string" || !manifest.version)
+		throw new Error("PLUGIN_PACKAGE_METADATA_INVALID");
+	const rules = readdirSync(join(root, "rules"))
+		.filter(name => /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(name))
+		.map(name => name.slice(0, -3));
+	return { hash: pluginPackageHash(root), version: manifest.version, rules };
+}
+
+function createPluginRunner(omp: string, home: string, profiles: readonly PluginProfile[], store: string, storeHash: string): PluginRunner {
+	const byName = new Map(profiles.map(profile => [profile.name, profile]));
+	const invoke = (profile: string, args: readonly string[]) => {
+		const normalized = args[0] === "--profile" && args[1] === profile ? args.slice(2) : args;
+		return nativePluginInvoke(omp, home, profile, normalized);
+	};
+	const snapshot = (name: string): PluginSnapshot => {
+		const profile = byName.get(name);
+		const pluginDir = profile?.pluginDir;
+		const linkPath = join(home, name === "default" ? ".omp/plugins" : `.omp/profiles/${name}/plugins`, "node_modules/omp-kit-companion");
+		const base: PluginSnapshot = { installed: false, target: null, link_path: linkPath, plugins_dir_hash: null, lock_hash: null };
+		if (!pluginDir) return { ...base, snapshot_issue: "PROFILE_UNAVAILABLE" };
+		try {
+			const pluginDirKind = pluginFilesystemKind(pluginDir);
+			const nodeModulesDir = join(pluginDir, "node_modules");
+			const nodeModulesKind = pluginFilesystemKind(nodeModulesDir);
+			const lockPath = join(pluginDir, "omp-plugins.lock.json");
+			const lockFsKind = pluginFilesystemKind(lockPath);
+			const linkKind = pluginFilesystemKind(linkPath);
+			let issue: string | undefined;
+			if (!["ABSENT", "DIRECTORY"].includes(pluginDirKind) ||
+				!["ABSENT", "DIRECTORY"].includes(nodeModulesKind) ||
+				!["ABSENT", "SYMLINK", "DIRECTORY"].includes(linkKind) ||
+				!["ABSENT", "FILE"].includes(lockFsKind)) issue = "PROFILE_PLUGIN_PATH_UNSAFE";
+			let hashes: Pick<PluginSnapshot, "plugins_dir_hash" | "lock_hash"> | undefined;
+			try { hashes = pluginProfileHashes(pluginDir); }
+			catch (error) { issue ??= error instanceof Error ? error.message : String(error); }
+
+			const listedResult = invoke(name, ["plugin", "list", "--json"]);
+			if (listedResult.code !== 0 || listedResult.stderr.trim()) issue ??= "PLUGIN_LIST_UNAVAILABLE";
+			let listed: Record<string, unknown> = {};
+			try {
+				const parsed: unknown = JSON.parse(listedResult.stdout);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("PLUGIN_LIST_INVALID");
+				listed = parsed as Record<string, unknown>;
+			} catch { issue ??= "PLUGIN_LIST_INVALID"; }
+			const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
+			const kit = entries.find(item => item && typeof item === "object" && String((item as Record<string, unknown>).name ?? "") === "omp-kit-companion") as Record<string, unknown> | undefined;
+			const installed = kit !== undefined;
+			const listedPath = typeof kit?.path === "string" && isAbsolute(kit.path) ? kit.path : null;
+			if (installed !== (linkKind !== "ABSENT") || (installed && !listedPath)) issue ??= "PLUGIN_LIST_FILESYSTEM_MISMATCH";
+			let target: string | null = null;
+			let targetText: string | null = null;
+			if (linkKind === "SYMLINK") targetText = readlinkSync(linkPath);
+			if (linkKind === "SYMLINK" || linkKind === "DIRECTORY") target = realpathSync(linkPath);
+			if (listedPath && target) {
+				try {
+					if (realpathSync(listedPath) !== target) issue ??= "PLUGIN_LIST_TARGET_MISMATCH";
+				} catch { issue ??= "PLUGIN_LIST_TARGET_UNAVAILABLE"; }
+			}
+			let packageHash: string | null = null, version: string | null = null;
+			if (installed && target) {
+				try {
+					const metadata = pluginPackageMetadata(target);
+					packageHash = metadata.hash;
+					version = metadata.version;
+				} catch (error) { issue ??= error instanceof Error ? error.message : String(error); }
+			}
+			const policy = invoke(name, ["config", "get", "ttsr.disabledRules", "--json"]);
+			let disabledRules: readonly string[] | undefined;
+			if (policy.code !== 0 || policy.stderr.trim() || policy.stdout.length > 64 * 1024) issue ??= "PROFILE_POLICY_UNVERIFIED";
+			else {
+				try {
+					const value = JSON.parse(policy.stdout) as Record<string, unknown>;
+					if (!value || value.key !== "ttsr.disabledRules" || !Array.isArray(value.value) ||
+						!value.value.every(rule => typeof rule === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule)))
+						throw new Error("PROFILE_POLICY_UNVERIFIED");
+					disabledRules = value.value as string[];
+				} catch { issue ??= "PROFILE_POLICY_UNVERIFIED"; }
+			}
+			return {
+				...base,
+				installed,
+				target,
+				plugins_dir_hash: hashes?.plugins_dir_hash ?? null,
+				lock_hash: hashes?.lock_hash ?? null,
+				package_hash: packageHash,
+				version,
+				link_target_text: targetText,
+				link_kind: linkKind,
+				lock_kind: lockFsKind === "ABSENT" ? "ABSENT" : lockFsKind === "FILE" ? "FILE" : "OTHER",
+				plugin_dir_present: pluginDirKind === "DIRECTORY",
+				node_modules_present: nodeModulesKind === "DIRECTORY",
+				...(disabledRules ? { disabled_rules: disabledRules } : {}),
+				...(issue ? { snapshot_issue: issue } : {}),
+			};
+		} catch (error) {
+			return { ...base, snapshot_issue: error instanceof Error ? error.message : String(error) };
+		}
+	};
+	return {
 		invoke,
-		snapshot: profile => {
-			try {
-				const result = invoke(profile, ["plugin", "list", "--json"]);
-				const listed = JSON.parse(result.stdout) as Record<string, unknown>;
-				const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
-				const kit = entries.find(item => item && typeof item === "object" && /omp-kit-companion/i.test(String((item as Record<string, unknown>).name ?? ""))) as Record<string, unknown> | undefined;
-				return { installed: kit !== undefined, target: typeof kit?.path === "string" ? kit.path : null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null };
-			} catch { return { installed: false, target: null, link_path: join(home, profile === "default" ? ".omp/plugins" : `.omp/profiles/${profile}/plugins`, "node_modules/omp-kit-companion"), plugins_dir_hash: null, lock_hash: null }; }
-		},
+		snapshot,
+		setDisabledRules: (profile, rules) => invoke(profile, ["config", "set", "ttsr.disabledRules", JSON.stringify(rules), "--json"]),
 		postcheck: profile => {
-			try {
-				const listed = JSON.parse(invoke(profile, ["plugin", "list", "--json"]).stdout) as Record<string, unknown>;
-				const entries = ["npm", "marketplace"].flatMap(key => Array.isArray(listed[key]) ? listed[key] : []);
-				const kit = entries.find(item => item && typeof item === "object" && /omp-kit-companion/i.test(String((item as Record<string, unknown>).name ?? ""))) as Record<string, unknown> | undefined;
-				const target = typeof kit?.path === "string" ? kit.path : "";
-				return target !== "" && existsSync(join(target, "rules")) ? { ok: true } : { ok: false, reason: "POSTCHECK_PARTIAL:PLUGIN_RULES_DIR_MISSING" };
-			} catch (error) { return { ok: false, reason: `POSTCHECK_PARTIAL:${error instanceof Error ? error.message : String(error)}` }; }
+			const current = snapshot(profile);
+			return current.snapshot_issue === undefined && current.installed &&
+				(current.target === store || current.package_hash === storeHash)
+				? { ok: true }
+				: { ok: false, reason: current.snapshot_issue ?? "POSTCHECK_PARTIAL:PLUGIN_PACKAGE_MISMATCH" };
 		},
 	};
+}
+
+function pluginCommand(request: ParsedCommand): CliResult {
+	const root = kitIdentity().release.root, home = process.env.HOME, stateRoot = receiptStateRoot();
+	if (!root || !home || !isAbsolute(home) || resolve(home) !== home || !stateRoot)
+		return refusal("INSTALL_UNAVAILABLE", "An installed kit, canonical absolute HOME and private state root are required", "Run the compiled kit release with a canonical HOME; no plugin mutation was attempted.");
+	const storeFlag = request.flags.get("--store");
+	const store = typeof storeFlag === "string" ? storeFlag : root;
+	if (!isAbsolute(store) || resolve(store) !== store) return refusal("INVALID_STORE", "Plugin store must be an absolute canonical package root", "Pass --store ABSOLUTE_DIR containing package.json, rules/, and extensions/.");
+	const allProfiles = pluginProfiles(home), namedProfiles = allProfiles.filter(profile => profile.name !== "default");
+	const selected = request.flags.get("--profiles");
+	let selectedNames = namedProfiles.map(profile => profile.name);
+	if (selected !== undefined) {
+		if (typeof selected !== "string") return refusal("INVALID_PROFILES", "Profile selection must be a name list or all", "Use --profiles all or --profiles NAME[,NAME].");
+		if (selected !== "all") selectedNames = selected.split(",");
+	}
+	if (selectedNames.some(name => !matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name.endsWith(".") || name === "default") ||
+		new Set(selectedNames).size !== selectedNames.length)
+		return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles", "Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
+	const existingNames = new Set(namedProfiles.map(profile => profile.name));
+	if (selectedNames.some(name => !existingNames.has(name))) return refusal("INVALID_PROFILES", "A selected named profile does not exist", "Select existing OMP profiles with --profiles all or --profiles NAME[,NAME].");
+	const includeDefault = request.flags.has("--include-default");
+	const selectedSet = new Set(selectedNames);
+	const profiles = allProfiles.filter(profile => profile.name === "default" ? includeDefault : selectedSet.has(profile.name));
+	if (!profiles.length) return refusal("INVALID_PROFILES", "No OMP profiles were selected", "Select named profiles or pass --include-default.");
+	const omp = resolveOmpIdentity(process.env).launcher;
+	if (!omp || !isAbsolute(omp)) return refusal("OMP_UNAVAILABLE", "The OMP launcher is unavailable", "Install OMP or provide the canonical launcher; no profile was changed.");
 	try {
-		const plan = planPlugin(store, pluginProfiles(home));
-		const data = { overall: "UNVERIFIED", action: "PLAN", store, steps: plan.steps, skipped: plan.skipped, receipt_id: null as string | null };
-		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
-		const receipt = applyPlugin(plan, runner, stateRoot);
-		const refused = receipt.rows.filter(row => row.status === "REFUSED");
-		return { code: refused.length ? 1 : 0, data: { ...data, action: refused.length ? "PARTIAL" : "APPLIED", receipt_id: receipt.id, rows: receipt.rows }, verification: "UNVERIFIED" };
-	} catch (error) { return refusal("PLUGIN_APPLY_FAILED", error instanceof Error ? error.message : String(error), "Inspect the profile plan and receipt; no unverified rollback was attempted."); }
+		const metadata = pluginPackageMetadata(store);
+		const reportPath = request.flags.get("--regex-budget-report");
+		let reportOutput: string | undefined, regexBudget: RegexBudgetSelection | undefined;
+		if (reportPath !== undefined) {
+			if (typeof reportPath !== "string" || !isAbsolute(reportPath) || resolve(reportPath) !== reportPath)
+				return refusal("INVALID_REGEX_BUDGET_REPORT", "Regex-budget report path must be absolute and canonical", "Pass the captured scripts/regex-budget.ts output file as an absolute path.");
+			reportOutput = readFileSync(reportPath, "utf8");
+			regexBudget = analyzeRegexBudgetOutput(reportOutput);
+		}
+		const runner = createPluginRunner(omp, home, allProfiles, store, metadata.hash);
+		const snapshots = new Map(profiles.map(profile => [profile.name, runner.snapshot(profile.name)]));
+		const plan = planPlugin(store, profiles, snapshots, {
+			store_version: metadata.version,
+			package_hash: metadata.hash,
+			available_rules: metadata.rules,
+			...(regexBudget ? { regex_budget: regexBudget } : {}),
+		});
+		const blocked = plan.skipped.length > 0 || plan.steps.some(step => step.refusal_reason !== undefined);
+		const data = {
+			overall: blocked ? "FAIL" : "UNVERIFIED",
+			action: "PLAN",
+			store,
+			package_hash: metadata.hash,
+			regex_budget: regexBudget ?? null,
+			steps: plan.steps,
+			skipped: plan.skipped,
+			receipt_id: null as string | null,
+		};
+		if (!request.flags.has("--apply")) return { code: blocked ? 1 : 0, data, verification: "UNVERIFIED" };
+		const receipt = applyPlugin(plan, runner, stateRoot, reportOutput);
+		const failed = receipt.rows.some(row => row.status !== "APPLIED" && row.status !== "UNCHANGED");
+		return {
+			code: failed ? 1 : 0,
+			data: { ...data, action: failed ? "PARTIAL" : "APPLIED", receipt_id: receipt.id, rows: receipt.rows },
+			verification: "UNVERIFIED",
+		};
+	} catch (error) {
+		return refusal("PLUGIN_APPLY_FAILED", error instanceof Error ? error.message : String(error), "Inspect the profile plan and receipt; no unverified rollback was attempted.");
+	}
 }
 
 registerCommandHandler("apply plugin", pluginCommand);

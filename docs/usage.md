@@ -241,6 +241,39 @@ Link a checkout instead of copying rules by hand:
 omp plugin link "$WT" && omp plugin list
 ```
 
+### Profile-wide package rollout
+
+Run `KIT_SOURCE/src/cli.ts` from the checkout containing this implementation;
+use the installed package release root as `--store`. It must contain
+`package.json`, `rules/`, and `extensions/` (not a nested `plugin/` directory).
+Capture the complete runtime budget output, including its `JSON_REPORT=` line,
+even when the script exits nonzero:
+
+```sh
+KIT_SOURCE=/absolute/omp-kit-companion
+KIT_RELEASE=/absolute/kit-release-root
+REPORT=/absolute/regex-budget.out
+if bun "$KIT_SOURCE/scripts/regex-budget.ts" > "$REPORT" 2>&1; then budget_rc=0; else budget_rc=$?; fi
+printf 'regex_budget_exit=%s\n' "$budget_rc"
+
+bun "$KIT_SOURCE/src/cli.ts" apply plugin --plan --store "$KIT_RELEASE" \
+  --regex-budget-report "$REPORT" --profiles all --include-default --json
+bun "$KIT_SOURCE/src/cli.ts" apply plugin --apply --yes --store "$KIT_RELEASE" \
+  --regex-budget-report "$REPORT" --profiles all --include-default --json
+```
+
+The receipt binds the selected RX2 exclusions to the report hash and stores a
+private copy of the report. Exclusions are added only to named profiles, unioned
+with their existing `ttsr.disabledRules`; the default profile's policy is never changed.
+
+The report records host load averages; stream timings are raw and are not
+load-normalized.
+
+Run `bun "$KIT_SOURCE/src/cli.ts" undo RECEIPT_ID --yes` to restore each
+verified profile's previous plugin package, lock file, and named-profile policy.
+Undo refuses if a postimage changed.
+
+
 ```sh verified rc=0 contains="omp-plugins"
 omp ttsr list --json
 ```
