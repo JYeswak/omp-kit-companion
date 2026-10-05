@@ -2218,7 +2218,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const job = scoped[name!]!;
 			if (linux) {
 				const state = systemctlState(job, defaultRunner);
-				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, last_run_at: readJobFinishedAt(home, name) };
+				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, lastExit: null, runs: null, last_run_at: readJobFinishedAt(home, name) };
 			}
 			const installed = readInstalledPlist(home, job.label);
 			const print = queryPrint(job.label);
