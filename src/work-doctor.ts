@@ -1,19 +1,20 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { auditStaleReservedEdits, DEFAULT_RESERVATION_LIMIT_MINUTES, type StaleReservedEdit } from "./reservation-age.ts";
 
 export type WorkRootStatus = "OK" | "UNAVAILABLE";
 export type WorkRepoStatus = "OK" | "WARN" | "UNVERIFIED";
 
-export interface WorkDoctorInput { roots: readonly string[]; concurrency?: number; perRepoTimeoutMs?: number; }
+export interface WorkDoctorInput { roots: readonly string[]; concurrency?: number; perRepoTimeoutMs?: number; staleEditLimitMinutes?: number; nowMs?: number; }
 export interface WorkRootReport { path: string; status: WorkRootStatus; repo_count: number; reason?: string; discovery?: { max_depth: number; ignored_directory_names: string[]; skipped_depth_directories: number; skipped_symlink_directories: number; skipped_ignored_directories: number }; }
 export interface WorkRepoReport {
 	name: string; path: string; status: WorkRepoStatus; dirty_file_count: number; tracked_dirty_file_count: number; untracked_file_count: number | null; untracked_file_cap: number; untracked_scan_status: "OK" | "CAP" | "TIMEOUT" | "ERROR"; commits_ahead: number | null; commits_behind: number | null;
 	unpushed_commits: number; has_upstream: boolean; has_remote: boolean; no_upstream: boolean; no_remote: boolean; stash_count: number;
 	detached: boolean; branch: string | null; last_commit_epoch: number | null; last_commit_age_days: number | null; active_worktrees: number;
-	worktree_paths: string[]; risk_score: number; findings: string[]; reason?: string;
+	worktree_paths: string[]; reservation_scan_status: "OK" | "PARTIAL" | "UNAVAILABLE" | "UNCONFIGURED"; stale_uncommitted_edits: StaleReservedEdit[]; reservation_scan_reason?: string; risk_score: number; findings: string[]; reason?: string;
 }
 export interface WorkDoctorReport {
-	scope: "work"; overall: "REPORT"; roots: WorkRootReport[]; repos: WorkRepoReport[]; concurrency: number; per_repo_timeout_ms: number;
+	scope: "work"; overall: "REPORT"; roots: WorkRootReport[]; repos: WorkRepoReport[]; concurrency: number; per_repo_timeout_ms: number; stale_edit_limit_minutes: number;
 	elapsed_ms: number; timed_out_repos: number; text: string;
 }
 interface GitResult { code: number | null; stdout: string; stderr: string; timed_out: boolean; }
@@ -58,6 +59,51 @@ function parseUntracked(result: GitResult): { count: number | null; status: "OK"
 	return count > UNTRACKED_FILE_CAP ? { count: UNTRACKED_FILE_CAP, status: "CAP" } : { count, status: "OK" };
 }
 
+function staleEditLimit(input: WorkDoctorInput): number {
+	const raw = input.staleEditLimitMinutes ?? process.env.OMP_KIT_WORK_STALE_EDIT_MINUTES;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 1 ? Math.trunc(parsed) : DEFAULT_RESERVATION_LIMIT_MINUTES;
+}
+
+function agentMailStorageRoot(repo: string, configured: string, env: Record<string, string | undefined> = process.env): string | null {
+	const raw = configured.trim() || env.AGENT_MAIL_STORAGE_ROOT?.trim() || env.STORAGE_ROOT?.trim() || "";
+	if (!raw) return null;
+	const home = env.HOME ?? "";
+	const expanded = raw === "~" ? home : raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
+	return resolve(repo, expanded);
+}
+
+function dirtyFileMetadata(repo: string, paths: readonly string[]): Array<{ path: string; modifiedMs: number }> {
+	const files: Array<{ path: string; modifiedMs: number }> = [];
+	for (const path of new Set(paths)) {
+		const absolute = resolve(repo, path);
+		const relativePath = relative(repo, absolute).replaceAll("\\", "/");
+		if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || isAbsolute(relativePath)) continue;
+		try {
+			const stat = lstatSync(absolute);
+			if (stat.isFile() || stat.isSymbolicLink()) files.push({ path: relativePath, modifiedMs: stat.mtimeMs });
+		} catch { /* Removed paths have no current mtime to report. */ }
+	}
+	return files;
+}
+interface ReservationScan { status: WorkRepoReport["reservation_scan_status"]; stale: StaleReservedEdit[]; reason?: string; }
+
+async function scanReservedEdits(repo: string, dirtyFiles: number, untracked: GitResult, untrackedResult: ReturnType<typeof parseUntracked>, limitMinutes: number, nowMs: number, timeoutMs: number): Promise<ReservationScan> {
+	if (dirtyFiles === 0) return { status: "UNCONFIGURED", stale: [] };
+	const storageConfig = await runGit(repo, ["config", "--local", "--get", "omp-kit.agent-mail-storage-root"], timeoutMs);
+	const storageLookupFailed = storageConfig.timed_out || (storageConfig.code !== 0 && storageConfig.code !== 1);
+	const storageRoot = agentMailStorageRoot(repo, storageConfig.code === 0 ? storageConfig.stdout : "");
+	if (storageLookupFailed && !storageRoot) return { status: "UNAVAILABLE", stale: [], reason: "Agent Mail storage configuration could not be read" };
+	if (!storageRoot) return { status: "UNCONFIGURED", stale: [], reason: "Agent Mail storage root is not configured" };
+	const trackedChanges = await runGit(repo, ["diff", "--name-only", "--no-ext-diff", "-z", "HEAD"], timeoutMs);
+	const trackedPaths = trackedChanges.code === 0 ? trackedChanges.stdout.split("\0").filter(Boolean) : [];
+	const untrackedPaths = untrackedResult.status === "OK" ? untracked.stdout.split("\0").filter(Boolean) : [];
+	const dirtyFileMtimes = dirtyFileMetadata(repo, [...trackedPaths, ...untrackedPaths]);
+	const audit = auditStaleReservedEdits({ archiveRoot: storageRoot, projectKey: repo, dirtyFiles: dirtyFileMtimes, limitMinutes, nowMs });
+	const status = trackedChanges.code !== 0 || untrackedResult.status !== "OK" ? "PARTIAL" : audit.status;
+	return { status, stale: audit.stale, ...(status === "OK" ? {} : { reason: "Agent Mail reservation scan " + status.toLowerCase() }) };
+}
+
 interface GitMetadata { hasRemote: boolean; stashCount: number; worktreePaths: string[]; readable: boolean; }
 function gitMetadata(repo: string): GitMetadata {
 	try {
@@ -89,7 +135,7 @@ function gitMetadata(repo: string): GitMetadata {
 	}
 }
 
-async function inspectRepo(repo: string, timeoutMs: number): Promise<WorkRepoReport> {
+async function inspectRepo(repo: string, timeoutMs: number, staleEditLimitMinutes: number, nowMs: number): Promise<WorkRepoReport> {
 	const metadata = gitMetadata(repo);
 	const [status, lastCommit, untracked] = await Promise.all([
 		runGit(repo, ["status", "--porcelain=v2", "--branch", "--untracked-files=no"], timeoutMs),
@@ -111,6 +157,10 @@ async function inspectRepo(repo: string, timeoutMs: number): Promise<WorkRepoRep
 	const trackedDirtyFiles = statusLines.filter((line) => !line.startsWith("#")).length;
 	const untrackedResult = parseUntracked(untracked);
 	const dirtyFiles = trackedDirtyFiles + (untrackedResult.count ?? 0);
+	const reservationScan = await scanReservedEdits(repo, dirtyFiles, untracked, untrackedResult, staleEditLimitMinutes, nowMs, timeoutMs);
+	const reservationScanStatus = reservationScan.status;
+	const staleUncommittedEdits = reservationScan.stale;
+	const reservationScanReason = reservationScan.reason;
 	const lastEpoch = lastCommit.code === 0 ? parseInteger(lastCommit.stdout) : null;
 	const ageDays = lastEpoch === null ? null : Math.max(0, (Date.now() / 1000 - lastEpoch) / 86_400);
 	const unpushed = ahead ?? (localCount?.code === 0 ? parseInteger(localCount.stdout) ?? 0 : 0);
@@ -124,14 +174,18 @@ async function inspectRepo(repo: string, timeoutMs: number): Promise<WorkRepoRep
 	const detached = branchHead === null || branchHead === "(detached)";
 	if (detached) findings.push("detached");
 	if (coreIncomplete) findings.push("unverified");
+	if (staleUncommittedEdits.length) findings.push("stale_uncommitted_edits");
+	if (dirtyFiles && reservationScanStatus !== "OK") findings.push("reservation_unverified");
 	const riskScore = unpushed * Math.max(1, ageDays ?? 0);
 	return {
-		name: basename(repo), path: repo, status: findings.includes("unverified") ? "UNVERIFIED" : findings.length ? "WARN" : "OK", dirty_file_count: dirtyFiles,
+		name: basename(repo), path: repo, status: findings.includes("unverified") || findings.includes("reservation_unverified") ? "UNVERIFIED" : findings.length ? "WARN" : "OK", dirty_file_count: dirtyFiles,
 		tracked_dirty_file_count: trackedDirtyFiles, untracked_file_count: untrackedResult.count, untracked_file_cap: UNTRACKED_FILE_CAP, untracked_scan_status: untrackedResult.status,
 		commits_ahead: ahead, commits_behind: behind, unpushed_commits: unpushed, has_upstream: Boolean(upstreamName), has_remote: metadata.hasRemote,
 		no_upstream: !upstreamName, no_remote: !metadata.hasRemote, stash_count: metadata.stashCount, detached, branch: detached ? null : branchHead,
 		last_commit_epoch: lastEpoch, last_commit_age_days: ageDays, active_worktrees: metadata.worktreePaths.length, worktree_paths: metadata.worktreePaths, risk_score: riskScore, findings,
-		...(coreIncomplete || untrackedResult.status !== "OK" ? { reason: [...errors.map((error) => error.stderr).filter(Boolean), ...timeoutSources.map((source) => source + " timed out"), ...(untrackedResult.status !== "OK" ? ["untracked scan " + untrackedResult.status] : [])].join("; ") || "git inspection incomplete" } : {}),
+		reservation_scan_status: reservationScanStatus, stale_uncommitted_edits: staleUncommittedEdits,
+		...(reservationScanReason ? { reservation_scan_reason: reservationScanReason } : {}),
+		...(coreIncomplete || untrackedResult.status !== "OK" || reservationScanReason ? { reason: [...errors.map((error) => error.stderr).filter(Boolean), ...timeoutSources.map((source) => source + " timed out"), ...(untrackedResult.status !== "OK" ? ["untracked scan " + untrackedResult.status] : []), ...(reservationScanReason ? [reservationScanReason] : [])].join("; ") || "git inspection incomplete" } : {}),
 	};
 }
 function discover(root: string): { root: WorkRootReport; repos: string[] } {
@@ -158,17 +212,23 @@ function discover(root: string): { root: WorkRootReport; repos: string[] } {
 	return { root: { path: root, status: "OK", repo_count: repos.length, discovery: { max_depth: DISCOVERY_MAX_DEPTH, ignored_directory_names: [...ignored].filter((name) => name !== ".git"), skipped_depth_directories: skippedDepth, skipped_symlink_directories: skippedSymlinks, skipped_ignored_directories: skippedIgnored } }, repos };
 }
 function renderTable(repos: readonly WorkRepoReport[]): string {
-	const rows = ["RISK  DIRTY AHEAD UNPUSHED STASH DETACHED STATUS       REPOSITORY"];
-	for (const repo of repos) rows.push(`${repo.risk_score.toFixed(1).padStart(6)} ${String(repo.dirty_file_count).padStart(5)} ${String(repo.commits_ahead ?? "-").padStart(5)} ${String(repo.unpushed_commits).padStart(7)} ${String(repo.stash_count).padStart(5)} ${String(repo.detached).padStart(8)} ${repo.status.padEnd(12)} ${repo.path}`);
+	const rows = ["RISK  DIRTY STALE AHEAD UNPUSHED STASH DETACHED STATUS       REPOSITORY"];
+	for (const repo of repos) {
+		const staleCount = repo.stale_uncommitted_edits.length;
+		const staleCell = repo.reservation_scan_status === "OK" ? String(staleCount) : repo.dirty_file_count ? staleCount ? `${staleCount}+?` : "?" : "0";
+		rows.push(`${repo.risk_score.toFixed(1).padStart(6)} ${String(repo.dirty_file_count).padStart(5)} ${staleCell.padStart(5)} ${String(repo.commits_ahead ?? "-").padStart(5)} ${String(repo.unpushed_commits).padStart(7)} ${String(repo.stash_count).padStart(5)} ${String(repo.detached).padStart(8)} ${repo.status.padEnd(12)} ${repo.path}`);
+	}
 	return rows.join("\n");
 }
 
 export async function inspectWorkFleet(input: WorkDoctorInput): Promise<WorkDoctorReport> {
 	const started = performance.now(); const concurrency = Math.max(1, Math.min(64, Math.trunc(input.concurrency ?? DEFAULT_CONCURRENCY)));
 	const perRepoTimeoutMs = Math.max(100, Math.min(60_000, Math.trunc(input.perRepoTimeoutMs ?? DEFAULT_REPO_TIMEOUT_MS)));
+	const staleEditLimitMinutes = staleEditLimit(input);
+	const nowMs = input.nowMs ?? Date.now();
 	const discovered = input.roots.flatMap(discover); const allRepos = [...new Set(discovered.flatMap((entry) => entry.repos))]; const repos: WorkRepoReport[] = []; let cursor = 0;
-	async function worker(): Promise<void> { while (cursor < allRepos.length) { const index = cursor++; repos[index] = await inspectRepo(allRepos[index]!, perRepoTimeoutMs); } }
+	async function worker(): Promise<void> { while (cursor < allRepos.length) { const index = cursor++; repos[index] = await inspectRepo(allRepos[index]!, perRepoTimeoutMs, staleEditLimitMinutes, nowMs); } }
 	await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, allRepos.length)) }, () => worker()));
 	const ordered = repos.filter(Boolean).sort((left, right) => right.risk_score - left.risk_score || left.path.localeCompare(right.path)); const elapsedMs = performance.now() - started;
-	return { scope: "work", overall: "REPORT", roots: discovered.map((entry) => entry.root), repos: ordered, concurrency, per_repo_timeout_ms: perRepoTimeoutMs, elapsed_ms: elapsedMs, timed_out_repos: ordered.filter((repo) => repo.findings.includes("unverified")).length, text: renderTable(ordered) };
+	return { scope: "work", overall: "REPORT", roots: discovered.map((entry) => entry.root), repos: ordered, concurrency, per_repo_timeout_ms: perRepoTimeoutMs, stale_edit_limit_minutes: staleEditLimitMinutes, elapsed_ms: elapsedMs, timed_out_repos: ordered.filter((repo) => repo.findings.includes("unverified")).length, text: renderTable(ordered) };
 }

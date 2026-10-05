@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { inspectWorkFleet } from "../../src/work-doctor.ts";
+import { projectSlug } from "../../src/reservation-age.ts";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -80,7 +81,7 @@ test("read-only work scope classifies clean dirty ahead no-upstream stash detach
 	expect(row("detached").detached).toBe(true);
 	expect(row("ahead").active_worktrees).toBe(2);
 	expect(report.repos.map((entry) => entry.risk_score)).toEqual([...report.repos].map((entry) => entry.risk_score).sort((a, b) => b - a));
-});
+}, 30_000);
 
 test("work scope marks a missing root as unavailable without changing exit semantics", async () => {
 	const report = await inspectWorkFleet({ roots: [join(runtimeTempRoot(), "does-not-exist-work-root")], concurrency: 1, perRepoTimeoutMs: 100 });
@@ -94,12 +95,90 @@ test("work scope CLI renders JSON and human table while exiting zero", async () 
 	const f = fixture();
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
 	const args = [entry, "doctor", "--scope", "work", "--root", f.root, "--jobs", "6", "--timeout-ms", "1000"];
-	const json = Bun.spawnSync([process.execPath, ...args, "--json"], { cwd: f.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.root } });
+	const json = Bun.spawnSync([process.execPath, ...args, "--json"], { cwd: f.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" } });
 	expect(json.exitCode).toBe(0);
 	const envelope = JSON.parse(json.stdout.toString());
 	expect(envelope.data.scope).toBe("work");
+	expect(envelope.data.stale_edit_limit_minutes).toBe(45);
 	expect(envelope.data.elapsed_ms).toBeGreaterThan(0);
 	const human = Bun.spawnSync([process.execPath, ...args], { cwd: f.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.root } });
 	expect(human.exitCode).toBe(0);
 	expect(human.stdout.toString()).toContain("RISK");
+}, 30_000);
+
+test("work scope reports only old dirty files with matching active reservations", async () => {
+	const root = mkdtempSync(join(runtimeTempRoot(), "work-doctor-age."));
+	fixtures.push(root);
+	const target = join(root, "stale-edits");
+	const hooks = join(root, "hooks");
+	mkdirSync(target, { recursive: true });
+	mkdirSync(hooks, { recursive: true });
+	git(target, "init", "--quiet");
+	git(target, "config", "user.email", "fixture@example.invalid");
+	git(target, "config", "user.name", "fixture");
+	git(target, "config", "commit.gpgsign", "false");
+	git(target, "config", "core.hooksPath", hooks);
+	writeFileSync(join(target, "README.md"), "stale-edits\n");
+	git(target, "add", "README.md");
+	git(target, "commit", "--quiet", "-m", "seed [test]");
+	const stalePath = join(target, "stale.txt");
+	const freshPath = join(target, "fresh.txt");
+	const freePath = join(target, "unreserved.txt");
+	writeFileSync(stalePath, "initial stale\n");
+	writeFileSync(freshPath, "initial fresh\n");
+	git(target, "add", "stale.txt", "fresh.txt");
+	git(target, "commit", "--quiet", "-m", "seed age files [test]");
+	writeFileSync(stalePath, "changed stale\n");
+	writeFileSync(freshPath, "changed fresh\n");
+	writeFileSync(freePath, "unreserved peer change\n");
+	const nowMs = Date.parse("2026-10-05T21:00:00Z");
+	const staleMtime = new Date(nowMs - 31 * 60_000);
+	const freshMtime = new Date(nowMs - 29 * 60_000);
+	const freeMtime = new Date(nowMs - 60 * 60_000);
+	utimesSync(stalePath, staleMtime, staleMtime);
+	utimesSync(freshPath, freshMtime, freshMtime);
+	utimesSync(freePath, freeMtime, freeMtime);
+	const archiveRoot = join(root, "mail-storage");
+	const projectDir = join(archiveRoot, "projects", projectSlug(target));
+	const reservations = join(projectDir, "file_reservations");
+	mkdirSync(reservations, { recursive: true });
+	writeFileSync(join(projectDir, "project.json"), JSON.stringify({ slug: projectSlug(target), human_key: target }));
+	const expires = new Date(nowMs + 60 * 60_000).toISOString();
+	for (const [index, file] of [[0, "stale.txt"], [1, "fresh.txt"]] as const) {
+		writeFileSync(join(reservations, "hold-" + index + ".json"), JSON.stringify({
+			id: index + 1, agent_name: index === 0 ? "OldHolder" : "FreshHolder", path_pattern: file, exclusive: true,
+			reason: "ompkit-rc-epic-land-fix-release-dogfood-rz5.106.4",
+			created_ts: new Date(nowMs - 10 * 60_000).toISOString(), expires_ts: expires,
+		}));
+	}
+	git(target, "config", "--local", "--replace-all", "omp-kit.agent-mail-storage-root", archiveRoot);
+	const before = [stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }));
+	const statusBefore = git(target, "status", "--porcelain=v1");
+	const report = await inspectWorkFleet({ roots: [root], concurrency: 4, perRepoTimeoutMs: 5_000, nowMs, staleEditLimitMinutes: 30 });
+	const row = report.repos.find((entry) => entry.path === target)!;
+	const stale = (row as any).stale_uncommitted_edits;
+	expect(stale).toHaveLength(1);
+	expect(stale[0]).toMatchObject({ path: "stale.txt", agent_name: "OldHolder", bead: "ompkit-rc-epic-land-fix-release-dogfood-rz5.106.4", age_minutes: 31 });
+	expect(row.findings).toContain("stale_uncommitted_edits");
+	expect([stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }))).toEqual(before);
+	expect(git(target, "status", "--porcelain=v1")).toBe(statusBefore);
+	const cliNowMs = Date.now();
+	for (const [path, minutes] of [[stalePath, 31], [freshPath, 29], [freePath, 60]] as const) {
+		const modified = new Date(cliNowMs - minutes * 60_000);
+		utimesSync(path, modified, modified);
+	}
+	const beforeCli = [stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }));
+	const statusBeforeCli = git(target, "status", "--porcelain=v1");
+	const entry = resolve(import.meta.dir, "../../src/cli.ts");
+	const cli = Bun.spawnSync([process.execPath, entry, "doctor", "--scope", "work", "--root", root, "--json"], {
+		cwd: target, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" },
+	});
+	expect(cli.exitCode, cli.stderr.toString()).toBe(0);
+	const envelope = JSON.parse(cli.stdout.toString());
+	expect(envelope.data.stale_edit_limit_minutes).toBe(45);
+	const cliRow = envelope.data.repos.find((entry: { path: string }) => entry.path === target);
+	expect(cliRow.reservation_scan_status).toBe("OK");
+	expect(cliRow.stale_uncommitted_edits).toEqual([]);
+	expect([stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }))).toEqual(beforeCli);
+	expect(git(target, "status", "--porcelain=v1")).toBe(statusBeforeCli);
 });

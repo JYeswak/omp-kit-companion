@@ -1,5 +1,5 @@
 import { lstatSync, openSync, closeSync, fstatSync, readFileSync, readdirSync, type Stats } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 export const DEFAULT_RESERVATION_LIMIT_MINUTES = 30;
 
@@ -48,30 +48,19 @@ function asString(value: unknown): string | null {
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** List exclusive reservation holds older than limitMinutes from an Agent Mail archive. */
-export function auditReservationAge(input: {
-	archiveRoot: string;
-	projectKey: string;
-	limitMinutes?: number;
-	nowMs?: number;
-}): ReservationAgeReport {
-	const limitMinutes = input.limitMinutes ?? DEFAULT_RESERVATION_LIMIT_MINUTES;
-	const nowMs = input.nowMs ?? Date.now();
-	const directory = join(input.archiveRoot, "projects", projectSlug(input.projectKey), "file_reservations");
+interface ActiveReservation { path_pattern: string; agent_name: string; bead: string; granted_ts: string; expires_ts: string; granted_ms: number; }
+interface ActiveReservationReport { records: ActiveReservation[]; checked: number; unreadable: number; available: boolean; }
+
+function readActiveReservations(archiveRoot: string, projectKey: string, nowMs: number): ActiveReservationReport {
+	const directory = join(archiveRoot, "projects", projectSlug(projectKey), "file_reservations");
 	let names: string[];
-	try {
-		names = readdirSync(directory).filter((name) => name.endsWith(".json")).sort();
-	} catch {
-		return { archive_root: input.archiveRoot, project: input.projectKey, limit_minutes: limitMinutes, checked: 0, unreadable: 0, overdue: [] };
-	}
-	const overdue: OverdueReservation[] = [];
-	let checked = 0, unreadable = 0;
+	try { names = readdirSync(directory).filter((name) => name.endsWith(".json")).sort(); }
+	catch { return { records: [], checked: 0, unreadable: 0, available: false }; }
+	const records: ActiveReservation[] = [];
+	let unreadable = 0;
 	for (const name of names) {
 		const parsed: unknown = readJsonFile(join(directory, name));
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("exclusive" in parsed)) {
-			unreadable++;
-			continue;
-		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("exclusive" in parsed)) { unreadable++; continue; }
 		const record = parsed as { exclusive?: unknown; released_ts?: unknown; expires_ts?: unknown; path_pattern?: unknown; path?: unknown; agent_name?: unknown; agent?: unknown; created_ts?: unknown; reason?: unknown };
 		if (record.released_ts !== undefined && record.released_ts !== null && String(record.released_ts).length > 0) continue;
 		const expires = asString(record.expires_ts);
@@ -80,23 +69,56 @@ export function auditReservationAge(input: {
 		const pathPattern = asString(record.path_pattern ?? record.path);
 		const holder = asString(record.agent_name ?? record.agent);
 		const granted = asString(record.created_ts);
-		if (!pathPattern || !holder || !granted || !Number.isFinite(Date.parse(granted))) {
-			unreadable++;
-			continue;
-		}
-		checked++;
-		const ageMinutes = (nowMs - Date.parse(granted)) / 60000;
-		if (ageMinutes > limitMinutes) {
-			overdue.push({
-				path_pattern: pathPattern,
-				agent_name: holder,
-				bead: asString(record.reason) ?? "",
-				age_minutes: Math.round(ageMinutes * 10) / 10,
-				granted_ts: granted,
-				expires_ts: expires ?? "",
-			});
-		}
+		if (!pathPattern || !holder || !granted || !Number.isFinite(Date.parse(granted))) { unreadable++; continue; }
+		records.push({ path_pattern: pathPattern, agent_name: holder, bead: asString(record.reason) ?? "", granted_ts: granted, expires_ts: expires ?? "", granted_ms: Date.parse(granted) });
 	}
+	return { records, checked: records.length, unreadable, available: true };
+}
+
+function relativeReservationPattern(projectKey: string, rawPattern: string): string | null {
+	let pattern = rawPattern.replaceAll("\\", "/");
+	if (isAbsolute(rawPattern)) pattern = relative(resolve(projectKey), resolve(rawPattern)).replaceAll("\\", "/");
+	while (pattern.startsWith("./")) pattern = pattern.slice(2);
+	if (!pattern || isAbsolute(pattern) || pattern.split("/").includes("..")) return null;
+	return pattern;
+}
+
+export interface StaleReservedEdit { path: string; path_pattern: string; agent_name: string; bead: string; age_minutes: number; }
+export interface StaleReservedEditReport { archive_root: string; project: string; limit_minutes: number; checked: number; unreadable: number; status: "OK" | "PARTIAL" | "UNAVAILABLE"; stale: StaleReservedEdit[]; }
+
+/** Report old dirty files only when a live exclusive reservation covers that path. */
+export function auditStaleReservedEdits(input: { archiveRoot: string; projectKey: string; dirtyFiles: readonly { path: string; modifiedMs: number }[]; limitMinutes?: number; nowMs?: number }): StaleReservedEditReport {
+	const limitMinutes = input.limitMinutes ?? DEFAULT_RESERVATION_LIMIT_MINUTES;
+	const nowMs = input.nowMs ?? Date.now();
+	const source = readActiveReservations(input.archiveRoot, input.projectKey, nowMs);
+	let unreadable = source.unreadable;
+	const reservations = source.records.flatMap((record) => {
+		const pattern = relativeReservationPattern(input.projectKey, record.path_pattern);
+		if (pattern === null) { unreadable++; return []; }
+		try { return [{ record, glob: new Bun.Glob(pattern) }]; } catch { unreadable++; return []; }
+	}).sort((a, b) => b.record.granted_ms - a.record.granted_ms);
+	const stale: StaleReservedEdit[] = [];
+	for (const file of input.dirtyFiles) {
+		const path = file.path.replaceAll("\\", "/");
+		if (!path || isAbsolute(file.path) || path.split("/").includes("..") || !Number.isFinite(file.modifiedMs)) continue;
+		const ageMinutes = (nowMs - file.modifiedMs) / 60_000;
+		if (ageMinutes <= limitMinutes) continue;
+		const reservation = reservations.find((candidate) => candidate.glob.match(path));
+		if (!reservation) continue;
+		stale.push({ path, path_pattern: reservation.record.path_pattern, agent_name: reservation.record.agent_name, bead: reservation.record.bead, age_minutes: Math.round(ageMinutes * 10) / 10 });
+	}
+	stale.sort((a, b) => b.age_minutes - a.age_minutes || a.path.localeCompare(b.path));
+	return { archive_root: input.archiveRoot, project: input.projectKey, limit_minutes: limitMinutes, checked: source.checked, unreadable, status: !source.available ? "UNAVAILABLE" : unreadable ? "PARTIAL" : "OK", stale };
+}
+
+/** List exclusive reservation holds older than limitMinutes from an Agent Mail archive. */
+export function auditReservationAge(input: { archiveRoot: string; projectKey: string; limitMinutes?: number; nowMs?: number }): ReservationAgeReport {
+	const limitMinutes = input.limitMinutes ?? DEFAULT_RESERVATION_LIMIT_MINUTES;
+	const nowMs = input.nowMs ?? Date.now();
+	const source = readActiveReservations(input.archiveRoot, input.projectKey, nowMs);
+	const overdue = source.records.filter((record) => (nowMs - record.granted_ms) / 60_000 > limitMinutes).map((record) => ({
+		path_pattern: record.path_pattern, agent_name: record.agent_name, bead: record.bead, age_minutes: Math.round(((nowMs - record.granted_ms) / 60_000) * 10) / 10, granted_ts: record.granted_ts, expires_ts: record.expires_ts,
+	}));
 	overdue.sort((a, b) => b.age_minutes - a.age_minutes);
-	return { archive_root: input.archiveRoot, project: input.projectKey, limit_minutes: limitMinutes, checked, unreadable, overdue };
+	return { archive_root: input.archiveRoot, project: input.projectKey, limit_minutes: limitMinutes, checked: source.checked, unreadable: source.unreadable, overdue };
 }
