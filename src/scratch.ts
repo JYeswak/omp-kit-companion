@@ -30,7 +30,38 @@ const ORPHAN_MIN_AGE_S = 3600;
 export const HARNESS_SERVER_PATTERNS = ["mock-model.mjs", "external-live.mjs"];
 
 export function parseOwnerFile(text: string): ScratchOwner | null {
+	const trimmed = text.trim();
+	if (trimmed.startsWith("{")) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			return null;
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		const seen: Record<string, string> = {};
+		for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
+			if (typeof value !== "number" && typeof value !== "string") return null;
+			seen[key] = String(value);
+		}
+		return validateOwnerFields(seen);
+	}
 	const seen: Record<string, string> = {};
+	const contentLines = text.split("\n").filter(line => line !== "");
+	const tokens = contentLines.length === 1 ? contentLines[0]!.trim().split(/[ \t]+/) : null;
+	if (tokens !== null && tokens.length > 1) {
+		for (const token of tokens) {
+			const eq = token.indexOf("=");
+			if (eq < 0) return null;
+			const key = token.slice(0, eq);
+			const value = token.slice(eq + 1);
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
+			if (value === "" || seen[key] !== undefined) return null;
+			seen[key] = value;
+		}
+		return validateOwnerFields(seen);
+	}
 	for (const line of text.split("\n")) {
 		if (line === "") continue;
 		const eq = line.indexOf("=");
@@ -42,6 +73,10 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 		if (seen[key] !== undefined) return null;
 		seen[key] = value;
 	}
+	return validateOwnerFields(seen);
+}
+
+function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null {
 	const complete = OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === OWNER_FIELDS.length;
 	const legacy = LEGACY_OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === LEGACY_OWNER_FIELDS.length;
 	if (!complete && !legacy) return null;
@@ -103,6 +138,19 @@ export function probeOwner(pid: number, expectedStart: string, deps: LivenessDep
 	// so recheck with ps; a visible PID is never treated as dead.
 	if (deps.psVisible(pid)) return "live-unreachable";
 	return "dead";
+}
+
+const PS_MONTHS: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+	Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+
+/** Parse `ps -o lstart=` ctime output ("Mon Oct  5 13:27:00 2026") to epoch ms; null when unparseable. */
+export function parsePsStart(text: string): number | null {
+	const match = /^[A-Z][a-z]{2} ([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
+	if (!match) return null;
+	const month = PS_MONTHS[match[1]!];
+	if (month === undefined) return null;
+	const ms = Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]));
+	return Number.isNaN(ms) ? null : ms;
 }
 
 function isSymlink(path: string): boolean {
@@ -206,36 +254,58 @@ function readOwner(dir: string): { owner: ScratchOwner | null; malformed: boolea
 }
 
 export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict {
-	const verdict = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
-		({ dir, action, reason, owner, sizeBytes: 0 });
-	if (isSymlink(dir)) return verdict("SKIP", "session-is-symlink");
+	const sized = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
+		({ dir, action, reason, owner, sizeBytes: dirSize(dir) });
+	if (isSymlink(dir)) return { dir, action: "SKIP", reason: "session-is-symlink", owner: null, sizeBytes: 0 };
 	let stat;
 	try {
 		stat = statSync(dir);
 	} catch {
-		return verdict("SKIP", "not-directory");
+		return { dir, action: "SKIP", reason: "not-directory", owner: null, sizeBytes: 0 };
 	}
-	if (!stat.isDirectory()) return verdict("SKIP", "not-directory");
-	if (resolve(dir) !== dir || !dir.startsWith(root)) return verdict("SKIP", "session-outside-root");
+	if (!stat.isDirectory()) return { dir, action: "SKIP", reason: "not-directory", owner: null, sizeBytes: 0 };
+	if (resolve(dir) !== dir || !dir.startsWith(root)) return { dir, action: "SKIP", reason: "session-outside-root", owner: null, sizeBytes: 0 };
 	const { owner, malformed } = readOwner(dir);
-	if (!owner) return verdict("SKIP", malformed ? "malformed-owner-file" : "no-owner-file");
+	if (!owner) return sized("SKIP", malformed ? "malformed-owner-file" : "no-owner-file");
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith(".")) {
-		return verdict("SKIP", "owner-label-invalid", owner);
+		return sized("SKIP", "owner-label-invalid", owner);
 	}
 	const name = dir.slice(root.length + 1);
-	if (nameRequired && name !== `${owner.label}.${owner.pid}`) return verdict("SKIP", "session-name-owner-mismatch", owner);
+	if (nameRequired && !name.endsWith(`.${owner.pid}`)) return sized("SKIP", "session-name-owner-mismatch", owner);
 	if (!hasProcessIdentity(owner)) {
-		if (deps.liveness.signalAlive(owner.pid) || deps.liveness.psVisible(owner.pid))
-			return verdict("LIVE", "owner-alive-start-unverified", owner);
-		return verdict("SKIP", "owner-identity-incomplete", owner);
+		if (!deps.liveness.signalAlive(owner.pid) && !deps.liveness.psVisible(owner.pid))
+			return sized("SKIP", "owner-identity-incomplete", owner);
+		const reuse = reuseAfterCreated(owner, deps.liveness);
+		if (reuse === true) {
+			const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
+			if (!clear) return sized("LIVE", "owner-dead-pid-reused-but-open-fds-present", owner);
+			return sized("REAP", "owner-dead-pid-reused-no-open-fds", owner);
+		}
+		return sized("LIVE", "owner-alive-start-unverified", owner);
 	}
 	const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
-	if (state === "live" || state === "live-unreachable") return verdict("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
-	if (state === "unknown") return verdict("SKIP", "owner-liveness-unproven", owner);
+	if (state === "live" || state === "live-unreachable") return sized("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
+	if (state === "unknown") return sized("SKIP", "owner-liveness-unproven", owner);
 	const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
-	if (clear === null) return verdict("SKIP", "lsof-evidence-unavailable", owner);
-	if (!clear) return verdict("LIVE", `owner-${state}-but-open-fds-present`, owner);
-	return { dir, action: "REAP", reason: `owner-${state}-no-open-fds`, owner, sizeBytes: dirSize(dir) };
+	if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
+	if (!clear) return sized("LIVE", `owner-${state}-but-open-fds-present`, owner);
+	return sized("REAP", `owner-${state}-no-open-fds`, owner);
+}
+
+/**
+ * PID-reuse proof for owners without process identity (legacy key=value or JSON):
+ * the pid is alive, but the live process started after the owner's `created` time,
+ * so it cannot be the process that wrote the owner file. Null when unprovable
+ * (fail closed: the caller keeps the LIVE verdict).
+ */
+export function reuseAfterCreated(owner: ScratchOwner, liveness: LivenessDeps): boolean | null {
+	const start = liveness.processStart(owner.pid);
+	if (start === null) return null;
+	const startMs = parsePsStart(start) ?? Date.parse(start);
+	const createdMs = Date.parse(owner.createdAt);
+	if (Number.isNaN(startMs) || Number.isNaN(createdMs)) return null;
+	return startMs > createdMs;
 }
 
 /** Latest activity in a tree: dir mtime first (cheap), then a bounded walk for newer entries. */
@@ -314,6 +384,15 @@ export function resolveSystemWorkDirs(): string[] {
 	}
 	return [...new Set(roots)];
 }
+/**
+ * Fleet-wide suite TMPDIR base (localbench lesson 2026-10-05): suite temp inside a
+ * repo tree breaks git-tree guards, and anything under ~ breaks the scratch rule,
+ * so fleet test temp lives outside every git tree and outside ~.
+ */
+export function fleetTestTmpBase(): string {
+	return process.platform === "darwin" ? "/Users/Shared/omp-kit-tmp" : join("/tmp", "omp-kit-tmp");
+}
+
 export function resolveScratchRoots(home: string): string[] {
 	const override = process.env.OMP_KIT_SCRATCH_ROOTS;
 	if (override !== undefined && override !== "") return override.split(delimiter).map(part => part.trim()).filter(part => part !== "");
@@ -335,6 +414,11 @@ export function resolveScratchRoots(home: string): string[] {
 		} catch {
 			continue;
 		}
+	}
+	try {
+		if (statSync(fleetTestTmpBase()).isDirectory() && !isSymlink(fleetTestTmpBase())) roots.push(fleetTestTmpBase());
+	} catch {
+		/* absent until a suite creates it */
 	}
 	const tmpdir = process.env.TMPDIR ?? "/tmp";
 	for (const base of [tmpdir, "/tmp"]) {
@@ -418,9 +502,12 @@ function appendLog(home: string, event: ReapEvent): void {
 		/* logging never blocks the verdict */
 	}
 }
-interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string }
+interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string; legacy: boolean; legacyName: string | null }
 
-function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerText"> & { ownerHash: string; device: string; inode: string } | null {
+const RELEASE_MARKER_REQUIRED = ["version", "owner_sha256", "device", "inode", "released_at"] as const;
+const RELEASE_MARKER_OPTIONAL = ["legacy", "legacy_name", "release_reason", "release_actor", "legacy_owner_b64"] as const;
+
+function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerText" | "legacy" | "legacyName"> & { ownerHash: string; device: string; inode: string; legacyName: string | null; releaseReason: string | null } | null {
 	const seen: Record<string, string> = {};
 	for (const line of text.split("\n")) {
 		if (line === "") continue;
@@ -428,14 +515,21 @@ function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerT
 		if (eq < 0) return null;
 		const key = line.slice(0, eq);
 		const value = line.slice(eq + 1);
-		if (!["version", "owner_sha256", "device", "inode", "released_at"].includes(key) ||
-			value === "" || /[\t\r\n]/.test(value) || seen[key] !== undefined) return null;
+		if (!(RELEASE_MARKER_REQUIRED as readonly string[]).includes(key) &&
+			!(RELEASE_MARKER_OPTIONAL as readonly string[]).includes(key)) return null;
+		if (value === "" || /[\t\r\n]/.test(value) || seen[key] !== undefined) return null;
 		seen[key] = value;
 	}
-	if (Object.keys(seen).length !== 5 || seen.version !== "1" ||
-		!/^[0-9a-f]{64}$/.test(seen.owner_sha256!) || !/^\d+$/.test(seen.device!) ||
+	for (const key of RELEASE_MARKER_REQUIRED) if (seen[key] === undefined) return null;
+	if (seen.version !== "1" || !/^[0-9a-f]{64}$/.test(seen.owner_sha256!) || !/^\d+$/.test(seen.device!) ||
 		!/^\d+$/.test(seen.inode!) || !Number.isFinite(Date.parse(seen.released_at!))) return null;
-	return { markerText: text, releasedAt: seen.released_at!, ownerHash: seen.owner_sha256!, device: seen.device!, inode: seen.inode! };
+	const legacy = seen.legacy === "1";
+	if (seen.legacy !== undefined && !legacy) return null;
+	if (legacy && (seen.legacy_name === undefined || seen.release_reason === undefined)) return null;
+	if (!legacy && (seen.legacy_name !== undefined || seen.release_reason !== undefined ||
+		seen.release_actor !== undefined || seen.legacy_owner_b64 !== undefined)) return null;
+	return { markerText: text, releasedAt: seen.released_at!, ownerHash: seen.owner_sha256!, device: seen.device!, inode: seen.inode!,
+		legacyName: seen.legacy_name ?? null, releaseReason: seen.release_reason ?? null };
 }
 
 function readReleaseRecord(dir: string): ReleaseRecord | null {
@@ -447,9 +541,8 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	if (markerText === null || isSymlink(ownerPath)) return null;
 	const ownerText = readText(ownerPath);
 	if (ownerText === null) return null;
-	const owner = parseOwnerFile(ownerText);
 	const marker = parseReleaseMarker(markerText);
-	if (!owner || !marker) return null;
+	if (!marker) return null;
 	let stat;
 	try {
 		stat = lstatSync(dir);
@@ -459,7 +552,16 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	if (!stat.isDirectory() || stat.isSymbolicLink() ||
 		createHash("sha256").update(ownerText).digest("hex") !== marker.ownerHash ||
 		String(stat.dev) !== marker.device || String(stat.ino) !== marker.inode) return null;
-	return { owner, ownerText, markerText, releasedAt: marker.releasedAt };
+	if (!marker.legacyName) {
+		const owner = parseOwnerFile(ownerText);
+		if (!owner) return null;
+		return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: false, legacyName: null };
+	}
+	const parsed = parseOwnerFile(ownerText);
+	const suffixPid = /\.(\d+)$/.exec(marker.legacyName);
+	const owner: ScratchOwner = parsed ?? { pid: suffixPid ? Number(suffixPid[1]) : 0, processStart: null,
+		label: marker.legacyName, repo: "", createdAt: "", argv0: null };
+	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName };
 }
 
 function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
@@ -486,7 +588,9 @@ function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner
 
 export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
 
-export function releaseScratch(path: string, home: string, deps: InspectDeps): ScratchReleaseResult {
+export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string }
+
+export function releaseScratch(path: string, home: string, deps: InspectDeps, opts: ScratchReleaseOptions = {}): ScratchReleaseResult {
 	let dir: string;
 	try {
 		dir = resolve(path);
@@ -507,9 +611,9 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps): S
 	if (isSymlink(ownerPath)) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };
 	const ownerText = readText(ownerPath);
 	const owner = ownerText === null ? null : parseOwnerFile(ownerText);
-	if (!owner) return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
+	if (!owner) return releaseLegacy(dir, home, deps, stat.dev, stat.ino, ownerText, opts);
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") ||
-		owner.label.startsWith(".") || basename(dir) !== `${owner.label}.${owner.pid}`)
+		owner.label.startsWith(".") || !basename(dir).endsWith(`.${owner.pid}`))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
 	if (!callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
@@ -543,11 +647,94 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps): S
 	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
 }
 
+/**
+ * Operator release for dirs whose .owner is free-form (bare label, JSON, partial):
+ * records the original owner text, the reason and the actor in the marker and
+ * receipt. Refused without a reason; never marks a dir with open fds.
+ */
+function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number, ino: number,
+	ownerText: string | null, opts: ScratchReleaseOptions): ScratchReleaseResult {
+	const reason = opts.reason?.trim() ?? "";
+	if (opts.legacyOwner !== true || reason === "")
+		return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
+	if (/[\r\n\t]/.test(reason) || /[\r\n]/.test(basename(dir)))
+		return { ok: false, changed: false, dir, reason: "release-reason-invalid", ownerPid: null };
+	if (ownerText === null) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };
+	const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	if (clear !== true) return { ok: false, changed: false, dir,
+		reason: clear === null ? "lsof-evidence-unavailable" : "release-open-fds-present", ownerPid: null };
+	const markerPath = join(dir, RELEASE_FILE);
+	if (existsSync(markerPath)) {
+		const prior = readReleaseRecord(dir);
+		if (prior && prior.legacy && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: prior.owner.pid };
+		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: null };
+	}
+	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
+	const markerText = `version=1\nlegacy=1\nlegacy_name=${basename(dir)}\nrelease_reason=${reason}\nrelease_actor=${process.pid}\nlegacy_owner_b64=${Buffer.from(ownerText, "utf8").toString("base64")}\nowner_sha256=${createHash("sha256").update(ownerText).digest("hex")}\ndevice=${dev}\ninode=${ino}\nreleased_at=${releasedAt}\n`;
+	try {
+		writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+	} catch {
+		const prior = readReleaseRecord(dir);
+		if (prior && prior.legacy && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: prior.owner.pid };
+		return { ok: false, changed: false, dir, reason: "release-marker-write-failed", ownerPid: null };
+	}
+	const released = readReleaseRecord(dir);
+	if (!released || !released.legacy || released.markerText !== markerText || released.ownerText !== ownerText ||
+		`${dev}:${ino}` !== inodeOf(dir))
+		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: null };
+	appendLog(home, { event: "release", dir, at: releasedAt, owner: released.owner.pid, legacy: true, reason });
+	return { ok: true, changed: true, dir, reason: "owner-released-legacy", ownerPid: released.owner.pid };
+}
+export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string }
+
+/**
+ * Canonical scratch create: <repo>/var/agent-tmp/<label>.<pid>/ with a valid
+ * .owner (pid, process start, label, repo, created). Agents call this instead
+ * of hand-writing .owner files; hand-written bare-label owners are reported
+ * as malformed-owner-file with per-root counts in the plan totals.
+ */
+export function createScratch(label: string, repoDir: string, deps: InspectDeps): ScratchCreateResult {
+	if (!/^[A-Za-z0-9][A-Za-z0-9._%-]*$/.test(label)) return { ok: false, dir: "", exportLine: "", reason: "label-invalid" };
+	let repo: string;
+	try {
+		repo = resolve(repoDir);
+	} catch {
+		return { ok: false, dir: "", exportLine: "", reason: "repo-invalid" };
+	}
+	const start = deps.liveness.processStart(process.pid);
+	if (start === null) return { ok: false, dir: "", exportLine: "", reason: "process-identity-unavailable" };
+	const root = join(repo, "var", "agent-tmp");
+	const dir = join(root, `${label}.${process.pid}`);
+	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
+	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
+	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n`;
+	try {
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+	} catch {
+		return { ok: false, dir: "", exportLine: "", reason: "root-create-failed" };
+	}
+	try {
+		mkdirSync(dir, { mode: 0o700 });
+	} catch {
+		return { ok: false, dir: "", exportLine: "", reason: "directory-create-failed" };
+	}
+	try {
+		writeFileSync(join(dir, ".owner"), ownerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+	} catch {
+		return { ok: false, dir: "", exportLine: "", reason: "owner-write-failed" };
+	}
+	const parsed = parseOwnerFile(ownerText);
+	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
+	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created" };
+}
+
 /** Move an owner-released session to quarantine without requiring its process to exit. */
 function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
 	const released = readReleaseRecord(dir);
-	if (!released || dirname(dir) !== root || basename(dir) !== `${released.owner.label}.${released.owner.pid}`)
+	if (!released || dirname(dir) !== root || (released.legacy
+		? basename(dir) !== released.legacyName
+		: !basename(dir).endsWith(`.${released.owner.pid}`)))
 		return fail("owner-release-changed-after-initial-check");
 	const identity = inodeOf(dir);
 	if (identity === null) return fail("inode-proof-unavailable");
@@ -776,7 +963,24 @@ export function killOrphan(pid: number, deps: ApplyDeps): boolean {
 	return kill(pid);
 }
 
-export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number }
+export interface ScratchTotals { sizeByVerdict: Record<string, number>; countByVerdict: Record<string, number>; sizeByRoot: Record<string, number>; malformedByRoot: Record<string, number> }
+
+/** What makes an unowned dir "active": newest mtime in the tree within 72h. Stated here so plan output and help text share it. */
+export const UNOWNED_ACTIVE_RULE = "unowned dir with newest mtime in tree within 72h is LIVE unowned-but-active; idle past 72h with no open fds goes to quarantine";
+
+export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): ScratchTotals {
+	const totals: ScratchTotals = { sizeByVerdict: {}, countByVerdict: {}, sizeByRoot: {}, malformedByRoot: {} };
+	for (const verdict of sessions) {
+		const key = `${verdict.action}:${verdict.reason}`;
+		totals.sizeByVerdict[key] = (totals.sizeByVerdict[key] ?? 0) + verdict.sizeBytes;
+		totals.countByVerdict[key] = (totals.countByVerdict[key] ?? 0) + 1;
+		const root = roots.find(candidate => verdict.dir.startsWith(candidate + "/")) ?? dirname(verdict.dir);
+		totals.sizeByRoot[root] = (totals.sizeByRoot[root] ?? 0) + verdict.sizeBytes;
+		if (verdict.reason === "malformed-owner-file" || verdict.reason === "malformed-owner-file-but-active")
+			totals.malformedByRoot[root] = (totals.malformedByRoot[root] ?? 0) + 1;
+	}
+	return totals;
+}
 
 /** One directory through the full plan verdict (owner release, live/dead identity and unowned age). */
 export function inspectOne(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict | null {
@@ -786,8 +990,10 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 		return null;
 	}
 	const released = readReleaseRecord(dir);
-	if (released && dirname(dir) === root && resolve(dir) === dir &&
-		basename(dir) === `${released.owner.label}.${released.owner.pid}`) {
+	const releasedNameOk = released !== null && (released.legacy
+		? basename(dir) === released.legacyName
+		: basename(dir).endsWith(`.${released.owner.pid}`));
+	if (released && dirname(dir) === root && resolve(dir) === dir && releasedNameOk) {
 		return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine",
 			owner: released.owner, sizeBytes: dirSize(dir) };
 	}
@@ -798,7 +1004,9 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 		if (freshest !== null && freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS) {
 			return { ...verdict, action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine", sizeBytes: dirSize(dir) };
 		}
-		return { ...verdict, action: "LIVE", reason: "unowned-but-active" };
+		return verdict.reason === "malformed-owner-file"
+			? { ...verdict, action: "LIVE", reason: "malformed-owner-file-but-active" }
+			: { ...verdict, action: "LIVE", reason: "unowned-but-active" };
 	}
 	return verdict;
 }
@@ -816,6 +1024,8 @@ function eachSessionDir(root: string, visit: (dir: string) => void): void {
 	}
 }
 
+export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number; totals: ScratchTotals; unownedActiveRule: string }
+
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = resolveScratchRoots(home);
 	const systemWorkDirs = resolveSystemWorkDirs();
@@ -830,7 +1040,8 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
-	return { roots: allRoots, sessions, orphans,
+	const totals = summarizeScratch(sessions, allRoots);
+	return { roots: allRoots, sessions, orphans, totals, unownedActiveRule: UNOWNED_ACTIVE_RULE,
 		reapableBytes: sessions.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: sessions.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }
@@ -869,6 +1080,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	});
 	const expired = applyQuarantineExpiry(home, deps);
 	return { roots: allRoots, sessions, orphans, applied, killed, expired,
+		totals: summarizeScratch(applied, allRoots), unownedActiveRule: UNOWNED_ACTIVE_RULE,
 		reapableBytes: applied.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: applied.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, defaultLiveness, defaultRunner, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, selectHarnessOrphans, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, summarizeScratch, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 
 const roots: string[] = [];
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -562,4 +562,150 @@ test("a timed-out lsof keeps the directory instead of reaping it", () => {
 	expect(verdict.action).toBe("SKIP");
 	expect(verdict.reason).toBe("lsof-evidence-unavailable");
 	expect(existsSync(dead)).toBe(true);
+});
+
+test("JSON owner files parse to the same owner as key=value", () => {
+	const kv = parseOwnerFile("pid=42\nlabel=omp\nrepo=/repo\ncreated=2026-10-01T00:00:00Z\n");
+	const json = parseOwnerFile(JSON.stringify({ pid: 42, label: "omp", repo: "/repo", created: "2026-10-01T00:00:00Z" }));
+	expect(json).toEqual(kv);
+	expect(json).toMatchObject({ pid: 42, processStart: null, label: "omp" });
+	const modern = ownerText(liveFields("a"));
+	const modernJson = parseOwnerFile(JSON.stringify(Object.fromEntries(modern.trim().split("\n").map(line => {
+		const eq = line.indexOf("=");
+		return [line.slice(0, eq), line.slice(eq + 1)];
+	}))));
+	expect(modernJson).toEqual(parseOwnerFile(modern));
+	expect(parseOwnerFile("{not json")).toBeNull();
+	expect(parseOwnerFile(JSON.stringify({ pid: 42, label: "omp" }))).toBeNull();
+	expect(parseOwnerFile(JSON.stringify({ pid: 42, label: "omp", repo: "/repo", created: "2026-10-01T00:00:00Z", evil: 1 }))).toBeNull();
+});
+
+test("one-line owner files parse like the multi-line form", () => {
+	const pid = deadPid();
+	const oneLine = `pid=${pid} label=jev-snap repo=/repo created=2026-10-01T00:00:00Z`;
+	const multi = `pid=${pid}\nlabel=jev-snap\nrepo=/repo\ncreated=2026-10-01T00:00:00Z\n`;
+	expect(parseOwnerFile(oneLine)).toEqual(parseOwnerFile(multi));
+	expect(parseOwnerFile(`${oneLine}\n`)).toEqual(parseOwnerFile(multi));
+	expect(parseOwnerFile(oneLine)).toMatchObject({ pid, label: "jev-snap" });
+	expect(parseOwnerFile("BrRepair")).toBeNull();
+	expect(parseOwnerFile(`pid=${pid} label=`)).toBeNull();
+	expect(parseOwnerFile(`pid=${pid} label=x label=y repo=/r created=2026-10-01T00:00:00Z`)).toBeNull();
+});
+
+test("parsePsStart reads ctime lstart output", () => {
+	expect(parsePsStart("Mon Oct  5 13:27:00 2026")).toBe(Date.UTC(2026, 9, 5, 13, 27, 0));
+	expect(parsePsStart("Thu Jan  1 00:00:00 1970")).toBe(0);
+	expect(parsePsStart("garbage")).toBeNull();
+	expect(parsePsStart("")).toBeNull();
+});
+
+test("reuseAfterCreated proves PID reuse from the created timestamp", () => {
+	const owner = { pid: 1, processStart: null, label: "x", repo: "r", createdAt: "2026-10-01T00:00:00Z", argv0: null };
+	const after = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Oct  5 00:00:01 2026" };
+	const before = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Sep  1 00:00:00 2025" };
+	expect(reuseAfterCreated(owner, after)).toBe(true);
+	expect(reuseAfterCreated(owner, before)).toBe(false);
+	expect(reuseAfterCreated(owner, { signalAlive: () => true, psVisible: () => true, processStart: () => null })).toBeNull();
+	expect(reuseAfterCreated({ ...owner, createdAt: "not-a-date" }, after)).toBeNull();
+});
+
+test("legacy owner with reused pid reaps instead of staying LIVE", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const pid = deadPid();
+	const dir = sessionDir(root, "2nb8-head-ffea66a0", pid);
+	writeFileSync(join(dir, ".owner"), `pid=${pid}\nlabel=other-label\nrepo=/repo\ncreated=2026-10-01T00:00:00Z\n`);
+	writeFileSync(join(dir, "bulk.bin"), "x".repeat(4096));
+	const reused = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Oct  5 00:00:01 2026" };
+	const verdict = inspectSession(dir, root, depsFor({ liveness: reused }));
+	expect(verdict.action).toBe("REAP");
+	expect(verdict.reason).toBe("owner-dead-pid-reused-no-open-fds");
+	expect(verdict.sizeBytes).toBeGreaterThanOrEqual(4096);
+	const alive = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Sep  1 00:00:00 2025" };
+	const live = inspectSession(dir, root, depsFor({ liveness: alive }));
+	expect(live.action).toBe("LIVE");
+	expect(live.reason).toBe("owner-alive-start-unverified");
+	expect(live.sizeBytes).toBeGreaterThanOrEqual(4096);
+});
+
+test("every verdict carries its size, including mismatches", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const pid = deadPid();
+	const dir = join(root, "wrong-name.99999");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, ".owner"), ownerText({ pid: String(pid), label: "right-label", repo: "test", created: "2026-10-01T00:00:00Z" }));
+	writeFileSync(join(dir, "bulk.bin"), "x".repeat(8192));
+	const verdict = inspectSession(dir, root, depsFor());
+	expect(verdict.reason).toBe("session-name-owner-mismatch");
+	expect(verdict.sizeBytes).toBeGreaterThanOrEqual(8192);
+});
+
+test("plan totals count a planted gigabyte dir whatever its verdict", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const pid = deadPid();
+	const dir = sessionDir(root, "plant", pid);
+	writeFileSync(join(dir, ".owner"), "BrRepair");
+	const fd = openSync(join(dir, "plant.bin"), "w");
+	ftruncateSync(fd, 1024 * 1024 * 1024);
+	closeSync(fd);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const plan = planScratch(root, depsFor());
+	expect(plan.totals.sizeByRoot[root]).toBeGreaterThanOrEqual(1024 * 1024 * 1024);
+	expect(plan.totals.malformedByRoot[root]).toBe(1);
+	expect(plan.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
+	expect(Object.values(plan.totals.sizeByVerdict).reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(1024 * 1024 * 1024);
+});
+
+test("legacy release quarantines while the session lives; unreleased stays LIVE", () => {
+	const { home } = cliHome();
+	mkdirSync(join(home, "Developer", "proj", "var"), { recursive: true });
+	const root = mkdtempSync(join(home, "Developer", "proj", "var", "agent-tmp"));
+	const run = (args: readonly string[]) => {
+		if (args[0] === "ps") return { code: 1, stdout: "", stderr: "" };
+		return { code: 1, stdout: "", stderr: "" };
+	};
+	const deps = { liveness: defaultLiveness(), run, now: Date.now() };
+	const released = join(root, "task.9289");
+	const held = join(root, "other.9289");
+	mkdirSync(released, { recursive: true });
+	mkdirSync(held, { recursive: true });
+	writeFileSync(join(released, ".owner"), "BrRepair");
+	writeFileSync(join(held, ".owner"), "BrRepair");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	process.env.XDG_STATE_HOME = join(home, "state");
+	expect(releaseScratch(released, home, deps).ok).toBe(false);
+	expect(releaseScratch(released, home, deps, { legacyOwner: true }).reason).toBe("owner-file-invalid");
+	const done = releaseScratch(released, home, deps, { legacyOwner: true, reason: "task finished, session lives on" });
+	expect(done).toMatchObject({ ok: true, changed: true, reason: "owner-released-legacy" });
+	const planned = inspectOne(released, root, deps);
+	expect(planned?.action).toBe("QUARANTINE");
+	const idle = inspectOne(held, root, deps);
+	expect(idle?.action).toBe("LIVE");
+	expect(idle?.reason).toBe("malformed-owner-file-but-active");
+	const applied = applyScratch(home, { ...deps, home });
+	expect(applied.applied.find(v => v.dir.endsWith(".q-") || v.reason === "owner-released-quarantined") ?? applied.applied.find(v => v.action === "QUARANTINE")).toBeDefined();
+	expect(existsSync(released)).toBe(false);
+	expect(existsSync(held)).toBe(true);
+});
+
+test("createScratch makes a dir with a valid owner and an export line", () => {
+	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-repo-"));
+	roots.push(repo);
+	const created = createScratch("mylabel", repo, depsFor());
+	expect(created.ok).toBe(true);
+	expect(created.dir).toBe(join(repo, "var", "agent-tmp", `mylabel.${process.pid}`));
+	expect(created.exportLine).toBe(`export TMPDIR=${created.dir}`);
+	const owner = parseOwnerFile(readFileSync(join(created.dir, ".owner"), "utf8"));
+	expect(owner).toMatchObject({ pid: process.pid, label: "mylabel", repo });
+	expect(createScratch("../evil", repo, depsFor()).ok).toBe(false);
+	expect(createScratch("", repo, depsFor()).ok).toBe(false);
+});
+
+test("fleet test tmp base lives outside git trees and home", () => {
+	const base = fleetTestTmpBase();
+	expect(base.startsWith(process.env.HOME ?? "/nonexistent-home")).toBe(false);
+	expect(base).not.toContain(".git");
+	expect(summarizeScratch([], [base]).sizeByRoot).toEqual({});
 });
