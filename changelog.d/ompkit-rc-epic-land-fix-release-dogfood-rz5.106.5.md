@@ -1,0 +1,1 @@
+- PUB1e slice: `scripts/public-files-check.sh [REPO]` lists missing standard public files (SECURITY, CONTRIBUTING, CODEOWNERS, PR/issue templates, dependabot, deny.toml for Rust). Live run on this repo names 4 gaps (filed, not filled here). Still open: neutral templates, CONTRIBUTING policy comparison, doctor wiring, uds pilot.
