@@ -1,1 +1,1 @@
-- PUB1c slice: `docs/release-procedure.md` generalizes the companion release flow (fragments, assemble, semver tag, platform archives with sha256, install verify; signing delegated to rz5.59.3) for uds adoption. Still open: uds cuts a release with it, live pilot, local-copy retirement, cross-repo runs.
+- Adopting the release procedure in another repo (PUB1c): fragment convention, first tag, coverage check and assembly steps in CONTRIBUTING; the check is repo-agnostic (git runs in the caller's checkout) and flags the one uncovered direct commit here.

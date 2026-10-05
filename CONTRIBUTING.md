@@ -60,3 +60,25 @@ is unverified, so even `dsr build --dry-run` stops at target resolution. The mac
 (mmini, wlap) were unreachable so no native darwin build was possible; `api.github.com`
 was unreachable; minisign key and `syft` are unconfigured, so dsr signing/SBOM output is
 unavailable. Until those close, every archive still ships through the release workflow.
+
+## Adopting the release procedure in another repo (PUB1c)
+
+`scripts/release-notes.sh` carries no repo-specific paths: point it at any repo with a
+`changelog.d/` directory and `vX.Y.Z` tags. To adopt:
+
+1. Create `changelog.d/` and write one bullet per change in `changelog.d/<bead>.md`
+   (fragment path must be `changelog.d/<bead>.md`; a direct commit on shipped paths
+   needs a `Bead:` trailer, a `[no-changelog] <reason>` line, or a fragment naming
+   the commit).
+2. Tag the starting point (`git tag v0.0.0` on the adoption commit if the repo never
+   released; later releases tag `vX.Y.Z` per semver).
+3. Check coverage with `sh <kit>/scripts/release-notes.sh check --base-tag <tag>
+   --head HEAD` run from the adopting repo (the script resolves its own directory,
+   so it runs from any checkout).
+4. Assemble with `assemble --base-tag … --head HEAD --version X.Y.Z --date YYYY-MM-DD`.
+
+Verified 2026-10-05: `scripts/release-notes.ts` contains no repo-specific paths and
+resolves its helpers from its own directory; the check flags the one uncovered direct
+commit on this repo (`b82d3e5`, exit 1, names the commit). uds trial (first `v0.0.0`
+tag, fragment convention, pilot transcript, pilot-script retire) is tracked on the
+bead; signing stays in rz5.59.3.
