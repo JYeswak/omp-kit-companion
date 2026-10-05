@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -509,4 +509,38 @@ test("a same-named rule from a foreign plugin is not a kit win", () => {
 	const kitRules = first !== null && typeof first === "object" && "kit_rules" in first ? first.kit_rules : undefined;
 	expect(kitRules !== null && typeof kitRules === "object" && "plugin" in kitRules ? kitRules.plugin : undefined).toEqual([]);
 	expect(kitRules !== null && typeof kitRules === "object" && "missing" in kitRules ? kitRules.missing : undefined).toEqual(["rule-a"]);
+});
+
+test("regex tools finder names the install command per missing tool", () => {
+	const empty = inspectRegexTools("");
+	expect(empty.status).toBe("DEGRADED");
+	const missing = empty.evidence?.missing;
+	expect(Array.isArray(missing) && missing.includes("grex")).toBe(true);
+	expect(empty.reason).toContain("cargo install grex");
+	expect(empty.reason).toContain("pip3 install --user regexploit");
+});
+
+test("planted missing grex is reported with its install command", () => {
+	const dir = mkdtempSync(join(tmpdir(), "regex-tools-"));
+	fixtures.push(dir);
+	for (const bin of ["pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"]) {
+		const path = join(dir, bin);
+		writeFileSync(path, "#!/bin/sh\n");
+		chmodSync(path, 0o755);
+	}
+	const row = inspectRegexTools(dir);
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.missing).toEqual(["grex"]);
+	expect(row.reason).toContain("grex (cargo install grex)");
+});
+
+test("all regex tools present reports OK", () => {
+	const dir = mkdtempSync(join(tmpdir(), "regex-tools-"));
+	fixtures.push(dir);
+	for (const bin of ["grex", "pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"]) {
+		const path = join(dir, bin);
+		writeFileSync(path, "#!/bin/sh\n");
+		chmodSync(path, 0o755);
+	}
+	expect(inspectRegexTools(dir).status).toBe("OK");
 });

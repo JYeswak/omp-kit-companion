@@ -501,10 +501,17 @@ function inspectRouter(jsmPath?: string): Finding {
 			"Install JSM separately only if optional router skills are wanted.",
 		{ optional: true, availability: available ? "PRESENT" : "UNAVAILABLE", proof: "EXECUTABLE_ONLY" });
 }
-const REGEX_TOOL_BINS = ["grex", "pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"] as const;
+const REGEX_TOOLS: ReadonlyArray<{ readonly bin: string; readonly install: string }> = [
+	{ bin: "grex", install: "cargo install grex" },
+	{ bin: "pomsky", install: "cargo install pomsky" },
+	{ bin: "regexploit", install: "pip3 install --user regexploit" },
+	{ bin: "regexploit-js", install: "pip3 install --user regexploit, then npm install --omit=dev in the regexploit bin/javascript dir" },
+	{ bin: "regexploit-py", install: "pip3 install --user regexploit" },
+	{ bin: "rgx", install: "cargo install rgx --features pcre2-engine,redos" },
+];
 export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 	const directories = pathValue === "" ? [] : pathValue.split(delimiter).map((directory) => directory || ".");
-	const tools = REGEX_TOOL_BINS.map((bin) => {
+	const tools = REGEX_TOOLS.map(({ bin, install }) => {
 		let installPath: string | null = null;
 		for (const directory of directories) {
 			const candidate = join(directory, bin);
@@ -513,14 +520,14 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 				if (statSync(candidate).isFile()) { installPath = candidate; break; }
 			} catch { /* Continue through PATH; inaccessible entries are not installations. */ }
 		}
-		return { bin, installed: installPath !== null, install_path: installPath };
+		return { bin, installed: installPath !== null, install_path: installPath, install };
 	});
-	const missing = tools.filter((tool) => !tool.installed).map((tool) => tool.bin);
+	const missing = tools.filter((tool) => !tool.installed);
 	return finding("regex-tools", missing.length ? "DEGRADED" : "OK",
-		missing.length ? `Regex engineering tools are missing from PATH: ${missing.join(", ")}` :
+		missing.length ? `Regex engineering tools are missing from PATH: ${missing.map((tool) => `${tool.bin} (${tool.install})`).join(", ")}` :
 			"All required regex engineering tools are executable on PATH",
-		missing.length ? "Install the missing regex engineering tools and rerun omp-kit doctor --scope regex-tools." : "No action required.",
-		{ tools, missing, proof: "EXECUTABLE_ON_PATH" });
+		missing.length ? "Install each missing tool with its command and rerun omp-kit doctor --scope regex-tools." : "No action required.",
+		{ tools, missing: missing.map((tool) => tool.bin), proof: "EXECUTABLE_ON_PATH" });
 }
 
 
