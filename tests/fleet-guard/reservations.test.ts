@@ -68,6 +68,31 @@ describe("fleet guard reservation checks", () => {
 		await check({ toolName: "edit", arguments: { path: "src/main.ts" } }, context);
 		expect(calls).toBe(1);
 	});
+
+	test("a reservation granted after a refusal allows the edit inside the cache window", async () => {
+		let covered = false;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/fresh.ts" } }, context)).toMatchObject({ block: true });
+		covered = true;
+		now += 5_000;
+		expect(await check({ toolName: "edit", arguments: { path: "src/fresh.ts" } }, context)).toBeUndefined();
+		expect(calls).toBe(2);
+	});
+
+	test("another agent's hold never allows the edit, however often it is rechecked", async () => {
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered: false, conflicts: [{ agent: "YellowSalmon" }] }; };
+		let now = 2_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/fresh.ts" } }, context)).toMatchObject({ block: true });
+		now += 5_000;
+		expect(await check({ toolName: "edit", arguments: { path: "src/fresh.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
 	test("derives the live storage root from the Agent Mail environment resource", () => {
 		expect(storageRootFromEnvironment({ database_url: "sqlite:////Users/josh/.local/share/mcp-agent-mail-rust-live/storage.sqlite3" })).toBe("/Users/josh/.local/share/mcp-agent-mail-rust-live");
 		expect(storageRootFromEnvironment({ database_url: "postgres://localhost/db" })).toBeUndefined();

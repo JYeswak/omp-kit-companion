@@ -249,7 +249,7 @@ export async function check(event: ReservationEvent, context: ReservationCheckCo
 	const now = context.now?.() ?? Date.now();
 	const earlyKey = knownAgent ? projectKey + "\\0" + knownAgent + "\\0" + pathKey : undefined;
 	const early = earlyKey ? cachedLookup(earlyKey, now) : undefined;
-	if (early) return early.covered ? undefined : { block: true, reason: RESERVATION_REASON };
+	if (early) return undefined;
 	if (!(await trackedPath(absolutePath, root, context))) return undefined;
 	let agentName = knownAgent;
 	try {
@@ -264,10 +264,10 @@ export async function check(event: ReservationEvent, context: ReservationCheckCo
 	}
 	const key = projectKey + "\\0" + agentName + "\\0" + pathKey;
 	const cached = cachedLookup(key, now);
-	if (cached) return cached.covered ? undefined : { block: true, reason: RESERVATION_REASON };
+	if (cached) return undefined;
 	try {
 		const result = await lookupReservations({ projectKey, agentName, path: pathKey }, context);
-		cache.set(key, { expiresAt: now + CACHE_TTL_MS, result });
+		if (result.covered) cache.set(key, { expiresAt: now + CACHE_TTL_MS, result });
 		if (result.covered) return undefined;
 		return { block: true, reason: RESERVATION_REASON };
 	} catch (error) {

@@ -1,0 +1,1 @@
+- GUARD1: fleet-guard caches only positive reservation lookups. A negative result is re-queried on the next edit instead of served stale for 30 s, so reserving right after a refusal allows the edit; another agent's hold is still refused on every recheck.
