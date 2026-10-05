@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadGate } from "./infra.ts";
 
 /**
  * SVC1 single-flight: one running job per name. The second overlapping run
@@ -117,4 +118,23 @@ export function forgeLockForTest(jobsDir: string, job: string, pid: number, star
 	const dir = join(jobsDir, `${job}.lock`);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	writeFileSync(join(dir, "pid"), JSON.stringify({ pid, startedAt }), { mode: 0o600 });
+}
+
+export const LOAD_GATE_FACTOR = 2.5;
+export const SKIPPED_LOAD_EXIT = 4;
+
+export type RunLoadGate =
+	| { proceed: true }
+	| { proceed: false; status: "SKIPPED-LOAD"; exit: number; detail: string };
+
+/**
+ * SVC1 load gate: a service run starts only when the 1-minute load is at or
+ * under 2.5x cores. Binds the contract's threshold (distinct from TOOL1's
+ * 1.5x ladder gate) and shapes the skip verdict the run handler reports.
+ */
+export function gateRunLoad(load1: number, ncpu: number): RunLoadGate {
+	const gate = loadGate(load1, ncpu, LOAD_GATE_FACTOR);
+	if (gate.ok) return { proceed: true };
+	return { proceed: false, status: "SKIPPED-LOAD", exit: SKIPPED_LOAD_EXIT,
+		detail: `SKIPPED-LOAD: ${gate.reason} No work was done; retry when quiet.` };
 }

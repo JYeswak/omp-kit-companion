@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, forgeLockForTest, OVERLAP_EXIT } from "../../src/service-run.ts";
+import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, SKIPPED_LOAD_EXIT } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -80,4 +80,20 @@ test("SVC1: a fresh empty lock dir stays overlapped", () => {
 	mkdirSync(join(dir, "load-watch.lock"), { recursive: true, mode: 0o700 });
 	const next = acquireRunLock(dir, "load-watch", Date.now());
 	expect(next.status).toBe("OVERLAP");
+});
+
+
+test("SVC1 planted: a run under high load writes SKIPPED-LOAD and does no work", () => {
+	expect(LOAD_GATE_FACTOR).toBe(2.5);
+	const verdict = gateRunLoad(87, 32);
+	expect(verdict.proceed).toBe(false);
+	if (verdict.proceed) throw new Error("expected skip");
+	expect(verdict.status).toBe("SKIPPED-LOAD");
+	expect(verdict.exit).toBe(SKIPPED_LOAD_EXIT);
+	expect(verdict.detail).toContain("No work was done");
+});
+
+test("SVC1: a run under normal load proceeds", () => {
+	expect(gateRunLoad(10, 32)).toEqual({ proceed: true });
+	expect(gateRunLoad(80, 32).proceed).toBe(true);
 });
