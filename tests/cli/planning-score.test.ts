@@ -105,12 +105,12 @@ test("doctor compares the kit-owned planning skill to a fixture HOME without wri
 	const original = Buffer.from("kit-owned planning protocol\n");
 	writeFileSync(source, original);
 	writeFileSync(copy, original);
-	const matching = await diagnose({ root, home });
+	const matching = await diagnose({ root, home, scope: "kit" });
 	expect(matching.find((item) => item.component === "planning_skill")?.status).toBe("OK");
 	const changed = Buffer.from(original);
 	changed[0] = changed[0]! ^ 1;
 	writeFileSync(copy, changed);
-	const drifted = await diagnose({ root, home });
+	const drifted = await diagnose({ root, home, scope: "kit" });
 	expect(drifted.find((item) => item.component === "planning_skill")?.status).toBe("DRIFT");
 	expect(readFileSync(source)).toEqual(original);
 	expect(readFileSync(copy)).toEqual(changed);
@@ -277,4 +277,35 @@ test("A8 beads doctor catches acceptance written in the description but missing 
 	const finding = report.find((item) => item.component === "beads");
 	expect(finding?.status).toBe("FAIL");
 	expect(finding?.evidence?.missing_acceptance).toEqual([{ id: "bad", title: "Legacy bead" }]);
+});
+
+const dupA = { id: "dup-a", title: "Add deep flag to acfs doctor", description: "Context part of the enhanced doctor epic. What to do add a deep flag that runs functional tests beyond binary existence checks parsing the flag alongside json output. Files scripts lib doctor. Rationale default doctor stays fast while deep mode verifies auth and database connectivity end to end.", acceptance_criteria: "- [ ] deep flag parsed\n- [ ] default doctor unchanged\n- [ ] deep runs functional tests", status: "open" };
+const dupB = { id: "dup-b", title: "Add deep flag to acfs doctor", description: "Context part of the enhanced doctor epic. What to do add a deep flag that runs functional tests beyond binary existence checks parsing the flag together with json output. Files scripts lib doctor. Rationale default doctor stays fast while deep mode verifies auth and database connectivity end to end. Document the flag in the cheatsheet.", acceptance_criteria: "- [ ] deep flag parsed\n- [ ] default doctor unchanged\n- [ ] deep runs functional tests", status: "open" };
+const distinctA = { id: "distinct-a", title: "Rotate release signing keys", description: "Ceremony generates a fresh minisign keypair inside the hardware vault. Attestation reissues signatures across archived artifacts while custodians witness rotation. Old keys enter revocation quarantine after backups confirm restoration drills.", acceptance_criteria: "- [ ] fresh keypair generated\n- [ ] archives re-signed", status: "open" };
+const distinctB = { id: "distinct-b", title: "Translate onboarding tutorial to Spanish", description: "Linguists rewrite the interactive lessons preserving command examples verbatim. Native speakers review idioms and screenshots refresh against the translated interface before publishing the localized learning path.", acceptance_criteria: "- [ ] lessons translated\n- [ ] native review complete", status: "open" };
+
+function writeBeadProject(label: string, issues: unknown[]): { root: string; home: string } {
+	const root = fixture(label);
+	const home = fixture(label + "-home");
+	mkdirSync(join(root, ".beads"), { recursive: true });
+	writeFileSync(join(root, ".beads", "issues.jsonl"), (issues as Record<string, unknown>[]).map((issue) => JSON.stringify(issue)).join("\n") + "\n");
+	return { root, home };
+}
+
+
+
+test("FLY1 duplicates: planted near-identical pair is reported, distinct pair is not", async () => {
+	const { root, home } = writeBeadProject("beads-dedup", [dupA, dupB, distinctA, distinctB]);
+	const report = await diagnose({ root, home, project: root, scope: "beads" });
+	const finding = report.find((item) => item.component === "beads" && item.evidence !== undefined && "duplicate_pairs" in item.evidence);
+	expect(finding?.status).toBe("FAIL");
+	const pairs = (finding?.evidence?.duplicate_pairs ?? []) as Array<{ a_id: string; b_id: string; similarity: number }>;
+	expect(pairs.map((pair) => [pair.a_id, pair.b_id].sort().join("+"))).toContain("dup-a+dup-b");
+	for (const pair of pairs) expect([pair.a_id, pair.b_id].sort().join("+")).not.toMatch(/distinct/);
+});
+
+test("FLY1 duplicates: distinct beads produce no duplicate report", async () => {
+	const { root, home } = writeBeadProject("beads-dedup-clean", [distinctA, distinctB]);
+	const report = await diagnose({ root, home, project: root, scope: "beads" });
+	expect(report.find((item) => item.component === "beads" && item.evidence !== undefined && "duplicate_pairs" in item.evidence)?.status).toBe("OK");
 });

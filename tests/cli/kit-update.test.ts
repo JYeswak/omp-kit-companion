@@ -94,7 +94,7 @@ const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.sta
 
 function copyReleaseSource(sourceRoot: string, destination: string): void {
 	mkdirSync(destination, { recursive: true });
-	for (const directory of ["src", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "tests/live"]) {
+	for (const directory of ["src", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live"]) {
 		const target = join(destination, directory);
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
