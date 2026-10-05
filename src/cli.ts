@@ -333,7 +333,7 @@ ${scoped}
 const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	kit: ["kit", "manifest"],
 	omp: ["omp"],
-	rules: ["installed_rules", "retired_rules", "unknown_rules", "project_rules"],
+	rules: ["installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
 	settings: ["policy"],
 	extensions: ["extensions", "extension_imports"],

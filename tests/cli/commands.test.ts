@@ -380,6 +380,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		const drift = invoke("doctor", "--scope", "rules");
 		expect(drift.code).toBe(0);
 		expect(drift.envelope.data.findings.find((row: { component: string }) => row.component === "installed_rules").evidence.drifted).toEqual(["rule-a"]);
+		expect(drift.envelope.data.findings.find((row: { component: string }) => row.component === "effective_rules").recommended_action).toContain("omp-kit apply plugin --plan");
 		expect(drift.envelope.data.recommended_actions.some((action: string) => action.includes("omp-kit apply rules --plan"))).toBe(true);
 		writeFileSync(join(release, "retired", "old-rule.md"), "retired source\n");
 		writeFileSync(join(home, ".agents", "rules", "old-rule.md"), "unowned retirement\n");

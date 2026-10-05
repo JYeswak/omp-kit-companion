@@ -75,6 +75,23 @@ test("fresh release verifies shipped bytes but does not claim unapplied rules or
 	expect(health(rows)).toBe("UNVERIFIED");
 });
 
+test("effective profile probes do not replace installed-byte diagnostics", async () => {
+	const f = fixture(); installOmp(f);
+	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+	const effective = finding(rows, "effective_rules");
+	expect(effective.status).toBe("DEGRADED");
+	expect((effective.evidence?.profiles as Array<{ status: string }>)[0]?.status).toBe("UNVERIFIED");
+	expect(finding(rows, "installed_rules").evidence?.missing).toEqual(["rule-a"]);
+});
+
+test("without a native profile probe, installed-byte diagnostics remain available", async () => {
+	const f = fixture();
+	const rows = await diagnose({ root: f.root, home: f.home });
+	expect(finding(rows, "installed_rules").status).toBe("DEGRADED");
+	expect(finding(rows, "installed_rules").evidence?.missing).toEqual(["rule-a"]);
+	expect(rows.some((row) => row.component === "effective_rules")).toBe(false);
+});
+
 test("an absent installed directory cannot prove absence of retired or unknown Markdown", async () => {
 	const f = fixture(); installOmp(f);
 	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });

@@ -33,6 +33,7 @@ test("degrades when named profiles lack the kit plugin", () => {
 test("reports OK when every covered profile has the matching plugin", () => {
 	const finding = inspectEffectiveRules(input({ default: { plugin: true }, codex: { plugin: true }, claude: { plugin: true } }));
 	expect(finding.status).toBe("OK");
+	expect(finding.component).toBe("effective_rules");
 });
 
 test("names an older kit plugin version", () => {

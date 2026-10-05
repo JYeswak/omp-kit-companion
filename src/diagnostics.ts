@@ -584,7 +584,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });
 		}
 	}
-	return finding("installed_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
+	return finding("effective_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
 }
 async function runEffectiveRuleProbeAsync(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
 	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
@@ -717,11 +717,12 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		kitVersion = record(packageValue) && typeof packageValue.version === "string" ? packageValue.version : null;
 	} catch {}
 	const alwaysRules = manifest.rules.filter(rule => { try { return /^alwaysApply:\s*true/m.test(fileBytes(join(root, "rules", `${rule.name}.md`)).toString("utf8")); } catch { return false; } }).map(rule => rule.name);
-	const effectiveRules = input.ompPath && !manifest.error
-		? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, profiles: profiles.profiles })
-		: finding("installed_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
-	const installedIndex = rows.findIndex(row => row.component === "installed_rules");
-	if (installedIndex >= 0) rows[installedIndex] = effectiveRules;
+	if (input.ompPath) {
+		const effectiveRules = !manifest.error
+			? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, profiles: profiles.profiles })
+			: finding("effective_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
+		rows.push(effectiveRules);
+	}
 	const project = input.project && resolve(input.project);
 	const projectConfig = inspectProjectConfig(project);
 	rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));

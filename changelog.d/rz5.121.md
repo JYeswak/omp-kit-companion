@@ -1,0 +1,1 @@
+- Fixed doctor rules inventory to keep installed-byte and ownership evidence separate from native per-profile effective-rule findings; `doctor --scope rules` now reports both without altering health evidence.
