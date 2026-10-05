@@ -116,3 +116,75 @@ export async function checkInfraCandidate(input: {
 		failedStage: failed?.label ?? (green ? null : "ladder-incomplete"),
 		stages };
 }
+
+export interface PromoteCheck {
+	tool: string;
+	version: string;
+	status: "PASS" | "FAIL";
+}
+
+export interface PromoteReceipt {
+	tool: string;
+	from: string;
+	to: string;
+	check: "PASS";
+	at: string;
+}
+
+export type PromoteResult =
+	| { status: "REFUSED"; reason: string }
+	| { status: "PROMOTED"; receipt: PromoteReceipt; pins: InfraPins }
+	| { status: "FAILED"; reason: string };
+
+/**
+ * TOOL1 promote: move one pinned tool to a checked version. Refuses without
+ * explicit human authorization and without a PASSING check for the exact
+ * candidate; the installer is injected so tests prove the call sequence.
+ * Undo is a second promote back, not a special case (see undoPromote).
+ */
+export async function promoteInfra(input: {
+	tool: string;
+	version: string;
+	pins: InfraPins;
+	check: PromoteCheck;
+	human: boolean;
+	install: (tool: string, version: string) => Promise<boolean>;
+	nowIso?: string;
+}): Promise<PromoteResult> {
+	if (!input.human) {
+		return { status: "REFUSED", reason: "Human authorization required: Josh promotes, agents prepare the check." };
+	}
+	const current = input.pins.tools[input.tool];
+	if (!current) return { status: "REFUSED", reason: `Unknown tool ${input.tool}; the pin file governs the promoted set.` };
+	if (input.check.status !== "PASS" || input.check.tool !== input.tool || input.check.version !== input.version) {
+		return { status: "REFUSED", reason: `No passing check for ${input.tool} ${input.version}; run infra check first.` };
+	}
+	if (current.version === input.version) {
+		return { status: "REFUSED", reason: `${input.tool} is already pinned at ${input.version}; nothing to promote.` };
+	}
+	const installed = await input.install(input.tool, input.version);
+	if (!installed) return { status: "FAILED", reason: `Installer reported failure for ${input.tool} ${input.version}; pin unchanged.` };
+	return { status: "PROMOTED",
+		receipt: { tool: input.tool, from: current.version, to: input.version, check: "PASS", at: input.nowIso ?? new Date().toISOString() },
+		pins: { tools: { ...input.pins.tools, [input.tool]: { version: input.version, receipt: current.receipt } } } };
+}
+
+/**
+ * Undo a promotion by promoting back: reinstalls the receipt's from-version
+ * and returns pins showing it. The rollback target needs its own PASSING
+ * check like any promote; nothing here fabricates one.
+ */
+export async function undoPromote(input: {
+	receipt: PromoteReceipt;
+	pins: InfraPins;
+	check: PromoteCheck;
+	human: boolean;
+	install: (tool: string, version: string) => Promise<boolean>;
+	nowIso?: string;
+}): Promise<PromoteResult> {
+	if (!input.human) {
+		return { status: "REFUSED", reason: "Human authorization required: Josh promotes, agents prepare the check." };
+	}
+	return promoteInfra({ tool: input.receipt.tool, version: input.receipt.from,
+		pins: input.pins, check: input.check, human: true, install: input.install, nowIso: input.nowIso });
+}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkInfraCandidate, diffInfraPins, parseInfraPins, type InfraExec } from "../../src/infra.ts";
+import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, undoPromote, type InfraExec } from "../../src/infra.ts";
 
 const GOOD = `[tools.bun]
 version = "1.4.0"
@@ -88,4 +88,59 @@ test("TOOL1: a spawn failure reports FAIL as ladder-spawn", async () => {
 		exec: { run: () => Promise.reject(new Error("spawn ENOENT")) } });
 	expect(report.status).toBe("FAIL");
 	expect(report.failedStage).toBe("ladder-spawn");
+});
+
+
+const PINS = { tools: { bun: { version: "1.4.0", receipt: "ladder-A" } } };
+const PASS_NEW = { tool: "bun", version: "1.5.0", status: "PASS" as const };
+const PASS_OLD = { tool: "bun", version: "1.4.0", status: "PASS" as const };
+const okInstall = (seen: string[]) => (_tool: string, version: string) => {
+	seen.push(version);
+	return Promise.resolve(true);
+};
+
+test("TOOL1 planted: promote without human authorization is REFUSED", async () => {
+	const seen: string[] = [];
+	const result = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
+		check: PASS_NEW, human: false, install: okInstall(seen) });
+	expect(result.status).toBe("REFUSED");
+	expect(seen).toEqual([]);
+});
+
+test("TOOL1 planted: promote without a passing check for the exact candidate is REFUSED", async () => {
+	const seen: string[] = [];
+	for (const check of [{ ...PASS_NEW, status: "FAIL" as const }, { ...PASS_OLD }]) {
+		const result = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
+			check, human: true, install: okInstall(seen) });
+		expect(result.status, JSON.stringify(check)).toBe("REFUSED");
+	}
+	expect(seen).toEqual([]);
+});
+
+test("TOOL1: promote installs, updates the pin and writes the receipt", async () => {
+	const seen: string[] = [];
+	const result = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
+		check: PASS_NEW, human: true, install: okInstall(seen), nowIso: "2026-10-05T21:45:00Z" });
+	expect(seen).toEqual(["1.5.0"]);
+	if (result.status !== "PROMOTED") throw new Error("expected PROMOTED");
+	expect(result.pins.tools["bun"]!.version).toBe("1.5.0");
+	expect(result.receipt).toEqual({ tool: "bun", from: "1.4.0", to: "1.5.0", check: "PASS", at: "2026-10-05T21:45:00Z" });
+});
+
+test("TOOL1: promote then undo restores the previous version", async () => {
+	const seen: string[] = [];
+	const promoted = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
+		check: PASS_NEW, human: true, install: okInstall(seen) });
+	if (promoted.status !== "PROMOTED") throw new Error("expected PROMOTED");
+	const undone = await undoPromote({ receipt: promoted.receipt, pins: promoted.pins,
+		check: PASS_OLD, human: true, install: okInstall(seen) });
+	if (undone.status !== "PROMOTED") throw new Error("expected PROMOTED undo");
+	expect(undone.pins.tools["bun"]!.version).toBe("1.4.0");
+	expect(seen).toEqual(["1.5.0", "1.4.0"]);
+});
+
+test("TOOL1: installer failure reports FAILED and leaves the pin", async () => {
+	const result = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
+		check: PASS_NEW, human: true, install: () => Promise.resolve(false) });
+	expect(result.status).toBe("FAILED");
 });
