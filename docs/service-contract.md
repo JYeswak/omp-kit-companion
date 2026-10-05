@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # SVC1 service job contract (box 1)
 
 Bead: `ompkit-rc-epic-land-fix-release-dogfood-rz5.113`. Every recurring piece of

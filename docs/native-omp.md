@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Native OMP first
 
 Before reaching for kit rules, use what OMP already ships. Every command below

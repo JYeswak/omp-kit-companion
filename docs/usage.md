@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Usage
 
 `$KIT` below is your installed release binary

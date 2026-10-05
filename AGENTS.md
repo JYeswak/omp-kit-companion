@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # AGENTS.md — omp-kit
 
 Instructions for coding agents (and humans) working in this repository.

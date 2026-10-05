@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Contributing
 
 Bug reports and focused proposals are welcome through GitHub issues. Describe the omp version, operating system, command or rule involved, expected behavior, actual behavior, and a minimal sanitized reproduction. Do not post session logs, local absolute paths, credentials, or private model transcripts.

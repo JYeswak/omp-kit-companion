@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Roadmap
 
 omp-kit is built in public. This file is the plan of record: what is done, what is in review, and what is next. Every pull request that changes the status of an item updates this file in the same change.

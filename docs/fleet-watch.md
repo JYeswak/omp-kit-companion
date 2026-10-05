@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Fleet Watch
 
 Fleet Watch is an opt-in service. Install it only after creating
