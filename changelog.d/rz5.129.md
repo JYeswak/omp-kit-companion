@@ -1,0 +1,1 @@
+- CYCLE1 reservation age (part 1): `doctor --scope reservations` reports exclusive Agent Mail holds older than the limit (default 30 min) with holder, bead and age from `AGENT_MAIL_STORAGE_ROOT`, FAIL when any are overdue.

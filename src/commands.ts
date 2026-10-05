@@ -224,6 +224,12 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"], 
 	} } },
 	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
 } };
+const sendData: DataSchema = { type: "object", required: ["overall", "session", "pane", "status"], properties: {
+	overall: { enum: ["OK", "NOT_DELIVERED", "UNAVAILABLE", "UNVERIFIED"] },
+	session: { type: "string" }, pane: { type: "string" }, status: { enum: ["OK", "NOT_DELIVERED"] },
+	marker: { type: ["string", "null"] }, sends: { type: ["number", "null"] },
+	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
+} };
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
@@ -255,7 +261,7 @@ export const COMMANDS: readonly Command[] = [
 	], runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--deep --yes]", flags: [
-			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field" },
+			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
@@ -437,6 +443,9 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
 		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback)", usage: "send SESSION PANE MESSAGE", flags: [
+		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
+	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
 	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },

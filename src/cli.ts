@@ -56,6 +56,8 @@ import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, exe
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
+import { proveSend } from "./send.ts";
+import { auditReservationAge } from "./reservation-age.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -194,6 +196,10 @@ function parse(args: readonly string[]): ParseResult {
 		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the child command after `--`", "Use omp-kit heavy [flags] -- COMMAND [ARG ...]; no child command was run."), json };
 		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "heavy needs `-- COMMAND [ARG ...]`", "Pass the child command after `--`; no command was run."), json };
 		if (!flags.has("--help") && json) return { failure: refusal("RAW_OUTPUT_MODE", "heavy preserves the child command's raw output", "Omit --json/--robot before `--`; pass child-specific flags after `--`."), json };
+	} else if (command.name === "send") {
+		// send is the one three-positional command (SESSION PANE MESSAGE); the
+		// message keeps its spaces because the request joins rest (see sendCommand).
+		if (rest.length !== 3 && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent."), json };
 	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) {
 		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
 	}
@@ -398,6 +404,25 @@ async function ruleCalibrationDoctor(request: ParsedCommand): Promise<CliResult>
 	}
 }
 
+/** CYCLE1: report exclusive Agent Mail holds older than the configured limit. */
+function inspectReservationAge(request: ParsedCommand): Finding {
+	const archiveRoot = process.env.AGENT_MAIL_STORAGE_ROOT;
+	if (!archiveRoot) return { component: "reservations", status: "UNVERIFIED",
+		reason: "AGENT_MAIL_STORAGE_ROOT is unset; reservation holds cannot be read",
+		recommended_action: "Point AGENT_MAIL_STORAGE_ROOT at the live Agent Mail root." };
+	const project = typeof request.flags.get("--project") === "string" ? String(request.flags.get("--project")) : process.cwd();
+	const report = auditReservationAge({ archiveRoot, projectKey: project });
+	if (report.overdue.length === 0) return { component: "reservations", status: "OK",
+		reason: `No exclusive hold older than ${report.limit_minutes} min (${report.checked} checked)`,
+		recommended_action: "No action required.",
+		evidence: { checked: report.checked, unreadable: report.unreadable, limit_minutes: report.limit_minutes } };
+	const worst = report.overdue[0]!;
+	return { component: "reservations", status: "FAIL",
+		reason: `${report.overdue.length} exclusive hold(s) older than ${report.limit_minutes} min; oldest ${worst.path_pattern} by ${worst.agent_name} at ${worst.age_minutes} min (${worst.bead || "no bead named"})`,
+		recommended_action: "Land or release the overdue hold; a hold past the push is a stop sign.",
+		evidence: { checked: report.checked, overdue: report.overdue } };
+}
+
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.has("--deep")) {
 		const scope = String(request.flags.get("--scope") ?? "effective_profile");
@@ -469,6 +494,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 		const scope = request.flags.get("--scope");
 		if (scope === "dicklesworthstone") {
 			findings = [await inspectDicklesworthstone()];
+		} else if (scope === "reservations") {
+			findings = [inspectReservationAge(request)];
 		} else if (typeof scope === "string") {
 			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
@@ -2341,8 +2368,41 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	return refusal("UNKNOWN_SERVICE_COMMAND", `Unknown service subcommand: ${sub}`, "Run omp-kit help service for exact grammar.");
 }
 
+/** SEND1: send a fleet message and prove the marker landed; exit code is delivery, not the send call. */
+async function sendCommand(request: ParsedCommand): Promise<CliResult> {
+	try {
+		serviceHome();
+	} catch {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "Send needs an absolute HOME",
+				remediation: "Run with an absolute HOME; nothing was sent." }], verification: "UNVERIFIED" };
+	}
+	// The parser joins the three positionals; session and pane never contain
+	// spaces, so the first two tokens delimit and the remainder is the message.
+	const [session, pane, ...messageParts] = (request.argument ?? "").split(" ").filter(part => part !== "");
+	if (!session || !pane || messageParts.length === 0) {
+		return refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent.");
+	}
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was sent.");
+	const dropFlag = request.flags.get("--drop-dir");
+	if (typeof dropFlag === "string" && !isAbsolute(dropFlag)) {
+		return refusal("INVALID_DROP_DIR", "The drop folder requires a canonical absolute path",
+			"Pass an absolute --drop-dir; nothing was sent.");
+	}
+	const result = await proveSend({ session, pane, message: messageParts.join(" "), dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop") });
+	if (result.status === "OK") {
+		return { code: 0, data: { overall: "OK", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail }, verification: "UNVERIFIED" };
+	}
+	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail }, verification: "UNVERIFIED",
+		errors: [{ code: "NOT_DELIVERED", message: result.detail,
+			remediation: result.drop_path ? `Relay the message manually; the full text is at ${result.drop_path}.` : "Retry the send; no drop file was written." }] };
+}
+
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
 registerCommandHandler("load watch", loadWatchCommand);
+registerCommandHandler("send", sendCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
