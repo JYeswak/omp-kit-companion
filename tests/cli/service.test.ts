@@ -161,18 +161,30 @@ test("rendered plist escapes XML metacharacters in paths", () => {
   expect(text).not.toContain("a&b.json");
 });
 
-test("interval jobs render their configured cadence and load trigger", () => {
+test("interval jobs render their configured cadence without run-at-load", () => {
   const { home, launcher } = fixture();
   const text = renderLaunchdPlist(home, intervalJob, launcher, null).text;
   expect(text).toContain("<key>StartInterval</key>");
   expect(text).toContain("<integer>21600</integer>");
-  expect(text).toContain("<key>RunAtLoad</key>\n\t<true/>");
+  expect(text).toContain("<key>RunAtLoad</key>\n\t<false/>");
   expect(text).not.toContain("WatchPaths");
 });
+test("fleet-lessons is a six-hour interval without run-at-load", () => {
+  expect(Object.hasOwn(KNOWN_JOBS, "fleet-lessons")).toBe(true);
+  const job = KNOWN_JOBS["fleet-lessons"]!;
+  expect(job).toMatchObject({ kind: "interval", intervalSeconds: 21600, runAtLoad: false });
+  const { home, launcher } = fixture();
+  const plist = renderLaunchdPlist(home, job, launcher, null).text;
+  expect(plist).toContain("<string>fleet-lessons</string>");
+  expect(plist).toContain("<integer>21600</integer>");
+  const units = renderSystemdUnits(home, job, launcher, null);
+  expect(units.service).toContain("service run fleet-lessons");
+  expect(systemdTimer(job)).toContain("OnUnitActiveSec=21600s");
+});
 
-test("systemd scratch timer starts at boot and repeats at the configured interval", () => {
+test("systemd scratch timer repeats at the configured interval without a boot start", () => {
   const timer = systemdTimer(intervalJob);
-  expect(timer).toContain("OnBootSec=0");
+  expect(timer).not.toContain("OnBootSec=0");
   expect(timer).toContain("OnUnitActiveSec=21600s");
   expect(timer).not.toContain("OnCalendar=daily");
 });
