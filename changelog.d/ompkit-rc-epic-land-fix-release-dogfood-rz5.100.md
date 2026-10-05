@@ -1,1 +1,2 @@
 - DISPATCH1 slice: `scripts/dispatch-check.sh --db PATH` fails closed on any disagreement between `bv --robot-next` and the `bv --robot-triage` top: agreement prints `CLAIM_TOP=<id>` (exit 0), anything else prints `BV_TOP_MISMATCH` (exit 3) so no claim is made from robot-next's pick. Live tracker agrees today (rz5.104). Still open: pagerank-certificate rerun procedure, upstream bv stranger repro if a real mismatch appears, independent rerun.
+- Follow-up: empty rankings fail closed naming the cause (dry queue reports no-id instead of unreadable-JSON).

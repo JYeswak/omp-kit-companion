@@ -32,7 +32,7 @@ fi
 next_json=$("$BV" --robot-next --db "$DB" -f json 2>/dev/null) || fail "BV_TOP_MISMATCH robot-next failed"
 triage_json=$("$BV" --robot-triage --db "$DB" -f json 2>/dev/null) || fail "BV_TOP_MISMATCH robot-triage failed"
 claim_top=$(printf '%s' "$next_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id') or '')" 2>/dev/null) || fail "BV_TOP_MISMATCH robot-next JSON unreadable"
-triage_top=$(printf '%s' "$triage_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get('triage') or {}).get('quick_ref', {}).get('top_picks', [{}])[0].get('id') or '')" 2>/dev/null) || fail "BV_TOP_MISMATCH robot-triage JSON unreadable"
+triage_top=$(printf '%s' "$triage_json" | python3 -c "import json,sys; d=json.load(sys.stdin); picks=(d.get('triage') or {}).get('quick_ref', {}).get('top_picks') or []; print(picks[0].get('id') if picks else '')" 2>/dev/null) || fail "BV_TOP_MISMATCH robot-triage JSON unreadable"
 if [ -z "$claim_top" ]; then
 	fail "BV_TOP_MISMATCH robot-next named no id"
 fi

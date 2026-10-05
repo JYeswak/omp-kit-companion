@@ -69,6 +69,12 @@ BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[]}}}'
 stub_bv
 run_case empty-triage 3
 
+# 6. dry queue (no next id, empty triage) fails closed naming the cause
+BV_NEXT='{"message":"No proven actionable item available"}'
+BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[]}}}'
+stub_bv
+run_case dry-queue 3
+
 # 5. missing --db fails closed
 if "$CHECK" > "$TMP/stdout" 2> "$TMP/stderr"; then
 	fail=$((fail + 1)); printf 'FAIL no-db: rc=0\n'
