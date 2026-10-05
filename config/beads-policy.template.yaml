@@ -1,0 +1,39 @@
+# Shared strict .beads/policy.yaml template (MP3, Mission Protocol v0.1 P3).
+# Closed is reachable only through gated edges. Measured on br 0.7.4: without
+# strict + explicit transitions, open->closed and in_progress->closed bypass gates.
+# Copy to a tracker's .beads/policy.yaml, then apply that tracker's deltas below.
+# Delete the tracker's policy.yaml to restore br's default behavior.
+workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, blocked, deferred, closed]
+    in_progress: [in_review, open, blocked, deferred]
+    in_review: [closed, rework]
+    rework: [in_progress]
+    blocked: [open, in_progress]
+    deferred: [open]
+    closed: [open]
+  status_groups:
+    ready: [open, rework]
+  required_fields:
+    in_review: [acceptance_criteria, transition_comment]
+    closed: [transition_comment]
+  gates:
+    "in_review -> closed":
+      require_all:
+        - min_reviewers: 1
+    "open -> closed":
+      require_all:
+        - min_reviewers: 1
+
+# Per-session deltas (fleet trackers, 2026-10-05). The template is the floor;
+# a tracker adds statuses or gates, never removes a gate or opens an edge.
+# - omp-kit: adds required_fields "open -> in_progress": [acceptance_criteria_present].
+# - jev: as template, except deferred: [open, closed] (extra closed edge, reviewer-gated
+#   by its "deferred -> closed" min_reviewers gate); see jev/.beads/policy.yaml.
+# - uds: extra statuses grading, draft, pinned, tombstone; closure gates
+#   uds_l3_close_support on open/in_progress -> closed; allow_bypass: false.
+# - localbench: closure gates worker_report_landed on open/in_progress -> closed.
+# - cfsios: no policy.yaml yet; adopt the template unchanged first.

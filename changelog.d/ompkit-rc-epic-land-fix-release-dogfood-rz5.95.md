@@ -1,0 +1,1 @@
+- Shared strict `.beads/policy.yaml` template (`config/beads-policy.template.yaml`): closed is reachable only through gated edges, with per-session deltas; `tests/cli/beads-policy.test.ts` tries every status-to-closed edge on a scratch tracker (refused without a reviewer pass, closed with one) and asserts `br ready` counts are unchanged by the policy file.
