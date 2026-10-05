@@ -63,22 +63,10 @@ unavailable. Until those close, every archive still ships through the release wo
 
 ## Adopting the release procedure in another repo (PUB1c)
 
-`scripts/release-notes.sh` carries no repo-specific paths: point it at any repo with a
-`changelog.d/` directory and `vX.Y.Z` tags. To adopt:
-
-1. Create `changelog.d/` and write one bullet per change in `changelog.d/<bead>.md`
-   (fragment path must be `changelog.d/<bead>.md`; a direct commit on shipped paths
-   needs a `Bead:` trailer, a `[no-changelog] <reason>` line, or a fragment naming
-   the commit).
-2. Tag the starting point (`git tag v0.0.0` on the adoption commit if the repo never
-   released; later releases tag `vX.Y.Z` per semver).
-3. Check coverage with `sh <kit>/scripts/release-notes.sh check --base-tag <tag>
-   --head HEAD` run from the adopting repo (the script resolves its own directory,
-   so it runs from any checkout).
-4. Assemble with `assemble --base-tag … --head HEAD --version X.Y.Z --date YYYY-MM-DD`.
-
-Verified 2026-10-05: `scripts/release-notes.ts` contains no repo-specific paths and
-resolves its helpers from its own directory; the check flags the one uncovered direct
-commit on this repo (`b82d3e5`, exit 1, names the commit). uds trial (first `v0.0.0`
-tag, fragment convention, pilot transcript, pilot-script retire) is tracked on the
-bead; signing stays in rz5.59.3.
+The full procedure lives in `docs/release-procedure.md` (fragments, assemble, semver
+tag, platform archives, publish); that doc is the source of truth, not this section.
+Two facts worth recording here: `scripts/release-notes.sh` carries no repo-specific
+paths and runs its git commands in the caller's checkout, so the coverage check works
+from any adopting repo; and the check flags the one uncovered direct commit on this
+repo (`b82d3e5`, exit 1, names the commit). uds trial (first `v0.0.0` tag, fragment
+convention, pilot transcript, pilot-script retire) is tracked on the bead.
