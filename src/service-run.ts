@@ -138,3 +138,80 @@ export function gateRunLoad(load1: number, ncpu: number): RunLoadGate {
 	return { proceed: false, status: "SKIPPED-LOAD", exit: SKIPPED_LOAD_EXIT,
 		detail: `SKIPPED-LOAD: ${gate.reason} No work was done; retry when quiet.` };
 }
+
+export interface SpawnHandle {
+	readonly pid: number | null;
+	wait(): Promise<{ code: number | null; out: string }>;
+	kill(): void;
+}
+
+export interface CapExec {
+	spawn(argv: readonly string[], opts: { cwd: string; env: Record<string, string> }): SpawnHandle;
+	sleep(ms: number): Promise<void>;
+	now(): number;
+}
+
+export type CappedRun =
+	| { status: "OK"; exit: number; elapsedMs: number; out: string }
+	| { status: "FAILED"; exit: number | null; elapsedMs: number; out: string }
+	| { status: "TIMEOUT"; exit: null; elapsedMs: number; out: string };
+
+/**
+ * SVC1 time cap: run argv to completion or SIGKILL it at capMs. A run that
+ * outlives the cap is TIMEOUT (never OK/FAILED); elapsed time is measured on
+ * the injected clock so tests are deterministic. Output travels with the
+ * wait result so receipts can quote the tail.
+ */
+export async function runWithCap(input: {
+	argv: readonly string[];
+	cwd: string;
+	env: Record<string, string>;
+	capMs: number;
+	exec: CapExec;
+}): Promise<CappedRun> {
+	const started = input.exec.now();
+	const handle = input.exec.spawn(input.argv, { cwd: input.cwd, env: input.env });
+	const outcome = await Promise.race([
+		handle.wait().then(result => ({ kind: "done" as const, code: result.code, out: result.out })),
+		input.exec.sleep(input.capMs).then(() => ({ kind: "timeout" as const, code: null as number | null, out: "" })),
+	]);
+	const elapsedMs = input.exec.now() - started;
+	if (outcome.kind === "timeout") {
+		handle.kill();
+		const killed = await handle.wait();
+		return { status: "TIMEOUT", exit: null, elapsedMs, out: killed.out };
+	}
+	if (outcome.code === 0) return { status: "OK", exit: 0, elapsedMs, out: outcome.out };
+	return { status: "FAILED", exit: outcome.code, elapsedMs, out: outcome.out };
+}
+
+/** Live timers + SIGKILL for service run wiring (Bun runtime only). */
+export function bunCapExec(): CapExec {
+	return {
+		spawn: (argv, opts) => {
+			const child = Bun.spawn([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe" });
+			return {
+				pid: child.pid,
+				wait: async () => {
+					const code = await child.exited;
+					let out = "";
+					try {
+						out = await new Response(child.stdout).text();
+					} catch { /* killed pipes disturb the body; output is lost, verdict stands */ }
+					let err = "";
+					try {
+						err = await new Response(child.stderr).text();
+					} catch { /* same */ }
+					return { code, out: `${out}\n${err}` };
+				},
+				kill: () => {
+					try {
+						child.kill(9);
+					} catch { /* already gone is fine */ }
+				},
+			};
+		},
+		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		now: () => Date.now(),
+	};
+}

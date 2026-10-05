@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, SKIPPED_LOAD_EXIT } from "../../src/service-run.ts";
+import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, runWithCap, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -96,4 +96,67 @@ test("SVC1 planted: a run under high load writes SKIPPED-LOAD and does no work",
 test("SVC1: a run under normal load proceeds", () => {
 	expect(gateRunLoad(10, 32)).toEqual({ proceed: true });
 	expect(gateRunLoad(80, 32).proceed).toBe(true);
+});
+
+
+test("SVC1: a fast run returns OK with elapsed time and output", async () => {
+	const seen: string[][] = [];
+	const exec: CapExec = {
+		spawn: (argv) => {
+			seen.push([...argv]);
+			return { pid: 4242, wait: () => Promise.resolve({ code: 0, out: "ok\n" }), kill: () => {} };
+		},
+		sleep: () => new Promise<void>(() => {}),
+		now: () => 0,
+	};
+	const result = await runWithCap({ argv: ["bun", "test"], cwd: "/repo", env: {}, capMs: 60000, exec });
+	expect(seen).toEqual([["bun", "test"]]);
+	expect(result.status).toBe("OK");
+	if (result.status !== "OK") throw new Error("expected OK");
+	expect(result.exit).toBe(0);
+	expect(result.out).toBe("ok\n");
+});
+
+test("SVC1 planted: a slow run is killed at the cap and recorded TIMEOUT", async () => {
+	let t = 0;
+	let killed = false;
+	let waited = false;
+	const exec: CapExec = {
+		spawn: () => ({
+			pid: 4243,
+			wait: () => {
+				if (!killed) return new Promise<{ code: number | null; out: string }>(() => {});
+				waited = true;
+				return Promise.resolve({ code: null, out: "partial\n" });
+			},
+			kill: () => {
+				killed = true;
+			},
+		}),
+		sleep: (ms) => {
+			t += ms;
+			return Promise.resolve();
+		},
+		now: () => t,
+	};
+	const result = await runWithCap({ argv: ["bun", "test"], cwd: "/repo", env: {}, capMs: 60000, exec });
+	expect(killed).toBe(true);
+	expect(waited).toBe(true);
+	expect(result.status).toBe("TIMEOUT");
+	if (result.status !== "TIMEOUT") throw new Error("expected TIMEOUT");
+	expect(result.exit).toBeNull();
+	expect(result.elapsedMs).toBe(60000);
+	expect(result.out).toBe("partial\n");
+});
+
+test("SVC1: a failing run reports FAILED with its exit", async () => {
+	const exec: CapExec = {
+		spawn: () => ({ pid: 4244, wait: () => Promise.resolve({ code: 3, out: "boom\n" }), kill: () => {} }),
+		sleep: () => new Promise<void>(() => {}),
+		now: () => 0,
+	};
+	const result = await runWithCap({ argv: ["bun", "test"], cwd: "/repo", env: {}, capMs: 60000, exec });
+	expect(result.status).toBe("FAILED");
+	if (result.status !== "FAILED") throw new Error("expected FAILED");
+	expect(result.exit).toBe(3);
 });
