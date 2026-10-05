@@ -1,0 +1,1 @@
+- PUB1a slice: `scripts/doc-drift-check.sh BASE HEAD` refuses a CLI surface change with no `docs/` change, naming the undocumented surface. The surface is derived from the `src/commands.ts` registry at each revision via throwaway worktrees, never grep. Live range clean; still open: pre-push wiring, uds pilot, cross-repo runs.
