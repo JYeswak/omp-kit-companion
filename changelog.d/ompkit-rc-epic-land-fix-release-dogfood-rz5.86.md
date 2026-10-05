@@ -1,0 +1,1 @@
+- Stale-base deletion guard (`src/land-guard.ts`, `tests/cli/land-guard.test.ts`): refuses a candidate tree that drops lines added after its base, naming the commit per file; planted replay of the 38afcc7e59 revert names the dropped commit.
