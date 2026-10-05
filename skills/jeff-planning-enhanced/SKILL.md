@@ -86,8 +86,12 @@ Commit after each round: `beads(<mission>): polish round N`. Keep acceptance onl
 
 If unit and e2e coverage is unclear, run once: "Do we have full unit test coverage without using mocks/fake stuff? What about complete e2e integration test scripts with great, detailed logging? If not, then create a comprehensive and granular set of beads for all this with tasks, subtasks, and dependency structure overlaid with detailed comments."
 
+**Bead size (every polish round).** A bead must fit one reserve → edit → test → commit → push → release cycle of minutes, not hours. Split any bead whose work would hold files longer than about 30 minutes, or touch more than a handful of files, into sibling beads with precise dependencies. Large beads are what keep files reserved and edits uncommitted for hours in a shared checkout.
+
 ### 7. Build, continuously
 Workers claim ready beads with `bv` and build (`multi-agent-swarm-workflow`, `vibing-with-ntm`: fungible agents, the "code first" doctrine, no per-change full builds). There is no planning freeze for unrelated beads. When code reveals a plan error, fix the plan and the affected beads in place (one owner), and keep building the rest.
+
+Every change follows Jeff's cycle (agent-flywheel.com `/complete-guide`): "Pull latest, reserve files, edit and test, commit immediately, push, release reservation." All agents commit directly to main; "push after every commit (unpushed commits are invisible to other agents)." Reserve at the moment you edit, not for the whole bead, and release on push. Never stash, revert, overwrite or otherwise disturb another agent's work. One designated committer agent sweeps every 1–2 hours and commits whatever is left in logical groups without editing code ("Designating one agent prevents merge conflicts").
 
 ### 8. Verify against the beads — this is not a review round
 Close needs the bead's own tests and acceptance passing at the exact pushed SHA, graded by someone other than the implementer **[fleet: uds's exact-SHA route and independent grade]**. Periodically, `reality-check-for-project` asks whether the code delivers the plan; after closes, `beads-compliance-and-completion-verification` audits that closed means done.
@@ -104,6 +108,8 @@ Run on every `br` write, as reports, never as a review round: cycles and edge di
 | Copy governance text (approval rules, landing rules) into every bead | Put it once in AGENTS.md and the mission file |
 | Spawn reviewer subagents on an unapproved model | Workers are luna or muse; Opus orchestrates only |
 | Restating acceptance in the description | The two copies drift. Acceptance lives only in the `acceptance_criteria` field; coverage still checks beads against the plan |
+| Hold reservations or uncommitted edits for hours ("holding reservations too long") | Reserve, edit, commit, push, release in minutes; split the bead if it can't |
+| Build a commit from a tree older than origin/main | Pull latest before every edit; check `git show --stat` deletes only what you meant to |
 
 ## Scoring: `omp-kit planning score`
 Reads the repo's git history, plan file and tracker; prints one JSON line per mission and an overall score. Thresholds and weights live in one file, so tuning means editing one number: kit defaults in `omp-kit/config/planning-score.toml`, with an optional repo override in `.omp/planning-score.toml`.
