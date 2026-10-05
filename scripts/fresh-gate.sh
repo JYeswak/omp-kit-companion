@@ -196,17 +196,19 @@ gate_focused() {
 			echo "focused shellcheck: unavailable; no shell files were executed"
 		fi
 	fi
-	if [ "$needs_regex" = 1 ]; then
-		# Regex cost gate (RX1): self-bounding (internal 57 s deadline); red names
-		# the rule, shape and encoding, and the push is refused.
-		(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null scripts/regex-budget.ts) || return $?
-	fi
 	if [ "$needs_actionlint" = 1 ]; then
 		if command -v actionlint >/dev/null 2>&1; then
 			actionlint "$ARCHIVE_DIR/.github/workflows"/*.yml "$ARCHIVE_DIR/.github/workflows"/*.yaml
 		else
 			echo "focused actionlint: unavailable; no workflow files were executed"
 		fi
+	fi
+	if [ -n "${FRESH_GATE_SKIP_REGEX:-}" ]; then
+		printf 'focused regex-budget: SKIPPED (%s)\n' "$FRESH_GATE_SKIP_REGEX"
+	elif [ "$needs_regex" = 1 ]; then
+		# Regex cost gate (RX1): self-bounding (internal 57 s deadline); red names
+		# the rule, shape and encoding, and the push is refused.
+		(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null scripts/regex-budget.ts) || return $?
 	fi
 	if { [ -n "$focus_tests" ] || [ "$needs_cli" = 1 ]; } && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (

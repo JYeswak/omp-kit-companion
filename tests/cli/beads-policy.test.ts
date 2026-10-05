@@ -64,6 +64,8 @@ function br(project: string, args: string[]): { rc: number; out: string } {
 }
 
 function scratchTracker(policyYaml: string | null): string {
+	const probe = spawnSync("br", ["--version"], { encoding: "utf8" });
+	if (probe.status !== 0) throw new Error("MP3 live tests need the br binary on PATH (cli-contracts installs pinned br 0.7.4); refusing to skip silently");
 	const project = join(scratch, "proj-" + Math.random().toString(36).slice(2));
 	mkdirSync(join(project, ".beads"), { recursive: true });
 	const init = spawnSync("br", ["init", "--db", join(project, ".beads", "probe.db"), "--prefix", "t"], { cwd: project, encoding: "utf8" });

@@ -16,8 +16,13 @@ function fixture(): string {
 	return dir;
 }
 
-function run(script: string, args: string[]) {
-	return Bun.spawnSync(["sh", script, ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+// Manifest/update tests exercise manifest logic, not regex cost: they state
+// their reason and skip only the budget stage. Direct budget-gate tests in
+// regex-budget.test.ts prove the stage still runs by default.
+const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "fixture exercises manifest logic, not regex cost" };
+
+function run(script: string, args: string[], extraEnv: Record<string, string> = {}) {
+	return Bun.spawnSync(["sh", script, ...args], { cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, ...extraEnv } });
 }
 
 test("fresh gate refuses an edited rule with a stale manifest", () => {
@@ -26,7 +31,7 @@ test("fresh gate refuses an edited rule with a stale manifest", () => {
 		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		const rule = join(dir, "rules/bash-glob-silenced.md");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nStale manifest plant.\n");
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], SKIP_BUDGET);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).not.toBe(0);
 		expect(output).toContain("build-manifest --check: FAIL");
@@ -40,10 +45,11 @@ test("fresh gate accepts rule-only edits without a committed manifest", () => {
 	try {
 		const rule = join(dir, "rules/bash-glob-silenced.md");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n");
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"]);
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], SKIP_BUDGET);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("FRESH-GATE: GREEN");
+		expect(output).toContain("focused regex-budget: SKIPPED");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
