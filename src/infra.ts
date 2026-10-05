@@ -76,6 +76,7 @@ export interface InfraCheckReport {
 	status: "PASS" | "FAIL";
 	failedStage: string | null;
 	stages: LadderStage[];
+	logTail: string;
 }
 
 const GREEN_STAGE = /^GREEN (\S+) producer_rc=(\d+)\s*$/;
@@ -114,7 +115,46 @@ export async function checkInfraCandidate(input: {
 	return { tool: input.tool, version: input.version,
 		status: failed === null && green ? "PASS" : "FAIL",
 		failedStage: failed?.label ?? (green ? null : "ladder-incomplete"),
-		stages };
+		stages, logTail: out.slice(-2000) };
+}
+
+/**
+ * Bump one tool's version line inside its [tools.<name>] section, keeping
+ * receipt lines, comments and layout byte-identical otherwise. Null when the
+ * section or its version line is absent (fail-closed, never invents TOML).
+ * With a receipt, the section's receipt line is set to it as well.
+ */
+export function updatePinVersion(text: string, tool: string, version: string, receipt?: string): string | null {
+	const escaped = tool.replace(/[^A-Za-z0-9_-]/g, (char) => `\\${char}`);
+	const lines = text.split("\n");
+	const section = new RegExp(`^\\[tools\\.${escaped}\\]\\s*$`);
+	let at = -1;
+	for (let index = 0; index < lines.length; index++) {
+		if (section.test(lines[index] ?? "")) {
+			at = index;
+			break;
+		}
+	}
+	if (at < 0) return null;
+	let versioned = false;
+	let receipted = receipt === undefined;
+	for (let index = at + 1; index < lines.length; index++) {
+		const line = lines[index] ?? "";
+		if (/^\s*\[/.test(line)) break;
+		const versionMatch = /^(\s*version\s*=\s*)"[^"]*"(.*)$/.exec(line);
+		if (versionMatch && !versioned) {
+			lines[index] = `${versionMatch[1]}"${version}"${versionMatch[2] ?? ""}`;
+			versioned = true;
+			continue;
+		}
+		const receiptMatch = /^(\s*receipt\s*=\s*)"[^"]*"(.*)$/.exec(line);
+		if (receiptMatch && receipt !== undefined && !receipted) {
+			lines[index] = `${receiptMatch[1]}"${receipt}"${receiptMatch[2] ?? ""}`;
+			receipted = true;
+		}
+	}
+	if (!versioned || !receipted) return null;
+	return lines.join("\n");
 }
 
 export interface PromoteCheck {

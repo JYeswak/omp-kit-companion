@@ -230,6 +230,17 @@ const sendData: DataSchema = { type: "object", required: ["overall", "session", 
 	marker: { type: ["string", "null"] }, sends: { type: ["number", "null"] },
 	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
 } };
+const infraData: DataSchema = { type: "object", required: ["overall", "command"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+	command: { enum: ["pin", "check", "promote", "undo"] },
+	tool: { type: ["string", "null"] }, version: { type: ["string", "null"] },
+	status: { type: "string" }, failed_stage: { type: ["string", "null"] },
+	stages: { type: "array", items: { type: "object" } },
+	log_tail: { type: "string" },
+	drift: { type: "array", items: { type: "object" } },
+	receipt_id: { type: ["string", "null"] }, drop_path: { type: ["string", "null"] },
+	detail: { type: "string" },
+} };
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
@@ -446,6 +457,30 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback)", usage: "send SESSION PANE MESSAGE", flags: [
 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
 	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
+	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes)", usage: "infra pin|check|promote|undo", flags: [], subcommands: [
+		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
+			{ name: "--file", value: "PATH", description: "Pin file to read (default: kit .omp/infra-pins.toml)" },
+		], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
+		{ name: "check", description: "Run the ladder with a candidate binary first on PATH and name the failing stage", usage: "infra check --tool NAME --candidate VERSION --binary PATH [--prefix DIR]", flags: [
+			{ name: "--tool", value: "NAME", description: "Tool to check (bun, typescript-language-server)" },
+			{ name: "--candidate", value: "VERSION", description: "Candidate version under test" },
+			{ name: "--binary", value: "PATH", description: "Candidate binary to stage into the isolated prefix" },
+			{ name: "--prefix", value: "DIR", description: "Isolated prefix root (default: state-root infra-check)" },
+		], example: "omp-kit infra check --tool bun --candidate 1.5.0 --binary /tmp/bun-1.5.0/bun --json", runnable: false, dataSchema: infraData },
+		{ name: "promote", description: "Certify a checked candidate: update the pin with receipt (human only)", usage: "infra promote --tool NAME --candidate VERSION --binary PATH --human --apply --yes", flags: [
+			{ name: "--tool", value: "NAME", description: "Tool to promote" },
+			{ name: "--candidate", value: "VERSION", description: "Checked version to certify" },
+			{ name: "--binary", value: "PATH", description: "Candidate binary (re-verified before certifying)" },
+			{ name: "--human", description: "Explicit human authorization: Josh promotes, agents prepare" },
+			{ name: "--apply", description: "Request the guarded pin update" },
+			{ name: "--yes", description: "Confirm the pin update in noninteractive mode" },
+		], example: "omp-kit infra promote --tool bun --candidate 1.5.0 --binary /tmp/bun-1.5.0/bun --human --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
+		{ name: "undo", description: "Restore the pin file from a promote backup", usage: "infra undo --receipt PATH --apply --yes", flags: [
+			{ name: "--receipt", value: "PATH", description: "Promote receipt naming the backup to restore" },
+			{ name: "--apply", value: "PATH", description: "Request the guarded restore" },
+			{ name: "--yes", description: "Confirm the restore in noninteractive mode" },
+		], example: "omp-kit infra undo --receipt PATH --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
+	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
 	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },

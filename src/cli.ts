@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
@@ -56,6 +56,8 @@ import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, exe
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
+import { validateMissionRecord } from "./mission.ts";
+import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 
@@ -2417,9 +2419,248 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			remediation: result.drop_path ? `Relay the message manually; the full text is at ${result.drop_path}.` : "Retry the send; no drop file was written." }] };
 }
 
+const INFRA_BINARIES: Record<string, string> = { bun: "bun", "typescript-language-server": "typescript-language-server" };
+
+function defaultPinFile(): string {
+	const root = kitIdentity().release.root;
+	if (root) return join(root, ".omp", "infra-pins.toml");
+	return join(import.meta.dir, "..", ".omp", "infra-pins.toml");
+}
+
+/** Read and parse a pin file; fail-closed on missing, unsafe or malformed input. */
+function readInfraPinFile(pinPath: string): { pins: InfraPins } | { error: string } {
+	try {
+		const stat = lstatSync(pinPath);
+		if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) {
+			return { error: `Pin file ${pinPath} is not a safe regular file` };
+		}
+	} catch {
+		return { error: `Pin file ${pinPath} is missing or unreadable` };
+	}
+	const pins = parseInfraPins(readFileSync(pinPath, "utf8"));
+	if (!pins) return { error: `Pin file ${pinPath} is malformed or carries no pins` };
+	return { pins };
+}
+
+function installedInfraVersions(): Record<string, string | null> {
+	const versions: Record<string, string | null> = {};
+	for (const [tool, binary] of Object.entries(INFRA_BINARIES)) {
+		try {
+			const run = defaultRunner([binary, "--version"]);
+			versions[tool] = run.code === 0 ? (run.stdout.trim().split("\n")[0] ?? null) : null;
+		} catch {
+			versions[tool] = null;
+		}
+	}
+	return versions;
+}
+
+
+/** TOOL1: pin, check, promote and undo the toolchain the gates run on. */
+async function infraCommand(request: ParsedCommand): Promise<CliResult> {
+	const sub = request.command.name;
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNAVAILABLE", command: sub },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "Infra commands need an absolute HOME",
+				remediation: "Run with an absolute HOME; nothing was changed." }], verification: "UNVERIFIED" };
+	}
+	const flag = (name: string): string | undefined => {
+		const value = request.flags.get(name);
+		return typeof value === "string" ? value : undefined;
+	};
+	if (sub === "pin") {
+		const pinPath = flag("--file") ?? defaultPinFile();
+		if (!isAbsolute(pinPath)) {
+			return refusal("INVALID_PIN_FILE", "The pin file requires a canonical absolute path",
+				"Pass an absolute --file PATH; nothing was changed.");
+		}
+		const read = readInfraPinFile(pinPath);
+		if ("error" in read) {
+			return { code: 3, data: { overall: "UNAVAILABLE", command: sub },
+				errors: [{ code: "PIN_FILE_UNAVAILABLE", message: read.error,
+					remediation: "Certify a toolchain version with infra check/promote first; nothing was changed." }], verification: "UNVERIFIED" };
+		}
+		const drift = diffInfraPins(read.pins, installedInfraVersions());
+		if (drift.length === 0) {
+			return { code: 0, data: { overall: "OK", command: sub, status: "OK", drift, detail: "Installed toolchain matches every pin." }, verification: "UNVERIFIED" };
+		}
+		const first = drift[0]!;
+		return { code: 1, data: { overall: "FINDINGS", command: sub, status: "DRIFT", drift,
+				detail: `${first.tool} is ${first.installed ?? "unknown"}, pinned ${first.pinned}.` },
+			errors: [{ code: "INFRA_DRIFT", message: `${drift.length} pinned tool(s) differ from installed`,
+				remediation: "Run infra check on a candidate, then promote with --human; nothing was changed." }], verification: "UNVERIFIED" };
+	}
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) {
+		return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+			"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was changed.");
+	}
+	if (sub === "undo") {
+		if (!request.flags.has("--apply") || !request.flags.has("--yes")) {
+			return refusal("UNDO_REQUIRES_APPLY", "infra undo restores the pin file from a promote backup",
+				"Re-run with --apply --yes; without --apply this is a read-only refusal.");
+		}
+		const receiptPath = flag("--receipt");
+		if (!receiptPath || !isAbsolute(receiptPath)) {
+			return refusal("MISSING_ARGUMENT", "infra undo needs --receipt PATH",
+				"Pass the promote receipt holding the backup path; nothing was changed.");
+		}
+		let receipt: unknown;
+		try {
+			receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+		} catch {
+			return refusal("RECEIPT_UNREADABLE", `Promote receipt ${receiptPath} is missing or unparsable`,
+				"Pass the receipt written by infra promote; nothing was changed.");
+		}
+		if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) ||
+			!("pin_backup" in receipt) || typeof receipt.pin_backup !== "string" ||
+			!("tool" in receipt) || typeof receipt.tool !== "string") {
+			return refusal("RECEIPT_INVALID", `Promote receipt ${receiptPath} names no pin backup`,
+				"Pass the receipt written by infra promote; nothing was changed.");
+		}
+		let backupText: string;
+		try {
+			backupText = readFileSync(receipt.pin_backup, "utf8");
+		} catch {
+			return refusal("BACKUP_MISSING", `Pin backup ${receipt.pin_backup} is absent; the pin file is untouched`,
+				"Restore the pin file manually from version control; nothing was changed.");
+		}
+		const pinPath = flag("--file") ?? defaultPinFile();
+		if (!isAbsolute(pinPath)) {
+			return refusal("INVALID_PIN_FILE", "The pin file requires a canonical absolute path",
+				"Pass an absolute --file PATH; nothing was changed.");
+		}
+		writeFileSync(pinPath, backupText, { mode: 0o600 });
+		const readBack = readInfraPinFile(pinPath);
+		if ("error" in readBack) {
+			return { code: 1, data: { overall: "FINDINGS", command: sub, status: "UNVERIFIED", receipt_id: receiptPath,
+					detail: `Pin file restored from backup but does not parse: ${readBack.error}` },
+				errors: [{ code: "UNDO_UNVERIFIED", message: readBack.error,
+					remediation: "Inspect the restored pin file manually." }], verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "CHANGED", command: sub, status: "RESTORED", receipt_id: receiptPath,
+				detail: `Pin file restored from ${receipt.pin_backup}; ${receipt.tool} reads back ${JSON.stringify(readBack.pins.tools[receipt.tool] ?? null)}.` }, verification: "UNVERIFIED" };
+	}
+	const tool = flag("--tool"), candidate = flag("--candidate");
+	if (!tool || !candidate) {
+		return refusal("MISSING_ARGUMENT", `infra ${sub} needs --tool NAME --candidate VERSION`,
+			"Pass the tool and candidate version; nothing was changed.");
+	}
+	const binaryName = INFRA_BINARIES[tool];
+	if (!binaryName) {
+		return refusal("UNKNOWN_TOOL", `Unknown tool ${tool}`,
+			`Known tools: ${Object.keys(INFRA_BINARIES).join(", ")}; nothing was changed.`);
+	}
+	if (sub === "promote" && (!request.flags.has("--apply") || !request.flags.has("--yes"))) {
+		return refusal("PROMOTE_REQUIRES_APPLY", "infra promote rewrites the pin file",
+			"Re-run with --human --apply --yes; without --apply this is a read-only refusal.");
+	}
+	if (sub === "promote" && !request.flags.has("--human")) {
+		return refusal("HUMAN_REQUIRED", "Only Josh promotes; agents prepare the check",
+			"Josh re-runs with --human --apply --yes; nothing was changed.");
+	}
+	const binary = flag("--binary");
+	if (!binary || !isAbsolute(binary) || !executableFile(binary)) {
+		return refusal("CANDIDATE_UNAVAILABLE", `Candidate binary ${binary ?? "(none)"} is missing or not executable`,
+			"Pass an executable --binary PATH; nothing was changed.");
+	}
+	const prefix = flag("--prefix") ?? join(stateRoot, "infra-check", `${tool}-${candidate}`);
+	if (!isAbsolute(prefix)) {
+		return refusal("INVALID_PREFIX", "The isolated prefix requires a canonical absolute path",
+			"Pass an absolute --prefix DIR; nothing was changed.");
+	}
+	mkdirSync(join(prefix, "bin"), { recursive: true, mode: 0o700 });
+	const staged = join(prefix, "bin", binaryName);
+	writeFileSync(staged, readFileSync(binary), { mode: 0o755 });
+	chmodSync(staged, 0o755);
+	const probe = defaultRunner([staged, "--version"]);
+	if (probe.code !== 0 || !probe.stdout.includes(candidate)) {
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: "FAIL", failed_stage: "candidate-mismatch",
+				detail: `Staged ${binaryName} does not report ${candidate}.` },
+			errors: [{ code: "CANDIDATE_MISMATCH", message: `Staged binary reports ${probe.stdout.trim().slice(0, 80) || `exit ${probe.code}`}, not ${candidate}`,
+				remediation: "Pass the binary for the candidate version; nothing else was changed." }], verification: "UNVERIFIED" };
+	}
+	const childEnv: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") childEnv[key] = value;
+	const report = await checkInfraCandidate({ tool, version: candidate, repoRoot: process.cwd(), pathPrefix: prefix, baseEnv: childEnv,
+		exec: { run: (argv, opts) => {
+			const run = Bun.spawnSync([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe" });
+			return Promise.resolve({ code: run.exitCode, out: `${run.stdout.toString()}\n${run.stderr.toString()}` });
+		} } });
+	if (sub === "check") {
+		if (report.status === "PASS") {
+			return { code: 0, data: { overall: "OK", command: sub, tool, version: candidate, status: report.status,
+					failed_stage: null, stages: report.stages, log_tail: report.logTail,
+					detail: `${tool} ${candidate} passed the ladder with the candidate first on PATH.` }, verification: "UNVERIFIED" };
+		}
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: report.status,
+				failed_stage: report.failedStage, stages: report.stages, log_tail: report.logTail,
+				detail: `${tool} ${candidate} failed at ${report.failedStage ?? "an unknown stage"}.` },
+			errors: [{ code: "CHECK_FAILED", message: `${tool} ${candidate} failed the ladder at ${report.failedStage ?? "an unknown stage"}`,
+				remediation: "Inspect the failing stage; the machine toolchain is unchanged." }], verification: "UNVERIFIED" };
+	}
+	if (sub !== "promote") {
+		return refusal("UNKNOWN_INFRA_COMMAND", `Unknown infra subcommand: ${sub}`, "Run omp-kit help infra for exact grammar.");
+	}
+	if (report.status !== "PASS") {
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: report.status,
+				failed_stage: report.failedStage, stages: report.stages, log_tail: report.logTail,
+				detail: `Refusing promote: ${tool} ${candidate} failed at ${report.failedStage ?? "an unknown stage"}.` },
+			errors: [{ code: "CHECK_FAILED", message: "A passing check for the exact candidate is required before promote",
+				remediation: "Fix the failing stage and re-run infra check; nothing was changed." }], verification: "UNVERIFIED" };
+	}
+	const installed = installedInfraVersions()[tool] ?? null;
+	if (installed === null || !installed.includes(candidate)) {
+		return refusal("INSTALLED_MISMATCH", `${tool} is installed as ${installed ?? "unknown"}, not ${candidate}`,
+			`Upgrade ${tool} to ${candidate} first, then promote to certify it; nothing was changed.`);
+	}
+	const pinPath = flag("--file") ?? defaultPinFile();
+	if (!isAbsolute(pinPath)) {
+		return refusal("INVALID_PIN_FILE", "The pin file requires a canonical absolute path",
+			"Pass an absolute --file PATH; nothing was changed.");
+	}
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const certification = `ladder-${stamp}-${tool}-${candidate}-PASS`;
+	const existing = readInfraPinFile(pinPath);
+	if ("error" in existing) {
+		const created = `# Toolchain pins: versions certified by ladder runs. See TOOL1.\n[tools.${tool}]\nversion = "${candidate}"\nreceipt = "${certification}"\n`;
+		mkdirSync(dirname(pinPath), { recursive: true, mode: 0o700 });
+		writeFileSync(pinPath, created, { mode: 0o600 });
+		const receiptId = join(stateRoot, `infra-promote-${tool}-${stamp}.json`);
+		writeFileSync(receiptId, JSON.stringify({ tool, from: null, to: candidate, check: "PASS", at: new Date().toISOString(), pin_receipt: certification, prior_receipt: null, pin_backup: null, pin_file: pinPath }), { mode: 0o600 });
+		return { code: 0, data: { overall: "CHANGED", command: sub, tool, version: candidate, status: "PROMOTED",
+				receipt_id: receiptId, detail: `${tool} ${candidate} certified as the first pin.` }, verification: "UNVERIFIED" };
+	}
+	const promoted = await promoteInfra({ tool, version: candidate, pins: existing.pins,
+		check: { tool, version: candidate, status: "PASS" }, receipt: certification,
+		human: true, install: () => Promise.resolve(true) });
+	if (promoted.status !== "PROMOTED") {
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: promoted.status,
+				detail: promoted.reason },
+			errors: [{ code: "PROMOTE_REFUSED", message: promoted.reason,
+				remediation: "Satisfy the guard and re-run; nothing was changed." }], verification: "UNVERIFIED" };
+	}
+	const backup = `${pinPath}.backup-${stamp}`;
+	writeFileSync(backup, readFileSync(pinPath, "utf8"), { mode: 0o600 });
+	const bumped = updatePinVersion(readFileSync(pinPath, "utf8"), tool, candidate, certification);
+	if (!bumped) {
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: "FAILED",
+				detail: `Pin file ${pinPath} resists the version bump; backup at ${backup}.` },
+			errors: [{ code: "PIN_UPDATE_FAILED", message: `Pin file ${pinPath} resists the version bump`,
+				remediation: `Restore from ${backup} or edit the pin file manually; the pin is unchanged.` }], verification: "UNVERIFIED" };
+	}
+	writeFileSync(pinPath, bumped, { mode: 0o600 });
+	const receiptId = join(stateRoot, `infra-promote-${tool}-${stamp}.json`);
+	writeFileSync(receiptId, JSON.stringify({ ...promoted.receipt, pin_backup: backup, pin_file: pinPath }), { mode: 0o600 });
+	return { code: 0, data: { overall: "CHANGED", command: sub, tool, version: candidate, status: "PROMOTED",
+			receipt_id: receiptId, detail: `${tool} certified at ${candidate}; backup at ${backup}.` }, verification: "UNVERIFIED" };
+}
+
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
 registerCommandHandler("load watch", loadWatchCommand);
 registerCommandHandler("send", sendCommand);
+for (const subcommand of ["pin", "check", "promote", "undo"]) registerCommandHandler(`infra ${subcommand}`, infraCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;

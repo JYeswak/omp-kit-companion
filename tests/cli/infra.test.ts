@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, undoPromote, type InfraExec } from "../../src/infra.ts";
+import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, undoPromote, updatePinVersion, type InfraExec } from "../../src/infra.ts";
 
 const GOOD = `[tools.bun]
 version = "1.4.0"
@@ -143,4 +143,45 @@ test("TOOL1: installer failure reports FAILED and leaves the pin", async () => {
 	const result = await promoteInfra({ tool: "bun", version: "1.5.0", pins: PINS,
 		check: PASS_NEW, human: true, install: () => Promise.resolve(false) });
 	expect(result.status).toBe("FAILED");
+});
+
+
+const PINNED = `# toolchain pins (certified by ladder runs)
+[tools.bun]
+version = "1.4.0"
+receipt = "ladder-A"
+
+[tools.typescript-language-server]
+version = "4.3.3"
+receipt = "ladder-B"
+`;
+
+test("TOOL1: pin bump keeps receipt, comments and layout", () => {
+	const bumped = updatePinVersion(PINNED, "bun", "1.5.0");
+	expect(bumped).toContain('version = "1.5.0"');
+	expect(bumped).toContain('receipt = "ladder-A"');
+	expect(bumped).toContain("# toolchain pins");
+	expect(bumped).toContain('version = "4.3.3"');
+	expect(parseInfraPins(bumped!)?.tools["bun"]).toEqual({ version: "1.5.0", receipt: "ladder-A" });
+});
+
+test("TOOL1: pin bump on unknown tool or key fails closed", () => {
+	expect(updatePinVersion(PINNED, "node", "22.0.0")).toBeNull();
+	expect(updatePinVersion("[tools.bun]\nreceipt = \"ladder-A\"\n", "bun", "1.5.0")).toBeNull();
+});
+
+test("TOOL1: check report carries the log tail", async () => {
+	const out = `${"x".repeat(5000)}\nLADDER: GREEN\n`;
+	const report = await checkInfraCandidate({ tool: "bun", version: "1.5.0", repoRoot: "/repo",
+		pathPrefix: "/prefix", baseEnv: {}, exec: { run: () => Promise.resolve({ code: 0, out }) } });
+	expect(report.logTail.length).toBeLessThanOrEqual(2000);
+	expect(report.logTail).toContain("LADDER: GREEN");
+});
+
+
+test("TOOL1: pin bump can rotate the certification receipt too", () => {
+	const bumped = updatePinVersion(PINNED, "bun", "1.5.0", "ladder-C");
+	expect(bumped).toContain('version = "1.5.0"');
+	expect(bumped).toContain('receipt = "ladder-C"');
+	expect(parseInfraPins(bumped!)?.tools["bun"]).toEqual({ version: "1.5.0", receipt: "ladder-C" });
 });
