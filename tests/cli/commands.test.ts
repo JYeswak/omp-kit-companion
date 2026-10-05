@@ -355,7 +355,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(doctor.envelope.ok).toBe(true);
 		expect(doctor.envelope.data.findings.find((row: { component: string }) => row.component === "effective_profile").status).toBe("UNVERIFIED");
 		const kitOnly = invoke("doctor", "--scope", "kit");
-		expect(kitOnly.envelope.data.findings.map((row: { component: string }) => row.component)).toEqual(["kit", "manifest"]);
+		expect(kitOnly.envelope.data.findings.map((row: { component: string }) => row.component)).toEqual(["kit", "manifest", "planning_skill"]);
 		const policy = invoke("doctor", "--scope", "policy");
 		expect(policy.code).toBe(0);
 		expect(policy.envelope.data.findings).toEqual(expect.arrayContaining([expect.objectContaining({ component: "policy", status: "UNVERIFIED" })]));
