@@ -5,3 +5,4 @@
 - SVC1 single-flight (box 4, module): `src/service-run.ts` claims one lock per job (atomic mkdir, PID-liveness + age backstop, stale empty-dir grace, fail-closed) with 7 planted tests; `service run` wiring maps OVERLAP to SKIPPED-OVERLAP exit 4.
 - SVC1 load gate (box 5, module): `src/service-run.ts` `gateRunLoad` binds the 2.5x threshold and shapes the SKIPPED-LOAD verdict (planted high-load test); `service run` wiring gates on entry with no work.
 - SVC1 time cap (box 6, module): `src/service-run.ts` `runWithCap` SIGKILLs past the cap and reports TIMEOUT with elapsed time (disturbed-pipe reads guarded); live `/bin/sleep` killed at 203ms for a 200ms cap; `service run` wiring applies the cap and records it.
+- SVC1 off switch (box 7, module): `src/service-run.ts` `readJobOff` disables on any `<job>.off` marker (reason from content, fail toward no-run); `service run` wiring checks it first with no run and no receipt.

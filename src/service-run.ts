@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadGate } from "./infra.ts";
 
@@ -214,4 +214,27 @@ export function bunCapExec(): CapExec {
 		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 		now: () => Date.now(),
 	};
+}
+
+export type JobOffSwitch = { disabled: true; reason: string | null } | { disabled: false };
+
+/**
+ * SVC1 off switch: a `<job>.off` marker beside the job state means no run and
+ * no receipt. Any existing entry disables (fail toward no-run); a regular
+ * file's trimmed content names the reason. The run handler checks this first.
+ */
+export function readJobOff(offPath: string): JobOffSwitch {
+	let stat;
+	try {
+		stat = lstatSync(offPath);
+	} catch {
+		return { disabled: false };
+	}
+	if (!stat.isFile()) return { disabled: true, reason: null };
+	let reason: string | null = null;
+	try {
+		const text = readFileSync(offPath, "utf8").trim();
+		if (text.length > 0) reason = text.split("\n")[0] ?? null;
+	} catch { /* unreadable file still disables; reason stays null */ }
+	return { disabled: true, reason };
 }

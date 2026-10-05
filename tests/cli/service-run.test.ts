@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, runWithCap, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -159,4 +159,23 @@ test("SVC1: a failing run reports FAILED with its exit", async () => {
 	expect(result.status).toBe("FAILED");
 	if (result.status !== "FAILED") throw new Error("expected FAILED");
 	expect(result.exit).toBe(3);
+});
+
+
+test("SVC1 planted: a disabled job produces no run", () => {
+	const dir = jobsDir();
+	writeFileSync(join(dir, "load-watch.off"), "paused for the incident\n");
+	const off = readJobOff(join(dir, "load-watch.off"));
+	expect(off).toEqual({ disabled: true, reason: "paused for the incident" });
+});
+
+test("SVC1: an absent off marker leaves the job enabled", () => {
+	const dir = jobsDir();
+	expect(readJobOff(join(dir, "load-watch.off"))).toEqual({ disabled: false });
+});
+
+test("SVC1: an unreadable or odd off entry still disables", () => {
+	const dir = jobsDir();
+	mkdirSync(join(dir, "load-watch.off"), { recursive: true });
+	expect(readJobOff(join(dir, "load-watch.off"))).toEqual({ disabled: true, reason: null });
 });

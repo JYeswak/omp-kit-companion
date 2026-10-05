@@ -16,7 +16,7 @@ contract; `service doctor` enforces it item by item.
 | 1 | install = render, diff, backup, bootstrap, verify, with receipt; `--dry-run` previews | IMPLEMENTED (`src/service.ts` `installService`, `planInstall`; cli `serviceCommand`) | `plist-present`, `plist-valid`, `plist-matches-renderer`, `loaded`, `binary-resolves` |
 | 2 | uninstall restores (backup kept, bootout verified) | IMPLEMENTED (`uninstallService`, `uninstallSystemd`) | `plist-present` / `unit-present` after the fact |
 | 3 | refuses a label loaded from another plist unless `--replace` | IMPLEMENTED (`LABEL_LOADED_ELSEWHERE`, both platforms) | `loaded` (path-mismatch FAIL) |
-| 4 | off switch per job: uninstalled, or a disabled flag; off means no run and no receipt | PARTIAL: only `fleet-watch` has one (`.off` file, `src/cli.ts` `serviceCommand`) | MISSING: `contract-off-switch` (runtime; needs `service.ts`/`cli.ts` holder) |
+| 4 | off switch per job: uninstalled, or a disabled flag; off means no run and no receipt | MODULE (`src/service-run.ts` `readJobOff`: any `<job>.off` marker disables, reason from content; 3 planted tests; fleet-watch keeps its own) | WIRING OPEN: `service run` must check it first per job |
 | 5 | RunAtLoad false | RESOLVED: defs are `runAtLoad: false`; enforced by `contract-run-at-load` (see below) | `contract-run-at-load` (`src/service-contract.ts`, wired into `checkService`) |
 | 6 | ProcessType Background | IMPLEMENTED in renderer | NEW: `contract-processtype` |
 | 7 | explicit absolute PATH/HOME from config | IMPLEMENTED in renderer | NEW: `contract-env`, `contract-systemd-env` |
