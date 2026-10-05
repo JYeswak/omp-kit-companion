@@ -17,7 +17,7 @@ contract; `service doctor` enforces it item by item.
 | 2 | uninstall restores (backup kept, bootout verified) | IMPLEMENTED (`uninstallService`, `uninstallSystemd`) | `plist-present` / `unit-present` after the fact |
 | 3 | refuses a label loaded from another plist unless `--replace` | IMPLEMENTED (`LABEL_LOADED_ELSEWHERE`, both platforms) | `loaded` (path-mismatch FAIL) |
 | 4 | off switch per job: uninstalled, or a disabled flag; off means no run and no receipt | PARTIAL: only `fleet-watch` has one (`.off` file, `src/cli.ts` `serviceCommand`) | MISSING: `contract-off-switch` (runtime; needs `service.ts`/`cli.ts` holder) |
-| 5 | RunAtLoad false | CONFLICT (see below) | NEW: `contract-run-at-load` (`src/service-contract.ts`) |
+| 5 | RunAtLoad false | RESOLVED: defs are `runAtLoad: false`; enforced by `contract-run-at-load` (see below) | `contract-run-at-load` (`src/service-contract.ts`, wired into `checkService`) |
 | 6 | ProcessType Background | IMPLEMENTED in renderer | NEW: `contract-processtype` |
 | 7 | explicit absolute PATH/HOME from config | IMPLEMENTED in renderer | NEW: `contract-env`, `contract-systemd-env` |
 | 8 | no secrets or secret paths in the plist/unit (PUB1) | IMPLEMENTED by convention only | NEW: `contract-no-secrets`, `contract-systemd-no-secrets` (reuses canonical `looksSecret`, `src/mcp-sources.ts`) |
@@ -29,40 +29,33 @@ contract; `service doctor` enforces it item by item.
 | 14 | logs rotated by doctor | IMPLEMENTED (`--fix` renames oversized own logs; `oversizedOwnLogs`, 50 MB threshold) | `log-dir-logs` |
 | 15 | launchd macOS / systemd user timers Linux | IMPLEMENTED (si4 tracks Linux) | `unit-present`, `unit-matches-renderer`, `loaded` (linux) |
 | 16 | one schedule owner per machine; doctor flags double scheduling | MISSING | MISSING: `contract-double-schedule` (runtime; holder wires) |
-| 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | BROKEN (see below) | Box 2, not this box |
+| 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | FIXED: parser accepts declared `--all`; rows carry loaded/lastExit/runs/last_run_at (box-2 commit) | `service status --all`, `service list` |
 
-## Open conflict: RunAtLoad
+## Resolved: RunAtLoad
 
-The contract says RunAtLoad false. The renderer emits `<true/>` for four jobs
-(`scratch-reaper`, `fleet-watch`, `fleet-lessons`, `load-watch`;
-`src/service.ts` `KNOWN_JOBS`). `contract-run-at-load` enforces the contract
-text, so those four jobs go FAIL until either the defs change to
-`runAtLoad: false` (one-line each in `KNOWN_JOBS`, holder applies) or the
-contract is amended with a reason. No silent third option.
+The contract says RunAtLoad false. `KNOWN_JOBS` rendered `<true/>` for four jobs
+(scratch-reaper, fleet-watch, fleet-lessons, load-watch); the defs are now
+`runAtLoad: false` and `contract-run-at-load` enforces it. Installed plists
+rendered before the flip report drift (`plist-matches-renderer`) until
+reinstalled; `contract-env` may also FAIL on those stale installs (they carry
+`~`-rooted PATH entries the current renderer no longer emits).
 
-## Known defect for box 2 (recorded, not fixed here)
+## Box 2 (fixed)
 
-`service status --all` and `service doctor --all` never reach their handlers:
-the generic parser (`src/cli.ts` argument check) refuses any command with a
-declared `argument` when no positional is given, before `--all` is considered.
-Reproduced on repo main: `status needs JOB`, overall `NOT_RUN`. The schema
-already documents `--all` (`src/commands.ts` service `status`/`doctor`), so the
-fix is a parser exemption, owned by whoever takes box 2 (needs `src/cli.ts`,
-held by SunnyIbis to ~20:18Z).
+`service status --all` / `doctor --all` reached their handlers after a generic
+parser exemption (a subcommand declaring `--all` accepts the flag in place of
+its positional); list/status rows carry loaded, lastExit, runs and receipt
+last_run_at. Proven by `tests/cli/service-fleet.test.ts` including a
+live-install planted test.
 
-## Wiring (for the `src/service.ts` holder)
+## Wiring (landed)
 
-```ts
-import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
-// launchd path, after the existing checks:
-checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered));
-// linux path, after the existing checks:
-checks.push(...checkSystemdContract(input.job.name, input.renderedService ?? installed ?? ""));
-```
-
-Plus the four `runAtLoad: false` def edits above. Then `service doctor --all`
-on Josh's machine must show every installed job PASS (modulo the runtime
-MISSING rows, which stay open until boxes 4-9 land).
+`checkService` concats `checkPlistContract` over the installed (or freshly
+rendered) plist; `checkServiceLinux` concats `checkSystemdContract` over the
+installed unit (or `renderedService`). Live proof: `service doctor kit-update`
+reports all six `contract-*` checks. `service doctor --all` on Josh's machine
+still needs stale installs reinstalled (drifted plists report
+`plist-matches-renderer` until `--fix` rewrites them).
 
 ## Jobs shipping through this contract
 

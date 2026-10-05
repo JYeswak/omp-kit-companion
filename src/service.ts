@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
+import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -18,11 +19,11 @@ export type ServiceRunner = (args: readonly string[]) => ServiceRunResult;
 export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number; runAtLoad?: boolean }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
-	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: true },
+	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
-	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: true },
-	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: true },
-	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: true },
+	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
+	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
+	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -546,6 +547,8 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 	} catch {
 		checks.push({ id: "scope-sanity", status: "PASS", message: "User scope only", remediation: "None." });
 	}
+	// SVC1 contract checks over the installed (or freshly rendered) definition.
+	checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered));
 	return checks;
 }
 export interface LinuxUnitInput {
@@ -601,6 +604,8 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 		checks.push({ id: "loaded", status: "PASS", message: `${input.unit} enabled=${input.enabled} active=${input.active}`, remediation: "None." });
 	}
 	checks.push({ id: "logs", status: "PASS", message: "Output goes to the journal; use omp-kit service logs (journalctl) to inspect", remediation: "None." });
+	// SVC1 contract checks over the installed (or freshly rendered) unit.
+	checks.push(...checkSystemdContract(input.job.name, installed ?? input.renderedService));
 	return checks;
 }
 export interface SystemdState { enabled: boolean; active: boolean; fragmentPath: string | null }
