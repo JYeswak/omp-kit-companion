@@ -25,6 +25,7 @@ concurrency:
 jobs:
   # A cheap Linux check: the macOS run happens only when OMP or main changed since the last green run.
   gate:
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -46,7 +47,7 @@ jobs:
 
   latest:
     needs: gate
-    if: needs.gate.outputs.run == 'true'
+    if: github.event.repository.private == false && needs.gate.outputs.run == 'true'
     runs-on: macos-15
     timeout-minutes: 45
     steps:

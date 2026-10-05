@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   validate-tag:
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -35,6 +36,7 @@ jobs:
 
   native-candidate:
     needs: validate-tag
+    if: github.event.repository.private == false
     uses: ./.github/workflows/ci.yml
     with:
       version: ${{ inputs.version }}

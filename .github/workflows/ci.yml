@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   resolve-omp-versions:
+    if: github.event.repository.private == false
     runs-on: ubuntu-24.04
     outputs:
       minimum: ${{ steps.resolve.outputs.minimum }}
@@ -59,6 +60,7 @@ jobs:
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
   cli-contracts:
+    if: github.event.repository.private == false
     needs: resolve-omp-versions
     strategy:
       fail-fast: false
@@ -126,6 +128,7 @@ jobs:
               exit 1
           fi
   ladder:
+    if: github.event.repository.private == false
     needs: resolve-omp-versions
     strategy:
       fail-fast: false
@@ -197,7 +200,7 @@ jobs:
 
   build-candidates:
     needs: resolve-omp-versions
-    if: github.event_name != 'push'
+    if: github.event.repository.private == false && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -228,6 +231,7 @@ jobs:
           retention-days: ${{ inputs.version && 7 || 2 }}
 
   real-home-journey:
+    if: github.event.repository.private == false
     needs: [build-candidates, resolve-omp-versions]
     strategy:
       fail-fast: false
@@ -284,6 +288,7 @@ jobs:
           retention-days: 2
 
   native-certification:
+    if: github.event.repository.private == false
     needs: [build-candidates, resolve-omp-versions]
     # One failing target is excluded; the aggregate still requires a nonempty native-certified set.
     continue-on-error: true
@@ -338,7 +343,7 @@ jobs:
 
   candidate-index:
     needs: [build-candidates, native-certification, resolve-omp-versions]
-    if: ${{ always() && github.event_name != 'push' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
+    if: ${{ github.event.repository.private == false && always() && github.event_name != 'push' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

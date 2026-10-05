@@ -1,0 +1,1 @@
+- CI1 slice: every job in the kit's three workflows carries `if: github.event.repository.private == false`, so a private fork or mirror never bills minutes. `tests/cli/workflows-private-guard.test.ts` fails on any job without the exact guard string. Still open: doctor private-repo finding, budget reporting, burn cuts, Josh's per-repo decisions.
