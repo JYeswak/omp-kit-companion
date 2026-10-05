@@ -203,7 +203,9 @@ function parse(args: readonly string[]): ParseResult {
 	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) {
 		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
 	}
-	if (command.argument && !rest.length && command.name !== "help" && command.name !== "heavy" && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
+	// A subcommand that declares --all accepts the flag in place of its positional (service status/doctor --all).
+	const allDeclared = (parent ? [...parent.flags, ...command.flags] : command.flags).some((flag) => flag.name === "--all");
+	if (command.argument && !rest.length && command.name !== "help" && command.name !== "heavy" && !flags.has("--help") && !(flags.has("--all") && allDeclared)) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
 	const scope = flags.get("--scope");
 	if (typeof scope === "string") {
 		const grammar = (parent ? [...parent.flags, ...command.flags] : command.flags).find((flag) => flag.name === "--scope")?.value;
@@ -2081,6 +2083,17 @@ async function reviewReduceCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 registerCommandHandler("review reduce", reviewReduceCommand);
+/** Last run time from the job receipt; null when the job never wrote one. */
+function readJobFinishedAt(home: string, jobName: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(jobReceiptPath(home, jobName), "utf8"));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("finished_at" in parsed)) return null;
+		return typeof parsed.finished_at === "string" ? parsed.finished_at : null;
+	} catch {
+		return null;
+	}
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -2121,7 +2134,11 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		return { code: 0, data: { overall: "OK", job: names.join(","), jobs: names.map(name => {
 			const { job, launcher } = resolveJob(name);
 			const installed = platform === "darwin" ? readInstalledPlist(home, job.label) : null;
-			return { name, label: job.label, kind: job.kind, launcher, installed: installed !== null };
+			const print = platform === "darwin" ? queryPrint(job.label) : null;
+			const state = linux ? systemctlState(job, defaultRunner) : null;
+			const loaded = print !== null ? print.loaded : (state !== null && (state.enabled || state.active));
+			return { name, label: job.label, kind: job.kind, launcher, installed: installed !== null, loaded,
+				lastExit: print?.lastExit ?? null, runs: print?.runs ?? null, last_run_at: readJobFinishedAt(home, name) };
 		}) }, verification: "UNVERIFIED" };
 	}
 	if (sub === "install") {
@@ -2201,11 +2218,11 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const job = scoped[name!]!;
 			if (linux) {
 				const state = systemctlState(job, defaultRunner);
-				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath };
+				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, last_run_at: readJobFinishedAt(home, name) };
 			}
 			const installed = readInstalledPlist(home, job.label);
 			const print = queryPrint(job.label);
-			return { name, label: job.label, installed: installed !== null, loaded: print.loaded, state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit };
+			return { name, label: job.label, installed: installed !== null, loaded: print.loaded, state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, last_run_at: readJobFinishedAt(home, name) };
 		});
 		const down = rows.some(row => !row.loaded);
 		return { code: down ? 1 : 0, data: { overall: down ? "FINDINGS" : "OK", job: names.join(","), status: rows }, verification: "UNVERIFIED" };
