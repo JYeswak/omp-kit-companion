@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectDicklesworthstone, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -488,4 +488,25 @@ test("dual-config and policy-skipped profiles surface as not covered with named 
 	expect(reasons.work).toMatch(/policy skipProfiles/);
 	expect(reasons.claude).toMatch(/^DUAL_CONFIG: config\.yml \+ settings\.json/);
 	expect(finding(rows, "extensions").evidence?.skipped_profiles).toEqual(["work"]);
+});
+
+test("a same-named rule from a foreign plugin is not a kit win", () => {
+	const home = "/test-home";
+	const kitDir = "/test-home/.omp/plugins/node_modules/omp-kit-companion";
+	const pluginEntry = { name: "omp-kit-companion", version: "0.2.5", path: kitDir };
+	const base = { home, ompPath: "/bin/omp", kitVersion: "0.2.5", ompVersion: "18.6.1", rules: ["rule-a"], profiles: [{ name: "p" }] };
+	const kitRow = inspectEffectiveRules({ ...base, probe: (profile, command) => command === "ttsr"
+		? [{ name: "rule-a", path: `${kitDir}/rules/rule-a.md`, provider: "plugin" }]
+		: { npm: [pluginEntry], marketplace: [] } });
+	expect(kitRow.status).toBe("OK");
+	const foreignRow = inspectEffectiveRules({ ...base, probe: (profile, command) => command === "ttsr"
+		? [{ name: "rule-a", path: "/test-home/.omp/plugins/node_modules/other/rules/rule-a.md", provider: "plugin" }]
+		: { npm: [pluginEntry], marketplace: [] } });
+	expect(foreignRow.status).toBe("DEGRADED");
+	const profiles = foreignRow.evidence !== undefined && "profiles" in foreignRow.evidence ? foreignRow.evidence.profiles : undefined;
+	expect(Array.isArray(profiles)).toBe(true);
+	const first = Array.isArray(profiles) ? profiles[0] : undefined;
+	const kitRules = first !== null && typeof first === "object" && "kit_rules" in first ? first.kit_rules : undefined;
+	expect(kitRules !== null && typeof kitRules === "object" && "plugin" in kitRules ? kitRules.plugin : undefined).toEqual([]);
+	expect(kitRules !== null && typeof kitRules === "object" && "missing" in kitRules ? kitRules.missing : undefined).toEqual(["rule-a"]);
 });

@@ -547,10 +547,10 @@ function pluginEntries(value: unknown): Record<string, unknown>[] {
 	return ["npm", "marketplace"].flatMap(key => Array.isArray(value[key]) ? value[key].filter(record) : []);
 }
 
-function ruleSource(home: string, profile: string, item: Record<string, unknown>, pluginVersion: string | null): "kit_plugin" | "native_overlay" | "legacy" | "absent" {
+function ruleSource(home: string, profile: string, item: Record<string, unknown>, pluginVersion: string | null, kitPackageDir: string | null): "kit_plugin" | "native_overlay" | "legacy" | "absent" {
 	const path = typeof item.path === "string" ? item.path : "";
 	if (!path) return "absent";
-	if (path.includes("omp-kit-companion") || item.provider === "plugin" || item.provider === "npm") return pluginVersion ? "kit_plugin" : "absent";
+	if (kitPackageDir !== null && (path === kitPackageDir || path.startsWith(`${kitPackageDir}/`))) return pluginVersion ? "kit_plugin" : "absent";
 	if (path.startsWith(join(home, ".agents", "rules"))) return "legacy";
 	if (path.startsWith(join(home, ".omp", "agent", "rules")) || path.startsWith(join(home, ".omp", "profiles", profile, "agent", "rules"))) return "native_overlay";
 	return "absent";
@@ -567,14 +567,15 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			const plugins = pluginEntries(probe(profile.name, "plugin"));
 			const kitPlugin = plugins.find(item => typeof item.name === "string" && /omp-kit-companion/i.test(item.name));
 			const pluginVersion = kitPlugin && typeof kitPlugin.version === "string" ? kitPlugin.version : null;
+			const kitPackageDir = kitPlugin && typeof kitPlugin.path === "string" ? kitPlugin.path : null;
 			const ruleRows = Array.isArray(rules) ? rules.filter(record) : [];
 			const byName = new Map(ruleRows.map(item => [typeof item.name === "string" ? item.name : "", item]));
 			const alwaysRules = new Set(input.always_rules ?? []);
 			const conditionalRules = input.rules.filter(name => !alwaysRules.has(name));
-			const missing = conditionalRules.filter(name => !byName.has(name));
-			const legacy = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "legacy");
-			const overlays = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "native_overlay");
-			const pluginRules = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion) === "kit_plugin");
+			const missing = conditionalRules.filter(name => !byName.has(name) || (byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "absent"));
+			const legacy = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "legacy");
+			const overlays = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "native_overlay");
+			const pluginRules = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "kit_plugin");
 			const pluginPath = kitPlugin && typeof kitPlugin.path === "string" ? kitPlugin.path : null;
 			const alwaysMissing = [...alwaysRules].filter(name => !pluginPath || !existsSync(join(pluginPath, "rules", `${name}.md`)));
 			const versionMismatch = pluginRules.length > 0 && input.kitVersion !== null && pluginVersion !== input.kitVersion;

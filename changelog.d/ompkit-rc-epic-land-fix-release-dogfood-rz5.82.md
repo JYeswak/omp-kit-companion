@@ -1,0 +1,1 @@
+- PROF2 slice: a same-named rule counts as kit-loaded only when its path sits under the kit plugin's package dir; foreign-plugin and provider-only matches now land in `missing` instead of vanishing from every bucket. Planted foreign-plugin test goes DEGRADED with the rule named missing.
