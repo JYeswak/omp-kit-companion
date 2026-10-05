@@ -31,3 +31,28 @@ A release is:
 4. Publication of the certified archives and `release-index.json` as a GitHub release, then a fresh-HOME install from the published index.
 
 A target that fails native certification is not published. One documented rerun of its job is allowed only when its receipt names a known, tracked upstream defect.
+
+## Release fallback when GitHub runners queue (dsr)
+
+If a release run queues over 10 minutes (`dsr check`), build locally with dsr instead of waiting:
+
+```sh
+dsr repos add JYeswak/omp-kit-companion --local-path ~/Developer/omp-kit-companion
+dsr health all
+dsr build omp-kit-companion --dry-run --allow-dirty
+```
+
+The repo registry entry plus per-target definition lives in `~/.config/dsr/repos.yaml` and
+`~/.config/dsr/repos.d/omp-kit-companion.yaml` (undo: `dsr repos remove omp-kit-companion`
+and delete the repos.d file). A dsr build carries the same receipts as a CI build: run
+`scripts/native-candidate.py` per platform and keep its receipts; a target without a
+certification receipt is not published, same as step 4 of Releases above.
+
+Known gaps 2026-10-05 (DS1 rz5.54): dsr targets use a fixed vocabulary (`linux/amd64`,
+`linux/arm64`, `darwin/arm64`, `windows/amd64`) with one shared `build_cmd`, while the kit
+needs four platform keys (`darwin-arm64-none`, `darwin-x64-none`, `linux-arm64-gnu`,
+`linux-x64-gnu`) passed to `scripts/package-release.ts --platform`; the per-target mapping
+is unverified, so even `dsr build --dry-run` stops at target resolution. The macOS remotes
+(mmini, wlap) were unreachable so no native darwin build was possible; `api.github.com`
+was unreachable; minisign key and `syft` are unconfigured, so dsr signing/SBOM output is
+unavailable. Until those close, every archive still ships through the release workflow.
