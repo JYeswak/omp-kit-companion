@@ -21,7 +21,7 @@ contract; `service doctor` enforces it item by item.
 | 6 | ProcessType Background | IMPLEMENTED in renderer | NEW: `contract-processtype` |
 | 7 | explicit absolute PATH/HOME from config | IMPLEMENTED in renderer | NEW: `contract-env`, `contract-systemd-env` |
 | 8 | no secrets or secret paths in the plist/unit (PUB1) | IMPLEMENTED by convention only | NEW: `contract-no-secrets`, `contract-systemd-no-secrets` (reuses canonical `looksSecret`, `src/mcp-sources.ts`) |
-| 9 | single-flight lock: overlap exits SKIPPED-OVERLAP | MISSING (`service run` has no lock) | MISSING: `contract-single-flight` (runtime; holder wires) |
+| 9 | single-flight lock: overlap exits SKIPPED-OVERLAP | MODULE (`src/service-run.ts` `acquireRunLock`: mkdir-claim, PID-liveness + age backstop, fail-closed; 7 planted tests) | WIRING OPEN: `service run` must call it and map OVERLAP to SKIPPED-OVERLAP exit 4 |
 | 10 | load gate: 1-min load > 2.5x cores writes SKIPPED-LOAD, no work; heavy steps via `omp-kit heavy` at nice 10 | MISSING in `service run` (census exists: `runLoadWatch`) | MISSING: `contract-load-gate` (runtime; holder wires) |
 | 11 | per-run time cap: kill past the cap, record TIMEOUT | MISSING (systemd has `TimeoutStartSec=600` only) | NEW static half: `contract-systemd-timeout`; MISSING runtime half |
 | 12 | one receipt per run (job, version, start, duration, exit, outcome counts) feeding VALUE1 | PARTIAL: `scratch-reaper` + default jobs write `JobReceipt`; `load-watch`, `kit-update`, `fleet-watch` do not | MISSING: `contract-receipt` (runtime; holder wires) |
