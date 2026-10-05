@@ -1,0 +1,1 @@
+- Reservation-age report (`src/reservation-age.ts`, `tests/cli/reservation-age.test.ts`): audits an Agent Mail archive for exclusive holds older than the limit (default 30 min) with holder and bead; a 45-minute planted hold is reported, a 10-minute one is not. Doctor-scope registration follows when the scope files are free.
