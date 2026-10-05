@@ -73,7 +73,7 @@ export interface LadderStage {
 export interface InfraCheckReport {
 	tool: string;
 	version: string;
-	status: "PASS" | "FAIL";
+	status: "PASS" | "FAIL" | "INCONCLUSIVE";
 	failedStage: string | null;
 	stages: LadderStage[];
 	logTail: string;
@@ -95,6 +95,8 @@ export async function checkInfraCandidate(input: {
 	pathPrefix: string;
 	baseEnv: Record<string, string>;
 	exec: InfraExec;
+	/** The run was forced above the load limit: stages are evidence, never a verdict. */
+	forcedHighLoad?: boolean;
 }): Promise<InfraCheckReport> {
 	const out = await input.exec.run(["/bin/sh", "scripts/ladder.sh"], {
 		cwd: input.repoRoot,
@@ -112,6 +114,11 @@ export async function checkInfraCandidate(input: {
 	}
 	const failed = stages.find(stage => stage.status === "RED") ?? null;
 	const green = out.split("\n").some(line => line.trim() === "LADDER: GREEN");
+	if (input.forcedHighLoad === true) {
+		return { tool: input.tool, version: input.version, status: "INCONCLUSIVE",
+			failedStage: failed?.label ?? (green ? null : "ladder-incomplete"),
+			stages, logTail: out.slice(-2000) };
+	}
 	return { tool: input.tool, version: input.version,
 		status: failed === null && green ? "PASS" : "FAIL",
 		failedStage: failed?.label ?? (green ? null : "ladder-incomplete"),
@@ -155,6 +162,24 @@ export function updatePinVersion(text: string, tool: string, version: string, re
 	}
 	if (!versioned || !receipted) return null;
 	return lines.join("\n");
+}
+
+export const DEFAULT_LOAD_LIMIT_FACTOR = 1.5;
+
+export type LoadGate = { ok: true } | { ok: false; reason: string };
+
+/**
+ * TOOL1 quiet-machine gate: refuse ladder work when the 1-minute load exceeds
+ * factor * cores. Pure decision; the CLI reads the load and enforces waiting.
+ */
+export function loadGate(load1: number, ncpu: number, factor: number = DEFAULT_LOAD_LIMIT_FACTOR): LoadGate {
+	if (!(ncpu > 0) || !(load1 >= 0) || !(factor > 0)) {
+		return { ok: false, reason: `Unusable load reading (load1=${load1}, ncpu=${ncpu}); refusing rather than running blind.` };
+	}
+	if (load1 > factor * ncpu) {
+		return { ok: false, reason: `1-minute load ${load1} exceeds ${factor}x${ncpu} cores; retry when quiet.` };
+	}
+	return { ok: true };
 }
 
 export interface PromoteCheck {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, undoPromote, updatePinVersion, type InfraExec } from "../../src/infra.ts";
+import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, undoPromote, updatePinVersion, type InfraExec } from "../../src/infra.ts";
 
 const GOOD = `[tools.bun]
 version = "1.4.0"
@@ -184,4 +184,28 @@ test("TOOL1: pin bump can rotate the certification receipt too", () => {
 	expect(bumped).toContain('version = "1.5.0"');
 	expect(bumped).toContain('receipt = "ladder-C"');
 	expect(parseInfraPins(bumped!)?.tools["bun"]).toEqual({ version: "1.5.0", receipt: "ladder-C" });
+});
+
+
+test("TOOL1: the load gate refuses above 1.5x cores", () => {
+	const shut = loadGate(55, 32);
+	expect(shut.ok).toBe(false);
+	if (!shut.ok) expect(shut.reason).toContain("55");
+	expect(loadGate(10, 32).ok).toBe(true);
+	expect(loadGate(48, 32).ok).toBe(true);
+	expect(loadGate(-1, 32).ok).toBe(false);
+	expect(loadGate(10, 0).ok).toBe(false);
+});
+
+test("TOOL1 planted: a check forced above the load limit is INCONCLUSIVE, never PASS or FAIL", async () => {
+	const broken = "GREEN manifest producer_rc=0\nRED   regex-budget producer_rc=1\n";
+	const failed = await checkInfraCandidate({ tool: "bun", version: "1.4.2", repoRoot: "/repo",
+		pathPrefix: "/prefix", baseEnv: {}, forcedHighLoad: true,
+		exec: { run: () => Promise.resolve({ code: 1, out: broken }) } });
+	expect(failed.status).toBe("INCONCLUSIVE");
+	expect(failed.failedStage).toBe("regex-budget");
+	const passed = await checkInfraCandidate({ tool: "bun", version: "1.4.2", repoRoot: "/repo",
+		pathPrefix: "/prefix", baseEnv: {}, forcedHighLoad: true,
+		exec: { run: () => Promise.resolve({ code: 0, out: "GREEN manifest producer_rc=0\nLADDER: GREEN\n" }) } });
+	expect(passed.status).toBe("INCONCLUSIVE");
 });
