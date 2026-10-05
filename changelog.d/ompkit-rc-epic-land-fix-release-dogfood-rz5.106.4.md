@@ -1,1 +1,1 @@
-- `doctor --scope work` reports dirty files older than the configured limit only when an active exclusive Agent Mail reservation covers the path; the default is 30 minutes, configurable with `OMP_KIT_WORK_STALE_EDIT_MINUTES`. The scan is read-only and never commits, stashes, or modifies files.
+- `doctor --scope work` reports timed-out Git probes as `TIMED_OUT` with all state metrics unknown, never inventing zero dirty/stale counts or detached state. The check remains read-only; the 30-minute stale-age default and `OMP_KIT_WORK_STALE_EDIT_MINUTES` override are unchanged.

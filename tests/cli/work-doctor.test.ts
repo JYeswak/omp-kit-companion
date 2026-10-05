@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { inspectWorkFleet } from "../../src/work-doctor.ts";
@@ -80,7 +80,9 @@ test("read-only work scope classifies clean dirty ahead no-upstream stash detach
 	expect(row("stash").stash_count).toBe(1);
 	expect(row("detached").detached).toBe(true);
 	expect(row("ahead").active_worktrees).toBe(2);
-	expect(report.repos.map((entry) => entry.risk_score)).toEqual([...report.repos].map((entry) => entry.risk_score).sort((a, b) => b - a));
+	const riskScores = report.repos.map((entry) => entry.risk_score).filter((score): score is number => score !== null);
+	expect(riskScores).toHaveLength(report.repos.length);
+	expect(riskScores).toEqual([...riskScores].sort((a, b) => b - a));
 }, 30_000);
 
 test("work scope marks a missing root as unavailable without changing exit semantics", async () => {
@@ -182,3 +184,44 @@ test("work scope reports only old dirty files with matching active reservations"
 	expect([stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }))).toEqual(beforeCli);
 	expect(git(target, "status", "--porcelain=v1")).toBe(statusBeforeCli);
 });
+
+test("work scope exposes no clean-looking values when Git status times out", async () => {
+	const root = mkdtempSync(join(runtimeTempRoot(), "work-doctor-timeout."));
+	fixtures.push(root);
+	const target = repo(root, "timeout");
+	const hook = join(root, "fsmonitor.sh");
+	const marker = join(root, "fsmonitor.started");
+	const pidFile = join(root, "fsmonitor.pid");
+	writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$$" > ${JSON.stringify(pidFile)}\nprintf started > ${JSON.stringify(marker)}\nexec sleep 10 >/dev/null 2>&1\n`);
+	chmodSync(hook, 0o755);
+	git(target, "config", "core.fsmonitor", hook);
+	let hookPid: number | null = null;
+	try {
+		const report = await inspectWorkFleet({ roots: [root], concurrency: 1, perRepoTimeoutMs: 500 });
+		expect(existsSync(marker)).toBe(true);
+		hookPid = Number(readFileSync(pidFile, "utf8").trim());
+		const row = report.repos.find((entry) => entry.path === target)!;
+		expect(report.timed_out_repos).toBe(1);
+		expect(row.status).toBe("TIMED_OUT");
+		expect(row).toMatchObject({
+			dirty_file_count: null, tracked_dirty_file_count: null, untracked_file_count: null, untracked_scan_status: "UNKNOWN",
+			commits_ahead: null, commits_behind: null, unpushed_commits: null, has_upstream: null, no_upstream: null,
+			has_remote: null, no_remote: null, stash_count: null, detached: null, branch: null,
+			last_commit_epoch: null, last_commit_age_days: null, active_worktrees: null, worktree_paths: null,
+			risk_score: null, reservation_scan_status: "UNKNOWN", stale_uncommitted_edits: null,
+		});
+		expect(row.findings).toContain("status_timed_out");
+		const values = (value: unknown): unknown[] => Array.isArray(value) ? value.flatMap(values) : value && typeof value === "object" ? Object.values(value as Record<string, unknown>).flatMap(values) : [value];
+		const leaves = values(row);
+		expect(leaves).not.toContain(0);
+		expect(leaves).not.toContain(false);
+		expect(leaves).not.toContainEqual([]);
+		expect(report.text).toContain("TIMED_OUT");
+		expect(report.text).toContain("UNKNOWN");
+	} finally {
+		if (hookPid !== null && Number.isInteger(hookPid) && hookPid > 0) {
+			try { process.kill(hookPid, "SIGKILL"); }
+			catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error; }
+		}
+	}
+}, 30_000);

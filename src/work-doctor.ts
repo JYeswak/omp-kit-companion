@@ -3,15 +3,15 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { auditStaleReservedEdits, DEFAULT_RESERVATION_LIMIT_MINUTES, type StaleReservedEdit } from "./reservation-age.ts";
 
 export type WorkRootStatus = "OK" | "UNAVAILABLE";
-export type WorkRepoStatus = "OK" | "WARN" | "UNVERIFIED";
+export type WorkRepoStatus = "OK" | "WARN" | "UNVERIFIED" | "TIMED_OUT";
 
 export interface WorkDoctorInput { roots: readonly string[]; concurrency?: number; perRepoTimeoutMs?: number; staleEditLimitMinutes?: number; nowMs?: number; }
 export interface WorkRootReport { path: string; status: WorkRootStatus; repo_count: number; reason?: string; discovery?: { max_depth: number; ignored_directory_names: string[]; skipped_depth_directories: number; skipped_symlink_directories: number; skipped_ignored_directories: number }; }
 export interface WorkRepoReport {
-	name: string; path: string; status: WorkRepoStatus; dirty_file_count: number; tracked_dirty_file_count: number; untracked_file_count: number | null; untracked_file_cap: number; untracked_scan_status: "OK" | "CAP" | "TIMEOUT" | "ERROR"; commits_ahead: number | null; commits_behind: number | null;
-	unpushed_commits: number; has_upstream: boolean; has_remote: boolean; no_upstream: boolean; no_remote: boolean; stash_count: number;
-	detached: boolean; branch: string | null; last_commit_epoch: number | null; last_commit_age_days: number | null; active_worktrees: number;
-	worktree_paths: string[]; reservation_scan_status: "OK" | "PARTIAL" | "UNAVAILABLE" | "UNCONFIGURED"; stale_uncommitted_edits: StaleReservedEdit[]; reservation_scan_reason?: string; risk_score: number; findings: string[]; reason?: string;
+	name: string; path: string; status: WorkRepoStatus; dirty_file_count: number | null; tracked_dirty_file_count: number | null; untracked_file_count: number | null; untracked_file_cap: number; untracked_scan_status: "OK" | "CAP" | "TIMEOUT" | "ERROR" | "UNKNOWN"; commits_ahead: number | null; commits_behind: number | null;
+	unpushed_commits: number | null; has_upstream: boolean | null; has_remote: boolean | null; no_upstream: boolean | null; no_remote: boolean | null; stash_count: number | null;
+	detached: boolean | null; branch: string | null; last_commit_epoch: number | null; last_commit_age_days: number | null; active_worktrees: number | null;
+	worktree_paths: string[] | null; reservation_scan_status: "OK" | "PARTIAL" | "UNAVAILABLE" | "UNCONFIGURED" | "UNKNOWN"; stale_uncommitted_edits: StaleReservedEdit[] | null; reservation_scan_reason?: string; risk_score: number | null; findings: string[]; reason?: string;
 }
 export interface WorkDoctorReport {
 	scope: "work"; overall: "REPORT"; roots: WorkRootReport[]; repos: WorkRepoReport[]; concurrency: number; per_repo_timeout_ms: number; stale_edit_limit_minutes: number;
@@ -86,24 +86,37 @@ function dirtyFileMetadata(repo: string, paths: readonly string[]): Array<{ path
 	}
 	return files;
 }
-interface ReservationScan { status: WorkRepoReport["reservation_scan_status"]; stale: StaleReservedEdit[]; reason?: string; }
+interface ReservationScan { status: WorkRepoReport["reservation_scan_status"]; stale: StaleReservedEdit[]; timed_out: boolean; reason?: string; }
 
 async function scanReservedEdits(repo: string, dirtyFiles: number, untracked: GitResult, untrackedResult: ReturnType<typeof parseUntracked>, limitMinutes: number, nowMs: number, timeoutMs: number): Promise<ReservationScan> {
-	if (dirtyFiles === 0) return { status: "UNCONFIGURED", stale: [] };
+	if (dirtyFiles === 0) return { status: "UNCONFIGURED", stale: [], timed_out: false };
 	const storageConfig = await runGit(repo, ["config", "--local", "--get", "omp-kit.agent-mail-storage-root"], timeoutMs);
-	const storageLookupFailed = storageConfig.timed_out || (storageConfig.code !== 0 && storageConfig.code !== 1);
+	if (storageConfig.timed_out) return { status: "UNKNOWN", stale: [], timed_out: true, reason: "Agent Mail storage configuration timed out" };
+	const storageLookupFailed = storageConfig.code !== 0 && storageConfig.code !== 1;
 	const storageRoot = agentMailStorageRoot(repo, storageConfig.code === 0 ? storageConfig.stdout : "");
-	if (storageLookupFailed && !storageRoot) return { status: "UNAVAILABLE", stale: [], reason: "Agent Mail storage configuration could not be read" };
-	if (!storageRoot) return { status: "UNCONFIGURED", stale: [], reason: "Agent Mail storage root is not configured" };
+	if (storageLookupFailed && !storageRoot) return { status: "UNAVAILABLE", stale: [], timed_out: false, reason: "Agent Mail storage configuration could not be read" };
+	if (!storageRoot) return { status: "UNCONFIGURED", stale: [], timed_out: false, reason: "Agent Mail storage root is not configured" };
 	const trackedChanges = await runGit(repo, ["diff", "--name-only", "--no-ext-diff", "-z", "HEAD"], timeoutMs);
+	if (trackedChanges.timed_out) return { status: "UNKNOWN", stale: [], timed_out: true, reason: "Git tracked dirty-path scan timed out" };
 	const trackedPaths = trackedChanges.code === 0 ? trackedChanges.stdout.split("\0").filter(Boolean) : [];
 	const untrackedPaths = untrackedResult.status === "OK" ? untracked.stdout.split("\0").filter(Boolean) : [];
 	const dirtyFileMtimes = dirtyFileMetadata(repo, [...trackedPaths, ...untrackedPaths]);
 	const audit = auditStaleReservedEdits({ archiveRoot: storageRoot, projectKey: repo, dirtyFiles: dirtyFileMtimes, limitMinutes, nowMs });
 	const status = trackedChanges.code !== 0 || untrackedResult.status !== "OK" ? "PARTIAL" : audit.status;
-	return { status, stale: audit.stale, ...(status === "OK" ? {} : { reason: "Agent Mail reservation scan " + status.toLowerCase() }) };
+	return { status, stale: audit.stale, timed_out: false, ...(status === "OK" ? {} : { reason: "Agent Mail reservation scan " + status.toLowerCase() }) };
 }
 
+function timedOutRepo(repo: string, sources: readonly string[], timeoutMs: number, detail?: string): WorkRepoReport {
+	const reason = detail ?? `Git ${sources.join(", ")} timed out after ${timeoutMs} ms`;
+	return {
+		name: basename(repo), path: repo, status: "TIMED_OUT", dirty_file_count: null, tracked_dirty_file_count: null,
+		untracked_file_count: null, untracked_file_cap: UNTRACKED_FILE_CAP, untracked_scan_status: "UNKNOWN",
+		commits_ahead: null, commits_behind: null, unpushed_commits: null, has_upstream: null, has_remote: null, no_upstream: null, no_remote: null, stash_count: null,
+		detached: null, branch: null, last_commit_epoch: null, last_commit_age_days: null, active_worktrees: null, worktree_paths: null,
+		reservation_scan_status: "UNKNOWN", stale_uncommitted_edits: null, reservation_scan_reason: reason, risk_score: null,
+		findings: ["unverified", sources.includes("status") ? "status_timed_out" : "git_probe_timed_out"], reason,
+	};
+}
 interface GitMetadata { hasRemote: boolean; stashCount: number; worktreePaths: string[]; readable: boolean; }
 function gitMetadata(repo: string): GitMetadata {
 	try {
@@ -142,22 +155,26 @@ async function inspectRepo(repo: string, timeoutMs: number, staleEditLimitMinute
 		runGit(repo, ["log", "-1", "--format=%ct"], timeoutMs),
 		runGit(repo, ["ls-files", "--others", "--exclude-standard", "-z"], timeoutMs),
 	]);
+	const initialTimeouts = [status.timed_out ? "status" : null, lastCommit.timed_out ? "log" : null, untracked.timed_out ? "untracked" : null].filter((source): source is string => source !== null);
+	if (initialTimeouts.length) return timedOutRepo(repo, initialTimeouts, timeoutMs);
 	const statusLines = lines(status.stdout);
 	const branchHead = statusLines.find((line) => line.startsWith("# branch.head "))?.slice("# branch.head ".length).trim() ?? null;
 	const upstreamName = statusLines.find((line) => line.startsWith("# branch.upstream "))?.slice("# branch.upstream ".length).trim() ?? null;
 	const upstreamCount = upstreamName ? await runGit(repo, ["rev-list", "--left-right", "--count", "@{u}...HEAD"], timeoutMs) : null;
 	const localCount = upstreamName ? null : await runGit(repo, ["rev-list", "--count", "HEAD"], timeoutMs);
+	const countTimeouts = [upstreamCount?.timed_out ? "upstream-count" : null, localCount?.timed_out ? "local-count" : null].filter((source): source is string => source !== null);
+	if (countTimeouts.length) return timedOutRepo(repo, countTimeouts, timeoutMs);
 	const aheadBehind = upstreamCount?.code === 0 ? upstreamCount.stdout.trim().match(/^(\d+)\s+(\d+)$/) : null;
 	const behind = aheadBehind ? Number.parseInt(aheadBehind[1]!, 10) : null;
 	const ahead = aheadBehind ? Number.parseInt(aheadBehind[2]!, 10) : null;
 	const coreResults = [status, lastCommit, ...(upstreamCount ? [upstreamCount] : []), ...(localCount ? [localCount] : [])];
 	const errors = coreResults.filter((result) => result.code !== 0 && result.code !== 1);
-	const timeoutSources = [status.timed_out ? "status" : null, lastCommit.timed_out ? "log" : null, upstreamCount?.timed_out ? "upstream-count" : null, localCount?.timed_out ? "local-count" : null].filter((source): source is string => source !== null);
-	const coreIncomplete = errors.length > 0 || timeoutSources.length > 0 || !metadata.readable;
+	const coreIncomplete = errors.length > 0 || !metadata.readable;
 	const trackedDirtyFiles = statusLines.filter((line) => !line.startsWith("#")).length;
 	const untrackedResult = parseUntracked(untracked);
 	const dirtyFiles = trackedDirtyFiles + (untrackedResult.count ?? 0);
 	const reservationScan = await scanReservedEdits(repo, dirtyFiles, untracked, untrackedResult, staleEditLimitMinutes, nowMs, timeoutMs);
+	if (reservationScan.timed_out) return timedOutRepo(repo, ["reservation scan"], timeoutMs, reservationScan.reason);
 	const reservationScanStatus = reservationScan.status;
 	const staleUncommittedEdits = reservationScan.stale;
 	const reservationScanReason = reservationScan.reason;
@@ -185,7 +202,7 @@ async function inspectRepo(repo: string, timeoutMs: number, staleEditLimitMinute
 		last_commit_epoch: lastEpoch, last_commit_age_days: ageDays, active_worktrees: metadata.worktreePaths.length, worktree_paths: metadata.worktreePaths, risk_score: riskScore, findings,
 		reservation_scan_status: reservationScanStatus, stale_uncommitted_edits: staleUncommittedEdits,
 		...(reservationScanReason ? { reservation_scan_reason: reservationScanReason } : {}),
-		...(coreIncomplete || untrackedResult.status !== "OK" || reservationScanReason ? { reason: [...errors.map((error) => error.stderr).filter(Boolean), ...timeoutSources.map((source) => source + " timed out"), ...(untrackedResult.status !== "OK" ? ["untracked scan " + untrackedResult.status] : []), ...(reservationScanReason ? [reservationScanReason] : [])].join("; ") || "git inspection incomplete" } : {}),
+		...(coreIncomplete || untrackedResult.status !== "OK" || reservationScanReason ? { reason: [...errors.map((error) => error.stderr).filter(Boolean), ...(untrackedResult.status !== "OK" ? ["untracked scan " + untrackedResult.status] : []), ...(reservationScanReason ? [reservationScanReason] : [])].join("; ") || "git inspection incomplete" } : {}),
 	};
 }
 function discover(root: string): { root: WorkRootReport; repos: string[] } {
@@ -214,9 +231,15 @@ function discover(root: string): { root: WorkRootReport; repos: string[] } {
 function renderTable(repos: readonly WorkRepoReport[]): string {
 	const rows = ["RISK  DIRTY STALE AHEAD UNPUSHED STASH DETACHED STATUS       REPOSITORY"];
 	for (const repo of repos) {
-		const staleCount = repo.stale_uncommitted_edits.length;
-		const staleCell = repo.reservation_scan_status === "OK" ? String(staleCount) : repo.dirty_file_count ? staleCount ? `${staleCount}+?` : "?" : "0";
-		rows.push(`${repo.risk_score.toFixed(1).padStart(6)} ${String(repo.dirty_file_count).padStart(5)} ${staleCell.padStart(5)} ${String(repo.commits_ahead ?? "-").padStart(5)} ${String(repo.unpushed_commits).padStart(7)} ${String(repo.stash_count).padStart(5)} ${String(repo.detached).padStart(8)} ${repo.status.padEnd(12)} ${repo.path}`);
+		const staleCount = repo.stale_uncommitted_edits?.length ?? null;
+		const staleCell = staleCount === null ? "UNKNOWN" : repo.reservation_scan_status === "OK" ? String(staleCount) : repo.dirty_file_count === null ? "UNKNOWN" : repo.dirty_file_count ? staleCount ? `${staleCount}+?` : "?" : "0";
+		const riskCell = repo.risk_score === null ? "UNKNOWN" : repo.risk_score.toFixed(1);
+		const dirtyCell = repo.dirty_file_count === null ? "UNKNOWN" : String(repo.dirty_file_count);
+		const aheadCell = repo.status === "TIMED_OUT" ? "UNKNOWN" : String(repo.commits_ahead ?? "-");
+		const unpushedCell = repo.unpushed_commits === null ? "UNKNOWN" : String(repo.unpushed_commits);
+		const stashCell = repo.stash_count === null ? "UNKNOWN" : String(repo.stash_count);
+		const detachedCell = repo.detached === null ? "UNKNOWN" : String(repo.detached);
+		rows.push(`${riskCell.padStart(6)} ${dirtyCell.padStart(5)} ${staleCell.padStart(5)} ${aheadCell.padStart(5)} ${unpushedCell.padStart(7)} ${stashCell.padStart(5)} ${detachedCell.padStart(8)} ${repo.status.padEnd(12)} ${repo.path}`);
 	}
 	return rows.join("\n");
 }
@@ -229,6 +252,11 @@ export async function inspectWorkFleet(input: WorkDoctorInput): Promise<WorkDoct
 	const discovered = input.roots.flatMap(discover); const allRepos = [...new Set(discovered.flatMap((entry) => entry.repos))]; const repos: WorkRepoReport[] = []; let cursor = 0;
 	async function worker(): Promise<void> { while (cursor < allRepos.length) { const index = cursor++; repos[index] = await inspectRepo(allRepos[index]!, perRepoTimeoutMs, staleEditLimitMinutes, nowMs); } }
 	await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, allRepos.length)) }, () => worker()));
-	const ordered = repos.filter(Boolean).sort((left, right) => right.risk_score - left.risk_score || left.path.localeCompare(right.path)); const elapsedMs = performance.now() - started;
-	return { scope: "work", overall: "REPORT", roots: discovered.map((entry) => entry.root), repos: ordered, concurrency, per_repo_timeout_ms: perRepoTimeoutMs, stale_edit_limit_minutes: staleEditLimitMinutes, elapsed_ms: elapsedMs, timed_out_repos: ordered.filter((repo) => repo.findings.includes("unverified")).length, text: renderTable(ordered) };
+	const ordered = repos.filter(Boolean).sort((left, right) => {
+		if (left.risk_score === null) return right.risk_score === null ? left.path.localeCompare(right.path) : 1;
+		if (right.risk_score === null) return -1;
+		return right.risk_score - left.risk_score || left.path.localeCompare(right.path);
+	});
+	const elapsedMs = performance.now() - started;
+	return { scope: "work", overall: "REPORT", roots: discovered.map((entry) => entry.root), repos: ordered, concurrency, per_repo_timeout_ms: perRepoTimeoutMs, stale_edit_limit_minutes: staleEditLimitMinutes, elapsed_ms: elapsedMs, timed_out_repos: ordered.filter((repo) => repo.status === "TIMED_OUT" || repo.findings.includes("unverified")).length, text: renderTable(ordered) };
 }
