@@ -89,3 +89,26 @@ export function checkCandidateTree(
 	const deletions = findStaleDeletions(git, repo, base, tip, candidateTree, paths);
 	return { ok: deletions.length === 0, deletions };
 }
+
+if (import.meta.main) {
+	const args = process.argv.slice(2);
+	const flag = (name: string): string | null => {
+		const index = args.indexOf(name);
+		return index >= 0 && index + 1 < args.length ? args[index + 1]! : null;
+	};
+	const repo = flag("--repo");
+	const base = flag("--base");
+	const tip = flag("--tip");
+	const tree = flag("--tree");
+	const pathsIndex = args.indexOf("--paths");
+	const paths = pathsIndex >= 0 ? args.slice(pathsIndex + 1) : null;
+	if (!repo || !base || !tip || !tree || !paths || paths.length === 0) {
+		process.stderr.write("land-guard: usage: land-guard.ts --repo DIR --base REV --tip REV --tree REV --paths FILE...\n");
+		process.exit(2);
+	}
+	const verdict = checkCandidateTree(repo, base, tip, tree, paths);
+	for (const row of verdict.deletions) {
+		process.stderr.write(`land-guard: stale deletion from ${row.commit} in ${row.file}: ${row.missing_lines.join(" | ").slice(0, 300)}\n`);
+	}
+	process.exit(verdict.ok ? 0 : 1);
+}

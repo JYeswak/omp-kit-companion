@@ -1,1 +1,2 @@
 - Stale-base deletion guard (`src/land-guard.ts`, `tests/cli/land-guard.test.ts`): refuses a candidate tree that drops lines added after its base, naming the commit per file; planted replay of the 38afcc7e59 revert names the dropped commit.
+- LAND1 wire: the pre-push hook runs the land-guard stale-deletion check first, from the base archive's code: a commit built on base B that drops lines added at B+1 is refused naming the adding commit; fresh pushes pass through.

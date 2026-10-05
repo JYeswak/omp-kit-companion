@@ -62,5 +62,53 @@ else
 	fail=$((fail + 1)); printf 'FAIL base-failure-refuses: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
+# 3. planted: a commit built on base B that deletes lines added at B+1 is
+# refused, naming the commit that added them
+KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+stalerepo="$TMP/stale"
+rm -rf "$stalerepo"
+mkdir -p "$stalerepo/scripts" "$stalerepo/src" "$stalerepo/var/agent-tmp"
+git -C "$stalerepo" init -q
+git -C "$stalerepo" config user.email "test@example.invalid"
+git -C "$stalerepo" config user.name "worker-1"
+cp "$KITREPO/src/land-guard.ts" "$stalerepo/src/land-guard.ts"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$stalerepo/scripts/regexploit-gate.py"
+printf '#!/bin/sh\nexit 0\n' > "$stalerepo/scripts/fresh-gate.sh"
+chmod +x "$stalerepo/scripts/fresh-gate.sh"
+printf 'one\n' > "$stalerepo/f.ts"
+git -C "$stalerepo" add -A
+git -C "$stalerepo" commit -qm "[test] base B"
+base=$(git -C "$stalerepo" rev-parse HEAD)
+printf 'one\ntwo added at B+1\n' > "$stalerepo/f.ts"
+git -C "$stalerepo" add -A
+git -C "$stalerepo" commit -qm "[test] B+1 adds line two"
+tip=$(git -C "$stalerepo" rev-parse HEAD)
+git -C "$stalerepo" checkout -q "$base"
+printf 'one\nmine without line two\n' > "$stalerepo/f.ts"
+git -C "$stalerepo" add -A
+git -C "$stalerepo" commit -qm "[test] stale candidate"
+candidate=$(git -C "$stalerepo" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$candidate" "$tip" | (cd -- "$stalerepo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" != "0" ] && grep -q "stale deletion from $tip" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL stale-refused: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
+# 4. control: the same candidate rebased onto the tip passes
+git -C "$stalerepo" checkout -q "$tip"
+printf 'one\ntwo added at B+1\nmine on top\n' > "$stalerepo/f.ts"
+git -C "$stalerepo" add -A
+git -C "$stalerepo" commit -qm "[test] fresh candidate"
+fresh=$(git -C "$stalerepo" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$fresh" "$tip" | (cd -- "$stalerepo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL fresh-passes: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

@@ -47,6 +47,16 @@ if [ -n "${base_ref:-}" ]; then
 	gate_scripts="$base_archive"
 fi
 if [ -n "${base_ref:-}" ]; then
+	merge_base=$(git -C "$ROOT" merge-base "$local_sha" "$base_ref") || { printf 'pre-push-gate: cannot find merge base\n' >&2; exit 1; }
+	if [ "$merge_base" != "$base_ref" ]; then
+		land_paths=$(git -C "$ROOT" diff --name-only "$base_ref" "$local_sha") || { printf 'pre-push-gate: cannot list pushed paths\n' >&2; exit 1; }
+		if [ -n "$land_paths" ]; then
+			# shellcheck disable=SC2086
+			bun run --no-env-file --config=/dev/null "$gate_scripts/src/land-guard.ts" --repo "$ROOT" --base "$merge_base" --tip "$base_ref" --tree "$local_sha" --paths $land_paths || exit 1
+		fi
+	fi
+fi
+if [ -n "${base_ref:-}" ]; then
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 else
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
