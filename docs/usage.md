@@ -81,9 +81,11 @@ A worked example, importing three math servers into every profile:
     "$KIT" apply mcp --from claude --servers mathlas,z3-prover,wolfram-alpha \
       --profiles all --startup-timeout-ms mathlas=180000 --apply --yes
     "$KIT" test --mcp --profiles all --servers mathlas,z3-prover,wolfram-alpha \
-      --call 'z3-prover:solve:{}' \
+      --call 'z3-prover:list_variables:{}' --expect 'z3-prover:.' \
       --call 'wolfram-alpha:wolfram_llm:{"query":"integrate x^2 from 0 to 3"}' \
-      --call 'mathlas:verify_numeric:{"value":"1.6449340668482264","closed_form":"pi**2/6"}'
+      --expect 'wolfram-alpha:\b9\b' \
+      --call 'mathlas:verify_numeric:{"value":"1.6449340668482264","closed_form":"pi**2/6"}' \
+      --expect 'mathlas:"verified": ?true'
     "$KIT" undo RUN_ID --yes
 
 What gets written: OMP's own `mcp.json` schema, validated against the
@@ -108,17 +110,43 @@ differing one is reported as a conflict.
   server entry, without editing the source config; the override path and
   hash go into the receipt.
 
+Edit mode changes servers already in the profiles, reading no source, with
+the same plan, receipt and `undo`. Only the named bytes change:
+
+- `--env-command SERVER:KEY='!CMD'` (repeatable) rewrites one env value of
+  an existing entry to an OMP command value. OMP runs a value starting with
+  `!` through `/bin/sh` in the session cwd and caches its stdout, so a
+  secret can stay in a store such as the macOS keychain and no file holds
+  it. The command text is secret-scanned; a value without `!` is refused.
+- `--enable NAMES` removes servers from a profile's `disabledServers` list.
+
+For example, reading the Wolfram key from the login keychain in every
+profile and re-enabling sympy-mcp in one:
+
+    security add-generic-password -s WOLFRAM_APP_ID -a "$USER" -w   # prompts
+    "$KIT" apply mcp --profiles all \
+      --env-command 'wolfram-alpha:WOLFRAM_APP_ID=!security find-generic-password -s WOLFRAM_APP_ID -w' --plan
+    "$KIT" apply mcp --profiles claude --enable sympy-mcp --apply --yes
+
 `test --mcp` starts a fresh `omp --mode rpc` per profile against a private
 mirror of that profile's agent config (OMP needs a model to make a call,
 and `--profile` would need the mock model written into the real profile).
-OMP connects the servers with its own strict stdio client, from a decoy
-cwd; `/mcp test` reports each server's tools; a scripted mock model makes
-each `--call` through OMP's tool bridge. Per server: `CALLABLE`,
-`ZERO_TOOLS`, `START_TIMEOUT`, `START_FAILED`, `CALL_FAILED`, `NOT_CALLED`
-(tools listed, no `--call`) or `NOT_CONFIGURED`. Anything but `CALLABLE`
-exits 1. A receipt lands under the state root in `mcp-tests/`. `CALLABLE`
-means the server answered one call through OMP, not that the answer is
-right.
+Before the session it checks each selected server's env: an upper-case
+env-name reference that is unset in the environment OMP runs with and in
+the dotenv files OMP loads (`~/.env`, `~/.omp/.env`, the profile's
+`agent/.env`) is `ENV_UNSET`; a `!command` that fails or prints nothing
+is `COMMAND_FAILED` (its output is never shown). OMP connects the servers
+with its own strict stdio client, from a decoy cwd; `/mcp test` reports
+each server's tools; a scripted mock model makes each `--call` through
+OMP's tool bridge. A call is `CALLABLE` only when its text has no
+error shape (`AUTH_ERROR`, `HTTP 4xx/5xx`, `Unauthorized`, `Forbidden`)
+and matches its `--expect SERVER:REGEX`; error text is `CALL_FAILED` even
+when the server set `isError` false, and an answer with no `--expect` is
+`UNVERIFIED_RESULT`. Other states: `ZERO_TOOLS`, `START_TIMEOUT`,
+`START_FAILED`, `NOT_CALLED` (tools listed, no `--call`) and
+`NOT_CONFIGURED`. Anything but `CALLABLE` exits 1. A receipt lands under
+the state root in `mcp-tests/`. `CALLABLE` means the server answered one
+call through OMP and the answer matched the pattern, not that it is right.
 
 ## Keep up with OMP
 

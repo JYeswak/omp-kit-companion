@@ -27,8 +27,8 @@ import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspRead
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
 import { discoverSources, inspectMcpSources, listOmpProfiles, readSource, selectProfiles, type OmpProfileDir } from "./mcp-sources.ts";
-import { applyMcpPlan, chooseMcpSelection, McpApplyError, parseTimeouts, planMcpApply, readOverride, type McpApplyPlan, type WizardIo } from "./mcp-apply.ts";
-import { parseCallSpec, probeMcpProfiles, type McpCallSpec } from "./mcp-probe.ts";
+import { applyMcpPlan, chooseMcpSelection, McpApplyError, parseEnvCommand, parseTimeouts, planMcpApply, planMcpEdit, readOverride, type McpApplyPlan, type WizardIo } from "./mcp-apply.ts";
+import { parseCallSpec, parseExpectSpec, probeMcpProfiles, type McpCallSpec } from "./mcp-probe.ts";
 import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./services.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
@@ -1120,9 +1120,10 @@ registerCommandHandler("apply extensions", extensionCommand);
 
 const MCP_SELECTION_FLAGS = "--from claude|cursor|codex|project|ABS_PATH --servers NAME[,NAME]|all --profiles all|NAME[,NAME], then --plan, or --apply --yes";
 
-/** A walk-through needs a real terminal on every stream and no machine-output mode. */
+/** A walk-through needs a real terminal on every stream and no machine-output mode; edit mode is never interactive. */
 function interactiveMcpApply(request: ParsedCommand): boolean {
 	return !request.json && !request.robot && !request.flags.has("--servers") && !request.flags.has("--profiles") &&
+		!request.flags.has("--env-command") && !request.flags.has("--enable") &&
 		!Object.hasOwn(process.env, "CI") && process.env.TERM !== "dumb" && isatty(0) && isatty(1) && isatty(2);
 }
 
@@ -1143,7 +1144,8 @@ function terminalIo(): WizardIo & { close(): void } {
 }
 
 function mcpPlanText(plan: McpApplyPlan): string {
-	const lines = [`source: ${plan.source.id} (${plan.source.path})`, `schema: ${plan.schema.path}`];
+	const lines = plan.source ? [`source: ${plan.source.id} (${plan.source.path})`, `schema: ${plan.schema.path}`]
+		: [`edit: ${[...(plan.edits?.env_commands ?? []).map(edit => `${edit.server} env.${edit.key}=${edit.command}`), ...(plan.edits?.enable ?? []).map(name => `enable ${name}`)].join("; ")}`, `schema: ${plan.schema.path}`];
 	for (const server of plan.servers) {
 		const notes = [server.env_refs.length ? `env refs ${server.env_refs.map(ref => ref.key === ref.var ? ref.key : `${ref.key}<-${ref.var}`).join(",")}` : "",
 			server.env_literal.length ? `env literal ${server.env_literal.join(",")}` : "", server.env_unset.length ? `UNSET NOW ${server.env_unset.join(",")}` : "",
@@ -1159,10 +1161,53 @@ function mcpPlanText(plan: McpApplyPlan): string {
 	return lines.join("\n");
 }
 
+/** Shared refusal mapping for apply mcp: nothing is claimed written unless a receipt exists. */
+function mcpApplyFailure(error: unknown): CliResult {
+	if (error instanceof McpApplyError) return { code: 2, data: { overall: "NOT_RUN", findings_detail: error.findings },
+		errors: [{ code: error.code, message: error.message, remediation: "Nothing was written. Fix the named server, source, override or edit, then replan." }], verification: "NOT_RUN" };
+	const code = error instanceof Error ? error.message : "";
+	if (code.startsWith("MISSING_PROFILE") || code === "INVALID_PROFILES" || code === "INVALID_SOURCE")
+		return refusal(code.split(":")[0]!, code, `Pass ${MCP_SELECTION_FLAGS}; profiles are enumerated from ~/.omp at run time.`);
+	if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code))
+		return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "PARTIAL_APPLY", message: "MCP apply may have left a durable pending receipt",
+			remediation: "Inspect omp-kit audit and the profile files before another apply; no rollback is implied." }], verification: "UNVERIFIED" };
+	return refusal(["FRESH_PLAN", "INVALID_PLAN", "STATE_UNSAFE", "LOCK_BUSY", "UNSAFE_PATH"].includes(code) ? code : "MCP_APPLY_FAILED",
+		"MCP plan or apply refused without claiming a completed mutation", "Inspect the selected profiles and omp-kit audit, then replan.");
+}
+
+/** Edit mode: change servers already in the profiles (env !command values, disabledServers removals); reads no source. */
+function applyMcpEdit(request: ParsedCommand, home: string, stateRoot: string): CliResult {
+	const flag = (name: string) => { const value = request.flags.get(name); return typeof value === "string" ? value : undefined; };
+	for (const name of ["--from", "--servers", "--override", "--env-literal", "--startup-timeout-ms"])
+		if (request.flags.has(name)) return refusal("INVALID_FLAG", `${name} belongs to import mode; --env-command and --enable edit servers already in the profiles`,
+			"Run an edit as omp-kit apply mcp --profiles NAMES|all [--env-command SERVER:KEY=!CMD]... [--enable NAMES] --plan, and imports separately.");
+	const profileSelection = flag("--profiles");
+	if (!profileSelection) return refusal("MCP_SELECTION_REQUIRED", "apply mcp edit mode needs --profiles NAMES|all", "Pass --profiles all|NAME[,NAME], then --plan, or --apply --yes.");
+	const schema = ompMcpSchema();
+	if (!schema) return refusal("OMP_SCHEMA_UNAVAILABLE", "The installed OMP src/config/mcp-schema.json cannot be read", "Install OMP and put its launcher on PATH; nothing is written without schema validation.");
+	const { profiles: allProfiles, skipped } = listOmpProfiles(home);
+	try {
+		const envCommands = (flag("--env-command") ?? "").split("\n").filter(Boolean).map(parseEnvCommand);
+		const enable = (flag("--enable") ?? "").split(",").map(name => name.trim()).filter(Boolean);
+		const plan = planMcpEdit({ profiles: selectProfiles(allProfiles, profileSelection), stateRoot, schema: schema.schema, schemaPath: schema.path, envCommands, enable });
+		const text = mcpPlanText(plan);
+		const data = { overall: "UNVERIFIED", action: "PLAN", source: null, servers: [], edits: plan.edits, overrides: [], schema: plan.schema,
+			profiles: plan.profiles, skipped_profiles: skipped, receipt_id: null as string | null, text };
+		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
+		const applied = applyMcpPlan(plan);
+		const touched = [...new Set([...envCommands.map(edit => edit.server), ...enable])];
+		return { code: 0, data: { ...data, action: applied.receiptId ? "APPLIED" : "NO_CHANGE", receipt_id: applied.receiptId,
+			text: `${text}\n\n${applied.receiptId ? `APPLIED receipt ${applied.receiptId}; undo with: omp-kit undo ${applied.receiptId} --yes` : "NO_CHANGE"}` },
+			commands: applied.receiptId ? [`omp-kit undo ${applied.receiptId} --yes`, `omp-kit test --mcp --profiles ${profileSelection} --servers ${touched.join(",")}`] : [],
+			verification: "UNVERIFIED" };
+	} catch (error) { return mcpApplyFailure(error); }
+}
+
 async function applyMcpCommand(request: ParsedCommand): Promise<CliResult> {
 	const home = process.env.HOME, stateRoot = receiptStateRoot();
 	if (!home || !isAbsolute(home) || !stateRoot)
 		return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and private state root are required", "Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; no profile was read.");
+	if (request.flags.has("--env-command") || request.flags.has("--enable")) return applyMcpEdit(request, home, stateRoot);
 	const interactive = interactiveMcpApply(request);
 	const flag = (name: string) => { const value = request.flags.get(name); return typeof value === "string" ? value : undefined; };
 	if (!interactive && (!flag("--servers") || !flag("--profiles") || !flag("--from")))
@@ -1208,18 +1253,7 @@ async function applyMcpCommand(request: ParsedCommand): Promise<CliResult> {
 			text: `${text}\n\n${applied.receiptId ? `APPLIED receipt ${applied.receiptId}; undo with: omp-kit undo ${applied.receiptId} --yes` : "NO_CHANGE"}` },
 			commands: applied.receiptId ? [`omp-kit undo ${applied.receiptId} --yes`, `omp-kit test --mcp --profiles ${profileSelection} --servers ${servers.join(",")}`] : [],
 			verification: "UNVERIFIED" };
-	} catch (error) {
-		if (error instanceof McpApplyError) return { code: 2, data: { overall: "NOT_RUN", findings_detail: error.findings },
-			errors: [{ code: error.code, message: error.message, remediation: "Nothing was written. Fix the named server, source or override, then replan." }], verification: "NOT_RUN" };
-		const code = error instanceof Error ? error.message : "";
-		if (code.startsWith("MISSING_PROFILE") || code === "INVALID_PROFILES" || code === "INVALID_SOURCE")
-			return refusal(code.split(":")[0]!, code, `Pass ${MCP_SELECTION_FLAGS}; profiles are enumerated from ~/.omp at run time.`);
-		if (["PENDING_RECOVERY", "MUTATION_FAILED"].includes(code))
-			return { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "PARTIAL_APPLY", message: "MCP apply may have left a durable pending receipt",
-				remediation: "Inspect omp-kit audit and the profile files before another apply; no rollback is implied." }], verification: "UNVERIFIED" };
-		return refusal(["FRESH_PLAN", "INVALID_PLAN", "STATE_UNSAFE", "LOCK_BUSY", "UNSAFE_PATH"].includes(code) ? code : "MCP_APPLY_FAILED",
-			"MCP plan or apply refused without claiming a completed mutation", "Inspect the selected profiles and omp-kit audit, then replan.");
-	} finally { io?.close(); }
+	} catch (error) { return mcpApplyFailure(error); } finally { io?.close(); }
 }
 
 registerCommandHandler("apply mcp", applyMcpCommand);
@@ -1241,7 +1275,7 @@ function mcpSourcesInventory(): CliResult {
 
 async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 	for (const flag of ["--full", "--record", "--capabilities", "--rules", "--cases", "--live-fixture", "--project", "--integrations", "--profile", "--plan", "--out", "--metamorphic", "--mutants", "--repeat"])
-		if (request.flags.has(flag)) return refusal("INVALID_FLAG", `test --mcp cannot be combined with ${flag}`, "Run omp-kit test --mcp --profiles all|NAME[,NAME] [--servers NAMES] [--call SERVER:TOOL:JSON]...");
+		if (request.flags.has(flag)) return refusal("INVALID_FLAG", `test --mcp cannot be combined with ${flag}`, "Run omp-kit test --mcp --profiles all|NAME[,NAME] [--servers NAMES] [--call SERVER:TOOL:JSON --expect SERVER:REGEX]...");
 	const home = process.env.HOME, stateRoot = receiptStateRoot();
 	const selection = request.flags.get("--profiles");
 	if (typeof selection !== "string") return refusal("PROFILE_REQUIRED", "test --mcp needs --profiles all|NAME[,NAME]", "Name the profiles to prove; nothing was started.");
@@ -1253,18 +1287,25 @@ async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 	let launcher: string;
 	try { launcher = resolveOmpIdentity(process.env).launcher; }
 	catch { return refusal("OMP_UNAVAILABLE", "No validated OMP launcher on PATH", "Install OMP and put omp on PATH; nothing was started."); }
-	let calls: McpCallSpec[], profiles: OmpProfileDir[];
+	let calls: McpCallSpec[], profiles: OmpProfileDir[], expects: { server: string; pattern: string }[];
 	try {
 		calls = String(request.flags.get("--call") ?? "").split("\n").filter(Boolean).map(parseCallSpec);
+		expects = String(request.flags.get("--expect") ?? "").split("\n").filter(Boolean).map(parseExpectSpec);
 		profiles = selectProfiles(listOmpProfiles(home).profiles, selection);
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
-		return refusal(code.split(":")[0] || "INVALID_SELECTION", code, "Use --call SERVER:TOOL:{\"arg\":1} and --profiles all|NAME[,NAME]; nothing was started.");
+		return refusal(code.split(":")[0] || "INVALID_SELECTION", code, "Use --call SERVER:TOOL:{\"arg\":1}, --expect SERVER:REGEX and --profiles all|NAME[,NAME]; nothing was started.");
 	}
 	const serverRaw = request.flags.get("--servers");
 	const servers = typeof serverRaw === "string" && serverRaw !== "all" ? serverRaw.split(",").map(name => name.trim()).filter(Boolean) : undefined;
 	if (calls.some((call, index) => calls.findIndex(other => other.server === call.server) !== index))
 		return refusal("INVALID_CALL", "At most one --call per server", "Pass one --call SERVER:TOOL:JSON per server.");
+	for (const [index, expect] of expects.entries()) {
+		const call = calls.find(item => item.server === expect.server);
+		if (!call || expects.findIndex(other => other.server === expect.server) !== index)
+			return refusal("INVALID_EXPECT", `--expect ${expect.server} needs exactly one --call for that server and at most one --expect`, "Pass --call SERVER:TOOL:JSON and one --expect SERVER:REGEX per server; nothing was started.");
+		call.expect = expect.pattern;
+	}
 	const workDir = mkdtempSync(join(tmpdir(), "omp-kit-mcp-test-"));
 	let rows;
 	try { rows = await probeMcpProfiles({ ompPath: launcher, profiles, ...(servers ? { servers } : {}), calls, startupTimeoutMs, workDir }); }
@@ -1272,14 +1313,14 @@ async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const pass = rows.length > 0 && rows.every(row => row.status === "PASS");
 	const receiptId = `mcp-test-${new Date().toISOString().replace(/[:.]/g, "")}-${process.pid}`;
 	const report = { schema_version: 1, receipt_id: receiptId, recorded_at: new Date().toISOString(), startup_timeout_ms: startupTimeoutMs,
-		method: "fresh omp --mode rpc per profile on a private mirror of its agent config; /mcp test per server; one mock-model tool call per --call",
-		claim_limit: "CALLABLE means the server answered one call through OMP; it does not prove the answer is right", profiles: rows };
+		method: "fresh omp --mode rpc per profile on a private mirror of its agent config; env references and !command values checked; /mcp test per server; one mock-model tool call per --call, judged by --expect and an error-text check",
+		claim_limit: "CALLABLE means the server answered one call through OMP with no error-shaped text and the answer matched --expect; it does not prove the answer is right beyond that pattern", profiles: rows };
 	ensureMutationStateRoot(stateRoot);
 	mkdirSync(join(stateRoot, "mcp-tests"), { recursive: true, mode: 0o700 });
 	writePrivate(join(stateRoot, "mcp-tests", `${receiptId}.json`), `${JSON.stringify(report, null, 2)}\n`);
 	const text = [`overall: ${pass ? "PASS" : "FAIL"}  receipt: ${receiptId}`, ...rows.flatMap(row => [
 		`${row.status.padEnd(5)} ${row.profile}${row.ready_ms !== null ? ` (ready ${row.ready_ms} ms)` : ""}${row.detail ? ` - ${row.detail}` : ""}`,
-		...row.servers.map(server => `  ${server.status.padEnd(15)} ${server.server}${server.tools !== null ? ` tools=${server.tools}` : ""}${server.connect_ms !== null ? ` connect=${server.connect_ms}ms` : ""}${server.call ? ` call=${server.call.tool} ${server.call.ms ?? "?"}ms: ${server.call.result_excerpt.slice(0, 80)}` : ""}${server.status === "CALLABLE" ? "" : ` - ${server.detail}`}`),
+		...row.servers.map(server => `  ${server.status.padEnd(17)} ${server.server}${server.tools !== null ? ` tools=${server.tools}` : ""}${server.connect_ms !== null ? ` connect=${server.connect_ms}ms` : ""}${server.call ? ` call=${server.call.tool} ${server.call.ms ?? "?"}ms: ${server.call.result_excerpt.slice(0, 80)}` : ""}${server.status === "CALLABLE" ? "" : ` - ${server.detail}`}`),
 	]), "", report.claim_limit].join("\n");
 	return { code: pass ? 0 : 1, data: { overall: pass ? "PASS" : "FAIL", mcp: { ...report, profiles: rows }, text }, verification: "PERFORMED" };
 }
@@ -1739,7 +1780,7 @@ async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (request.flags.has("--integrations")) return integrationsCommand(request);
 	if (request.flags.has("--mcp")) return mcpTestCommand(request);
-	for (const flag of ["--profiles", "--servers", "--call", "--startup-timeout-ms"])
+	for (const flag of ["--profiles", "--servers", "--call", "--expect", "--startup-timeout-ms"])
 		if (request.flags.has(flag)) return refusal("INVALID_FLAG", `${flag} is only valid with test --mcp`, "Run omp-kit test --mcp --profiles all|NAME[,NAME].");
 	if (request.flags.has("--repeat")) return repeatTestCommand(request);
 	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);
@@ -2434,7 +2475,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
 	if (command.name === "examples") return { code: 0, data: { text: COMMANDS.map((item) => `${item.example}${isRunnable(item, item.name) ? "" : " # not yet available"}`).join("\n") }, verification: "PERFORMED" };
-	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
+	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD and --enable NAMES edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
 	return refusal("HANDLER_UNAVAILABLE", `${path} is documented but its safe handler is not installed`, `Run omp-kit capabilities --json to see runnable commands; no ${command.mutation ? "mutation" : "probe"} was attempted.`);
 }
 

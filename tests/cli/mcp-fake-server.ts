@@ -3,6 +3,7 @@
 //   zero   - initializes and lists 0 tools
 //   fail   - one tool "echo" whose calls return isError
 //   banner - like echo, but first prints a non-JSON banner line, which OMP's strict stdio reader rejects
+//   auth   - like echo, but every call answers "FAKE_AUTH_ERROR (HTTP 401)" as normal text with isError false
 const mode = process.argv[2] ?? "echo";
 if (mode === "banner") process.stdout.write("fake-server banner: starting up\n");
 const tools = mode === "zero" ? [] : [{
@@ -28,6 +29,7 @@ process.stdin.on("data", (chunk: string) => {
 			const text = String(request.params?.arguments?.text ?? "");
 			send({ jsonrpc: "2.0", id: request.id, result: mode === "fail"
 				? { content: [{ type: "text", text: "fake failure" }], isError: true }
+				: mode === "auth" ? { content: [{ type: "text", text: "FAKE_AUTH_ERROR (HTTP 401): invalid appid" }], isError: false }
 				: { content: [{ type: "text", text: `echo:${text}` }] } });
 		} else send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "method not found" } });
 	}

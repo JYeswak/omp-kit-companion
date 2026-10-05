@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { chooseMcpSelection, insertMcpServers, McpApplyError, planMcpApply, validateJsonSchema } from "../../src/mcp-apply.ts";
+import { chooseMcpSelection, insertMcpServers, McpApplyError, parseEnvCommand, planMcpApply, removeDisabledServer, scanRenderedSecrets, setMcpEnvValue, validateJsonSchema } from "../../src/mcp-apply.ts";
 import { listOmpProfiles, readSource } from "../../src/mcp-sources.ts";
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
@@ -139,4 +139,72 @@ test("insertion into an empty or compact file stays valid JSON and preserves eve
 		expect(next.text.slice(0, next.at) + next.text.slice(next.at + next.length)).toBe(original);
 		expect(JSON.parse(next.text).mcpServers.n).toEqual({ command: "c" });
 	}
+});
+
+const KEYCHAIN = "!security find-generic-password -s APP_ID -w";
+
+test("edit mode sets one env value to a !command and re-enables a server in place; every other byte is kept and undo restores it", () => {
+	const f = fixture({});
+	const original = "{\n\t\"$schema\": \"x\",\n\t\"mcpServers\": {\n\t\t\"keep\": { \"command\": \"true\", \"args\": [\"é\"], \"env\": { \"APP_ID\": \"APP_ID\" } },\n\t\t\"wolf\": {\n\t\t\t\"command\": \"py\",\n\t\t\t\"env\": {\n\t\t\t\t\"APP_ID\": \"APP_ID\",\n\t\t\t\t\"MODE\": \"x\"\n\t\t\t}\n\t\t}\n\t},\n\t\"disabledServers\": [\n\t\t\"a\",\n\t\t\"sym\",\n\t\t\"b\"\n\t]\n}\n";
+	writeFileSync(f.alphaMcp, original);
+	const untouched = "{\"mcpServers\":{\"other\":{\"command\":\"x\"}}}";
+	writeFileSync(f.defaultMcp, untouched);
+	const args = ["apply", "mcp", "--profiles", "all", "--env-command", `wolf:APP_ID=${KEYCHAIN}`, "--enable", "sym", "--json"];
+	const planned = f.run([...args, "--plan"]);
+	expect(planned.code).toBe(0);
+	const plan = JSON.parse(planned.stdout).data;
+	expect(plan.profiles.find((row: { profile: string }) => row.profile === "alpha")).toMatchObject({ action: "EDIT", added: [`wolf env.APP_ID=${KEYCHAIN}`, "enable sym"] });
+	expect(plan.profiles.find((row: { profile: string }) => row.profile === "default")).toMatchObject({ action: "NO_CHANGE", conflicts: [expect.stringContaining("server absent")] });
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
+	const applied = f.run([...args, "--apply", "--yes"]);
+	expect(applied.code).toBe(0);
+	const envelope = JSON.parse(applied.stdout).data;
+	expect(envelope.action).toBe("APPLIED");
+	const expected = original.replace("\"APP_ID\": \"APP_ID\",\n\t\t\t\t\"MODE\"", `"APP_ID": ${JSON.stringify(KEYCHAIN)},\n\t\t\t\t"MODE"`).replace("\t\t\"sym\",\n", "");
+	expect(expected).not.toBe(original);
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(expected);
+	expect(readFileSync(f.defaultMcp, "utf8")).toBe(untouched);
+	const recorded = JSON.parse(readFileSync(join(f.state, "omp-kit", `mcp-apply-${envelope.receipt_id}.json`), "utf8"));
+	expect(recorded).toMatchObject({ source: null, edits: { env_commands: [{ server: "wolf", key: "APP_ID", command: KEYCHAIN }], enable: ["sym"] } });
+	const again = f.run([...args, "--plan"]);
+	expect(JSON.parse(again.stdout).data.profiles.find((row: { profile: string }) => row.profile === "alpha").action).toBe("NO_CHANGE");
+	const undone = f.run(["undo", envelope.receipt_id, "--yes", "--json"]);
+	expect(undone.code).toBe(0);
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
+});
+
+test("edit mode accepts a !command but refuses a literal value or a credential inside the command, before any write", () => {
+	const f = fixture({});
+	const original = "{\"mcpServers\":{\"wolf\":{\"command\":\"py\",\"env\":{\"APP_ID\":\"APP_ID\"}}}}";
+	writeFileSync(f.alphaMcp, original);
+	const leaked = f.run(["apply", "mcp", "--profiles", "alpha", "--env-command", `wolf:APP_ID=!echo ${PLANTED_TOKEN}`, "--apply", "--yes", "--json"]);
+	expect(leaked.code).toBe(2);
+	expect(JSON.parse(leaked.stdout).errors[0].code).toBe("LITERAL_SECRET");
+	expect(leaked.stdout + leaked.stderr).not.toContain(PLANTED_TOKEN);
+	const literal = f.run(["apply", "mcp", "--profiles", "alpha", "--env-command", `wolf:APP_ID=${PLANTED_ENV_VALUE}`, "--apply", "--yes", "--json"]);
+	expect(literal.code).toBe(2);
+	expect(JSON.parse(literal.stdout).errors[0].code).toBe("INVALID_ENV_COMMAND");
+	expect(literal.stdout + literal.stderr).not.toContain(PLANTED_ENV_VALUE);
+	const mixed = f.run(["apply", "mcp", "--from", "claude", "--profiles", "alpha", "--enable", "wolf", "--plan", "--json"]);
+	expect(mixed.code).toBe(2);
+	expect(mixed.stdout + mixed.stderr).toContain("INVALID_FLAG");
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
+	expect(scanRenderedSecrets("wolf", { command: "py", env: { APP_ID: KEYCHAIN } })).toEqual([]);
+	expect(scanRenderedSecrets("wolf", { command: "py", env: { APP_ID: `!echo ${PLANTED_TOKEN}` } })).toEqual([{ server: "wolf", field: "env.APP_ID" }]);
+	expect(scanRenderedSecrets("wolf", { command: "py", env: { APP_ID: "!" } })).toEqual([{ server: "wolf", field: "env.APP_ID" }]);
+	expect(parseEnvCommand(`wolfram-alpha:WOLFRAM_APP_ID=${KEYCHAIN}`)).toEqual({ server: "wolfram-alpha", key: "WOLFRAM_APP_ID", command: KEYCHAIN });
+	for (const bad of ["wolf:APP_ID", "wolf:APP_ID=", "wolf:APP_ID=!  ", ":APP_ID=!x", "wolf:9X=!x"]) expect(() => parseEnvCommand(bad)).toThrow(McpApplyError);
+});
+
+test("in-place edits keep every other byte in compact and pretty files", () => {
+	expect(removeDisabledServer("{\"disabledServers\":[\"a\",\"s\",\"b\"]}", "s")).toBe("{\"disabledServers\":[\"a\",\"b\"]}");
+	expect(removeDisabledServer("{\"disabledServers\":[\"a\", \"s\"]}", "s")).toBe("{\"disabledServers\":[\"a\"]}");
+	expect(removeDisabledServer("{\"disabledServers\": [ \"s\" ]}", "s")).toBe("{\"disabledServers\": []}");
+	expect(removeDisabledServer("{\"disabledServers\":[\"s\",\"a\",\"s\"]}", "s")).toBe("{\"disabledServers\":[\"a\"]}");
+	expect(removeDisabledServer("{\"disabledServers\":[\"a\"],\"x\":[\"s\"]}", "s")).toBeNull();
+	expect(removeDisabledServer("{\"mcpServers\":{}}", "s")).toBeNull();
+	const compact = "{\"mcpServers\":{\"w\":{\"env\":{\"K\":\"K\",\"L\":\"K\"}},\"env\":{\"K\":\"K\"}}}";
+	expect(setMcpEnvValue(compact, "w", "K", "!c")).toBe("{\"mcpServers\":{\"w\":{\"env\":{\"K\":\"!c\",\"L\":\"K\"}},\"env\":{\"K\":\"K\"}}}");
+	expect(setMcpEnvValue(compact, "w", "M", "!c")).toBeNull();
+	expect(setMcpEnvValue(compact, "absent", "K", "!c")).toBeNull();
 });

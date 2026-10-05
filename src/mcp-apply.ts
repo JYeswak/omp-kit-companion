@@ -45,24 +45,30 @@ export interface RenderedServer {
 export interface McpProfilePlan {
 	profile: string;
 	path: string;
-	action: "ADD" | "NO_CHANGE" | "SKIPPED";
+	action: "ADD" | "EDIT" | "NO_CHANGE" | "SKIPPED";
 	reason?: string;
+	/** Insert mode: server names added; edit mode: edit labels applied. */
 	added: string[];
 	already_present: string[];
+	/** Insert mode: names whose existing entry differs; edit mode: edits that do not apply to this profile. */
 	conflicts: string[];
 	diff: string;
 	before_sha256: string | null;
 	after_sha256: string | null;
 }
+/** `env.KEY` of an existing server becomes an OMP `!command` value. */
+export interface McpEnvCommand { server: string; key: string; command: string }
 export interface McpApplyPlan {
-	source: { id: string; path: string };
+	/** Null in edit mode (--env-command / --enable), which reads no source. */
+	source: { id: string; path: string } | null;
 	servers: Omit<RenderedServer, "config">[];
+	edits: { env_commands: McpEnvCommand[]; enable: string[] } | null;
 	profiles: McpProfilePlan[];
 	overrides: { name: string; path: string; sha256: string }[];
 	schema: { path: string; validated: true };
 	stateRoot: string;
 	mutation: MutationPlan | null;
-	/** Internal: pre-existing entries per touched profile, for readback. */
+	/** Internal: per touched profile, the mcpServers entries the written file must hold (pre-existing ones unchanged), for readback. */
 	readonly existing: ReadonlyMap<string, Record<string, unknown>>;
 }
 
@@ -123,6 +129,11 @@ export function renderServer(server: SourceServer, options: { timeoutMs?: number
 	return { name: server.name, config, display, env_refs: envRefs, env_literal: envLiteral, env_unset: envUnset, override: options.override ?? null };
 }
 
+/** An env-var NAME reference, or an OMP `!command` whose text holds no likely credential. */
+function referenceValue(value: string): boolean {
+	return ENV_NAME.test(value) || (value.startsWith("!") && value.slice(1).trim() !== "" && !looksSecret(value.slice(1)));
+}
+
 /** PUB1: refuse a rendered server holding a likely literal credential. Findings carry field paths, never values. */
 export function scanRenderedSecrets(name: string, config: Record<string, unknown>, envLiteral: ReadonlySet<string> = new Set()): Record<string, unknown>[] {
 	const findings: Record<string, unknown>[] = [];
@@ -131,10 +142,10 @@ export function scanRenderedSecrets(name: string, config: Record<string, unknown
 	if (Array.isArray(config.args)) for (const index of secretArgIndexes(config.args as string[])) findings.push({ server: name, field: `args[${index}]` });
 	if (record(config.env)) for (const [key, value] of Object.entries(config.env)) {
 		if (typeof value !== "string") continue;
-		if (envLiteral.has(key) ? looksSecret(value) : !(ENV_NAME.test(value) || value.startsWith("!"))) findings.push({ server: name, field: `env.${key}` });
+		if (envLiteral.has(key) ? looksSecret(value) : !referenceValue(value)) findings.push({ server: name, field: `env.${key}` });
 	}
 	if (record(config.headers)) for (const [key, value] of Object.entries(config.headers))
-		if (typeof value !== "string" || !(ENV_NAME.test(value) || value.startsWith("!"))) findings.push({ server: name, field: `headers.${key}` });
+		if (typeof value !== "string" || !referenceValue(value)) findings.push({ server: name, field: `headers.${key}` });
 	return findings;
 }
 
@@ -400,7 +411,7 @@ export function planMcpApply(input: McpApplyInput): McpApplyPlan {
 	}
 	return {
 		source: { id: input.source.id, path: input.source.path },
-		servers: rendered.map(({ config: _config, ...rest }) => rest),
+		servers: rendered.map(({ config: _config, ...rest }) => rest), edits: null,
 		profiles, overrides: [...overrides.values()].map(({ name, path, sha256 }) => ({ name, path, sha256 })),
 		schema: { path: input.schemaPath, validated: true }, stateRoot: input.stateRoot, existing,
 		mutation: files.length ? planMutation({ stateRoot: input.stateRoot, roots, files }) : null,
@@ -414,7 +425,7 @@ export function applyMcpPlan(plan: McpApplyPlan): { receiptId: string | null; fi
 		return { receiptId: null, files: 0 };
 	}
 	const receipt = applyMutation(plan.mutation);
-	for (const step of plan.profiles.filter(row => row.action === "ADD")) {
+	for (const step of plan.profiles.filter(row => row.action === "ADD" || row.action === "EDIT")) {
 		const after = readProfileFile(step.path);
 		let entries: unknown;
 		try {
@@ -432,10 +443,167 @@ export function applyMcpPlan(plan: McpApplyPlan): { receiptId: string | null; fi
 	writePrivate(join(plan.stateRoot, `mcp-apply-${receipt.id}.json`), `${JSON.stringify({
 		schema_version: 1, receipt_id: receipt.id, recorded_at: new Date().toISOString(), source: plan.source,
 		servers: plan.servers.map(server => ({ name: server.name, env_refs: server.env_refs, env_literal: server.env_literal, override: server.override, timeout: server.display.timeout ?? null })),
-		overrides: plan.overrides, omp_schema: plan.schema.path,
+		overrides: plan.overrides, edits: plan.edits, omp_schema: plan.schema.path,
 		profiles: plan.profiles.map(({ diff: _diff, ...row }) => row),
 	}, null, 2)}\n`);
 	return { receiptId: receipt.id, files: receipt.files };
+}
+
+/** `SERVER:KEY=!COMMAND`; the command text is secret-scanned, and a value without `!` is refused, never written as a literal. */
+export function parseEnvCommand(spec: string): McpEnvCommand {
+	const colon = spec.indexOf(":"), equals = spec.indexOf("=", colon + 1);
+	const server = spec.slice(0, colon), key = spec.slice(colon + 1, equals), command = spec.slice(equals + 1);
+	if (colon <= 0 || equals < 0 || !SERVER_NAME.test(server) || !ENV_NAME.test(key) || !command.startsWith("!") || command.slice(1).trim() === "")
+		throw new McpApplyError("INVALID_ENV_COMMAND", "--env-command needs SERVER:KEY=!COMMAND (an OMP command value starting with !)");
+	if (!referenceValue(command))
+		throw new McpApplyError("LITERAL_SECRET", `--env-command for ${server} env.${key} holds a likely literal credential; read it from a store instead`, [{ server, field: `env.${key}` }]);
+	return { server, key, command };
+}
+
+/** Token index of the value of member `name` directly inside the object opened at token `open`; -1 when absent or `open` is not an object. */
+function memberValue(text: string, tokens: readonly Token[], open: number, name: string): number {
+	if (tokens[open]?.kind !== "{") return -1;
+	const close = closing(tokens, open);
+	for (let index = open + 1; index < close; index++) {
+		const token = tokens[index]!;
+		if (token.kind !== "string" || tokens[index + 1]?.kind !== ":") continue;
+		if (JSON.parse(text.slice(token.start, token.end)) === name) return index + 2;
+		index += 2;
+		if (tokens[index]?.kind === "{" || tokens[index]?.kind === "[") index = closing(tokens, index);
+	}
+	return -1;
+}
+
+/** Byte-preserving: rewrites only the string token of mcpServers[server].env[key]; null when that string value is absent. */
+export function setMcpEnvValue(text: string, server: string, key: string, value: string): string | null {
+	const tokens = tokenize(text);
+	const env = memberValue(text, tokens, memberValue(text, tokens, memberValue(text, tokens, 0, "mcpServers"), server), "env");
+	const at = memberValue(text, tokens, env, key);
+	if (at < 0 || tokens[at]!.kind !== "string") return null;
+	return text.slice(0, tokens[at]!.start) + JSON.stringify(value) + text.slice(tokens[at]!.end);
+}
+
+/** Byte-preserving: removes every `server` element of the root disabledServers array with one separator; null when not listed. */
+export function removeDisabledServer(text: string, server: string): string | null {
+	let changed = false;
+	for (;;) {
+		const tokens = tokenize(text);
+		const list = memberValue(text, tokens, 0, "disabledServers");
+		if (tokens[list]?.kind !== "[") break;
+		const close = closing(tokens, list);
+		const items: { start: number; end: number; match: boolean }[] = [];
+		for (let index = list + 1; index < close; index++) {
+			const token = tokens[index]!;
+			if (token.kind === ",") continue;
+			const last = token.kind === "{" || token.kind === "[" ? closing(tokens, index) : index;
+			items.push({ start: token.start, end: tokens[last]!.end, match: token.kind === "string" && JSON.parse(text.slice(token.start, token.end)) === server });
+			index = last;
+		}
+		const at = items.findIndex(item => item.match);
+		if (at < 0) break;
+		// Drop the element and the separator after it; the last element takes the separator before it.
+		const [from, to] = items.length === 1 ? [tokens[list]!.end, tokens[close]!.start]
+			: at < items.length - 1 ? [items[at]!.start, items[at + 1]!.start] : [items[at - 1]!.end, items[at]!.end];
+		text = text.slice(0, from) + text.slice(to);
+		changed = true;
+	}
+	return changed ? text : null;
+}
+
+/** Unified-style diff of the one changed line block between two texts. */
+function lineDiff(path: string, before: string, after: string): string {
+	const a = before.split("\n"), b = after.split("\n");
+	let head = 0, tail = 0;
+	while (head < a.length && head < b.length && a[head] === b[head]) head++;
+	while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+	const removed = a.slice(head, a.length - tail), added = b.slice(head, b.length - tail);
+	return [`--- ${path}`, `+++ ${path}`, `@@ -${head + 1},${removed.length} +${head + 1},${added.length} @@`, ...removed.map(line => `-${line}`), ...added.map(line => `+${line}`)].join("\n");
+}
+
+export interface McpEditInput {
+	profiles: readonly OmpProfileDir[];
+	stateRoot: string;
+	schema: unknown;
+	schemaPath: string;
+	envCommands: readonly McpEnvCommand[];
+	/** Servers to remove from each profile's disabledServers list. */
+	enable: readonly string[];
+}
+
+/** Edit mode, read-only: env `!command` values and disabledServers removals, in place; every other byte is kept. Throws McpApplyError on any refusal. */
+export function planMcpEdit(input: McpEditInput): McpApplyPlan {
+	if (!input.envCommands.length && !input.enable.length) throw new McpApplyError("NO_EDIT", "Edit mode needs --env-command or --enable");
+	for (const name of input.enable) if (!SERVER_NAME.test(name)) throw new McpApplyError("INVALID_ENABLE", "--enable needs comma-separated server names");
+	if (new Set(input.envCommands.map(edit => `${edit.server}\n${edit.key}`)).size !== input.envCommands.length || new Set(input.enable).size !== input.enable.length)
+		throw new McpApplyError("DUPLICATE_EDIT", "Each --env-command SERVER:KEY and each --enable name may appear once");
+	for (const edit of input.envCommands) if (!referenceValue(edit.command))
+		throw new McpApplyError("LITERAL_SECRET", `env.${edit.key} of ${edit.server} is not a clean !command value`, [{ server: edit.server, field: `env.${edit.key}` }]);
+	const profiles: McpProfilePlan[] = [], files: FileMutation[] = [], roots: { id: string; path: string }[] = [];
+	const existing = new Map<string, Record<string, unknown>>();
+	for (const profile of input.profiles) {
+		const base = { profile: profile.name, path: profile.mcpPath, added: [] as string[], already_present: [] as string[], conflicts: [] as string[], diff: "", before_sha256: null as string | null, after_sha256: null as string | null };
+		let current: { bytes: Buffer; image: Image } | null;
+		try { current = readProfileFile(profile.mcpPath); }
+		catch { profiles.push({ ...base, action: "SKIPPED", reason: "UNSAFE: mcp.json is not a regular file; left untouched" }); continue; }
+		const text = current?.bytes.toString("utf8") ?? null;
+		let parsed: unknown;
+		try { parsed = text === null ? {} : JSON.parse(text); } catch { parsed = undefined; }
+		if (!record(parsed) || (parsed.mcpServers !== undefined && !record(parsed.mcpServers))
+			|| (parsed.disabledServers !== undefined && !(Array.isArray(parsed.disabledServers) && parsed.disabledServers.every(item => typeof item === "string")))) {
+			profiles.push({ ...base, action: "SKIPPED", reason: "UNPARSEABLE: mcp.json is not a JSON object with an mcpServers object and a string disabledServers list; left untouched", before_sha256: current?.image.sha256 ?? null });
+			continue;
+		}
+		const expected = structuredClone(parsed);
+		const entries = record(expected.mcpServers) ? expected.mcpServers : {};
+		let next = text ?? "";
+		const diffs: string[] = [];
+		for (const edit of input.envCommands) {
+			const label = `${edit.server} env.${edit.key}=${edit.command}`;
+			const entry = entries[edit.server];
+			const env = record(entry) && record(entry.env) ? entry.env : undefined;
+			if (typeof env?.[edit.key] !== "string") { base.conflicts.push(`${label}: ${record(entry) ? `the entry has no string env.${edit.key}` : "server absent"}; left untouched`); continue; }
+			if (env[edit.key] === edit.command) { base.already_present.push(label); continue; }
+			const edited = setMcpEnvValue(next, edit.server, edit.key, edit.command);
+			if (edited === null) throw new McpApplyError("RENDER_FAILED", `Could not locate ${edit.server} env.${edit.key} in ${profile.name}'s mcp.json`);
+			diffs.push(lineDiff(profile.mcpPath, next, edited));
+			next = edited;
+			env[edit.key] = edit.command;
+			base.added.push(label);
+		}
+		for (const name of input.enable) {
+			const label = `enable ${name}`;
+			const listed = (expected.disabledServers as string[] | undefined) ?? [];
+			if (record(entries[name]) && entries[name].enabled === false) base.conflicts.push(`${label}: the entry itself has enabled false; left as is`);
+			if (!listed.includes(name)) { base.already_present.push(`${label} (not in disabledServers)`); continue; }
+			const edited = removeDisabledServer(next, name);
+			if (edited === null) throw new McpApplyError("RENDER_FAILED", `Could not locate ${name} in ${profile.name}'s disabledServers`);
+			diffs.push(lineDiff(profile.mcpPath, next, edited));
+			next = edited;
+			expected.disabledServers = listed.filter(item => item !== name);
+			base.added.push(label);
+		}
+		if (!diffs.length) { profiles.push({ ...base, action: "NO_CHANGE", before_sha256: current?.image.sha256 ?? null, after_sha256: current?.image.sha256 ?? null }); continue; }
+		let reparsed: unknown;
+		try { reparsed = JSON.parse(next); } catch { throw new McpApplyError("RENDER_FAILED", `Edit of ${profile.name} produced invalid JSON`); }
+		if (JSON.stringify(reparsed) !== JSON.stringify(expected)) throw new McpApplyError("RENDER_FAILED", `Edit of ${profile.name} changed content it was not asked to change`);
+		const documentErrors = validateJsonSchema(reparsed, input.schema);
+		if (documentErrors.length) {
+			profiles.push({ ...base, action: "SKIPPED", reason: `SCHEMA_INVALID: edited mcp.json would fail the OMP schema (${documentErrors.slice(0, 3).join("; ")}); left untouched`, before_sha256: current?.image.sha256 ?? null });
+			continue;
+		}
+		const afterBytes = Buffer.from(next);
+		const rootId = `profile-${roots.length}`;
+		roots.push({ id: rootId, path: dirname(profile.mcpPath) });
+		files.push({ root: rootId, relativePath: "mcp.json", expectedBefore: current!.image,
+			after: { bytes: afterBytes, mode: current!.image.mode, uid: current!.image.uid, gid: current!.image.gid } });
+		existing.set(profile.mcpPath, entries);
+		profiles.push({ ...base, action: "EDIT", diff: diffs.join("\n"), before_sha256: current!.image.sha256, after_sha256: hash(afterBytes) });
+	}
+	return {
+		source: null, servers: [], edits: { env_commands: [...input.envCommands], enable: [...input.enable] }, profiles, overrides: [],
+		schema: { path: input.schemaPath, validated: true }, stateRoot: input.stateRoot, existing,
+		mutation: files.length ? planMutation({ stateRoot: input.stateRoot, roots, files }) : null,
+	};
 }
 
 /** `N` for every selected server, or NAME=N[,NAME=N]. */
