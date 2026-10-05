@@ -2,3 +2,4 @@
 - ID1 spawn wiring: `scripts/agent-spawn-env.sh --agent NAME` installs the br identity shim into a pane-scoped bin dir and prints eval-able exports, so every pane runs br through the shim with its own identity; anonymous names refused, real br required beyond the shim.
 - ID1 commit trailer: `scripts/agent-trailer-hook.sh` (installed by `scripts/install-agent-trailer-hook.sh` into the hooks chain) appends `Agent: $AGENT_NAME` when the message has none; unknown identity or existing trailer left untouched.
 - ID1 close guard: `scripts/close-guard.sh BEAD` refuses when the caller holds the claim or has an Agent trailer on a naming commit, unless a reviewer-fresh-context label is present; different actors pass.
+- ID1 uniqueness: `scripts/identity-uniqueness-check.sh` reads pane identity files plus live tmux panes and flags live panes without files, stale files for dead panes, and one name on two live panes.
