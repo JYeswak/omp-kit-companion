@@ -29,7 +29,7 @@ footer = (
     f"Last verified against OMP {omp_version} on {stamp_date} by `bun test\n"
     "tests/cli/docs.test.ts`. Refresh with `sh scripts/docs-footer.sh`; the\n"
     "scheduled compatibility workflow re-runs the same check against the\n"
-    "latest OMP every 3 hours.\n"
+    "latest OMP once a day.\n"
     f"{end}"
 )
 updates = []
