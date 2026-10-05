@@ -557,7 +557,10 @@ function pluginEntries(value: unknown): Record<string, unknown>[] {
 function ruleSource(home: string, profile: string, item: Record<string, unknown>, pluginVersion: string | null, kitPackageDir: string | null): "kit_plugin" | "native_overlay" | "legacy" | "absent" {
 	const path = typeof item.path === "string" ? item.path : "";
 	if (!path) return "absent";
-	if (kitPackageDir !== null && (path === kitPackageDir || path.startsWith(`${kitPackageDir}/`))) return pluginVersion ? "kit_plugin" : "absent";
+	const underKit = kitPackageDir !== null
+		? path === kitPackageDir || path.startsWith(`${kitPackageDir}/`)
+		: path.includes("omp-kit-companion");
+	if (underKit) return pluginVersion ? "kit_plugin" : "absent";
 	if (path.startsWith(join(home, ".agents", "rules"))) return "legacy";
 	if (path.startsWith(join(home, ".omp", "agent", "rules")) || path.startsWith(join(home, ".omp", "profiles", profile, "agent", "rules"))) return "native_overlay";
 	return "absent";

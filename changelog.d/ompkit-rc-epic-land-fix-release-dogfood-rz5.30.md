@@ -1,0 +1,1 @@
+- Red main: the PROF2 strict path check broke contract fixtures whose plugin entry carries no path; when the kit package dir is unknown the check falls back to the path-contains heuristic instead of failing closed, restoring cli-contracts/profile-rules greens.
