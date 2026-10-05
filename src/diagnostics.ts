@@ -665,6 +665,59 @@ function inspectBeadAcceptance(project: string): Finding {
 		? finding("beads", "FAIL", "Beads put acceptance in the description while the acceptance_criteria field is empty", "Move tests and acceptance into acceptance_criteria; do not restate them in the description.", { tracker_path: trackerPath, missing_acceptance: missingAcceptance })
 		: finding("beads", "OK", "No description acceptance section is missing its acceptance_criteria field", "No action required.", { tracker_path: trackerPath, checked_beads: rows.length });
 }
+const DUPLICATE_PAIR_SIMILARITY = 0.75;
+const DUPLICATE_MIN_TOKENS = 10;
+const DUPLICATE_MAX_PAIRS = 20;
+
+function beadWordTokens(text: string): Set<string> {
+	const tokens = new Set<string>();
+	for (const token of text.toLowerCase().split(/[^a-z0-9]+/)) {
+		if (token.length >= 2) tokens.add(token);
+	}
+	return tokens;
+}
+
+function tokenOverlap(a: Set<string>, b: Set<string>): number {
+	if (a.size === 0 || b.size === 0) return 0;
+	let shared = 0;
+	for (const token of a) if (b.has(token)) shared++;
+	return shared / (a.size + b.size - shared);
+}
+
+function beadSearchText(row: Record<string, unknown>): Set<string> {
+	const title = typeof row.title === "string" ? row.title : "";
+	const description = typeof row.description === "string" ? row.description : "";
+	const acceptance = typeof row.acceptance_criteria === "string" ? row.acceptance_criteria : "";
+	return beadWordTokens(`${title}\n${description}\n${acceptance}`);
+}
+
+function inspectBeadDuplicates(project: string): Finding {
+	const trackerPath = join(project, ".beads", "issues.jsonl");
+	if (pathState(trackerPath) !== "file") return finding("beads", "UNVERIFIED", "Tracker issues export is missing or unsafe", "Run doctor --scope beads --project PATH on the tracker repository.", { tracker_path: trackerPath });
+	let rows: unknown[];
+	try { rows = fileBytes(trackerPath).toString("utf8").split("\n").filter(line => line.trim().length > 0).map(line => JSON.parse(line)); }
+	catch { return finding("beads", "UNVERIFIED", "Tracker issues export cannot be read as JSONL", "Repair the read-only tracker export before checking for duplicate beads.", { tracker_path: trackerPath }); }
+	const tokenized = rows.filter(record)
+		.filter((row) => row.status !== "closed" && row.status !== "tombstone")
+		.map((row) => ({
+			id: typeof row.id === "string" ? row.id : "UNKNOWN",
+			title: typeof row.title === "string" ? row.title : "",
+			tokens: beadSearchText(row),
+		}))
+		.filter((bead) => bead.tokens.size >= DUPLICATE_MIN_TOKENS);
+	const pairs: Array<{ a_id: string; a_title: string; b_id: string; b_title: string; similarity: number }> = [];
+	for (let i = 0; i < tokenized.length && pairs.length < DUPLICATE_MAX_PAIRS; i++) {
+		for (let j = i + 1; j < tokenized.length && pairs.length < DUPLICATE_MAX_PAIRS; j++) {
+			const similarity = tokenOverlap(tokenized[i]!.tokens, tokenized[j]!.tokens);
+			if (similarity < DUPLICATE_PAIR_SIMILARITY) continue;
+			pairs.push({ a_id: tokenized[i]!.id, a_title: tokenized[i]!.title, b_id: tokenized[j]!.id, b_title: tokenized[j]!.title, similarity: Math.round(similarity * 1000) / 1000 });
+		}
+	}
+	pairs.sort((a, b) => b.similarity - a.similarity);
+	return pairs.length
+		? finding("beads", "FAIL", "Likely duplicate beads share most of their title, description and acceptance text", "Merge each pair into one canonical bead, keeping the richer testing specs and dependency chain.", { tracker_path: trackerPath, duplicate_pairs: pairs })
+		: finding("beads", "OK", "No live bead pair shares enough text to look duplicated", "No action required.", { tracker_path: trackerPath, checked_beads: tokenized.length, duplicate_pairs: pairs });
+}
 
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
@@ -673,6 +726,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const home = resolve(input.home);
 	rows.push(inspectPlanningSkill(root, home));
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
+	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
