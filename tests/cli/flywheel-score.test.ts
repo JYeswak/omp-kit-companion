@@ -99,9 +99,33 @@ test("scoreFlywheel aggregates a planted good week to straight A", () => {
 	expect(grades["index-incidents"]).toBe("A");
 	expect(grades["close-flow"]).toBe("A");
 	expect(grades["freshness"]).toBe("A");
-	expect(grades["verdict-closes"]).toBe("A");
-	expect(grades["lessons"]).toBe("A");
-});
+ 	expect(grades["verdict-closes"]).toBe("A");
+ 	expect(grades["lessons"]).toBe("A");
+ });
+
+ test("planted: verdict and lesson count from the text field br actually emits", () => {
+ 	const now = Date.parse("2026-10-06T12:00:00.000Z");
+ 	const day = "2026-10-05T12:00:00.000Z";
+ 	const issues = [
+ 		{ id: "ompkit-aaa", status: "in_progress", updated_at: day, acceptance_items: [{ checked: true }] },
+ 		{ id: "ompkit-bbb", status: "closed", created_at: day, updated_at: day },
+ 	];
+ 	const run = (cmd: string[]) => {
+ 		const text = cmd.join(" ");
+ 		if (text.includes(" list ")) return { code: 0, stdout: JSON.stringify({ issues }) };
+ 		if (text.includes("audit log")) return { code: 0, stdout: JSON.stringify({ events: [] }) };
+ 		if (text.includes(" search ")) return { code: 0, stdout: JSON.stringify({ issues: [] }) };
+ 		if (text.includes("comments")) return { code: 0, stdout: JSON.stringify([
+ 			{ id: 1, issue_id: "ompkit-bbb", author: "SandyLake", text: "VERDICT box1 PASS\nlesson: plant fixtures first", created_at: day },
+ 		]) };
+ 		const sep = String.fromCharCode(1);
+ 		if (cmd[0] === "git") return { code: 0, stdout: ["aaa1", "[test] x ompkit-aaa", "p0"].join(sep) + "\n" };
+ 		throw new Error("unexpected command " + text);
+ 	};
+ 	const grades = Object.fromEntries(scoreFlywheel({ repo: "/repo", beadsDb: "/db", now }, run).map(m => [m.metric, m.grade]));
+ 	expect(grades["verdict-closes"]).toBe("A");
+ 	expect(grades["lessons"]).toBe("A");
+ });
 
 test("empty samples grade N/A, never A", () => {
 	const known = { "ompkit-aaa": true as const };

@@ -196,8 +196,8 @@ export function metricFreshness(stale: number, active: number): FlywheelMetric {
 export function metricVerdictCloses(withVerdict: number, closes: number): FlywheelMetric {
 	if (!closes) return na("verdict-closes", "0 closes", "no closes in window");
 	const pct = (withVerdict / closes) * 100;
-	return { metric: "verdict-closes", value: pct, display: `${withVerdict}/${closes} closes carry a closer VERDICT comment`,
-		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: VERDICT token in a closer comment within 24h before close" };
+ 	return { metric: "verdict-closes", value: pct, display: `${withVerdict}/${closes} closes carry a closer VERDICT comment`,
+ 		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: VERDICT token in a comment within 24h before close; limit: counts a VERDICT from anyone, not just the closer" };
 }
 
 /** M7: share of window closes with a lesson line or an explicit none. */
@@ -208,7 +208,7 @@ export function metricLessons(withLesson: number, closes: number): FlywheelMetri
 		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: /^lesson\\b/i line or /^none\\.?$/i line in a closer comment" };
 }
 
-export interface CommentRow { author?: string; body?: string; created_at?: string }
+ export interface CommentRow { author?: string; body?: string; text?: string; created_at?: string }
 
 /** Run the full seven-metric (plus incidents) computation against live git + tracker. */
 export function scoreFlywheel(input: FlywheelInput, run: RunFn): FlywheelMetric[] {
@@ -254,8 +254,8 @@ export function scoreFlywheel(input: FlywheelInput, run: RunFn): FlywheelMetric[
 		const rows: CommentRow[] = Array.isArray(payload) ? payload.filter((row): row is CommentRow => typeof row === "object" && row !== null) : [];
 		const closeTs = Date.parse(issue.updated_at ?? "");
 		const near = rows.filter(row => row.created_at && Date.parse(row.created_at) >= closeTs - DAY_MS);
-		if (near.some(row => (row.body ?? "").includes("VERDICT"))) withVerdict++;
-		if (near.some(row => (row.body ?? "").split("\n").some(line => /^lesson\b/i.test(line.trim()) || /^none\.?$/i.test(line.trim())))) withLesson++;
+ 		if (near.some(row => (row.text ?? row.body ?? "").includes("VERDICT"))) withVerdict++;
+ 		if (near.some(row => (row.text ?? row.body ?? "").split("\n").some(line => /^lesson\b/i.test(line.trim()) || /^none\.?$/i.test(line.trim())))) withLesson++;
 	}
 
 	const active = issues.filter(issue => issue.status === "in_progress");
