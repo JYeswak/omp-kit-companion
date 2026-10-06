@@ -188,3 +188,39 @@ test("ID-only renewal scoped to another id ignores the hot hold", async () => {
 	});
 	expect(block).toBeUndefined();
 });
+
+const twoHolds = (now: number) => [
+	{ id: 7, path_pattern: "src/cli.ts", exclusive: true, agent_name: "PlumRaven", granted_ms: now - 60 * MIN, expires_ms: now + 10 * MIN },
+	{ id: 8, path_pattern: "src/other.ts", exclusive: true, agent_name: "PlumRaven", granted_ms: now - 60 * MIN, expires_ms: now + 10 * MIN },
+];
+
+test("path-scoped renewal of a non-hot hold passes despite an over-cap hot hold", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check({
+		toolName: "xd://mcp__mcp_agent_mail_renew_file_reservations",
+		arguments: { agent_name: "PlumRaven", project_key: "/repo", extend_seconds: 10 * 60, paths: ["src/other.ts"] },
+	}, { cwd: root, repoRoot: root, now: () => now, activeHolds: twoHolds(now) });
+	expect(block).toBeUndefined();
+});
+
+test("path-scoped renewal of the hot hold is still refused", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check({
+		toolName: "xd://mcp__mcp_agent_mail_renew_file_reservations",
+		arguments: { agent_name: "PlumRaven", project_key: "/repo", extend_seconds: 10 * 60, paths: ["src/cli.ts"] },
+	}, { cwd: root, repoRoot: root, now: () => now, activeHolds: twoHolds(now) });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("hold 7");
+});
+
+test("id-only renewal of the hot hold is still refused with a sibling hold present", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check(idOnlyRenew({}), {
+		cwd: root, repoRoot: root, now: () => now, activeHolds: twoHolds(now),
+	});
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("hold 7");
+});

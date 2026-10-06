@@ -295,11 +295,17 @@ async function checkHotRenewal(
 		}
 		holds = report.holds;
 	}
-	const wanted = new Set(scope.ids);
+	const namedPaths = reservationArgs(event).paths;
+	const inScope = (hold: ActiveHold): boolean => {
+		if (scope.ids.length > 0 && (hold.id === null || !scope.ids.includes(hold.id))) return false;
+		if (namedPaths.length > 0 && !namedPaths.some((named) =>
+			reservationPatternCovers(hold.path_pattern, named) || reservationPatternCovers(named, hold.path_pattern))) return false;
+		return true;
+	};
 	const extendMinutes = scope.extendSeconds === undefined ? 0 : scope.extendSeconds / 60;
 	for (const hold of holds) {
 		if (hold.agent_name !== holder) continue;
-		if (wanted.size > 0 && (hold.id === null || !wanted.has(hold.id))) continue;
+		if (!inScope(hold)) continue;
 		if (!hold.exclusive) continue;
 		const hot = isHotPath(hotPaths, hold.path_pattern);
 		if (hot === null) continue;
