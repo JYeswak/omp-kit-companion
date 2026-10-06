@@ -43,3 +43,20 @@ test("orphan browser sharing a live Chrome clone is killed without quarantining 
 	const applied = applyBrowserReap(plan, { kill: pid => pid === 20, quarantine: path => path === clone });
 	expect(applied).toEqual({ killed: [20], quarantined: [] });
 });
+
+test("reparented headless Chrome with no OMP marker is UNATTRIBUTED and never killed", () => {
+	const stranger = parseBrowserCommand(50, 1, "/Applications/Google Chrome --headless --user-data-dir=/tmp/mine", 0);
+	const report = inspectBrowserProcesses([stranger], [], Date.now());
+	expect(report.browsers.map(browser => [browser.pid, browser.status])).toEqual([[50, "UNATTRIBUTED"]]);
+	expect(report.orphaned).toEqual([]);
+	expect(planBrowserReap(report)).toEqual([]);
+	const applied = applyBrowserReap(planBrowserReap(report), { kill: () => true, quarantine: () => true });
+	expect(applied).toEqual({ killed: [], quarantined: [] });
+});
+
+test("reparented headless Chrome with an OMP profile path stays ORPHAN and kill-eligible", () => {
+	const orphan = parseBrowserCommand(51, 1, "/Applications/Google Chrome --headless --user-data-dir=/Users/josh/.omp/profiles/claude/run/daemons/x/omp.browser-1", 0);
+	const report = inspectBrowserProcesses([orphan], [{ pid: 99, alive: false }], Date.now());
+	expect(report.browsers.map(browser => [browser.pid, browser.status])).toEqual([[51, "ORPHAN"]]);
+	expect(planBrowserReap(report)).toEqual([{ pid: 51, clones: [] }]);
+});

@@ -10,7 +10,7 @@ export type BrowserProcess = {
 	codeSignClones: string[];
 };
 export type BrowserSession = { pid: number; alive: boolean };
-export type BrowserFinding = BrowserProcess & { status: "ORPHAN" | "LIVE"; reason: string; ageMs: number };
+export type BrowserFinding = BrowserProcess & { status: "ORPHAN" | "LIVE" | "UNATTRIBUTED"; reason: string; ageMs: number };
 export type BrowserInventory = { processes: BrowserProcess[]; sessions: BrowserSession[]; clones: string[] };
 export type BrowserDoctorReport = { status: "OK" | "WARN"; browsers: BrowserFinding[]; orphaned: BrowserFinding[]; clones: string[] };
 
@@ -19,17 +19,23 @@ const BROKER = /__omp_worker_daemon_broker/;
 const USER_DATA = /--user-data-dir=([^\s"']+)/;
 const CLONE = /(?:^|\s)(\/[^\s]*code_sign_clone[^\s]*)/g;
 
-/** Pure classification: only headless Chrome descendants of OMP broker processes qualify. */
-export function inspectBrowserProcesses(processes: readonly BrowserProcess[], sessions: readonly BrowserSession[], now = Date.now(), extraClones: readonly string[] = []): BrowserDoctorReport {
-	const byPid = new Map(processes.map(process => [process.pid, process]));
-	const liveSessions = new Set(sessions.filter(session => session.alive).map(session => session.pid));
-	const browsers = processes.filter(process => CHROME.test(process.command) && /--headless(?:=|\s|$)/i.test(process.command)
-		&& (process.ppid === 1 || isBrokerDescendant(process, byPid)));
-	const classified = browsers.map(browser => {
-		const sessionAlive = liveSessions.has(browser.ppid) || liveSessions.has(byPid.get(browser.ppid)?.ppid ?? -1);
-		return { ...browser, status: sessionAlive ? "LIVE" as const : "ORPHAN" as const,
-			reason: sessionAlive ? "owning OMP session is live" : browser.ppid === 1 ? "broker was reparented to launchd" : "owning OMP session is absent", ageMs: Math.max(0, now - browser.startedAt) };
-	});
+/** Positive OMP attribution for a reparented headless Chrome: an OMP browser-tool user-data-dir or profile path, or the broker marker on its own command line. */
+const OMP_BROWSER_MARKER = /(?:__omp_worker_daemon_broker|\/\.omp\/|omp\.brows)/;
+
+ /** Pure classification: only headless Chrome descendants of OMP broker processes qualify. */
+ export function inspectBrowserProcesses(processes: readonly BrowserProcess[], sessions: readonly BrowserSession[], now = Date.now(), extraClones: readonly string[] = []): BrowserDoctorReport {
+ 	const byPid = new Map(processes.map(process => [process.pid, process]));
+ 	const liveSessions = new Set(sessions.filter(session => session.alive).map(session => session.pid));
+ 	const browsers = processes.filter(process => CHROME.test(process.command) && /--headless(?:=|\s|$)/i.test(process.command)
+ 		&& (process.ppid === 1 || isBrokerDescendant(process, byPid)));
+ 	const classified = browsers.map(browser => {
+ 		const sessionAlive = liveSessions.has(browser.ppid) || liveSessions.has(byPid.get(browser.ppid)?.ppid ?? -1);
+		const attributed = OMP_BROWSER_MARKER.test(browser.command) || (browser.userDataDir !== null && OMP_BROWSER_MARKER.test(browser.userDataDir));
+		if (!sessionAlive && browser.ppid === 1 && !isBrokerDescendant(browser, byPid) && !attributed)
+			return { ...browser, status: "UNATTRIBUTED" as const, reason: "reparented headless Chrome with no OMP marker: never kill", ageMs: Math.max(0, now - browser.startedAt) };
+ 		return { ...browser, status: sessionAlive ? "LIVE" as const : "ORPHAN" as const,
+ 			reason: sessionAlive ? "owning OMP session is live" : browser.ppid === 1 ? "broker was reparented to launchd" : "owning OMP session is absent", ageMs: Math.max(0, now - browser.startedAt) };
+ 	});
 	const orphaned = classified.filter(browser => browser.status === "ORPHAN");
 	const clones = [...new Set([...orphaned.flatMap(browser => browser.codeSignClones), ...extraClones])];
 	return { status: orphaned.length ? "WARN" : "OK", browsers: classified, orphaned, clones };
