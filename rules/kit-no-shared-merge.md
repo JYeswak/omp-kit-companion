@@ -1,7 +1,7 @@
 ---
 description: "Never merge, pull or rebase in a shared checkout; land from a private index"
 condition:
-  - '(?i)(?<!\becho[\s\S]{0,64})(?<!\bprintf[\s\S]{0,64})\bgit(?<!var\/agent-tmp[\s\S]{0,64})(?![\s\S]{0,64}var\/agent-tmp)(?:\s|\\{1,3}n)+(?:merge|pull|rebase)(?!(?:-base|-tree)\b)(?=[\s;&|)"\x60]|\\n)'
+  - '(?i)\bgit(?<!\becho[^;\n]{0,64})(?<!\bprintf[^;\n]{0,64})(?<!var\/agent-tmp[\s\S]{0,64})(?![\s\S]{0,64}var\/agent-tmp)(?:\s|\\{1,3}n)+(?:merge|pull|rebase)(?!(?:-base|-tree)\b)(?=[\s;&|)"\x60]|\\n)'
 scope: tool:bash
 interruptMode: never
 ---
