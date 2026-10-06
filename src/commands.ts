@@ -498,7 +498,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the restore in noninteractive mode" },
 		], example: "omp-kit infra undo --receipt PATH --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
-	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
+	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: an unowned dir with fresh activity (newest mtime within 72h) stays LIVE; idle past 72h with no open fds goes to quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
 		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
