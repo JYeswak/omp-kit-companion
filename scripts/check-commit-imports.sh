@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
 		*) printf 'check-commit-imports: unknown argument %s\n' "$1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$REPO" ] && [ -n "$BASE" ] && [ -n "$TIP" ] || { printf 'check-commit-imports: --repo DIR --base SHA --tip SHA required\n' >&2; exit 2; }
+ if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$TIP" ]; then printf 'check-commit-imports: --repo DIR --base SHA --tip SHA required\n' >&2; exit 2; fi
 
 # Resolve a ./x or ../x spec against the importing file's directory.
 resolve_spec() {
