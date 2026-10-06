@@ -1,7 +1,7 @@
 ---
 description: "Use the regex-engineering workflow before adding a regular expression"
 condition:
-  - 'new\s+RegExp\s*\(|\/[^/\\\n]*(?:\\.[^/\\\n]*)*\/[dgimsuvy]*\.test\s*\(|\.(?:match|replace|split)\s*\(\s*/|re\.(?:compile|search|match|sub|f(?:ind(?:all|iter)|ullmatch))\s*\(|Regex::new\s*\(|condition:'
+  - 'new\s+RegExp\s*\(|\/(?![/*])[^/\\\n]*(?:\\.[^/\\\n]*)*\/[dgimsuvy]*\.test\s*\(|\.(?:match|replace|split)\s*\(\s*/|re\.(?:compile|search|match|sub|f(?:ind(?:all|iter)|ullmatch))\s*\(|Regex::new\s*\(|condition:'
 scope:
   - 'tool:write(**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,py,rs})'
   - 'tool:edit(**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,py,rs})'
