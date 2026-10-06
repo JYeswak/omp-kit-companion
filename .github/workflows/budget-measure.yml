@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-latest]
+        os: [macos-15-intel, macos-latest]
         target: [base, guard]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
