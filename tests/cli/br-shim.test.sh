@@ -180,7 +180,7 @@ printf '{"id":"X","status":"in_progress","assignee":"TestShim","labels":["review
 : > "$TMP/argv"
 br close X > "$TMP/out" 2>&1
 got_rc=$?
-check "fresh-context-passes" 0 "close X --actor TestShim"
+check "fresh-context-label-refused" 4 ""
 
 printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
