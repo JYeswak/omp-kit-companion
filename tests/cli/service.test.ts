@@ -653,9 +653,10 @@ test("service run executes the stable launcher and writes a job receipt", () => 
   chmodSync(join(bin, "omp-kit"), 0o755);
   mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
   chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
-  const result = cli(["service", "run", "omp-watch"], home);
+  // Pinned quiet: the gate reads the live machine, which CI runners can spike.
+  const result = cli(["service", "run", "omp-watch"], home, { OMP_KIT_LOAD_OVERRIDE: "0.05/8" });
   expect(result.code).toBe(0);
-  expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch" });
+  expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch", status: "OK" });
   const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
   expect(receipt).toMatchObject({ exit: 0 });
   expect(typeof receipt.started_at).toBe("string");
@@ -671,9 +672,9 @@ test("service run maps a failing launcher to FINDINGS without losing the receipt
   chmodSync(join(bin, "omp-kit"), 0o755);
   mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
   chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
-  const result = cli(["service", "run", "omp-watch"], home);
+  const result = cli(["service", "run", "omp-watch"], home, { OMP_KIT_LOAD_OVERRIDE: "0.05/8" });
   expect(result.code).toBe(1);
-  expect(result.envelope.data).toMatchObject({ overall: "FINDINGS", job: "omp-watch" });
+  expect(result.envelope.data).toMatchObject({ overall: "FINDINGS", job: "omp-watch", status: "FAILED" });
   expect(result.envelope.errors[0].code).toBe("JOB_FAILED");
   const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
   expect(receipt.exit).toBe(3);
@@ -971,12 +972,12 @@ test("service run notifies on failure and stays silent on success", () => {
   }
   const { dir, log } = fakebin();
   const path = `${dir}:${process.env.PATH ?? ""}`;
-  const failing = cli(["service", "run", "omp-watch"], runHome(3), { PATH: path, NOTIFY_LOG: log });
+  const failing = cli(["service", "run", "omp-watch"], runHome(3), { PATH: path, NOTIFY_LOG: log, OMP_KIT_LOAD_OVERRIDE: "0.05/8" });
   expect(failing.code).toBe(1);
   expect(failing.envelope.data.notification.attempted).toBe(true);
   expect(readFileSync(log, "utf8")).toContain("omp-kit test did not pass after an OMP update");
   rmSync(log, { force: true });
-  const passing = cli(["service", "run", "omp-watch"], runHome(0), { PATH: path, NOTIFY_LOG: log });
+  const passing = cli(["service", "run", "omp-watch"], runHome(0), { PATH: path, NOTIFY_LOG: log, OMP_KIT_LOAD_OVERRIDE: "0.05/8" });
   expect(passing.code).toBe(0);
   expect(passing.envelope.data.notification).toEqual({ attempted: false, method: "none" });
   expect(existsSync(log)).toBe(false);

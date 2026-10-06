@@ -225,7 +225,16 @@ export function bunCapExec(): CapExec {
 				},
 			};
 		},
-		sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		sleep: (ms) => new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, ms);
+			// The deadline must never outlive the run: an unref'd timer fires
+			// while work is pending but cannot keep the CLI alive after the
+			// child settles (CI fail 2026-10-06: 300 s cap held `service run`
+			// past bun's 5 s test timeout). Guarded: runtimes without unref
+			// keep the old hold-the-loop behavior.
+			const t = timer as unknown as { unref?: () => void };
+			if (typeof t.unref === "function") t.unref();
+		}),
 		now: () => Date.now(),
 	};
 }

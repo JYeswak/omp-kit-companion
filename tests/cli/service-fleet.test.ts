@@ -144,7 +144,12 @@ test("SVC1 planted: a run under high load writes SKIPPED-LOAD and does no work",
 
 test("SVC1 planted: a slow run is killed at the cap and recorded TIMEOUT", () => {
 	const home = fixtureHome();
-	const result = cli(["service", "run", "omp-watch"], home, namespace(), { OMP_KIT_RUN_CAP_MS: "1" });
+	// The launcher must outlive the cap by oceans: on a loaded 2-core CI
+	// runner the 1 ms deadline timer can fire late, and an instant launcher
+	// won that race (2026-10-06: OK envelope, status undefined). sleep 20
+	// makes TIMEOUT deterministic under any timer jitter.
+	writeFileSync(join(home, ".local", "bin", "omp-kit"), "#!/bin/sh\nsleep 20\nexit 0\n", { mode: 0o755 });
+	const result = cli(["service", "run", "omp-watch"], home, namespace(), { OMP_KIT_RUN_CAP_MS: "1", OMP_KIT_LOAD_OVERRIDE: "0.05/8" });
 	expect(result.envelope.data.status).toBe("TIMEOUT");
 	expect(result.envelope.errors[0].code).toBe("TIMEOUT");
 	expect(readReceipt(home, "omp-watch")).toMatchObject({ status: "TIMEOUT" });

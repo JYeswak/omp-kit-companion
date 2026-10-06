@@ -2462,7 +2462,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "TIMEOUT", message: `test --record exceeded the ${capMs} ms cap and was killed`,
 					remediation: "Run the recorded command manually with --json and read its failures." }], verification: "UNVERIFIED" };
 		}
-		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: run.exit ?? 1, omp_version: ompVersion };
+		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: run.exit ?? 1, omp_version: ompVersion, status: run.status };
 		try {
 			mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
 			writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
@@ -2478,7 +2478,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null })
 			: { attempted: false, method: "none" as const };
 		lock.release();
-		return { code: run.exit === 0 ? 0 : 1, data: { overall: run.exit === 0 ? "OK" : "FINDINGS", job: job.name, receipt, notification }, verification: "UNVERIFIED",
+		return { code: run.exit === 0 ? 0 : 1, data: { overall: run.exit === 0 ? "OK" : "FINDINGS", job: job.name, status: run.status, receipt, notification }, verification: "UNVERIFIED",
 			errors: run.exit === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${run.exit}: ${run.out.trim().slice(0, 300)}`,
 				remediation: "Run the recorded command manually with --json and read its failures." }] };
 	}
