@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { githubFinding, hostsToken, probeGithubCapabilities, repairGithubHosts, type GhFetch, type GhFetchResponse } from "../../src/gh-doctor.ts";
 
 function stubFetch(routes: Record<string, { status: number; scopes?: string; body: unknown }>, seen: string[]): GhFetch {
@@ -149,5 +149,29 @@ describe("github finding fold", () => {
 		expect(finding.component).toBe("github");
 		expect(finding.status).toBe("FAIL");
 		expect(finding.reason).toContain("issue_create_foreign");
+	});
+});
+
+describe("doctor --scope github entry", () => {
+	test("the real CLI returns the capability rows with no credential present", () => {
+		const home = mkdtempSync(join(tmpdir(), "gh-doctor-cli-"));
+		try {
+			const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"),
+				"doctor", "--scope", "github", "--json"], {
+				cwd: home,
+				env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "state") },
+				stdout: "pipe", stderr: "pipe",
+			});
+			expect(child.exitCode).toBe(0);
+			const envelope = JSON.parse(child.stdout.toString());
+			const row = envelope.data.findings.find((item: { component: string }) => item.component === "github");
+			expect(row).toBeDefined();
+			const capabilities = row.evidence.capabilities;
+			expect(capabilities.map((entry: { capability: string }) => entry.capability)).toEqual(
+				["issue_create_foreign", "push_owned", "workflow_dispatch", "run_read"]);
+			expect(capabilities.every((entry: { status: string }) => entry.status === "UNVERIFIED")).toBe(true);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 });

@@ -18,6 +18,7 @@ import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
 import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
+import { githubFinding, probeGithubCapabilities } from "./gh-doctor.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
 import { inspectOmpSessions } from "./session-doctor.ts";
@@ -506,6 +507,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			findings = [await inspectDicklesworthstone()];
 		} else if (scope === "reservations") {
 			findings = [inspectReservationAge(request)];
+		} else if (scope === "github") {
+			findings = [githubFinding(await probeGithubCapabilities({ foreignRepo: "can1357/oh-my-pi", ownedRepo: "JYeswak/omp-kit-companion" }))];
 		} else if (typeof scope === "string") {
 			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
