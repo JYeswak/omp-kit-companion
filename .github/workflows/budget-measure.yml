@@ -1,12 +1,13 @@
 name: budget-measure
 
-# Scratch measurement only (blocker D): stream totals per runner for
-# origin/main vs the karen-guard candidate. workflow_dispatch only, never main.
+# Scratch measurement only: paired stream totals per runner for origin/main
+# vs the dispatched ref, interleaved on the SAME VM (base, cand alternating),
+# so machine variance cannot confound the comparison. workflow_dispatch only.
 on:
   workflow_dispatch:
     inputs:
       runs:
-        description: Budget repetitions per leg
+        description: Paired repetitions per OS
         type: string
         required: false
         default: "5"
@@ -25,47 +26,41 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-15-intel, macos-latest]
-        target: [base, guard]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check out candidate tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
-      - name: Select tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${{ matrix.target }}" == "base" ]]; then
-            git checkout origin/main
-          fi
-          git log --oneline -1
-          git status --porcelain -- rules/ | head -3
+          path: cand
+      - name: Check out main tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: base
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Install stock OMP latest
         env:
           TMPDIR: ${{ runner.temp }}
           npm_config_cache: ${{ runner.temp }}/npm-cache
         run: npm install --global "@oh-my-pi/pi-coding-agent@latest"
-      - name: Stream budget xN
+      - name: Paired stream budget
         env:
           TMPDIR: ${{ runner.temp }}
         shell: bash
         run: |
           set -euo pipefail
-          results_dir="$RUNNER_TEMP/budget-measure-${{ matrix.target }}-${{ matrix.os }}"
+          results_dir="$RUNNER_TEMP/budget-measure-${{ matrix.os }}"
           mkdir -p "$results_dir"
-          missing_report=0
           for i in $(seq 1 "${{ inputs.runs }}"); do
-            output="$results_dir/run-$i.log"
-            rc=0
-            bun scripts/regex-budget.ts --judge-regardless-of-load >"$output" 2>&1 || rc=$?
-            echo "--- run $i target=${{ matrix.target }} os=${{ matrix.os }} rc=$rc"
-            grep -E '^(REGEX-BUDGET:|live stream:|stream |JSON_REPORT=)' "$output" || true
-            if ! grep -q '^REGEX-BUDGET: ' "$output"; then
-              echo "No budget summary on run $i; full output: $output" >&2
-              missing_report=1
-            fi
+            for target in base cand; do
+              output="$results_dir/run-$i-$target.log"
+              rc=0
+              (cd "$target" && bun scripts/regex-budget.ts --judge-regardless-of-load >"$output" 2>&1) || rc=$?
+              echo "--- run $i target=$target os=${{ matrix.os }} rc=$rc"
+              grep -E '^(REGEX-BUDGET:|live stream:|stream |JSON_REPORT=)' "$output" || true
+            done
           done
-          exit "$missing_report"
