@@ -151,6 +151,24 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertNotIn(incomplete, proof["platform_omp_versions"])
         self.assertEqual(set(proof["certified_platforms"]), set(PLATFORMS[1:]))
 
+    def test_refusal_detail_names_failing_stage_and_scenarios(self) -> None:
+        payload = {
+            "data": {"test": {
+                "status": "FAIL",
+                "stages": {"fast": {"status": "PASS"}, "full": {"status": "FAIL"}},
+                "failures": ["G4 live scenario planted-fail"],
+                "live_scenarios": {"expected_ids": ["planted-fail", "planted-pass"], "observed_ids": ["planted-pass"]},
+            }},
+            "errors": [{"code": "LIVE_FAIL", "message": "planted-fail refused"}],
+        }
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(payload).encode(), stderr=b"tail")
+        detail = native_candidate.refusal_detail("test --full", child)
+        self.assertEqual(detail["command"], "test --full")
+        self.assertEqual(detail["rc"], 1)
+        self.assertEqual(detail["failed_stages"], ["full"])
+        self.assertIn("G4 live scenario planted-fail", detail["failures"])
+        self.assertEqual(detail["missing_scenarios"], ["planted-fail"])
+
 
 if __name__ == "__main__":
     unittest.main()
