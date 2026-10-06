@@ -9,13 +9,35 @@ import { writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 
-const REPO_ROOT = resolve(import.meta.dir, "../..");
-let fixtureBase = "";
-let releaseRoot = "";
-let stableExecutable = "";
-let matcherRoot = "";
-let matcherExecutable = "";
-let matcherCaller = "";
+ const REPO_ROOT = resolve(import.meta.dir, "../..");
+ // l9pt box 4: suite-owned TMPDIR. Fixtures must never land in the ambient
+ // session TMPDIR (fleet debris regrew session-omp-test to 1.2G); this suite
+ // redirects tmpdir() into an isolated repo-scratch dir it removes itself.
+ let suiteTmp = "";
+ const savedSuiteEnv = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+ function dirBytes(root: string): number {
+ 	let total = 0;
+ 	const stack = [root];
+ 	while (stack.length > 0) {
+ 		const current = stack.pop()!;
+ 		let entries = [];
+ 		try { entries = readdirSync(current); } catch { continue; }
+ 		for (const entry of entries) {
+ 			const path = join(current, entry);
+ 			let stat = null;
+ 			try { stat = lstatSync(path); } catch { continue; }
+ 			if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
+ 			else total += stat.size;
+ 		}
+ 	}
+ 	return total;
+ }
+ let fixtureBase = "";
+ let releaseRoot = "";
+ let stableExecutable = "";
+ let matcherRoot = "";
+ let matcherExecutable = "";
+ let matcherCaller = "";
 function countRuleRows(root: string): { rules: number; ttsrRules: number } {
 	const rules = readdirSync(join(root, "rules")).filter((name) => name.endsWith(".md"));
 	const ttsrRules = readFileSync(join(root, "MANIFEST.tsv"), "utf8").split("\n").slice(1).filter((row) => row.trim() !== "" && row.split("\t")[2] !== "always").length;
@@ -172,8 +194,12 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
 	return { root, stable, executable };
 }
 
-beforeAll(() => {
-	fixtureBase = mkdtempSync(join(tmpdir(), "omp-kit-fast-test-"));
+ beforeAll(() => {
+ 	suiteTmp = mkdtempSync(join(REPO_ROOT, "var/agent-tmp", "suite-fast-test-"));
+ 	process.env.TMPDIR = suiteTmp;
+ 	process.env.TMP = suiteTmp;
+ 	process.env.TEMP = suiteTmp;
+ 	fixtureBase = mkdtempSync(join(tmpdir(), "omp-kit-fast-test-"));
 	const prefix = join(fixtureBase, "kit");
 	releaseRoot = join(prefix, "releases", "v1.0.0");
 	mkdirSync(join(releaseRoot, "bin"), { recursive: true });
@@ -252,9 +278,27 @@ beforeAll(() => {
 	chmodSync(matcherCaller, 0o755);
 });
 
-afterAll(() => {
-	if (fixtureBase) rmSync(fixtureBase, { recursive: true, force: true });
-});
+ afterAll(() => {
+ 	if (fixtureBase) rmSync(fixtureBase, { recursive: true, force: true });
+ 	if (savedSuiteEnv.TMPDIR === undefined) delete process.env.TMPDIR;
+ 	else process.env.TMPDIR = savedSuiteEnv.TMPDIR;
+ 	if (savedSuiteEnv.TMP === undefined) delete process.env.TMP;
+ 	else process.env.TMP = savedSuiteEnv.TMP;
+ 	if (savedSuiteEnv.TEMP === undefined) delete process.env.TEMP;
+ 	else process.env.TEMP = savedSuiteEnv.TEMP;
+ 	if (suiteTmp) rmSync(suiteTmp, { recursive: true, force: true });
+ });
+
+ test("suite TMPDIR discipline: a fixture cycle leaves session-omp-test unchanged in size", () => {
+ 	expect(tmpdir()).toBe(suiteTmp);
+ 	const session = join(REPO_ROOT, "var/agent-tmp", "session-omp-test");
+ 	if (!existsSync(session)) return;
+ 	const before = dirBytes(session);
+ 	const probe = mkdtempSync(join(tmpdir(), "omp-kit-tmpdir-probe-"));
+ 	writeFileSync(join(probe, "payload"), "x".repeat(65536));
+ 	rmSync(probe, { recursive: true, force: true });
+ 	expect(dirBytes(session)).toBe(before);
+ });
 
 describe("runFastTest", () => {
 	test("runs the real packaged matcher and reports missing install, project shadow, and live as unverified or not run", () => {

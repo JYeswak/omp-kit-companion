@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+ import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, relative, resolve, sep } from "node:path";
@@ -9,15 +9,37 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { judgeFleet, readProfileWiring, runIntegrations, staticVerdict } from "../../src/integrations.ts";
 import type { LiveAttempt } from "../../src/integrations.ts";
 
-const REPO_ROOT = resolve(import.meta.dir, "../..");
+ const REPO_ROOT = resolve(import.meta.dir, "../..");
 
-let base = "";
-let binary = "";
-let home = "";
-let release = "";
-let plantHome = "";
-let ompLauncher = "";
-let environment: Record<string, string>;
+ // l9pt box 4: suite-owned TMPDIR (see test-runner.test.ts). Fixtures must
+ // never land in the ambient session TMPDIR.
+ let suiteTmp = "";
+ const savedSuiteEnv = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+ function dirBytes(root: string): number {
+ 	let total = 0;
+ 	const stack = [root];
+ 	while (stack.length > 0) {
+ 		const current = stack.pop()!;
+ 		let entries: string[] = [];
+ 		try { entries = readdirSync(current); } catch { continue; }
+ 		for (const entry of entries) {
+ 			const path = join(current, entry);
+ 			let stat = null;
+ 			try { stat = lstatSync(path); } catch { continue; }
+ 			if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
+ 			else total += stat.size;
+ 		}
+ 	}
+ 	return total;
+ }
+
+ let base = "";
+ let binary = "";
+ let home = "";
+ let release = "";
+ let plantHome = "";
+ let ompLauncher = "";
+ let environment: Record<string, string>;
 
 
 function profileConfig(extensions: string[]): string {
@@ -27,10 +49,14 @@ function profileConfig(extensions: string[]): string {
 	}), ""].join("\n");
 }
 
-beforeAll(() => {
-	const omp = resolveOmpIdentity(process.env);
-	ompLauncher = omp.launcher;
-	base = mkdtempSync(join(tmpdir(), "omp-kit-integrations-"));
+ beforeAll(() => {
+ 	suiteTmp = mkdtempSync(join(REPO_ROOT, "var/agent-tmp", "suite-integrations-"));
+ 	process.env.TMPDIR = suiteTmp;
+ 	process.env.TMP = suiteTmp;
+ 	process.env.TEMP = suiteTmp;
+ 	const omp = resolveOmpIdentity(process.env);
+ 	ompLauncher = omp.launcher;
+ 	base = mkdtempSync(join(tmpdir(), "omp-kit-integrations-"));
 	release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");
@@ -130,9 +156,27 @@ beforeAll(() => {
 	};
 }, 120_000);
 
-afterAll(() => {
-	if (base) rmSync(base, { recursive: true, force: true });
-});
+ afterAll(() => {
+ 	if (base) rmSync(base, { recursive: true, force: true });
+ 	if (savedSuiteEnv.TMPDIR === undefined) delete process.env.TMPDIR;
+ 	else process.env.TMPDIR = savedSuiteEnv.TMPDIR;
+ 	if (savedSuiteEnv.TMP === undefined) delete process.env.TMP;
+ 	else process.env.TMP = savedSuiteEnv.TMP;
+ 	if (savedSuiteEnv.TEMP === undefined) delete process.env.TEMP;
+ 	else process.env.TEMP = savedSuiteEnv.TEMP;
+ 	if (suiteTmp) rmSync(suiteTmp, { recursive: true, force: true });
+ });
+
+ test("suite TMPDIR discipline: a fixture cycle leaves session-omp-test unchanged in size", () => {
+ 	expect(tmpdir()).toBe(suiteTmp);
+ 	const session = join(REPO_ROOT, "var/agent-tmp", "session-omp-test");
+ 	if (!existsSync(session)) return;
+ 	const before = dirBytes(session);
+ 	const probe = mkdtempSync(join(tmpdir(), "omp-kit-tmpdir-probe-"));
+ 	writeFileSync(join(probe, "payload"), "x".repeat(65536));
+ 	rmSync(probe, { recursive: true, force: true });
+ 	expect(dirBytes(session)).toBe(before);
+ });
 
 function runCli(args: string[]): { exitCode: number; envelope: Record<string, unknown> } {
 	const child = Bun.spawnSync([binary, ...args], {

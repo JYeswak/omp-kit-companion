@@ -1,1 +1,2 @@
 - scratch service test pins quiet load; heaviest multi-spawn test gets an explicit 30s timeout.
+ - fast-test and integrations suites use a suite-owned TMPDIR they remove, with a planted check that a fixture cycle leaves session-omp-test unchanged in size.
