@@ -1,0 +1,13 @@
+- Commit index for 0.2.7: every shipped-path commit since v0.2.6 that had no fragment of its own, grouped by bead.
+
+- ompkit-udm1: (commit 4e9addf)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.54: (commit 83d815c)
+- ompkit-wqk9: (commit 58a11dd)
+- ompkit-uzgf: (commit fd8fcd9)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.6: (commit 15385a7)
+- ompkit-l9pt: (commit 72f14b9)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.5: (commit e9bab97)
+- ompkit-t8do: (commit 9cc4b17)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.3: (commit d197245)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.113: (commit 5673499)
+- feat(omp-compat): compare latest three OMP releases daily (commit 032980e)

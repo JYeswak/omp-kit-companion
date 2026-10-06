@@ -4,6 +4,42 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.7 — 2026-10-06
+
+- FLY2-1 linkage fix: `src/flywheel-score.ts` BEAD_ID accepts the dotted numeric suffix in bead ids (rz5.113); without it every dotted commit counted unlinked (linkage read 1/50). Linear-time pattern (word-bounded, exclusive classes, no nested quantifiers). Planted test: dotted ids link, truncated prefixes do not; landing-hygiene covered too.
+- FLY2-1 bare resolution: realIds also accepts bare rz5.NNN exactly like the COMMIT1 hook, resolving against known tracker ids by unique suffix; unknown or ambiguous suffixes never link. Planted: resolving bare links, unknown bare does not, duplicate-suffix fixture does not.
+
+- FLY2-2 self-pick rule: `skills/jeff-planning-enhanced/SKILL.md` section 7 now says claim from `bv --robot-next` (RERUN-REQUEST grades first) and hold at most one bead at a time, closing the gap where marching orders implied it but neither document stated it.
+
+- scratch service test pins quiet load; heaviest multi-spawn test gets an explicit 30s timeout.
+
+- PUB1e doctor scope: `doctor --scope public-files --project` lists missing standard public files (OK when complete, DEGRADED naming each).
+
+- PUB1f doctor scope: `doctor --scope layout --project` reports standard layout deviations (OK when clean, DEGRADED naming each).
+
+- Release fallback when GitHub runners queue (DS1): `dsr repos add` registration plus per-target definition, `dsr health all`, and a CONTRIBUTING procedure whose publication bar matches CI (per-platform native-cert receipts); precise gap list included (target vocabulary, unreachable macOS remotes, signing/SBOM unconfigured).
+- DS1 dsr mapping: package-release accepts v-prefix, Rust triples and native (resolving to the host kit triple); repo-tracked dsr/omp-kit-companion.yaml names platform targets for up hosts with measured interface notes.
+
+The daily OMP compatibility workflow now tests the latest three stable releases, compares their first-fire indexes and default-policy outcomes, and produces a diff-checked matrix linked from the README. The report names known policy failures and limits its claim to the tested releases and checks.
+
+- FLY2-3 dangling imports: the pre-push chain refuses commits importing files missing from their tree (planted commit refused naming sha+path; suite 3/3).
+
+- Commit index for 0.2.7: every shipped-path commit since v0.2.6 that had no fragment of its own, grouped by bead.
+
+- ompkit-udm1: (commit 4e9addf)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.54: (commit 83d815c)
+- ompkit-wqk9: (commit 58a11dd)
+- ompkit-uzgf: (commit fd8fcd9)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.6: (commit 15385a7)
+- ompkit-l9pt: (commit 72f14b9)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.5: (commit e9bab97)
+- ompkit-t8do: (commit 9cc4b17)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.3: (commit d197245)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.113: (commit 5673499)
+- feat(omp-compat): compare latest three OMP releases daily (commit 032980e)
+
+- RELEASE BLOCKER A: `runEffectiveRuleProbe` (sync + async) in `src/diagnostics.ts` spawns OMP against an isolated probe HOME carrying only small non-database configs from `.omp/agent` and the probed profile; OMP's SQLite state init lands in throwaway and findings match real-HOME runs byte for byte. Planted test asserts an inspected HOME stays byte- and mtime-identical (RED on unfixed code, GREEN fixed).
+
 ## 0.2.6 — 2026-10-06
 
 - F2 no-egress tripwire (box 6): `tests/cli/corpus.test.ts` runs the full corpus with all proxy vars poisoned to unroutable endpoints and asserts the seeded counts; a positive control proves the poison is lethal in the running runtime (a future runtime that ignores proxy env fails the control, never silently vacuous). Scope: CLI parent layer via the standard proxy-respecting stack; the harness child runs under runtime.ts's proxy-free allowlisted env, so any future child egress would be direct-dial.
