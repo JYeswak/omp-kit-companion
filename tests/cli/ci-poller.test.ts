@@ -7,6 +7,16 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 const roots: string[] = [];
 const savedApi = process.env.OMP_KIT_GITHUB_API;
 const savedRepos = process.env.OMP_KIT_CI_REPOS;
+const savedNoProxy = process.env.NO_PROXY;
+const savedNoProxyLower = process.env.no_proxy;
+// Localhost fixtures must never route through a proxy: ubuntu CI runners
+// carry proxy env vars, and a proxied 127.0.0.1 refuses instantly (red main
+// 2026-10-06: 3 poller tests ERROR). Bun honors NO_PROXY per request.
+process.env.NO_PROXY = [savedNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+process.env.no_proxy = [savedNoProxyLower, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+// Restores API vars per test (asserted on); the proxy bypass stays for the
+// process lifetime: re-applying the runner proxy between tests would
+// re-break every later localhost fixture in this file.
 afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 	if (savedApi === undefined) delete process.env.OMP_KIT_GITHUB_API;
