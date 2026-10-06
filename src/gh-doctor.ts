@@ -47,6 +47,8 @@ export interface GhProbeInput {
 	fetchImpl?: GhFetch;
 	/** HOME override for hosts.yml lookup (tests). */
 	home?: string;
+	/** Override for `gh auth token` (tests); default shells out to gh. */
+	ghToken?: () => string | null;
 }
 
 const API = "https://api.github.com";
@@ -100,11 +102,39 @@ function permsOf(body: unknown): { push: boolean; admin: boolean } {
 	return { push: push || admin, admin };
 }
 
+/** Resolve the credential without ever printing it. Order: explicit token,
+ * env (GH_TOKEN/GITHUB_TOKEN), the gh keyring via `gh auth token`, then the
+ * hosts.yml oauth_token. This machine keeps the token in the macOS keyring,
+ * so hosts.yml alone resolves nothing. */
+export function resolveCredential(input: {
+	token?: string; tokenSource?: string; home: string;
+	env?: Record<string, string | undefined>;
+	ghToken?: () => string | null;
+}): { token: string; source: string } | null {
+	if (input.token !== undefined) return { token: input.token, source: input.tokenSource ?? "caller-supplied token" };
+	const env = input.env ?? process.env;
+	const fromEnv = env.GH_TOKEN ?? env.GITHUB_TOKEN;
+	if (fromEnv) return { token: fromEnv, source: `env:${env.GH_TOKEN ? "GH_TOKEN" : "GITHUB_TOKEN"}` };
+	const viaGh = input.ghToken ?? defaultGhToken;
+	const keyring = viaGh();
+	if (keyring) return { token: keyring, source: "gh keyring" };
+	return hostsToken(input.home);
+}
+
+function defaultGhToken(): string | null {
+	try {
+		const out = Bun.spawnSync(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
+		if (out.exitCode !== 0) return null;
+		const token = out.stdout.toString().trim();
+		return token === "" ? null : token;
+	} catch {
+		return null;
+	}
+}
+
 export async function probeGithubCapabilities(input: GhProbeInput): Promise<GhCapabilityRow[]> {
 	const home = input.home ?? process.env.HOME ?? "";
-	const found = input.token !== undefined
-		? { token: input.token, source: input.tokenSource ?? "caller-supplied token" }
-		: hostsToken(home);
+	const found = resolveCredential({ token: input.token, tokenSource: input.tokenSource, home, ghToken: input.ghToken });
 	if (!found || !found.token) {
 		const credential: GhCredential = { source: "none found", fingerprint_prefix: "", kind: "unknown" };
 		const unverified = (capability: GhCapabilityRow["capability"]): GhCapabilityRow =>

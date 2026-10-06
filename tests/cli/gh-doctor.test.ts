@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { githubFinding, hostsToken, probeGithubCapabilities, repairGithubHosts, type GhFetch, type GhFetchResponse } from "../../src/gh-doctor.ts";
 
 function stubFetch(routes: Record<string, { status: number; scopes?: string; body: unknown }>, seen: string[]): GhFetch {
@@ -68,11 +68,32 @@ describe("github capability probes", () => {
 		const rows = await probeGithubCapabilities({
 			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
 			home: join(tmpdir(), "gh-doctor-no-home"),
+			ghToken: () => null,
 			fetchImpl: stubFetch(fullRoutes, seen),
 		});
 		expect(rows).toHaveLength(4);
 		expect(rows.every(row => row.status === "UNVERIFIED")).toBe(true);
 		expect(seen).toHaveLength(0);
+	});
+	test("keyring token is used when hosts.yml carries none", async () => {
+		const base = mkdtempSync(join(tmpdir(), "gh-doctor-keyring-"));
+		try {
+			mkdirSync(join(base, ".config", "gh"), { recursive: true });
+			writeFileSync(join(base, ".config", "gh", "hosts.yml"), "github.com:\n    user: me\n    git_protocol: https\n");
+			const seen: string[] = [];
+			const rows = await probeGithubCapabilities({
+				foreignRepo: "acme/foreign", ownedRepo: "me/owned",
+				home: base,
+				ghToken: () => "ghp_keyring999",
+				fetchImpl: stubFetch(fullRoutes, seen),
+			});
+			expect(rows.every(row => row.status === "PASS")).toBe(true);
+			expect(rows[0]!.credential.source).toBe("gh keyring");
+			expect(rows[0]!.credential.fingerprint_prefix).toBe("ghp_key");
+			expect(JSON.stringify(rows)).not.toContain("ghp_keyring999");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 	test("each row names its credential without the secret", async () => {
 		const seen: string[] = [];
@@ -156,10 +177,13 @@ describe("doctor --scope github entry", () => {
 	test("the real CLI returns the capability rows with no credential present", () => {
 		const home = mkdtempSync(join(tmpdir(), "gh-doctor-cli-"));
 		try {
+			mkdirSync(join(home, "bin"));
+			writeFileSync(join(home, "bin", "gh"), "#!/bin/sh\nexit 1\n");
+			Bun.spawnSync(["chmod", "+x", join(home, "bin", "gh")]);
 			const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"),
 				"doctor", "--scope", "github", "--json"], {
 				cwd: home,
-				env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "state") },
+				env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "state"), PATH: `${join(home, "bin")}${delimiter}${process.env.PATH ?? "/usr/bin:/bin"}` },
 				stdout: "pipe", stderr: "pipe",
 			});
 			expect(child.exitCode).toBe(0);
