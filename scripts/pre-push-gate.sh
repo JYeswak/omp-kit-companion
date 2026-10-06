@@ -6,6 +6,10 @@ ROOT=$(git rev-parse --show-toplevel)
 IFS=' '
 read -r local_ref local_sha remote_ref remote_sha || exit 0
 : "${remote_ref:-}"
+# An inherited FRESH_GATE_SKIP_REGEX must never leak into a main judgment: a
+# caller-side export would otherwise skip the regex budget on main. Clear it
+# first, then set it only for scratch measurement refs.
+unset FRESH_GATE_SKIP_REGEX
 # Scratch measurement refs skip ONLY the regex-budget judgment (the budget is
 # judged on CI for the release candidate); every other check still runs, and
 # main pushes are still fully judged.
