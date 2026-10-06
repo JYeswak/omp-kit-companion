@@ -9,4 +9,4 @@ scope:
   - 'tool:edit(rules/*.md)'
 interruptMode: never
 ---
-**Before adding or changing a regular expression, read the `regex-engineering` skill first and complete its §7 Verify checklist.** Run the pattern in the engine that ships it; include a required match, a reject/boundary case, and a timed long near-miss; run regexploit for backtracking risk. For untrusted inputs, cap input length or choose a linear engine where possible. Don't claim speed without measured results.
+**Before adding or changing a regular expression, read the `regex-engineering` skill first and complete its §7 Verify checklist.** Run the pattern in the engine that ships it; include a required match, a reject/boundary case, and a timed long near-miss; run regexploit for backtracking risk. For untrusted inputs, cap input length or choose a linear engine where possible. Don't claim speed without measured results. This is a reminder, not enforcement: firing does not prove the skill was applied; the gates prove it.
