@@ -10,6 +10,11 @@ const platformTargets: Record<string, string> = {
 	"darwin-x64-none": "bun-darwin-x64",
 	"linux-arm64-gnu": "bun-linux-arm64",
 	"linux-x64-gnu": "bun-linux-x64",
+	// dsr resolves platform targets to Rust triples; accept those spellings too.
+	"aarch64-apple-darwin": "bun-darwin-arm64",
+	"x86_64-apple-darwin": "bun-darwin-x64",
+	"aarch64-unknown-linux-gnu": "bun-linux-arm64",
+	"x86_64-unknown-linux-gnu": "bun-linux-x64",
 };
 const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills"];
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
@@ -66,9 +71,28 @@ function expand(directory: string, result: string[]): void {
 }
 function argumentsOf(args: string[]) {
 	if (args.length !== 6 || args[0] !== "--version" || args[2] !== "--platform" || args[4] !== "--out")
-		fail("Usage: package-release.sh --version X.Y.Z --platform darwin-arm64-none|darwin-x64-none|linux-arm64-gnu|linux-x64-gnu --out ABSOLUTE_DIR");
-	const version = args[1]!, key = args[3]!, out = args[5]!;
+		fail("Usage: package-release.sh --version [v]X.Y.Z --platform darwin-arm64-none|darwin-x64-none|linux-arm64-gnu|linux-x64-gnu|native --out ABSOLUTE_DIR");
+	const rawVersion = args[1]!;
+	// Accept an optional v prefix (dsr displays v-prefixed versions); the archive records bare.
+	const version = rawVersion.startsWith("v") ? rawVersion.slice(1) : rawVersion;
+	const rawKey = args[3]!;
+	const out = args[5]!;
 	if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)) fail("INVALID_RELEASE_VERSION");
+	// dsr resolves platform targets to Rust triples, and builds natively per
+	// host without passing a target at all. Normalize every spelling to the
+	// kit triple so filenames and asset records keep one naming scheme.
+	const kitTriple: Record<string, string> = {
+		"aarch64-apple-darwin": "darwin-arm64-none",
+		"x86_64-apple-darwin": "darwin-x64-none",
+		"aarch64-unknown-linux-gnu": "linux-arm64-gnu",
+		"x86_64-unknown-linux-gnu": "linux-x64-gnu",
+		"darwin:arm64": "darwin-arm64-none",
+		"darwin:x64": "darwin-x64-none",
+		"linux:arm64": "linux-arm64-gnu",
+		"linux:x64": "linux-x64-gnu",
+	};
+	const hostKey = `${process.platform}:${process.arch}`;
+	const key = kitTriple[rawKey] ?? (rawKey === "native" ? kitTriple[hostKey] : undefined) ?? rawKey;
 	if (!Object.hasOwn(platformTargets, key)) fail("UNSUPPORTED_PLATFORM");
 	if (!isAbsolute(out) || resolve(out) !== out || !lstatSync(out).isDirectory() || lstatSync(out).isSymbolicLink()) fail("UNSAFE_OUTPUT_DIRECTORY");
 	return { version, key, out };

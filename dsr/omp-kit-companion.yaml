@@ -1,0 +1,20 @@
+# Kit-owned dsr build definition for JYeswak/omp-kit-companion (DS1 rz5.54).
+# Install: copy to ~/.config/dsr/repos.d/omp-kit-companion.yaml (operator step;
+# the kit never writes outside its repo). Undo: dsr repos remove omp-kit-companion.
+# Targets name only hosts that are up (linux/* via trj). darwin/windows wait on
+# mmini + wlap (recorded host fact 2026-10-06, not a code task).
+# Interface notes (dsr 0.2.3, measured): only $VERSION expands in build_cmd
+# (bare X.Y.Z); {version}/{target}/{out} pass through literally and no
+# TARGET/OUT env reaches the command, so the command builds natively
+# (--platform native) and dsr collects $binary_name from the repo root.
+# A dsr build that skips native certification must not publish: publication
+# requires per-platform receipts from scripts/native-candidate.py (see bead).
+tool: omp-kit-companion
+repo: JYeswak/omp-kit-companion
+local_path: /Users/josh/Developer/omp-kit-companion
+build_cmd: bun scripts/package-release.ts --version ${VERSION} --platform native --out $PWD
+binary_name: omp-kit
+targets:
+  - linux/amd64
+  - linux/arm64
+workflow: .github/workflows/release.yml
