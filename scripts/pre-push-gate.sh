@@ -115,4 +115,20 @@ elif [ -n "${base_ref:-}" ]; then
 else
 	printf 'SKIP pushed-bead-ids: no base to range against\n' >&2
 fi
+# FLY2-3: every pushed non-merge commit must import only files present in its
+# own tree. Skipped until the base archive carries the checker (first landing).
+if [ ! -f "$gate_scripts/scripts/check-commit-imports.sh" ]; then
+	printf 'SKIP commit-imports: checker absent from base archive\n' >&2
+elif [ -n "${base_ref:-}" ]; then
+	printf '== commit-imports\n'
+	if sh "$gate_scripts/scripts/check-commit-imports.sh" --repo "$ROOT" --base "$base_ref" --tip "$local_sha"; then
+		printf 'GREEN commit-imports\n'
+	else
+		rc=$?
+		printf 'RED commit-imports producer_rc=%s\n' "$rc" >&2
+		exit "$rc"
+	fi
+else
+	printf 'SKIP commit-imports: no base to range against\n' >&2
+fi
 exec sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
