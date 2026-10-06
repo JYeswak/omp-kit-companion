@@ -55,10 +55,14 @@ test("machine admission blocks only above 2.5 times the core count", () => {
 	expect(machineLoadBlockReason(1, 4)).toBeNull();
 });
 
-test("heavy streams the child and preserves its exit code", async () => {
-	const root = fixture();
-	configure(root, { slots: 1, max_wait_s: 1 });
-	const result = await invoke(root, ["heavy", "--label", "tiny", "--", "sh", "-c", "printf child; exit 23"]);
+ // Slot-logic tests pin a quiet load reading (OMP_KIT_LOAD_OVERRIDE) so the
+ // slot behavior under test, not ambient runner load, decides the outcome.
+ // The LOAD1 gate itself stays covered by the machineLoadBlockReason tests.
+ const QUIET_LOAD = { OMP_KIT_LOAD_OVERRIDE: "0.5/8" };
+ test("heavy streams the child and preserves its exit code", async () => {
+ 	const root = fixture();
+ 	configure(root, { slots: 1, max_wait_s: 1 });
+ 	const result = await invoke(root, ["heavy", "--label", "tiny", "--", "sh", "-c", "printf child; exit 23"], QUIET_LOAD);
 
 	expect(result.code).toBe(23);
 	expect(result.stdout).toBe("child");
@@ -70,7 +74,7 @@ test("no-wait defers on a full machine slot without starting the command", async
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const jobs = await seedJob(root, { id: "slot-owner" });
 	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", `printf ran > '${marker}'`]);
+ 	const result = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", `printf ran > '${marker}'`], QUIET_LOAD);
 
 	expect(result.code).toBe(75);
 	expect(result.stderr).toContain("deferred: all 1 heavy-work slot is occupied");
@@ -82,7 +86,7 @@ test("a pane cannot start a second heavy command when another global slot is fre
 	const root = fixture();
 	configure(root, { slots: 2, max_wait_s: 1 });
 	await seedJob(root, { id: "pane-owner", pane: "%heavy-pane" });
-	const result = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", "exit 0"], { TMUX_PANE: "%heavy-pane" });
+ 	const result = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", "exit 0"], { TMUX_PANE: "%heavy-pane", ...QUIET_LOAD });
 
 	expect(result.code).toBe(75);
 	expect(result.stderr).toContain("pane already has running job existing");
