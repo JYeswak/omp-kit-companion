@@ -253,6 +253,11 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 	expired: { type: "array", items: { type: "object" } },
 	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
 } };
+const ciStatusData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "UNAVAILABLE"] },
+	stale_after_ms: { type: "number" },
+	repos: { type: "object" },
+} };
 const loadData: DataSchema = { type: "object", required: ["scope", "overall", "verdict", "sampled_at", "machine", "consumers", "system_groups", "lsp_counts", "heavy_jobs", "contention_streak", "sample_cost_ms", "text"], properties: { scope: { enum: ["load"] }, overall: { enum: ["OK", "CONTENDED"] }, verdict: { enum: ["OK", "CONTENDED"] }, sampled_at: { type: "string" }, machine: { type: "object" }, consumers: { type: "array" }, system_groups: { type: "array" }, lsp_counts: { type: "object" }, heavy_jobs: { type: "array" }, contention_streak: { type: "number" }, sample_cost_ms: { type: "number" }, text: { type: "string" } } };
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
@@ -286,7 +291,7 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit mission validate --json", runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--deep --yes]", flags: [
-			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations|identity|flywheel|derived|layout|public-files", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit; identity checks pane identities for missing, shared and stale names; flywheel grades fleet practices from git and the tracker (set BEADS_DB to the tracker beads.db when --project is a code repo); derived lists literal probe-readable facts in config files; layout reports standard repo layout deviations; public-files lists missing standard public files" },
+			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations|identity|flywheel|derived|layout|public-files|github", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit; identity checks pane identities for missing, shared and stale names; flywheel grades fleet practices from git and the tracker (set BEADS_DB to the tracker beads.db when --project is a code repo); derived lists literal probe-readable facts in config files; layout reports standard repo layout deviations; public-files lists missing standard public files; github probes read-only GitHub capability rows" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
 		{ name: "--labels", value: "ABS_FILE", description: "Rules calibration: read deterministic false-fire labels without writing" },
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
@@ -406,8 +411,8 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--enable", value: "NAMES", description: "Edit mode: remove these servers from a profile's disabledServers list, in place" },
 		], example: "omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json", runnable: false, mutation: true },
 	], example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
-	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state [--plan|--apply --yes]", flags: [
-		{ name: "--scope", value: "rules|policy|extensions|state", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700" }, ...planApply,
+	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state|github [--plan|--apply --yes]", flags: [
+		{ name: "--scope", value: "rules|policy|extensions|state|github", description: "Required exact reversible repair scope; state only restores the private state root to mode 0700; github rewrites hosts.yml from the Infisical fine-grained token only" }, ...planApply,
 	], example: "omp-kit repair --scope rules --plan --json", runnable: false, mutation: true, dataSchema: repairData },
 	{ name: "migrate", description: "Move legacy ~/.agents/rules kit copies to native plugin layering; edited copies are kept and flagged for overlay", usage: "migrate [--plan|--apply --yes]", flags: planApply, example: "omp-kit migrate --plan --json", runnable: false, mutation: true, dataSchema: migrateData },
 	{ name: "undo", description: "Guardedly restore one verified receipt", usage: "undo RUN_ID [--yes]", argument: "RUN_ID", flags: [
@@ -506,6 +511,9 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
 		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
 	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+	{ name: "ci", description: "Read-only CI status over tracked repos; never dispatches or reruns", usage: "ci status", flags: [], subcommands: [
+		{ name: "status", description: "Show cached CI status per repo; UNAVAILABLE when the cache is missing or stale", usage: "ci status", flags: [], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
+	], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [
 		{ name: "bash", description: "Bash completion", usage: "completion bash", flags: [], example: "omp-kit completion bash", runnable: true, dataSchema: completionData },
