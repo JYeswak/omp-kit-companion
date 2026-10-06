@@ -231,6 +231,13 @@ export function failsStreamBudget(totalMs: number): boolean {
 	return !Number.isFinite(totalMs) || totalMs > STREAM_BUDGET_MS;
 }
 
+export function medianTotalMs(samples: readonly number[]): number {
+	if (!samples.length || samples.some(sample => !Number.isFinite(sample) || sample < 0)) return Number.POSITIVE_INFINITY;
+	const ordered = [...samples].sort((left, right) => left - right);
+	const middle = Math.floor(ordered.length / 2);
+	return ordered.length % 2 === 1 ? ordered[middle]! : (ordered[middle - 1]! + ordered[middle]!) / 2;
+}
+
 function repeatToSize(literal: string, size: number): string {
 	if (!literal) literal = "x";
 	return literal.repeat(Math.ceil(size / literal.length)).slice(0, size);
@@ -393,7 +400,7 @@ type GateReport = {
 	load_average_after: number[];
 	rules_loaded: number;
 	conditions_measured: number;
-	stream: { complete: boolean; file: string; wire_bytes: number; chunk_bytes: number; deltas: number; total_ms: number; budget_ms: number; by_rule: Array<{ rule: string; condition_index: number; ms: number }> };
+	stream: { complete: boolean; file: string; wire_bytes: number; chunk_bytes: number; deltas: number; total_ms: number; budget_ms: number; by_rule: Array<{ rule: string; condition_index: number; ms: number }>; sample_total_ms?: number[]; median_total_ms?: number };
 	measurements: ConditionMeasurement[];
 	lint_violations: Array<{ rule: string; condition_index: number; code: string; pattern: string }>;
 	gate_elapsed_ms: number;
@@ -473,6 +480,40 @@ export async function runGate(rulesDir: string, streamFile: string, opts: { judg
 	};
 }
 
+function summarizeRepeatedReports(reports: readonly GateReport[]): GateReport {
+	if (reports.length === 1) return reports[0]!;
+	if (!reports.length) throw new Error("REGEX_BUDGET_NO_SAMPLES");
+	const sampleTotals = reports.map(report => report.stream.total_ms);
+	const median = medianTotalMs(sampleTotals);
+	const medianReport = reports.find(report => report.stream.total_ms === median) ?? reports[Math.floor(reports.length / 2)]!;
+	const confirmedNonBudgetFailure = reports.find(report =>
+		report.status !== "INCONCLUSIVE" && (
+			report.rules_loaded === 0 ||
+			!report.stream.complete ||
+			report.lint_violations.length > 0 ||
+			report.measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0)
+		),
+	);
+	const inconclusive = reports.find(report => report.status === "INCONCLUSIVE");
+	const selected = confirmedNonBudgetFailure ?? inconclusive ?? medianReport;
+	const status = confirmedNonBudgetFailure ? "FAIL"
+		: inconclusive ? "INCONCLUSIVE"
+			: failsStreamBudget(median) ? "FAIL" : "PASS";
+	return {
+		...selected,
+		status,
+		stream: { ...medianReport.stream, complete: reports.every(report => report.stream.complete), sample_total_ms: sampleTotals, median_total_ms: median },
+		gate_elapsed_ms: reports.reduce((total, report) => total + report.gate_elapsed_ms, 0),
+	};
+}
+
+async function runGateRepeated(rulesDir: string, streamFile: string, runs: number, options: { judgeRegardlessOfLoad?: boolean }): Promise<GateReport> {
+	if (runs === 1) return runGate(rulesDir, streamFile, options);
+	const reports: GateReport[] = [];
+	for (let run = 0; run < runs; run++) reports.push(await runGate(rulesDir, streamFile, options));
+	return summarizeRepeatedReports(reports);
+}
+
 function formatMs(value: number | undefined): string {
 	return typeof value === "number" ? value.toFixed(1) : "TIMEOUT";
 }
@@ -500,8 +541,11 @@ function printReport(report: GateReport): void {
 	console.log("structural lint:");
 	if (!report.lint_violations.length) console.log("(none)");
 	for (const violation of report.lint_violations) console.log(violation.rule + "#" + violation.condition_index + " | " + violation.code + " | " + violation.pattern);
-	const streamStatus = !report.stream.complete ? "INCOMPLETE" : failsStreamBudget(report.stream.total_ms) ? "FAIL" : "PASS";
-	console.log("live stream: " + streamStatus + " file=" + report.stream.file + " wire=" + report.stream.wire_bytes + "B chunk=" + report.stream.chunk_bytes + "B deltas/condition=" + report.stream.deltas + " total=" + report.stream.total_ms.toFixed(1) + "ms / " + report.stream.budget_ms + "ms");
+	const streamTotal = report.stream.median_total_ms ?? report.stream.total_ms;
+	const streamStatus = !report.stream.complete ? "INCOMPLETE" : failsStreamBudget(streamTotal) ? "FAIL" : "PASS";
+	const streamTotalLabel = report.stream.sample_total_ms ? " median=" : " total=";
+	const streamSamples = report.stream.sample_total_ms ? " samples=[" + report.stream.sample_total_ms.map(value => value.toFixed(1)).join(",") + "]" : "";
+	console.log("live stream: " + streamStatus + " file=" + report.stream.file + " wire=" + report.stream.wire_bytes + "B chunk=" + report.stream.chunk_bytes + "B deltas/condition=" + report.stream.deltas + streamTotalLabel + streamTotal.toFixed(1) + "ms / " + report.stream.budget_ms + "ms" + streamSamples);
 	for (const item of report.stream.by_rule.slice(0, 8)) console.log("stream " + item.rule + "#" + item.condition_index + " | " + item.ms.toFixed(1) + "ms");
 	console.log("JSON_REPORT=" + JSON.stringify(report));
 	console.log("Scope: measured shapes and this Bun/JSC runtime only; no universal regex-safety claim.");
@@ -511,6 +555,10 @@ if (process.argv.includes("--regex-budget-worker")) {
 	await workerMain();
 } else if (import.meta.main) {
 	const args = process.argv.slice(2);
+	const runsIndex = args.indexOf("--runs");
+	const runsValue = runsIndex < 0 ? "1" : args[runsIndex + 1];
+	if (runsIndex >= 0 && (args.indexOf("--runs", runsIndex + 1) >= 0 || (runsValue !== "1" && runsValue !== "5"))) throw new Error("--runs must be 1 or 5");
+	const runs = runsValue === "5" ? 5 : 1;
 	const rulesIndex = args.indexOf("--rules");
 	const streamIndex = args.indexOf("--stream");
 	const rulesPath = rulesIndex < 0 ? path.join(KIT, "rules") : args[rulesIndex + 1];
@@ -519,7 +567,7 @@ if (process.argv.includes("--regex-budget-worker")) {
 	const rulesDir = path.resolve(rulesPath);
 	const streamFile = path.resolve(streamPath);
 	try {
-		const report = await runGate(rulesDir, streamFile, { judgeRegardlessOfLoad: args.includes("--judge-regardless-of-load") });
+		const report = await runGateRepeated(rulesDir, streamFile, runs, { judgeRegardlessOfLoad: args.includes("--judge-regardless-of-load") });
 		printReport(report);
 		// 75 = retry later: a busy machine must not refuse a correct push.
 		process.exitCode = report.status === "PASS" ? 0 : report.status === "INCONCLUSIVE" ? 75 : 1;

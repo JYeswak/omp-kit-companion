@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
-import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
+import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition, medianTotalMs, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -86,4 +86,60 @@ test("planted contention reports INCONCLUSIVE without measuring", async () => {
 		expect(report.conditions_measured).toBe(0);
 		expect(report.note ?? "").toContain("RX1");
 	} finally { delete process.env.RX1_FAKE_LOAD1; }
+});
+
+test("five-run stream budget judges the median of total_ms samples", () => {
+	const passing = [480, 490, 495, 900, 950];
+	expect(medianTotalMs(passing)).toBe(495);
+	expect(failsStreamBudget(medianTotalMs(passing))).toBe(false);
+
+	const failing = [480, 510, 520, 530, 900];
+	expect(medianTotalMs(failing)).toBe(520);
+	expect(failsStreamBudget(medianTotalMs(failing))).toBe(true);
+});
+
+test("single-run stream budget keeps the 500ms boundary", () => {
+	expect(medianTotalMs([500])).toBe(500);
+	expect(failsStreamBudget(medianTotalMs([500]))).toBe(false);
+	expect(failsStreamBudget(medianTotalMs([500.1]))).toBe(true);
+	expect(failsStreamBudget(500)).toBe(false);
+	expect(failsStreamBudget(500.1)).toBe(true);
+});
+
+test("five-run CLI reports five stream totals and their median", () => {
+	const fixture = fixtureRule("fixture-linear", "^a+b$");
+	const streamFile = join(fixture.dir, "stream.sh");
+	writeFileSync(streamFile, "printf '%s\\n' ok\n");
+	try {
+		const result = Bun.spawnSync([
+			process.execPath, "run", "--no-env-file", "--config=/dev/null",
+			resolve(root, "scripts/regex-budget.ts"), "--rules", fixture.dir, "--stream", streamFile, "--runs", "5",
+		], { cwd: root, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+		const reportLine = result.stdout.toString().split("\n").find(line => line.startsWith("JSON_REPORT="));
+		if (!reportLine) throw new Error("REGEX_BUDGET_JSON_REPORT_MISSING: " + result.stderr.toString());
+		const report: { stream: { total_ms: number; median_total_ms: number; sample_total_ms: number[] } } =
+			JSON.parse(reportLine.slice("JSON_REPORT=".length));
+		expect(report.stream.sample_total_ms).toHaveLength(5);
+		expect(report.stream.total_ms).toBe(report.stream.median_total_ms);
+		expect(typeof report.stream.median_total_ms).toBe("number");
+	} finally { cleanup(fixture.dir); }
+});
+
+test("default CLI preserves the single-run report shape", () => {
+	const fixture = fixtureRule("fixture-linear", "^a+b$");
+	const streamFile = join(fixture.dir, "stream.sh");
+	writeFileSync(streamFile, "printf '%s\\n' ok\n");
+	try {
+		const result = Bun.spawnSync([
+			process.execPath, "run", "--no-env-file", "--config=/dev/null",
+			resolve(root, "scripts/regex-budget.ts"), "--rules", fixture.dir, "--stream", streamFile,
+		], { cwd: root, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+		const reportLine = result.stdout.toString().split("\n").find(line => line.startsWith("JSON_REPORT="));
+		if (!reportLine) throw new Error("REGEX_BUDGET_JSON_REPORT_MISSING: " + result.stderr.toString());
+		const report: { stream: { total_ms: number; sample_total_ms?: number[]; median_total_ms?: number } } =
+			JSON.parse(reportLine.slice("JSON_REPORT=".length));
+		expect(typeof report.stream.total_ms).toBe("number");
+		expect(report.stream.sample_total_ms).toBeUndefined();
+		expect(report.stream.median_total_ms).toBeUndefined();
+	} finally { cleanup(fixture.dir); }
 });

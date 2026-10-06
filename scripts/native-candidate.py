@@ -260,6 +260,10 @@ def native(args):
             home = root / "home"
             home.mkdir()
             env = cert_env(home, root)
+            regex_budget_runs = os.environ.get("OMP_KIT_NATIVE_REGEX_BUDGET_RUNS", "1")
+            if regex_budget_runs not in ("1", "5"):
+                raise ValueError("regex-budget run count must be 1 or 5")
+            env["OMP_KIT_NATIVE_REGEX_BUDGET_RUNS"] = regex_budget_runs
             omp = subprocess.run(["omp", "--version"], cwd=root, env=env, capture_output=True, timeout=30)
             observed = (omp.stdout + omp.stderr).decode(errors="replace").strip()
             if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(omp_version) + r"(?!\d)", observed):

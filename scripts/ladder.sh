@@ -3,6 +3,17 @@
 # G1-G3 harness gate, harness selftest (plants must go RED), checker selftests under /bin/sh,
 # manifest check, G4 live suite, G4 plant (must go RED). Prints each complete producer log and rc.
 set -u
+REGEX_BUDGET_RUNS=1
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != "--regex-budget-runs" ]; then
+    echo "ladder: usage: --regex-budget-runs 1|5" >&2
+    exit 2
+  fi
+  case "$2" in
+    1|5) REGEX_BUDGET_RUNS=$2 ;;
+    *) echo "ladder: regex-budget run count must be 1 or 5" >&2; exit 2 ;;
+  esac
+fi
 HERE=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 cd "$HERE" || exit 1
 OMP_KIT_BUN="$HERE/scripts/runtime-adapter.sh"
@@ -59,11 +70,13 @@ step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
 # On CI runners the budget is judged regardless of machine load (CI is the
 # judge of record; the verdict is recorded as judged-under-load). Local runs
 # stay fail-closed: INCONCLUSIVE on a loud box, never a refusal.
-if [ -n "${GITHUB_ACTIONS:-}" ]; then
-	step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" --judge-regardless-of-load
+if [ "$REGEX_BUDGET_RUNS" = "5" ]; then
+  set -- --runs 5
 else
-	step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
+  set --
 fi
+if [ -n "${GITHUB_ACTIONS:-}" ]; then set -- "$@" --judge-regardless-of-load; fi
+step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" "$@"
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8

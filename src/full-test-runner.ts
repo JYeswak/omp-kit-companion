@@ -141,7 +141,12 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   ? ompPackage.version : null;
  // The same pre-fast snapshot also detects writes during the matcher stage.
  let result: BundledRunResult;
- try { result = await runIsolatedShell("scripts/ladder.sh", [], input.root, input.executablePath); }
+ // The native certification workflow sets this only for the Intel macOS row.
+ const regexBudgetRuns = process.env.OMP_KIT_NATIVE_REGEX_BUDGET_RUNS;
+ if (regexBudgetRuns !== undefined && regexBudgetRuns !== "1" && regexBudgetRuns !== "5")
+  throw new Error("INVALID_NATIVE_REGEX_BUDGET_RUNS");
+ const ladderArgs = regexBudgetRuns === "5" ? ["--regex-budget-runs", "5"] : [];
+ try { result = await runIsolatedShell("scripts/ladder.sh", ladderArgs, input.root, input.executablePath); }
  catch (error) { result = { code: 3, stdout: "", stderr: error instanceof Error ? error.message : String(error) }; }
  const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
