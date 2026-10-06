@@ -4,6 +4,18 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.9 — 2026-10-06
+
+- Commit index for 0.2.9: every shipped-path commit since v0.2.8 that had no fragment of its own, grouped by bead.
+
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.59.3: (commit 4130852)
+- ompkit-ex6l: (commit 963b98a)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.113: (commit 43137ba)
+
+- RELEASE BLOCKER A3: the CI-judge signal passes `runIsolatedShell`. `CHILD_ENV_KEYS` in `src/runtime.ts` carries `GITHUB_ACTIONS` so the nested ladder keys `--judge-regardless-of-load` on macOS cert (keying on `CI=true` would break local fail-closed, since cert sets it always). Planted: `sanitizedEnv` contract test proves the signal survives and non-allowlisted keys stay scrubbed (RED on unfixed code).
+
+- RT1 installer verifies release origin: `verify_attestation()` in `installer/install.py` checks the release-published `<archive>.sigstore.json` bundle via `gh attestation verify --owner` (seams: `GH_BIN`, `OMP_KIT_ATTEST_OWNER`). A failing bundle refuses; a missing bundle warns hash-only so offline installs keep working. Planted: tampered archive refused, bad attestation refused, no-bundle warns and passes (4/4 `tests/cli/install-verify.test.sh`).
+
 ## 0.2.8 — 2026-10-06
 
 - COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.

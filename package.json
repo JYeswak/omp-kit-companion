@@ -1,11 +1,11 @@
 {
   "name": "omp-kit-companion",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Tested stream-triggered rules and a guarded CLI for an existing OMP installation",
   "license": "MIT",
   "omp": {
     "name": "omp-kit-companion",
-    "version": "0.2.8",
+    "version": "0.2.9",
     "description": "Tested stream-triggered rules and the project-loading guard extension",
     "extensions": [
       "extensions/kit-guard-optin.ts",
