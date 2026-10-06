@@ -212,3 +212,51 @@ test("corpus seeded fixture reproduces identical counts on repeat runs", () => {
 	expect(second.exitCode).toBe(0);
 	expect(corpusOf(second.envelope).corpus).toEqual(corpusOf(first.envelope).corpus);
 }, 300_000);
+
+test("corpus runs with no network egress (poisoned proxy + lethal control)", async () => {
+	// Box 6: the corpus must work with the network stack poisoned. The
+	// positive control proves the poison is lethal in this runtime (a future
+	// runtime that ignores proxy env fails HERE, never silently vacuous).
+	// Scope: the CLI parent layer via the standard proxy-respecting stack.
+	// The harness child runs under runtime.ts's proxy-free allowlisted env,
+	// so any future child egress would be direct-dial: review node:net/http
+	// imports if this test ever fails for the wrong reason.
+	const poison: Record<string, string> = {
+		HTTP_PROXY: "http://127.0.0.1:9/", HTTPS_PROXY: "http://127.0.0.1:9/",
+		http_proxy: "http://127.0.0.1:9/", https_proxy: "http://127.0.0.1:9/",
+		ALL_PROXY: "http://127.0.0.1:9/", all_proxy: "http://127.0.0.1:9/",
+		NO_PROXY: "", no_proxy: "",
+	};
+	const saved: Record<string, string | undefined> = {};
+	for (const key of Object.keys(poison)) {
+		saved[key] = process.env[key];
+		process.env[key] = poison[key];
+	}
+	try {
+		let controlThrew = false;
+		try {
+			await fetch("https://example.com/");
+		} catch {
+			controlThrew = true;
+		}
+		expect(controlThrew).toBe(true);
+		const child = Bun.spawnSync([binary, "corpus", "--sessions", sessions, "--json"], {
+			cwd: home, env: { ...environment, ...poison }, stdout: "pipe", stderr: "pipe",
+		});
+		const stdout = child.stdout.toString();
+		if (!stdout.trim()) throw new Error(`poisoned corpus returned no JSON (rc=${child.exitCode}): ${child.stderr.toString().slice(0, 500)}`);
+		const envelope = JSON.parse(stdout) as Record<string, unknown>;
+		const errors = "errors" in envelope ? envelope.errors : undefined;
+		expect(child.exitCode, JSON.stringify(errors)).toBe(0);
+		const set = corpusOf(envelope);
+		expect(set.overall).toBe("OK");
+		expect(set.corpus?.files).toBe(1);
+		expect(set.corpus?.assistant_messages).toBe(4);
+		expect(set.corpus?.parse_errors).toBe(1);
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}, 300_000);
