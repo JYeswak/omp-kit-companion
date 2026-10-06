@@ -353,6 +353,7 @@ const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
 	settings: ["policy"],
 	extensions: ["extensions", "extension_imports"],
 	browsers: ["browsers"],
+	identity: ["identity"],
 	"regex-tools": ["regex-tools"],
 };
 

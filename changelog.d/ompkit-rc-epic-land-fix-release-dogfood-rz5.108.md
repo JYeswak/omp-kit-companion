@@ -5,3 +5,4 @@
 - ID1 uniqueness: `scripts/identity-uniqueness-check.sh` reads pane identity files plus live tmux panes and flags live panes without files, stale files for dead panes, and one name on two live panes.
 - ID1 modes fix: the four executed shell scripts committed +x (were 100644 from index staging); file-modes test asserts committed modes.
 - ID1 doctor finder: `inspectPaneIdentity` classifies live panes (shared name FAIL, missing file and week-idle registrations DEGRADED); scope wiring needs the cli/commands holders.
+- ID1 scope wiring: `doctor --scope identity` routes to the pane finder (cli map + registry enum).
