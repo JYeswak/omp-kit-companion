@@ -72,5 +72,6 @@ jobs:
           for i in 1 2 3 4 5; do for t in base cand; do
             tot=$(grep -oE 'total=[0-9.]+ms' "$d/run-$i-$t.log" | head -1 | grep -oE '[0-9.]+')
             rle=$(grep -E '^stream kit-regex-engineering' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
-            echo "PAIR i=$i target=$t total_ms=$tot regexEng_ms=$rle"
+            stm=$(grep -E '^stream kit-settings-mutation' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
+            echo "PAIR i=$i target=$t total_ms=$tot regexEng_ms=$rle settings_ms=$stm"
           done; done
