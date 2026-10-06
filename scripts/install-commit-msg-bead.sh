@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the bead-id commit-msg hook and the pushed-beads pre-push member
 # into a repo's hook chains.
-# Usage: install-commit-msg-bead.sh [REPO] (default: this kit checkout).
+# Usage: install-commit-msg-bead.sh [--check] [REPO] (default: this kit checkout).
 # For each hook type the installer handles three states: absent (creates a
 # chain runner), bespoke (moves the existing entry to hooks.d/<type>/10-<name>
 # and creates a runner that calls it first, then ours), chain (adds our
@@ -13,6 +13,8 @@ set -eu
 UNDO_MOVES=""
 UNDO_RM=""
 KITROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+MODE=install
+if [ "${1:-}" = "--check" ]; then MODE=check; shift; fi
 TARGET=${1:-$KITROOT}
 TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-commit-msg-bead: cannot enter ${1:-$KITROOT}" >&2; exit 2; }
 HOOKS=$(git -C "$TARGET" rev-parse --git-path hooks) || { echo "install-commit-msg-bead: $TARGET is not a git repo" >&2; exit 2; }
@@ -20,6 +22,30 @@ case "$HOOKS" in
 	/*) ;;
 	*) HOOKS="$TARGET/$HOOKS" ;;
 esac
+
+# --check names installed members that differ from this checkout (a stale
+# installed hook runs old rules after the source moves on). Exit 0 when every
+# member matches, 3 naming each missing or stale member.
+if [ "$MODE" = "check" ]; then
+	stale=0
+	for pair in "hooks.d/commit-msg/40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh" \
+		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
+		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh"; do
+		# shellcheck disable=SC2086
+		set -- $pair
+		dest="$HOOKS/$1"
+		src="$KITROOT/$2"
+		if [ ! -f "$dest" ]; then
+			printf 'install-commit-msg-bead: MISSING installed member: %s\n' "$dest" >&2
+			stale=1
+		elif ! cmp -s "$dest" "$src"; then
+			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s\n' "$dest" "$src" "$0" >&2
+			stale=1
+		fi
+	done
+	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
+	exit 3
+fi
 
 chain_dir() {
 	printf '%s/hooks.d/%s' "$HOOKS" "$1"

@@ -118,5 +118,18 @@ ok "$?" "0" "prepush-empty-range"
 sh "$INSTALLER" "$TMP/nope" > /dev/null 2>&1
 ok "$?" "2" "nonrepo-refused"
 
+# 5. --check: fresh members pass; an older source names each stale member
+# (planted: the installed hook predates the digit-less fix).
+sh "$INSTALLER" --check "$A" > /dev/null 2>&1
+ok "$?" "0" "check-fresh-rc"
+mkdir -p "$TMP/oldkit/scripts"
+cp "$INSTALLER" "$TMP/oldkit/scripts/install-commit-msg-bead.sh"
+printf '#!/bin/sh\n# old hook predating the fix\nexit 0\n' > "$TMP/oldkit/scripts/commit-msg-bead.sh"
+printf '# old checker\n' > "$TMP/oldkit/scripts/check-pushed-beads.sh"
+sh "$TMP/oldkit/scripts/install-commit-msg-bead.sh" --check "$A" > "$TMP/o-stale" 2>&1
+ok "$?" "3" "check-stale-rc"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" "$TMP/o-stale"
+ok "$?" "0" "check-stale-named"
+
 printf 'install-commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
