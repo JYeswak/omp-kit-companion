@@ -1,0 +1,59 @@
+name: budget-measure
+
+# Scratch measurement only (blocker D): stream totals per runner for
+# origin/main vs the karen-guard candidate. workflow_dispatch only, never main.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Budget repetitions per leg
+        type: string
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: budget-measure-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-latest]
+        target: [base, guard]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Select tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.target }}" == "base" ]]; then
+            git checkout origin/main
+          fi
+          git log --oneline -1
+          git status --porcelain -- rules/ | head -3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install stock OMP latest
+        env:
+          TMPDIR: ${{ runner.temp }}
+          npm_config_cache: ${{ runner.temp }}/npm-cache
+        run: npm install --global "@oh-my-pi/pi-coding-agent@latest"
+      - name: Stream budget xN
+        env:
+          TMPDIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 "${{ inputs.runs }}"); do
+            echo "--- run $i target=${{ matrix.target }} os=${{ matrix.os }}"
+            bun scripts/regex-budget.ts --judge-regardless-of-load 2>&1 | grep -E "live stream:|^stream |JSON_REPORT" | head -12
+          done
