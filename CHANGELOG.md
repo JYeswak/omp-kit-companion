@@ -4,6 +4,240 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.6 — 2026-10-06
+
+- F2 no-egress tripwire (box 6): `tests/cli/corpus.test.ts` runs the full corpus with all proxy vars poisoned to unroutable endpoints and asserts the seeded counts; a positive control proves the poison is lethal in the running runtime (a future runtime that ignores proxy env fails the control, never silently vacuous). Scope: CLI parent layer via the standard proxy-respecting stack; the harness child runs under runtime.ts's proxy-free allowlisted env, so any future child egress would be direct-dial.
+
+- ID1 doctor finder: `inspectPaneIdentity` classifies live panes via `am resolve-pane` (shared name FAIL, missing file and week-idle registrations DEGRADED); live fleet run resolves all 8 omp-test panes with no collisions.
+
+- Add read-only load census attribution for agent panes, system groups, LSP counts, and the `jobs/<id>.json` heavy-job ledger; absent ledger state reports `heavy jobs: none registered (LOAD1 not installed)`.
+
+- COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.
+- COMMIT1 installer takes an optional repo argument, absolutizes relative hooks paths, and refuses non-repos; cfsios installed and verified live per-tracker (foreign ids refused).
+- COMMIT1 redesign: pre-push gate refuses id-less pushed commits (commit-tree included), the installer chains beside bespoke hooks, and ids resolve against the repo tracker (cfsios/uds shapes pass, versions don't).
+
+- FLY2 score: `doctor --scope flywheel --project` grades seven fleet practices (bead size, commit linkage, self-pick, landing hygiene, close flow, freshness, verdicts, lessons) from git and the tracker with value, threshold and letter grade; planted A/F fixture suite green.
+- FLY2 empty samples read N/A (UNVERIFIED), never A; close-flow A needs max in_review within 2h; the git read scrubs GIT_DIR/WORK_TREE so --project always wins.
+
+- REAP2: scratch plan parent rows exclude nested plan rows' bytes (each byte counted once); planted nested fixture proves parent reads own bytes only.
+
+- bash-pipe-exit: condition 0 checks the echo/printf quote lookbehinds after the pipe-to-head/tail match, not before it, so near-miss cost stays flat (16K: 1958 ms to 0.14 ms) with fire/quiet cases unchanged (ompkit-ex6l).
+
+- Regex budget gate wired in (RX1): `ladder.sh` runs `scripts/regex-budget.ts`, and the pre-push gate runs it when `rules/*.md` changes (refuses on RED); mission Proven check already points at it. Live rules currently fail it (near-miss, lint, stream budget) — rule fixes ride in RX2/RX5/RX6.
+- RX1 load gate: the budget refuses to judge on a loud box (load1 above 1.5x cores) and reports INCONCLUSIVE (exit 75) instead of failing a correct push; the push gate defers to CI on 75. Planted contention proves the path; budget unit tests 8/8.
+
+- DISPATCH1 slice: `scripts/dispatch-check.sh --db PATH` fails closed on any disagreement between `bv --robot-next` and the `bv --robot-triage` top: agreement prints `CLAIM_TOP=<id>` (exit 0), anything else prints `BV_TOP_MISMATCH` (exit 3) so no claim is made from robot-next's pick. Live tracker agrees today (rz5.104). Still open: pagerank-certificate rerun procedure, upstream bv stranger repro if a real mismatch appears, independent rerun.
+- Follow-up: empty rankings fail closed naming the cause (dry queue reports no-id instead of unreadable-JSON).
+
+- GUARD1: fleet-guard caches only positive reservation lookups. A negative result is re-queried on the next edit instead of served stale for 30 s, so reserving right after a refusal allows the edit; another agent's hold is still refused on every recheck.
+
+- CI1 slice: every job in the kit's three workflows carries `if: github.event.repository.private == false`, so a private fork or mirror never bills minutes. `tests/cli/workflows-private-guard.test.ts` fails on any job without the exact guard string. Still open: doctor private-repo finding, budget reporting, burn cuts, Josh's per-repo decisions.
+
+- PUB1a slice: `scripts/doc-drift-check.sh BASE HEAD` refuses a CLI surface change with no `docs/` change, naming the undocumented surface. The surface is derived from the `src/commands.ts` registry at each revision via throwaway worktrees, never grep. Live range clean; still open: pre-push wiring, uds pilot, cross-repo runs.
+
+- Doc status gate (`scripts/doc-status-check.sh`, `tests/cli/doc-status.test.sh`): every doc carries front-matter status; dangling superseded-by and missing status are refused; `docs/INDEX.md` regenerates deterministically. Front matter added to the kit docs (README follows when its holder lands).
+
+- PUB1c slice: `docs/release-procedure.md` generalizes the companion release flow (fragments, assemble, semver tag, platform archives with sha256, install verify; signing delegated to rz5.59.3) for uds adoption. Still open: uds cuts a release with it, live pilot, local-copy retirement, cross-repo runs.
+- Adopting the release procedure in another repo (PUB1c): fragment convention, first tag, coverage check and assembly steps in CONTRIBUTING (pointing at `docs/release-procedure.md`); the check is repo-agnostic (git runs in the caller's checkout) and flags the one uncovered direct commit here.
+
+- `doctor --scope work` reports timed-out Git probes as `TIMED_OUT` with all state metrics unknown, never inventing zero dirty/stale counts or detached state. The check remains read-only; the 30-minute stale-age default and `OMP_KIT_WORK_STALE_EDIT_MINUTES` override are unchanged.
+
+- PUB1e slice: `scripts/public-files-check.sh [REPO]` lists missing standard public files (SECURITY, CONTRIBUTING, CODEOWNERS, PR/issue templates, dependabot, deny.toml for Rust). Live run on this repo names 4 gaps (filed, not filled here). Still open: neutral templates, CONTRIBUTING policy comparison, doctor wiring, uds pilot.
+
+- PUB1f slice: `scripts/repo-layout-check.sh [--strict] [REPO]` reports layout deviations as WARN (exit 0) or FAIL (exit 1) with strict opt-in, including repo-local scratch ignore (operator global ignore does not count). Ships `docs/repo-layout.md` and `docs/adr/0000-template.md`; live repo is clean. Still open: doctor wiring, uds pilot, cross-repo runs.
+
+- PUB1 slice: `scripts/publishability-check.sh [ROOT]` scans tracked files for secret-shaped tokens, absolute home paths, private IPs and LAN hostnames (scratch, .git and binaries skipped; neutral fixtures pass), exit 1 with file:line findings. Dogfood on this repo: 0 secrets, 16 home-path findings in test fixtures/docs/lessons (filed for holders, not fixed here). Still open: TTSR rule, doctor/pre-push wiring, uds script retirement, live fire, cross-repo counts.
+
+- ID1 slice: `scripts/br-shim.sh` puts the pane's Agent Mail identity on every `br` invocation: `--actor $AGENT_NAME` is appended when absent and must equal `$AGENT_NAME` when present (refused exit 4 otherwise), anonymous runs are refused, and a real binary resolving to the shim itself is refused instead of exec-looped. `tests/cli/br-shim.test.sh` proves injection on every write kind plus the no-shim passthrough that shows enforcement lives in the shim. Still open: spawn-time AGENT_NAME wiring, commit trailer hook, close/grade guard, doctor uniqueness check, upstream BR_ACTOR issue.
+- ID1 spawn wiring: `scripts/agent-spawn-env.sh --agent NAME` installs the br identity shim into a pane-scoped bin dir and prints eval-able exports, so every pane runs br through the shim with its own identity; anonymous names refused, real br required beyond the shim.
+- ID1 commit trailer: `scripts/agent-trailer-hook.sh` (installed by `scripts/install-agent-trailer-hook.sh` into the hooks chain) appends `Agent: $AGENT_NAME` when the message has none; unknown identity or existing trailer left untouched.
+- ID1 close guard: `scripts/close-guard.sh BEAD` refuses when the caller holds the claim or has an Agent trailer on a naming commit, unless a reviewer-fresh-context label is present; different actors pass.
+- ID1 uniqueness: `scripts/identity-uniqueness-check.sh` reads pane identity files plus live tmux panes and flags live panes without files, stale files for dead panes, and one name on two live panes.
+- ID1 modes fix: the four executed shell scripts committed +x (were 100644 from index staging); file-modes test asserts committed modes.
+- ID1 doctor finder: `inspectPaneIdentity` classifies live panes (shared name FAIL, missing file and week-idle registrations DEGRADED); scope wiring needs the cli/commands holders.
+- ID1 scope wiring: `doctor --scope identity` routes to the pane finder (cli map + registry enum).
+- ID1 scope follow-up: `doctor --scope identity` accepts `--project` for the pane-identity project key.
+
+- Scratch reaper reads the owner formats the fleet actually writes: JSON and one-line `pid=.. label=..` files parse to the same owner as multi-line key=value, and hand-written bare-label owners are reported per root instead of silently kept. A legacy owner whose pid is alive but whose process started after the owner's `created` time is classified owner-dead-pid-reused and reaped under the lsof gate instead of staying LIVE. Directory names only need to end in `.<pid>`, and every plan row carries its size with per-verdict, per-root and malformed-owner totals. `scratch release DIR --legacy-owner --reason TEXT` releases free-form-owner dirs (operator intent recorded in the marker and receipt, never with open fds), and the canonical `createScratch` writer replaces hand-written `.owner` files. Fleet suite temp lives at `/Users/Shared/omp-kit-tmp` (outside every git tree and `~`) and is reaped the same way. CLI surfacing (`scratch create`, `--legacy-owner/--reason` flags, plan totals in `--json`, unowned-active rule in help) is still open for the commands/cli owner.
+- REAP1 help doc: `omp-kit help scratch` now states the unowned-active rule (fresh activity within 72h stays LIVE; idle past 72h with no open fds goes to quarantine).
+
+- DERIVE1 slice: `scripts/derived-check.sh FILE...` flags literal probe-readable facts in config files (version pins, absolute paths, hard-coded counts, pid/lease values), each with its replacing probe; decision lines with reasons and probe calls stay quiet. Dogfood on `.omp/*.toml` is clean. Still open: protocol rule text, TTSR rule, doctor scope wiring, bead-lint merge, cross-repo run.
+
+- `doctor --scope kit` contract lists the `planning_skill` finding: PLAN1 added it to the kit scope components, and the grammar/refusal test pins the exact list.
+
+- SEND1 capture proof: marker check uses the bare pane id with scrollback history (session:pane misparses as a window; rendered messages scroll off the visible screen).
+
+- `doctor --scope beads` reports likely duplicate beads: live bead pairs sharing 75% or more of their title, description and acceptance text are listed with a similarity score (planted near-identical pair reported, distinct pair not).
+
+- CI installs pinned br 0.7.4 (sha256-verified) for the policy-gate live tests, which refuse to skip when the binary is absent.
+
+- Reservation-age report (`src/reservation-age.ts`, `tests/cli/reservation-age.test.ts`): audits an Agent Mail archive for exclusive holds older than the limit (default 30 min) with holder and bead; a 45-minute planted hold is reported, a 10-minute one is not. Doctor-scope registration follows when the scope files are free.
+
+- Red main: the PROF2 strict path check broke contract fixtures whose plugin entry carries no path; when the kit package dir is unknown the check falls back to the path-contains heuristic instead of failing closed, restoring cli-contracts/profile-rules greens.
+- B7 refusal proof: planted failing scenario makes the native receipt name the stage, failures and missing scenarios (candidate suite 5/5).
+
+- Release fallback when GitHub runners queue (DS1): `dsr repos add` registration plus per-target definition, `dsr health all`, and a CONTRIBUTING procedure whose publication bar matches CI (per-platform native-cert receipts); precise gap list included (target vocabulary, unreachable macOS remotes, signing/SBOM unconfigured).
+
+- PI1 MCP ABSENT: the planted no-server profile is separate from the shared fixture (which gained a server), so the ABSENT assertion tests the verdict, not the fixture.
+
+- PI1 live scenarios run omp in the prepared setup repo (not an empty sibling), and the MCP judge accepts OMP 18.6.1's single-underscore tool spelling.
+- PI1 scenario branches no longer embed the integration name (shell errors echoing the path self-matched judge regexes).
+
+- PROF2 slice: a same-named rule counts as kit-loaded only when its path sits under the kit plugin's package dir; foreign-plugin and provider-only matches now land in `missing` instead of vanishing from every bucket. Planted foreign-plugin test goes DEGRADED with the rule named missing.
+
+- Stale-base deletion guard (`src/land-guard.ts`, `tests/cli/land-guard.test.ts`): refuses a candidate tree that drops lines added after its base, naming the commit per file; planted replay of the 38afcc7e59 revert names the dropped commit.
+- LAND1 wire: the pre-push hook runs the land-guard stale-deletion check first, from the base archive's code: a commit built on base B that drops lines added at B+1 is refused naming the adding commit; fresh pushes pass through.
+
+- GATE1 slice: the pre-push hook runs gate code from the base archive (authoritative), never the working tree or the pushed head; a head that deletes a gate step is still judged by the base gate, and a failing base gate refuses.
+- The base-authoritative pre-push chain now runs six checker contract suites; any failing or missing suite refuses the push.
+
+- Shared strict `.beads/policy.yaml` template (`config/beads-policy.template.yaml`): closed is reachable only through gated edges, with per-session deltas; `tests/cli/beads-policy.test.ts` tries every status-to-closed edge on a scratch tracker (refused without a reviewer pass, closed with one) and asserts `br ready` counts are unchanged by the policy file.
+
+- LOAD1 evidence: targeted matrix for the landed admission gate — concurrent runs serialize on one slot (timestamp-ordered markers), child runs +10 nice above its parent, SIGINT/SIGTERM release the slot with 130/143 and empty ledger. Joins the existing threshold/exit-code/no-wait/pane-exclusivity/stale-reap/timeout tests.
+- LOAD1 contention plants: OMP_KIT_HEAVY_FAKE_LOAD1 seam drives end-to-end queue/no-wait deferral tests; unseamed control runs.
+- LOAD1 status lines: waiting job prints position, running jobs and contention reason before deferring.
+
+- `kit-regex-engineering` reminds agents to apply the regex-engineering skill before adding patterns. `doctor --scope regex-tools` reports the six required executables on PATH; the L6 pre-push gate and CI scan commit-exact changed JS/TS/Python with regexploit, reject findings with file:line, and exercise a planted TypeScript ReDoS negative. The gate excludes only `tests/scripts/regexploit-gate_test.py`, whose embedded malicious pattern is the fixture; the generated changed TypeScript source remains scanned and asserted vulnerable.
+- RX5 slice: the regex-tools doctor finding names the exact install command per missing tool (cargo/pip per the skill toolkit). Live machine: all six present, OK. Still open: reminder-rule fire rows, pre-push regexploit path, installed-profile run, independent spot-check.
+
+- Add per-profile plugin plan/apply/receipt/undo core with explicit DUAL_CONFIG and unwritable-profile skips.
+
+- Deploy the kit plugin package across OMP profiles with verified profile hashes, report-derived named-profile RX2 exclusions, durable per-profile receipt rows, and exact plugin/lock rollback data.
+
+- Report effective kit rule sources and plugin versions per OMP profile through `doctor --scope rules`; native overlays are listed, legacy `~/.agents/rules` copies are not treated as installed kit rules.
+
+- Commit index for 0.2.6: every shipped-path commit since v0.2.5 that had no fragment of its own, grouped by bead.
+
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.123: (commit a103ed3)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.113: (commit 7341db3) (commit 3eb78d1) (commit 2d77c9f) (commit bb851b8) (commit e2d3029) (commit abdbdea) (commit e5198fc) (commit a5bcc20) (commit 329bf9c) (commit 4a91016) (commit f8d5827)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.118: (commit aacaa3c) (commit dcbd280)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.108: (commit 367381d) (commit f9be277) (commit 871b74a) (commit c81ba88) (commit 558ef2e) (commit 0e36f42) (commit ba859e1) (commit 1d22f78) (commit 316ed4f)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.103: (commit e5f536c)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.100: (commit f6978a0) (commit 80e7de4)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106: (commit 8dcb21a)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.119: (commit cda6a9a) (commit 73d73d8)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.1: (commit 68eaefa)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.5: (commit a2167b6)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.106.6: (commit a9a63aa)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.129: (commit 8eebca6)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.128: (commit 40b8a43) (commit 20005e2) (commit 383b142) (commit 711064c) (commit 8951fb2) (commit ca8bade)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.82: (commit 5ddede7)
+- ompkit-xade: (commit 799edf8) (commit 53e54e3)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.30: (commit 1b9b420)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.88: (commit 316b22f) (commit 807a861)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.86: (commit f3e7359)
+- ompkit-2w7h: (commit b0dff61) (commit 1491cb5) (commit 672b432)
+- ompkit-t8do: (commit cf2c48e)
+- ompkit-kxdy: (commit 98c1717)
+- ompkit-sewn: (commit 2908072)
+- ompkit-l9pt: (commit 6189f27) (commit a83cd7c) (commit 9abebba)
+- ompkit-8m75: (commit 8aed51f) (commit ad4f3d2) (commit 0f87ece)
+- ompkit-pwdi: (commit 3d37e92) (commit eac5125) (commit 1f39f19) (commit 34e85a6)
+- ompkit-azpk: (commit 0204f13)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.95: (commit 2085489)
+- ompkit-ex6l: (commit c57f744)
+- ompkit-y8f9: (commit b75193d)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.104: (commit c5f12bd)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.125: (commit 974417a)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.87: (commit 69e6122)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.56: (commit 4f4beb7)
+- feat(load): add machine census and watch service (commit b82d3e5)
+- fix(load): correct census telemetry and ownership (commit fb5af2a)
+- feat: add load-gated heavy command (commit 9fce4c1)
+- fix(load): capture owner start and enforce machine rule (commit d1000fe)
+- chore: route gates through heavy admission (commit fe30746)
+- feat(doctor): report effective rules per profile (commit 854b58e)
+- feat(plugin): add per-profile receipt and undo core (commit 8bb1680)
+- feat(plugin): document apply plugin grammar (commit 1ec9506)
+- feat(plugin): wire apply and undo CLI (commit c28502e)
+- fix(plugin): isolate native profile environment (commit b6c8398)
+- fix(doctor): run per-profile native probes safely (commit 2d4d557)
+- fix(plugin): reject nested profile stores (commit 13969cd)
+- fix(plugin): clean native link on undo (commit 10aeaa0)
+- perf(rules): bash-glob G4 1492ms-to-PASS (commit a9162a7)
+- fix(plugin): undo absent links without unsupported unlink (commit 73e0526)
+- fix(plugin): report unwritable profiles as refused (commit fc3d8b1)
+- fix(doctor): ignore always-apply rules and bound probes (commit 41d111c)
+- fix(rules): keep later gh -f quiet (9/9) (commit 30a78ee)
+- fix(plugin): name unwritable profile refusal errno (commit dea3b5a)
+- fix(plugin): postcheck profile rule coverage (commit a465ff6)
+- fix(scratch): log failed reaper actions (commit ddd1383)
+- fix(gate): run pre-push checks from committed archive (commit 6874521)
+- fix(fleet-watch): preserve tmux env and recover steering (commit 1dee7ec)
+- feat(mcp): import MCP servers from other harnesses into OMP profiles and prove them callable (commit db7369c)
+- docs-footer: generated footer says the latest-OMP check runs once a day (commit 48baf6e)
+- fix(diagnostics): separate rules findings 24/7→31/0 (commit 9eb58e3)
+- FLY1 dedup: doctor --scope beads duplicate report (INV-28) (commit 764b915)
+- MP3 slice 1: shared beads policy template + closed-edge test (commit 38afcc7)
+- PROF1R: implement profile-wide plugin apply and undo (commit e673895)
+- main CI health fix and FLY1 dedup (commit dbeb827)
+- CYCLE1 reservation age + SEND1 proven send modules with tests (commit 744ecb9)
+- PUB1b: doc status gate plus front matter and generated index (commit 7562052)
+- CYCLE1: doctor reservations scope accepts --project (commit 1752ee0)
+- LAND1: stale-base deletion guard with 38afcc7e59 replay (commit 1298b02)
+- RX1: wire regex budget gate into ladder and pre-push (commit 9a2d1bc)
+- RX1 CI fixes: pinned br install, ten-stage contract, budget skip hatch (commit ef21da7)
+- PUB1d: report stale edits on reserved files (commit cdb1a2a)
+- PUB1d timeout-safe work rows (commit 612b647)
+- ID1 doctor finder: pane identity scope logic + unit tests (39/39; gate GREEN locally) (commit 873f175)
+- MP1 private-index pre-push gate candidate (commit c4965fc)
+- perf(rx2): optimize four hot rule conditions (commit d1ba07f)
+- perf(scratch): prefilter tmp-path events (commit 4e06e22)
+- CI red: allowlist regex-budget.ts in runtime-adapter (commit 4f58add)
+- CI red: runtime-adapter.sh back to mode 100755 (4f58add8 made it 644; ladder exits 2 runtime adapter missing) (commit a54c52d)
+- fix(integrations): isolate proof scenarios (commit d0b42c8)
+
+- SVC1 service job contract (box 1, part 1): `docs/service-contract.md` states the hardening contract for every recurring job, and `src/service-contract.ts` adds static `service doctor` checks (`contract-*`) for the plist/unit items with planted negatives in `tests/cli/service-contract.test.ts`. Runtime items (single-flight, load gate, time cap, off switch, double schedule, fleet-view `--all`) are specified with owners; wiring into `checkService` waits on the `src/service.ts` holder.
+- SVC1 fleet hygiene: `bunfig.toml` `[test] pathIgnorePatterns` excludes `var/agent-tmp/**` (and pins `node_modules/**`) so `bun test` no longer walks ~7,400 scratch `*.test.ts` copies; a planted failing tripwire in scratch proves the exclusion.
+- SVC1 fleet view (box 2): `service status --all`/`doctor --all` reach their handlers (parser accepts declared `--all` in place of the positional), and `service list`/`status` rows carry loaded state, last exit, run count and receipt last-run age; planted loaded-job-misreported negative in `tests/cli/service-fleet.test.ts`.
+- SVC1 contract wiring (box 1, part 2): `checkService`/`checkServiceLinux` run the `contract-*` checks over installed definitions, and the four interval jobs render RunAtLoad false; live `service doctor kit-update` proves all six checks (stale installs report drift until reinstalled).
+- SVC1 single-flight (box 4, module): `src/service-run.ts` claims one lock per job (atomic mkdir, PID-liveness + age backstop, stale empty-dir grace, fail-closed) with 7 planted tests; `service run` wiring maps OVERLAP to SKIPPED-OVERLAP exit 4.
+- SVC1 load gate (box 5, module): `src/service-run.ts` `gateRunLoad` binds the 2.5x threshold and shapes the SKIPPED-LOAD verdict (planted high-load test); `service run` wiring gates on entry with no work.
+- SVC1 time cap (box 6, module): `src/service-run.ts` `runWithCap` SIGKILLs past the cap and reports TIMEOUT with elapsed time (disturbed-pipe reads guarded); live `/bin/sleep` killed at 203ms for a 200ms cap; `service run` wiring applies the cap and records it.
+- SVC1 off switch (box 7, module): `src/service-run.ts` `readJobOff` disables on any `<job>.off` marker (reason from content, fail toward no-run); `service run` wiring checks it first with no run and no receipt.
+- SVC1 run wiring (boxes 4-7): `service run` enforces off switch, single-flight, load gate and subprocess time cap in order, releasing the lock on every path; planted end-to-end overlap/load/timeout/off tests through the real command.
+
+- Add `doctor --scope mcp --sources`: read-only inventory of MCP servers configured for Claude, Cursor, Codex and the project `.mcp.json`, with a per-profile matrix over every OMP profile; env and header values appear as names only.
+- Add `apply mcp`: import selected servers into OMP profiles' `mcp.json` (interactive walk-through on a terminal, explicit flags otherwise), validated against the installed OMP `mcp-schema.json`, env values written as references, literal credentials refused, existing bytes left in place, one receipt for `undo`; `--startup-timeout-ms`, `--override NAME=ABS_JSON` and `--env-literal` cover slow starts, corrected commands and non-secret config.
+- Add `test --mcp`: per profile, a fresh `omp --mode rpc` on a private mirror of the profile's config lists each server's tools through OMP's own client and makes each `--call` through OMP's tool bridge; reports CALLABLE / ZERO_TOOLS / START_TIMEOUT / START_FAILED / CALL_FAILED / NOT_CALLED / NOT_CONFIGURED with a receipt, exit 1 unless every selected server is CALLABLE.
+- Fix `test --mcp` false pass: a `--call` is CALLABLE only when its result text has no error shape (`AUTH_ERROR`, `HTTP 4xx/5xx`, `Unauthorized`, `Forbidden`) and matches `--expect SERVER:REGEX`; error text is CALL_FAILED even when the server sets `isError` false (the wolfram-alpha 401 case), and an unchecked answer is UNVERIFIED_RESULT.
+- `test --mcp` checks each server's env before the session: an env-name reference unset where OMP runs (process env and the dotenv files OMP loads) is ENV_UNSET, and a `!command` value that fails or prints nothing is COMMAND_FAILED; command output is never shown.
+- Add `apply mcp` edit mode: `--env-command SERVER:KEY='!CMD'` sets one env value of an existing entry to an OMP command value (e.g. a macOS keychain lookup), and `--enable NAMES` removes servers from `disabledServers`; both edit in place with plan, receipt and `undo`. The secret scan now also checks the text of `!command` values.
+
+- Fixed doctor rules inventory to keep installed-byte and ownership evidence separate from native per-profile effective-rule findings; `doctor --scope rules` now reports both without altering health evidence.
+
+- Added `omp-kit planning score` for per-mission or fleet scoring from git, beads, and CI evidence; packaged the planning skill and defaults, added repo-level overrides, and made `doctor --scope beads` flag acceptance criteria left in descriptions.
+- Corrected health diagnostics to inspect the optional planning-skill row only in kit scope or when the packaged skill file exists; kept N+2 candidate fixtures aligned with packaged `config/` and `skills/` roots.
+
+- Adds a six-hour `fleet-lessons` service job with run-at-load behavior.
+
+- SEND1 proven send (part 2): `omp-kit send SESSION PANE MESSAGE` wraps ntm with a marker poll (15 s), one retry and a state-root drop-folder fallback; the exit code is delivery (OK 0, NOT_DELIVERED 1), never the send call.
+
+- TOOL1 toolchain pins (part 1): `src/infra.ts` parses the pin file fail-closed and diffs installed versions into DRIFT rows, with planted negatives in `tests/cli/infra.test.ts`. Live pin file, `infra check`/`promote` and doctor wiring follow.
+- TOOL1 candidate check: `checkInfraCandidate` runs the ladder with the candidate prefix leading PATH and reports PASS or the failing stage (machine toolchain untouched; per-tool acquisition URLs still open).
+- TOOL1 guarded promote: `promoteInfra` refuses without human authorization and without a PASSING check for the exact candidate, installs via injection, updates the pin and writes the receipt; `undoPromote` promotes back (readback in pins). Same planted REFUSED/FAILED coverage.
+- TOOL1 CLI registration: `infra pin|check|promote|undo` commands with guarded promote (human + passing check + installed readback) and pin backup/restore; candidate staging verifies the binary reports the candidate version.
+- TOOL1 quiet-machine rule: `loadGate` refuses ladder work above 1.5x cores and a forced run reports INCONCLUSIVE (never PASS/FAIL), with planted tests; CLI gate + wait + origin/main export follow when `src/cli.ts` frees.
+- TOOL1 quiet wiring: `infra check` refuses above 1.5x cores (or waits with `--wait`, or runs forced as INCONCLUSIVE) and runs the ladder from an export of origin/main, never the dirty tree.
+
+- CYCLE1 reservation age (part 1): `doctor --scope reservations` reports exclusive Agent Mail holds older than the limit (default 30 min) with holder, bead and age from `AGENT_MAIL_STORAGE_ROOT`, FAIL when any are overdue.
+
+- Corpus rejects missing or non-directory `--sessions` roots with `INVALID_CORPUS_SELECTION`; unknown schema versions refuse with a named error before writing a report; fixed-fixture bash counts match the legacy Python extractor.
+- Corpus counts malformed rows as parse errors without failing the run (planted truncated row yields parse_errors 1, counts unchanged).
+- Corpus seeded fixture reproduces identical counts on repeat runs (two consecutive reports deep-equal).
+
+- Fixed fleet-watch service setup and capture handling: the service preserves `TMUX_TMPDIR`, rejects missing config/socket-directory inputs, and uses absolute PATH entries; capture failures report `NO_DECISION` with the error instead of nudging an assumed-idle pane. Idle `Steering · N` panes submit one queued message with `M-Up` then `Enter` and log it; busy panes are left untouched. Added coordinator/worker configuration and doctor coverage.
+
+- Added explicit `allow_bypass: false` to the shared Beads policy template and a known-bad fixture; fresh-context gate providers no longer bypass the implementer-identity guard.
+
+- SYNC1 start gate (box 1): `scripts/sync-check.sh --repo DIR` refuses exit 4 unless HEAD equals origin/main after fetch, printing `drop back: sync first`, the behind count and the exact `merge --ff-only` command; 19-case contract in `tests/cli/sync-check.test.sh` (file:// bare origin: current passes, 3-behind refused with count + command).
+- SYNC1 fast-forward (box 2): `sync-check.sh --repo DIR --fast-forward` moves HEAD via git's own ff-only merge (refuses rather than overwrite dirty paths), reports DIVERGED without attempting when histories split, and never stashes, resets or rebases; planted dirty-blocked and diverged cases prove HEAD and content untouched.
+- SYNC1 post-push assertion (box 3): `sync-check.sh --repo DIR --assert-synced` reports POST-PUSH-GAP with the behind count after a landing (exit 4) or clean (exit 0); planted gap + clean cases in the contract.
+- SYNC1 close gate at review entry (box 4): `scripts/br-shim.sh` runs `close-guard.sh` unchanged on `br update ID --status in_review` and `br close ID`, refusing the transition on its FAIL before a grader spends time on self-review; all other invocations pass through byte-identical. Planted claimant-refused / other-passes / label-passes / non-review-ungated cases in `tests/cli/br-shim.test.sh` (stub br serves canned bead JSON, argv file proves the transition never reached real br on refusal).
+- SYNC1 install + doctor (box 5): `scripts/install-sync-check.sh [REPO]` installs a self-contained copy with a verify probe and printed undo (planted installer contract); `doctor.sh` check 10 `sync` fetches every dev-root repo carrying scripts/sync-check.sh and RED-names laggards. Rolled out to uds; baseline 2026-10-06: uds 251 behind, companion 51 behind; 0-behind-for-a-day measurement started.
+
+- Add `omp-kit heavy` for bounded, machine-wide load admission with nice-10 execution, per-pane exclusion, queue status, and `--no-wait` deferral; route ladder and fresh-gate heavy work through it.
+
 ## 0.2.5 — 2026-10-04
 
 Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed its release-notes check before any build and was never published; this release carries everything since 0.2.3.
