@@ -404,7 +404,8 @@ export function reapLogPath(home: string): string {
 }
 
 export function quarantineEntryFor(dirName: string, at: Date = new Date()): string {
-	return `${dirName}.q-${at.toISOString().replace(/[:.]/g, "-")}`;
+	// Nested session-relative paths carry slashes; flatten so the entry is a single quarantine dir name.
+	return `${dirName.split("/").join("__")}.q-${at.toISOString().replace(/[:.]/g, "-")}`;
 }
 
 export function quarantineTimeOf(entryName: string): number | null {
