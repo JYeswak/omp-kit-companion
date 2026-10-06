@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -616,4 +616,29 @@ test("doctor identity scope reaches the pane finder through diagnose", async () 
 		if (savedPath === undefined) delete process.env.PATH;
 		else process.env.PATH = savedPath;
 	}
+});
+
+test("private repo with Actions enabled fails billing with remedy", () => {
+	const row = inspectActionsBilling({ repo: "o/r", isPrivate: true, actionsEnabled: true });
+	expect(row.status).toBe("FAIL");
+	expect(row.reason).toContain("billable");
+	expect(row.recommended_action).toContain("enabled=false");
+});
+
+test("public repo with Actions enabled and private repo without are OK", () => {
+	expect(inspectActionsBilling({ repo: "o/r", isPrivate: false, actionsEnabled: true }).status).toBe("OK");
+	expect(inspectActionsBilling({ repo: "o/r", isPrivate: true, actionsEnabled: false }).status).toBe("OK");
+});
+
+test("unknown visibility or Actions state is UNVERIFIED, never OK", () => {
+	expect(inspectActionsBilling({ repo: "o/r", isPrivate: null, actionsEnabled: true }).status).toBe("UNVERIFIED");
+	expect(inspectActionsBilling({ repo: "o/r", isPrivate: true, actionsEnabled: null }).status).toBe("UNVERIFIED");
+});
+
+test("diagnose includes the billing row only when a probe is supplied", async () => {
+	const f = fixture();
+	const plain = await diagnose({ root: f.root, home: f.home });
+	expect(plain.some(row => row.component === "actions-billing")).toBe(false);
+	const flagged = await diagnose({ root: f.root, home: f.home, actionsBilling: { repo: "o/r", isPrivate: true, actionsEnabled: true } });
+	expect(finding(flagged, "actions-billing").status).toBe("FAIL");
 });

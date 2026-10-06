@@ -29,6 +29,8 @@ export interface DiagnoseInput {
 	jsmPath?: string;
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
 	stateRoot?: string;
+	/** GitHub billing probe; when present the actions-billing finding is included. */
+	actionsBilling?: ActionsBillingProbe | null;
 }
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
@@ -123,6 +125,15 @@ function directoryPath(base: string, segments: readonly string[]): "missing" | "
 }
 function finding(component: string, status: DiagnosticStatus, reason: string, recommended_action: string, evidence?: Record<string, unknown>): Finding {
 	return { component, status, reason, recommended_action, ...(evidence ? { evidence } : {}) };
+}
+/** GitHub billing probe for the checkout's origin repo. Nulls mean unknown (gh missing, unauthenticated or offline): UNVERIFIED, never OK. A gh collector fills this in the wiring slice. */
+export interface ActionsBillingProbe { repo: string; isPrivate: boolean | null; actionsEnabled: boolean | null }
+export function inspectActionsBilling(probe: ActionsBillingProbe): Finding {
+	if (probe.isPrivate === null || probe.actionsEnabled === null)
+		return finding("actions-billing", "UNVERIFIED", `Cannot determine billing exposure for ${probe.repo}: GitHub repo visibility or Actions state is unknown`, "Run with gh authenticated and network reachable, then rerun omp-kit doctor.", { repo: probe.repo, proof: "GH_API_UNREACHABLE" });
+	if (probe.isPrivate && probe.actionsEnabled)
+		return finding("actions-billing", "FAIL", `Private repo ${probe.repo} has GitHub Actions enabled: runs are billable`, "Disable Actions on the private repo (gh api -X PUT repos/<owner>/<repo>/actions/permissions -F enabled=false) or make the repo public.", { repo: probe.repo, proof: "PRIVATE_ACTIONS_ENABLED" });
+	return finding("actions-billing", "OK", probe.isPrivate ? `Private repo ${probe.repo} has Actions disabled` : `Public repo ${probe.repo}: Actions runs are not billable`, "No action required.", { repo: probe.repo, proof: "NO_BILLABLE_EXPOSURE" });
 }
 export function parseRuleManifest(manifest: string): ManifestRule[] {
 	if (!manifest.endsWith("\n")) throw new Error("MANIFEST.tsv must end with a newline");
@@ -889,6 +900,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
+	if (input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
