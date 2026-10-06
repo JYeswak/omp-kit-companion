@@ -1,6 +1,6 @@
 # omp-kit mission record (Mission Protocol v0.1 P1). Human text: ROADMAP.md "Mission" (b1d50e7b7d).
-# One file, edited in place. Each pillar check is repo code: it runs only after hash registration
-# (MP1 rz5.93); until then every check is status = "unregistered" and nothing executes it.
+# One file, edited in place. Each pillar check is repo code; it runs only after canonical-path
+# and SHA256 registration. Validation never executes a check.
 
 identity = "omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintainer's own fleet is the proving ground."
 stage = "1: the fleet runs the kit (every profile loaded, rules within budget, done enforced)"
@@ -17,6 +17,7 @@ not_in_mission = [
   "adopting research because it is impressive rather than because it measured better",
 ]
 product_paths = ["src/**", "rules/**", "extensions/**", "installer/**", "skills/**", "bin/**", "package.json"]
+pillar_ids = ["current", "loaded", "proven", "measured", "learning", "shareable"]
 uphill = "Every finding or gap from any session is reported to omp-test %54, fixed in omp-kit, and applied to all sessions (MP0 rz5.92)."
 
 [cadence]
@@ -32,35 +33,47 @@ sessions = ["every OMP session on the machine, all profiles"]
 [[pillar]]
 id = "current"
 clause = "every OMP release re-certified within a day of publication"
-check = "omp-kit status --json  # last-test omp version == installed omp version"
-status = "unregistered"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar current"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "12887091596f5b8c1d2edb285619c6479cbf4bd731813a9342de75ff0143a2d5"
 
 [[pillar]]
 id = "loaded"
 clause = "every agent in every profile runs the current rules, hooks, skills, commands and extensions"
-check = "omp-kit doctor --scope rules --json  # PROF2: every covered profile OK"
-status = "unregistered"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar loaded"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "66d350f2b85284dd83805779ac901b0fa4180f1fb5c6a4984fda9c6bd252a281"
 
 [[pillar]]
 id = "proven"
 clause = "every rule, hook, skill and command ships with a testing ground: fire, near-miss, planted red, live"
-check = "omp-kit test --json && bun scripts/regex-budget.ts"
-status = "unregistered"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar proven"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "db778b17b7be3679a1fcad0046fe96e37bd60a8c4700a6b51278a4392358963e"
 
 [[pillar]]
 id = "measured"
 clause = "the local agentic environment is measurable end to end; every change judged against a baseline"
-check = "omp-kit doctor --scope load --json"
-status = "unregistered"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar measured"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "4c7af87181c1642dcf6328f8bc494ec2a738d95a594cbc738741e263ebcdc03e"
 
 [[pillar]]
 id = "learning"
 clause = "research and repeated gaps become tested rules, hooks or skills; adopted only if they measure better"
-check = "MISSING: no runnable check yet (LR1 ompkit-gbkj, MP7 rz5.99)"
-status = "missing"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar learning"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "ebb95be953a29f36e1aeaffd9d8b7a0b8233b6d019a19d38e7bb4c4f242cbf35"
 
 [[pillar]]
 id = "shareable"
 clause = "only what OMP lacks; native path taught; installs cleanly for a stranger on macOS and Linux"
-check = "bun test tests/cli/docs.test.ts"
-status = "unregistered"
+check = "omp-kit heavy -- bun scripts/mission-check.ts --pillar shareable"
+check_path = "scripts/mission-check.ts"
+check_sha256 = "3001d59a2fdc10613a00a24e9e5ae9acb7e81ae677cdbf382fb6f40003c8fa72"
+check_command_sha256 = "996f5036a3052441549e720e8a36dad58cb83410f48639ec92f0e92f0e967220"

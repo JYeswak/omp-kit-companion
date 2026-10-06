@@ -257,6 +257,15 @@ const loadData: DataSchema = { type: "object", required: ["scope", "overall", "v
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 } };
+const missionData: DataSchema = { type: "object", required: ["overall", "mission_file", "identity", "stage", "pillars", "errors", "no_claim"], properties: {
+	overall: { enum: ["VALID", "UNREGISTERED", "INVALID"] }, mission_file: { type: "string" },
+	identity: { type: ["string", "null"] }, stage: { type: ["string", "null"] },
+	pillars: { type: "array", items: { type: "object", required: ["id", "clause", "check", "status", "path", "sha256", "command_sha256"], properties: {
+		id: { type: "string" }, clause: { type: "string" }, check: { type: "string" }, status: { enum: ["REGISTERED", "UNREGISTERED"] },
+		path: { type: ["string", "null"] }, sha256: { type: ["string", "null"] }, command_sha256: { type: ["string", "null"] }, reason: { type: "string" },
+	} } },
+	errors: { type: "array", items: { type: "string" } }, no_claim: { type: "string" },
+} };
 
 export const COMMANDS: readonly Command[] = [
 	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
@@ -270,6 +279,11 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
 		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
 	], runnable: false },
+	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate [--project PATH] [--json]", flags: [], subcommands: [
+		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [
+			{ name: "--project", value: "PATH", description: "Project root to validate; defaults to the current directory" },
+		], example: "omp-kit mission validate --json", runnable: false, dataSchema: missionData },
+	], example: "omp-kit mission validate --json", runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--deep --yes]", flags: [
 			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit" },

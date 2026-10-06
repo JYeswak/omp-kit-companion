@@ -2756,6 +2756,16 @@ function planningScoreCommand(request: ParsedCommand): CliResult {
 	return runPlanningScore({ kitRoot, ...(typeof repoFlag === "string" ? { repoPath: repoFlag } : {}), fleet: request.flags.has("--fleet"), cwd: process.cwd(), home: process.env.HOME });
 }
 registerCommandHandler("planning score", planningScoreCommand);
+function missionValidateCommand(request: ParsedCommand): CliResult {
+	const projectFlag = request.flags.get("--project");
+	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission validate --project PATH or run from the project root.");
+	const projectRoot = resolve(typeof projectFlag === "string" ? projectFlag : process.cwd());
+	const report = validateMissionRecord(projectRoot);
+	return { code: report.overall === "VALID" ? 0 : 1, data: { ...report }, verification: "PERFORMED" };
+}
+registerCommandHandler("mission validate", missionValidateCommand);
+
 registerCommandHandler("update", updateCommand);
 
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
