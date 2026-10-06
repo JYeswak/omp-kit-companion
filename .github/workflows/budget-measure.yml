@@ -56,7 +56,8 @@ jobs:
           results_dir="$RUNNER_TEMP/budget-measure-${{ matrix.os }}"
           mkdir -p "$results_dir"
           for i in $(seq 1 "${{ inputs.runs }}"); do
-            for target in base cand; do
+            if (( i % 2 == 0 )); then order="cand base"; else order="base cand"; fi
+            for target in $order; do
               output="$results_dir/run-$i-$target.log"
               rc=0
               (cd "$target" && bun scripts/regex-budget.ts --judge-regardless-of-load >"$output" 2>&1) || rc=$?
