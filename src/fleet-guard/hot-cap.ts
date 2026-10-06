@@ -146,3 +146,48 @@ export function reservationArgs(event: { arguments?: unknown; input?: unknown; p
 	}
 	return { paths, exclusive, ttlSeconds };
 }
+
+/** Pull renewal scope (hold ids, holder, project, extension) from any arg shape.
+ * ID-only renewals carry file_reservation_ids with no paths or exclusive flag;
+ * a renewal inherits the hold's exclusivity, so the cap judges the hold. */
+export function renewScope(event: { arguments?: unknown; input?: unknown; params?: unknown }): {
+	ids: number[]; agentName: string | undefined; projectKey: string | undefined; extendSeconds: number | undefined;
+} {
+	const sources: unknown[] = [event.arguments, event.input, event.params];
+	let ids: number[] = [];
+	let agentName: string | undefined;
+	let projectKey: string | undefined;
+	let extendSeconds: number | undefined;
+	for (const source of sources) {
+		if (!source || typeof source !== "object") continue;
+		const record = source as Record<string, unknown>;
+		if (ids.length === 0) {
+			const rawIds = record.file_reservation_ids ?? record.reservation_ids ?? record.ids;
+			if (Array.isArray(rawIds)) {
+				const listed = rawIds.filter((item): item is number => typeof item === "number" && Number.isFinite(item));
+				if (listed.length > 0) ids = listed;
+			} else if (typeof record.file_reservation_id === "number" && Number.isFinite(record.file_reservation_id)) {
+				ids = [record.file_reservation_id];
+			} else if (typeof record.reservation_id === "number" && Number.isFinite(record.reservation_id)) {
+				ids = [record.reservation_id];
+			} else if (typeof record.id === "number" && Number.isFinite(record.id)) {
+				ids = [record.id];
+			}
+		}
+		if (agentName === undefined) {
+			for (const key of ["agent_name", "agentName", "agent"]) {
+				if (typeof record[key] === "string" && (record[key] as string).trim() !== "") { agentName = (record[key] as string).trim(); break; }
+			}
+		}
+		if (projectKey === undefined) {
+			for (const key of ["project_key", "projectKey", "project"]) {
+				if (typeof record[key] === "string" && (record[key] as string).trim() !== "") { projectKey = (record[key] as string).trim(); break; }
+			}
+		}
+		if (extendSeconds === undefined) {
+			if (typeof record.extend_seconds === "number" && Number.isFinite(record.extend_seconds)) extendSeconds = record.extend_seconds;
+			else if (typeof record.extendSeconds === "number" && Number.isFinite(record.extendSeconds)) extendSeconds = record.extendSeconds;
+		}
+	}
+	return { ids, agentName, projectKey, extendSeconds };
+}

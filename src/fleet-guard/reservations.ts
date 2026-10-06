@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import { checkHotCap, isReservationTool, readHotPaths, reservationArgs } from "./hot-cap.ts";
+import { type ActiveHold, readActiveHolds } from "../reservation-age.ts";
+import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, readHotPaths, renewScope, reservationArgs } from "./hot-cap.ts";
 
 export interface ReservationEvent {
 	toolName?: unknown;
@@ -31,6 +32,10 @@ export interface ReservationCheckContext {
 	lookupReservations?: (input: ReservationLookupInput) => Promise<ReservationLookupResult>;
 	warn?: (message: string) => void;
 	now?: () => number;
+	/** Live holds for renewal-cap judgment (test seam; production reads the archive). */
+	activeHolds?: ActiveHold[];
+	/** Agent Mail archive root override for hold lookup. */
+	archiveRoot?: string;
 }
 
 export interface ReservationBlock {
@@ -236,11 +241,11 @@ function cachedLookup(key: string, now: number): ReservationLookupResult | undef
 }
 
 /** RES1: refuse over-cap exclusive holds on hot paths at request/renew time. */
-function checkHotReservation(
+async function checkHotReservation(
 	event: ReservationEvent,
 	context: ReservationCheckContext,
 	kind: "reserve" | "renew",
-): ReservationBlock | undefined {
+): Promise<ReservationBlock | undefined> {
 	const cwd = context.cwd ?? process.cwd();
 	const root = context.repoRoot ?? context.projectRoot ?? findRepoRoot(cwd);
 	if (!root) return undefined;
@@ -248,8 +253,63 @@ function checkHotReservation(
 	if (hotPaths.length === 0) return undefined;
 	const args = reservationArgs(event);
 	const verdict = checkHotCap({ hotPaths, request: { ...args, kind } });
-	if (!verdict.blocked) return undefined;
-	return { block: true, reason: verdict.reason ?? "fleet-guard hot-path cap refused the hold" };
+	if (verdict.blocked) return { block: true, reason: verdict.reason ?? "fleet-guard hot-path cap refused the hold" };
+	if (kind === "renew") return checkHotRenewal(event, context, hotPaths);
+	return undefined;
+}
+
+/**
+ * A renewal inherits the hold's exclusivity: judge the existing hold's own
+ * exclusive flag and path, not the call's flags. ID-only renewals carry no
+ * paths, so without this the cap is bypassed. Total lifetime is hold age plus
+ * the requested extension; past the cap the renewal is refused.
+ */
+async function checkHotRenewal(
+	event: ReservationEvent,
+	context: ReservationCheckContext,
+	hotPaths: readonly string[],
+): Promise<ReservationBlock | undefined> {
+	const scope = renewScope(event);
+	const holder = scope.agentName ?? context.agentName;
+	if (!holder) {
+		warn(context, "fleet-guard hot-path cap fail-open: renewal without an agent identity cannot be matched to a hold");
+		return undefined;
+	}
+	const now = context.now?.() ?? Date.now();
+	let holds = context.activeHolds;
+	if (!holds) {
+		const archiveRoot = context.archiveRoot ?? AGENT_MAIL_STORAGE_ROOT ?? process.env.AGENT_MAIL_STORAGE_ROOT;
+		if (!archiveRoot) {
+			warn(context, "fleet-guard hot-path cap fail-open: no hold source for renewal judgment");
+			return undefined;
+		}
+		const projectKey = scope.projectKey ?? context.projectKey;
+		if (!projectKey) {
+			warn(context, "fleet-guard hot-path cap fail-open: renewal without a project key cannot be matched to a hold");
+			return undefined;
+		}
+		const report = readActiveHolds(archiveRoot, projectKey, now);
+		if (!report.available) {
+			warn(context, "fleet-guard hot-path cap fail-open: hold archive is unavailable");
+			return undefined;
+		}
+		holds = report.holds;
+	}
+	const wanted = new Set(scope.ids);
+	const extendMinutes = scope.extendSeconds === undefined ? 0 : scope.extendSeconds / 60;
+	for (const hold of holds) {
+		if (hold.agent_name !== holder) continue;
+		if (wanted.size > 0 && (hold.id === null || !wanted.has(hold.id))) continue;
+		if (!hold.exclusive) continue;
+		const hot = isHotPath(hotPaths, hold.path_pattern);
+		if (hot === null) continue;
+		const totalMinutes = (now - hold.granted_ms) / 60000 + extendMinutes;
+		if (totalMinutes > HOT_CAP_MINUTES) {
+			const label = hold.id === null ? hold.path_pattern : `hold ${hold.id} on ${hold.path_pattern}`;
+			return { block: true, reason: `fleet-guard hot-path cap: renewal of exclusive ${label} reaches ${Math.round(totalMinutes)} min, over the ${HOT_CAP_MINUTES} min cap for hot path ${hot} (listed in .omp/hot-paths). Release first.` };
+		}
+	}
+	return undefined;
 }
 
 export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> {

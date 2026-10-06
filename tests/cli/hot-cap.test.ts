@@ -140,3 +140,51 @@ test("glob path matching a hot file is refused; non-matching glob passes", async
 	}, { cwd: root, repoRoot: root });
 	expect(ok).toBeUndefined();
 });
+
+const MIN = 60_000;
+const idOnlyRenew = (extra: Record<string, unknown>) => ({
+	toolName: "xd://mcp__mcp_agent_mail_renew_file_reservations",
+	arguments: { agent_name: "PlumRaven", project_key: "/repo", extend_seconds: 10 * 60, file_reservation_ids: [7], ...extra },
+});
+
+test("ID-only renewal of an exclusive hot hold past 30 min is refused", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check(idOnlyRenew({}), {
+		cwd: root, repoRoot: root, now: () => now,
+		activeHolds: [{ id: 7, path_pattern: "src/cli.ts", exclusive: true, agent_name: "PlumRaven", granted_ms: now - 31 * MIN, expires_ms: now + 10 * MIN }],
+	});
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("hold 7");
+	expect(block?.reason).toContain("src/cli.ts");
+});
+
+test("ID-only renewal of a young exclusive hot hold within cap passes", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check(idOnlyRenew({}), {
+		cwd: root, repoRoot: root, now: () => now,
+		activeHolds: [{ id: 7, path_pattern: "src/cli.ts", exclusive: true, agent_name: "PlumRaven", granted_ms: now - 5 * MIN, expires_ms: now + 10 * MIN }],
+	});
+	expect(block).toBeUndefined();
+});
+
+test("ID-only renewal of a non-exclusive hot hold passes", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check(idOnlyRenew({}), {
+		cwd: root, repoRoot: root, now: () => now,
+		activeHolds: [{ id: 7, path_pattern: "src/cli.ts", exclusive: false, agent_name: "PlumRaven", granted_ms: now - 60 * MIN, expires_ms: now + 10 * MIN }],
+	});
+	expect(block).toBeUndefined();
+});
+
+test("ID-only renewal scoped to another id ignores the hot hold", async () => {
+	const root = hotRepo();
+	const now = Date.now();
+	const block = await check(idOnlyRenew({ file_reservation_ids: [9] }), {
+		cwd: root, repoRoot: root, now: () => now,
+		activeHolds: [{ id: 7, path_pattern: "src/cli.ts", exclusive: true, agent_name: "PlumRaven", granted_ms: now - 60 * MIN, expires_ms: now + 10 * MIN }],
+	});
+	expect(block).toBeUndefined();
+});

@@ -52,6 +52,51 @@ function asString(value: unknown): string | null {
 interface ActiveReservation { path_pattern: string; agent_name: string; bead: string; granted_ts: string; expires_ts: string; granted_ms: number; }
 interface ActiveReservationReport { records: ActiveReservation[]; checked: number; unreadable: number; available: boolean; }
 
+/** A live hold for renewal-cap judgment: the hold's own exclusive and path. */
+export interface ActiveHold {
+	id: number | null;
+	path_pattern: string;
+	exclusive: boolean;
+	agent_name: string;
+	granted_ms: number;
+	expires_ms: number | null;
+}
+
+export interface ActiveHoldReport { holds: ActiveHold[]; checked: number; unreadable: number; available: boolean; }
+
+/** List live (unreleased, unexpired) holds of any exclusivity for renewal judgment. */
+export function readActiveHolds(archiveRoot: string, projectKey: string, nowMs: number): ActiveHoldReport {
+	const directory = join(archiveRoot, "projects", projectSlug(projectKey), "file_reservations");
+	let names: string[];
+	try { names = readdirSync(directory).filter((name) => name.endsWith(".json")).sort(); }
+	catch { return { holds: [], checked: 0, unreadable: 0, available: false }; }
+	const holds: ActiveHold[] = [];
+	let unreadable = 0;
+	for (const name of names) {
+		const parsed: unknown = readJsonFile(join(directory, name));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { unreadable++; continue; }
+		const record = parsed as Record<string, unknown>;
+		const released = record.released_ts;
+		if (released !== undefined && released !== null && String(released).length > 0) continue;
+		const expiresMs = typeof record.expires_ts === "string" && Number.isFinite(Date.parse(record.expires_ts))
+			? Date.parse(record.expires_ts as string) : null;
+		if (expiresMs !== null && expiresMs <= nowMs) continue;
+		const pathPattern = asString(record.path_pattern ?? record.path);
+		const holder = asString(record.agent_name ?? record.agent);
+		const granted = asString(record.created_ts ?? record.granted_ts);
+		if (!pathPattern || !holder || !granted || !Number.isFinite(Date.parse(granted))) { unreadable++; continue; }
+		holds.push({
+		id: typeof record.id === "number" && Number.isFinite(record.id) ? record.id : null,
+			path_pattern: pathPattern,
+			exclusive: record.exclusive === true,
+			agent_name: holder,
+			granted_ms: Date.parse(granted),
+			expires_ms: expiresMs,
+		});
+	}
+	return { holds, checked: holds.length, unreadable, available: true };
+}
+
 function readActiveReservations(archiveRoot: string, projectKey: string, nowMs: number): ActiveReservationReport {
 	const directory = join(archiveRoot, "projects", projectSlug(projectKey), "file_reservations");
 	let names: string[];
