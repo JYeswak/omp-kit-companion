@@ -215,3 +215,15 @@ test("planted no-wait under contention exits 75 without starting", async () => {
 	expect(existsSync(marker)).toBe(false);
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 });
+
+test("a waiting job reports position, running jobs and the contention reason", async () => {
+	const root = fixture();
+	configure(root, { slots: 2, max_wait_s: 3 });
+	const result = await invoke(root, ["heavy", "--label", "waiter", "--", "sh", "-c", "exit 0"],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("heavy: queue position 1;");
+	expect(result.stderr).toContain("running=none");
+	expect(result.stderr).toContain("LOAD1");
+	expect(result.stderr).toContain("deferred:");
+});
