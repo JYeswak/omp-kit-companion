@@ -26,8 +26,8 @@ if [ -n "${BEADS_DB:-}" ]; then
 else
 	ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 	DB="$ROOT/.beads/beads.db"
-	[ -f "$DB" ] || exit 0
 fi
+[ -f "$DB" ] || exit 0
 MSG=$(cat -- "$FILE" 2>/dev/null) || exit 0
 CANDIDATES=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | grep '[0-9]' | sort -u | head -20) || true
 if [ -z "$CANDIDATES" ]; then

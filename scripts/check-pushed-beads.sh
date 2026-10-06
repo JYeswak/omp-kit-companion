@@ -14,6 +14,7 @@ BASE=""
 TIP=""
 DB=""
 BRBIN=""
+PREPUSH=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo) REPO=${2:-}; shift 2 ;;
@@ -21,37 +22,53 @@ while [ $# -gt 0 ]; do
 		--tip) TIP=${2:-}; shift 2 ;;
 		--db) DB=${2:-}; shift 2 ;;
 		--br) BRBIN=${2:-}; shift 2 ;;
+		--pre-push) PREPUSH=1; shift ;;
 		--) shift; break ;;
 		*) printf 'check-pushed-beads: unknown argument %s\n' "$1" >&2; exit 2 ;;
 	esac
 done
+if [ "$PREPUSH" = "1" ]; then
+	if [ -z "$REPO" ]; then
+		REPO=$(git rev-parse --show-toplevel 2>/dev/null) || { printf 'check-pushed-beads: --pre-push needs --repo DIR or a checkout cwd\n' >&2; exit 2; }
+	fi
+	rc=0
+	while IFS= read -r line; do
+		# pre-push hook lines: <local ref> <local sha> <remote ref> <remote sha>
+		# four whitespace-separated fields by protocol
+		# shellcheck disable=SC2086
+		set -- $line
+		if [ $# -ne 4 ]; then
+			continue
+		fi
+		case "$2:$4" in
+			0000000000000000000000000000000000000000:*|*:0000000000000000000000000000000000000000)
+				printf 'check-pushed-beads: skipping unscopable push line\n' >&2
+				continue
+				;;
+		esac
+		sh "$0" --repo "$REPO" --base "$4" --tip "$2" ${DB:+--db "$DB"} ${BRBIN:+--br "$BRBIN"} || rc=$?
+	done
+	exit "$rc"
+fi
 if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$TIP" ]; then
 	printf 'check-pushed-beads: needs --repo DIR --base SHA --tip SHA\n' >&2
 	exit 2
 fi
 HOOKDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 HOOK="$HOOKDIR/commit-msg-bead.sh"
-[ -x "$HOOK" ] || { printf 'check-pushed-beads: hook body missing at %s\n' "$HOOK" >&2; exit 2; }
+[ -f "$HOOK" ] || { printf 'check-pushed-beads: hook body missing at %s\n' "$HOOK" >&2; exit 2; }
 COMMITS=$(git -C "$REPO" rev-list --no-merges "$BASE..$TIP" 2>/dev/null) || { printf 'check-pushed-beads: cannot list %s..%s\n' "$BASE" "$TIP" >&2; exit 2; }
 TMPMSG=$(mktemp "${TMPDIR:-/tmp}/pushed-beads-msg.XXXXXX") || exit 2
 trap 'rm -f "$TMPMSG"' EXIT INT TERM
 export BEADS_DB="$DB"
 export BR_BIN="$BRBIN"
 checked=0
+# hook path is ours, set above; empty BEADS_DB/BR_BIN behave as unset inside the hook
+# shellcheck disable=SC2086
 for sha in $COMMITS; do
 	checked=$((checked + 1))
 	git -C "$REPO" log --format=%B -n 1 "$sha" > "$TMPMSG" 2>/dev/null || { printf 'check-pushed-beads: cannot read %s\n' "$sha" >&2; exit 2; }
-	# hook path is ours, set above
-	# shellcheck disable=SC2086
-	if [ -n "$BEADS_DB" ] && [ -n "$BRBIN" ]; then
-		BEADS_DB="$DB" BR_BIN="$BRBIN" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
-	elif [ -n "$BEADS_DB" ]; then
-		BEADS_DB="$DB" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
-	elif [ -n "$BRBIN" ]; then
-		BR_BIN="$BRBIN" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
-	else
-		sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
-	fi
+	BEADS_DB="$DB" BR_BIN="$BRBIN" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
 done
 if [ "$checked" = "0" ]; then
 	printf 'check-pushed-beads: no commits in %s..%s; nothing to check\n' "$BASE" "$TIP" >&2
