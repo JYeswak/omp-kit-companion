@@ -365,7 +365,8 @@ const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
 interface NotJudgedComponent { component: string; status: DiagnosticStatus; reason: string }
 
 async function workDoctor(request: ParsedCommand): Promise<CliResult> {
-	const rootFlag = request.flags.get("--root");
+	const projectFlag = request.flags.get("--project");
+	const rootFlag = typeof projectFlag === "string" ? projectFlag : request.flags.get("--root");
 	const timeoutFlag = request.flags.get("--timeout-ms");
 	const jobsFlag = request.flags.get("--jobs");
 	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;

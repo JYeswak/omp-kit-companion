@@ -108,6 +108,22 @@ test("work scope CLI renders JSON and human table while exiting zero", async () 
 	expect(human.stdout.toString()).toContain("RISK");
 }, 30_000);
 
+test("work scope --project overrides --root and scans only the selected repo", () => {
+	const f = fixture();
+	const target = f.repos.dirty;
+	const entry = resolve(import.meta.dir, "../../src/cli.ts");
+	const result = Bun.spawnSync([process.execPath, entry, "doctor", "--scope", "work", "--root", f.root, "--project", target, "--json"], {
+		cwd: f.root,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, HOME: f.root },
+	});
+	expect(result.exitCode, result.stderr.toString()).toBe(0);
+	const envelope = JSON.parse(result.stdout.toString());
+	expect(envelope.data.roots.map((root: { path: string }) => root.path)).toEqual([target]);
+	expect(envelope.data.repos.map((repo: { path: string }) => repo.path)).toEqual([target]);
+}, 30_000);
+
 test("work scope reports only old dirty files with matching active reservations", async () => {
 	const root = mkdtempSync(join(runtimeTempRoot(), "work-doctor-age."));
 	fixtures.push(root);

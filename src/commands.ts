@@ -292,7 +292,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--seed", value: "N", description: "Rules calibration sampling seed" },
 		{ name: "--sample-size", value: "N", description: "Rules calibration maximum labels per rule" },
 		{ name: "--noisy-lower-bound", value: "P", description: "Rules calibration noisy-rule lower-bound threshold" },
-		{ name: "--project", value: "PATH", description: "LSP, project-loading, context or beads: select a repository path instead of the current directory" },
+		{ name: "--project", value: "PATH", description: "LSP, project-loading, context, beads, or work scope: select a repository path; work scope scans only that project" },
 		{ name: "--root", value: "PATHS", description: "Work scope root list separated by the platform path delimiter; defaults to OMP_KIT_WORK_ROOTS or ~/Developer" },
 		{ name: "--timeout-ms", value: "N", description: "Work scope per-repository git command timeout in milliseconds" },
 		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },

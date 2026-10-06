@@ -1,0 +1,1 @@
+- `omp-kit doctor --scope work --project <path>` now scans only the selected repository, taking precedence over `--root`.
