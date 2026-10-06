@@ -735,6 +735,28 @@ export function inspectDerivedScope(project: string): Finding[] {
 		"Move each fact to its probe (see evidence), or record a reason on the line to mark a decision.",
 		{ project: dir, files_with_hits: Object.keys(byFile).length, by_kind: byKind, hits: hits.slice(0, 20) })];
 }
+
+/** PUB1f B2 (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.6): standard layout deviations. Read-only. */
+export function inspectLayoutScope(project: string, kitRoot: string): Finding[] {
+	const dir = resolve(project);
+	const script = join(resolve(kitRoot), "scripts", "repo-layout-check.sh");
+	let out = "";
+	try {
+		const result = Bun.spawnSync(["sh", script, dir], { stdout: "pipe", stderr: "pipe" });
+		out = `${result.stdout.toString()}\n${result.stderr.toString()}`;
+	} catch {
+		return [finding("layout", "UNVERIFIED", "Layout checker could not run",
+			"Rerun with a readable kit release and project.", { project: dir })];
+	}
+	const warns = out.split("\n").filter(line => line.includes("layout: WARN")).map(line => line.replace(/^.*layout: WARN /, ""));
+	if (!warns.length) {
+		return [finding("layout", "OK", "Standard repo layout holds (src, tests, scripts, docs, docs/adr; scratch ignored)",
+			"None.", { project: dir })];
+	}
+	return [finding("layout", "DEGRADED", `${warns.length} layout deviation(s): ${warns.join("; ")}`,
+		"Align the repo with docs/repo-layout.md, or opt in to strict for RED.",
+		{ project: dir, deviations: warns })];
+}
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
 export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
@@ -948,6 +970,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
+	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
 	if (input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));

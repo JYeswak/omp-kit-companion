@@ -1,1 +1,1 @@
-- PUB1f slice: `scripts/repo-layout-check.sh [--strict] [REPO]` reports layout deviations as WARN (exit 0) or FAIL (exit 1) with strict opt-in, including repo-local scratch ignore (operator global ignore does not count). Ships `docs/repo-layout.md` and `docs/adr/0000-template.md`; live repo is clean. Still open: doctor wiring, uds pilot, cross-repo runs.
+- PUB1f doctor scope: `doctor --scope layout --project` reports standard layout deviations (OK when clean, DEGRADED naming each).
