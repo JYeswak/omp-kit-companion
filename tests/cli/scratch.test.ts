@@ -172,6 +172,24 @@ test("inspect keeps live owners, reaps dead ones, and skips missing or legacy ow
   expect(inspectSession(naked, root, deps).reason).toBe("no-owner-file");
   expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
 });
+test("nested integrations work dirs reap on dead pid and stay live on live pid", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const session = join(root, "session-1");
+  mkdirSync(session, { recursive: true });
+  const gone = deadPid();
+  const dead = join(session, `omp-kit-integrations-${gone}-abc`);
+  mkdirSync(dead, { recursive: true });
+  writeFileSync(join(dead, ".owner"), `pid=${gone} label=omp-kit-integrations repo=test created=2026-10-01T00:00:00Z\n`);
+  const live = join(session, `omp-kit-integrations-${process.pid}-def`);
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=omp-kit-integrations repo=test created=${new Date().toISOString()}\n`);
+  const plan = planScratch(home, depsFor());
+  expect(plan.sessions.find(session => session.dir === dead)?.action).toBe("REAP");
+  expect(plan.sessions.find(session => session.dir === live)?.action).toBe("LIVE");
+});
 test("runtime omp-kit-work dirs with dead owners are reaped from system temp", () => {
 	const home = useState();
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "runtime-work-root-"));

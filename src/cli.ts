@@ -1836,8 +1836,17 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
 			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
 	}
+	const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
+	// The reaper keys dead runs off this marker (same rule as omp-kit-work dirs).
+	writeFileSync(join(workDir, ".owner"), `pid=${process.pid}\nlabel=omp-kit-integrations\nrepo=omp-kit-companion\ncreated=${new Date().toISOString()}\n`);
+	// Per-case fake HOMEs inherit XDG_CACHE_HOME inside the work dir; uv would
+	// otherwise grow a gigabyte cache per case home. Share one per-run cache.
+	const uvCache = join(workDir, "uv-cache");
+	mkdirSync(uvCache, { recursive: true });
+	const priorUvCache = process.env.UV_CACHE_DIR;
+	process.env.UV_CACHE_DIR = uvCache;
+	const keepWorkDir = request.flags.has("--keep");
 	try {
-		const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
 		const report = await runIntegrations({ root: identity.release.root, home,
 			profiles, workDir, ...(typeof outRaw === "string" ? { out: outRaw } : {}) });
 		return { code: 0, data: { overall: "OK", integrations: report }, verification: "UNVERIFIED" };
@@ -1849,6 +1858,9 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 			code: "INTEGRATIONS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error),
 			remediation: "Check the installed release and OMP installation; no profile was changed.",
 		}], verification: "UNVERIFIED" };
+	} finally {
+		if (priorUvCache === undefined) delete process.env.UV_CACHE_DIR; else process.env.UV_CACHE_DIR = priorUvCache;
+		if (!keepWorkDir) rmSync(workDir, { recursive: true, force: true });
 	}
 }
 

@@ -273,8 +273,15 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 	const name = dir.slice(root.length + 1);
 	if (nameRequired && !name.endsWith(`.${owner.pid}`)) return sized("SKIP", "session-name-owner-mismatch", owner);
 	if (!hasProcessIdentity(owner)) {
-		if (!deps.liveness.signalAlive(owner.pid) && !deps.liveness.psVisible(owner.pid))
-			return sized("SKIP", "owner-identity-incomplete", owner);
+		if (!deps.liveness.signalAlive(owner.pid) && !deps.liveness.psVisible(owner.pid)) {
+			// Dead pid with an identity-free (one-line or legacy JSON) owner file:
+			// no pid reuse is possible, so lsof-clear means REAP. (Was: SKIP
+			// owner-identity-incomplete, which stranded dead-owner dirs as unowned.)
+			const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
+			if (!clear) return sized("LIVE", "owner-dead-but-open-fds-present", owner);
+			return sized("REAP", "owner-dead-no-open-fds", owner);
+		}
 		const reuse = reuseAfterCreated(owner, deps.liveness);
 		if (reuse === true) {
 			const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
@@ -1011,7 +1018,10 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	return verdict;
 }
 
-function eachSessionDir(root: string, visit: (dir: string) => void): void {
+/** Test-run work dirs nested inside a session dir (e.g. omp-kit-integrations-<pid>-*): visited without the name-pid suffix rule so the dead-pid rule applies wherever TMPDIR put them. */
+const NESTED_WORKDIR = /^omp-kit-integrations-[1-9][0-9]*-/;
+
+function eachSessionDir(root: string, visit: (dir: string) => void, visitNested: (dir: string) => void = visit): void {
 	let entries: string[];
 	try {
 		entries = readdirSync(root);
@@ -1021,6 +1031,18 @@ function eachSessionDir(root: string, visit: (dir: string) => void): void {
 	for (const entry of entries) {
 		if (entry === "." || entry === "..") continue;
 		visit(join(root, entry));
+	}
+	for (const entry of entries) {
+		if (entry === "." || entry === "..") continue;
+		let children: string[];
+		try {
+			children = readdirSync(join(root, entry));
+		} catch {
+			continue;
+		}
+		for (const child of children) {
+			if (NESTED_WORKDIR.test(child)) visitNested(join(root, entry, child));
+		}
 	}
 }
 
@@ -1036,7 +1058,7 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
 	};
-	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
+	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
 	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
@@ -1070,7 +1092,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			if (terminal.action === "SKIP") appendLog(home, { event: "failure", dir: terminal.dir, at: new Date(deps.now ?? Date.now()).toISOString(), action: terminal.action, error: terminal.reason });
 		deps.onProgress?.(terminal);
 	};
-	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
+	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
 	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	const killed = orphans.map(proc => {
