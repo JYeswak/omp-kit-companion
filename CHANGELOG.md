@@ -4,6 +4,25 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.8 — 2026-10-06
+
+- COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.
+- COMMIT1 installer takes an optional repo argument, absolutizes relative hooks paths, and refuses non-repos; cfsios installed and verified live per-tracker (foreign ids refused).
+- COMMIT1 redesign: pre-push gate refuses id-less pushed commits (commit-tree included), the installer chains beside bespoke hooks, and ids resolve against the repo tracker (cfsios/uds shapes pass, versions don't).
+- COMMIT1 chain hardening: the installer moves fail-closed bespoke wrappers with their sibling impls (`<type>-*`), keeps helper copies non-executable (chain runners only execute `NN-*` members, so helpers never run arg-less), and probes the whole chain before declaring success (bespoke-must-match-preflight, bead member must refuse an unresolvable id, pre-push member must pass an empty range), rolling every mutation back on any probe failure. Checker runs via `sh` throughout so non-executable helpers work. Planted: sibling preservation, path-sensitive move regression (refused + rolled back), pre-existing refusal preserved.
+- COMMIT1 hook accepts any tracker-resolved id: the digit-shape prefilter is gone, existence comes from br show alone, so digit-less real ids (ompkit-kxdy) pass while made-up tokens are refused (12/12 contract tests, RED proven on the old filter).
+
+- scratch service test pins quiet load; heaviest multi-spawn test gets an explicit 30s timeout.
+ - fast-test and integrations suites use a suite-owned TMPDIR they remove, with a planted check that a fixture cycle leaves session-omp-test unchanged in size.
+
+- Commit index for 0.2.8: every shipped-path commit since v0.2.7 that had no fragment of its own, grouped by bead.
+
+- ompkit-2w7h: (commit e1a4256) (commit c563925)
+- ompkit-rc-epic-land-fix-release-dogfood-rz5.113: (commit bab5dd5)
+- ompkit-ex6l: (commit 5df2583)
+
+- RELEASE BLOCKER A2: the CI-judge signal survives into nested ladders. `cert_env()` in `scripts/native-candidate.py` passes GITHUB_ACTIONS through when the parent run sets it (local runs stay fail-closed); `scripts/runtime-adapter.sh` forwards it in the scrubbed child env; `scripts/ladder.sh` judges regex-budget regardless of load only under that signal. Planted: cert_env contains the key iff set (RED on unfixed code).
+
 ## 0.2.7 — 2026-10-06
 
 - FLY2-1 linkage fix: `src/flywheel-score.ts` BEAD_ID accepts the dotted numeric suffix in bead ids (rz5.113); without it every dotted commit counted unlinked (linkage read 1/50). Linear-time pattern (word-bounded, exclusive classes, no nested quantifiers). Planted test: dotted ids link, truncated prefixes do not; landing-hygiene covered too.
