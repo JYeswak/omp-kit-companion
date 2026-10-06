@@ -56,7 +56,14 @@ step harness-gate "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --gate
 step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
 # Regex cost gate: every rule condition timed in Bun on near-miss shapes and a
 # realistic live stream (RX1). Red names the rule, shape and encoding.
-step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
+# On CI runners the budget is judged regardless of machine load (CI is the
+# judge of record; the verdict is recorded as judged-under-load). Local runs
+# stay fail-closed: INCONCLUSIVE on a loud box, never a refusal.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+	step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" --judge-regardless-of-load
+else
+	step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
+fi
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8

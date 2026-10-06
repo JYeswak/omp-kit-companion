@@ -399,13 +399,15 @@ type GateReport = {
 	gate_elapsed_ms: number;
 };
 
-export async function runGate(rulesDir: string, streamFile: string): Promise<GateReport> {
+export async function runGate(rulesDir: string, streamFile: string, opts: { judgeRegardlessOfLoad?: boolean } = {}): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
 	// A loud box cannot judge regex timing: refuse to measure rather than fail a correct push.
+	// --judge-regardless-of-load overrides this ONLY where CI is the judge of record (ladder passes
+	// it iff GITHUB_ACTIONS is set); the verdict is then recorded as judged-under-load in note.
 	const loudAtStart = regexLoadBlockReason(testFakeLoad() ?? before[0] ?? Number.NaN, cpus().length);
-	if (loudAtStart) {
+	if (loudAtStart && !opts.judgeRegardlessOfLoad) {
 		console.log("REGEX-BUDGET: INCONCLUSIVE (" + loudAtStart + "; retry on a quieter machine)");
 		return {
 			status: "INCONCLUSIVE",
@@ -451,12 +453,14 @@ export async function runGate(rulesDir: string, streamFile: string): Promise<Gat
 	const streamComplete = byRule.length === rules.length;
 	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(m => m.status !== "MEASURED" || m.failures.length > 0) || failsStreamBudget(streamTotal);
 	// Load spiked mid-run: a FAIL measured under contention is suspect, so report it as INCONCLUSIVE. A PASS stays a PASS.
+	// Under --judge-regardless-of-load the verdict stands as measured and the load is recorded in note.
 	const after = loadavg();
 	const loudAtEnd = regexLoadBlockReason(testFakeLoad() ?? after[0] ?? Number.NaN, cpus().length);
-	const status = loudAtEnd && failed ? "INCONCLUSIVE" : failed ? "FAIL" : "PASS";
+	const status = loudAtEnd && failed && !opts.judgeRegardlessOfLoad ? "INCONCLUSIVE" : failed ? "FAIL" : "PASS";
 	return {
 		status,
-		...(loudAtEnd && failed ? { note: loudAtEnd + "; FAIL measured under contention is suspect; retry on a quieter machine" } : {}),
+		...(loudAtEnd && failed && !opts.judgeRegardlessOfLoad ? { note: loudAtEnd + "; FAIL measured under contention is suspect; retry on a quieter machine" } : {}),
+		...(opts.judgeRegardlessOfLoad && (loudAtStart || loudAtEnd) ? { note: "judged under load per --judge-regardless-of-load (CI judge of record); load before/after in report" } : {}),
 		engine: { bun: Bun.version, omp_source: OMP_SRC },
 		load_average_before: before,
 		load_average_after: after,
@@ -515,7 +519,7 @@ if (process.argv.includes("--regex-budget-worker")) {
 	const rulesDir = path.resolve(rulesPath);
 	const streamFile = path.resolve(streamPath);
 	try {
-		const report = await runGate(rulesDir, streamFile);
+		const report = await runGate(rulesDir, streamFile, { judgeRegardlessOfLoad: args.includes("--judge-regardless-of-load") });
 		printReport(report);
 		// 75 = retry later: a busy machine must not refuse a correct push.
 		process.exitCode = report.status === "PASS" ? 0 : report.status === "INCONCLUSIVE" ? 75 : 1;
