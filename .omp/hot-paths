@@ -1,0 +1,4 @@
+# Hot paths: exclusive holds here are capped at 30 min (fleet-guard RES1).
+# One project-relative path per line; a trailing / matches a directory tree.
+src/cli.ts
+src/commands.ts

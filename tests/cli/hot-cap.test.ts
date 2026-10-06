@@ -1,0 +1,88 @@
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, parseHotPaths, readHotPaths } from "../../src/fleet-guard/hot-cap.ts";
+import { check } from "../../src/fleet-guard/reservations.ts";
+
+const dirs: string[] = [];
+afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+function hotRepo(): string {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-"));
+	dirs.push(root);
+	mkdirSync(join(root, ".omp"), { recursive: true });
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, ".omp", "hot-paths"), "# hot files\nsrc/cli.ts\nsrc/commands.ts\n");
+	writeFileSync(join(root, "src", "cli.ts"), "x\n");
+	writeFileSync(join(root, "src", "other.ts"), "y\n");
+	return root;
+}
+
+const reserveEvent = (paths: string[], exclusive: boolean, ttlMinutes: number | undefined) => ({
+	toolName: "xd://mcp__mcp_agent_mail_file_reservation_paths",
+	arguments: { agent_name: "PlumRaven", paths, exclusive, ttl_seconds: ttlMinutes === undefined ? undefined : ttlMinutes * 60, reason: "ompkit-wodi" },
+});
+
+test("147-min exclusive on a hot path is refused naming cap and path", async () => {
+	const root = hotRepo();
+	const block = await check(reserveEvent(["src/cli.ts"], true, 147), { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("30 min cap");
+	expect(block?.reason).toContain("src/cli.ts");
+});
+
+test("20-min exclusive on a hot path passes", async () => {
+	const root = hotRepo();
+	const block = await check(reserveEvent(["src/cli.ts"], true, 20), { cwd: root, repoRoot: root });
+	expect(block).toBeUndefined();
+});
+
+test("147-min exclusive on a non-hot path passes", async () => {
+	const root = hotRepo();
+	const block = await check(reserveEvent(["src/other.ts"], true, 147), { cwd: root, repoRoot: root });
+	expect(block).toBeUndefined();
+});
+
+test("147-min renewal on a hot path is refused", async () => {
+	const root = hotRepo();
+	const block = await check({
+		toolName: "xd://mcp__mcp_agent_mail_renew_file_reservations",
+		arguments: { agent_name: "PlumRaven", paths: ["src/commands.ts"], exclusive: true, ttl_seconds: 147 * 60 },
+	}, { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("renewal");
+});
+
+test("non-exclusive long hold on a hot path passes", async () => {
+	const root = hotRepo();
+	const block = await check(reserveEvent(["src/cli.ts"], false, 147), { cwd: root, repoRoot: root });
+	expect(block).toBeUndefined();
+});
+
+test("no hot-paths file means no cap", async () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-"));
+	dirs.push(root);
+	const block = await check(reserveEvent(["src/cli.ts"], true, 147), { cwd: root, repoRoot: root });
+	expect(block).toBeUndefined();
+	expect(readHotPaths(root)).toEqual([]);
+});
+
+test("hot-path matching: exact, dir prefix, and parsing", () => {
+	expect(parseHotPaths("# c\n\nsrc/cli.ts\nsrc/\n")).toEqual(["src/cli.ts", "src/"]);
+	expect(isHotPath(["src/cli.ts"], "src/cli.ts")).toBe("src/cli.ts");
+	expect(isHotPath(["src/cli.ts"], "src/other.ts")).toBeNull();
+	expect(isHotPath(["src/"], "src/cli.ts")).toBe("src/");
+	expect(isHotPath([], "src/cli.ts")).toBeNull();
+	expect(isReservationTool("xd://mcp__mcp_agent_mail_file_reservation_paths")).toBe("reserve");
+	expect(isReservationTool("xd://mcp__mcp_agent_mail_renew_file_reservations")).toBe("renew");
+	expect(isReservationTool("edit")).toBeNull();
+	expect(HOT_CAP_MINUTES).toBe(30);
+});
+
+test("checkHotCap unit: cap boundary and message", () => {
+	const hot = ["src/cli.ts"];
+	expect(checkHotCap({ hotPaths: hot, request: { paths: ["src/cli.ts"], exclusive: true, ttlSeconds: 30 * 60, kind: "reserve" } }).blocked).toBe(false);
+	const over = checkHotCap({ hotPaths: hot, request: { paths: ["src/cli.ts"], exclusive: true, ttlSeconds: 31 * 60, kind: "reserve" } });
+	expect(over.blocked).toBe(true);
+	expect(over.reason).toContain("src/cli.ts");
+});

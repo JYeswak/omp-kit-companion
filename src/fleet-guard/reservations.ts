@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { checkHotCap, isReservationTool, readHotPaths, reservationArgs } from "./hot-cap.ts";
 
 export interface ReservationEvent {
 	toolName?: unknown;
@@ -234,7 +235,26 @@ function cachedLookup(key: string, now: number): ReservationLookupResult | undef
 	return entry.result;
 }
 
+/** RES1: refuse over-cap exclusive holds on hot paths at request/renew time. */
+function checkHotReservation(
+	event: ReservationEvent,
+	context: ReservationCheckContext,
+	kind: "reserve" | "renew",
+): ReservationBlock | undefined {
+	const cwd = context.cwd ?? process.cwd();
+	const root = context.repoRoot ?? context.projectRoot ?? findRepoRoot(cwd);
+	if (!root) return undefined;
+	const hotPaths = readHotPaths(root);
+	if (hotPaths.length === 0) return undefined;
+	const args = reservationArgs(event);
+	const verdict = checkHotCap({ hotPaths, request: { ...args, kind } });
+	if (!verdict.blocked) return undefined;
+	return { block: true, reason: verdict.reason ?? "fleet-guard hot-path cap refused the hold" };
+}
+
 export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> {
+	const reservationKind = isReservationTool(eventToolName(event));
+	if (reservationKind !== null) return checkHotReservation(event, context, reservationKind);
 	if (!isEditOrWriteTool(eventToolName(event))) return undefined;
 	const inputPath = eventPath(event);
 	if (!inputPath) return undefined;

@@ -1,0 +1,1 @@
+- RES1 hot-path TTL cap: fleet-guard refuses exclusive reservation/renewal over 30 min on paths in per-repo `.omp/hot-paths` (companion seeds `src/cli.ts`, `src/commands.ts`), naming cap and path; renewals capped the same. Planted: 147-min hot refused, 20-min hot passes, 147-min non-hot passes (8/8 `tests/cli/hot-cap.test.ts`).
