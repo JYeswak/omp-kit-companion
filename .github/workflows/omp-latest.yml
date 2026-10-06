@@ -1,17 +1,11 @@
-name: OMP latest compatibility
+name: OMP release compatibility
 
-# OMP ships often and operators update it on their own schedule (UCA runs every 3 h). This job runs the
-# CLI contracts and the full rule ladder against whatever OMP npm currently publishes, and keeps exactly one
-# open issue per breaking OMP version. GitHub disables schedules after 60 days without repository activity.
+# UCA can update OMP every three hours. Test the latest three stock releases daily so
+# the matrix notices release drift within 24 hours without probing OMP main nightly.
 on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
-    inputs:
-      omp_version:
-        description: OMP version to test (default latest)
-        type: string
-        required: false
 
 permissions:
   contents: read
@@ -23,162 +17,171 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A cheap Linux check: the macOS run happens only when OMP or main changed since the last green run.
   gate:
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       run: ${{ github.event_name == 'workflow_dispatch' || steps.tested.outputs.cache-hit != 'true' }}
-      version: ${{ steps.version.outputs.version }}
+      versions: ${{ steps.versions.outputs.versions }}
+      version_hash: ${{ steps.versions.outputs.version_hash }}
     steps:
-      - id: version
-        env:
-          OMP_SPEC: ${{ inputs.omp_version || 'latest' }}
-        run: echo "version=$(npm view "@oh-my-pi/pi-coding-agent@$OMP_SPEC" version | tail -1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - id: versions
+        run: |
+          npm view @oh-my-pi/pi-coding-agent versions --json > versions.json
+          node -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"))
+              .filter(value => /^\d+\.\d+\.\d+$/.test(value))
+              .sort((a, b) => {
+                const left = a.split(".").map(Number), right = b.split(".").map(Number);
+                for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] - right[i];
+                return 0;
+              })
+              .slice(-3);
+            if (versions.length !== 3) throw new Error("expected three stable OMP releases, got " + versions.length);
+            const value = JSON.stringify(versions);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "versions=" + value + "\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "version_hash=" + crypto.createHash("sha256").update(value).digest("hex") + "\n");
+          '
       - id: tested
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: omp-latest-tested
-          key: omp-latest-tested-${{ steps.version.outputs.version }}-${{ github.sha }}
+          key: omp-latest-tested-${{ github.sha }}-${{ steps.versions.outputs.version_hash }}
           lookup-only: true
       - if: steps.tested.outputs.cache-hit == 'true'
-        run: echo "OMP ${{ steps.version.outputs.version }} already passed on ${{ github.sha }}; skipping." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "OMP release matrix already passed on this commit and these three versions; skipping." >> "$GITHUB_STEP_SUMMARY"
 
-  latest:
+  releases:
     needs: gate
-    if: github.event.repository.private == false && needs.gate.outputs.run == 'true'
+    if: needs.gate.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        omp_version: ${{ fromJSON(needs.gate.outputs.versions) }}
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Install the selected OMP release and TypeScript LSP
+      - name: Install selected OMP release and TypeScript LSP
         env:
-          OMP_SPEC: ${{ needs.gate.outputs.version }}
+          OMP_VERSION: ${{ matrix.omp_version }}
         run: |
-          npm install --global "@oh-my-pi/pi-coding-agent@$OMP_SPEC" typescript-language-server@5.1.3 typescript@5.9.3
-          version="$(omp --version | sed 's#^omp/##')"
-          echo "OMP_VERSION=$version" >> "$GITHUB_ENV"
-          echo "### OMP $version ($OMP_SPEC) on $(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
+          npm install --global "@oh-my-pi/pi-coding-agent@$OMP_VERSION" typescript-language-server@5.1.3 typescript@5.9.3
+          actual="$(omp --version)"
+          test "$actual" = "omp/$OMP_VERSION"
+          echo "### OMP $OMP_VERSION ($actual) on $(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
       - name: CLI contracts against this OMP
         run: bun test tests/cli
       - name: Full rule ladder (G1-G4, planted negative) against this OMP
         run: |
           set -o pipefail
-          sh scripts/ladder.sh 2>&1 | tee ladder.log
-      - name: Report OMP late-interrupt probe outcome
-        if: always()
-        run: |
-          {
-            echo "## Late-interrupt probe (OMP $OMP_VERSION)"
-            grep -E "^PROBE omp-late-interrupt: " ladder.log || echo "probe did not run (ladder ended before the probe scenario)"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Record G3 first-fire indices for this OMP
-        if: success()
-        run: |
-          sh scripts/runtime-adapter.sh "$GITHUB_WORKSPACE/scripts/ttsr-harness.ts" --gate-json > gate.json
-          bun -e '
-            const rep = await Bun.file("gate.json").json();
-            const cases = {};
-            for (const c of rep.cases ?? []) cases[c.rule + ":" + c.line] = { expect: c.expect, g2: c.g2, first_fire: c.first_fire, wire_length: c.wire_length };
-            await Bun.write("first-fire-" + process.env.OMP_VERSION + ".json", JSON.stringify({ schema_version: 1, omp_version: process.env.OMP_VERSION, cases }, null, 2) + "\n");
-          '
-      - name: Download previous first-fire baseline
-        if: success()
+          sh scripts/ladder.sh 2>&1 | tee "ladder-${{ matrix.omp_version }}.log"
+      - name: Record first-fire indices
+        run: sh scripts/runtime-adapter.sh "$GITHUB_WORKSPACE/scripts/ttsr-harness.ts" --gate-json > gate.json
+      - name: Record default-policy outcome (report-only)
         env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
-        run: |
-          current="first-fire-$OMP_VERSION.json"
-          pick() {
-            for id in $(gh run list --workflow omp-latest.yml --status completed --limit 20 --json databaseId --jq "[.[] | select(.databaseId != $RUN_ID) | .databaseId] | .[]"); do
-              name=$(gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '[.artifacts[] | select(.name | startswith("first-fire-")) | .name] | first // empty')
-              if [ -z "$name" ]; then continue; fi
-              if [ "$1" = different ] && [ "$name" = "$current" ]; then continue; fi
-              echo "$id:$name"
-              return 0
-            done
-            return 1
-          }
-          baseline="$(pick different || pick any || true)"
-          if [ -n "$baseline" ]; then
-            gh run download "${baseline%%:*}" -n "${baseline#*:}" -D baseline
-            echo "BASELINE_FILE=baseline/${baseline#*:}" >> "$GITHUB_ENV"
-          else
-            echo "BASELINE_FILE=" >> "$GITHUB_ENV"
-          fi
-      - name: Report first-fire differential
-        if: success()
-        run: |
-          {
-            echo "## First-fire differential (OMP $OMP_VERSION)"
-            if [ -n "$BASELINE_FILE" ]; then
-              bun -e '
-                const prev = await Bun.file(process.env.BASELINE_FILE).json();
-                const next = await Bun.file("first-fire-" + process.env.OMP_VERSION + ".json").json();
-                const keys = new Set([...Object.keys(prev.cases ?? {}), ...Object.keys(next.cases ?? {})]);
-                let changed = 0;
-                for (const k of [...keys].sort()) {
-                  const a = prev.cases ? prev.cases[k] : undefined, b = next.cases ? next.cases[k] : undefined;
-                  if (JSON.stringify(a) !== JSON.stringify(b)) { changed++; console.log("CHANGED " + k + ": " + JSON.stringify(a ? a.first_fire : null) + " -> " + JSON.stringify(b ? b.first_fire : null)); }
-                }
-                console.log(changed === 0 ? "No first-fire index changes vs " + prev.omp_version + "." : changed + " first-fire index change(s) vs " + prev.omp_version + ".");
-              '
-            else
-              echo "No prior first-fire baseline; this run establishes first-fire-$OMP_VERSION.json."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload first-fire artifact for this OMP
-        if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: first-fire-${{ env.OMP_VERSION }}.json
-          path: first-fire-${{ env.OMP_VERSION }}.json
-          # The next OMP version's run diffs against this file (step "Download previous first-fire baseline"),
-          # and OMP can go weeks between releases. 3 KB; keep it.
-          retention-days: 90
-      - name: Default-policy G4 run (reported separately, never gates)
-        if: success()
+          OMP_VERSION: ${{ matrix.omp_version }}
         run: |
           set +e
-          OMP_KIT_DEFAULT_TTSR=1 sh scripts/e2e-live.sh
+          OMP_KIT_DEFAULT_TTSR=1 sh scripts/e2e-live.sh > default-policy.log 2>&1
           rc=$?
-          {
-            echo "## Default-policy G4 (OMP $OMP_VERSION)"
-            echo "exit=$rc (report-only; the kit-policy G4 in the ladder above gates the job)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
-      - name: Open or update one issue for this OMP version
+          set -e
+          DEFAULT_POLICY_EXIT=$rc bun -e '
+            const gate = await Bun.file("gate.json").json();
+            if (!Array.isArray(gate.cases) || gate.cases.length === 0) throw new Error("first-fire report has no cases");
+            const output = await Bun.file("default-policy.log").text();
+            const failures = [...output.matchAll(/^FAIL\s+([^\s]+)\s+::\s+FAIL:\s+(.+?)(?:\s+\(omp exit|$)/gm)]
+              .map(match => match[1] + ": " + match[2]);
+            if (Number(process.env.DEFAULT_POLICY_EXIT) !== 0 && failures.length === 0) {
+              failures.push("unclassified e2e-live exit " + process.env.DEFAULT_POLICY_EXIT);
+            }
+            const report = {
+              schema_version: 1,
+              omp_version: process.env.OMP_VERSION,
+              default_policy_exit: Number(process.env.DEFAULT_POLICY_EXIT),
+              default_policy_failures: failures,
+              first_fires: gate.cases,
+            };
+            await Bun.write("first-fire-" + process.env.OMP_VERSION + ".json", JSON.stringify(report, null, 2) + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: first-fire-${{ matrix.omp_version }}
+          path: first-fire-${{ matrix.omp_version }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  report:
+    needs: [gate, releases]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: first-fire-*
+          merge-multiple: true
+      - name: Generate compatibility table from release runs
+        env:
+          OMP_VERSIONS: ${{ needs.gate.outputs.versions }}
+        run: |
+          bun -e '
+            import { compatibilityRegressions, renderCompatibilityTable } from "./scripts/omp-compatibility.ts";
+            const versions = JSON.parse(process.env.OMP_VERSIONS ?? "[]");
+            const reports = await Promise.all(versions.map(async version => Bun.file("first-fire-" + version + ".json").json()));
+            const table = renderCompatibilityTable(reports);
+            await Bun.write("docs/omp-compatibility.md", table);
+            await Bun.write("matrix.md", table);
+            await Bun.write("compatibility-regressions.json", JSON.stringify(compatibilityRegressions(reports), null, 2) + "\n");
+          '
+      - name: Diff-check generated compatibility table
+        if: always()
+        run: git diff --exit-code -- docs/omp-compatibility.md
+      - name: Gate first-fire and default-policy differentials
+        if: always()
+        run: |
+          bun -e '
+            const table = await Bun.file("matrix.md").text();
+            if (!table.startsWith("<!-- generated by scripts/omp-compatibility.ts; do not hand-edit -->")) throw new Error("generated matrix marker missing");
+            if (table.includes("RED —")) throw new Error("OMP compatibility differential is RED; inspect docs/omp-compatibility.md");
+          '
+      - name: Fail if any per-release job failed
+        if: always() && needs.releases.result != 'success'
+        run: exit 1
+      - name: Open one compatibility issue on failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          title="OMP ${OMP_VERSION:-unknown} breaks omp-kit main"
-          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          title="OMP three-release compatibility differential"
+          existing="$(gh issue list --state open --search 'in:title "OMP three-release compatibility differential"' --json number,title --jq '.[] | select(.title == "OMP three-release compatibility differential") | .number' | head -n 1)"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: $RUN_URL"
           else
-            gh issue create --title "$title" --body "The scheduled compatibility run failed against OMP ${OMP_VERSION:-unknown}: $RUN_URL. It stays open until a run on this or a later OMP passes."
+            gh issue create --title "$title" --body "The daily first-fire/default-policy differential or generated-table check failed for the latest three stable OMP releases: $RUN_URL. See the workflow summary and artifacts."
           fi
-      - name: Close compatibility issues once a run passes
+      - name: Close compatibility issue after a green matrix
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh issue list --state open --search "in:title \"breaks omp-kit main\"" --json number,title \
-            --jq '.[] | select(.title | test("^OMP .* breaks omp-kit main$")) | .number' |
-          while read -r number; do
-            gh issue close "$number" --comment "Passing on OMP $OMP_VERSION: $RUN_URL"
+          gh issue list --state open --json number,title --jq '.[] | select(.title == "OMP three-release compatibility differential") | .number' | while read -r number; do
+            gh issue close "$number" --comment "Passing on the latest three stable OMP releases: $RUN_URL"
           done
-      - name: Remember that this OMP passed on this commit
+      - name: Remember that this matrix passed on this commit
         if: success()
-        run: mkdir -p omp-latest-tested && echo "$OMP_VERSION ${{ github.sha }}" > omp-latest-tested/marker
+        run: mkdir -p omp-latest-tested && echo "${{ needs.gate.outputs.versions }} ${{ github.sha }}" > omp-latest-tested/marker
       - if: success()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: omp-latest-tested
-          key: omp-latest-tested-${{ needs.gate.outputs.version }}-${{ github.sha }}
+          key: omp-latest-tested-${{ github.sha }}-${{ needs.gate.outputs.version_hash }}

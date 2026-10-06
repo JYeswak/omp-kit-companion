@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "omp_version": "18.5.2",
+  "default_policy_exit": 0,
+  "default_policy_failures": [],
+  "fixture_reason": "Planted first-fire index differs from the stable release while the default-policy outcome remains exit 0.",
+  "first_fires": [
+    {
+      "rule": "verification",
+      "line": 10,
+      "expect": "fire",
+      "g2": "fire",
+      "first_fire": 2,
+      "wire_length": 8
+    },
+    {
+      "rule": "verification",
+      "line": 11,
+      "expect": "quiet",
+      "g2": "quiet",
+      "first_fire": null,
+      "wire_length": 7
+    }
+  ]
+}

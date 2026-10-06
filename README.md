@@ -3,6 +3,8 @@
 
 Test OMP rules, preview every change, apply with receipts.
 
+The [OMP compatibility matrix](docs/omp-compatibility.md) is generated daily from the latest three stable releases. GREEN records agreement with the oldest tested release; it does not certify the default policy, other versions, or OMP main.
+
 ## Installation
 
 ```sh

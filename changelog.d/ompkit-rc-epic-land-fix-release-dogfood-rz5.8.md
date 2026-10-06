@@ -1,0 +1,1 @@
+The daily OMP compatibility workflow now tests the latest three stable releases, compares their first-fire indexes and default-policy outcomes, and produces a diff-checked matrix linked from the README. The report names known policy failures and limits its claim to the tested releases and checks.
