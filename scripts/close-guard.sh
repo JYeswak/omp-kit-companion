@@ -6,7 +6,7 @@
 # commit naming the bead. A fresh-context gate provider is recorded separately;
 # it never overrides same-pane refusal. Prints the reason; exit 4 on refusal,
 # exit 0 to proceed, exit 2 on usage/context errors.
-# Usage: close-guard.sh BEAD_ID [--db PATH]
+ # Usage: close-guard.sh BEAD_ID [--db PATH] [--sub close|update] [--reason TEXT]
 set -u
 
 fail() {
@@ -18,14 +18,21 @@ refuse() {
 	exit 4
 }
 
-BEAD=${1:-}
-DB=""
-if [ "${2:-}" = "--db" ]; then
-	DB=${3:-}
-fi
-if [ -z "$BEAD" ]; then
-	fail "usage: close-guard.sh BEAD_ID [--db PATH]"
-fi
+ BEAD=${1:-}
+ DB=""; SUB=""; REASON=""
+ shift 2>/dev/null || true
+ while [ $# -gt 0 ]; do
+ 	case "$1" in
+ 		--db) DB=${2:-}; shift 2 ;;
+ 		--sub) SUB=${2:-}; shift 2 ;;
+ 		--reason) REASON=${2:-}; shift 2 ;;
+ 		*) shift ;;
+ 	esac
+ done
+ # Legacy positional form: close-guard.sh BEAD_ID [--db PATH]
+ if [ -z "$BEAD" ]; then
+ 	fail "usage: close-guard.sh BEAD_ID [--db PATH] [--sub SUB] [--reason TEXT]"
+ fi
 if [ -z "${AGENT_NAME:-}" ]; then
 	fail "AGENT_NAME is required (pane identity)"
 fi
@@ -41,5 +48,17 @@ fi
 trailer=$(git log --format=%B --grep="$BEAD" 2>/dev/null | grep -iE '^[[:space:]]*Agent:[[:space:]]' | head -1) || true
 if printf '%s' "$trailer" | grep -qiE "^[[:space:]]*Agent:[[:space:]]*${AGENT_NAME}[[:space:]]*$"; then
 	refuse "caller $AGENT_NAME has an Agent trailer on a $BEAD commit; a different worker must close or grade"
-fi
-printf 'close-guard: OK (%s may close or grade %s)\n' "$AGENT_NAME" "$BEAD"
+ fi
+ # LESSON1 (ompkit-ok3y): a close carries its lesson in the transition comment.
+ # Only the close subcommand with a non-empty comment is judged; review/grading
+ # entries and reason-less invocations keep the old behavior.
+ if [ "$SUB" = "close" ] && [ -n "$REASON" ]; then
+ 	if printf '%s\n' "$REASON" | grep -qiE '^[[:space:]]*lesson[[:space:]]*:'; then
+ 		:
+ 	elif printf '%s\n' "$REASON" | grep -qiE '^[[:space:]]*none\.?[[:space:]]*$'; then
+ 		:
+ 	else
+ 		refuse "close of $BEAD carries no Lesson: line or explicit none in its transition comment"
+ 	fi
+ fi
+ printf 'close-guard: OK (%s may close or grade %s)\n' "$AGENT_NAME" "$BEAD"

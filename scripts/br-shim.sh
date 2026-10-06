@@ -67,22 +67,31 @@ fi
 # --status in_review` and `br close ID` call close-guard.sh unchanged; its
 # FAIL refuses the transition before a grader spends time on self-review.
 # All other invocations pass through untouched.
-gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_skip=0
-for gate_arg in "$@"; do
-	if [ "$gate_skip" = 1 ]; then gate_skip=0; continue; fi
-	case "$gate_arg" in
-		--status|--db)
-			case "$gate_arg" in
-				--status) gate_status="next" ;;
-				--db) gate_db="next" ;;
-			esac ;;
-		--actor|-m|--message|--comment|--reason|--title)
-			gate_skip=1 ;;
-		--actor=*|--db=*|--status=*)
-			case "$gate_arg" in
-				--status=*) gate_status="${gate_arg#--status=}" ;;
-				--db=*) gate_db="${gate_arg#--db=}" ;;
-			esac ;;
+ gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
+ for gate_arg in "$@"; do
+ 	if [ "$gate_skip" = 1 ]; then
+ 		if [ "$gate_want_reason" = 1 ]; then gate_reason="$gate_arg"; gate_want_reason=0; fi
+ 		if [ "$gate_want_tcomment" = 1 ]; then gate_tcomment="$gate_arg"; gate_want_tcomment=0; fi
+ 		gate_skip=0; continue; fi
+ 	case "$gate_arg" in
+ 		--status|--db)
+ 			case "$gate_arg" in
+ 				--status) gate_status="next" ;;
+ 				--db) gate_db="next" ;;
+ 			esac ;;
+ 		--actor|-m|--message|--comment|--reason|-r|--transition-comment|--title)
+ 			gate_skip=1
+ 			case "$gate_arg" in
+ 				-m|--message|--comment|--reason|-r) gate_want_reason=1 ;;
+ 				--transition-comment) gate_want_tcomment=1 ;;
+ 			esac ;;
+ 		--actor=*|--db=*|--status=*|-m*|--message=*|--comment=*|--reason=|--transition-comment=*)
+ 			case "$gate_arg" in
+ 				--status=*) gate_status="${gate_arg#--status=}" ;;
+ 				--db=*) gate_db="${gate_arg#--db=}" ;;
+ 				--transition-comment=*) gate_tcomment="${gate_arg#--transition-comment=}" ;;
+ 				-m*|--message=*|--comment=*|--reason=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
+ 			esac ;;
 		-*) ;;
 		*)
 			if [ "$gate_status" = "next" ]; then gate_status="$gate_arg";
@@ -94,18 +103,19 @@ done
 gate_fire=0
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then gate_fire=1; fi
-if [ "$gate_fire" = 1 ]; then
-	gate_guard="$(dirname -- "$self_path")/close-guard.sh"
-	if [ -x "$gate_guard" ]; then
-		if [ -n "$gate_db" ]; then
-			sh "$gate_guard" "$gate_id" --db "$gate_db" || exit "$?"
-		else
-			sh "$gate_guard" "$gate_id" || exit "$?"
-		fi
-	else
-		echo "br-shim: close-guard absent, skipping review gate" >&2
-	fi
-fi
+ if [ "$gate_fire" = 1 ]; then
+ 	gate_guard="$(dirname -- "$self_path")/close-guard.sh"
+ 	gate_comment="${gate_tcomment:-$gate_reason}"
+ 	if [ -x "$gate_guard" ]; then
+ 		if [ -n "$gate_db" ]; then
+ 			sh "$gate_guard" "$gate_id" --db "$gate_db" --sub "$gate_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
+ 		else
+ 			sh "$gate_guard" "$gate_id" --sub "$gate_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
+ 		fi
+ 	else
+ 		echo "br-shim: close-guard absent, skipping review gate" >&2
+ 	fi
+ fi
 if [ -n "$found" ]; then
 	exec "$real" "$@"
 else

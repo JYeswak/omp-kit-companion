@@ -81,7 +81,37 @@ if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" > "$TMP/out" 2>&1); then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL other-caller: rc!=0 out<<<%s>>>\n' "$(cat "$TMP/out")"
-fi
-
-printf 'close-guard: %s pass %s fail\n' "$pass" "$fail"
-[ "$fail" = "0" ]
+ fi
+ 
+ # 6. LESSON1: close without a lesson is refused
+ set_bead '{"id":"bead-1","status":"in_progress","assignee":"","labels":[]}'
+ if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close --reason "done, all green" > "$TMP/out" 2>&1); then
+ 	fail=$((fail + 1)); printf 'FAIL no-lesson: rc=0\n'
+ elif grep -q "no Lesson" "$TMP/out"; then
+ 	pass=$((pass + 1))
+ else
+ 	fail=$((fail + 1)); printf 'FAIL no-lesson: wrong refusal\n'
+ fi
+ # 7. LESSON1: close with explicit none passes
+ if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close --reason "done, all green
+ none" > "$TMP/out" 2>&1); then
+ 	pass=$((pass + 1))
+ else
+ 	fail=$((fail + 1)); printf 'FAIL explicit-none: rc!=0\n'
+ fi
+ # 8. LESSON1: close with a real lesson passes
+ if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close --reason "done, all green
+ Lesson: plant the negative case first" > "$TMP/out" 2>&1); then
+ 	pass=$((pass + 1))
+ else
+ 	fail=$((fail + 1)); printf 'FAIL real-lesson: rc!=0\n'
+ fi
+ # 9. LESSON1: review entries carry no lesson requirement
+ if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub update > "$TMP/out" 2>&1); then
+ 	pass=$((pass + 1))
+ else
+ 	fail=$((fail + 1)); printf 'FAIL review-ungated: rc!=0\n'
+ fi
+ 
+ printf 'close-guard: %s pass %s fail\n' "$pass" "$fail"
+ [ "$fail" = "0" ]
