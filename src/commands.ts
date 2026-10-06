@@ -475,11 +475,14 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
 			{ name: "--file", value: "PATH", description: "Pin file to read (default: kit .omp/infra-pins.toml)" },
 		], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
-		{ name: "check", description: "Run the ladder with a candidate binary first on PATH and name the failing stage", usage: "infra check --tool NAME --candidate VERSION --binary PATH [--prefix DIR]", flags: [
+		{ name: "check", description: "Run the ladder with a candidate binary first on PATH and name the failing stage", usage: "infra check --tool NAME --candidate VERSION --binary PATH [--prefix DIR] [--wait] [--force]", flags: [
 			{ name: "--tool", value: "NAME", description: "Tool to check (bun, typescript-language-server)" },
 			{ name: "--candidate", value: "VERSION", description: "Candidate version under test" },
 			{ name: "--binary", value: "PATH", description: "Candidate binary to stage into the isolated prefix" },
 			{ name: "--prefix", value: "DIR", description: "Isolated prefix root (default: state-root infra-check)" },
+			{ name: "--wait", description: "Wait for the load to drop under 1.5x cores instead of refusing" },
+			{ name: "--wait-timeout-min", value: "N", description: "Minutes to wait for quiet with --wait (default 120)" },
+			{ name: "--force", description: "Run now above the load limit; the verdict is INCONCLUSIVE" },
 		], example: "omp-kit infra check --tool bun --candidate 1.5.0 --binary /tmp/bun-1.5.0/bun --json", runnable: false, dataSchema: infraData },
 		{ name: "promote", description: "Certify a checked candidate: update the pin with receipt (human only)", usage: "infra promote --tool NAME --candidate VERSION --binary PATH --human --apply --yes", flags: [
 			{ name: "--tool", value: "NAME", description: "Tool to promote" },

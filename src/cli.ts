@@ -57,7 +57,7 @@ import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyF
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { validateMissionRecord } from "./mission.ts";
-import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
+import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
@@ -2666,18 +2666,89 @@ async function infraCommand(request: ParsedCommand): Promise<CliResult> {
 			errors: [{ code: "CANDIDATE_MISMATCH", message: `Staged binary reports ${probe.stdout.trim().slice(0, 80) || `exit ${probe.code}`}, not ${candidate}`,
 				remediation: "Pass the binary for the candidate version; nothing else was changed." }], verification: "UNVERIFIED" };
 	}
+	const waitFlag = request.flags.has("--wait");
+	const forceFlag = request.flags.has("--force");
+	if (waitFlag && forceFlag) {
+		return refusal("CONFLICTING_FLAGS", "--wait and --force cannot be combined",
+			`Choose waiting for quiet or forcing now for ${sub}; nothing was changed.`);
+	}
+	const timeoutRaw = flag("--wait-timeout-min");
+	let timeoutMin = 120;
+	if (timeoutRaw !== undefined) {
+		timeoutMin = Number(timeoutRaw);
+		if (!Number.isInteger(timeoutMin) || timeoutMin < 1) {
+			return refusal("INVALID_TIMEOUT", "--wait-timeout-min needs a positive integer number of minutes",
+				"Pass e.g. --wait-timeout-min 60; nothing was changed.");
+		}
+	}
+	const readLoad = (): { load1: number; ncpu: number } => {
+		const loads = loadavg();
+		return { load1: loads[0] ?? 0, ncpu: cpus().length };
+	};
+	let sample = readLoad();
+	let gate = loadGate(sample.load1, sample.ncpu);
+	let waitedMs = 0;
+	if (!gate.ok && waitFlag) {
+		const waitStart = Date.now();
+		const deadline = waitStart + timeoutMin * 60 * 1000;
+		while (Date.now() < deadline) {
+			await new Promise<void>((resolve) => setTimeout(resolve, 30_000));
+			sample = readLoad();
+			gate = loadGate(sample.load1, sample.ncpu);
+			if (gate.ok) break;
+		}
+		waitedMs = Date.now() - waitStart;
+	}
+	if (!gate.ok && !waitFlag && !forceFlag) {
+		return refusal("LOAD_TOO_HIGH", `1-minute load ${sample.load1} exceeds the 1.5x-cores check gate; retry when quiet`,
+			"Re-run with --wait to wait for quiet, or --force to run now (the verdict will be INCONCLUSIVE); nothing was changed.");
+	}
+	const forced = !gate.ok;
+	const repoTop = defaultRunner(["git", "rev-parse", "--show-toplevel"]);
+	const originTip = defaultRunner(["git", "rev-parse", "--verify", "origin/main"]);
+	if (repoTop.code !== 0 || originTip.code !== 0) {
+		return refusal("NOT_A_CHECKOUT", "infra check runs the ladder from an export of origin/main",
+			"Run from a contributor checkout with origin/main present; nothing was changed.");
+	}
+	const exportDir = join(prefix, "export");
+	mkdirSync(exportDir, { recursive: true, mode: 0o700 });
+	const archive = Bun.spawnSync(["git", "-C", repoTop.stdout.trim(), "archive", "origin/main"], { stdout: "pipe", stderr: "pipe" });
+	if (archive.exitCode !== 0) {
+		return refusal("ARCHIVE_FAILED", "git archive of origin/main failed; the ladder has no clean tree to run on",
+			"Repair the checkout and re-run; nothing was changed.");
+	}
+	const untar = Bun.spawnSync(["tar", "-x", "-C", exportDir], { stdin: archive.stdout, stdout: "pipe", stderr: "pipe" });
+	if (untar.exitCode !== 0) {
+		return refusal("ARCHIVE_FAILED", "Extracting the origin/main export failed; the ladder has no clean tree to run on",
+			"Repair tar availability and re-run; nothing was changed.");
+	}
 	const childEnv: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") childEnv[key] = value;
-	const report = await checkInfraCandidate({ tool, version: candidate, repoRoot: process.cwd(), pathPrefix: prefix, baseEnv: childEnv,
-		exec: { run: (argv, opts) => {
-			const run = Bun.spawnSync([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe" });
-			return Promise.resolve({ code: run.exitCode, out: `${run.stdout.toString()}\n${run.stderr.toString()}` });
-		} } });
+	let report;
+	try {
+		report = await checkInfraCandidate({ tool, version: candidate, repoRoot: exportDir, pathPrefix: prefix, baseEnv: childEnv,
+			forcedHighLoad: forced || undefined,
+			exec: { run: (argv, opts) => {
+				const run = Bun.spawnSync([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe" });
+				return Promise.resolve({ code: run.exitCode, out: `${run.stdout.toString()}\n${run.stderr.toString()}` });
+			} } });
+	} finally {
+		try {
+			rmSync(exportDir, { recursive: true, force: true });
+		} catch { /* export cleanup is best-effort; evidence is in the report */ }
+	}
 	if (sub === "check") {
 		if (report.status === "PASS") {
 			return { code: 0, data: { overall: "OK", command: sub, tool, version: candidate, status: report.status,
 					failed_stage: null, stages: report.stages, log_tail: report.logTail,
 					detail: `${tool} ${candidate} passed the ladder with the candidate first on PATH.` }, verification: "UNVERIFIED" };
+		}
+		if (report.status === "INCONCLUSIVE") {
+			return { code: 3, data: { overall: "UNVERIFIED", command: sub, tool, version: candidate, status: report.status,
+					failed_stage: report.failedStage, stages: report.stages, log_tail: report.logTail,
+					detail: `${tool} ${candidate} ran forced above the load limit${waitedMs > 0 ? ` after waiting ${Math.round(waitedMs / 60000)} min` : ""}; stages are evidence, never a verdict.` },
+				errors: [{ code: "INCONCLUSIVE", message: "A forced run above the load limit cannot pass or fail",
+					remediation: "Re-run when quiet (or with --wait); the machine toolchain is unchanged." }], verification: "UNVERIFIED" };
 		}
 		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, version: candidate, status: report.status,
 				failed_stage: report.failedStage, stages: report.stages, log_tail: report.logTail,
