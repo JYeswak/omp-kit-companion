@@ -49,6 +49,7 @@ beforeAll(() => {
 	writeFileSync(join(sessions, "s1.jsonl"), [
 		`{"type":"title","v":1,"title":"fixture","updatedAt":"2026-09-30T10:00:00.000Z"}`,
 		`{"type":"session","version":3,"id":"s1","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,
+		`{"version": `,
 		assistantText("t1", "fixture note"),
 		toolCall("c1", "bash", { command: "echo zzzz_systemwide_canary_9c42" }),
 		toolCall("c2", "bash", { command: "grep -rl 'x' crates/*/Cargo.toml 2>/dev/null" }),
@@ -110,6 +111,7 @@ test("corpus reports exact planted fire counts with Wilson intervals", () => {
 	expect(set.overall).toBe("OK");
 	expect(set.corpus?.files).toBe(1);
 	expect(set.corpus?.assistant_messages).toBe(4);
+	expect(set.corpus?.parse_errors).toBe(1);
 	expect(set.corpus?.versions).toEqual(["v:1", "version:3"]);
 	expect(set.corpus?.events).toMatchObject({ bash: 3, text: 1 });
 	const canary = findRule(set.corpus?.rules, "zz-canary-scope-probe", "bash");
