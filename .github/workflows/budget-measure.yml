@@ -74,5 +74,6 @@ jobs:
             rle=$(grep -E '^stream kit-regex-engineering' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
             stm=$(grep -E '^stream kit-settings-mutation' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
             rmrf=$(grep -E '^stream kit-no-ask-rmrf' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
-            echo "PAIR i=$i target=$t total_ms=$tot regexEng_ms=$rle settings_ms=$stm rmrf_ms=$rmrf"
+            nvrf=$(grep -E '^stream kit-no-verify' "$d/run-$i-$t.log" | grep -oE '[0-9.]+ms' | head -1 | grep -oE '[0-9.]+')
+            echo "PAIR i=$i target=$t total_ms=$tot regexEng_ms=$rle settings_ms=$stm rmrf_ms=$rmrf noverify_ms=$nvrf"
           done; done
