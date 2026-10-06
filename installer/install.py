@@ -172,6 +172,29 @@ def verify_manifest(members, manifest, version):
             refuse("unlisted empty release directory")
 
 
+def verify_attestation(archive):
+    """Refuse archives whose Sigstore bundle fails `gh attestation verify`.
+    The bundle is the release-published sibling <archive>.sigstore.json. A
+    missing bundle warns and falls back to hash-only (offline installs keep
+    working; hashes prove integrity against the index, not origin). A present
+    bundle that does not verify refuses. Test seams: GH_BIN overrides the gh
+    binary, OMP_KIT_ATTEST_OWNER overrides the expected owner."""
+    bundle = Path(archive).parent / (Path(archive).name + ".sigstore.json")
+    if not bundle.is_file():
+        print("warning: no attestation bundle; hash-only verification", file=sys.stderr)
+        return
+    owner = os.environ.get("OMP_KIT_ATTEST_OWNER", "JYeswak")
+    gh = os.environ.get("GH_BIN", "gh")
+    try:
+        result = subprocess.run([gh, "attestation", "verify", str(archive),
+                                 "--owner", owner, "--bundle", str(bundle)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        refuse("attestation verifier unavailable: " + str(exc))
+    if result.returncode != 0:
+        refuse("attestation verification failed: " + result.stderr.decode(errors="replace").strip()[-200:])
+
+
 def safe_directory(path):
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         refuse("unsafe installation directory: " + str(path))
@@ -186,6 +209,7 @@ def install(index_path, version, platform, archive, prefix, dry_run):
         refuse("archive filename differs from selected index asset")
     members, manifest = archive_members(archive, asset)
     verify_manifest(members, manifest, version)
+    verify_attestation(archive)
     if not os.path.isabs(prefix) or os.path.normpath(prefix) != prefix:
         refuse("installation prefix must be canonical and absolute")
     prefix = Path(prefix)
