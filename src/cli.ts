@@ -3003,8 +3003,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	}
 	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
 		const scope = flags.get("--scope");
-		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file"));
-		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads and reservations accept only --project", "Use doctor --scope beads --project PATH for a tracker export, or doctor --scope reservations --project PATH for another repo holds.");
+		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file")) || (scope === "identity" && flags.has("--project") && !flags.has("--file"));
+		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads, reservations and identity accept only --project", "Use doctor --scope beads --project PATH for a tracker export, doctor --scope reservations --project PATH for another repo's holds, or doctor --scope identity --project PATH for pane identities.");
 	}
 	if (parent?.name === "memory" && command.name === "audit") return privateMemoryAudit(request);
 	if (parent?.name === "lsp" && command.name === "setup") {
