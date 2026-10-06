@@ -1,7 +1,7 @@
 ---
 description: "AGENTS.md Storing: never ask the human to clear scratch with rm -rf"
 condition:
-  - '(?i)(?<!not )(?<!never )(?<!n''t )\b(?:please\s+)?(?:run|execute)\s+rm\s+-rf\b'
+  - '(?i)(?<!n(?:ot |ever |''t ))\b(?:please\s+)?(?:run|execute)\s+rm\s+-rf\b'
 scope: text
 interruptMode: prose-only
 ---
