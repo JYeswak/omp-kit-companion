@@ -14,6 +14,8 @@
 #   9 extensions   each extension in policy/extensions.json is installed in ~/.omp/omp-extensions/ as an
 #                  exact copy of extensions/<name> and is in every profile's `extensions` list except
 #                  policy skipProfiles
+#   10 sync        every fleet repo under the dev root carrying
+#                  scripts/sync-check.sh sits at origin/main (RED names laggards)
 #   --target DIR    rule root (default ~/.agents/rules)
 #   --dev-root DIR  where project shadows are looked for (default ~/Developer)
 set -u
@@ -267,6 +269,29 @@ for name in $(jq -r '.extensions[]' "$EXTPOL" 2>/dev/null); do
     report RED extensions "$name: missing from the extensions list of:$missing; run scripts/install-extensions.sh"
   fi
 done
+
+# ---- 10 sync ----
+# Every fleet repo carrying scripts/sync-check.sh must sit at origin/main.
+# The check fetches each carrier (read-only) and names the behind ones.
+synced_repos=0
+behind_repos=
+for d in "$devroot"/*/; do
+	[ -x "$d/scripts/sync-check.sh" ] || continue
+	[ -d "$d/.git" ] || continue
+	synced_repos=$((synced_repos + 1))
+	if sh "$d/scripts/sync-check.sh" --repo "$d" >/dev/null 2>&1; then
+		: # at origin/main
+	else
+		behind_repos="$behind_repos $(basename "$d")"
+	fi
+done
+if [ "$synced_repos" = 0 ]; then
+	report WARN sync "no repo under $devroot carries scripts/sync-check.sh; run scripts/install-sync-check.sh REPO"
+elif [ -z "$behind_repos" ]; then
+	report GREEN sync "$synced_repos repo(s) at origin/main"
+else
+	report RED sync "behind origin/main:$behind_repos; run scripts/sync-check.sh --repo DIR --fast-forward"
+fi
 
 echo "doctor: $reds RED, $warns WARN"
 [ "$reds" = 0 ]
