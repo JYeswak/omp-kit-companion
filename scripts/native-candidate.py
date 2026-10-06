@@ -216,6 +216,19 @@ def asset_for(path, platform, version, directory):
     return asset
 
 
+def cert_env(home, root):
+    """Scrubbed environment for certification children. CI=true always: these
+    runs judge. GITHUB_ACTIONS passes through when the parent run sets it so
+    nested CI judges (ladder regex-budget --judge-regardless-of-load) see the
+    signal; local runs stay fail-closed. Nothing else leaks."""
+    env = {"PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": str(root), "CI": "true",
+           "NO_COLOR": "1", "XDG_STATE_HOME": str(home / "state"),
+           "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data")}
+    if os.environ.get("GITHUB_ACTIONS"):
+        env["GITHUB_ACTIONS"] = os.environ["GITHUB_ACTIONS"]
+    return env
+
+
 def native(args):
     if args.platform not in PLATFORMS or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", args.version):
         raise ValueError("unsupported native candidate")
@@ -246,9 +259,7 @@ def native(args):
             root = Path(temp).resolve()
             home = root / "home"
             home.mkdir()
-            env = {"PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": str(root), "CI": "true",
-                   "NO_COLOR": "1", "XDG_STATE_HOME": str(home / "state"),
-                   "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data")}
+            env = cert_env(home, root)
             omp = subprocess.run(["omp", "--version"], cwd=root, env=env, capture_output=True, timeout=30)
             observed = (omp.stdout + omp.stderr).decode(errors="replace").strip()
             if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(omp_version) + r"(?!\d)", observed):

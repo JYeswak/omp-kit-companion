@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -169,6 +170,36 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertIn("G4 live scenario planted-fail", detail["failures"])
         self.assertEqual(detail["missing_scenarios"], ["planted-fail"])
 
+
+
+class CertEnvTests(unittest.TestCase):
+    """RELEASE BLOCKER A2: the CI-judge signal must survive the scrubbed env."""
+
+    def test_github_actions_passes_through_when_set(self) -> None:
+        home, root = Path("/tmp/home"), Path("/tmp/root")
+        saved = os.environ.get("GITHUB_ACTIONS")
+        os.environ["GITHUB_ACTIONS"] = "true"
+        try:
+            env = native_candidate.cert_env(home, root)
+        finally:
+            if saved is None:
+                del os.environ["GITHUB_ACTIONS"]
+            else:
+                os.environ["GITHUB_ACTIONS"] = saved
+        self.assertEqual(env["GITHUB_ACTIONS"], "true")
+        self.assertEqual(env["CI"], "true")
+        self.assertEqual(env["HOME"], "/tmp/home")
+
+    def test_github_actions_absent_when_unset(self) -> None:
+        home, root = Path("/tmp/home"), Path("/tmp/root")
+        saved = os.environ.pop("GITHUB_ACTIONS", None)
+        try:
+            env = native_candidate.cert_env(home, root)
+        finally:
+            if saved is not None:
+                os.environ["GITHUB_ACTIONS"] = saved
+        self.assertNotIn("GITHUB_ACTIONS", env)
+        self.assertEqual(env["CI"], "true")
 
 if __name__ == "__main__":
     unittest.main()

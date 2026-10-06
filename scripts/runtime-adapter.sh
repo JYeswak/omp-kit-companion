@@ -171,7 +171,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
   exec /usr/bin/env -i \
     PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
-    LANG="${LANG:-}" LC_ALL="${LC_ALL:-}" CI="${CI:-}" NO_COLOR="${NO_COLOR:-}" SHELL="${SHELL:-}" \
+    LANG="${LANG:-}" LC_ALL="${LC_ALL:-}" CI="${CI:-}" GITHUB_ACTIONS="${GITHUB_ACTIONS:-}" NO_COLOR="${NO_COLOR:-}" SHELL="${SHELL:-}" \
     TMPDIR="$TMPDIR" TMP="$TMPDIR" TEMP="$TMPDIR" \
     XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
     XDG_DATA_HOME="$XDG_DATA_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
