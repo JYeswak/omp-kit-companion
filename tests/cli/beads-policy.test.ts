@@ -31,12 +31,24 @@ function auditEdges(policyYaml: string): EdgeVerdict[] {
 		const edge = status + " -> closed";
 		const targets: unknown = transitionTable.find(([name]) => name === status)?.[1];
 		if (!Array.isArray(targets) || !targets.includes("closed")) return { edge, verdict: "forbidden" as const };
-		const gated = gates !== null && typeof gates === "object" && edge in gates;
+		const gate = gates !== null && typeof gates === "object" && !Array.isArray(gates) && edge in gates ? (gates as Record<string, unknown>)[edge] : undefined;
+		const requireAll = gate !== null && typeof gate === "object" && !Array.isArray(gate) && "require_all" in gate && Array.isArray((gate as Record<string, unknown>).require_all)
+			? (gate as Record<string, unknown>).require_all as unknown[]
+			: [];
+		const gated = requireAll.length > 0;
 		return { edge, verdict: (gated ? "gated" : "open") as "gated" | "open" };
 	});
 }
-
+function assertSafePolicy(policyYaml: string): void {
+	const openEdges = auditEdges(policyYaml).filter((row) => row.verdict === "open").map((row) => row.edge);
+	if (openEdges.length) throw new Error("unsafe close edge(s): " + openEdges.join(", "));
+	const parsed: unknown = YAML.parse(policyYaml);
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("allow_bypass" in parsed) || parsed.allow_bypass !== false) {
+		throw new Error("allow_bypass must be false");
+	}
+}
 test("MP3 template: every status->closed edge is gated or forbidden", () => {
+	assertSafePolicy(template);
 	expect(Object.fromEntries(auditEdges(template).map((row) => [row.edge, row.verdict]))).toEqual({
 		"open -> closed": "gated",
 		"in_progress -> closed": "forbidden",
@@ -46,6 +58,21 @@ test("MP3 template: every status->closed edge is gated or forbidden", () => {
 		"deferred -> closed": "forbidden",
 	});
 });
+
+test("MP3 planted: the in-tree known-bad policy is refused before an unsafe close", () => {
+	const lax = template.replace("strict: true", "strict: false");
+	expect(() => assertSafePolicy(lax)).toThrow(/open -> closed/);
+	const ungated = template.replace('    "open -> closed":\n      require_all:\n        - min_reviewers: 1\n', "");
+	expect(() => assertSafePolicy(ungated)).toThrow(/open -> closed/);
+	const emptyGate = template.replace('    "open -> closed":\n      require_all:\n        - min_reviewers: 1\n', '    "open -> closed":\n      require_all: []\n');
+	expect(() => assertSafePolicy(emptyGate)).toThrow(/open -> closed/);
+	const knownBad = readFileSync(join(repoRoot, "tests", "fixtures", "beads-policy", "known-bad.yaml"), "utf8");
+	expect(() => assertSafePolicy(knownBad)).toThrow(/open -> closed/);
+	const project = scratchTracker(knownBad);
+	const id = makeBead(project);
+	const unsafeClose = br(project, ["close", id, "-r", "known-bad fixture", "--transition-comment", "known-bad fixture"]);
+	expect(unsafeClose.rc, "the planted fixture must demonstrate an unreviewed live close").toBe(0);
+}, 60000);
 
 test("MP3 planted: template without strict, or missing one gate, reports the open edge", () => {
 	const lax = template.replace("strict: true", "strict: false");
@@ -131,4 +158,42 @@ test("MP3 live: ready counts are unchanged by the policy file", () => {
 	const removed = spawnSync("rm", [join(project, ".beads", "policy.yaml")]);
 	expect(removed.status).toBe(0);
 	expect(readyCount(project)).toBe(withPolicy);
+}, 60000);
+
+test("MP3 fallback: provider evidence is recorded and same-pane close remains refused", () => {
+	const project = scratchTracker(template);
+	const id = makeBead(project);
+	const claim = br(project, ["update", id, "--status", "in_progress", "--assignee", "ProbeWorker", "--transition-comment", "claim probe"]);
+	expect(claim.rc).toBe(0);
+	const marker = br(project, ["update", id, "--add-label", "reviewer-fresh-context:gpt-6-luna"]);
+	expect(marker.rc).toBe(0);
+	const review = br(project, ["update", id, "--status", "in_review", "--acceptance-criteria", "Review evidence recorded.", "--transition-comment", "Ready for review"]);
+	expect(review.rc).toBe(0);
+	const provider = "reviewer-fresh-context:gpt-6-luna";
+	const gate = br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", provider, "--status", "pass", "--to", "closed"]);
+	expect(gate.rc).toBe(0);
+	const gateRow: unknown = JSON.parse(gate.out);
+	expect(gateRow).toMatchObject({ provider, passed: true, to_status: "closed" });
+	const guard = (agent: string) => spawnSync("sh", [join(repoRoot, "scripts", "close-guard.sh"), id, "--db", join(project, ".beads", "probe.db")], {
+		cwd: project, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+		env: { ...process.env, RUST_LOG: "warn", AGENT_NAME: agent },
+	});
+	const samePane = guard("ProbeWorker");
+	expect(samePane.status, "a recorded provider must not let the implementer close their own bead").toBe(4);
+	expect(samePane.stderr).toMatch(/holds the claim/);
+	expect(guard("FreshContextReviewer").status).toBe(0);
+	const closed = br(project, ["close", id, "--actor", "FreshContextReviewer", "-r", "fresh-context review", "--transition-comment", "reviewer pass"]);
+	expect(closed.rc).toBe(0);
+}, 60000);
+
+test("MP3 bypass: every status->closed edge refuses --bypass-policy", () => {
+	const project = scratchTracker(template);
+	for (const row of auditEdges(template)) {
+		const status = row.edge.split(" -> ")[0]!;
+		const id = makeBead(project);
+		walk(project, id, status);
+		const bypassed = br(project, ["close", id, "--reason", "probe bypass", "--transition-comment", "probe", "--bypass-policy", "--bypass-reason", "planted bypass probe"]);
+		expect(bypassed.rc, "bypass " + row.edge + " must be refused").not.toBe(0);
+		expect(bypassed.out).toMatch(/allow_bypass: false|bypass-policy is disabled/);
+	}
 }, 60000);

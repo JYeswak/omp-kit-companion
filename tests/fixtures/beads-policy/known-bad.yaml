@@ -1,0 +1,21 @@
+# INTENTIONALLY UNSAFE MP3 fixture. Never copy into a live tracker.
+# It demonstrates that a present gate is inert without strict workflow enforcement.
+workflow:
+  strict: false
+  statuses: [open, in_progress, in_review, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, closed]
+    in_progress: [in_review, closed]
+    in_review: [closed]
+    closed: [open]
+  required_fields:
+    closed: [transition_comment]
+  gates:
+    "open -> closed":
+      require_all:
+        - min_reviewers: 1
+    "in_progress -> closed":
+      require_all:
+        - min_reviewers: 1
+allow_bypass: true

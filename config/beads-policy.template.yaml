@@ -27,13 +27,16 @@ workflow:
     "open -> closed":
       require_all:
         - min_reviewers: 1
+allow_bypass: false
 
-# Per-session deltas (fleet trackers, 2026-10-05). The template is the floor;
-# a tracker adds statuses or gates, never removes a gate or opens an edge.
+# Per-session deltas (fleet trackers, 2026-10-06). The template is the shared floor:
+# every status->closed edge is forbidden or has a nonempty gate; no bypass is allowed.
 # - omp-kit: adds required_fields "open -> in_progress": [acceptance_criteria_present].
-# - jev: as template, except deferred: [open, closed] (extra closed edge, reviewer-gated
-#   by its "deferred -> closed" min_reviewers gate); see jev/.beads/policy.yaml.
-# - uds: extra statuses grading, draft, pinned, tombstone; closure gates
-#   uds_l3_close_support on open/in_progress -> closed; allow_bypass: false.
-# - localbench: closure gates worker_report_landed on open/in_progress -> closed.
-# - cfsios: no policy.yaml yet; adopt the template unchanged first.
+# - jev: adds deferred -> closed with min_reviewers: 1; also carries close_policy
+#   self-close/reference checks (see the live .beads/policy.yaml).
+# - uds: adds grading, draft, pinned, tombstone; open, in_review and grading -> closed
+#   require uds_l3_close_support + min_reviewers; pinned returns to open/in_progress.
+# - localbench: open/in_progress -> closed are forbidden; in_review -> closed requires
+#   worker_report_landed + min_reviewers.
+# - cfsios: uses the shared transition map; add this template's allow_bypass: false.
+# Verify every live policy copy after rollout; these comments are not proof of activation.

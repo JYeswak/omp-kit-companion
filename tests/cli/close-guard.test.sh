@@ -5,10 +5,13 @@
 # trailers. Every verdict comes from exit codes plus complete output.
 set -u
 
-CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/close-guard.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/close-guard-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECK="$REPO/scripts/close-guard.sh"
+REPO_TMP="$REPO/var/agent-tmp"
+mkdir -p "$REPO_TMP" || exit 1
+TMP="$REPO_TMP/close-guard-test.$$"
+mkdir -m 700 "$TMP" || exit 1
+printf 'pid=%s label=close-guard-test repo=%s created=%s\n' "$$" "$REPO" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$TMP/.owner"
 
 pass=0
 fail=0
@@ -44,12 +47,13 @@ else
 	fail=$((fail + 1)); printf 'FAIL other: rc!=0\n'
 fi
 
-# 3. fresh-context label passes even for the claimant
+# 3. a fresh-context marker never bypasses a same-pane claim
 set_bead '{"id":"bead-1","status":"in_progress","assignee":"GuardTest","labels":["reviewer-fresh-context:muse"]}'
 if sh "$CHECK" "$BEAD" --db "$TMP/db" > "$TMP/out" 2>&1; then
-	pass=$((pass + 1))
+	fail=$((fail + 1)); printf 'FAIL fresh-same-pane: rc=0\n'
 else
-	fail=$((fail + 1)); printf 'FAIL fresh: rc!=0\n'
+	if grep -q "holds the claim" "$TMP/out"; then pass=$((pass + 1));
+	else fail=$((fail + 1)); printf 'FAIL fresh-same-pane: wrong refusal\n'; fi
 fi
 
 # 4. unclaimed bead but caller trailer on a naming commit -> refused
