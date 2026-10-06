@@ -53,7 +53,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { matchesBounded } from "./regex-guards.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { validateMissionRecord } from "./mission.ts";
@@ -2123,6 +2123,15 @@ function recordJobReceipt(home: string, jobName: string, receipt: Record<string,
 	}
 }
 
+/** First failed reaper action for the job summary: dir and verdict reason, same predicate as the failure count. */
+export function firstFailure(result: Pick<ScratchApplyResult, "applied" | "killed">): string {
+	const failed = result.applied.find(isApplyFailure);
+	if (failed) return `; first: ${failed.dir} ${failed.reason}`;
+	const unkilled = result.killed.find(kill => !kill.ok);
+	if (unkilled) return `; first: pid ${unkilled.pid} ${unkilled.command} not reaped`;
+	return "";
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -2441,7 +2450,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					deleted: result.expired.length, failures: failed,
 					reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
 				sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired },
-			errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)`,
+			errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)${firstFailure(result)}`,
 				remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 			verification: "UNVERIFIED" };
 		}
