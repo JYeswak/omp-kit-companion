@@ -35,6 +35,7 @@ import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import { runKitUpdateJob } from "./kit-update-job.ts";
+import { claudeSaveJobEnabled, runClaudeSaveJob } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
@@ -2413,6 +2414,20 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
  			}
  			lock.release();
  			return { code: 0, data: { overall: "OK", job: job.name, ...pollResult }, verification: "UNVERIFIED" };
+		}
+		if (job.name === "claude-save") {
+			const enabled = claudeSaveJobEnabled(process.env);
+			const repo = join(home, ".claude");
+			const stateRoot = join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
+			const gitleaksBin = Bun.which("gitleaks");
+			const gitleaks = gitleaksBin === null ? undefined : (target: string) => {
+				const out = Bun.spawnSync([gitleaksBin, "detect", "--source", target, "--no-git", "--verbose"], { stdout: "pipe", stderr: "pipe" });
+				return { code: out.exitCode, output: `${out.stdout.toString()}\n${out.stderr.toString()}`.slice(0, 500) };
+			};
+			const result = await runClaudeSaveJob({ enabled, repo, stateRoot }, { gitleaks,
+				notify: message => notifyJobFailure({ title: "omp-kit claude-save", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
+			lock.release();
+			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
 		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {

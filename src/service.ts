@@ -25,6 +25,7 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
  	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },
  	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false },
+	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
  };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
