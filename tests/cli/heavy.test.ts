@@ -159,7 +159,8 @@ test("the child runs ten nice points above its parent", async () => {
 	const [childNice, parentNice] = result.stdout.trim().split("\n").map((line) => Number(line.trim()));
 	expect(Number.isInteger(childNice) && Number.isInteger(parentNice)).toBe(true);
 	expect(childNice! - parentNice!).toBe(10);
-});
+	// macos-15 CI hit the 5 s default at 5008 ms (bun spawn + admission under load); measured cause.
+}, 30000);
 
 test("SIGINT releases the slot with exit 130", async () => {
 	const root = fixture();
@@ -175,7 +176,8 @@ test("SIGINT releases the slot with exit 130", async () => {
 	expect(code).toBe(130);
 	expect(stderr).toBe("");
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
-});
+// macos-15 CI hit the 5 s default at 5002 ms (spawn + ledger poll under load); measured cause.
+}, 30000);
 
 test("SIGTERM releases the slot with exit 143", async () => {
 	const root = fixture();
@@ -190,7 +192,8 @@ test("SIGTERM releases the slot with exit 143", async () => {
 	const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
 	expect(code).toBe(143);
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
-});
+// Same measured cause as above.
+}, 30000);
 
 test("planted contention queues the job even with a free slot", async () => {
 	const root = fixture();
