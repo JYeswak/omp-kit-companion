@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
-import { runtimeTempRoot } from "../../src/runtime.ts";
+import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
 import { once } from "node:events";
 
 const fixtures: string[] = [];
@@ -412,4 +412,18 @@ test("runtime temp root avoids caller HOME when TMPDIR is nested there", () => {
 		if (previousTmpdir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previousTmpdir;
 	}
+});
+
+test("isolated children inherit the CI judge signal through runIsolatedShell", () => {
+	// RELEASE BLOCKER A3: the nested ladder keys --judge-regardless-of-load on
+	// GITHUB_ACTIONS; sanitizedEnv must carry it or macOS certification refuses
+	// with producer_rc=75. Non-allowlisted keys stay scrubbed either way.
+	const identity = { launcher: "/bin/omp", packageRoot: "/pkg", source: "/src", nativeRoot: "/native" };
+	const withSignal = sanitizedEnv(identity, { CI: "true", GITHUB_ACTIONS: "true", PATH: "/usr/bin:/bin", SECRET: "x" }, "/private");
+	expect(withSignal.GITHUB_ACTIONS).toBe("true");
+	expect(withSignal.CI).toBe("true");
+	expect("SECRET" in withSignal).toBe(false);
+	const withoutSignal = sanitizedEnv(identity, { CI: "true", PATH: "/usr/bin:/bin" }, "/private");
+	expect("GITHUB_ACTIONS" in withoutSignal).toBe(false);
+	expect(withoutSignal.CI).toBe("true");
 });

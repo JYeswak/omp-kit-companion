@@ -9,7 +9,7 @@ export interface BundledRunResult {
 	stderr: string;
 }
 
-const CHILD_ENV_KEYS = ["CI", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER"] as const;
+const CHILD_ENV_KEYS = ["CI", "GITHUB_ACTIONS", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER"] as const;
 const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"] as const;
 
 let cachedSystemTempRoots: readonly string[] | undefined;
@@ -59,7 +59,8 @@ export function runtimeTempRoot(): string {
 	return roots[0]!;
 }
 
-function sanitizedEnv(
+/** Allowlisted child environment for isolated runs. Exported for contract tests. */
+export function sanitizedEnv(
 	identity: OmpIdentity,
 	inherited: Record<string, string | undefined>,
 	privateRoot: string,
