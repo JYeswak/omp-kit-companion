@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
 import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
+import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
 import { inspectStateRoot } from "./state-root.ts";
 import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
@@ -688,6 +690,51 @@ export function inspectFlywheelScope(project: string): Finding[] {
 			"Rerun with a reachable tracker database and git history.", { project: dir })];
 	}
 }
+
+/** DERIVE1 B3 (ompkit-rc-epic-land-fix-release-dogfood-rz5.119): literal probe-readable facts in config files. Read-only. */
+export function inspectDerivedScope(project: string): Finding[] {
+	const dir = resolve(project);
+	const hits: { file: string; line: number; kind: string; text: string; probe: string }[] = [];
+	const stack = [dir];
+	while (stack.length > 0) {
+		const current = stack.pop() as string;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(current, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			const full = join(current, entry.name);
+			const relative = full.slice(dir.length + 1);
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) {
+				stack.push(full);
+				continue;
+			}
+			if (!entry.isFile() || !shouldScanFile(relative)) continue;
+			try {
+				const text = readFileSync(full, "utf8");
+				hits.push(...scanDerivedText(relative, text));
+			} catch {
+				continue;
+			}
+		}
+	}
+	if (!hits.length) {
+		return [finding("derived", "OK", "No literal probe-readable facts in config or registry files",
+			"None.", { project: dir, files_with_hits: 0 })];
+	}
+	const byKind: Record<string, number> = {};
+	const byFile: Record<string, true> = {};
+	for (const hit of hits) {
+		byKind[hit.kind] = (byKind[hit.kind] ?? 0) + 1;
+		byFile[hit.file] = true;
+	}
+	return [finding("derived", "DEGRADED", `${hits.length} literal probe-readable fact(s) in config files`,
+		"Move each fact to its probe (see evidence), or record a reason on the line to mark a decision.",
+		{ project: dir, files_with_hits: Object.keys(byFile).length, by_kind: byKind, hits: hits.slice(0, 20) })];
+}
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
 export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
@@ -900,6 +947,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
+	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
 	if (input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));

@@ -482,7 +482,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
 	const doctorScope = request.command.name === "doctor" && typeof request.flags.get("--scope") === "string" ? String(request.flags.get("--scope")) : undefined;
 	const projectFlag = request.flags.get("--project");
-	const diagnosticProject = doctorScope === "beads" && typeof projectFlag === "string" ? resolve(projectFlag) : process.cwd();
+	const diagnosticProject = typeof projectFlag === "string" && projectFlag ? resolve(projectFlag) : process.cwd();
 	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
 	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
 		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
@@ -3024,8 +3024,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	}
 	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
 		const scope = flags.get("--scope");
-		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file")) || (scope === "identity" && flags.has("--project") && !flags.has("--file")) || (scope === "flywheel" && flags.has("--project") && !flags.has("--file"));
-		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads, reservations, identity and flywheel accept only --project", "Use doctor --scope beads --project PATH for a tracker export, doctor --scope reservations --project PATH for another repo's holds, doctor --scope identity --project PATH for pane identities, or doctor --scope flywheel --project PATH for fleet practice grades.");
+		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file")) || (scope === "identity" && flags.has("--project") && !flags.has("--file")) || (scope === "flywheel" && flags.has("--project") && !flags.has("--file")) || (scope === "derived" && flags.has("--project") && !flags.has("--file"));
+		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads, reservations, identity, flywheel and derived accept only --project", "Use doctor --scope beads --project PATH for a tracker export, doctor --scope reservations --project PATH for another repo's holds, doctor --scope identity --project PATH for pane identities, doctor --scope flywheel --project PATH for fleet practice grades, or doctor --scope derived --project PATH for literal facts in config files.");
 	}
 	if (parent?.name === "memory" && command.name === "audit") return privateMemoryAudit(request);
 	if (parent?.name === "lsp" && command.name === "setup") {
