@@ -43,5 +43,39 @@ jobs:
     permissions:
       contents: read
 
+  attest:
+    needs: native-candidate
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [darwin-arm64-none, darwin-x64-none, linux-arm64-gnu, linux-x64-gnu]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-${{ matrix.platform }}
+          path: candidate/
+      - name: Generate SBOM for the candidate archive
+        uses: anchore/sbom-action@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        with:
+          path: candidate/
+          format: spdx-json
+          output-file: sbom-${{ matrix.platform }}.spdx.json
+      - name: Attest build provenance for the candidate archive
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: candidate/*.tar
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
+        with:
+          subject-path: candidate/*.tar
+          sbom-path: sbom-${{ matrix.platform }}.spdx.json
+
 # Deliberately no release upload, GitHub visibility change, latest pointer, or tag creation.
 # P25 alone may promote the exact SHA-bound candidate after privacy and hero authorization.

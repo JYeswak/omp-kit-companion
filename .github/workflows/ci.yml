@@ -200,7 +200,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh tests/e2e/real-home-journey.sh
+          shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh tests/cli/install-verify.test.sh tests/e2e/real-home-journey.sh
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Install stock OMP for the ${{ matrix.omp.track }} ladder
@@ -213,6 +213,10 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: sh tests/cli/installer.test.sh
+      - name: Check installer attestation refusal against native archive
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: sh tests/cli/install-verify.test.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
