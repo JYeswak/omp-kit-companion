@@ -26,7 +26,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export BR_BIN="$TMP/bin/br"
 export BEADS_DB="$TMP/beads.db"
 : > "$BEADS_DB"
-export KNOWN_IDS="ompkit-2w7h rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r"
+export KNOWN_IDS="ompkit-2w7h rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r ompkit-kxdy"
 
 run_case() {
 	name=$1
@@ -54,6 +54,10 @@ run_case short-id 0 "wire the loop rz5.128"
 run_case cfs-id 0 "port the app cfs-twenty-app-portfolio-hgub5.2.5"
 # 6. uds-shaped id passes when the tracker knows it (planted)
 run_case uds-id 0 "fix the lane uds-6z2r"
+# 6b. digit-less real id passes: existence comes from br, not token shape (planted)
+run_case digitless-id 0 "polish the copy ompkit-kxdy"
+# 6c. digit-less made-up id is refused by br, not by shape (planted)
+run_case digitless-unknown 4 "polish the copy ompkit-zzqy"
 # 7. a bare version number is not a bead id (planted)
 run_case version-only 4 "upgrade bun 1.4.2"
 # 8. merge source is exempt

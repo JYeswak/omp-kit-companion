@@ -5,11 +5,13 @@
 # chain. Git calls: commit-msg MSG_FILE [SOURCE [SHA]].
 # Id shapes are per-repo: any token the repo's own tracker resolves counts
 # (full ompkit-<id>, short rz5.<n>, cfs- or uds-shaped ids, ...). Candidates
-# are message tokens of 3+ chars containing a digit (all known fleets mint
-# ids that way); each is checked with `br show` until one passes, at most 20
-# lookups. Merge/template sources are exempt (their messages are generated);
-# repos without a tracker are skipped, never blocked. Test seams: BEADS_DB
-# overrides the tracker path, BR_BIN overrides the br binary under test.
+# are message tokens of 3+ chars; existence is decided by `br show` alone, not
+# by token shape, so digit-less real ids (ompkit-kxdy) pass while made-up
+# tokens are refused. Each candidate is checked with `br show` until one
+# passes, at most 20 lookups. Merge/template sources are exempt (their
+# messages are generated); repos without a tracker are skipped, never
+# blocked. Test seams: BEADS_DB overrides the tracker path, BR_BIN overrides
+# the br binary under test.
 set -u
 
 FILE=${1:-}
@@ -29,7 +31,7 @@ else
 fi
 [ -f "$DB" ] || exit 0
 MSG=$(cat -- "$FILE" 2>/dev/null) || exit 0
-CANDIDATES=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | grep '[0-9]' | sort -u | head -20) || true
+CANDIDATES=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | sort -u | head -20) || true
 if [ -z "$CANDIDATES" ]; then
 	printf 'commit-msg-bead: refusing commit with no bead-like token; name a bead id the tracker resolves\n' >&2
 	exit 4
