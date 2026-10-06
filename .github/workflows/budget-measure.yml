@@ -9,7 +9,7 @@ on:
         description: Budget repetitions per leg
         type: string
         required: false
-        default: "3"
+        default: "5"
 
 permissions:
   contents: read
@@ -54,7 +54,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          results_dir="$RUNNER_TEMP/budget-measure-${{ matrix.target }}-${{ matrix.os }}"
+          mkdir -p "$results_dir"
+          missing_report=0
           for i in $(seq 1 "${{ inputs.runs }}"); do
-            echo "--- run $i target=${{ matrix.target }} os=${{ matrix.os }}"
-            bun scripts/regex-budget.ts --judge-regardless-of-load 2>&1 | grep -E "live stream:|^stream |JSON_REPORT" | head -12
+            output="$results_dir/run-$i.log"
+            rc=0
+            bun scripts/regex-budget.ts --judge-regardless-of-load >"$output" 2>&1 || rc=$?
+            echo "--- run $i target=${{ matrix.target }} os=${{ matrix.os }} rc=$rc"
+            grep -E '^(REGEX-BUDGET:|live stream:|stream |JSON_REPORT=)' "$output" || true
+            if ! grep -q '^REGEX-BUDGET: ' "$output"; then
+              echo "No budget summary on run $i; full output: $output" >&2
+              missing_report=1
+            fi
           done
+          exit "$missing_report"
