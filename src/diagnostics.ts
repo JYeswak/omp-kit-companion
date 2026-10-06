@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -789,15 +790,75 @@ function nativeProfileArgs(ompPath: string, profile: string, command: "ttsr" | "
 	return [ompPath, ...(profile === "default" ? [] : ["--profile", profile]), command, "list", "--json"];
 }
 
+/** Config bytes copied per OMP state dir; OMP databases and stores stay behind. */
+const PROBE_CONFIG_COPY_BYTES = 1024 * 1024;
+
+/** Copy small non-database files so OMP resolves the profile; skip the rest. */
+function copyProbeConfigs(fromDir: string, toDir: string): void {
+	let entries: string[];
+	try {
+		entries = readdirSync(fromDir);
+	} catch {
+		return;
+	}
+	mkdirSync(toDir, { recursive: true });
+	for (const entry of entries) {
+		if (entry === "." || entry === "..") continue;
+		const source = join(fromDir, entry);
+		let stat;
+		try {
+			stat = lstatSync(source);
+		} catch {
+			continue;
+		}
+		if (!stat.isFile()) continue;
+		if (stat.size > PROBE_CONFIG_COPY_BYTES) continue;
+		const lower = entry.toLowerCase();
+		if (lower.endsWith(".db") || lower.endsWith(".db-wal") || lower.endsWith(".db-shm") || lower.endsWith(".db-journal")) continue;
+		try {
+			writeFileSync(join(toDir, entry), readFileSync(source));
+		} catch {
+			// Unreadable config reads as absent; the probe reports it.
+		}
+	}
+}
+
+/**
+ * Isolated HOME for OMP probes. OMP initializes SQLite state (agent.db-wal
+ * and agent.db-shm) under $HOME on startup, so probing with the inspected
+ * HOME mutates it. The isolated copy carries only the small config files OMP
+ * needs to resolve the profile; rule and plugin paths in OMP output stay
+ * absolute, so findings match a real-HOME run byte for byte. Cleanup removes
+ * the whole tree; call it in a finally.
+ */
+export function isolatedProbeHome(home: string, profile: string): { home: string; cleanup: () => void } {
+	const root = mkdtempSync(join(tmpdir(), "omp-kit-probe-home-"));
+	const tempHome = join(root, "home");
+	copyProbeConfigs(join(home, ".omp", "agent"), join(tempHome, ".omp", "agent"));
+	copyProbeConfigs(join(home, ".omp", "profiles", profile, "agent"), join(tempHome, ".omp", "profiles", profile, "agent"));
+	return { home: tempHome, cleanup: () => {
+		try {
+			rmSync(root, { recursive: true, force: true });
+		} catch {
+			// Best effort; the OS reaps temp.
+		}
+	} };
+}
+
 
 export function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
 	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const env = { ...process.env, HOME: home };
+	const isolated = isolatedProbeHome(home, profile);
+	const env = { ...process.env, HOME: isolated.home };
 	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
-	const result = spawnSync(executable!, args, { cwd: home, env, encoding: "utf8", timeout: 15000 });
-	if (result.error) throw result.error;
-	if (result.status !== 0) throw new Error(`${command} exited ${result.status ?? "unknown"}`);
-	return JSON.parse(result.stdout);
+	try {
+		const result = spawnSync(executable!, args, { cwd: home, env, encoding: "utf8", timeout: 15000 });
+		if (result.error) throw result.error;
+		if (result.status !== 0) throw new Error(`${command} exited ${result.status ?? "unknown"}`);
+		return JSON.parse(result.stdout);
+	} finally {
+		isolated.cleanup();
+	}
 }
 function pluginEntries(value: unknown): Record<string, unknown>[] {
 	if (!record(value)) return [];
@@ -851,12 +912,17 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 }
 async function runEffectiveRuleProbeAsync(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
 	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const env = { ...process.env, HOME: home };
+	const isolated = isolatedProbeHome(home, profile);
+	const env = { ...process.env, HOME: isolated.home };
 	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
-	const child = Bun.spawn([executable!, ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
-	const status = await child.exited;
-	if (status !== 0) throw new Error(`${command} exited ${status}`);
-	return JSON.parse(await new Response(child.stdout).text());
+	try {
+		const child = Bun.spawn([executable!, ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+		const status = await child.exited;
+		if (status !== 0) throw new Error(`${command} exited ${status}`);
+		return JSON.parse(await new Response(child.stdout).text());
+	} finally {
+		isolated.cleanup();
+	}
 }
 
 export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, concurrency = 6): Promise<Finding> {

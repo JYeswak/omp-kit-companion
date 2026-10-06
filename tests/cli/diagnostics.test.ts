@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -642,3 +642,46 @@ test("diagnose includes the billing row only when a probe is supplied", async ()
 	const flagged = await diagnose({ root: f.root, home: f.home, actionsBilling: { repo: "o/r", isPrivate: true, actionsEnabled: true } });
 	expect(finding(flagged, "actions-billing").status).toBe("FAIL");
 });
+
+test("effective-rules probe leaves the inspected HOME byte- and mtime-identical", async () => {
+	// RELEASE BLOCKER A: OMP initializes SQLite state (agent.db-wal/shm)
+	// under $HOME on startup, so probing with the inspected HOME mutated it.
+	// The probe runs OMP against an isolated copy carrying only small configs.
+	const omp = resolveOmpIdentity(process.env).launcher;
+	const home = mkdtempSync(join(tmpdir(), "omp-kit-probe-home-"));
+	fixtures.push(home);
+	mkdirSync(join(home, ".omp", "agent"), { recursive: true });
+	writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory:\n  backend: off\n");
+	mkdirSync(join(home, ".omp", "profiles", "native-fixture", "agent"), { recursive: true });
+	writeFileSync(join(home, ".omp", "profiles", "native-fixture", "agent", "config.yml"), "memory:\n  backend: off\n");
+	const snapshot = (dir: string): Record<string, string> => {
+		const out: Record<string, string> = {};
+		const stack: string[] = [dir];
+		while (stack.length) {
+			const current = stack.pop() as string;
+			let entries: string[];
+			try {
+				entries = readdirSync(current);
+			} catch {
+				continue;
+			}
+			for (const entry of entries) {
+				if (entry === "." || entry === "..") continue;
+				const path = join(current, entry);
+				let stat;
+				try {
+					stat = lstatSync(path);
+				} catch {
+					continue;
+				}
+				out[path] = `${stat.mode & 0o777}:${stat.size}:${stat.mtimeMs}`;
+				if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
+			}
+		}
+		return out;
+	};
+	const before = snapshot(home);
+	const report = await inspectEffectiveRulesAsync({ home, ompPath: omp, kitVersion: null, ompVersion: null, rules: [], profiles: [{ name: "native-fixture" }] });
+	expect(snapshot(home)).toEqual(before);
+	expect(JSON.stringify(report)).toContain("native-fixture");
+}, 120_000);
