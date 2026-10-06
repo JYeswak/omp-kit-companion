@@ -159,17 +159,38 @@ describe("hosts.yml repair", () => {
 });
 
 describe("github finding fold", () => {
-	test("FAIL names failing capabilities", async () => {
+	test("by-design FAIL plus everything else PASS gives overall OK", async () => {
 		const seen: string[] = [];
 		const rows = await probeGithubCapabilities({
 			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
 			token: "github_pat_fine123", tokenSource: "test",
-			fetchImpl: stubFetch(fullRoutes, seen),
+			fetchImpl: stubFetch({
+				"/repos/acme/foreign": { status: 200, body: { has_issues: true } },
+				"/repos/me/owned": { status: 200, scopes: "repo, workflow", body: { permissions: { push: true } } },
+				"/repos/me/owned/actions/runs?per_page=1": { status: 200, body: { total_count: 0 } },
+			}, seen),
 		});
+		expect(rows.find(row => row.capability === "issue_create_foreign")).toMatchObject({ status: "FAIL", expected: true });
 		const finding = githubFinding(rows);
 		expect(finding.component).toBe("github");
+		expect(finding.status).toBe("OK");
+		expect(finding.reason).toContain("expected by design");
+	});
+	test("an unexpected FAIL gives overall FAIL naming only it", async () => {
+		const seen: string[] = [];
+		const rows = await probeGithubCapabilities({
+			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
+			token: "ghp_classic123", tokenSource: "test",
+			fetchImpl: stubFetch({
+				"/repos/acme/foreign": { status: 200, body: { has_issues: true } },
+				"/repos/me/owned": { status: 403, body: null },
+				"/repos/me/owned/actions/runs?per_page=1": { status: 200, body: { total_count: 0 } },
+			}, seen),
+		});
+		const finding = githubFinding(rows);
 		expect(finding.status).toBe("FAIL");
-		expect(finding.reason).toContain("issue_create_foreign");
+		expect(finding.reason).toContain("push_owned");
+		expect(finding.reason).not.toContain("issue_create_foreign");
 	});
 });
 

@@ -23,14 +23,10 @@ export interface GhCapabilityRow {
 	capability: "issue_create_foreign" | "push_owned" | "workflow_dispatch" | "run_read";
 	credential: GhCredential;
 	status: GhCapabilityStatus;
+	/** True when this outcome is the designed behavior (not an alarm). */
+	expected?: boolean;
 	missing_scope?: string;
 	remedy?: string;
-}
-
-export interface GhFetchResponse {
-	status: number;
-	headers: Record<string, string>;
-	json: unknown;
 }
 
 export type GhFetch = (url: string, init: { method: string; headers: Record<string, string> }) => Promise<GhFetchResponse>;
@@ -153,7 +149,7 @@ export async function probeGithubCapabilities(input: GhProbeInput): Promise<GhCa
 	// issue_create_foreign: a fine-grained token is repo-scoped and cannot file
 	// on foreign repos; the classic token (public_repo) can.
 	if (credential.kind === "fine-grained") {
-		rows.push({ capability: "issue_create_foreign", credential, status: "FAIL", missing_scope: "repo-wide issue create", remedy: "File foreign-repo issues with the classic GH_ISSUES_TOKEN (public_repo), injected per call, never written to hosts.yml." });
+		rows.push({ capability: "issue_create_foreign", credential, status: "FAIL", expected: true, missing_scope: "repo-wide issue create", remedy: "File foreign-repo issues with the classic GH_ISSUES_TOKEN (public_repo), injected per call, never written to hosts.yml." });
 	} else {
 		const repo = await getJson(fetchImpl, found.token, `/repos/${input.foreignRepo}`);
 		const body = repo.body;
@@ -186,14 +182,16 @@ export async function probeGithubCapabilities(input: GhProbeInput): Promise<GhCa
 }
 
 export function githubFinding(rows: GhCapabilityRow[]): Finding {
-	const failed = rows.filter(row => row.status === "FAIL");
+	const failed = rows.filter(row => row.status === "FAIL" && row.expected !== true);
+	const expected = rows.filter(row => row.status === "FAIL" && row.expected === true);
 	const unverified = rows.filter(row => row.status === "UNVERIFIED");
+	const expectedNote = expected.length ? ` (${expected.length} expected by design: ${expected.map(row => row.capability).join(", ")})` : "";
 	return {
 		component: "github",
 		status: failed.length ? "FAIL" : unverified.length ? "UNVERIFIED" : "OK",
 		reason: failed.length
-			? `${failed.length} GitHub capabilit${failed.length === 1 ? "y" : "ies"} failing: ${failed.map(row => row.capability).join(", ")}`
-			: unverified.length ? `${unverified.length} GitHub capabilities unverified` : "All GitHub capability probes pass",
+			? `${failed.length} GitHub capabilit${failed.length === 1 ? "y" : "ies"} failing: ${failed.map(row => row.capability).join(", ")}${expectedNote}`
+			: unverified.length ? `${unverified.length} GitHub capabilities unverified${expectedNote}` : `All GitHub capability probes pass${expectedNote}`,
 		recommended_action: failed.length
 			? (failed[0]!.remedy ?? "Rerun omp-kit doctor --scope github.")
 			: "No action required.",
