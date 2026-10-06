@@ -1,0 +1,2 @@
+- PI1 live scenarios run omp in the prepared setup repo (not an empty sibling), and the MCP judge accepts OMP 18.6.1's single-underscore tool spelling.
+- PI1 scenario branches no longer embed the integration name (shell errors echoing the path self-matched judge regexes).

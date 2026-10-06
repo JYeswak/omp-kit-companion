@@ -294,13 +294,13 @@ function containedOmpCommand(input: IntegrationsInput, ompPath: string, args: st
 }
 
 /** Run one scripted mock-model turn set against a profile in an isolated HOME. */
-export async function runLiveScenario(input: IntegrationsInput & { profile: string },
+export async function runLiveScenario(input: IntegrationsInput & { profile: string; repo: string },
 	scenario: ScenarioDef, vars: Record<string, string>): Promise<LiveAttempt> {
 	const kind = scenario.kind;
 	const integration = scenario.integration;
 	const runRoot = join(input.workDir, `itg-${input.profile}-${integration}-${kind}`);
 	const home = join(runRoot, "home");
-	const repo = join(runRoot, "repo");
+	const repo = input.repo;
 	const tempDir = join(runRoot, "tmp");
 	const isolatedAgentDir = join(home, ".omp/profiles", input.profile, "agent");
 	const configSource = join(input.home, ".omp/profiles", input.profile, "agent/config.yml");
@@ -539,7 +539,9 @@ function judgeMcp(input: JudgeInput): IntegrationVerdict {
 	if (/unknown tool|not found|no such tool/i.test(blob)) {
 		return { ...base, verdict: "ABSENT", detail: "health_check tool not offered to the model", evidence: [] };
 	}
-	if (/mcp__mcp_agent_mail__health_check/i.test(blob) && /"ok"|healthy|uptime|version/i.test(blob)) {
+	// OMP 18.6.1 echoes the MCP tool with one underscore (mcp__mcp_agent_mail_health_check);
+	// older turns use two. The tool fired and answered if either spelling met an ok answer.
+	if (/mcp__mcp_agent_mail__?health_check/i.test(blob) && /"ok"|healthy|uptime|version/i.test(blob)) {
 		return { ...base, verdict: "WIRED", detail: "health_check answered through the profile MCP server", evidence: [] };
 	}
 	return { ...base, verdict: "CONFIGURED_NOT_FIRING",
@@ -812,11 +814,13 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 			}
 			const stamp = `${profile}-${integration}-${runId}`;
 			const repo = join(input.workDir, `repo-${stamp}`);
-			const branch = `itg-${stamp}`;
+			// Branch names must not embed the integration: shell errors echo the
+			// path, and judge regexes would self-match their own evidence.
+			const branch = `itg-${profile}-${runId}`;
 			const marker = integration === "fleet-guard" ? join("/tmp", `${branch}.txt`) : join(repo, "marker.txt");
 			const vars: Record<string, string> = { BRANCH: branch, MARKER: marker };
 			setupScenarioRepo(repo, fire.setup, vars);
-			const fireAttempt = await runLiveScenario({ ...input, profile }, fire, vars);
+			const fireAttempt = await runLiveScenario({ ...input, profile, repo }, fire, vars);
 			let quietAttempt: LiveAttempt | null = null;
 			if (quiet) {
 				const quietRepo = `${repo}-quiet`;
@@ -824,7 +828,7 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 					? join("/tmp", `${branch}-quiet.txt`) : join(quietRepo, "marker.txt");
 				const quietVars = { ...vars, MARKER: quietMarker };
 				setupScenarioRepo(quietRepo, quiet.setup, quietVars);
-				quietAttempt = await runLiveScenario({ ...input, profile }, quiet, quietVars);
+				quietAttempt = await runLiveScenario({ ...input, profile, repo: quietRepo }, quiet, quietVars);
 			}
 			const judgeInput: JudgeInput = { fire: fireAttempt, quiet: quietAttempt, repo, vars };
 			const judge = integration === "kit-guard" ? judgeKitGuard : JUDGES[integration];
