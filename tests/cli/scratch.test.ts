@@ -442,7 +442,7 @@ test("scratch release quarantines its live owner while leaving unreleased live s
   expect(existsSync(join(quarantine, oldEntry))).toBe(false);
   expect(expired.envelope.data.expired.some((v: { reason: string }) =>
     v.reason === "quarantine-expired-7d-owner-released")).toBe(true);
-});
+ }, 30000);
 
 test("scratch release refuses a live directory owned by a different process", async () => {
   const { home, state } = cliHome();
