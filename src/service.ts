@@ -23,8 +23,9 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
-	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },
-};
+ 	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },
+ 	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false },
+ };
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 

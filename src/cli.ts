@@ -50,7 +50,8 @@ import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integra
 import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest } from "./external-pack.ts";
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
-import { matchesBounded } from "./regex-guards.ts";
+ import { matchesBounded } from "./regex-guards.ts";
+ import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
@@ -2387,6 +2388,28 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const report = runLoadWatch(stateRoot);
 			lock.release();
 			return { code: 0, data: { overall: report.verdict, job: job.name, ...report }, verification: "UNVERIFIED" };
+ 		}
+ 		if (job.name === "ci-poller") {
+ 			const stateDir = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+ 			const cachePath = join(stateDir, "omp-kit", CACHE_NAME);
+ 			const cache: CiCacheFile = readCacheFile(cachePath) ?? { version: 1, repos: {} };
+ 			const pollResult = await pollRepos({ fetch: async (url, headers) => {
+ 				const response = await fetch(url, { headers });
+ 				const out: Record<string, string> = {};
+ 				response.headers.forEach((value, key) => { out[key] = value; });
+ 				return { status: response.status, headers: out, json: () => response.json() as Promise<unknown> };
+ 			} }, cache, defaultTrackedRepos());
+ 			try {
+ 				mkdirSync(join(stateDir, "omp-kit"), { recursive: true, mode: 0o700 });
+ 				writeFileSync(cachePath, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
+ 			} catch {
+ 				lock.release();
+ 				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+ 					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "CI cache could not be written to the private state root",
+ 						remediation: "Repair the state root; no runs were recorded." }], verification: "UNVERIFIED" };
+ 			}
+ 			lock.release();
+ 			return { code: 0, data: { overall: "OK", job: job.name, ...pollResult }, verification: "UNVERIFIED" };
 		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {
@@ -2885,9 +2908,20 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
 
-for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
-
-
+ for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+ 
+ async function ciStatusCommand(request: ParsedCommand): Promise<CliResult> {
+ 	const sub = request.command.name;
+ 	if (sub !== "status") return refusal("UNKNOWN_CI_COMMAND", `Unknown ci subcommand: ${sub}`, "Run omp-kit help ci for exact grammar.");
+ 	const stateRoot = receiptStateRoot();
+ 	if (stateRoot === null) return refusal("CI_STATE_UNAVAILABLE", "ci status needs a canonical absolute HOME/state root",
+ 		"Set a canonical HOME and XDG_STATE_HOME; nothing was fetched.");
+ 	const cache = readCacheFile(join(stateRoot, CACHE_NAME));
+ 	if (cache === null) return { code: 0, data: { overall: "UNAVAILABLE", stale_after_ms: STALE_AFTER_MS, repos: {} }, verification: "UNVERIFIED" };
+ 	const data = readStatus(cache, Date.now());
+ 	return { code: 0, data: { overall: data.overall, stale_after_ms: data.stale_after_ms, repos: data.repos }, verification: "UNVERIFIED" };
+ }
+ registerCommandHandler("ci status", ciStatusCommand);
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 	const scope = "kit";
 	const applying = request.flags.has("--apply");

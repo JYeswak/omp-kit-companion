@@ -1,0 +1,1 @@
+- GH2: one shared CI poller (ETag/304, Retry-After, cache with fetched_at+source per row); `ci status` reads only the cache.
