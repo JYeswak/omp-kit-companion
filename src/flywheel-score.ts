@@ -28,7 +28,13 @@ export interface FlywheelInput {
 
 export type RunFn = (cmd: string[], env?: Record<string, string>) => { code: number | null; stdout: string; stderr?: string };
 
-const BEAD_ID = /\bompkit-[a-z0-9]+(?:-[a-z0-9]+)*\b/g;
+// Bead ids carry an optional dotted numeric suffix (rz5.113); without the
+// suffix group the matcher truncates them and nothing dotted ever links
+// (FLY2-1: linkage read 1/50 with the fleet on dotted ids).
+const BEAD_ID = /\bompkit-[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[0-9]+)?\b/g;
+// Bare release suffix (rz5.113): resolves against known tracker ids only.
+// Word-bounded alphanumerics around a single dot run; linear, no nesting.
+const BARE_ID = /\brz[0-9]+\.[0-9]+\b/g;
 const DAY_MS = 86_400_000;
 
 export function letterGrade(pct: number): Grade {
@@ -90,6 +96,13 @@ function openBoxes(issue: Issue): number {
 function realIds(text: string, known: Record<string, true>): string[] {
 	const found: Record<string, true> = {};
 	for (const match of text.match(BEAD_ID) ?? []) if (known[match]) found[match] = true;
+	// Bare rz5.NNN resolves like the COMMIT1 hook: to exactly one existing
+	// tracker id. Unknown or ambiguous suffixes never link.
+	for (const bare of text.match(BARE_ID) ?? []) {
+		if (known[bare]) { found[bare] = true; continue; }
+		const candidates = Object.keys(known).filter(id => id.endsWith("-" + bare));
+		if (candidates.length === 1) found[candidates[0]!] = true;
+	}
 	return Object.keys(found);
 }
 

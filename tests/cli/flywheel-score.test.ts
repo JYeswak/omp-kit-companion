@@ -29,6 +29,25 @@ test("each metric grades A on the good shape and F on the bad shape", () => {
 	expect(metricLessons(0, 10).grade).toBe("F");
 });
 
+test("dotted bead ids link in full; truncated prefixes do not", () => {
+	const known = { "ompkit-rc-epic-land-fix-release-dogfood-rz5.113": true as const, "ompkit-2w7h": true as const };
+	expect(metricCommitLinkage(["[test] thing ompkit-rc-epic-land-fix-release-dogfood-rz5.113", "fix ompkit-2w7h"], known).grade).toBe("A");
+	expect(metricCommitLinkage(["[test] thing ompkit-rc-epic-land-fix-release-dogfood-rz5"], known).grade).toBe("F");
+	expect(metricLandingHygiene([{ subject: "[test] x ompkit-rc-epic-land-fix-release-dogfood-rz5.113", merge: false }], known).grade).toBe("A");
+});
+
+test("bare rz ids resolve to exactly one tracker id", () => {
+	const known = {
+		"ompkit-rc-epic-land-fix-release-dogfood-rz9.99": true as const,
+		"ompkit-rc-epic-land-fix-release-dogfood-rz9.97": true as const,
+		"ompkit-other-epic-rz9.97": true as const,
+		"ompkit-2w7h": true as const,
+	};
+	expect(metricCommitLinkage(["fix thing rz9.99"], known).grade).toBe("A");
+	expect(metricCommitLinkage(["fix thing rz9.98"], known).grade).toBe("F");
+	expect(metricCommitLinkage(["fix thing rz9.97"], known).grade).toBe("F");
+});
+
 test("tallyClaims separates self-picks from dispatches inside the window", () => {
 	const since = Date.parse("2026-10-01T00:00:00.000Z");
 	const events = [[
