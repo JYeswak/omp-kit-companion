@@ -596,3 +596,24 @@ test("distinct identities on live panes pass, unavailable tmux is unverified", (
 	expect(clean.status).toBe("OK");
 	expect(inspectPaneIdentity({ listPanes: () => null, resolvePane: () => null, listAgents: () => null }).status).toBe("UNVERIFIED");
 });
+
+test("doctor identity scope reaches the pane finder through diagnose", async () => {
+	const f = fixture();
+	const bin = join(f.base, "bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "tmux"), "#!/bin/sh\nprintf 's 0 0 %%101\\ns 0 1 %%102\\n'\n");
+	chmodSync(join(bin, "tmux"), 0o755);
+	writeFileSync(join(bin, "am"), "#!/bin/sh\nprintf '{\"name\":\"SharedName\"}'\n");
+	chmodSync(join(bin, "am"), 0o755);
+	const savedPath = process.env.PATH;
+	process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${savedPath ?? ""}`;
+	try {
+		const rows = await diagnose({ root: f.root, home: f.home, project: f.project, scope: "identity" });
+		const row = finding(rows, "identity");
+		expect(row.status).toBe("FAIL");
+		expect(row.reason).toContain("SharedName");
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
+	}
+});

@@ -529,6 +529,7 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 		missing.length ? "Install each missing tool with its command and rerun omp-kit doctor --scope regex-tools." : "No action required.",
 		{ tools, missing: missing.map((tool) => tool.bin), proof: "EXECUTABLE_ON_PATH" });
 }
+
 export interface PaneIdentity { session: string; window: string; index: string; id: string }
 export interface PaneIdentityAgent { name: string; lastActiveMs: number | null }
 export interface PaneIdentityDeps {
@@ -545,7 +546,9 @@ const PANE_AGENT_STALE_MS = 7 * 24 * 3600 * 1000;
 
 function paneArgs(binary: string, args: readonly string[]): { code: number; out: string } {
 	try {
-		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore" });
+		// env is passed explicitly: Bun resolves the binary against the PATH
+		// in effect at call time, not a startup snapshot.
+		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env } });
 		return { code: run.exitCode, out: run.stdout.toString() };
 	} catch {
 		return { code: 127, out: "" };
@@ -570,8 +573,15 @@ export function defaultPaneIdentity(projectKey: string): PaneIdentityDeps {
 			if (resolved.code !== 0) return null;
 			try {
 				const value: unknown = JSON.parse(resolved.out);
-				const record = (Array.isArray(value) ? value[0] : value) as { name?: unknown } | null;
-				return record !== null && typeof record === "object" && typeof record.name === "string" && record.name !== "" ? record.name : null;
+				const record: unknown = Array.isArray(value) ? value[0] : value;
+				if (record !== null && typeof record === "object") {
+					for (const key of ["agent_name", "name"] as const) {
+						if (!(key in record)) continue;
+						const candidate: unknown = record[key];
+						if (typeof candidate === "string" && candidate !== "") return candidate;
+					}
+				}
+				return null;
 			} catch {
 				return null;
 			}
@@ -633,9 +643,6 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 		"Register each pane at spawn (agent-spawn-env.sh) and give every pane its own identity; resolve collisions before trusting that pane's writes.",
 		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
 }
-
-
-
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
 export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
@@ -781,6 +788,7 @@ function inspectBeadAcceptance(project: string): Finding {
 		? finding("beads", "FAIL", "Beads put acceptance in the description while the acceptance_criteria field is empty", "Move tests and acceptance into acceptance_criteria; do not restate them in the description.", { tracker_path: trackerPath, missing_acceptance: missingAcceptance })
 		: finding("beads", "OK", "No description acceptance section is missing its acceptance_criteria field", "No action required.", { tracker_path: trackerPath, checked_beads: rows.length });
 }
+
 const DUPLICATE_PAIR_SIMILARITY = 0.75;
 const DUPLICATE_MIN_TOKENS = 10;
 const DUPLICATE_MAX_PAIRS = 20;
@@ -845,6 +853,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	}
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
+	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
