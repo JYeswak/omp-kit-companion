@@ -22,8 +22,8 @@ function runPayload(id: number, conclusion: string | null) {
 
 interface FakePlan { etag: string; failFirstWith403?: boolean; resetOnly?: boolean; resetAtSec?: number; seen: string[]; }
 
-function fakeGitHub(plan: FakePlan) {
-	return Bun.serve({ port: 0, fetch(request) {
+ function fakeGitHub(plan: FakePlan) {
+ 	return Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(request) {
 		const url = new URL(request.url);
 		plan.seen.push(`${request.method} ${url.pathname}${url.search}`);
 		if (plan.failFirstWith403 && plan.seen.length === 1) {
