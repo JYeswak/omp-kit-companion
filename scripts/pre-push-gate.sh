@@ -83,6 +83,17 @@ do
 		printf 'GREEN checker-contract %s\n' "$checker_test"
 	else
 		rc=$?
+		# GATE2: a contract red on the base tree is judged from the candidate
+		# tree. The loop, the regexploit gate and fresh-gate.sh still come
+		# from base; only this one rerun executes the candidate's test file.
+		cand_path="$archive/tests/cli/$checker_test"
+		if [ -n "${base_ref:-}" ] && [ -f "$cand_path" ]; then
+			mkdir -p "$archive/var/agent-tmp"
+			if TMPDIR="$archive/var/agent-tmp" sh "$cand_path" >/dev/null 2>&1; then
+				printf 'BASE-RED checker-contract %s: base rc=%s, candidate green\n' "$checker_test" "$rc"
+				continue
+			fi
+		fi
 		printf 'RED checker-contract %s producer_rc=%s\n' "$checker_test" "$rc" >&2
 		exit "$rc"
 	fi

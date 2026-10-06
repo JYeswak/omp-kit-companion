@@ -17,7 +17,7 @@ create_checker_test_stubs() {
 	repo=$1
 	failing_test=${2:-}
 	mkdir -p "$repo/tests/cli"
-	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh; do
+	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh; do
 		test_path="$repo/tests/cli/$checker_test"
 		if [ "$checker_test" = "$failing_test" ]; then
 			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
@@ -137,5 +137,79 @@ for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.
 		fail=$((fail + 1)); printf 'FAIL checker-contract-%s: rc=%s out<<<%s>>>\n' "$checker_test" "$rc" "$out"
 	fi
 done
+
+# 8. GATE2 row A: base-red contract plus a candidate fix is accepted with BASE-RED named
+g2="$TMP/g2base"
+rm -rf "$g2"
+mkdir -p "$g2/scripts" "$g2/var/agent-tmp"
+git -C "$g2" init -q
+git -C "$g2" config user.email "test@example.invalid"
+git -C "$g2" config user.name "worker-1"
+printf '#!/bin/sh\nexit 0\n' > "$g2/scripts/fresh-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$g2/scripts/regexploit-gate.py"
+create_checker_test_stubs "$g2" "br-shim.test.sh"
+git -C "$g2" add -A
+git -C "$g2" commit -qm "[test] base with red br-shim contract"
+printf '#!/bin/sh\nprintf "CHECKER-PASS: br-shim.test.sh\\n"\n' > "$g2/tests/cli/br-shim.test.sh"
+git -C "$g2" add -A
+git -C "$g2" commit -qm "[test] head fixes br-shim contract"
+g2base=$(git -C "$g2" rev-parse HEAD~1)
+g2head=$(git -C "$g2" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$g2head" "$g2base" | (cd -- "$g2" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && grep -q "BASE-RED checker-contract br-shim.test.sh" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL base-red-accepts-fix: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
+# 9. GATE2 row B: base-red contract plus a still-red candidate is refused, never accepted
+printf '#!/bin/sh\nexit 0\n' > "$g2/scripts/fresh-gate.sh"
+printf '#!/bin/sh\nprintf "CHECKER-FAIL: br-shim.test.sh\\n" >&2\nexit 7\n' > "$g2/tests/cli/br-shim.test.sh"
+git -C "$g2" add -A
+git -C "$g2" commit -qm "[test] head still red"
+g2head2=$(git -C "$g2" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$g2head2" "$g2base" | (cd -- "$g2" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" != "0" ] && grep -q "RED checker-contract br-shim.test.sh" "$TMP/out" && ! grep -q "candidate green" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL base-red-refuses-still-red: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
+# 10. GATE2 row C: green base plus a candidate that adds a vulnerable regex is refused by the base gate scripts judging the candidate tree
+g3="$TMP/g3base"
+rm -rf "$g3"
+mkdir -p "$g3/scripts" "$g3/var/agent-tmp"
+git -C "$g3" init -q
+git -C "$g3" config user.email "test@example.invalid"
+git -C "$g3" config user.name "worker-1"
+printf '#!/bin/sh\nexit 0\n' > "$g3/scripts/fresh-gate.sh"
+cat > "$g3/scripts/regexploit-gate.py" <<'PYEOF'
+#!/usr/bin/env python3
+import subprocess, sys
+args = sys.argv[1:]
+head = args[args.index("--head") + 1] if "--head" in args else "HEAD"
+base = args[args.index("--base") + 1] if "--base" in args else None
+changed = subprocess.run(["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", base, head] if base else ["git", "ls-tree", "-r", "--name-only", head], capture_output=True, text=True).stdout.split()
+bad = [p for p in changed if p.endswith(".ts") and "(a+)+b" in subprocess.run(["git", "show", f"{head}:{p}"], capture_output=True, text=True).stdout]
+print("vulnerable: " + ", ".join(bad) if bad else "clean")
+sys.exit(1 if bad else 0)
+PYEOF
+create_checker_test_stubs "$g3"
+git -C "$g3" add -A
+git -C "$g3" commit -qm "[test] green base"
+printf 'const ok = /(a+)+b/.test(source);\n' > "$g3/evil.ts"
+git -C "$g3" add -A
+git -C "$g3" commit -qm "[test] head adds vulnerable regex"
+g3base=$(git -C "$g3" rev-parse HEAD~1)
+g3head=$(git -C "$g3" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$g3head" "$g3base" | (cd -- "$g3" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" != "0" ] && grep -q "vulnerable: evil.ts" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL green-base-refuses-break: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
