@@ -90,6 +90,7 @@ If unit and e2e coverage is unclear, run once: "Do we have full unit test covera
 
 ### 7. Build, continuously
 Workers claim ready beads with `bv` and build (`multi-agent-swarm-workflow`, `vibing-with-ntm`: fungible agents, the "code first" doctrine, no per-change full builds). There is no planning freeze for unrelated beads. When code reveals a plan error, fix the plan and the affected beads in place (one owner), and keep building the rest.
+Claim from `bv --robot-next` (RERUN-REQUEST grades first); hold at most one bead at a time — release, with a handoff comment, before claiming the next **[fleet: one owner, one claim; parallel claims split focus and stall the ready queue]**.
 
 Every change follows Jeff's cycle (agent-flywheel.com `/complete-guide`): "Pull latest, reserve files, edit and test, commit immediately, push, release reservation." All agents commit directly to main; "push after every commit (unpushed commits are invisible to other agents)." Reserve at the moment you edit, not for the whole bead, and release on push. Never stash, revert, overwrite or otherwise disturb another agent's work. One designated committer agent sweeps every 1–2 hours and commits whatever is left in logical groups without editing code ("Designating one agent prevents merge conflicts").
 
