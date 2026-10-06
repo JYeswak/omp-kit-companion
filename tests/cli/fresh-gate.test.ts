@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { cpSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -9,17 +10,37 @@ const gate = join(root, "scripts/fresh-gate.sh");
 function fixture(): string {
 	const dir = mkdtempSync(join(scratchRoot, "fresh-gate-test-"));
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
-	for (const name of ["src", "rules", "scripts", "checkers", "cases", "policy", "retired", "extensions", "examples"]) {
-		cpSync(join(root, name), join(dir, name), { recursive: true });
+	mkdirSync(join(dir, "rules"));
+	mkdirSync(join(dir, "scripts"));
+	for (const name of ["rules/bash-glob-silenced.md", "scripts/build-manifest.sh", "scripts/rule-class.ts", "scripts/ttsr-harness.ts"]) {
+		cpSync(join(root, name), join(dir, name));
 	}
-	writeFileSync(join(dir, "package.json"), readFileSync(join(root, "package.json")));
 	return dir;
 }
 
-// Manifest/update tests exercise manifest logic, not regex cost: they state
-// their reason and skip only the budget stage. Direct budget-gate tests in
-// regex-budget.test.ts prove the stage still runs by default.
-const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "fixture exercises manifest logic, not regex cost" };
+
+// Manifest tests isolate manifest behavior from compile/harness work.
+// The test-local Bun shim supplies fixture classifications, then stops at the
+// first downstream Bun command; regex-budget.test.ts exercises RX1 by default.
+const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };
+function manifestTestEnv(dir: string): Record<string, string> {
+	const fakeBin = join(dir, "bin");
+	mkdirSync(fakeBin);
+	const fakeBun = join(fakeBin, "bun");
+	writeFileSync(fakeBun, `#!/bin/sh
+case "$*" in
+  *scripts/rule-class.ts*) printf 'bash-glob-silenced\\ttripwire\\n' ;;
+  *)
+    echo "fresh-gate.test: stopped after manifest verification" >&2
+    exit 99
+    ;;
+esac
+`);
+	chmodSync(fakeBun, 0o755);
+	return { ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}` };
+}
+
+
 
 function run(script: string, args: string[], extraEnv: Record<string, string> = {}) {
 	return Bun.spawnSync(["sh", script, ...args], { cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, ...extraEnv } });
@@ -28,10 +49,10 @@ function run(script: string, args: string[], extraEnv: Record<string, string> = 
 test("fresh gate refuses an edited rule with a stale manifest", () => {
 	const dir = fixture();
 	try {
-		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		const rule = join(dir, "rules/bash-glob-silenced.md");
+		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nStale manifest plant.\n");
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], SKIP_BUDGET);
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], manifestTestEnv(dir));
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).not.toBe(0);
 		expect(output).toContain("build-manifest --check: FAIL");
@@ -40,16 +61,20 @@ test("fresh gate refuses an edited rule with a stale manifest", () => {
 	}
 });
 
-test("fresh gate accepts rule-only edits without a committed manifest", () => {
+
+test("fresh gate validates the package-time manifest for rule-only edits", () => {
 	const dir = fixture();
 	try {
 		const rule = join(dir, "rules/bash-glob-silenced.md");
-		writeFileSync(rule, readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n");
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], SKIP_BUDGET);
+		const editedRule = readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n";
+		writeFileSync(rule, editedRule);
+		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], manifestTestEnv(dir));
 		const output = result.stdout.toString() + result.stderr.toString();
-		expect(result.exitCode).toBe(0);
-		expect(output).toContain("FRESH-GATE: GREEN");
-		expect(output).toContain("focused regex-budget: SKIPPED");
+		expect(result.exitCode).not.toBe(0);
+		expect(output).toContain("GREEN manifest");
+		expect(output).toContain("fresh-gate.test: stopped after manifest verification");
+		const expectedHash = createHash("sha256").update(editedRule).digest("hex");
+		expect(readFileSync(join(dir, "MANIFEST.tsv"), "utf8")).toContain(`bash-glob-silenced\t${expectedHash}\ttripwire\t`);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
