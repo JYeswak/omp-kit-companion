@@ -136,6 +136,18 @@ test("new gitlink refuses while baseline gitlinks are tolerated", async () => {
 	expect(headSha(repo)).toBe(before);
 });
 
+test("admitted edit commits with all 5 allowlisted gitlinks tracked (verdict leg)", async () => {
+	const { repo } = fixtureRepo();
+	const blob = sh(repo, "hash-object", "-w", "--stdin").stdout.trim();
+	for (const path of ["external-skills/app-store-connect-skill", "external-skills/claude-code-apple-skills", "mcps/postgres-mcp.disabled", "skills/.archived-non-skills-20261001/rawr-slides", "skills/.non-skill-dirs-relocated-20260610/rawr-slides"]) {
+		sh(repo, "update-index", "--add", "--cacheinfo", `160000,${blob},${path}`);
+	}
+	sh(repo, "commit", "-m", "track gitlinks");
+	writeFileSync(join(repo, "notes.md"), "verdict leg\n");
+	const result = await run(repo, join(repo, "..", "state"));
+	expect(result).toMatchObject({ status: "PUSHED", committed: true, pushed: true });
+});
+
 test("dirty settings.json refuses and stays unstaged", async () => {
 	const { repo } = fixtureRepo();
 	writeFileSync(join(repo, "settings.json"), '{"a":1}\n');

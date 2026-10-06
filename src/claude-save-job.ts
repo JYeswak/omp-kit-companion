@@ -149,7 +149,7 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 		const tracked = git(["ls-files"]);
 		const outside = checkSkillLibrary((tracked.stdout + "\n" + untracked.filter(p => basename(p) === "SKILL.md").join("\n")).split("\n").filter(p => p !== ""));
 		if (outside.length > 0) return record(ctx, fail(ctx, "SKILL_OUTSIDE_LIBRARY", `SKILL.md outside skills/: ${outside.join(", ")}`));
-		const candidates = [...dirtyTracked, ...untracked.filter(path => DENIED_BASENAMES[basename(path)] !== true && !allowGitlinks.has(path))];
+		const candidates = [...dirtyTracked.filter(path => !allowGitlinks.has(path)), ...untracked.filter(path => DENIED_BASENAMES[basename(path)] !== true && !allowGitlinks.has(path))];
 		if (candidates.length === 0) {
 			const result: ClaudeSaveResult = { status: "CLEAN", receiptId: null, committed: false, pushed: false, reason: "no admitted changes" };
 			return record(ctx, result);
@@ -163,15 +163,21 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 			git(["reset", "-q"]);
 			return record(ctx, fail(ctx, "DENIED_STAGED", `denied files reached the index, reset: ${stagedDenied.join(", ")}`));
 		}
-		const stagedIndex = git(["ls-files", "-s", "--cached"]);
+		const stagedRaw = git(["diff", "--cached", "--raw", "-z"]);
 		const stagedGitlinks: string[] = [];
-		for (const line of stagedIndex.stdout.split("\n")) {
-			const match = /^160000 [0-9a-f]{40} \d+\t(.*)$/.exec(line);
-			if (match) stagedGitlinks.push(match[1]!);
+		const rawParts = stagedRaw.stdout.split("\0");
+		for (let index = 0; index < rawParts.length; index++) {
+			const entry = rawParts[index]!;
+			if (!entry.startsWith(":")) continue;
+			const fields = entry.slice(1).split(" ");
+			if (fields.length < 5) continue;
+			const path = rawParts[index + 1];
+			if (path === undefined || path === "") continue;
+			if ((fields[0] === "160000" || fields[1] === "160000") && !allowGitlinks.has(path)) stagedGitlinks.push(path);
 		}
 		if (stagedGitlinks.length > 0) {
 			git(["reset", "-q"]);
-			return record(ctx, fail(ctx, "GITLINK_STAGED", `gitlinks reached the index, reset: ${stagedGitlinks.join(", ")}`));
+			return record(ctx, fail(ctx, "GITLINK_STAGED", `new gitlinks reached the index, reset: ${stagedGitlinks.join(", ")}`));
 		}
 		if (staged.length === 0) {
 			const result: ClaudeSaveResult = { status: "CLEAN", receiptId: null, committed: false, pushed: false, reason: "candidates reduced to nothing after staging audit" };
