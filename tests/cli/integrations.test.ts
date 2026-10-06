@@ -161,7 +161,10 @@ test("planted profile without the dcg extension reports ABSENT without running",
 }, 120_000);
 
 test("planted profile without the MCP server reports ABSENT", () => {
-	const wiring = readProfileWiring(plantHome, "planted");
+	const dir = join(base, "no-mcp-home", ".omp/profiles/planted/agent");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "config.yml"), profileConfig([]));
+	const wiring = readProfileWiring(join(base, "no-mcp-home"), "planted");
 	const verdict = staticVerdict(wiring, "mcp-agent-mail");
 	expect(verdict?.verdict).toBe("ABSENT");
 });

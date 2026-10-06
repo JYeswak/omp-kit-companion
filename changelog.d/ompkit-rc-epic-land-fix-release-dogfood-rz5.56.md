@@ -1,1 +1,1 @@
-Integration proof resolves symlink ancestors before rejecting work/report paths inside `~/.omp`, excludes macOS `/tmp` work roots, and verifies the RCH rewrite through the live fixture. No-op Agent Mail and kit-guard mutants exercise negative verdicts.
+- PI1 MCP ABSENT: the planted no-server profile is separate from the shared fixture (which gained a server), so the ABSENT assertion tests the verdict, not the fixture.
