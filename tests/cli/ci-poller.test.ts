@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { CACHE_NAME, STALE_AFTER_MS, pollRepos, readStatus, type CiCacheFile, type CiFetchResponse } from "../../src/ci-cache.ts";
+ import { join, resolve } from "node:path";
+ import { COMMANDS } from "../../src/commands.ts";
+ import { CACHE_NAME, STALE_AFTER_MS, pollRepos, readStatus, type CiCacheFile, type CiFetchResponse } from "../../src/ci-cache.ts";
 
 const roots: string[] = [];
 const savedApi = process.env.OMP_KIT_GITHUB_API;
@@ -19,15 +20,16 @@ function runPayload(id: number, conclusion: string | null) {
 		conclusion, created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T01:00:00Z" };
 }
 
-interface FakePlan { etag: string; failFirstWith403?: boolean; resetInSeconds?: number; seen: string[]; }
+interface FakePlan { etag: string; failFirstWith403?: boolean; resetOnly?: boolean; resetAtSec?: number; seen: string[]; }
 
 function fakeGitHub(plan: FakePlan) {
 	return Bun.serve({ port: 0, fetch(request) {
 		const url = new URL(request.url);
 		plan.seen.push(`${request.method} ${url.pathname}${url.search}`);
 		if (plan.failFirstWith403 && plan.seen.length === 1) {
-			return new Response("rate limited", { status: 403,
-				headers: { "retry-after": "2", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + (plan.resetInSeconds ?? 120)) } });
+			const headers: Record<string, string> = { "x-ratelimit-reset": String(plan.resetAtSec ?? (Math.floor(Date.now() / 1000) + 3600)) };
+			if (!plan.resetOnly) headers["retry-after"] = "2";
+			return new Response("rate limited", { status: 403, headers });
 		}
 		if (request.headers.get("if-none-match") === plan.etag) return new Response(null, { status: 304 });
 		return Response.json({ workflow_runs: [runPayload(1, "success")] }, { headers: { etag: plan.etag } });
@@ -79,17 +81,39 @@ test("a 403 with retry-after backs off and makes no further requests", async () 
 	server.stop();
 });
 
-test("readStatus marks rows stale past the window and reports no cache", () => {
-	expect(readStatus(null, 1_000_000).overall).toBe("NO_CACHE");
-	const fresh: CiCacheFile = { version: 1, repos: { "o/r": { etag: null,
-		fetched_at: new Date(1_000_000).toISOString(), source: "poll:200", backoff_until_ms: null, runs: [] } } };
-	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS).repos["o/r"]?.stale).toBe(false);
-	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS + 1).repos["o/r"]?.stale).toBe(true);
+test("planted: a reset-only 403 sleeps until x-ratelimit-reset, not the 60s default", async () => {
+	const resetAtSec = Math.floor(9_000_000 / 1000) + 1800;
+	const plan: FakePlan = { etag: '"v9"', failFirstWith403: true, resetOnly: true, resetAtSec, seen: [] };
+	const server = fakeGitHub(plan);
+	process.env.OMP_KIT_GITHUB_API = "http://fake";
+	const cache: CiCacheFile = { version: 1, repos: {} };
+	const result = await pollRepos(depsFor(server.port, 9_000_000), cache, ["o/r", "o/other"]);
+	expect(result.repos["o/r"]?.status).toBe("BACKOFF");
+	expect(result.backoffUntilMs).toBe(resetAtSec * 1000);
+	expect(cache.repos["o/r"]?.backoff_until_ms).toBe(resetAtSec * 1000);
+	expect(plan.seen.length).toBe(1);
+	expect(result.repos["o/other"]).toBeUndefined();
+	server.stop();
 });
 
-test("ci status reads only the cache file", () => {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-status-"));
-	roots.push(home);
+ test("readStatus marks rows stale past the window and reports no cache", () => {
+ 	expect(readStatus(null, 1_000_000).overall).toBe("NO_CACHE");
+ 	const fresh: CiCacheFile = { version: 1, repos: { "o/r": { etag: null,
+ 		fetched_at: new Date(1_000_000).toISOString(), source: "poll:200", backoff_until_ms: null, runs: [] } } };
+ 	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS).repos["o/r"]?.stale).toBe(false);
+ 	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS + 1).repos["o/r"]?.stale).toBe(true);
+ });
+ 
+ test("planted: ci status is wired through the documented grammar", () => {
+ 	const ci = COMMANDS.find(command => command.name === "ci");
+ 	expect(ci).toBeDefined();
+ 	const status = ci?.subcommands?.find(child => child.name === "status");
+ 	expect(status).toBeDefined();
+ 	expect(ci?.example).toContain("ci status");
+ });
+ 
+ test("ci status reads only the cache file", () => {
+ 	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-status-"));
 	const state = join(home, "state", "omp-kit");
 	mkdirSync(state, { recursive: true });
 	const stamped = new Date(Date.now()).toISOString();
@@ -107,6 +131,6 @@ test("ci status reads only the cache file", () => {
 	expect(child.exitCode).toBe(0);
 	const envelope = JSON.parse(child.stdout.toString());
 	expect(envelope.data.overall).toBe("OK");
-	expect(envelope.data.repos["o/r"]?.runs[0]).toMatchObject({ id: 7, stale: false });
-	expect(readFileSync(join(state, CACHE_NAME), "utf8")).toBe(before);
-});
+ 	expect(envelope.data.repos["o/r"]?.runs[0]).toMatchObject({ id: 7, stale: false });
+ 	expect(readFileSync(join(state, CACHE_NAME), "utf8")).toBe(before);
+ });
