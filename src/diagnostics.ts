@@ -4,6 +4,7 @@ import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, ope
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
+import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
 import { inspectStateRoot } from "./state-root.ts";
 import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
@@ -643,6 +644,35 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 		"Register each pane at spawn (agent-spawn-env.sh) and give every pane its own identity; resolve collisions before trusting that pane's writes.",
 		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
 }
+
+const FLYWHEEL_STATUS: Record<Grade, DiagnosticStatus> = { A: "OK", B: "DEGRADED", C: "DEGRADED", D: "FAIL", F: "FAIL" };
+
+/** FLY2 (ompkit-8m75): seven fleet-practice grades from the tracker's beads.db and repo git. Read-only. */
+export function inspectFlywheelScope(project: string): Finding[] {
+	const dir = resolve(project);
+	// Tracker database: the project's own .beads, else br's native BEADS_DB (git repo and tracker live in different checkouts in this fleet).
+	const localDb = join(dir, ".beads", "beads.db");
+	const envDb = process.env.BEADS_DB;
+	const beadsDb = pathState(localDb) === "file" ? localDb : (typeof envDb === "string" && envDb && pathState(envDb) === "file" ? envDb : null);
+	if (!beadsDb) {
+		return [finding("flywheel", "UNVERIFIED", `No tracker database at ${localDb} and no usable BEADS_DB; flywheel grades were not computed`,
+			"Pass the tracker checkout (the repo holding .beads/beads.db) as --project, or set BEADS_DB to its beads.db.", { project: dir })];
+	}
+	const run = (cmd: string[]) => {
+		const [executable, ...args] = cmd;
+		const result = Bun.spawnSync([executable!, ...args], { stdout: "pipe", stderr: "pipe" });
+		return { code: result.exitCode, stdout: result.stdout.toString() };
+	};
+	try {
+		return scoreFlywheel({ repo: dir, beadsDb }, run).map(metric => finding("flywheel", FLYWHEEL_STATUS[metric.grade],
+			`${metric.metric}: ${metric.display} — grade ${metric.grade} (${metric.threshold})`,
+			metric.grade === "A" ? "None." : `Raise ${metric.metric}: ${metric.detail || metric.display}.`,
+			{ metric: metric.metric, value: metric.value, display: metric.display, threshold: metric.threshold, grade: metric.grade, detail: metric.detail }));
+	} catch (error) {
+		return [finding("flywheel", "UNVERIFIED", `Flywheel scoring failed: ${error instanceof Error ? error.message : String(error)}`,
+			"Rerun with a reachable tracker database and git history.", { project: dir })];
+	}
+}
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
 export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
@@ -854,6 +884,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
+	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));

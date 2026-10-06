@@ -1,0 +1,1 @@
+- FLY2 score: `doctor --scope flywheel --project` grades seven fleet practices (bead size, commit linkage, self-pick, landing hygiene, close flow, freshness, verdicts, lessons) from git and the tracker with value, threshold and letter grade; planted A/F fixture suite green.
