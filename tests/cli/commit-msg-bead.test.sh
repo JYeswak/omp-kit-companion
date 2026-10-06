@@ -26,7 +26,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export BR_BIN="$TMP/bin/br"
 export BEADS_DB="$TMP/beads.db"
 : > "$BEADS_DB"
-export KNOWN_IDS="ompkit-2w7h rz5.128"
+export KNOWN_IDS="ompkit-2w7h rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r"
 
 run_case() {
 	name=$1
@@ -50,12 +50,18 @@ run_case nickname-only 4 "fix widgets ID1"
 run_case unknown-id 4 "fix widgets ompkit-nope9"
 # 4. short rz form passes when the tracker knows it
 run_case short-id 0 "wire the loop rz5.128"
-# 5. merge source is exempt
+# 5. cfsios-shaped id passes when the tracker knows it (planted)
+run_case cfs-id 0 "port the app cfs-twenty-app-portfolio-hgub5.2.5"
+# 6. uds-shaped id passes when the tracker knows it (planted)
+run_case uds-id 0 "fix the lane uds-6z2r"
+# 7. a bare version number is not a bead id (planted)
+run_case version-only 4 "upgrade bun 1.4.2"
+# 8. merge source is exempt
 run_case merge-exempt 0 "Merge branch main into x" "merge"
-# 6. missing message file skips
+# 9. missing message file skips
 if sh "$HOOK" "$TMP/absent" > /dev/null 2>&1; then pass=$((pass + 1));
 else fail=$((fail + 1)); printf 'FAIL missing-file\n'; fi
-# 7. no tracker skips without blocking
+# 10. no tracker skips without blocking
 printf '%s\n' "fix widgets ompkit-2w7h" > "$TMP/msg"
 if BEADS_DB="$TMP/absent.db" sh "$HOOK" "$TMP/msg" > /dev/null 2>&1; then pass=$((pass + 1));
 else fail=$((fail + 1)); printf 'FAIL no-tracker\n'; fi

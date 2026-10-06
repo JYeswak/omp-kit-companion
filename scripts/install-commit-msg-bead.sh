@@ -31,8 +31,11 @@ if [ ! -x "$CHAIN" ]; then
 	exit 0
 fi
 if ! grep -q 'hooks.d' "$CHAIN" || ! grep -q 'commit-msg' "$CHAIN"; then
-	echo "install-commit-msg-bead: refusing to bypass an existing non-chain commit-msg hook" >&2
-	exit 2
+	mkdir -p "$(dirname "$DEST")"
+	install_body
+	printf 'installed bead-id hook as chain member (inactive until chained): %s\n' "$DEST"
+	printf 'to activate: make %s run every executable in %s, then re-run this installer\n' "$CHAIN" "$(dirname "$DEST")" >&2
+	exit 0
 fi
 mkdir -p "$(dirname "$DEST")"
 install_body

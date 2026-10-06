@@ -69,7 +69,9 @@ for checker_test in \
 	derived-check.test.sh \
 	dispatch-check.test.sh \
 	br-shim.test.sh \
-	public-files.test.sh
+	public-files.test.sh \
+	commit-msg-bead.test.sh \
+	check-pushed-beads.test.sh
 do
 	test_path="$gate_scripts/tests/cli/$checker_test"
 	if [ ! -f "$test_path" ]; then
@@ -85,4 +87,21 @@ do
 		exit "$rc"
 	fi
 done
+# COMMIT1: every pushed non-merge commit names a bead id that exists in the
+# repo tracker. Reads git objects only, so commit-tree landings are checked.
+# Skipped until the base archive carries the checker (first landing).
+if [ ! -f "$gate_scripts/scripts/check-pushed-beads.sh" ]; then
+	printf 'SKIP pushed-bead-ids: checker absent from base archive\n' >&2
+elif [ -n "${base_ref:-}" ]; then
+	printf '== pushed-bead-ids\n'
+	if sh "$gate_scripts/scripts/check-pushed-beads.sh" --repo "$ROOT" --base "$base_ref" --tip "$local_sha"; then
+		printf 'GREEN pushed-bead-ids\n'
+	else
+		rc=$?
+		printf 'RED pushed-bead-ids producer_rc=%s\n' "$rc" >&2
+		exit "$rc"
+	fi
+else
+	printf 'SKIP pushed-bead-ids: no base to range against\n' >&2
+fi
 exec sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
