@@ -6,6 +6,12 @@ ROOT=$(git rev-parse --show-toplevel)
 IFS=' '
 read -r local_ref local_sha remote_ref remote_sha || exit 0
 : "${remote_ref:-}"
+# Scratch measurement refs skip ONLY the regex-budget judgment (the budget is
+# judged on CI for the release candidate); every other check still runs, and
+# main pushes are still fully judged.
+case "${remote_ref:-}" in
+	refs/heads/scratch/*) export FRESH_GATE_SKIP_REGEX="scratch measurement ref; main pushes still judged" ;;
+esac
 case "${local_ref:-}" in
 	''|delete|*:delete) exit 0 ;;
 esac

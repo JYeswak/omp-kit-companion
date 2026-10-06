@@ -211,5 +211,42 @@ if [ "$rc" != "0" ] && grep -q "vulnerable: evil.ts" "$TMP/out"; then
 else
 	fail=$((fail + 1)); printf 'FAIL green-base-refuses-break: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
 fi
+
+# 5. planted: a scratch remote ref exports the budget skip; a main ref does not.
+# The stub gate echoes the skip value so routing is proven without timing.
+run_adapter_ref() {
+	repo=$1
+	remote=$2
+	base=$(git -C "$repo" rev-parse HEAD~1)
+	head=$(git -C "$repo" rev-parse HEAD)
+	printf 'refs/heads/perf %s %s %s\n' "$head" "$remote" "$base" | (cd -- "$repo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+	printf '%s' "$?"
+}
+s4="$TMP/skiproute"
+rm -rf "$s4"
+mkdir -p "$s4/scripts" "$s4/var/agent-tmp"
+git -C "$s4" init -q
+git -C "$s4" config user.email "test@example.invalid"
+git -C "$s4" config user.name "worker-1"
+printf '#!/bin/sh\nprintf "SKIPVAL=%%s\\n" "$FRESH_GATE_SKIP_REGEX"\n' > "$s4/scripts/fresh-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$s4/scripts/regexploit-gate.py"
+create_checker_test_stubs "$s4"
+git -C "$s4" add -A
+git -C "$s4" commit -qm "[test] skip routing base"
+git -C "$s4" commit -qm "[test] skip routing head" --allow-empty
+rc=$(run_adapter_ref "$s4" "refs/heads/scratch/x")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "SKIPVAL=scratch measurement ref; main pushes still judged"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scratch-exports-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+rc=$(run_adapter_ref "$s4" "refs/heads/main")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "SKIPVAL=$" && ! printf '%s' "$out" | grep -q "scratch measurement ref"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL main-no-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

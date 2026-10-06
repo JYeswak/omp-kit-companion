@@ -80,6 +80,27 @@ test("fresh gate validates the package-time manifest for rule-only edits", () =>
 	}
 });
 
+test("scratch skip prints NOT JUDGED while other skips keep SKIPPED", () => {
+	const script = readFileSync(gate, "utf8");
+	const start = script.indexOf("print_budget_skip() {");
+	expect(start).toBeGreaterThan(-1);
+	const end = script.indexOf("\n}\n", start);
+	expect(end).toBeGreaterThan(start);
+	const fn = script.slice(start, end + 3);
+	const probe = join(scratchRoot, `skip-probe-${process.pid}.sh`);
+	writeFileSync(probe, fn + "\nprint_budget_skip\n");
+	try {
+		const scratch = Bun.spawnSync(["sh", probe], { env: { ...process.env, FRESH_GATE_SKIP_REGEX: "scratch measurement ref; main pushes still judged" }, stdout: "pipe", stderr: "pipe" });
+		expect(scratch.exitCode).toBe(0);
+		expect(scratch.stdout.toString()).toContain("regex-budget: NOT JUDGED (scratch measurement ref; main pushes still judged)");
+		const other = Bun.spawnSync(["sh", probe], { env: { ...process.env, FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" }, stdout: "pipe", stderr: "pipe" });
+		expect(other.stdout.toString()).toContain("focused regex-budget: SKIPPED");
+		expect(other.stdout.toString()).not.toContain("NOT JUDGED");
+	} finally {
+		rmSync(probe, { force: true });
+	}
+});
+
 
 test("fresh gate selftest refuses a deleted gate function", () => {
 	const dir = fixture();

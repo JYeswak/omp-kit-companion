@@ -51,6 +51,15 @@ run_step() {
 	fi
 }
 
+# Scratch measurement refs skip ONLY the budget judgment; the wording names
+# the skip so the CI record stays the judge of record for main pushes.
+print_budget_skip() {
+	case "${FRESH_GATE_SKIP_REGEX:-}" in
+		"scratch measurement ref;"*) printf 'regex-budget: NOT JUDGED (%s)\n' "$FRESH_GATE_SKIP_REGEX" ;;
+		*) printf 'focused regex-budget: SKIPPED (%s)\n' "$FRESH_GATE_SKIP_REGEX" ;;
+	esac
+}
+
 gate_manifest() {
 	if [ -e "$ARCHIVE_DIR/.git" ] || [ -x "$ARCHIVE_DIR/bin/omp-kit" ]; then
 		(
@@ -204,7 +213,7 @@ gate_focused() {
 		fi
 	fi
 	if [ -n "${FRESH_GATE_SKIP_REGEX:-}" ]; then
-		printf 'focused regex-budget: SKIPPED (%s)\n' "$FRESH_GATE_SKIP_REGEX"
+		print_budget_skip
 	elif [ "$needs_regex" = 1 ]; then
 		# Regex cost gate (RX1): self-bounding (internal 57 s deadline); red names
 		# the rule, shape and encoding, and the push is refused. Exit 75 means
