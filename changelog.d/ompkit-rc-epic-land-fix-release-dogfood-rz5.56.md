@@ -1,0 +1,1 @@
+Integration proof resolves symlink ancestors before rejecting work/report paths inside `~/.omp`, excludes macOS `/tmp` work roots, and verifies the RCH rewrite through the live fixture. No-op Agent Mail and kit-guard mutants exercise negative verdicts.

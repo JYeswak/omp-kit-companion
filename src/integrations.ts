@@ -1,7 +1,6 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, type Dirent } from "node:fs";
-import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
-
+import { createHash } from "node:crypto";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 export type IntegrationCell =
 	| "WIRED"
 	| "CONFIGURED_NOT_FIRING"
@@ -15,7 +14,7 @@ export interface IntegrationsInput {
 	home: string;
 	/** Named profiles to prove, e.g. ["muse", "codex"]. */
 	profiles: string[];
-	/** Subset of integrations to prove; defaults to all five. */
+	/** Subset of integrations to prove; defaults to all declared integrations. */
 	integrations?: string[];
 	/** Scratch root for isolated HOMEs, repos and mock files. */
 	workDir: string;
@@ -27,16 +26,35 @@ export interface IntegrationsInput {
 	out?: string;
 }
 
+export interface QuietAssessment {
+	outcome: "ALLOWED" | "BLOCKED";
+	detail: string;
+	evidence: string[];
+}
+
 export interface IntegrationVerdict {
 	profile: string;
 	integration: string;
 	verdict: IntegrationCell;
 	detail: string;
 	evidence: string[];
+	quiet?: QuietAssessment | null;
+	source?: { path: string; sha256: string | null };
+	markerPath?: string;
 }
 
 export interface IntegrationsReport {
 	profiles: string[];
+	ompVersion: string;
+	realOmpIntegrity: {
+		path: string;
+		homeOmpPath: string;
+		beforeSha256: string;
+		afterSha256: string;
+		complete: boolean;
+		unchanged: boolean;
+	};
+	limitations: string[];
 	matrix: IntegrationVerdict[];
 }
 
@@ -83,9 +101,9 @@ function expandVars(value: unknown, vars: Record<string, string>): unknown {
 	return value;
 }
 
-/** Extension basenames the profile config lists, from real config.yml lines. */
-export function listedExtensions(configText: string): string[] {
-	const names: string[] = [];
+/** Extension paths listed under the real config.yml `extensions` key. */
+function listedExtensionPaths(configText: string): string[] {
+	const paths: string[] = [];
 	let inList = false;
 	for (const line of configText.split("\n")) {
 		if (/^extensions:\s*$/.test(line)) {
@@ -95,18 +113,46 @@ export function listedExtensions(configText: string): string[] {
 		if (inList) {
 			const match = /^  - (\S+)\s*$/.exec(line);
 			if (match) {
-				names.push((match[1] ?? "").split("/").pop() ?? "");
+				paths.push(match[1] ?? "");
 				continue;
 			}
 			if (line.trim() !== "" && !line.startsWith(" ")) break;
 		}
 	}
-	return names.filter(name => name.length > 0);
+	return paths.filter(path => path.length > 0);
+}
+function resolveExtensionPath(home: string, agentDir: string, path: string): string {
+	const expanded = path.startsWith("~/") ? join(home, path.slice(2)) : path;
+	return isAbsolute(expanded) ? expanded : resolve(agentDir, expanded);
+}
+
+function resolvedExtensionConfig(configText: string, home: string, profile: string): string {
+	const agentDir = join(home, ".omp/profiles", profile, "agent");
+	let inList = false;
+	return configText.split("\n").map(line => {
+		if (/^extensions:\s*$/.test(line)) {
+			inList = true;
+			return line;
+		}
+		if (inList) {
+			const match = /^  - (\S+)\s*$/.exec(line);
+			if (match) return `  - ${resolveExtensionPath(home, agentDir, match[1] ?? "")}`;
+			if (line.trim() !== "" && !line.startsWith(" ")) inList = false;
+		}
+		return line;
+	}).join("\n");
+}
+
+
+/** Extension basenames the profile config lists, from real config.yml lines. */
+export function listedExtensions(configText: string): string[] {
+	return listedExtensionPaths(configText).map(path => basename(path)).filter(name => name.length > 0);
 }
 
 export interface ProfileWiring {
 	profile: string;
 	extensions: string[];
+	extensionPaths: string[];
 	hooks: string[];
 	mcpServers: string[];
 	mcpDisabled: string[];
@@ -122,6 +168,7 @@ export function readProfileWiring(home: string, profile: string): ProfileWiring 
 	} catch {
 		throw new IntegrationsInputError("UNKNOWN_PROFILE", `Profile ${profile} has no readable agent config`);
 	}
+	const extensionPaths = listedExtensionPaths(configText).map(path => resolveExtensionPath(home, agentDir, path));
 	const extensions = listedExtensions(configText);
 	const hooks: string[] = listHookFiles(join(agentDir, "hooks"));
 	let mcpServers: string[] = [];
@@ -135,7 +182,7 @@ export function readProfileWiring(home: string, profile: string): ProfileWiring 
 			if (Array.isArray(disabled)) mcpDisabled = disabled.filter((name): name is string => typeof name === "string");
 		}
 	} catch { /* no mcp.json: no MCP integrations */ }
-	return { profile, extensions, hooks, mcpServers, mcpDisabled,
+	return { profile, extensions, extensionPaths, hooks, mcpServers, mcpDisabled,
 		hasKitGuard: extensions.includes("kit-guard-optin.ts") };
 }
 
@@ -173,6 +220,16 @@ export function staticVerdict(wiring: ProfileWiring, integration: string): Integ
 	}
 	return null;
 }
+function sourceForIntegration(wiring: ProfileWiring, integration: string): { path: string; sha256: string | null } | undefined {
+	const names = EXTENSION_FILE_BY_INTEGRATION[integration] ?? [];
+	const path = wiring.extensionPaths.find(candidate => names.includes(basename(candidate)));
+	if (!path) return undefined;
+	try {
+		return { path, sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
+	} catch {
+		return { path, sha256: null };
+	}
+}
 
 export interface LiveAttempt {
 	profile: string;
@@ -185,6 +242,7 @@ export interface LiveAttempt {
 	workRepo: string;
 	marker: string;
 	timedOut: boolean;
+	evidencePaths: string[];
 }
 
 async function withTimeout<T>(work: Promise<T>, ms: number): Promise<{ done: boolean; value?: T }> {
@@ -197,6 +255,44 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<{ done: boo
 	}
 }
 
+function containedOmpCommand(input: IntegrationsInput, ompPath: string, args: string[], integration: string): string[] {
+	if (process.platform === "darwin") {
+		const sandboxExec = "/usr/bin/sandbox-exec";
+		if (!existsSync(sandboxExec)) {
+			throw new IntegrationsInputError("CONTAINMENT_UNAVAILABLE", "macOS sandbox-exec is required for integration scenarios");
+		}
+		const policy = [
+			"(version 1)",
+			"(allow default)",
+			`(deny file-write* (subpath ${JSON.stringify(join(input.home, ".omp"))}))`,
+			'(deny file-write* (subpath "/tmp"))',
+			'(deny file-write* (subpath "/private/tmp"))',
+		].join("\n");
+		return [sandboxExec, "-p", policy, ompPath, ...args];
+	}
+	if (process.platform === "linux") {
+		const bubblewrap = Bun.which("bwrap");
+		if (bubblewrap) {
+			const workDir = resolveWritePath(input.workDir);
+			const command = [bubblewrap, "--ro-bind", "/", "/"];
+			if (!pathIsWithin("/tmp", workDir) && !pathIsWithin("/private/tmp", workDir)) {
+				command.push("--tmpfs", "/tmp");
+			}
+			command.push("--bind", workDir, workDir, "--proc", "/proc", "--dev", "/dev",
+				"--share-net", "--die-with-parent", "--", ompPath, ...args);
+			return command;
+		}
+		if (integration === "fleet-guard") {
+			throw new IntegrationsInputError("CONTAINMENT_UNAVAILABLE", "fleet-guard scenario requires bwrap on Linux");
+		}
+	}
+	const realHome = process.env.HOME;
+	if (integration === "fleet-guard" || (realHome !== undefined && resolve(input.home) === resolve(realHome))) {
+		throw new IntegrationsInputError("CONTAINMENT_UNAVAILABLE", `No write containment is available on ${process.platform}`);
+	}
+	return [ompPath, ...args];
+}
+
 /** Run one scripted mock-model turn set against a profile in an isolated HOME. */
 export async function runLiveScenario(input: IntegrationsInput & { profile: string },
 	scenario: ScenarioDef, vars: Record<string, string>): Promise<LiveAttempt> {
@@ -205,25 +301,37 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 	const runRoot = join(input.workDir, `itg-${input.profile}-${integration}-${kind}`);
 	const home = join(runRoot, "home");
 	const repo = join(runRoot, "repo");
-	mkdirSync(home, { recursive: true });
+	const tempDir = join(runRoot, "tmp");
+	const isolatedAgentDir = join(home, ".omp/profiles", input.profile, "agent");
+	const configSource = join(input.home, ".omp/profiles", input.profile, "agent/config.yml");
+	const configSnapshot = join(isolatedAgentDir, "config.yml");
+	mkdirSync(isolatedAgentDir, { recursive: true });
 	mkdirSync(repo, { recursive: true });
-	const agentDir = join(input.home, ".omp/profiles", input.profile, "agent");
-	cpSync(join(agentDir, "config.yml"), join(home, "config.yml.tmp"));
-	mkdirSync(join(home, ".omp/profiles", input.profile, "agent"), { recursive: true });
-	copyFileSync(join(agentDir, "config.yml"), join(home, ".omp/profiles", input.profile, "agent/config.yml"));
+	mkdirSync(tempDir, { recursive: true });
+	writeFileSync(configSnapshot, resolvedExtensionConfig(readFileSync(configSource, "utf8"), input.home, input.profile));
+	const evidencePaths = [configSource, configSnapshot];
 	for (const file of ["mcp.json"]) {
-		const src = join(agentDir, file);
-		if (existsSync(src)) copyFileSync(src, join(home, ".omp/profiles", input.profile, `agent/${file}`));
+		const src = join(input.home, ".omp/profiles", input.profile, "agent", file);
+		if (existsSync(src)) {
+			const snapshot = join(isolatedAgentDir, file);
+			copyFileSync(src, snapshot);
+			evidencePaths.push(src, snapshot);
+		}
 	}
-	const hooksSrc = join(agentDir, "hooks");
-	if (existsSync(hooksSrc)) cpSync(hooksSrc, join(home, ".omp/profiles", input.profile, "agent/hooks"), { recursive: true });
+	const hooksSrc = join(input.home, ".omp/profiles", input.profile, "agent/hooks");
+	if (existsSync(hooksSrc)) cpSync(hooksSrc, join(isolatedAgentDir, "hooks"), { recursive: true });
 	const scenarioFile = join(runRoot, "scenario.json");
 	writeFileSync(scenarioFile, JSON.stringify({ turns: expandVars(scenario.turns, vars), chunk: 6 }));
+	evidencePaths.push(scenarioFile);
 	const mockLog = join(runRoot, "mock.log");
 	const portFile = join(runRoot, "port.txt");
-	const mock = Bun.spawn(["bun", join(input.root, "tests/live/mock-model.mjs")], {
+	const ompPath = input.ompPath ?? "omp";
+	const ompCommand = containedOmpCommand(input, ompPath, ["--profile", input.profile, "-p", "--no-session",
+		"--model", "mock/mock", "--approval-mode", "yolo", "go"], integration);
+	const mock = Bun.spawn([process.execPath, join(input.root, "tests/live/mock-model.mjs")], {
 		cwd: input.root,
-		env: { ...process.env, SCEN: scenarioFile, LOG: mockLog, PORTFILE: portFile },
+		env: { HOME: home, TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir,
+			SCEN: scenarioFile, LOG: mockLog, PORTFILE: portFile },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -232,10 +340,11 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 		try {
 			mock.kill(9);
 		} catch { /* already gone */ }
+		await mock.exited;
 		throw new IntegrationsInputError("INTEGRATIONS_UNAVAILABLE", "Mock model server did not start");
 	}
 	const port = readFileSync(portFile, "utf8").trim();
-	writeFileSync(join(home, ".omp/profiles", input.profile, "agent/models.yml"), [
+	writeFileSync(join(isolatedAgentDir, "models.yml"), [
 		"providers:",
 		"  mock:",
 		`    baseUrl: http://127.0.0.1:${port}/v1`,
@@ -249,12 +358,11 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 		"        maxTokens: 4096",
 		"",
 	].join("\n"));
-	const ompPath = input.ompPath ?? "omp";
+	evidencePaths.push(join(isolatedAgentDir, "models.yml"));
 	const timeoutMs = (input.timeoutSecs ?? 120) * 1000;
-	const child = Bun.spawn([ompPath, "--profile", input.profile, "-p", "--no-session",
-		"--model", "mock/mock", "--approval-mode", "yolo", "go"], {
+	const child = Bun.spawn(ompCommand, {
 		cwd: repo,
-		env: cleanEnv(home),
+		env: cleanEnv(home, tempDir),
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -277,17 +385,23 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 	const code = await child.exited;
 	const stdout = await new Response(child.stdout).text();
 	const stderr = await new Response(child.stderr).text();
+	const stdoutPath = join(runRoot, "stdout.log");
+	const stderrPath = join(runRoot, "stderr.log");
+	writeFileSync(stdoutPath, stdout);
+	writeFileSync(stderrPath, stderr);
 	let mockText = "";
 	try {
 		mockText = readFileSync(mockLog, "utf8");
 	} catch { /* no requests reached the mock */ }
+	if (!existsSync(mockLog)) writeFileSync(mockLog, mockText);
+	evidencePaths.push(mockLog, stdoutPath, stderrPath);
 	try {
 		mock.kill(9);
 	} catch { /* already gone */ }
 	await mock.exited;
 	const marker = vars["MARKER"] ?? join(repo, "marker.txt");
 	return { profile: input.profile, integration, kind, rc: code ?? 1, stdout, stderr,
-		mockLog: mockText, workRepo: repo, marker, timedOut };
+		mockLog: mockText, workRepo: repo, marker, timedOut, evidencePaths };
 }
 
 async function waitForFile(path: string, ms: number): Promise<boolean> {
@@ -302,7 +416,7 @@ async function waitForFile(path: string, ms: number): Promise<boolean> {
 	return false;
 }
 /** Isolated environment for omp and git: no profile inheritance, no system git config. */
-function cleanEnv(home: string): Record<string, string> {
+function cleanEnv(home: string, tempDir: string): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (value !== undefined) env[key] = value;
@@ -312,6 +426,9 @@ function cleanEnv(home: string): Record<string, string> {
 	env["XDG_CACHE_HOME"] = join(home, ".cache");
 	env["XDG_DATA_HOME"] = join(home, ".local/share");
 	env["XDG_STATE_HOME"] = join(home, ".local/state");
+	env["TMPDIR"] = tempDir;
+	env["TMP"] = tempDir;
+	env["TEMP"] = tempDir;
 	env["GIT_CONFIG_NOSYSTEM"] = "1";
 	delete env["OMP_PROFILE"];
 	delete env["PI_PROFILE"];
@@ -487,17 +604,17 @@ function judgeKitGuard(input: JudgeInput): IntegrationVerdict {
 }
 
 export function judgeFleet(input: JudgeInput): IntegrationVerdict {
-	const base = { profile: input.fire.profile, integration: "fleet-guard", evidence: [] as string[] };
+	const base = { profile: input.fire.profile, integration: "fleet-guard", evidence: [] as string[],
+		markerPath: input.fire.marker };
 	const load = loadErrorOf(input.fire.stderr, "fleet-guard");
 	if (load) return { ...base, verdict: "LOAD_ERROR", detail: `extension failed to load: ${load}`, evidence: [] };
-	const tmpMarker = join("/tmp", `${input.vars["BRANCH"] ?? "itg-branch"}.txt`);
-	if (existsSync(tmpMarker)) {
+	if (existsSync(input.fire.marker)) {
 		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
-			detail: "/tmp write executed; the guard did not stop it", evidence: [] };
+			detail: `marker was written at ${input.fire.marker}; fleet-guard did not stop it`, evidence: [] };
 	}
 	const source = blockSourceOf(firstToolResultText(input.fire.mockLog));
 	if (source === "fleet-guard") {
-		return { ...base, verdict: "WIRED", detail: "/tmp write refused", evidence: [] };
+		return { ...base, verdict: "WIRED", detail: `write refused; marker absent at ${input.fire.marker}`, evidence: [] };
 	}
 	if (source !== null) {
 		return { ...base, verdict: "CONFIGURED_NOT_FIRING",
@@ -514,6 +631,119 @@ const JUDGES: Record<string, (input: JudgeInput) => IntegrationVerdict> = {
 	"fleet-guard": judgeFleet,
 };
 
+function metadataDigest(root: string): { sha256: string; complete: boolean } {
+	const digest = createHash("sha256");
+	let complete = true;
+	const visit = (directory: string): void => {
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+		} catch {
+			complete = false;
+			digest.update(`unreadable:${directory}\n`);
+			return;
+		}
+		for (const entry of entries) {
+			const path = join(directory, entry.name);
+			try {
+				const stat = lstatSync(path, { bigint: true });
+				digest.update(`${path}\0${stat.mode}\0${stat.size}\0${stat.mtimeNs}\0${stat.ctimeNs}\n`);
+				if (stat.isDirectory()) visit(path);
+			} catch {
+				complete = false;
+				digest.update(`unreadable:${path}\n`);
+			}
+		}
+	};
+	try {
+		const linkStat = lstatSync(root, { bigint: true });
+		digest.update(`${root}\0${linkStat.mode}\0${linkStat.size}\0${linkStat.mtimeNs}\0${linkStat.ctimeNs}\n`);
+		const stat = linkStat.isSymbolicLink() ? statSync(root, { bigint: true }) : linkStat;
+		if (stat.isDirectory()) visit(root);
+		else complete = false;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") digest.update(`missing:${root}\n`);
+		else {
+			complete = false;
+			digest.update(`unreadable:${root}\n`);
+		}
+	}
+	return { sha256: digest.digest("hex"), complete };
+}
+
+function assessQuiet(attempt: LiveAttempt | null): QuietAssessment | null {
+	if (!attempt) return null;
+	const result = firstToolResultText(attempt.mockLog);
+	const blockedBy = blockSourceOf(result);
+	const loadError = loadErrorOf(attempt.stderr, attempt.integration);
+	const failedResult = result !== null && /unknown tool|no such tool|command not found|permission denied|operation not permitted|tool call failed/i.test(result);
+	let detail = "quiet scenario returned a tool result without refusal";
+	if (attempt.timedOut) detail = "quiet scenario timed out";
+	else if (attempt.rc !== 0) detail = `quiet OMP process exited ${attempt.rc}`;
+	else if (loadError) detail = `quiet scenario extension load failed: ${loadError}`;
+	else if (blockedBy) detail = `quiet tool call was refused by ${blockedBy}`;
+	else if (failedResult) detail = `quiet tool call returned an error: ${result}`;
+	else if (result === null) detail = "quiet scenario produced no tool result";
+	return {
+		outcome: attempt.timedOut || attempt.rc !== 0 || loadError !== null || blockedBy !== null || failedResult || result === null
+			? "BLOCKED" : "ALLOWED",
+		detail,
+		evidence: attempt.evidencePaths,
+	};
+}
+
+function captureOmpVersion(ompPath: string, home: string, tempDir: string): string {
+	try {
+		const result = Bun.spawnSync([ompPath, "--version"], {
+			cwd: home, env: cleanEnv(home, tempDir), stdout: "pipe", stderr: "pipe",
+		});
+		const output = `${result.stdout.toString()}\n${result.stderr.toString()}`.trim();
+		if (result.exitCode !== 0 || output.length === 0) {
+			throw new Error(`version command exited ${result.exitCode}: ${output}`);
+		}
+		return output;
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new IntegrationsInputError("OMP_UNAVAILABLE", `Could not capture OMP version: ${detail}`);
+	}
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+	const pathFromRoot = relative(root, resolve(candidate));
+	return pathFromRoot === "" || (pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`));
+}
+
+/** Resolve existing symlink ancestors while allowing a not-yet-created leaf. */
+function resolveWritePath(path: string): string {
+	let current = resolve(path);
+	const suffix: string[] = [];
+	while (true) {
+		try {
+			return resolve(realpathSync(current), ...suffix);
+		} catch (error) {
+			if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+				throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", `Cannot resolve write path ${path}`);
+			}
+			try {
+				if (lstatSync(current).isSymbolicLink()) {
+					throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", `Cannot resolve dangling symlink in ${path}`);
+				}
+			} catch (statError) {
+				if (!(typeof statError === "object" && statError !== null && "code" in statError && statError.code === "ENOENT")) {
+					throw statError;
+				}
+			}
+			const parent = dirname(current);
+			if (parent === current) {
+				throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", `Cannot resolve write path ${path}`);
+			}
+			suffix.unshift(basename(current));
+			current = parent;
+		}
+	}
+}
+
+
 /** Full per-profile matrix: static ABSENT short-circuits, otherwise live fire+quiet. */
 export async function runIntegrations(input: IntegrationsInput): Promise<IntegrationsReport> {
 	if (![input.root, input.home, input.workDir].every(value => typeof value === "string" && isAbsolute(value))) {
@@ -522,53 +752,134 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 	if (input.profiles.length === 0) {
 		throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", "Name at least one profile");
 	}
+	const realOmpRoot = resolve(input.home, ".omp");
+	const canonicalOmpRoot = resolveWritePath(realOmpRoot);
+	const canonicalWorkDir = resolveWritePath(input.workDir);
+	if (pathIsWithin(realOmpRoot, input.workDir) || pathIsWithin(canonicalOmpRoot, canonicalWorkDir)) {
+		throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", "Integration work dir must not be inside ~/.omp");
+	}
+	if (process.platform === "darwin" && (
+		pathIsWithin("/tmp", input.workDir) || pathIsWithin("/private/tmp", input.workDir) ||
+		pathIsWithin("/tmp", canonicalWorkDir) || pathIsWithin("/private/tmp", canonicalWorkDir)
+	)) {
+		throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION",
+			"Integration work dir must be outside /tmp and /private/tmp on macOS");
+	}
+	if (input.out !== undefined) {
+		if (!isAbsolute(input.out)) {
+			throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", "Report output path must be absolute");
+		}
+		const canonicalOutput = resolveWritePath(input.out);
+		if (pathIsWithin(realOmpRoot, input.out) || pathIsWithin(canonicalOmpRoot, canonicalOutput)) {
+			throw new IntegrationsInputError("INVALID_INTEGRATIONS_SELECTION", "Report output must not write inside ~/.omp");
+		}
+	}
 	const scenarios = loadScenarios(input.root);
 	const ompPath = input.ompPath ?? "omp";
+	mkdirSync(input.workDir, { recursive: true });
+	const versionHome = join(input.workDir, "version-home");
+	const versionTmp = join(input.workDir, "version-tmp");
+	mkdirSync(versionHome, { recursive: true });
+	mkdirSync(versionTmp, { recursive: true });
+	const ompVersion = captureOmpVersion(ompPath, versionHome, versionTmp);
+	const ompVersionPath = join(input.workDir, "omp-version.txt");
+	writeFileSync(ompVersionPath, `${ompVersion}\n`);
+	const beforeSnapshot = metadataDigest(realOmpRoot);
 	const matrix: IntegrationVerdict[] = [];
+	const runId = `${process.pid}-${Date.now()}`;
 	for (const profile of input.profiles) {
 		const wiring = readProfileWiring(input.home, profile);
 		for (const integration of INTEGRATIONS) {
 			if (input.integrations !== undefined && !input.integrations.includes(integration)) continue;
+			const profileConfig = join(input.home, ".omp/profiles", profile, "agent/config.yml");
+			const profileEvidence = [profileConfig];
+			const mcpConfig = join(input.home, ".omp/profiles", profile, "agent/mcp.json");
+			if (existsSync(mcpConfig)) profileEvidence.push(mcpConfig);
+			const source = sourceForIntegration(wiring, integration);
 			const still = staticVerdict(wiring, integration);
 			if (still) {
+				if (source) still.source = source;
+				still.evidence = [...profileEvidence, ...(source ? [source.path] : [])];
 				matrix.push(still);
 				continue;
 			}
 			const fire = scenarios.find(s => s.integration === integration && s.kind === "fire");
 			const quiet = scenarios.find(s => s.integration === integration && s.kind === "quiet") ?? null;
 			if (!fire) {
-				matrix.push({ profile, integration, verdict: "ABSENT", detail: "no fire scenario defined", evidence: [] });
+				matrix.push({ profile, integration, verdict: "ABSENT", detail: "no fire scenario defined",
+					evidence: [...profileEvidence, ...(source ? [source.path] : [])] });
 				continue;
 			}
-			const stamp = `${profile}-${integration}`;
+			const stamp = `${profile}-${integration}-${runId}`;
 			const repo = join(input.workDir, `repo-${stamp}`);
-			const vars: Record<string, string> = {
-				BRANCH: `itg-${stamp}`,
-				MARKER: join(repo, "marker.txt"),
-			};
+			const branch = `itg-${stamp}`;
+			const marker = integration === "fleet-guard" ? join("/tmp", `${branch}.txt`) : join(repo, "marker.txt");
+			const vars: Record<string, string> = { BRANCH: branch, MARKER: marker };
 			setupScenarioRepo(repo, fire.setup, vars);
 			const fireAttempt = await runLiveScenario({ ...input, profile }, fire, vars);
 			let quietAttempt: LiveAttempt | null = null;
 			if (quiet) {
 				const quietRepo = `${repo}-quiet`;
-				const quietVars = { ...vars, MARKER: join(quietRepo, "marker.txt") };
+				const quietMarker = integration === "fleet-guard"
+					? join("/tmp", `${branch}-quiet.txt`) : join(quietRepo, "marker.txt");
+				const quietVars = { ...vars, MARKER: quietMarker };
 				setupScenarioRepo(quietRepo, quiet.setup, quietVars);
 				quietAttempt = await runLiveScenario({ ...input, profile }, quiet, quietVars);
 			}
 			const judgeInput: JudgeInput = { fire: fireAttempt, quiet: quietAttempt, repo, vars };
-			if (integration === "kit-guard") {
-				matrix.push(judgeKitGuard(judgeInput));
-				continue;
-			}
-			const judge = JUDGES[integration];
+			const judge = integration === "kit-guard" ? judgeKitGuard : JUDGES[integration];
 			if (!judge) {
-				matrix.push({ profile, integration, verdict: "ABSENT", detail: "no judge implemented", evidence: [] });
+				matrix.push({ profile, integration, verdict: "ABSENT", detail: "no judge implemented", evidence: profileEvidence });
 				continue;
 			}
-			matrix.push(judge(judgeInput));
+			const verdict = judge(judgeInput);
+			const quietResult = assessQuiet(quietAttempt);
+			if (quietResult?.outcome === "BLOCKED" && verdict.verdict === "WIRED") {
+				verdict.verdict = "CONFIGURED_NOT_FIRING";
+				verdict.detail += `; quiet scenario failed: ${quietResult.detail}`;
+			}
+			verdict.quiet = quietResult;
+			if (source) verdict.source = source;
+			verdict.evidence = [...new Set([
+				...profileEvidence,
+				...fireAttempt.evidencePaths,
+				...(quietAttempt?.evidencePaths ?? []),
+				...(source ? [source.path] : []),
+			])];
+			matrix.push(verdict);
 		}
 	}
-	const report: IntegrationsReport = { profiles: [...input.profiles], matrix };
+	const afterSnapshot = metadataDigest(realOmpRoot);
+	const realOmpIntegrityPath = join(input.workDir, "real-omp-integrity.json");
+	const complete = beforeSnapshot.complete && afterSnapshot.complete;
+	const realOmpIntegrity = {
+		path: realOmpIntegrityPath,
+		homeOmpPath: realOmpRoot,
+		beforeSha256: beforeSnapshot.sha256,
+		afterSha256: afterSnapshot.sha256,
+		complete,
+		unchanged: complete && beforeSnapshot.sha256 === afterSnapshot.sha256,
+	};
+	if (!realOmpIntegrity.unchanged) {
+		for (const verdict of matrix) {
+			if (verdict.verdict !== "WIRED") continue;
+			verdict.verdict = "CONFIGURED_NOT_FIRING";
+			verdict.detail += "; ~/.omp integrity snapshot was incomplete or changed";
+		}
+	}
+	writeFileSync(realOmpIntegrityPath, `${JSON.stringify(realOmpIntegrity, null, 2)}\n`);
+	for (const verdict of matrix) verdict.evidence = [...new Set([...verdict.evidence, ompVersionPath, realOmpIntegrityPath])];
+	const report: IntegrationsReport = {
+		profiles: [...input.profiles],
+		ompVersion,
+		realOmpIntegrity,
+		limitations: [
+			"Mock-model results prove only the named profile configurations and reported OMP version.",
+			"They do not prove real-model tool choice, other profiles, or global safety.",
+			"~/.omp unchanged compares metadata-tree fingerprints, not full file-content hashes.",
+		],
+		matrix,
+	};
 	if (input.out !== undefined) {
 		writeFileSync(input.out, `${JSON.stringify({ overall: "OK", integrations: report }, null, 2)}\n`);
 	}
@@ -597,8 +908,5 @@ export function setupScenarioRepo(repo: string, setup: string[], vars: Record<st
 		writeFileSync(join(repo, "Cargo.toml"), '[package]\nname = "itg-crate"\nversion = "0.0.0"\nedition = "2021"\n');
 		mkdirSync(join(repo, "src"), { recursive: true });
 		writeFileSync(join(repo, "src/main.rs"), 'fn main() {}\n');
-	}
-	if (setup.includes("tmp-clean")) {
-		rmSync(join("/tmp", `${vars["BRANCH"] ?? "itg-branch"}.txt`), { force: true });
 	}
 }

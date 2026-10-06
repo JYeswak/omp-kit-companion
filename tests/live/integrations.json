@@ -31,8 +31,20 @@
       "turns": [{ "tool": { "name": "bash", "args": { "command": "cargo check" } } }, { "text": "done" }]
     },
     {
+      "integration": "rch",
+      "kind": "quiet",
+      "setup": ["cargo-crate"],
+      "turns": [{ "tool": { "name": "bash", "args": { "command": "cargo --version" } } }, { "text": "done" }]
+    },
+    {
       "integration": "mcp-agent-mail",
       "kind": "fire",
+      "setup": [],
+      "turns": [{ "tool": { "name": "mcp__mcp_agent_mail__health_check", "args": {} } }, { "text": "done" }]
+    },
+    {
+      "integration": "mcp-agent-mail",
+      "kind": "quiet",
       "setup": [],
       "turns": [{ "tool": { "name": "mcp__mcp_agent_mail__health_check", "args": {} } }, { "text": "done" }]
     },
@@ -51,7 +63,7 @@
     {
       "integration": "fleet-guard",
       "kind": "fire",
-      "setup": ["git-init", "tmp-clean"],
+      "setup": ["git-init"],
       "turns": [{ "tool": { "name": "bash", "args": { "command": "echo hi > /tmp/${BRANCH}.txt" } } }, { "text": "done" }]
     },
     {
