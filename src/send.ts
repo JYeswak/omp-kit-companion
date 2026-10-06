@@ -61,13 +61,16 @@ export async function proveSend(input: {
 		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text]).code !== 0) continue;
 		const started = Date.now();
 		while (Date.now() - started < deadlineMs) {
-			const got = exec.run(["tmux", "capture-pane", "-p", "-t", `${input.session}:${input.pane}`]);
+			// Bare pane id: session:pane is parsed as a window and misses.
+			// -S -200 reads scrollback history: a rendered message scrolls off
+			// the visible screen but stays provable in history.
+			const got = exec.run(["tmux", "capture-pane", "-p", "-S", "-200", "-t", input.pane]);
 			if (got.code === 0 && got.out.includes(marker)) {
-				return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.session}:${input.pane} after ${sends} send(s)` };
+				return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)` };
 			}
 			await wait(pollMs);
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.session}:${input.pane}; message written to ${dropPath}` };
+	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}` };
 }

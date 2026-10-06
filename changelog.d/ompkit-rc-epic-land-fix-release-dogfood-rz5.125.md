@@ -1,1 +1,1 @@
-- Proven send (`src/send.ts`, `tests/cli/send.test.ts`): `proveSend` wraps ntm send with a unique marker, polls the target pane capture up to 15 s, retries once, then writes the message to a drop folder and reports NOT_DELIVERED; delivered messages return OK with the marker seen. CLI registration and the bare-send rule pointer follow when the scope files are free.
+- SEND1 capture proof: marker check uses the bare pane id with scrollback history (session:pane misparses as a window; rendered messages scroll off the visible screen).

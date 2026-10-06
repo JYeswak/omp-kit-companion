@@ -12,8 +12,8 @@ writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-test 
 const noWait = async (_ms: number) => {};
 
 /** Fake pane: echoes the last sent text into captures once enough polls have passed. */
-function echoPane(capturesBeforeEcho: number, sendRc: number[] = []): { exec: SendExec; taken: { sends: number; captures: number } } {
-	const taken = { sends: 0, captures: 0 };
+function echoPane(capturesBeforeEcho: number, sendRc: number[] = []): { exec: SendExec; taken: { sends: number; captures: number; captureArgv: string[][] } } {
+	const taken = { sends: 0, captures: 0, captureArgv: [] as string[][] };
 	let lastText = "";
 	return {
 		taken,
@@ -26,6 +26,7 @@ function echoPane(capturesBeforeEcho: number, sendRc: number[] = []): { exec: Se
 					return { code, out: code === 0 ? "sent" : "ntm failed" };
 				}
 				taken.captures++;
+				taken.captureArgv.push(argv);
 				return { code: 0, out: taken.captures >= capturesBeforeEcho ? lastText : "nothing yet" };
 			},
 		},
@@ -65,4 +66,13 @@ test("SEND1: late marker within the deadline still returns OK without resending"
 	expect(late.status).toBe("OK");
 	expect(taken.sends).toBe(1);
 	expect(taken.captures).toBe(3);
+});
+
+test("SEND1 capture uses the bare pane id with scrollback history", async () => {
+	const { exec, taken } = echoPane(1);
+	await proveSend({ session: "s", pane: "%1", message: "hello", dropDir: dropDir(), exec, pollMs: 1, deadlineMs: 50, wait: noWait });
+	expect(taken.captureArgv.length).toBeGreaterThan(0);
+	for (const argv of taken.captureArgv) {
+		expect(argv).toEqual(["tmux", "capture-pane", "-p", "-S", "-200", "-t", "%1"]);
+	}
 });
