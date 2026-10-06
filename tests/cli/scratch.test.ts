@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, summarizeScratch, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 
 const roots: string[] = [];
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -171,6 +171,24 @@ test("inspect keeps live owners, reaps dead ones, and skips missing or legacy ow
   expect(inspectSession(dead, root, deps).action).toBe("REAP");
   expect(inspectSession(naked, root, deps).reason).toBe("no-owner-file");
   expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
+});
+test("one-line owner files: dead owner reaps with real size, live owner stays live", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const gone = deadPid();
+  const dead = sessionDir(root, "suite-snap", gone);
+  const deadOwner = `pid=${gone} label=suite-snap repo=test created=2026-10-01T00:00:00Z\n`;
+  writeFileSync(join(dead, ".owner"), deadOwner);
+  const payload = "x".repeat(1024);
+  writeFileSync(join(dead, "payload"), payload);
+  const live = sessionDir(root, "suite-snap", process.pid);
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=suite-snap repo=test created=${new Date().toISOString()}\n`);
+  const deps = depsFor();
+  const deadVerdict = inspectSession(dead, root, deps);
+  expect(deadVerdict.action).toBe("REAP");
+  expect(deadVerdict.reason).toBe("owner-dead-no-open-fds");
+  expect(deadVerdict.sizeBytes).toBe(payload.length + Buffer.byteLength(deadOwner));
+  expect(inspectSession(live, root, deps).action).toBe("LIVE");
 });
 test("nested integrations work dirs reap on dead pid and stay live on live pid", () => {
   const home = useState();
@@ -726,4 +744,22 @@ test("fleet test tmp base lives outside git trees and home", () => {
 	expect(base.startsWith(process.env.HOME ?? "/nonexistent-home")).toBe(false);
 	expect(base).not.toContain(".git");
 	expect(summarizeScratch([], [base]).sizeByRoot).toEqual({});
+});
+
+test("lsof snapshot: held file deep in a tree is HELD, empty is clear, failure is SKIP", () => {
+	const held = takeLsofSnapshot(() => ({ code: 0, stdout: "p123\nf3\nn/deep/tree/file.txt\n", stderr: "" }));
+	expect(snapshotClear(held, "/deep/tree")).toBe(false);
+	expect(snapshotClear(held, "/other")).toBe(true);
+	const empty = takeLsofSnapshot(() => ({ code: 1, stdout: "", stderr: "" }));
+	expect(snapshotClear(empty, "/deep/tree")).toBe(true);
+	const failed = takeLsofSnapshot(() => { throw new Error("no lsof"); });
+	expect(snapshotClear(failed, "/deep/tree")).toBeNull();
+	const diag = takeLsofSnapshot(() => ({ code: 0, stdout: "", stderr: "lsof: no such file" }));
+	expect(snapshotClear(diag, "/deep/tree")).toBeNull();
+});
+
+test("lsof snapshot prefix match does not confuse sibling names", () => {
+	const snap = takeLsofSnapshot(() => ({ code: 0, stdout: "p1\nn/a/bc/x\n", stderr: "" }));
+	expect(snapshotClear(snap, "/a/b")).toBe(true);
+	expect(snapshotClear(snap, "/a/bc")).toBe(false);
 });

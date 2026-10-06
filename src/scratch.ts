@@ -182,6 +182,46 @@ export function lsofClear(dir: string, run: ScratchRunner, timeoutMs = 0): boole
 
 export const LSOF_TIMEOUT_MS = 15000;
 
+/**
+ * One system-wide open-file snapshot per plan/apply (`lsof -nP -Fn`, ~2 s at
+ * load 34): per-dir `lsof +D` tree walks take 30 s+ on cache-dense dirs and
+ * time out, failing closed forever. Null when the snapshot itself fails or
+ * times out (callers fail closed). Absolute `n<path>` lines only.
+ */
+export function takeLsofSnapshot(run: ScratchRunner, timeoutMs = LSOF_TIMEOUT_MS): Set<string> | null {
+	let out: ScratchRunResult;
+	try {
+		out = timeoutMs > 0 ? run(["lsof", "-nP", "-Fn"], { timeoutMs }) : run(["lsof", "-nP", "-Fn"], {});
+	} catch {
+		return null;
+	}
+	if (out.code === null) return null;
+	const text = `${out.stdout}\n${out.stderr}`;
+	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text)) return null;
+	if (/^lsof:/m.test(text)) return null;
+	const paths = new Set<string>();
+	for (const line of out.stdout.split("\n")) {
+		if (line.startsWith("n/")) paths.add(line.slice(1));
+	}
+	return paths;
+}
+
+/** Same safety meaning as lsofClear against a snapshot: any open file at or under the dir means held. */
+export function snapshotClear(snapshot: Set<string> | null, dir: string): boolean | null {
+	if (snapshot === null) return null;
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	for (const path of snapshot) {
+		if (path === dir || path.startsWith(prefix)) return false;
+	}
+	return true;
+}
+
+/** Snapshot when the invocation provides one, otherwise the legacy per-dir walk. */
+function lsofClearDir(deps: InspectDeps, dir: string): boolean | null {
+	if (deps.lsofSnapshot !== undefined) return snapshotClear(deps.lsofSnapshot, dir);
+	return lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+}
+
 export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: number }): ScratchRunResult {
 	try {
 		const child = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
@@ -216,7 +256,7 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 	return verdict.action === "SKIP" && APPLY_FAILURE_REASONS[verdict.reason] === true;
 }
 
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; onProgress?: (verdict: ScratchVerdict) => void }
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; onProgress?: (verdict: ScratchVerdict) => void; lsofSnapshot?: Set<string> | null }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -277,14 +317,14 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 			// Dead pid with an identity-free (one-line or legacy JSON) owner file:
 			// no pid reuse is possible, so lsof-clear means REAP. (Was: SKIP
 			// owner-identity-incomplete, which stranded dead-owner dirs as unowned.)
-			const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			const clear = lsofClearDir(deps, dir);
 			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
 			if (!clear) return sized("LIVE", "owner-dead-but-open-fds-present", owner);
 			return sized("REAP", "owner-dead-no-open-fds", owner);
 		}
 		const reuse = reuseAfterCreated(owner, deps.liveness);
 		if (reuse === true) {
-			const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			const clear = lsofClearDir(deps, dir);
 			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
 			if (!clear) return sized("LIVE", "owner-dead-pid-reused-but-open-fds-present", owner);
 			return sized("REAP", "owner-dead-pid-reused-no-open-fds", owner);
@@ -294,7 +334,7 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 	const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 	if (state === "live" || state === "live-unreachable") return sized("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
 	if (state === "unknown") return sized("SKIP", "owner-liveness-unproven", owner);
-	const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const clear = lsofClearDir(deps, dir);
 	if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
 	if (!clear) return sized("LIVE", `owner-${state}-but-open-fds-present`, owner);
 	return sized("REAP", `owner-${state}-no-open-fds`, owner);
@@ -667,7 +707,7 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 	if (/[\r\n\t]/.test(reason) || /[\r\n]/.test(basename(dir)))
 		return { ok: false, changed: false, dir, reason: "release-reason-invalid", ownerPid: null };
 	if (ownerText === null) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };
-	const clear = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const clear = lsofClearDir(deps, dir);
 	if (clear !== true) return { ok: false, changed: false, dir,
 		reason: clear === null ? "lsof-evidence-unavailable" : "release-open-fds-present", ownerPid: null };
 	const markerPath = join(dir, RELEASE_FILE);
@@ -745,7 +785,7 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 		return fail("owner-release-changed-after-initial-check");
 	const identity = inodeOf(dir);
 	if (identity === null) return fail("inode-proof-unavailable");
-	const clearBefore = lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const clearBefore = lsofClearDir(deps, dir);
 	if (clearBefore !== true) return fail(clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present");
 	const at = new Date(deps.now ?? Date.now()).toISOString();
 	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
@@ -762,7 +802,7 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 		return fail("atomic-quarantine-failed");
 	}
 	const afterMove = readReleaseRecord(moved);
-	const clearAfter = lsofClear(moved, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const clearAfter = lsofClearDir(deps, moved);
 	if (inodeOf(moved) !== identity || !afterMove || afterMove.markerText !== released.markerText ||
 		afterMove.ownerText !== released.ownerText || clearAfter !== true) {
 		try {
@@ -822,7 +862,7 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	}
 	const finalText = readText(join(deleting, ".owner"));
 	const finalOwner = finalText === null ? null : parseOwnerFile(finalText);
-	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || lsofClear(deleting, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) {
+	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || lsofClearDir(deps, deleting) !== true) {
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
 	}
 	try {
@@ -859,7 +899,7 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps): Scratc
 	} catch {
 		return { ...base, reason: "atomic-quarantine-failed" };
 	}
-	if (inodeOf(moved) !== identity || lsofClear(moved, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) {
+	if (inodeOf(moved) !== identity || lsofClearDir(deps, moved) !== true) {
 		try {
 			renameSync(moved, dir);
 		} catch {
@@ -892,10 +932,10 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		const released = readReleaseRecord(path);
 		if (released) {
 			const identity = inodeOf(path);
-			if (identity === null || lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+			if (identity === null || lsofClearDir(deps, path) !== true) continue;
 			const rechecked = readReleaseRecord(path);
 			if (!rechecked || rechecked.markerText !== released.markerText || rechecked.ownerText !== released.ownerText ||
-				inodeOf(path) !== identity || lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+				inodeOf(path) !== identity || lsofClearDir(deps, path) !== true) continue;
 			try {
 				rmSync(path, { recursive: true, force: true });
 			} catch {
@@ -909,7 +949,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		}
 		const { owner, malformed } = readOwner(path);
 		if (!owner || malformed || !hasProcessIdentity(owner)) {
-			if (lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+			if (lsofClearDir(deps, path) !== true) continue;
 			try {
 				rmSync(path, { recursive: true, force: true });
 			} catch {
@@ -923,7 +963,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		}
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "dead" && state !== "reused") continue;
-		if (lsofClear(path, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) !== true) continue;
+		if (lsofClearDir(deps, path) !== true) continue;
 		try {
 			rmSync(path, { recursive: true, force: true });
 		} catch {
@@ -1052,8 +1092,9 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = resolveScratchRoots(home);
 	const systemWorkDirs = resolveSystemWorkDirs();
 	const sessions: ScratchVerdict[] = [];
+	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const visit = (dir: string, root: string, nameRequired = true) => {
-		const verdict = inspectOne(dir, root, deps, nameRequired);
+		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
 		if (verdict === null) return;
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
@@ -1077,16 +1118,19 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const applied: ScratchVerdict[] = [];
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const rootOf = (dir: string): string => allRoots.find(r => dir.startsWith(r + "/")) ?? dirname(dir);
+	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const visit = (dir: string, root: string, nameRequired = true) => {
-		const verdict = inspectOne(dir, root, deps, nameRequired);
+		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
 		if (verdict === null) return;
 		sessions.push(verdict);
 		let terminal = verdict;
-		if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, deps);
+		// Mutations move paths, so each action re-checks against a fresh snapshot.
+		const fresh: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+		if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, fresh);
 		else if (verdict.action === "QUARANTINE") {
 			terminal = verdict.reason === "owner-released-would-quarantine"
-				? applyReleased(verdict.dir, root, verdict, deps)
-				: applyUnowned(verdict.dir, rootOf(verdict.dir), deps);
+				? applyReleased(verdict.dir, root, verdict, fresh)
+				: applyUnowned(verdict.dir, rootOf(verdict.dir), fresh);
 		}
 		applied.push(terminal);
 			if (terminal.action === "SKIP") appendLog(home, { event: "failure", dir: terminal.dir, at: new Date(deps.now ?? Date.now()).toISOString(), action: terminal.action, error: terminal.reason });
