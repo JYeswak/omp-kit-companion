@@ -1,0 +1,1 @@
+- COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.
