@@ -204,3 +204,11 @@ test("corpus refuses a file as the sessions directory", () => {
 	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("INVALID_CORPUS_SELECTION");
 	expect(envelope.data).not.toHaveProperty("corpus");
 }, 120_000);
+
+test("corpus seeded fixture reproduces identical counts on repeat runs", () => {
+	const first = runCli(["corpus", "--sessions", sessions, "--json"]);
+	const second = runCli(["corpus", "--sessions", sessions, "--json"]);
+	expect(first.exitCode).toBe(0);
+	expect(second.exitCode).toBe(0);
+	expect(corpusOf(second.envelope).corpus).toEqual(corpusOf(first.envelope).corpus);
+}, 300_000);

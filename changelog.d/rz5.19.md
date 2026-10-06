@@ -1,2 +1,3 @@
 - Corpus rejects missing or non-directory `--sessions` roots with `INVALID_CORPUS_SELECTION`; unknown schema versions refuse with a named error before writing a report; fixed-fixture bash counts match the legacy Python extractor.
 - Corpus counts malformed rows as parse errors without failing the run (planted truncated row yields parse_errors 1, counts unchanged).
+- Corpus seeded fixture reproduces identical counts on repeat runs (two consecutive reports deep-equal).
