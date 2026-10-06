@@ -139,6 +139,20 @@ export function gateRunLoad(load1: number, ncpu: number): RunLoadGate {
 		detail: `SKIPPED-LOAD: ${gate.reason} No work was done; retry when quiet.` };
 }
 
+/**
+ * Per-job run time caps (ms). Interval jobs cap below their cadence so a
+ * hung run dies before the next scheduled start; one-shots get headroom.
+ * Initial values; tune from receipts, never past the interval.
+ */
+export const RUN_TIME_CAPS_MS: Record<string, number> = {
+	"omp-watch": 300_000,
+	"scratch-reaper": 1_800_000,
+	"kit-update": 600_000,
+	"fleet-watch": 90_000,
+	"fleet-lessons": 1_800_000,
+	"load-watch": 45_000,
+};
+
 export interface SpawnHandle {
 	readonly pid: number | null;
 	wait(): Promise<{ code: number | null; out: string }>;

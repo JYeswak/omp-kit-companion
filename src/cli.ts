@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, loadavg, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { isatty } from "node:tty";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -60,6 +60,9 @@ import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
+import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
+import { readLessonsConfig, runFleetLessonsOnce } from "./fleet-lessons.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -2096,6 +2099,17 @@ function readJobFinishedAt(home: string, jobName: string): string | null {
 	}
 }
 
+/** Write a job receipt; false when the state root refuses (caller reports). Three guarded call sites share this shape. */
+function recordJobReceipt(home: string, jobName: string, receipt: Record<string, unknown>): boolean {
+	try {
+		mkdirSync(dirname(jobReceiptPath(home, jobName)), { recursive: true, mode: 0o700 });
+		writeFileSync(jobReceiptPath(home, jobName), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -2291,16 +2305,69 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		return { code: 0, data: { overall: "OK", job: job.name, text }, verification: "UNVERIFIED" };
 	}
+
 	if (sub === "run") {
 		const [name] = names;
 		const job = scoped[name!]!;
+		const root = receiptStateRoot();
+		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
+		// SVC1 run gates, in order: off switch, single-flight, load gate. The
+		// time cap applies where the job body runs below.
+		const off = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
+		if (off.disabled) {
+			return { code: 0, data: { overall: "OK", job: job.name, status: "OFF", ...(off.reason ? { reason: off.reason } : {}) }, verification: "UNVERIFIED" };
+		}
+		try {
+			mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+		} catch { /* acquireRunLock reports unusable directories */ }
+		const claimed = acquireRunLock(jobsDir, job.name);
+		if (claimed.status !== "ACQUIRED") {
+			const receipt = { started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit: OVERLAP_EXIT, omp_version: null, status: "SKIPPED-OVERLAP" };
+			if (!recordJobReceipt(home, job.name, receipt)) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root; the job did not run." }], verification: "UNVERIFIED" };
+			}
+			return { code: OVERLAP_EXIT, data: { overall: "OK", job: job.name, status: "SKIPPED-OVERLAP", holder_age_ms: claimed.holderAgeMs, receipt }, verification: "UNVERIFIED" };
+		}
+		const lock = claimed.lock;
+		// OMP_KIT_LOAD_OVERRIDE is a test-only seam (load1/ncpu); production reads the machine.
+		const loadOverride = process.env.OMP_KIT_LOAD_OVERRIDE;
+		let load1: number, ncpu: number;
+		if (loadOverride !== undefined) {
+			const parts = loadOverride.split("/");
+			load1 = Number(parts[0]);
+			ncpu = Number(parts[1] ?? "");
+		} else {
+			const loads = loadavg();
+			load1 = loads[0] ?? 0;
+			ncpu = cpus().length;
+		}
+		const gate = gateRunLoad(load1, ncpu);
+		if (!gate.proceed) {
+			lock.release();
+			const receipt = { started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit: gate.exit, omp_version: null, status: "SKIPPED-LOAD" };
+			if (!recordJobReceipt(home, job.name, receipt)) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root; the job did not run." }], verification: "UNVERIFIED" };
+			}
+			return { code: gate.exit, data: { overall: "OK", job: job.name, status: gate.status, detail: gate.detail, receipt }, verification: "UNVERIFIED" };
+		}
+		// OMP_KIT_RUN_CAP_MS is a test-only seam; production uses RUN_TIME_CAPS_MS.
+		const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
+		const capMs = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : (RUN_TIME_CAPS_MS[job.name] ?? 600_000);
+		const childEnv: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") childEnv[key] = value;
 		if (job.name === "load-watch") {
 			const stateRoot = join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit", "load");
 			const report = runLoadWatch(stateRoot);
+			lock.release();
 			return { code: 0, data: { overall: report.verdict, job: job.name, ...report }, verification: "UNVERIFIED" };
 		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {
+			lock.release();
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; the job did not run." }], verification: "UNVERIFIED" };
@@ -2309,18 +2376,17 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const enabled = process.env.OMP_KIT_UPDATE_ENABLED === "1";
 			const indexPath = process.env.OMP_KIT_UPDATE_INDEX, archivePath = process.env.OMP_KIT_UPDATE_ARCHIVE;
 			const version = process.env.OMP_KIT_UPDATE_VERSION, sourceTag = process.env.OMP_KIT_UPDATE_SOURCE_TAG;
-			if (!indexPath || !archivePath || !version || !sourceTag) return refusal("KIT_UPDATE_JOB_CONFIG", "kit-update needs OMP_KIT_UPDATE_INDEX, ARCHIVE, VERSION and SOURCE_TAG", "Set the certified local release inputs or leave the job disabled.");
+			if (!indexPath || !archivePath || !version || !sourceTag) { lock.release(); return refusal("KIT_UPDATE_JOB_CONFIG", "kit-update needs OMP_KIT_UPDATE_INDEX, ARCHIVE, VERSION and SOURCE_TAG", "Set the certified local release inputs or leave the job disabled."); }
 			const identity = kitIdentity();
-			if (!identity.release.root) return refusal("KIT_UPDATE_JOB_UNAVAILABLE", "An installed kit release is required for kit-update", "Install a certified kit release before enabling the job.");
+			if (!identity.release.root) { lock.release(); return refusal("KIT_UPDATE_JOB_UNAVAILABLE", "An installed kit release is required for kit-update", "Install a certified kit release before enabling the job."); }
 			const platform = { os: process.platform === "darwin" ? "darwin" as const : "linux" as const, arch: process.arch === "arm64" ? "arm64" as const : "x64" as const, libc: process.platform === "darwin" ? "none" as const : "gnu" as const };
 			const result = await runKitUpdateJob({ enabled, prefix: dirname(dirname(identity.release.root)), stateRoot: receiptStateRoot() ?? "", home: process.env.HOME ?? "", project: process.cwd(), platform, indexPath, archivePath, version, sourceTag, pollRelease: async () => ({ indexPath, archivePath, version, sourceTag }) }, { notify: message => notifyJobFailure({ title: "omp-kit update", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
+			lock.release();
 			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
 		}
 		if (job.name === "fleet-watch") {
 			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
-			const offPath = join(home, ".local", "state", "omp-kit", "fleet-watch.off");
-			if (existsSync(offPath)) return { code: 0, data: { overall: "OK", job: job.name, status: "OFF" }, verification: "UNVERIFIED" };
-			if (!existsSync(configPath)) return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled.");
+			if (!existsSync(configPath)) { lock.release(); return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled."); }
 			try {
 				const config = loadFleetWatchConfig(configPath);
 				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
@@ -2330,8 +2396,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", session + ":" + pane, ...keys]); },
 					logPath,
 				});
+				lock.release();
 				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
-			} catch (error) { return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
+			} catch (error) { lock.release(); return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
 		}
 		if (job.name === "scratch-reaper") {
 			const started = new Date().toISOString();
@@ -2348,10 +2415,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
 				writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
 			} catch {
+				lock.release();
 				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
 						remediation: "Repair the state root; the scratch apply may already have run." }], verification: "UNVERIFIED" };
 			}
+			lock.release();
 			return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: job.name, receipt,
 				stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
 					reaped: result.applied.filter(v => v.action === "REAP").length,
@@ -2364,24 +2433,40 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			verification: "UNVERIFIED" };
 		}
 		const started = new Date().toISOString();
-		const child = Bun.spawnSync([launcher, "test", "--record", "--json"], { stdout: "pipe", stderr: "pipe", env: process.env });
+		const run = await runWithCap({ argv: [launcher, "test", "--record", "--json"], cwd: home, env: childEnv, capMs, exec: bunCapExec() });
 		const ompVersion = (() => { try { return ompIdentity().version; } catch { return null; } })();
-		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: child.exitCode, omp_version: ompVersion };
+		if (run.status === "TIMEOUT") {
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: ompVersion, status: "TIMEOUT" };
+			if (!recordJobReceipt(home, job.name, receipt)) {
+				lock.release();
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root, then rerun; the test itself may have passed." }], verification: "UNVERIFIED" };
+			}
+			lock.release();
+			return { code: 1, data: { overall: "FINDINGS", job: job.name, status: "TIMEOUT", receipt,
+					detail: `test --record exceeded the ${capMs} ms cap and was killed after ${run.elapsedMs} ms.` },
+				errors: [{ code: "TIMEOUT", message: `test --record exceeded the ${capMs} ms cap and was killed`,
+					remediation: "Run the recorded command manually with --json and read its failures." }], verification: "UNVERIFIED" };
+		}
+		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: run.exit ?? 1, omp_version: ompVersion };
 		try {
 			mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
 			writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
 		} catch {
+			lock.release();
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 				errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
 					remediation: "Repair the state root, then rerun; the test itself may have passed." }], verification: "UNVERIFIED" };
 		}
 		// The watcher exists to be seen when the post-update test fails: notify in-process, best-effort.
-		const notification = child.exitCode !== 0 && job.name === "omp-watch"
+		const notification = run.exit !== 0 && job.name === "omp-watch"
 			? notifyJobFailure({ title: "omp-kit", message: "omp-kit test did not pass after an OMP update. Run: omp-kit test --json",
 				platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null })
 			: { attempted: false, method: "none" as const };
-		return { code: child.exitCode === 0 ? 0 : 1, data: { overall: child.exitCode === 0 ? "OK" : "FINDINGS", job: job.name, receipt, notification }, verification: "UNVERIFIED",
-			errors: child.exitCode === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${child.exitCode}: ${child.stderr.toString().trim().slice(0, 300) || child.stdout.toString().trim().slice(0, 300)}`,
+		lock.release();
+		return { code: run.exit === 0 ? 0 : 1, data: { overall: run.exit === 0 ? "OK" : "FINDINGS", job: job.name, receipt, notification }, verification: "UNVERIFIED",
+			errors: run.exit === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${run.exit}: ${run.out.trim().slice(0, 300)}`,
 				remediation: "Run the recorded command manually with --json and read its failures." }] };
 	}
 	return refusal("UNKNOWN_SERVICE_COMMAND", `Unknown service subcommand: ${sub}`, "Run omp-kit help service for exact grammar.");

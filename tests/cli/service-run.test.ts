@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -80,6 +80,13 @@ test("SVC1: a fresh empty lock dir stays overlapped", () => {
 	mkdirSync(join(dir, "load-watch.lock"), { recursive: true, mode: 0o700 });
 	const next = acquireRunLock(dir, "load-watch", Date.now());
 	expect(next.status).toBe("OVERLAP");
+});
+
+
+test("SVC1: interval caps sit below cadence", () => {
+	expect(RUN_TIME_CAPS_MS["load-watch"]).toBeLessThan(60_000);
+	expect(RUN_TIME_CAPS_MS["fleet-watch"]).toBeLessThan(120_000);
+	for (const cap of Object.values(RUN_TIME_CAPS_MS)) expect(cap).toBeGreaterThan(0);
 });
 
 

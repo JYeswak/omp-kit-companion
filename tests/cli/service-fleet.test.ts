@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { KNOWN_JOBS } from "../../src/service.ts";
 
@@ -30,10 +30,10 @@ function fixtureHome(): string {
 	return home;
 }
 
-function cli(args: string[], home: string, ns: string) {
+function cli(args: string[], home: string, ns: string, extraEnv: Record<string, string> = {}) {
 	const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
 		cwd: home,
-		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns },
+		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
@@ -108,4 +108,55 @@ test("service doctor --all reaches the handler", () => {
 	const result = cli(["service", "doctor", "--all"], home, namespace());
 	expect(result.envelope.errors ?? []).toEqual([]);
 	expect(result.envelope.data.checks.length).toBeGreaterThan(0);
+});
+
+function jobsDir(home: string): string {
+	const dir = join(home, ".local", "state", "omp-kit", "jobs");
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
+}
+
+function readReceipt(home: string, job: string): Record<string, unknown> {
+	return JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", `${job}.json`), "utf8"));
+}
+
+test("SVC1 planted: an overlapping run exits SKIPPED-OVERLAP with no work", () => {
+	const home = fixtureHome();
+	const ns = namespace();
+	const dir = jobsDir(home);
+	mkdirSync(join(dir, "load-watch.lock"), { recursive: true, mode: 0o700 });
+	writeFileSync(join(dir, "load-watch.lock", "pid"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+	const result = cli(["service", "run", "load-watch"], home, ns);
+	expect(result.envelope.data.status).toBe("SKIPPED-OVERLAP");
+	expect(result.code).toBe(4);
+	expect(readReceipt(home, "load-watch")).toMatchObject({ status: "SKIPPED-OVERLAP" });
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "load"))).toBe(false);
+});
+
+test("SVC1 planted: a run under high load writes SKIPPED-LOAD and does no work", () => {
+	const home = fixtureHome();
+	const result = cli(["service", "run", "load-watch"], home, namespace(), { OMP_KIT_LOAD_OVERRIDE: "87/32" });
+	expect(result.envelope.data.status).toBe("SKIPPED-LOAD");
+	expect(result.code).toBe(4);
+	expect(readReceipt(home, "load-watch")).toMatchObject({ status: "SKIPPED-LOAD" });
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "load"))).toBe(false);
+});
+
+test("SVC1 planted: a slow run is killed at the cap and recorded TIMEOUT", () => {
+	const home = fixtureHome();
+	const result = cli(["service", "run", "omp-watch"], home, namespace(), { OMP_KIT_RUN_CAP_MS: "1" });
+	expect(result.envelope.data.status).toBe("TIMEOUT");
+	expect(result.envelope.errors[0].code).toBe("TIMEOUT");
+	expect(readReceipt(home, "omp-watch")).toMatchObject({ status: "TIMEOUT" });
+});
+
+test("SVC1 planted: a disabled job produces no run and no receipt", () => {
+	const home = fixtureHome();
+	mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
+	writeFileSync(join(home, ".local", "state", "omp-kit", "load-watch.off"), "paused in test\n");
+	const result = cli(["service", "run", "load-watch"], home, namespace());
+	expect(result.envelope.data.status).toBe("OFF");
+	expect(result.code).toBe(0);
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "load-watch.json"))).toBe(false);
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "load"))).toBe(false);
 });
