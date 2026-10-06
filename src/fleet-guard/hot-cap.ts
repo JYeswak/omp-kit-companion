@@ -44,9 +44,16 @@ function normalize(path: string): string {
 	return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-/** Exact match, or dir-prefix when the entry ends with /. */
+/** True when a requested path (concrete or glob) touches a hot entry. */
 export function isHotPath(hotPaths: readonly string[], requestedPath: string): string | null {
 	const want = normalize(requestedPath);
+	if (/[*?[]/.test(want)) {
+		for (const raw of hotPaths) {
+			const entry = normalize(raw.replace(/\/$/, ""));
+			if (globMatch(want, entry)) return raw.trim();
+		}
+		return null;
+	}
 	for (const raw of hotPaths) {
 		const entry = normalize(raw);
 		if (raw.trim().endsWith("/")) {
@@ -56,6 +63,33 @@ export function isHotPath(hotPaths: readonly string[], requestedPath: string): s
 		}
 	}
 	return null;
+}
+
+/** Minimal glob match (*, **, ?, [...] classes) for hot-path intersection. */
+export function globMatch(pattern: string, value: string): boolean {
+	let regex = "^";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "*") {
+			if (pattern[i + 1] === "*") { regex += ".*"; i++; }
+			else regex += "[^/]*";
+		} else if (ch === "?") {
+			regex += "[^/]";
+		} else if (ch === "[") {
+			const close = pattern.indexOf("]", i + 1);
+			if (close < 0) regex += "\\[";
+			else { regex += pattern.slice(i, close + 1); i = close; }
+		} else if ("\\.+^$()|{}".includes(ch)) {
+			regex += "\\" + ch;
+		} else {
+			regex += ch;
+		}
+	}
+	try {
+		return new RegExp(regex + "$").test(value);
+	} catch {
+		return false;
+	}
 }
 
 export function checkHotCap(input: {
@@ -81,9 +115,9 @@ export function checkHotCap(input: {
 /** True for Agent Mail reservation/renewal tool calls (any prefix/suffix shape). */
 export function isReservationTool(toolName: string): "reserve" | "renew" | null {
 	const name = toolName.toLowerCase();
-	if (name.endsWith("renew_file_reservations")) return "renew";
-	if (name.endsWith("file_reservation_paths")) return "reserve";
-	return null;
+	if (!name.includes("file_reservation")) return null;
+	if (name.includes("renew") || name.includes("extend")) return "renew";
+	return "reserve";
 }
 
 /** Pull reservation args from any of the event arg shapes. */
@@ -107,6 +141,8 @@ export function reservationArgs(event: { arguments?: unknown; input?: unknown; p
 		if (record.exclusive === true) exclusive = true;
 		if (typeof record.ttl_seconds === "number" && Number.isFinite(record.ttl_seconds)) ttlSeconds = record.ttl_seconds;
 		else if (typeof record.ttlSeconds === "number" && Number.isFinite(record.ttlSeconds)) ttlSeconds = record.ttlSeconds;
+		else if (typeof record.extend_seconds === "number" && Number.isFinite(record.extend_seconds)) ttlSeconds = record.extend_seconds;
+		else if (typeof record.extendSeconds === "number" && Number.isFinite(record.extendSeconds)) ttlSeconds = record.extendSeconds;
 	}
 	return { paths, exclusive, ttlSeconds };
 }

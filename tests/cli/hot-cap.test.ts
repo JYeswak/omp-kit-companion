@@ -105,3 +105,38 @@ test("doctor audit lists only hot overdue holds when filtered", () => {
 	const hot = auditReservationAge({ archiveRoot: archive, projectKey: project, hotPaths: ["src/cli.ts"] });
 	expect(hot.overdue.map(row => row.agent_name)).toEqual(["A"]);
 });
+
+test("renew via extend_seconds on a hot path is refused", async () => {
+	const root = hotRepo();
+	const block = await check({
+		toolName: "xd://mcp__mcp_agent_mail_renew_file_reservations",
+		arguments: { agent_name: "PlumRaven", paths: ["src/cli.ts"], exclusive: true, extend_seconds: 147 * 60 },
+	}, { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("147");
+});
+
+test("macro reservation cycle on a hot path is refused", async () => {
+	const root = hotRepo();
+	const block = await check({
+		toolName: "xd://mcp__mcp_agent_mail_macro_file_reservation_cycle",
+		arguments: { agent_name: "PlumRaven", paths: ["src/cli.ts"], exclusive: true, ttl_seconds: 147 * 60 },
+	}, { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("src/cli.ts");
+});
+
+test("glob path matching a hot file is refused; non-matching glob passes", async () => {
+	const root = hotRepo();
+	const bad = await check({
+		toolName: "xd://mcp__mcp_agent_mail_file_reservation_paths",
+		arguments: { agent_name: "PlumRaven", paths: ["src/*.ts"], exclusive: true, ttl_seconds: 147 * 60 },
+	}, { cwd: root, repoRoot: root });
+	expect(bad?.block).toBe(true);
+	expect(bad?.reason).toContain("src/cli.ts");
+	const ok = await check({
+		toolName: "xd://mcp__mcp_agent_mail_file_reservation_paths",
+		arguments: { agent_name: "PlumRaven", paths: ["docs/*.md"], exclusive: true, ttl_seconds: 147 * 60 },
+	}, { cwd: root, repoRoot: root });
+	expect(ok).toBeUndefined();
+});
