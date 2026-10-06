@@ -28,7 +28,21 @@ resolve_spec() {
 	spec=$2
 	case "$spec" in
 		./*) printf '%s' "$dir/${spec#./}" ;;
-		../*) printf '%s' "${dir%/*}/${spec#../}" ;;
+		../*)
+			d=$dir
+			s=$spec
+			while :; do
+				case "$s" in
+					../*) s=${s#../} ;;
+					*) break ;;
+				esac
+				case "$d" in
+					"."|"") d="" ;;
+					*/*) d=${d%/*} ;;
+					*) d="" ;;
+				esac
+			done
+			if [ -z "$d" ]; then printf '%s' "$s"; else printf '%s' "$d/$s"; fi ;;
 		*) return 1 ;;
 	esac
 }

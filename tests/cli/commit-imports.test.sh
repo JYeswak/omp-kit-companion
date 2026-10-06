@@ -74,5 +74,37 @@ else
 	fail=$((fail + 1)); printf 'FAIL minified-fast: rc=%s elapsed=%s out<<<%s>>>\n' "$rc" "$elapsed" "$out"
 fi
 
+# 4. planted: valid ../../src import from tests/cli passes (multi-level ../)
+repo4=$(mkrepo multilevel)
+mkdir -p "$repo4/tests/cli"
+printf 'export const deep = 1;\n' > "$repo4/src/deep.ts"
+printf 'import { deep } from "../../src/deep.ts";\nconsole.log(deep);\n' > "$repo4/tests/cli/check.ts"
+git -C "$repo4" add -A
+git -C "$repo4" commit -qm "[test] valid multilevel relative import"
+base4=$(git -C "$repo4" rev-parse HEAD~1)
+head4=$(git -C "$repo4" rev-parse HEAD)
+out=$(sh "$CHECKER" --repo "$repo4" --base "$base4" --tip "$head4" 2>&1)
+rc=$?
+if [ "$rc" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL multilevel-valid: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# 5. planted: missing ../../src/nope.ts from tests/cli is still refused
+repo5=$(mkrepo multilevel-dangling)
+mkdir -p "$repo5/tests/cli"
+printf 'import { nope } from "../../src/nope.ts";\nconsole.log(nope);\n' > "$repo5/tests/cli/check.ts"
+git -C "$repo5" add -A
+git -C "$repo5" commit -qm "[test] dangling multilevel import"
+base5=$(git -C "$repo5" rev-parse HEAD~1)
+head5=$(git -C "$repo5" rev-parse HEAD)
+out=$(sh "$CHECKER" --repo "$repo5" --base "$base5" --tip "$head5" 2>&1)
+rc=$?
+if [ "$rc" = "4" ] && printf '%s' "$out" | grep -q "$head5" && printf '%s' "$out" | grep -q "nope.ts"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL multilevel-dangling: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
 printf 'commit-imports: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
