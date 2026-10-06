@@ -52,6 +52,16 @@ ok "$?" "0" "behind-count"
 grep -q "merge --ff-only origin/main" "$TMP/o2"
 ok "$?" "0" "behind-exact-command"
 
+# 2b. post-push assertion: gap reported with count, clean reports OK
+sh "$CHECK" --repo "$WORK" --assert-synced > "$TMP/o2b" 2>&1
+ok "$?" "4" "assert-gap-rc"
+grep -q "POST-PUSH-GAP" "$TMP/o2b"
+ok "$?" "0" "assert-gap-named"
+grep -q "3 commit(s) behind" "$TMP/o2b"
+ok "$?" "0" "assert-gap-count"
+sh "$CHECK" --repo "$FRESH" --assert-synced > "$TMP/o2c" 2>&1
+ok "$?" "0" "assert-clean-rc"
+
 # 3. fast-forward happy path (with an unrelated uncommitted file present)
 echo precious > "$WORK/keep.txt"
 sh "$CHECK" --repo "$WORK" --fast-forward > "$TMP/o3" 2>&1

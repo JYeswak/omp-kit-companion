@@ -1,12 +1,15 @@
 #!/bin/sh
-# sync-check.sh - SYNC1 start gate + fast-forward (ompkit-pwdi boxes 1-2).
+# sync-check.sh - SYNC1 start gate + fast-forward + post-push assertion
+# (ompkit-pwdi boxes 1-3).
 #
 # Usage:
 #   sync-check.sh --repo DIR                 # start gate: HEAD == origin/main?
 #   sync-check.sh --repo DIR --fast-forward  # move HEAD when it can do so cleanly
+#   sync-check.sh --repo DIR --assert-synced # post-push check: report any gap
 #
-# Exit: 0 synced / fast-forwarded (nothing to do is also 0);
-#       4 refused: behind (gate) or cannot fast-forward (reason on stderr);
+# Exit: 0 synced / fast-forwarded / post-push clean (nothing to do is also 0);
+#       4 refused: behind (gate), cannot fast-forward (reason on stderr),
+#         or post-push gap (report on stderr);
 #       2 usage or config error (no repo, no origin/main, fetch failed).
 #
 # The script never stashes, resets, rebases, or edits the worktree. The only
@@ -15,10 +18,12 @@
 set -u
 REPO=""
 FF=0
+ASSERT=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo) [ $# -ge 2 ] || { echo "sync-check: --repo needs a directory" >&2; exit 2; }; REPO=$2; shift 2 ;;
 		--fast-forward) FF=1; shift ;;
+		--assert-synced) ASSERT=1; shift ;;
 		-h|--help) sed -n '2,17p' "$0"; exit 0 ;;
 		--) shift; break ;;
 		-*) echo "sync-check: unknown argument: $1" >&2; exit 2 ;;
@@ -33,6 +38,14 @@ UP_SHA=$(git -C "$REPO" rev-parse origin/main 2>/dev/null) || { echo "sync-check
 if [ "$HEAD_SHA" = "$UP_SHA" ]; then
 	echo "SYNCED $REPO at $HEAD_SHA"
 	exit 0
+fi
+if [ "$ASSERT" = 1 ]; then
+	BEHIND=$(git -C "$REPO" rev-list --count HEAD..origin/main 2>/dev/null) || BEHIND="?"
+	SHORT_HEAD=$(git -C "$REPO" rev-parse --short HEAD)
+	SHORT_UP=$(git -C "$REPO" rev-parse --short origin/main)
+	echo "sync-check: POST-PUSH-GAP: $REPO HEAD $SHORT_HEAD is $BEHIND commit(s) behind origin/main $SHORT_UP" >&2
+	echo "sync-check: shared checkout needs: git -C $REPO merge --ff-only origin/main" >&2
+	exit 4
 fi
 if [ "$FF" != 1 ]; then
 	BEHIND=$(git -C "$REPO" rev-list --count HEAD..origin/main 2>/dev/null) || BEHIND="?"
