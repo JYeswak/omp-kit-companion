@@ -222,6 +222,18 @@ export function bunCapExec(): CapExec {
 					try {
 						child.kill(9);
 					} catch { /* already gone is fine */ }
+					// A killed launcher's grandchildren (e.g. `sleep` under `sh`)
+					// can outlive it holding the pipes open; on Linux the pipe
+					// read in wait() then blocks until they exit (CI fail
+					// 2026-10-06: TIMEOUT plant hung 5 s on a sleep-20
+					// grandchild). Cancel our sides so wait() settles on the
+					// direct child's exit; orphaned grandchildren exit alone.
+					for (const stream of [child.stdout, child.stderr]) {
+						try {
+							const done = (stream as ReadableStream<Uint8Array> | null)?.cancel();
+							(done as Promise<void> | undefined)?.catch(() => { /* closed already */ });
+						} catch { /* already closed is fine */ }
+					}
 				},
 			};
 		},
