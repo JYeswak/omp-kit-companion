@@ -110,6 +110,17 @@ test("new branch outside the baseline refuses", async () => {
 	sh(repo, "branch", "-D", "sneaky-new");
 });
 
+test("a re-created archived branch is refused under the main-only baseline", async () => {
+	const { repo } = fixtureRepo();
+	sh(repo, "branch", "tick1e/clte-obsfold-recall-uol16");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "NEW_BRANCH" });
+	expect(result.reason).toContain("tick1e/clte-obsfold-recall-uol16");
+	expect(headSha(repo)).toBe(before);
+	sh(repo, "branch", "-D", "tick1e/clte-obsfold-recall-uol16");
+});
+
 test("new gitlink refuses while baseline gitlinks are tolerated", async () => {
 	const { repo } = fixtureRepo();
 	const blob = sh(repo, "hash-object", "-w", "--stdin").stdout.trim();

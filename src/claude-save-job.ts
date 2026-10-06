@@ -2,8 +2,8 @@
  *
  * An interval service job (hourly) that commits admitted changes on main and
  * pushes origin main. Refusals (each with a planted test): HEAD not main,
- * upstream not origin/main, any worktree, any branch outside the 2026-10-06
- * 34-branch baseline, any gitlink outside the 5-gitlink allowlist, a dirty
+ * upstream not origin/main, any worktree, any branch besides main, any
+ * gitlink outside the 5-gitlink allowlist, a dirty
  * tracked denied file (cc-router-local.json, settings.json), a gitleaks
  * finding, a missing gitleaks scanner (fail-closed), and SKILL.md outside
  * skills/. Gitlinks and denied files are never staged. No merge, rebase,
@@ -56,43 +56,10 @@ export const CLAUDE_SAVE_BASELINE_GITLINKS: readonly string[] = [
 	"skills/.non-skill-dirs-relocated-20260610/rawr-slides",
 ];
 
-/** Branch baseline snapshotted from ~/.claude 2026-10-06 (34 entries). */
-export const CLAUDE_SAVE_BASELINE_BRANCHES: readonly string[] = [
-	"alps-skills-2026-07-25",
-	"axis-g/speed-cost-harness-uol-6",
-	"client-side-desync-detector-uol-3-2",
-	"clte-differential-detector-uol-3-1",
-	"codex/canonical-scorecard-python311-install",
-	"coverage/axis-c-denominator-uol-5",
-	"detector/cache-key-collision-uol-3-4",
-	"detector/grammar-fuzz-composer-uol-3-7",
-	"feat/url-parser-ssrf-confusion-uol20",
-	"fix/http2-data-padding-hole5-uol15",
-	"gate2-reachability-uol-4",
-	"hooks-agent-mail-fleet-pre-auth-2026-05-21",
-	"hooks-infisical-scope-discovery-2026-05-21",
-	"hooks-tool-discovery-gate-2026-05-21",
-	"hooks-tool-discovery-gate-v11-2026-05-21",
-	"hooks-tool-discovery-gate-v12-2026-05-21",
-	"host-header-authority-confusion-uol-3-5",
-	"http2-stream-collision-uol-3-3",
-	"lane-a/maturity-registry-uol19",
-	"lane/payability-lattice-uol23",
-	"main",
-	"tick-uol22/ssrf-userinfo-fix",
-	"tick/harden-hole7-cachekey-method-uol-17",
-	"tick1/tri-gate-harness-uol-8",
-	"tick1a/http2-recall-fix",
-	"tick1b/http2-rst-close",
-	"tick1c/http2-goaway-cutoff",
-	"tick1d/clte-fp-fix",
-	"tick1e/clte-obsfold-recall-uol16",
-	"tick1e/clte-obsfold-recall-uol16-fix",
-	"tick3/corpus-provenance-gate-uol-10",
-	"variant-sweep-engine-uol-3-6",
-	"wip/flywheel/session-save-20260602T043422Z",
-	"write-hook-live-and-t4-recalibration-2026-06-15",
-];
+/** Branch baseline: main only. TopazRiver deleted every other ~/.claude
+ * branch with Josh's approval (amendment 3, 2026-10-06); any re-created
+ * archived branch is refused as new. */
+export const CLAUDE_SAVE_BASELINE_BRANCHES: readonly string[] = ["main"];
 
 export function claudeSaveJobEnabled(environment: { OMP_KIT_CLAUDE_SAVE_ENABLED?: string; OMP_KIT_JOB?: string }): boolean {
 	return environment.OMP_KIT_CLAUDE_SAVE_ENABLED === "1" || environment.OMP_KIT_JOB === "claude-save";
@@ -155,7 +122,7 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 		if (branches.code !== 0) return record(ctx, fail(ctx, "BRANCH_LIST_FAILED", branches.stderr.trim()));
 		const baseline = new Set(CLAUDE_SAVE_BASELINE_BRANCHES);
 		const extra = branches.stdout.split("\n").map(name => name.trim()).filter(name => name !== "" && !baseline.has(name));
-		if (extra.length > 0) return record(ctx, fail(ctx, "NEW_BRANCH", `new branches outside the 34-branch baseline: ${extra.join(", ")}`));
+		if (extra.length > 0) return record(ctx, fail(ctx, "NEW_BRANCH", `new branches outside the main-only baseline: ${extra.join(", ")}`));
 		const index = git(["ls-files", "-s"]);
 		if (index.code !== 0) return record(ctx, fail(ctx, "INDEX_READ_FAILED", index.stderr.trim()));
 		const allowGitlinks = new Set(CLAUDE_SAVE_BASELINE_GITLINKS);
