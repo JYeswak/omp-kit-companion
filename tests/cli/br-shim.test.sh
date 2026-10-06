@@ -13,11 +13,19 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$TMP/realbin" "$TMP/shimbindir"
 cat > "$TMP/realbin/br" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
+# SYNC1 box 4: answer `show` with canned bead JSON for the close gate;
+# record every other invocation for argv assertions.
+if [ "$1" = "show" ]; then
+	cat "$BR_GUARD_JSON_FILE"
+else
+	printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
+fi
 exit 0
 EOF
 chmod +x "$TMP/realbin/br"
 ln -s "$SHIM" "$TMP/shimbindir/br"
+printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
+export BR_GUARD_JSON_FILE="$TMP/bead.json"
 pass=0
 fail=0
 check() {
@@ -135,6 +143,44 @@ elif [ "$waited" -lt 5 ]; then
 	fail=$((fail + 1))
 	printf 'FAIL self-loop: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
 fi
+
+# 8. SYNC1 box 4: the close gate runs at review/grading entry.
+# The claimant is refused before the real br sees the transition;
+# anyone else passes through; non-review statuses are ungated.
+export PATH="$TMP/shimbindir:$TMP/realbin:/usr/bin:/bin"
+printf '{"id":"X","status":"in_progress","assignee":"TestShim","labels":[]}' > "$TMP/bead.json"
+: > "$TMP/argv"
+br update X --status in_review > "$TMP/out" 2>&1
+got_rc=$?
+if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -q "holds the claim" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL review-entry-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
+fi
+: > "$TMP/argv"
+br close X > "$TMP/out" 2>&1
+got_rc=$?
+if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL close-refused: rc=%s\n' "$got_rc"
+fi
+printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
+: > "$TMP/argv"
+br update X --status in_review > "$TMP/out" 2>&1
+got_rc=$?
+check "review-entry-passes" 0 "update X --status in_review --actor TestShim"
+: > "$TMP/argv"
+br update X --status open > "$TMP/out" 2>&1
+got_rc=$?
+check "non-review-ungated" 0 "update X --status open --actor TestShim"
+printf '{"id":"X","status":"in_progress","assignee":"TestShim","labels":["reviewer-fresh-context:muse"]}' > "$TMP/bead.json"
+: > "$TMP/argv"
+br close X > "$TMP/out" 2>&1
+got_rc=$?
+check "fresh-context-passes" 0 "close X --actor TestShim"
 
 printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
