@@ -1,0 +1,1 @@
+- Release C: scratch service-run tests pin a quiet load reading (OMP_KIT_LOAD_OVERRIDE) so the reaping logic, not runner load, is under test; proven immune to forced-loud outer load.

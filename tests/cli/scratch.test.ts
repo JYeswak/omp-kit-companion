@@ -413,7 +413,10 @@ test("scratch release quarantines its live owner while leaving unreleased live s
     `pid=${process.pid}\nlabel=live\nrepo=${home}\ncreated=${new Date().toISOString()}\n`);
   backdateTree(live, 73 * 3600 * 1000, Date.now());
   const lsof = fakeLsof().dir;
-  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state,
+  // Service runs gate on machine load; pin a quiet reading so the reaping
+  // logic (not runner load) is what's under test. The gate itself is covered
+  // by service-run unit tests.
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
     PATH: `${lsof}:${process.env.PATH ?? ""}` };
 
   const marked = cli(["scratch", "release", released], home, env);
@@ -515,7 +518,7 @@ test("service run applies scratch reaping and writes a receipt", () => {
   roots.push(root);
   const dead = sessionDir(root, "gone", deadPid());
   writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
-  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state,
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
     PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
   const run = cli(["service", "run", "scratch-reaper"], home, env);
   expect(run.code).toBe(0);
