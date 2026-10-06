@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { auditReservationAge } from "../../src/reservation-age.ts";
 import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, parseHotPaths, readHotPaths } from "../../src/fleet-guard/hot-cap.ts";
 import { check } from "../../src/fleet-guard/reservations.ts";
 
@@ -85,4 +86,22 @@ test("checkHotCap unit: cap boundary and message", () => {
 	const over = checkHotCap({ hotPaths: hot, request: { paths: ["src/cli.ts"], exclusive: true, ttlSeconds: 31 * 60, kind: "reserve" } });
 	expect(over.blocked).toBe(true);
 	expect(over.reason).toContain("src/cli.ts");
+});
+
+
+test("doctor audit lists only hot overdue holds when filtered", () => {
+	const archive = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-age-"));
+	dirs.push(archive);
+	const project = "org/repo";
+	const dir = join(archive, "projects", "org-repo", "file_reservations");
+	mkdirSync(dir, { recursive: true });
+	const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+	const fresh = new Date().toISOString();
+	writeFileSync(join(dir, "a.json"), JSON.stringify({ exclusive: true, path_pattern: "src/cli.ts", agent_name: "A", created_ts: old, reason: "b1" }));
+	writeFileSync(join(dir, "b.json"), JSON.stringify({ exclusive: true, path_pattern: "src/other.ts", agent_name: "B", created_ts: old, reason: "b2" }));
+	writeFileSync(join(dir, "c.json"), JSON.stringify({ exclusive: true, path_pattern: "src/cli.ts", agent_name: "C", created_ts: fresh, reason: "b3" }));
+	const all = auditReservationAge({ archiveRoot: archive, projectKey: project });
+	expect(all.overdue.map(row => row.agent_name).sort()).toEqual(["A", "B"]);
+	const hot = auditReservationAge({ archiveRoot: archive, projectKey: project, hotPaths: ["src/cli.ts"] });
+	expect(hot.overdue.map(row => row.agent_name)).toEqual(["A"]);
 });

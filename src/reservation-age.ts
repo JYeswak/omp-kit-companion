@@ -1,5 +1,6 @@
 import { lstatSync, openSync, closeSync, fstatSync, readFileSync, readdirSync, type Stats } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { isHotPath } from "./fleet-guard/hot-cap.ts";
 
 export const DEFAULT_RESERVATION_LIMIT_MINUTES = 30;
 
@@ -112,11 +113,15 @@ export function auditStaleReservedEdits(input: { archiveRoot: string; projectKey
 }
 
 /** List exclusive reservation holds older than limitMinutes from an Agent Mail archive. */
-export function auditReservationAge(input: { archiveRoot: string; projectKey: string; limitMinutes?: number; nowMs?: number }): ReservationAgeReport {
+export function auditReservationAge(input: { archiveRoot: string; projectKey: string; limitMinutes?: number; nowMs?: number; hotPaths?: readonly string[] }): ReservationAgeReport {
 	const limitMinutes = input.limitMinutes ?? DEFAULT_RESERVATION_LIMIT_MINUTES;
 	const nowMs = input.nowMs ?? Date.now();
 	const source = readActiveReservations(input.archiveRoot, input.projectKey, nowMs);
-	const overdue = source.records.filter((record) => (nowMs - record.granted_ms) / 60_000 > limitMinutes).map((record) => ({
+	const hotOnly = (input.hotPaths ?? []).length > 0;
+	const overdue = source.records
+		.filter((record) => (nowMs - record.granted_ms) / 60_000 > limitMinutes)
+		.filter((record) => !hotOnly || isHotPath(input.hotPaths ?? [], record.path_pattern) !== null)
+		.map((record) => ({
 		path_pattern: record.path_pattern, agent_name: record.agent_name, bead: record.bead, age_minutes: Math.round(((nowMs - record.granted_ms) / 60_000) * 10) / 10, granted_ts: record.granted_ts, expires_ts: record.expires_ts,
 	}));
 	overdue.sort((a, b) => b.age_minutes - a.age_minutes);

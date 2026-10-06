@@ -63,6 +63,7 @@ import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
+import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
 import { readLessonsConfig, runFleetLessonsOnce } from "./fleet-lessons.ts";
@@ -423,16 +424,18 @@ function inspectReservationAge(request: ParsedCommand): Finding {
 		reason: "AGENT_MAIL_STORAGE_ROOT is unset; reservation holds cannot be read",
 		recommended_action: "Point AGENT_MAIL_STORAGE_ROOT at the live Agent Mail root." };
 	const project = typeof request.flags.get("--project") === "string" ? String(request.flags.get("--project")) : process.cwd();
-	const report = auditReservationAge({ archiveRoot, projectKey: project });
+	const hotPaths = readHotPaths(project);
+	const report = auditReservationAge({ archiveRoot, projectKey: project, ...(hotPaths.length ? { hotPaths } : {}) });
+	const scope = hotPaths.length ? ` on hot paths (${hotPaths.join(", ")})` : "";
 	if (report.overdue.length === 0) return { component: "reservations", status: "OK",
-		reason: `No exclusive hold older than ${report.limit_minutes} min (${report.checked} checked)`,
+		reason: `No exclusive hold older than ${report.limit_minutes} min${scope} (${report.checked} checked)`,
 		recommended_action: "No action required.",
-		evidence: { checked: report.checked, unreadable: report.unreadable, limit_minutes: report.limit_minutes } };
+		evidence: { checked: report.checked, unreadable: report.unreadable, limit_minutes: report.limit_minutes, hot_paths: hotPaths } };
 	const worst = report.overdue[0]!;
 	return { component: "reservations", status: "FAIL",
-		reason: `${report.overdue.length} exclusive hold(s) older than ${report.limit_minutes} min; oldest ${worst.path_pattern} by ${worst.agent_name} at ${worst.age_minutes} min (${worst.bead || "no bead named"})`,
+		reason: `${report.overdue.length} exclusive hold(s) older than ${report.limit_minutes} min${scope}; oldest ${worst.path_pattern} by ${worst.agent_name} at ${worst.age_minutes} min (${worst.bead || "no bead named"})`,
 		recommended_action: "Land or release the overdue hold; a hold past the push is a stop sign.",
-		evidence: { checked: report.checked, overdue: report.overdue } };
+		evidence: { checked: report.checked, overdue: report.overdue, hot_paths: hotPaths } };
 }
 
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
