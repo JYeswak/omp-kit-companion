@@ -7,7 +7,7 @@
  * Data: `git log` subjects on main plus `br list/audit/comments/search --json`
  * against the tracker's beads.db. Proxies are named as proxies in `detail`.
  */
-export type Grade = "A" | "B" | "C" | "D" | "F";
+export type Grade = "A" | "B" | "C" | "D" | "F" | "N/A";
 
 export interface FlywheelMetric {
 	metric: string;
@@ -26,7 +26,7 @@ export interface FlywheelInput {
 	now?: number;
 }
 
-export type RunFn = (cmd: string[]) => { code: number | null; stdout: string; stderr?: string };
+export type RunFn = (cmd: string[], env?: Record<string, string>) => { code: number | null; stdout: string; stderr?: string };
 
 const BEAD_ID = /\bompkit-[a-z0-9]+(?:-[a-z0-9]+)*\b/g;
 const DAY_MS = 86_400_000;
@@ -96,18 +96,20 @@ function realIds(text: string, known: Record<string, true>): string[] {
 /** M1a: share of in-progress beads with at most 5 open boxes. */
 export function metricBeadSize(issues: Issue[]): FlywheelMetric {
 	const active = issues.filter(issue => issue.status === "in_progress");
+	if (!active.length) return na("bead-size", "0 in-progress beads", "no in-progress beads in tracker");
 	const small = active.filter(issue => openBoxes(issue) <= 5).length;
-	const pct = active.length ? (small / active.length) * 100 : 100;
+	const pct = (small / active.length) * 100;
 	return { metric: "bead-size", value: pct, display: `${small}/${active.length} in-progress beads with <=5 open boxes`,
-		threshold: "A>=90", grade: letterGrade(pct), detail: active.length ? "" : "no in-progress beads; vacuous A" };
+		threshold: "A>=90", grade: letterGrade(pct), detail: "" };
 }
 
 /** M1b: share of window commits naming a real bead id. */
 export function metricCommitLinkage(subjects: string[], known: Record<string, true>): FlywheelMetric {
+	if (!subjects.length) return na("commit-linkage", "0/0 commits", "no git history in window (export or quiet repo)");
 	const linked = subjects.filter(subject => realIds(subject, known).length > 0).length;
-	const pct = subjects.length ? (linked / subjects.length) * 100 : 100;
+	const pct = (linked / subjects.length) * 100;
 	return { metric: "commit-linkage", value: pct, display: `${linked}/${subjects.length} commits name a real bead id`,
-		threshold: "A>=90", grade: letterGrade(pct), detail: subjects.length ? "" : "no commits in window; vacuous A" };
+		threshold: "A>=90", grade: letterGrade(pct), detail: "" };
 }
 
 export interface ClaimTally { self: number; dispatched: number }
@@ -115,9 +117,15 @@ export interface ClaimTally { self: number; dispatched: number }
 /** M2: claims whose actor is the new assignee (bv self-pick) vs another actor (dispatch). */
 export function metricSelfPick(tally: ClaimTally): FlywheelMetric {
 	const total = tally.self + tally.dispatched;
-	const pct = total ? (tally.self / total) * 100 : 100;
+	if (!total) return na("self-pick", "0/0 claims", "no claims in window");
+	const pct = (tally.self / total) * 100;
 	return { metric: "self-pick", value: pct, display: `${tally.self}/${total} claims self-picked via bv`,
-		threshold: "A>=90", grade: letterGrade(pct), detail: total ? "" : "no claims in window; vacuous A" };
+		threshold: "A>=90", grade: letterGrade(pct), detail: "" };
+}
+
+/** Empty sample: no denominator, no grade. An unmeasured practice must never read A. */
+function na(metric: string, display: string, reason: string): FlywheelMetric {
+	return { metric, value: NaN, display: `${display} — n/a (${reason})`, threshold: "A>=90", grade: "N/A", detail: reason };
 }
 export function tallyClaims(allEvents: AuditEvent[][], since: number): ClaimTally {
 	const tally: ClaimTally = { self: 0, dispatched: 0 };
@@ -133,10 +141,11 @@ export function tallyClaims(allEvents: AuditEvent[][], since: number): ClaimTall
 /** M3: share of non-merge window commits naming exactly one real bead id (focused landings). */
 export function metricLandingHygiene(subjects: { subject: string; merge: boolean }[], known: Record<string, true>): FlywheelMetric {
 	const eligible = subjects.filter(entry => !entry.merge);
+	if (!eligible.length) return na("landing-hygiene", "0/0 non-merge commits", "no git history in window (export or quiet repo)");
 	const focused = eligible.filter(entry => realIds(entry.subject, known).length === 1).length;
-	const pct = eligible.length ? (focused / eligible.length) * 100 : 100;
+	const pct = (focused / eligible.length) * 100;
 	return { metric: "landing-hygiene", value: pct, display: `${focused}/${eligible.length} non-merge commits name exactly one bead`,
-		threshold: "A>=90", grade: letterGrade(pct), detail: eligible.length ? "" : "no non-merge commits; vacuous A" };
+		threshold: "A>=90", grade: letterGrade(pct), detail: "" };
 }
 
 /** M3 incidents: shared-index incident hits in the tracker (graded separately: A iff zero). */
@@ -147,13 +156,14 @@ export function metricIndexIncidents(hits: number): FlywheelMetric {
 
 /** M4: closes vs starts per day in window, plus max age in review. Grade is the weaker half. */
 export function metricCloseFlow(closes: number, starts: number, maxInReviewH: number | null): FlywheelMetric {
-	const ratio = starts > 0 ? closes / starts : closes > 0 ? 2 : 1;
+	if (!closes && !starts) return na("close-flow", "0 closes vs 0 starts", "no tracker movement in window");
+	const ratio = starts > 0 ? closes / starts : 2;
 	const ratioGrade = ratio >= 1 ? "A" : ratio >= 0.75 ? "B" : ratio >= 0.5 ? "C" : ratio >= 0.25 ? "D" : "F";
-	const ageGrade = maxInReviewH === null ? "A" : maxInReviewH <= 24 ? "A" : maxInReviewH <= 72 ? "C" : "F";
+	const ageGrade = maxInReviewH === null ? "A" : maxInReviewH <= 2 ? "A" : maxInReviewH <= 24 ? "C" : "F";
 	const order: Grade[] = ["A", "B", "C", "D", "F"];
 	const grade = order[Math.max(order.indexOf(ratioGrade as Grade), order.indexOf(ageGrade as Grade))];
 	return { metric: "close-flow", value: ratio, display: `${closes} closes vs ${starts} starts/day-window; max in_review ${maxInReviewH === null ? "n/a" : maxInReviewH.toFixed(1) + "h"}`,
-		threshold: "A iff closes>=starts and max in_review<=24h", grade, detail: `ratio grade ${ratioGrade}, age grade ${ageGrade}` };
+		threshold: "A iff closes>=starts and max in_review<=2h", grade, detail: `ratio grade ${ratioGrade}, age grade ${ageGrade}` };
 }
 
 /**
@@ -163,21 +173,24 @@ export function metricCloseFlow(closes: number, starts: number, maxInReviewH: nu
  * same failure. Documented proxy, not the thing itself.
  */
 export function metricFreshness(stale: number, active: number): FlywheelMetric {
-	const pct = active ? ((active - stale) / active) * 100 : 100;
+	if (!active) return na("freshness", "0 in-progress beads", "no in-progress beads in tracker");
+	const pct = ((active - stale) / active) * 100;
 	return { metric: "freshness", value: pct, display: `${active - stale}/${active} in-progress beads touched in 24h`,
 		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: updated_at freshness while ready is non-empty" };
 }
 
 /** M6: share of window closes with a VERDICT comment from the closer near close time. */
 export function metricVerdictCloses(withVerdict: number, closes: number): FlywheelMetric {
-	const pct = closes ? (withVerdict / closes) * 100 : 100;
+	if (!closes) return na("verdict-closes", "0 closes", "no closes in window");
+	const pct = (withVerdict / closes) * 100;
 	return { metric: "verdict-closes", value: pct, display: `${withVerdict}/${closes} closes carry a closer VERDICT comment`,
 		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: VERDICT token in a closer comment within 24h before close" };
 }
 
 /** M7: share of window closes with a lesson line or an explicit none. */
 export function metricLessons(withLesson: number, closes: number): FlywheelMetric {
-	const pct = closes ? (withLesson / closes) * 100 : 100;
+	if (!closes) return na("lessons", "0 closes", "no closes in window");
+	const pct = (withLesson / closes) * 100;
 	return { metric: "lessons", value: pct, display: `${withLesson}/${closes} closes cite a lesson or explicit none`,
 		threshold: "A>=90", grade: letterGrade(pct), detail: "proxy: /^lesson\\b/i line or /^none\\.?$/i line in a closer comment" };
 }
@@ -197,7 +210,13 @@ export function scoreFlywheel(input: FlywheelInput, run: RunFn): FlywheelMetric[
 	const known: Record<string, true> = {};
 	for (const issue of issues) known[issue.id] = true;
 
-	const logOut = run(["git", "-C", input.repo, "log", "--format=%H%x01%s%x01%P", "-n", String(windowCommits)]).stdout;
+	// Read git from --project no matter what the caller exported: GIT_DIR/GIT_WORK_TREE
+	// would otherwise redirect the read (or empty it) away from input.repo.
+	const gitEnv: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined && key !== "GIT_DIR" && key !== "GIT_WORK_TREE") gitEnv[key] = value;
+	}
+	const logOut = run(["git", "-C", input.repo, "log", "--format=%H%x01%s%x01%P", "-n", String(windowCommits)], gitEnv).stdout;
 	const commits = logOut.split("\n").filter(line => line.length > 0).map(line => {
 		const [, subject = "", parents = ""] = line.split("");
 		return { subject, merge: parents.trim().split(/\s+/).filter(Boolean).length > 1 };

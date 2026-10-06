@@ -645,7 +645,7 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
 }
 
-const FLYWHEEL_STATUS: Record<Grade, DiagnosticStatus> = { A: "OK", B: "DEGRADED", C: "DEGRADED", D: "FAIL", F: "FAIL" };
+const FLYWHEEL_STATUS: Record<Grade, DiagnosticStatus> = { A: "OK", B: "DEGRADED", C: "DEGRADED", D: "FAIL", F: "FAIL", "N/A": "UNVERIFIED" };
 
 /** FLY2 (ompkit-8m75): seven fleet-practice grades from the tracker's beads.db and repo git. Read-only. */
 export function inspectFlywheelScope(project: string): Finding[] {
@@ -658,16 +658,20 @@ export function inspectFlywheelScope(project: string): Finding[] {
 		return [finding("flywheel", "UNVERIFIED", `No tracker database at ${localDb} and no usable BEADS_DB; flywheel grades were not computed`,
 			"Pass the tracker checkout (the repo holding .beads/beads.db) as --project, or set BEADS_DB to its beads.db.", { project: dir })];
 	}
-	const run = (cmd: string[]) => {
+	const run = (cmd: string[], env?: Record<string, string>) => {
 		const [executable, ...args] = cmd;
-		const result = Bun.spawnSync([executable!, ...args], { stdout: "pipe", stderr: "pipe" });
+		// An explicit env replaces the inherited one outright, so callers can
+		// scrub redirecting variables (GIT_DIR) instead of overlaying them.
+		const result = env
+			? Bun.spawnSync([executable!, ...args], { stdout: "pipe", stderr: "pipe", env })
+			: Bun.spawnSync([executable!, ...args], { stdout: "pipe", stderr: "pipe" });
 		return { code: result.exitCode, stdout: result.stdout.toString() };
 	};
 	try {
 		return scoreFlywheel({ repo: dir, beadsDb }, run).map(metric => finding("flywheel", FLYWHEEL_STATUS[metric.grade],
 			`${metric.metric}: ${metric.display} — grade ${metric.grade} (${metric.threshold})`,
-			metric.grade === "A" ? "None." : `Raise ${metric.metric}: ${metric.detail || metric.display}.`,
-			{ metric: metric.metric, value: metric.value, display: metric.display, threshold: metric.threshold, grade: metric.grade, detail: metric.detail }));
+			metric.grade === "A" ? "None." : metric.grade === "N/A" ? "No sample in the window; widen the window or seed the practice, then rerun." : `Raise ${metric.metric}: ${metric.detail || metric.display}.`,
+			{ metric: metric.metric, value: Number.isNaN(metric.value) ? "n/a" : metric.value, display: metric.display, threshold: metric.threshold, grade: metric.grade, detail: metric.detail }));
 	} catch (error) {
 		return [finding("flywheel", "UNVERIFIED", `Flywheel scoring failed: ${error instanceof Error ? error.message : String(error)}`,
 			"Rerun with a reachable tracker database and git history.", { project: dir })];

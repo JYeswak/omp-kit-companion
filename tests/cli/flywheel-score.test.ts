@@ -19,8 +19,8 @@ test("each metric grades A on the good shape and F on the bad shape", () => {
 	expect(metricLandingHygiene([{ subject: "drive-by", merge: false }], known).grade).toBe("F");
 	expect(metricIndexIncidents(0).grade).toBe("A");
 	expect(metricIndexIncidents(2).grade).toBe("F");
-	expect(metricCloseFlow(7, 7, 3).grade).toBe("A");
-	expect(metricCloseFlow(0, 7, 200).grade).toBe("F");
+	expect(metricCloseFlow(7, 7, 1).grade).toBe("A");
+	expect(metricCloseFlow(7, 7, 3).grade).toBe("C");
 	expect(metricFreshness(0, 5).grade).toBe("A");
 	expect(metricFreshness(5, 5).grade).toBe("F");
 	expect(metricVerdictCloses(9, 10).grade).toBe("A");
@@ -82,4 +82,59 @@ test("scoreFlywheel aggregates a planted good week to straight A", () => {
 	expect(grades["freshness"]).toBe("A");
 	expect(grades["verdict-closes"]).toBe("A");
 	expect(grades["lessons"]).toBe("A");
+});
+
+test("empty samples grade N/A, never A", () => {
+	const known = { "ompkit-aaa": true as const };
+	expect(metricBeadSize([]).grade).toBe("N/A");
+	expect(metricCommitLinkage([], known).grade).toBe("N/A");
+	expect(metricSelfPick({ self: 0, dispatched: 0 }).grade).toBe("N/A");
+	expect(metricLandingHygiene([], known).grade).toBe("N/A");
+	expect(metricCloseFlow(0, 0, null).grade).toBe("N/A");
+	expect(metricFreshness(0, 0).grade).toBe("N/A");
+	expect(metricVerdictCloses(0, 0).grade).toBe("N/A");
+	expect(metricLessons(0, 0).grade).toBe("N/A");
+});
+
+test("planted 0/0 week: every denominator metric reads N/A", () => {
+	const run = (cmd: string[]) => {
+		const text = cmd.join(" ");
+		if (text.includes(" list ")) return { code: 0, stdout: JSON.stringify({ issues: [] }) };
+		if (text.includes(" search ")) return { code: 0, stdout: JSON.stringify({ issues: [] }) };
+		if (cmd[0] === "git") return { code: 0, stdout: "" };
+		throw new Error("unexpected command " + text);
+	};
+	const grades = Object.fromEntries(scoreFlywheel({ repo: "/repo", beadsDb: "/db", now: Date.now() }, run).map(m => [m.metric, m.grade]));
+	expect(grades["bead-size"]).toBe("N/A");
+	expect(grades["commit-linkage"]).toBe("N/A");
+	expect(grades["self-pick"]).toBe("N/A");
+	expect(grades["landing-hygiene"]).toBe("N/A");
+	expect(grades["index-incidents"]).toBe("A");
+	expect(grades["close-flow"]).toBe("N/A");
+	expect(grades["freshness"]).toBe("N/A");
+	expect(grades["verdict-closes"]).toBe("N/A");
+	expect(grades["lessons"]).toBe("N/A");
+});
+
+test("git reads run scrubbed of GIT_DIR and GIT_WORK_TREE", () => {
+	const seen: Record<string, string>[] = [];
+	const run = (cmd: string[], env?: Record<string, string>) => {
+		if (cmd[0] === "git") {
+			if (env) seen.push(env);
+			return { code: 0, stdout: "" };
+		}
+		return { code: 0, stdout: JSON.stringify({ issues: [] }) };
+	};
+	const savedDir = process.env.GIT_DIR, savedWork = process.env.GIT_WORK_TREE;
+	process.env.GIT_DIR = "/poisoned";
+	process.env.GIT_WORK_TREE = "/poisoned";
+	try {
+		scoreFlywheel({ repo: "/repo", beadsDb: "/db", now: Date.now() }, run);
+	} finally {
+		if (savedDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = savedDir;
+		if (savedWork === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = savedWork;
+	}
+	expect(seen.length).toBe(1);
+	expect(seen[0]).not.toHaveProperty("GIT_DIR");
+	expect(seen[0]).not.toHaveProperty("GIT_WORK_TREE");
 });
