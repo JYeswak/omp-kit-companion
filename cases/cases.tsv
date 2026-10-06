@@ -363,3 +363,15 @@ kit-regex-engineering	quiet	tool	write	src/regex_doc.py	"""Regular-expression gu
 kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	The RegExp constructor can build patterns from strings.	quiet RegExp prose mention
 kit-regex-engineering	quiet	tool	write	src/regex_doc.py	# re.compile names the constructor; no call is present.	quiet API mention in Python comment
 kit-regex-engineering	quiet	tool	write	src/test_regex.ts	function testRegexConstruction() { return true; }	quiet test-name substring
+kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	NavyDuck B2 merge refused today (ort over peer dirt)
+kit-no-shared-merge	fire	tool	bash	-	git fetch origin && git merge --no-edit origin/main	compound shape of the same refused merge
+kit-no-shared-merge	fire	tool	bash	-	git pull	peer pull occurrence shape per coordinator 2026-10-06
+kit-no-shared-merge	fire	tool	bash	-	git pull origin main	peer pull occurrence shape per coordinator 2026-10-06
+kit-no-shared-merge	fire	tool	bash	-	git rebase --continue	peer rebase occurrence shape per coordinator 2026-10-06
+kit-no-shared-merge	quiet	tool	bash	-	git merge-base --is-ancestor A B	merge-base explicitly out of scope
+kit-no-shared-merge	quiet	tool	bash	-	git merge-tree base A B	merge-tree explicitly out of scope
+kit-no-shared-merge	quiet	tool	bash	-	git -C var/agent-tmp/x merge --no-edit origin/main	scratch -C path stays quiet
+kit-no-shared-merge	quiet	tool	bash	-	cd var/agent-tmp/x && git merge --no-edit origin/main	scratch cwd stays quiet
+kit-no-shared-merge	quiet	tool	bash	-	git stash push -m wip	stash not covered by this rule
+kit-no-shared-merge	quiet	tool	bash	-	git log --oneline origin/main -1	ordinary read-only git
+kit-no-shared-merge	quiet	tool	bash	-	echo legit merge	word-embedding boundary
