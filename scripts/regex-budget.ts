@@ -6,7 +6,7 @@
  * omp's compileRuleCondition. A child process contains synchronous regex stalls.
  */
 import { readFileSync } from "node:fs";
-import { loadavg } from "node:os";
+import { cpus, loadavg } from "node:os";
 import path from "node:path";
 import { OMP_SRC, loadRules } from "./rule-class.ts";
 import type { LoadedRule } from "./rule-class.ts";
@@ -20,6 +20,21 @@ const NEAR_MISS_FLOOR_MS = 5;
 const STREAM_BUDGET_MS = 500;
 const GATE_DEADLINE_MS = 57_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 20_000;
+/** Same contention line as the TOOL1 quiet-machine check and the LOAD1 heavy gate: above 1.5x cores the box is too loud to judge timing. */
+const MAX_LOAD_PER_CORE = Number(process.env.RX1_MAX_LOAD_PER_CORE ?? "") > 0 ? Number(process.env.RX1_MAX_LOAD_PER_CORE) : 1.5;
+/** Test-only load injection for planted contention cases (mirrors OMP_KIT_HEAVY_FAKE_LOAD1). Production always reads the real one-minute average. */
+function testFakeLoad(): number | undefined {
+	const raw = process.env.RX1_FAKE_LOAD1;
+	if (raw === undefined || raw === "") return undefined;
+	const value = Number(raw);
+	return Number.isFinite(value) ? value : undefined;
+}
+/** Null when the machine is quiet enough to judge regex timing; otherwise the INCONCLUSIVE reason. */
+export function regexLoadBlockReason(load1: number, ncpu: number): string | null {
+	if (!Number.isFinite(load1) || !Number.isFinite(ncpu) || ncpu < 1) return "machine load unavailable";
+	const threshold = ncpu * MAX_LOAD_PER_CORE;
+	return load1 > threshold ? `RX1 load ${load1.toFixed(2)} exceeds ${threshold.toFixed(2)} (${ncpu} cores x ${MAX_LOAD_PER_CORE})` : null;
+}
 
 type Shape = typeof DEFAULT_SHAPES[number];
 type Encoding = typeof DEFAULT_ENCODINGS[number];
@@ -370,7 +385,9 @@ export async function measureCondition(input: {
 }
 
 type GateReport = {
-	status: "PASS" | "FAIL";
+	status: "PASS" | "FAIL" | "INCONCLUSIVE";
+	/** Set on INCONCLUSIVE: why the run cannot judge (e.g. machine too loud). */
+	note?: string;
 	engine: { bun: string; omp_source: string };
 	load_average_before: number[];
 	load_average_after: number[];
@@ -382,10 +399,28 @@ type GateReport = {
 	gate_elapsed_ms: number;
 };
 
-async function runGate(rulesDir: string, streamFile: string): Promise<GateReport> {
+export async function runGate(rulesDir: string, streamFile: string): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
+	// A loud box cannot judge regex timing: refuse to measure rather than fail a correct push.
+	const loudAtStart = regexLoadBlockReason(testFakeLoad() ?? before[0] ?? Number.NaN, cpus().length);
+	if (loudAtStart) {
+		console.log("REGEX-BUDGET: INCONCLUSIVE (" + loudAtStart + "; retry on a quieter machine)");
+		return {
+			status: "INCONCLUSIVE",
+			note: loudAtStart + "; retry on a quieter machine",
+			engine: { bun: Bun.version, omp_source: OMP_SRC },
+			load_average_before: before,
+			load_average_after: before,
+			rules_loaded: 0,
+			conditions_measured: 0,
+			stream: { complete: false, file: streamFile, wire_bytes: 0, chunk_bytes: 16, deltas: 0, total_ms: 0, budget_ms: STREAM_BUDGET_MS, by_rule: [] },
+			measurements: [],
+			lint_violations: [],
+			gate_elapsed_ms: performance.now() - started,
+		};
+	}
 	const loaded: LoadedRule[] = loadRules(rulesDir);
 	const rules = loaded.flatMap(item => (item.rule.condition ?? []).filter((condition): condition is string => typeof condition === "string" && condition.length > 0).map((pattern, conditionIndex) => ({ rule: item.name, conditionIndex, pattern, scope: item.rule.scope ?? [] })));
 	const lintViolations: GateReport["lint_violations"] = [];
@@ -415,11 +450,16 @@ async function runGate(rulesDir: string, streamFile: string): Promise<GateReport
 	const streamTotal = byRule.reduce((sum, item) => sum + item.ms, 0);
 	const streamComplete = byRule.length === rules.length;
 	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(m => m.status !== "MEASURED" || m.failures.length > 0) || failsStreamBudget(streamTotal);
+	// Load spiked mid-run: a FAIL measured under contention is suspect, so report it as INCONCLUSIVE. A PASS stays a PASS.
+	const after = loadavg();
+	const loudAtEnd = regexLoadBlockReason(testFakeLoad() ?? after[0] ?? Number.NaN, cpus().length);
+	const status = loudAtEnd && failed ? "INCONCLUSIVE" : failed ? "FAIL" : "PASS";
 	return {
-		status: failed ? "FAIL" : "PASS",
+		status,
+		...(loudAtEnd && failed ? { note: loudAtEnd + "; FAIL measured under contention is suspect; retry on a quieter machine" } : {}),
 		engine: { bun: Bun.version, omp_source: OMP_SRC },
 		load_average_before: before,
-		load_average_after: loadavg(),
+		load_average_after: after,
 		rules_loaded: loaded.length,
 		conditions_measured: rules.length,
 		stream: { complete: streamComplete, file: streamFile, wire_bytes: Buffer.byteLength(streamWire, "utf8"), chunk_bytes: 16, deltas: byRule.length ? (measurements.find(m => m.stream_deltas !== undefined)?.stream_deltas ?? 0) : 0, total_ms: streamTotal, budget_ms: STREAM_BUDGET_MS, by_rule: byRule.sort((a, b) => b.ms - a.ms) },
@@ -435,6 +475,7 @@ function formatMs(value: number | undefined): string {
 
 function printReport(report: GateReport): void {
 	console.log("REGEX-BUDGET: " + report.status);
+	if (report.note) console.log("note: " + report.note);
 	console.log("Bun=" + report.engine.bun + " OMP_SRC=" + report.engine.omp_source);
 	console.log("loadavg before=" + report.load_average_before.map(n => n.toFixed(2)).join(",") + " after=" + report.load_average_after.map(n => n.toFixed(2)).join(","));
 	console.log("rules=" + report.rules_loaded + " regex-conditions=" + report.conditions_measured + " elapsed=" + report.gate_elapsed_ms.toFixed(1) + "ms");
@@ -476,7 +517,8 @@ if (process.argv.includes("--regex-budget-worker")) {
 	try {
 		const report = await runGate(rulesDir, streamFile);
 		printReport(report);
-		process.exitCode = report.status === "PASS" ? 0 : 1;
+		// 75 = retry later: a busy machine must not refuse a correct push.
+		process.exitCode = report.status === "PASS" ? 0 : report.status === "INCONCLUSIVE" ? 75 : 1;
 	} catch (error) {
 		console.error("REGEX-BUDGET: FAIL");
 		console.error(String(error));

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
-import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition } from "../../scripts/regex-budget.ts";
+import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -70,4 +70,20 @@ test("literal-first fixture control compiles and stays below the budget", async 
 		expect(result.stream_deltas).toBe(3);
 		expect(typeof result.stream_ms).toBe("number");
 	} finally { cleanup(fixture.dir); }
+});
+
+test("load gate blocks only above 1.5 times the core count", () => {
+	expect(regexLoadBlockReason(48.01, 32)).toContain("RX1");
+	expect(regexLoadBlockReason(48.0, 32)).toBeNull();
+	expect(regexLoadBlockReason(Number.NaN, 32)).toContain("unavailable");
+});
+
+test("planted contention reports INCONCLUSIVE without measuring", async () => {
+	process.env.RX1_FAKE_LOAD1 = "9999";
+	try {
+		const report = await runGate(join(root, "rules"), join(root, "scripts/e2e-live.sh"));
+		expect(report.status).toBe("INCONCLUSIVE");
+		expect(report.conditions_measured).toBe(0);
+		expect(report.note ?? "").toContain("RX1");
+	} finally { delete process.env.RX1_FAKE_LOAD1; }
 });

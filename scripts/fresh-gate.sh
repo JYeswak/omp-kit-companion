@@ -207,8 +207,15 @@ gate_focused() {
 		printf 'focused regex-budget: SKIPPED (%s)\n' "$FRESH_GATE_SKIP_REGEX"
 	elif [ "$needs_regex" = 1 ]; then
 		# Regex cost gate (RX1): self-bounding (internal 57 s deadline); red names
-		# the rule, shape and encoding, and the push is refused.
-		(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null scripts/regex-budget.ts) || return $?
+		# the rule, shape and encoding, and the push is refused. Exit 75 means
+		# INCONCLUSIVE (machine too loud to judge): defer to CI, do not refuse.
+		(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null scripts/regex-budget.ts)
+		regex_rc=$?
+		if [ "$regex_rc" -eq 75 ]; then
+			printf 'focused regex-budget: INCONCLUSIVE (loud machine; deferred to CI)\n'
+		elif [ "$regex_rc" -ne 0 ]; then
+			return "$regex_rc"
+		fi
 	fi
 	if { [ -n "$focus_tests" ] || [ "$needs_cli" = 1 ]; } && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (

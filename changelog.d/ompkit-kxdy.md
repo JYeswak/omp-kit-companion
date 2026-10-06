@@ -1,8 +1,2 @@
-- Add a bounded Bun/JSC regex budget instrument for rule-condition near misses, Bash structural lint, and streamed shell-argument timing.
-- Put the readiness-script literal first in the matcher and recognize escaped-tab command prefixes; existing fire/quiet cases retain parity.
-- Put the claim-discipline checker literal first and recognize escaped-tab command starts while retaining quiet mention cases.
-- Put the canary token first and recognize newline/tab command payloads while quoted printf data stays quiet.
-- Put the close-evidence literal first and recognize escaped tab/newline command boundaries while preserving reasoned closes.
-- Make bash-glob-silenced literal-first with a shell-separator-bounded glob and stderr-suppression suffix; cover newline and escaped-tab forms.
-- Keep short-force detection inside the same `git push` command; stop at shell separators so later `gh -f` options stay quiet.
-- Regex budget gate wired in (RX1): `ladder.sh` runs `scripts/regex-budget.ts`, and the pre-push gate runs it when `rules/*.md` changes (refuses on RED); mission Proven check already points at it. Live rules currently fail it; fixes ride RX2/RX5/RX6.
+- Regex budget gate wired in (RX1): `ladder.sh` runs `scripts/regex-budget.ts`, and the pre-push gate runs it when `rules/*.md` changes (refuses on RED); mission Proven check already points at it. Live rules currently fail it (near-miss, lint, stream budget) — rule fixes ride in RX2/RX5/RX6.
+- RX1 load gate: the budget refuses to judge on a loud box (load1 above 1.5x cores) and reports INCONCLUSIVE (exit 75) instead of failing a correct push; the push gate defers to CI on 75. Planted contention proves the path; budget unit tests 8/8.
