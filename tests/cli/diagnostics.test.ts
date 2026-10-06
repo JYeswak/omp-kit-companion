@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
+import { diagnose, health, inspectDicklesworthstone, inspectEffectiveRules, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -543,4 +543,56 @@ test("all regex tools present reports OK", () => {
 		chmodSync(path, 0o755);
 	}
 	expect(inspectRegexTools(dir).status).toBe("OK");
+});
+
+test("one identity on two live panes fails with both panes named", () => {
+	const row = inspectPaneIdentity({
+		listPanes: () => [
+			{ session: "s", window: "0", index: "0", id: "%101" },
+			{ session: "s", window: "0", index: "1", id: "%102" },
+		],
+		resolvePane: () => "SharedName",
+		listAgents: () => [],
+	});
+	expect(row.status).toBe("FAIL");
+	expect(row.reason).toContain("SharedName");
+	expect(row.reason).toContain("%101");
+	expect(row.reason).toContain("%102");
+});
+
+test("a live pane without an identity file degrades", () => {
+	const row = inspectPaneIdentity({
+		listPanes: () => [{ session: "s", window: "0", index: "1", id: "%103" }],
+		resolvePane: () => null,
+		listAgents: () => [],
+	});
+	expect(row.status).toBe("DEGRADED");
+});
+
+test("an idle registration with no live pane degrades as stale", () => {
+	const now = Date.now();
+	const row = inspectPaneIdentity({
+		now,
+		listPanes: () => [{ session: "s", window: "0", index: "0", id: "%101" }],
+		resolvePane: () => "LiveAgent",
+		listAgents: () => [
+			{ name: "LiveAgent", lastActiveMs: now - 1000 },
+			{ name: "DeadAgent", lastActiveMs: now - 8 * 24 * 3600 * 1000 },
+		],
+	});
+	expect(row.status).toBe("DEGRADED");
+	expect(row.reason).toContain("DeadAgent");
+});
+
+test("distinct identities on live panes pass, unavailable tmux is unverified", () => {
+	const clean = inspectPaneIdentity({
+		listPanes: () => [
+			{ session: "s", window: "0", index: "0", id: "%101" },
+			{ session: "s", window: "0", index: "1", id: "%102" },
+		],
+		resolvePane: (id) => id === "%101" ? "AgentA" : "AgentB",
+		listAgents: () => [],
+	});
+	expect(clean.status).toBe("OK");
+	expect(inspectPaneIdentity({ listPanes: () => null, resolvePane: () => null, listAgents: () => null }).status).toBe("UNVERIFIED");
 });

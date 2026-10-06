@@ -529,6 +529,111 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 		missing.length ? "Install each missing tool with its command and rerun omp-kit doctor --scope regex-tools." : "No action required.",
 		{ tools, missing: missing.map((tool) => tool.bin), proof: "EXECUTABLE_ON_PATH" });
 }
+export interface PaneIdentity { session: string; window: string; index: string; id: string }
+export interface PaneIdentityAgent { name: string; lastActiveMs: number | null }
+export interface PaneIdentityDeps {
+	/** Live panes, or null when tmux is unavailable. */
+	listPanes(): PaneIdentity[] | null;
+	/** Agent name for a pane id, or null when no identity file matches. */
+	resolvePane(id: string): string | null;
+	/** Registered agents, or null when the roster is unreadable. */
+	listAgents(): PaneIdentityAgent[] | null;
+	now?: number;
+}
+
+const PANE_AGENT_STALE_MS = 7 * 24 * 3600 * 1000;
+
+function paneArgs(binary: string, args: readonly string[]): { code: number; out: string } {
+	try {
+		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore" });
+		return { code: run.exitCode, out: run.stdout.toString() };
+	} catch {
+		return { code: 127, out: "" };
+	}
+}
+
+export function defaultPaneIdentity(projectKey: string): PaneIdentityDeps {
+	return {
+		listPanes: () => {
+			const panes = paneArgs("tmux", ["list-panes", "-a", "-F", "#{session_name} #{window_index} #{pane_index} #{pane_id}"]);
+			if (panes.code !== 0) return null;
+			const rows: PaneIdentity[] = [];
+			for (const line of panes.out.split("\n")) {
+				const parts = line.trim().split(/\s+/);
+				if (parts.length !== 4 || !parts[3]) continue;
+				rows.push({ session: parts[0]!, window: parts[1]!, index: parts[2]!, id: parts[3]! });
+			}
+			return rows;
+		},
+		resolvePane: (id) => {
+			const resolved = paneArgs("am", ["agents", "resolve-pane", "--project", projectKey, "--pane", id, "--json"]);
+			if (resolved.code !== 0) return null;
+			try {
+				const value: unknown = JSON.parse(resolved.out);
+				const record = (Array.isArray(value) ? value[0] : value) as { name?: unknown } | null;
+				return record !== null && typeof record === "object" && typeof record.name === "string" && record.name !== "" ? record.name : null;
+			} catch {
+				return null;
+			}
+		},
+		listAgents: () => {
+			const listed = paneArgs("am", ["agents", "list", "--project", projectKey, "--format", "json"]);
+			if (listed.code !== 0) return null;
+			try {
+				const value: unknown = JSON.parse(listed.out);
+				if (!Array.isArray(value)) return null;
+				return value
+					.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+					.map((entry) => ({
+						name: typeof entry.name === "string" ? entry.name : "",
+						lastActiveMs: typeof entry.last_active_ts === "string" && Number.isFinite(Date.parse(entry.last_active_ts))
+							? Date.parse(entry.last_active_ts as string) : null,
+					}))
+					.filter((entry) => entry.name !== "");
+			} catch {
+				return null;
+			}
+		},
+	};
+}
+
+export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
+	const panes = deps.listPanes();
+	if (panes === null) return finding("identity", "UNVERIFIED", "Live tmux panes are unavailable; pane identities were not inspected", "Run on the machine hosting the fleet with tmux on PATH, then rerun omp-kit doctor --scope identity.");
+	const now = deps.now ?? Date.now();
+	const byName = new Map<string, string[]>();
+	const noFile: string[] = [];
+	for (const pane of panes) {
+		const name = deps.resolvePane(pane.id);
+		if (name === null) {
+			noFile.push(pane.id);
+			continue;
+		}
+		const ids = byName.get(name) ?? [];
+		ids.push(pane.id);
+		byName.set(name, ids);
+	}
+	const shared = [...byName.entries()].filter(([, ids]) => ids.length > 1)
+		.map(([name, ids]) => ({ name, panes: [...ids].sort() }));
+	const liveNames = new Set(byName.keys());
+	const stale: Array<{ name: string; idle_ms: number | null }> = [];
+	const agents = deps.listAgents();
+	if (agents !== null) {
+		for (const agent of agents) {
+			if (liveNames.has(agent.name)) continue;
+			if (agent.lastActiveMs === null || now - agent.lastActiveMs < PANE_AGENT_STALE_MS) continue;
+			stale.push({ name: agent.name, idle_ms: now - agent.lastActiveMs });
+		}
+	}
+	const status = shared.length ? "FAIL" : noFile.length || stale.length ? "DEGRADED" : "OK";
+	return finding("identity", status,
+		status === "OK" ? "Every live pane resolves to exactly one registered identity" :
+		shared.length ? `One identity resolves on multiple live panes: ${shared.map((row) => `${row.name} (${row.panes.join(", ")})`).join("; ")}` :
+		`Pane identity gaps: ${noFile.length ? `${noFile.length} live pane(s) without an identity file` : ""}${noFile.length && stale.length ? "; " : ""}${stale.length ? `idle registration(s) with no live pane: ${stale.map((row) => row.name).join(", ")}` : ""}`,
+		"Register each pane at spawn (agent-spawn-env.sh) and give every pane its own identity; resolve collisions before trusting that pane's writes.",
+		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
+}
+
 
 
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
