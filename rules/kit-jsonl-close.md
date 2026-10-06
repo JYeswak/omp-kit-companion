@@ -1,7 +1,7 @@
 ---
 description: "Kit B2: direct JSONL closes must carry a substantive close_reason"
 condition:
-  - '(?i)(?:^|\n)(?=[^\n]*"status"\s*:\s*"closed")(?!(?:[^\n]*"close_reason"\s*:\s*")(?:[^"\\\n]|\\.)*(?:\b(?:commit|sha)\s+[0-9a-f]{7,40}\b|\b(?=[0-9a-f]{0,39}[a-f])[0-9a-f]{7,40}\b|\b\d+\s+(?:tests?\s+)?passed\b|\bledger\s+row\s+[a-z0-9][a-z0-9._:-]*|\b[a-z][a-z0-9_./-]*(?:[ \t]+(?:[^"\\\n]|\\.)*?)?[ \t]+->[ \t]*[^\s"\\]))(?:[^"\\\n]|"(?:[^"\\\n]|\\.)*")*\}[ \t]*(?:\r?\n|$)'
+   - '(?i)"status"\s*:\s*"closed"(?=(?:[^"\\\n]|"(?:[^"\\\n]|\\.)*")*\}[ \t]*(?:\r?\n|$))(?!(?:[^\n]*"close_reason"\s*:\s*")(?:[^"\\\n]|\\.)*(?:\b(?:commit|sha)\s+[0-9a-f]{7,40}\b|\b(?=[0-9a-f]{0,39}[a-f])[0-9a-f]{7,40}\b|\b\d+\s+(?:tests?\s+)?passed\b|\bledger\s+row\s+[a-z0-9][a-z0-9._:-]*|\b[a-z][a-z0-9_./-]*(?:[ \t]+(?:[^"\\\n]|\\.)*?)?[ \t]+->[ \t]*[^\s"\\]))(?<=(?:^|\n)(?:(?!"close_reason")[^\n]|"close_reason"\s*:\s*"(?:(?!\b(?:commit|sha)\s+[0-9a-f]{7,40}\b|\b(?=[0-9a-f]{0,39}[a-f])[0-9a-f]{7,40}\b|\b\d+\s+(?:tests?\s+)?passed\b|\bledger\s+row\s+[a-z0-9][a-z0-9._:-]*|\b[a-z][a-z0-9_./-]*(?:[ \t]+(?:[^"\\\n]|\\.)*?)?[ \t]+->[ \t]*[^\s"\\])[^"\\\n]|\\.)*")*)'
 scope: "tool:edit(**/.beads/issues.jsonl), tool:write(**/.beads/issues.jsonl)"
 interruptMode: always
 ---
