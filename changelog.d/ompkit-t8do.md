@@ -1,1 +1,2 @@
 - LOAD1 evidence: targeted matrix for the landed admission gate — concurrent runs serialize on one slot (timestamp-ordered markers), child runs +10 nice above its parent, SIGINT/SIGTERM release the slot with 130/143 and empty ledger. Joins the existing threshold/exit-code/no-wait/pane-exclusivity/stale-reap/timeout tests.
+- LOAD1 contention plants: OMP_KIT_HEAVY_FAKE_LOAD1 seam drives end-to-end queue/no-wait deferral tests; unseamed control runs.

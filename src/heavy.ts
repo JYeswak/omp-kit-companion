@@ -62,6 +62,17 @@ export function machineLoadBlockReason(load1: number, ncpu: number): string | nu
 	return load1 > threshold ? `LOAD1 ${load1.toFixed(2)} exceeds ${threshold.toFixed(2)} (${ncpu} cores × ${LOAD_PER_CORE_LIMIT})` : null;
 }
 
+/**
+ * Test-only load injection for planted contention cases. Production never
+ * sets OMP_KIT_HEAVY_FAKE_LOAD1; the real one-minute load average applies.
+ */
+function testFakeLoad(): number | undefined {
+	const raw = process.env.OMP_KIT_HEAVY_FAKE_LOAD1;
+	if (raw === undefined || raw === "") return undefined;
+	const value = Number(raw);
+	return Number.isFinite(value) ? value : undefined;
+}
+
 
 
 function currentRepo(cwd: string): string {
@@ -255,7 +266,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					rowCreated = true;
 					waitingJobs = [...waitingJobs, job];
 				}
-				reason = admissionReason(waitingJobs, id, config.slots, { load1: loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
+			reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
 				if (!reason) {
 					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
 					writeJob(storage.jobs, running);

@@ -191,3 +191,27 @@ test("SIGTERM releases the slot with exit 143", async () => {
 	expect(code).toBe(143);
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 });
+
+test("planted contention queues the job even with a free slot", async () => {
+	const root = fixture();
+	configure(root, { slots: 2, max_wait_s: 2 });
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--label", "contended", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("deferred:");
+	expect(result.stderr).toContain("LOAD1");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("planted no-wait under contention exits 75 without starting", async () => {
+	const root = fixture();
+	configure(root, { slots: 2, max_wait_s: 30 });
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "contended-nowait", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("deferred:");
+	expect(existsSync(marker)).toBe(false);
+	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
+});
