@@ -757,6 +757,30 @@ export function inspectLayoutScope(project: string, kitRoot: string): Finding[] 
 		"Align the repo with docs/repo-layout.md, or opt in to strict for RED.",
 		{ project: dir, deviations: warns })];
 }
+
+/** PUB1e B1 (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.5): standard public files. Read-only. */
+export function inspectPublicFilesScope(project: string, kitRoot: string): Finding[] {
+	const dir = resolve(project);
+	const script = join(resolve(kitRoot), "scripts", "public-files-check.sh");
+	let out = "";
+	let code: number | null = null;
+	try {
+		const result = Bun.spawnSync(["sh", script, dir], { stdout: "pipe", stderr: "pipe" });
+		code = result.exitCode;
+		out = `${result.stdout.toString()}\n${result.stderr.toString()}`;
+	} catch {
+		return [finding("public-files", "UNVERIFIED", "Public files checker could not run",
+			"Rerun with a readable kit release and project.", { project: dir })];
+	}
+	const missing = out.replace(/public-files:\s*(OK|MISSING)?/g, "").replace(/\([^)]*\)/g, "").split(/\s+/).map(part => part.trim()).filter(part => part.length > 0);
+	if (code === 0) {
+		return [finding("public-files", "OK", "Every standard public file is present",
+			"None.", { project: dir })];
+	}
+	return [finding("public-files", "DEGRADED", `Missing standard public files: ${missing.join(", ")}`,
+		"Add the listed files from the kit templates.",
+		{ project: dir, missing })];
+}
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
 export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
@@ -971,6 +995,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
 	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
+	if (input.scope === "public-files" && input.project) rows.push(...inspectPublicFilesScope(resolve(input.project), root));
 	if (input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = readManifest(root);
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
