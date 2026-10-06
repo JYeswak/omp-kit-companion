@@ -1088,6 +1088,22 @@ function eachSessionDir(root: string, visit: (dir: string) => void, visitNested:
 
 export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number; totals: ScratchTotals; unownedActiveRule: string }
 
+
+/**
+ * REAP2 (ompkit-azpk): strip nested rows' bytes from ancestors so each byte
+ * counts once. A parent session dir's dirSize sums its whole tree, but nested
+ * session dirs (omp-kit-integrations-*) are plan rows themselves.
+ */
+export function dedupeNestedSizes(sessions: ScratchVerdict[]): ScratchVerdict[] {
+	const sizes = new Map(sessions.map(verdict => [verdict.dir, verdict.sizeBytes] as const));
+	return sessions.map(verdict => {
+		let own = verdict.sizeBytes;
+		for (const [dir, size] of sizes) {
+			if (dir !== verdict.dir && dir.startsWith(verdict.dir + "/")) own -= size;
+		}
+		return own === verdict.sizeBytes ? verdict : { ...verdict, sizeBytes: Math.max(0, own) };
+	});
+}
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = resolveScratchRoots(home);
 	const systemWorkDirs = resolveSystemWorkDirs();
@@ -1103,10 +1119,11 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
-	const totals = summarizeScratch(sessions, allRoots);
-	return { roots: allRoots, sessions, orphans, totals, unownedActiveRule: UNOWNED_ACTIVE_RULE,
-		reapableBytes: sessions.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
-		quarantinableBytes: sessions.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
+	const sized = dedupeNestedSizes(sessions);
+	const totals = summarizeScratch(sized, allRoots);
+	return { roots: allRoots, sessions: sized, orphans, totals, unownedActiveRule: UNOWNED_ACTIVE_RULE,
+		reapableBytes: sized.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
+		quarantinableBytes: sized.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }
 
 export interface ScratchApplyResult extends ScratchPlan { applied: ScratchVerdict[]; killed: { pid: number; command: string; ok: boolean }[]; expired: ScratchVerdict[] }
@@ -1145,7 +1162,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		return { pid: proc.pid, command: proc.command, ok };
 	});
 	const expired = applyQuarantineExpiry(home, deps);
-	return { roots: allRoots, sessions, orphans, applied, killed, expired,
+	const planEcho = dedupeNestedSizes(sessions);
+	return { roots: allRoots, sessions: planEcho, orphans, applied, killed, expired,
 		totals: summarizeScratch(applied, allRoots), unownedActiveRule: UNOWNED_ACTIVE_RULE,
 		reapableBytes: applied.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: applied.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
