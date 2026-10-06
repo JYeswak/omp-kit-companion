@@ -207,6 +207,11 @@ test("nested integrations work dirs reap on dead pid and stay live on live pid",
   const plan = planScratch(home, depsFor());
   expect(plan.sessions.find(session => session.dir === dead)?.action).toBe("REAP");
   expect(plan.sessions.find(session => session.dir === live)?.action).toBe("LIVE");
+  const nestedWork = join(session, "omp-kit-work.xyz");
+  mkdirSync(nestedWork, { recursive: true });
+  writeFileSync(join(nestedWork, ".owner"), `pid=${gone} label=omp-kit-work repo=test created=2026-10-01T00:00:00Z\n`);
+  const plan2 = planScratch(home, depsFor());
+  expect(plan2.sessions.find(session => session.dir === nestedWork)?.action).toBe("REAP");
 });
 test("runtime omp-kit-work dirs with dead owners are reaped from system temp", () => {
 	const home = useState();
