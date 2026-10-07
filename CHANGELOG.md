@@ -4,6 +4,11 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.11 — 2026-10-07
+
+- Release attestation derives its matrix from candidate-proof certified_platforms, validates source/version/index membership, and uses the verified actions/download-artifact v4.3.0 pin. It preserves the existing certified subset and does not enable excluded Intel platforms.
+- Publishability fixtures construct planted credential, home-path, private-IP, and LAN-host values at runtime; the shared DSR template omits dispatcher-local absolute local_path and documents its registration requirement.
+
 ## 0.2.10 — 2026-10-07
 
 - COMMIT1 bead lookup prioritizes recognized tracker-shaped tokens before the 20 local `br show` lookup cap; a 36-token long-message regression proves a resolvable id past position 20 passes while unknown ids remain refused (14/14 contract cases).
