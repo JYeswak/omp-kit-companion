@@ -4,6 +4,78 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.10 — 2026-10-07
+
+- COMMIT1 bead lookup prioritizes recognized tracker-shaped tokens before the 20 local `br show` lookup cap; a 36-token long-message regression proves a resolvable id past position 20 passes while unknown ids remain refused (14/14 contract cases).
+<!-- release coverage: (commit 4401ad2) -->
+
+- COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.
+- COMMIT1 installer takes an optional repo argument, absolutizes relative hooks paths, and refuses non-repos; cfsios installed and verified live per-tracker (foreign ids refused).
+- COMMIT1 redesign: pre-push gate refuses id-less pushed commits (commit-tree included), the installer chains beside bespoke hooks, and ids resolve against the repo tracker (cfsios/uds shapes pass, versions don't).
+- COMMIT1 chain hardening: the installer moves fail-closed bespoke wrappers with their sibling impls (`<type>-*`), keeps helper copies non-executable (chain runners only execute `NN-*` members, so helpers never run arg-less), and probes the whole chain before declaring success (bespoke-must-match-preflight, bead member must refuse an unresolvable id, pre-push member must pass an empty range), rolling every mutation back on any probe failure. Checker runs via `sh` throughout so non-executable helpers work. Planted: sibling preservation, path-sensitive move regression (refused + rolled back), pre-existing refusal preserved.
+- COMMIT1 hook accepts any tracker-resolved id: the digit-shape prefilter is gone, existence comes from br show alone, so digit-less real ids (ompkit-kxdy) pass while made-up tokens are refused (12/12 contract tests, RED proven on the old filter).
+- COMMIT1 installer gains `--check [REPO]`: names installed members that differ from the checkout source (exit 3), catching a stale installed hook after the source moves on (the NavyDuck digit-filter incident). Planted: fresh passes, older source names the stale member (22/22 contract tests, RED on the old installer).
+<!-- release coverage: (commit 47abe2d) -->
+
+- SAVE1 claude-save service: `src/claude-save-job.ts` commits admitted ~/.claude changes on main hourly and pushes origin main, with baselines snapshotted 2026-10-06 (5 gitlinks, main-only branches per amendment 3). Refuses: HEAD/upstream drift, worktrees, new branches/gitlinks, dirty denied files (left unstaged), gitleaks hits or missing scanner, SKILL.md outside skills/. No merge/rebase/force; non-FF push reported. Registered as `com.omp-kit.claude-save` (3600s) with `service run` wiring. Planted: every refusal on scratch repos only (15/15 `tests/cli/claude-save.test.ts`).
+- SAVE1 amendment 3: branch baseline is main-only (all other ~/.claude branches deleted with approval); a re-created archived branch is refused as new (15/15 contract tests).
+- SAVE1 staged-audit fix (NO-SHIP verdict): allowlisted gitlinks are never staged, and the index audit reads only gitlinks changed in the staged diff outside the allowlist — the old audit counted every tracked gitlink and could never commit. Planted: admitted edit with all 5 allowlisted gitlinks tracked commits; new gitlink refused; secret refused (16/16).
+<!-- release coverage: (commit 2c4384c) -->
+<!-- release coverage: (commit a9898c9) -->
+<!-- release coverage: (commit aa61e78) -->
+
+- bash-pipe-exit: condition 0 checks the echo/printf quote lookbehinds after the pipe-to-head/tail match, not before it, so near-miss cost stays flat (16K: 1958 ms to 0.14 ms) with fire/quiet cases unchanged (ompkit-ex6l).
+<!-- release coverage: (commit 5334e9a) -->
+
+- GH1 github doctor: `src/gh-doctor.ts` probes four read-only capabilities (issue_create_foreign, push_owned, workflow_dispatch, run_read) with GET-only fetches, rows shaped {capability, credential, status, missing_scope?, remedy?}; fine-grained default FAILs foreign issues with the classic-token remedy; `repairGithubHosts` rewrites hosts.yml from the Infisical fine-grained token and refuses classic. Planted: GET-only, workflow FAIL naming, classic remedy, classic refusal (10/10 `tests/cli/gh-doctor.test.ts`). Grammar wired; cli.ts dispatch queued.
+- GH1 keyring credential: `resolveCredential` tries explicit token, `GH_TOKEN`/`GITHUB_TOKEN`, then `gh auth token` (source `gh keyring`), then hosts.yml — this machine's token lives in the macOS keyring, so hosts.yml alone resolved nothing. Planted: keyring-style setup passes with the secret never printed.
+- GH1 expected failures: rows failing by design carry `expected:true` (fine-grained foreign-issue FAIL) and the overall derives from unexpected rows only, so consumers reading top-level status stop alarming. Planted: by-design FAIL + rest PASS gives OK; unexpected FAIL gives FAIL naming only it.
+<!-- release coverage: (commit 82e00ba) -->
+<!-- release coverage: (commit 5c7b9c7) -->
+<!-- release coverage: (commit 2d2054a) -->
+<!-- release coverage: (commit 970b78e) -->
+
+- Regex budget gate wired in (RX1): `ladder.sh` runs `scripts/regex-budget.ts`, and the pre-push gate runs it when `rules/*.md` changes (refuses on RED); mission Proven check already points at it. Live rules currently fail it (near-miss, lint, stream budget) — rule fixes ride in RX2/RX5/RX6.
+- RX1 load gate: the budget refuses to judge on a loud box (load1 above 1.5x cores) and reports INCONCLUSIVE (exit 75) instead of failing a correct push; the push gate defers to CI on 75. Planted contention proves the path; budget unit tests 8/8.
+- Gate-scope for scratch refs: pushes to `refs/heads/scratch/*` skip ONLY the regex-budget judgment with `regex-budget: NOT JUDGED (scratch measurement ref; main pushes still judged)`; lint, checkers, and main pushes are fully judged (from TurquoiseCrane's brief, landed by PlumRaven under arbitration). Planted: scratch routing exports the skip, main does not, NOT JUDGED vs SKIPPED rendering.
+<!-- release coverage: (commit 4654680) -->
+<!-- release coverage: (commit 3dfd214) -->
+
+- scratch service test pins quiet load; heaviest multi-spawn test gets an explicit 30s timeout.
+- fast-test and integrations suites use a suite-owned TMPDIR they remove, with a planted check that a fixture cycle leaves session-omp-test unchanged in size.
+- Flywheel close-verdict and lesson metrics now read br comment `text` with `body` fallback; the verdict proxy notes that it counts a VERDICT from any author.
+
+<!-- release coverage: (commit d37ffb1) -->
+
+- GH2: one shared CI poller (ETag/304, Retry-After, cache with fetched_at+source per row); `ci status` reads only the cache.
+- GH2 red-main fix: localhost fixtures bypass the proxy (`NO_PROXY`/`no_proxy` gain 127.0.0.1 + localhost) — ubuntu runners carry proxy vars and Bun routes 127.0.0.1 through them, refusing instantly. Reproduced with a poison proxy (same 3 ERRORs), green with the bypass.
+<!-- release coverage: (commit 41662be) -->
+
+- The close guard refuses a close lacking a Lesson line or explicit `none`; tests cover refusal and accepted transitions.
+
+<!-- release coverage: (commit 5d6dbf0) -->
+
+- Memory readiness recognizes the reviewed OMP 18.7.0 config-source fingerprint; the installed-source suite reports the expected backend and store states instead of UNVERIFIED (11/11 tests).
+<!-- release coverage: (commit 4401ad2) -->
+
+- FLY2-3 dangling imports: the pre-push chain refuses commits importing files missing from their tree (planted commit refused naming sha+path; suite 3/3).
+<!-- release coverage: (commit c80d337) -->
+
+- RES1 hot-path TTL cap: fleet-guard refuses exclusive reservation/renewal over 30 min on paths in per-repo `.omp/hot-paths` (companion seeds `src/cli.ts`, `src/commands.ts`), naming cap and path; renewals capped the same. Planted: 147-min hot refused, 20-min hot passes, 147-min non-hot passes (8/8 `tests/cli/hot-cap.test.ts`).
+- RES1 doctor lists hot over-cap holds: `auditReservationAge` takes an optional hot-path filter and `doctor --scope reservations` reads `.omp/hot-paths`, naming the holder (9/9 `tests/cli/hot-cap.test.ts` with the filter case).
+- RES1 three bypasses closed (RED verdict): renewals via `extend_seconds`, the `macro_file_reservation_cycle` tool name, and glob paths intersecting hot files are all capped like direct reservations. Planted one negative each (12/12 `tests/cli/hot-cap.test.ts`).
+<!-- release coverage: (commit 5c9cee7) -->
+<!-- release coverage: (commit becdba5) -->
+<!-- release coverage: (commit a3f92c2) -->
+<!-- release coverage: (commit 3f2eb04) -->
+<!-- release coverage: (commit fceddbe) -->
+
+- `omp-kit doctor --scope work --project <path>` now scans only the selected repository, taking precedence over `--root`.
+<!-- release coverage: (commit 4e6a112) -->
+
+- RT1 installer verifies release origin: `verify_attestation()` in `installer/install.py` checks the release-published `<archive>.sigstore.json` bundle via `gh attestation verify --owner` (seams: `GH_BIN`, `OMP_KIT_ATTEST_OWNER`). A failing bundle refuses; a missing bundle warns hash-only so offline installs keep working. Planted: tampered archive refused, bad attestation refused, no-bundle warns and passes (4/4 `tests/cli/install-verify.test.sh`).
+- RT1 release workflow attests every candidate: `release.yml` gains an `attest` matrix job (one per platform) that downloads the `candidate-<platform>` artifact, generates an SPDX SBOM (anchore/sbom-action), and records SLSA build-provenance plus SBOM attestations via GitHub OIDC (all actions SHA-pinned). Tag-dispatched only, like the rest of the workflow. The installer check is wired into CI (`install-verify.test.sh` in shellcheck and the ladder). Bundle publication alongside archives at promotion time remains a P25 step.
+
 ## 0.2.9 — 2026-10-06
 
 - Commit index for 0.2.9: every shipped-path commit since v0.2.8 that had no fragment of its own, grouped by bead.

@@ -1,3 +1,6 @@
 - SAVE1 claude-save service: `src/claude-save-job.ts` commits admitted ~/.claude changes on main hourly and pushes origin main, with baselines snapshotted 2026-10-06 (5 gitlinks, main-only branches per amendment 3). Refuses: HEAD/upstream drift, worktrees, new branches/gitlinks, dirty denied files (left unstaged), gitleaks hits or missing scanner, SKILL.md outside skills/. No merge/rebase/force; non-FF push reported. Registered as `com.omp-kit.claude-save` (3600s) with `service run` wiring. Planted: every refusal on scratch repos only (15/15 `tests/cli/claude-save.test.ts`).
 - SAVE1 amendment 3: branch baseline is main-only (all other ~/.claude branches deleted with approval); a re-created archived branch is refused as new (15/15 contract tests).
 - SAVE1 staged-audit fix (NO-SHIP verdict): allowlisted gitlinks are never staged, and the index audit reads only gitlinks changed in the staged diff outside the allowlist — the old audit counted every tracked gitlink and could never commit. Planted: admitted edit with all 5 allowlisted gitlinks tracked commits; new gitlink refused; secret refused (16/16).
+<!-- release coverage: (commit 2c4384c) -->
+<!-- release coverage: (commit a9898c9) -->
+<!-- release coverage: (commit aa61e78) -->
