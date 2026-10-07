@@ -1,2 +1,1 @@
-- Release attestation derives its matrix from candidate-proof certified_platforms, validates source/version/index membership, and uses the verified actions/download-artifact v4.3.0 pin. It preserves the existing certified subset and does not enable excluded Intel platforms.
-- Publishability fixtures construct planted credential, home-path, private-IP, and LAN-host values at runtime; the shared DSR template omits dispatcher-local absolute local_path and documents its registration requirement.
+- SBOM attestation separates the platform-specific workflow artifact name from the local SPDX JSON path consumed by attest-sbom; the proof-derived matrix rejects unapproved platform identities while preserving the certified subset.

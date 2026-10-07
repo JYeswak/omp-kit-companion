@@ -67,6 +67,8 @@ jobs:
           test "$(jq -er '.source_sha' "$proof")" = "$SOURCE_SHA"
           test "$(jq -er '.version' "$proof")" = "$VERSION"
           platforms="$(jq -cer '.certified_platforms | select(type == "array" and length > 0)' "$proof")"
+          # Reject proofs that advertise platforms outside the approved non-Intel set.
+          jq -e --argjson platforms "$platforms" --argjson allowed '["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"]' 'all($platforms[]; . as $platform | ($allowed | index($platform)) != null)' "$proof" >/dev/null
           jq -e --argjson platforms "$platforms" '(.assets | keys | sort) == ($platforms | sort)' "$index" >/dev/null
           test "$(jq -er '.source_tag' "$index")" = "v$VERSION"
           printf 'platforms=%s\n' "$platforms" >> "$GITHUB_OUTPUT"
@@ -94,7 +96,9 @@ jobs:
         with:
           path: candidate/
           format: spdx-json
-          output-file: sbom-${{ matrix.platform }}.spdx.json
+          artifact-name: sbom-${{ matrix.platform }}
+          # Pinned code reads output-file although action.yml omits it.
+          output-file: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
       - name: Attest build provenance for the candidate archive
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
@@ -103,7 +107,7 @@ jobs:
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
         with:
           subject-path: candidate/*.tar
-          sbom-path: sbom-${{ matrix.platform }}.spdx.json
+          sbom-path: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
 
 # Deliberately no release upload, GitHub visibility change, latest pointer, or tag creation.
 # P25 alone may promote the exact SHA-bound candidate after privacy and hero authorization.
