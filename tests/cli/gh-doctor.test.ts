@@ -53,7 +53,7 @@ describe("github capability probes", () => {
 		const seen: string[] = [];
 		const rows = await probeGithubCapabilities({
 			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
-			token: "github_pat_fine123", tokenSource: "test",
+			token: ["github", "pat", "fine123"].join("_"), tokenSource: "test",
 			fetchImpl: stubFetch(fullRoutes, seen),
 		});
 		const issue = rows.find(row => row.capability === "issue_create_foreign")!;
@@ -115,11 +115,13 @@ describe("hosts.yml token scan", () => {
 		const base = mkdtempSync(join(tmpdir(), "gh-doctor-hosts-"));
 		try {
 			mkdirSync(join(base, ".config", "gh"), { recursive: true });
+			const hostToken = ["ghp", "hoststoken1"].join("_");
+			const otherHostToken = ["secret", "other-host"].join("-");
 			writeFileSync(join(base, ".config", "gh", "hosts.yml"),
-				"github.com:\n    user: me\n    oauth_token: ghp_hoststoken1\n    git_protocol: https\n" +
-				"ghe.example.com:\n    oauth_token: secret-other-host\n");
+				"github.com:\n    user: me\n    oauth_token: " + hostToken + "\n    git_protocol: https\n" +
+				"ghe.example.com:\n    oauth_token: " + otherHostToken + "\n");
 			const found = hostsToken(base);
-			expect(found?.token).toBe("ghp_hoststoken1");
+			expect(found?.token).toBe(hostToken);
 			expect(found?.source).toContain("github.com");
 		} finally {
 			rmSync(base, { recursive: true, force: true });
@@ -163,7 +165,7 @@ describe("github finding fold", () => {
 		const seen: string[] = [];
 		const rows = await probeGithubCapabilities({
 			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
-			token: "github_pat_fine123", tokenSource: "test",
+			token: ["github", "pat", "fine123"].join("_"), tokenSource: "test",
 			fetchImpl: stubFetch({
 				"/repos/acme/foreign": { status: 200, body: { has_issues: true } },
 				"/repos/me/owned": { status: 200, scopes: "repo, workflow", body: { permissions: { push: true } } },

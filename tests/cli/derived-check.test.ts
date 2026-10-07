@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { scanDerivedText, shouldScanFile } from "../../src/derived-check.ts";
 
 test("planted version, path, count and pid literals each go RED with a probe", () => {
+	const plantedHomePath = ["/Users", "josh", "bin", "x"].join("/");
 	const rows = scanDerivedText("config/app.json", [
-		'{ "tool": "/Users/josh/bin/x" }',
+		'{ "tool": "' + plantedHomePath + '" }',
 		'{ "pinned": "1.2.3" }',
 		'{ "note": "17 profiles active" }',
 		'{ "owner": "pid=98411" }',

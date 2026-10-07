@@ -43,21 +43,49 @@ jobs:
     permissions:
       contents: read
 
-  attest:
+  attest-platforms:
     needs: native-candidate
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      platforms: ${{ steps.select.outputs.platforms }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unpublished-candidate-index
+          path: candidate-index/
+      - name: Select the exact native-certified subset
+        id: select
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          proof=candidate-index/candidate-proof.json
+          index=candidate-index/release-index.json
+          test "$(jq -er '.source_sha' "$proof")" = "$SOURCE_SHA"
+          test "$(jq -er '.version' "$proof")" = "$VERSION"
+          platforms="$(jq -cer '.certified_platforms | select(type == "array" and length > 0)' "$proof")"
+          jq -e --argjson platforms "$platforms" '(.assets | keys | sort) == ($platforms | sort)' "$index" >/dev/null
+          test "$(jq -er '.source_tag' "$index")" = "v$VERSION"
+          printf 'platforms=%s\n' "$platforms" >> "$GITHUB_OUTPUT"
+
+  attest:
+    needs: [native-candidate, attest-platforms]
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        platform: [darwin-arm64-none, darwin-x64-none, linux-arm64-gnu, linux-x64-gnu]
+        platform: ${{ fromJSON(needs['attest-platforms'].outputs.platforms) }}
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
           path: candidate/

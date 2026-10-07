@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 
-const HOME = "/Users/test-op";
-const LAUNCHER = "/Users/test-op/.local/bin/omp-kit";
+const HOME = "/fixture/user-home/test-op";
+const LAUNCHER = "/fixture/user-home/test-op/.local/bin/omp-kit";
 
 function statusOf(checks: { id: string; status: string }[], id: string): string {
 	return checks.find(check => check.id === id)?.status ?? "(missing)";

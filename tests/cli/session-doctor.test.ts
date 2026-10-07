@@ -4,19 +4,19 @@ import { inspectOmpSessions, parsePsProcesses, parseTmuxPanes, type SessionInsta
 const components = (agents: number): SessionInstall[] => [
 	{ label: "OMP package", path: "/omp/package", version: "18.5.0", installed_at_epoch_ms: 1000 },
 	{ label: "kit plugin", path: "/kit/plugin", version: "0.2.3", installed_at_epoch_ms: 2000 },
-	{ label: "~/.agents/AGENTS.md", path: "/home/josh/.agents/AGENTS.md", version: null, installed_at_epoch_ms: agents },
+	{ label: "~/.agents/AGENTS.md", path: "/fixture/user-home/.agents/AGENTS.md", version: null, installed_at_epoch_ms: agents },
 ];
 
 const process = (start: number): SessionProcess => ({
 	pid: 42,
 	ppid: 1,
-	command: "bun /Users/josh/.bun/bin/omp --profile claude",
+	command: "bun /fixture/user-home/.bun/bin/omp --profile claude",
 	start_epoch_ms: start,
 	start_text: "Sat Oct 3 10:00:00 2026",
 });
 
 test("session inventory parses OMP processes and tmux panes", () => {
-	const ps = " 42 1 Sat Oct  3 10:00:00 2026 bun /Users/josh/.bun/bin/omp --profile claude\n 43 1 Sat Oct  3 10:00:01 2026 /bin/zsh -l";
+	const ps = " 42 1 Sat Oct  3 10:00:00 2026 bun /fixture/user-home/.bun/bin/omp --profile claude\n 43 1 Sat Oct  3 10:00:01 2026 /bin/zsh -l";
 	const tmux = "omp-test 0.1\t42\tomp --profile claude\n";
 	expect(parsePsProcesses(ps)).toHaveLength(1);
 	expect(parsePsProcesses(ps)[0]?.pid).toBe(42);

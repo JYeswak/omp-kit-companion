@@ -31,7 +31,7 @@ function runner(): { runner: PluginRunner; calls: string[][]; state: Map<string,
 	const calls: string[][] = [];
 	const state = new Map<string, PluginSnapshot>();
 	const initial = (profile: string): PluginSnapshot => ({
-		installed: false, target: null, link_path: `/fixture/home/${profile}/plugins/node_modules/omp-kit-companion`,
+		installed: false, target: null, link_path: `/fixture/user-home/${profile}/plugins/node_modules/omp-kit-companion`,
 		plugins_dir_hash: "before-tree", lock_hash: "before-lock", disabled_rules: [], link_kind: "ABSENT",
 	});
 	const snapshot = (profile: string) => state.get(profile) ?? initial(profile);
@@ -88,7 +88,7 @@ test("undo restores an absent prior plugin", () => {
 	}
 });
 test("refuses a store nested inside a profile plugin directory", () => {
-	expect(() => planPlugin("/fixture/home/.omp/plugins/node_modules/omp-kit-companion", [{ name: "default", configFiles: ["config.yml"], pluginDir: "/fixture/home/.omp/plugins" }])).toThrow("STORE_INSIDE_PROFILE_PLUGIN_DIR");
+	expect(() => planPlugin("/fixture/user-home/.omp/plugins/node_modules/omp-kit-companion", [{ name: "default", configFiles: ["config.yml"], pluginDir: "/fixture/user-home/.omp/plugins" }])).toThrow("STORE_INSIDE_PROFILE_PLUGIN_DIR");
 });
 test("names a profile when postcheck loses its plugin rules", () => {
 	const fake = runner();

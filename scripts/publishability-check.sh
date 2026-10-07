@@ -32,8 +32,8 @@ git ls-files | while IFS= read -r file; do
 	esac
 	[ -f "$file" ] || continue
 	{
-		# Absolute home paths (/Users/x, /home/x); $HOME, ~ and the
-		# system-wide /Users/Shared pass.
+		# Absolute per-user home roots are refused; $HOME, ~ and
+		# shared-system paths pass.
 		grep -HnE -- '/Users/[^ /:]+|/home/[^ /:]+' "$file" 2>/dev/null | grep -v '/Users/Shared/' | sed 's/^/home-path: /'
 		# Secrets (fixed literal anchors, bounded token bodies).
 		grep -HnEI -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,120}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,200}|sk-live-[A-Za-z0-9]{16,100}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file" 2>/dev/null | sed 's/^/secret: /'

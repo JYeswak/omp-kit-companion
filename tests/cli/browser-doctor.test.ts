@@ -55,7 +55,7 @@ test("reparented headless Chrome with no OMP marker is UNATTRIBUTED and never ki
 });
 
 test("reparented headless Chrome with an OMP profile path stays ORPHAN and kill-eligible", () => {
-	const orphan = parseBrowserCommand(51, 1, "/Applications/Google Chrome --headless --user-data-dir=/Users/josh/.omp/profiles/claude/run/daemons/x/omp.browser-1", 0);
+	const orphan = parseBrowserCommand(51, 1, "/Applications/Google Chrome --headless --user-data-dir=/fixture/user-home/.omp/profiles/claude/run/daemons/x/omp.browser-1", 0);
 	const report = inspectBrowserProcesses([orphan], [{ pid: 99, alive: false }], Date.now());
 	expect(report.browsers.map(browser => [browser.pid, browser.status])).toEqual([[51, "ORPHAN"]]);
 	expect(planBrowserReap(report)).toEqual([{ pid: 51, clones: [] }]);

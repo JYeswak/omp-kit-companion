@@ -22,10 +22,10 @@ test("parses memory pressure level/free percentage and disk transfers per second
 });
 
 test("resolves pane agent profile and repository cwd without unknown placeholders", () => {
-	const processes = [{ pid: 10, ppid: 1, cpu_pct: 1, rss_bytes: 1, command: "tmux" }, { pid: 20, ppid: 10, cpu_pct: 3, rss_bytes: 2, command: "bun /Users/josh/.bun/bin/omp --profile codex" }];
-	const report = censusLoad({ processes, panes: [{ session: "omp-test", pane: "omp-test 0.1", pid: 10, cwd: "/Users/josh/Developer/repo" }], jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } });
+	const processes = [{ pid: 10, ppid: 1, cpu_pct: 1, rss_bytes: 1, command: "tmux" }, { pid: 20, ppid: 10, cpu_pct: 3, rss_bytes: 2, command: "bun /fixture/user-home/.bun/bin/omp --profile codex" }];
+	const report = censusLoad({ processes, panes: [{ session: "omp-test", pane: "omp-test 0.1", pid: 10, cwd: "/fixture/repo" }], jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } });
 
-	expect(report.consumers[0]).toMatchObject({ agent: "codex", repo: "/Users/josh/Developer/repo" });
+	expect(report.consumers[0]).toMatchObject({ agent: "codex", repo: "/fixture/repo" });
 	expect(JSON.stringify(report.consumers)).not.toContain("unknown");
 	expect(report.sample_cost_ms).toBeGreaterThanOrEqual(0);
 	expect(report.sample_cost_ms).toBeLessThan(600);

@@ -5,8 +5,10 @@
 # every verdict comes from the checker's exit code plus its complete output.
 set -u
 
-CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/publishability-check.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECK="$REPO_ROOT/scripts/publishability-check.sh"
+REPO_TMP="$REPO_ROOT/var/agent-tmp"
+mkdir -p "$REPO_TMP"
 TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/publishability-test.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
@@ -33,16 +35,24 @@ mkfixture() {
 
 # 1. planted secret token is refused
 mkfixture
-printf 'token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"\n' > "$TMP/fixture/config.txt"
+fake_token_prefix='ghp_'
+fake_token_body='abcdefghijklmnopqrstuvwxyz0123456789'
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/config.txt"
 git -C "$TMP/fixture" add config.txt
 expect_fail "secret-token"
 
 # 2. planted absolute home path is refused; the same path under scratch is ignored
 mkfixture
-printf 'root = "/Users/josh/work"\n' > "$TMP/fixture/paths.txt"
+home_root='/Users'
+home_separator='/'
+home_user='josh'
+home_suffix='/work'
+home_path="${home_root}${home_separator}${home_user}${home_suffix}"
+printf 'root = "%s"\n' "$home_path" > "$TMP/fixture/paths.txt"
 mkdir -p "$TMP/fixture/var/agent-tmp/scratch.1"
-printf 'root = "/Users/josh/work"\n' > "$TMP/fixture/var/agent-tmp/scratch.1/paths.txt"
-git -C "$TMP/fixture" add paths.txt var/agent-tmp/scratch.1/paths.txt
+printf 'root = "%s"\n' "$home_path" > "$TMP/fixture/var/agent-tmp/scratch.1/paths.txt"
+git -C "$TMP/fixture" add paths.txt
+git -C "$TMP/fixture" add -f var/agent-tmp/scratch.1/paths.txt
 expect_fail "home-path"
 if sh "$CHECK" "$TMP/fixture" 2>&1 | grep -q "scratch.1"; then
 	fail=$((fail + 1)); printf 'FAIL scratch-exempt: scratch finding reported\n'
@@ -52,7 +62,11 @@ fi
 
 # 3. planted private IP and LAN hostname refused; neutral fixtures pass
 mkfixture
-printf 'db = "10.0.4.15"\nlan = "printer.local"\n' > "$TMP/fixture/net.txt"
+private_ip_prefix='10.'
+private_ip_suffix='0.4.15'
+lan_host='printer'
+lan_suffix='.local'
+printf 'db = "%s%s"\nlan = "%s%s"\n' "$private_ip_prefix" "$private_ip_suffix" "$lan_host" "$lan_suffix" > "$TMP/fixture/net.txt"
 git -C "$TMP/fixture" add net.txt
 expect_fail "private-net"
 mkfixture

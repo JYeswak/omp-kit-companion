@@ -1,6 +1,10 @@
 # Kit-owned dsr build definition for JYeswak/omp-kit-companion (DS1 rz5.54).
-# Install: copy to ~/.config/dsr/repos.d/omp-kit-companion.yaml (operator step;
-# the kit never writes outside its repo). Undo: dsr repos remove omp-kit-companion.
+# Install: copy to the dispatcher's ~/.config/dsr/repos.d/omp-kit-companion.yaml.
+# DSR 0.2.3 requires an absolute dispatcher-local local_path mirrored in repos.yaml.
+# After copying, run dsr repos add JYeswak/omp-kit-companion --local-path <absolute checkout>
+# and copy that path here so both configs match. DSR rejects relative paths and does not
+# expand environment variables. This shared template intentionally omits local_path.
+# Undo: dsr repos remove omp-kit-companion.
 # Targets name only hosts that are up (linux/* via trj). darwin/windows wait on
 # mmini + wlap (recorded host fact 2026-10-06, not a code task).
 # Interface notes (dsr 0.2.3, measured): only $VERSION expands in build_cmd
@@ -11,7 +15,6 @@
 # requires per-platform receipts from scripts/native-candidate.py (see bead).
 tool: omp-kit-companion
 repo: JYeswak/omp-kit-companion
-local_path: /Users/josh/Developer/omp-kit-companion
 build_cmd: bun scripts/package-release.ts --version ${VERSION} --platform native --out $PWD
 binary_name: omp-kit
 targets:

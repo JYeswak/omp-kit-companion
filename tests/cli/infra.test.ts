@@ -55,7 +55,7 @@ const PASS_LOG = "GREEN manifest producer_rc=0\nGREEN harness-gate producer_rc=0
 test("TOOL1: a green ladder reports PASS with stages", async () => {
 	const seen: { argv: readonly string[]; env: Record<string, string> }[] = [];
 	const report = await checkInfraCandidate({ tool: "bun", version: "1.5.0", repoRoot: "/repo",
-		pathPrefix: "/prefix/candidate", baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
+		pathPrefix: "/prefix/candidate", baseEnv: { PATH: "/usr/bin:/bin", HOME: "/fixture/user-home/op" },
 		exec: fakeExec(PASS_LOG, seen) });
 	expect(report.status).toBe("PASS");
 	expect(report.failedStage).toBeNull();
@@ -64,12 +64,12 @@ test("TOOL1: a green ladder reports PASS with stages", async () => {
 
 test("TOOL1: the candidate prefix leads PATH and the base env is untouched", async () => {
 	const seen: { argv: readonly string[]; env: Record<string, string> }[] = [];
-	const baseEnv = { PATH: "/usr/bin:/bin", HOME: "/home/op" };
+	const baseEnv = { PATH: "/usr/bin:/bin", HOME: "/fixture/user-home/op" };
 	await checkInfraCandidate({ tool: "bun", version: "1.5.0", repoRoot: "/repo",
 		pathPrefix: "/prefix/candidate", baseEnv, exec: fakeExec(PASS_LOG, seen) });
 	expect(seen).toHaveLength(1);
 	expect(seen[0]!.env["PATH"]).toBe("/prefix/candidate/bin:/usr/bin:/bin");
-	expect(seen[0]!.env["HOME"]).toBe("/home/op");
+	expect(seen[0]!.env["HOME"]).toBe("/fixture/user-home/op");
 	expect(baseEnv["PATH"]).toBe("/usr/bin:/bin");
 });
 

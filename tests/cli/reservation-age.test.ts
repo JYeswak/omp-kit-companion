@@ -10,7 +10,7 @@ const scratch = mkdtempSync(join(scratchRoot, "reservation-age-test." + process.
 writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=reservation-age-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
 
 const NOW = Date.parse("2026-10-05T20:00:00Z");
-const PROJECT = "/Users/josh/Developer/omp-kit-companion";
+const PROJECT = resolve(import.meta.dir, "../..");
 
 function fixtureArchive(records: Array<Record<string, unknown>>): string {
 	const root = join(scratch, "archive-" + Math.random().toString(36).slice(2));

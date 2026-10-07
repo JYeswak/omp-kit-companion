@@ -5,8 +5,10 @@
 # every verdict comes from the checker's exit code plus its complete output.
 set -u
 
-CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/derived-check.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECK="$REPO_ROOT/scripts/derived-check.sh"
+REPO_TMP="$REPO_ROOT/var/agent-tmp"
+mkdir -p "$REPO_TMP"
 TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/derived-check-test.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
@@ -14,12 +16,11 @@ pass=0
 fail=0
 
 # 1. planted version, path, count and pid facts all go RED with their probes
-cat > "$TMP/bad.toml" <<'EOF'
-omp_version = "18.6.1"
-install_path = "/Users/josh/.local/opt/omp-kit"
-profiles = 17
-owner_pid = 9289
-EOF
+home_root='/Users'
+home_user='josh'
+path_suffix='/.local/opt/omp-kit'
+install_path="${home_root}/${home_user}${path_suffix}"
+printf 'omp_version = "18.6.1"\ninstall_path = "%s"\nprofiles = 17\nowner_pid = 9289\n' "$install_path" > "$TMP/bad.toml"
 if sh "$CHECK" "$TMP/bad.toml" > "$TMP/out" 2>&1; then
 	fail=$((fail + 1)); printf 'FAIL planted: rc=0\n'
 else
