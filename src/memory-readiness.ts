@@ -44,6 +44,8 @@ const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:d7929e81066485010e65740f79b4cf13c6375acd52952018dc321aa0e979d023",
 	// OMP 18.5.0: default off, no-op fallback, and legacy false -> off.
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:f6e978edd59e67e596cb47adfcca821aceb25c735258ca51c1cf4b141a45fa09",
+	// OMP 18.7.0: default off, no-op fallback, and legacy false -> off.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:b6667a6edd3079abe1b56c1473a9d2306ca7da6201674279d40355d338f20476",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [
 	"src/memory-backend/settings.ts",

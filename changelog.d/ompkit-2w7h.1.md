@@ -1,0 +1,1 @@
+- COMMIT1 bead lookup prioritizes recognized tracker-shaped tokens before the 20 local `br show` lookup cap; a 36-token long-message regression proves a resolvable id past position 20 passes while unknown ids remain refused (14/14 contract cases).

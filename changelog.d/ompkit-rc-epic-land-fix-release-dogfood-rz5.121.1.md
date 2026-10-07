@@ -1,0 +1,1 @@
+- Memory readiness recognizes the reviewed OMP 18.7.0 config-source fingerprint; the installed-source suite reports the expected backend and store states instead of UNVERIFIED (11/11 tests).

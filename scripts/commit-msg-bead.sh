@@ -31,7 +31,11 @@ else
 fi
 [ -f "$DB" ] || exit 0
 MSG=$(cat -- "$FILE" 2>/dev/null) || exit 0
-CANDIDATES=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | sort -u | head -20) || true
+TOKENS=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | sort -u) || true
+BEAD_TOKENS=$(printf '%s\n' "$TOKENS" | grep -E '^(ompkit-|rz5[.]|cfs-|uds-)' || true)
+OTHER_TOKENS=$(printf '%s\n' "$TOKENS" | grep -Ev '^(ompkit-|rz5[.]|cfs-|uds-)' | grep -E '.{3,}' || true)
+# Keep the 20 local SQLite br show lookup cap; try recognized bead prefixes first.
+CANDIDATES=$(printf '%s\n%s\n' "$BEAD_TOKENS" "$OTHER_TOKENS" | grep -E '.{3,}' | head -20) || true
 if [ -z "$CANDIDATES" ]; then
 	printf 'commit-msg-bead: refusing commit with no bead-like token; name a bead id the tracker resolves\n' >&2
 	exit 4

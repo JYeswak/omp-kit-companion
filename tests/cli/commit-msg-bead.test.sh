@@ -26,7 +26,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export BR_BIN="$TMP/bin/br"
 export BEADS_DB="$TMP/beads.db"
 : > "$BEADS_DB"
-export KNOWN_IDS="ompkit-2w7h rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r ompkit-kxdy"
+export KNOWN_IDS="ompkit-2w7h ompkit-2w7h.1 rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r ompkit-kxdy ompkit-rc-epic-land-fix-release-dogfood-rz5.121.1"
 
 run_case() {
 	name=$1
@@ -58,6 +58,11 @@ run_case uds-id 0 "fix the lane uds-6z2r"
 run_case digitless-id 0 "polish the copy ompkit-kxdy"
 # 6c. digit-less made-up id is refused by br, not by shape (planted)
 run_case digitless-unknown 4 "polish the copy ompkit-zzqy"
+# 6d. a resolvable bead after 36 earlier lexical tokens survives the 20-candidate cap
+LONG_PREFIX="a000 a001 a002 a003 a004 a005 a006 a007 a008 a009 a010 a011 a012 a013 a014 a015 a016 a017 a018 a019 a020 a021 a022 a023 a024 a025 a026 a027 a028 a029 a030 a031 a032 a033 a034 a035"
+LC_ALL=C run_case long-valid-id 0 "$LONG_PREFIX ompkit-rc-epic-land-fix-release-dogfood-rz5.121.1"
+# A bead-shaped but unknown id is still refused after prioritization.
+LC_ALL=C run_case long-unknown-id 4 "$LONG_PREFIX ompkit-nope9"
 # 7. a bare version number is not a bead id (planted)
 run_case version-only 4 "upgrade bun 1.4.2"
 # 8. merge source is exempt
