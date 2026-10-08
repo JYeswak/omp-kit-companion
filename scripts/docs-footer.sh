@@ -28,8 +28,8 @@ footer = (
     f"Minimum supported OMP: {minimum}.\n"
     f"Last verified against OMP {omp_version} on {stamp_date} by `bun test\n"
     "tests/cli/docs.test.ts`. Refresh with `sh scripts/docs-footer.sh`; the\n"
-    "scheduled compatibility workflow re-runs the same check against the\n"
-    "latest OMP once a day.\n"
+    "OMP certification workflow re-runs the same check against each new OMP\n"
+    "release before it becomes the certified version.\n"
     f"{end}"
 )
 updates = []
