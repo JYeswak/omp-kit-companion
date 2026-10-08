@@ -22,6 +22,16 @@ function pass(id: string, message: string): ServiceCheck {
 	return { id, status: "PASS", message, remediation: "None." };
 }
 
+function absolutePathStatus(value: string): string {
+	if (value === "") return "(missing)";
+	return isAbsolute(value) ? "absolute" : "not absolute";
+}
+
+function absoluteSearchPathStatus(value: string): string {
+	if (value === "") return "(missing)";
+	return value.split(":").every(entry => entry !== "" && isAbsolute(entry)) ? "absolute" : "has relative entries";
+}
+
 /** EnvironmentVariables entries of a launchd plist: key -> raw string value. */
 function plistEnvironment(text: string): Record<string, string> {
 	const entries: Record<string, string> = {};
@@ -79,10 +89,12 @@ export function checkPlistContract(jobName: string, text: string): ServiceCheck[
 	const env = plistEnvironment(text);
 	const home = env["HOME"] ?? "";
 	const path = env["PATH"] ?? "";
-	checks.push(home !== "" && isAbsolute(home) && path !== "" && path.split(":").every(entry => entry === "" || isAbsolute(entry))
+	const homeIsAbsolute = home !== "" && isAbsolute(home);
+	const searchPathIsAbsolute = path !== "" && path.split(":").every(entry => entry !== "" && isAbsolute(entry));
+	checks.push(homeIsAbsolute && searchPathIsAbsolute
 		? pass("contract-env", "HOME and PATH are explicit and absolute")
 		: fail("contract-env",
-			`HOME=${home === "" ? "(missing)" : "not absolute"} PATH=${path === "" ? "(missing)" : "has relative entries"}`,
+			`HOME=${absolutePathStatus(home)} PATH=${absoluteSearchPathStatus(path)}`,
 			`Render ${jobName} with explicit absolute HOME and PATH from config; launchd jobs must not inherit a caller PATH.`));
 	const secretKey = secretEnvKey(env);
 	checks.push(secretKey === null
@@ -92,7 +104,7 @@ export function checkPlistContract(jobName: string, text: string): ServiceCheck[
 			`Remove ${secretKey} from the rendered ${jobName} definition (SVC1/PUB1: no secrets or secret paths in the plist). The value is never printed.`));
 	const outPath = plistString(text, "StandardOutPath");
 	const errPath = plistString(text, "StandardErrorPath");
-	checks.push(outPath !== null && errPath !== null
+	checks.push(outPath !== null && isAbsolute(outPath) && errPath !== null && isAbsolute(errPath)
 		? pass("contract-log-paths", "StandardOutPath and StandardErrorPath are set")
 		: fail("contract-log-paths", "Out/err log paths are missing; failures would be invisible",
 			`Render ${jobName} with StandardOutPath/StandardErrorPath under Library/Logs/omp-kit.`));
@@ -134,9 +146,13 @@ export function checkSystemdContract(jobName: string, service: string): ServiceC
 	const home = unquoteUnit(env["HOME"] ?? "");
 	const path = unquoteUnit(env["PATH"] ?? "");
 	const tmpdir = unquoteUnit(env["TMPDIR"] ?? "");
-	checks.push(home !== "" && isAbsolute(home) && path !== "" && tmpdir !== "" && isAbsolute(tmpdir)
+	const homeIsAbsolute = home !== "" && isAbsolute(home);
+	const searchPathIsAbsolute = path !== "" && path.split(":").every(entry => entry !== "" && isAbsolute(entry));
+	const tmpdirIsAbsolute = tmpdir !== "" && isAbsolute(tmpdir);
+	checks.push(homeIsAbsolute && searchPathIsAbsolute && tmpdirIsAbsolute
 		? pass("contract-systemd-env", "HOME, PATH and TMPDIR are explicit and absolute")
-		: fail("contract-systemd-env", "HOME, PATH or TMPDIR is missing or not absolute",
+		: fail("contract-systemd-env",
+			`HOME=${absolutePathStatus(home)} PATH=${absoluteSearchPathStatus(path)} TMPDIR=${absolutePathStatus(tmpdir)}`,
 			`Render omp-kit-${jobName}.service with explicit absolute HOME, PATH and TMPDIR.`));
 	let secretKey: string | null = null;
 	for (const [key, value] of Object.entries(env)) {

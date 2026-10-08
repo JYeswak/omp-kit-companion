@@ -11,7 +11,7 @@ export type BrowserProcess = {
 };
 export type BrowserSession = { pid: number; alive: boolean };
 export type BrowserFinding = BrowserProcess & { status: "ORPHAN" | "LIVE" | "UNATTRIBUTED"; reason: string; ageMs: number };
-export type BrowserInventory = { processes: BrowserProcess[]; sessions: BrowserSession[]; clones: string[] };
+export type BrowserInventory = { processes: BrowserProcess[]; sessions: BrowserSession[]; clones: string[]; probeError?: string };
 export type BrowserDoctorReport = { status: "OK" | "WARN"; browsers: BrowserFinding[]; orphaned: BrowserFinding[]; clones: string[] };
 
 const CHROME = /(?:^|\/)(?:Google Chrome|Chromium|chrome|chromium)(?:$|\s)/i;
@@ -62,10 +62,11 @@ function isBrokerDescendant(process: BrowserProcess, byPid: ReadonlyMap<number, 
 
 
 /** Read the local process table; no process is killed or mutated. */
-export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString() }; }): BrowserInventory {
+export function collectBrowserProcesses(run: (args: readonly string[]) => { exitCode: number | null; stdout: string; stderr?: string } = args => { const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" }); return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() }; }): BrowserInventory {
 	let result = run(["/bin/ps", "-axo", "pid=,ppid=,etimes=,command="]);
 	const rows: BrowserProcess[] = [];
 	if (result.exitCode !== 0) result = run(["/bin/ps", "-axo", "pid=,ppid=,lstart=,command="]);
+	if (result.exitCode !== 0) return { processes: [], sessions: [], clones: [], probeError: `browser-ps-probe-failed: exit ${result.exitCode}; ${result.stderr ?? "process inventory unavailable"}` };
 	for (const line of result.stdout.split("\n")) {
 		const fields = line.trim().split(/\s+/);
 		if (fields.length < 4) continue;

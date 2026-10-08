@@ -1,0 +1,1 @@
+Added 12 non-blocking kit teach rules for false alarms, negative outcomes, check-ins, fleet gaps, verified sends, acceptance criteria, planning protocol, named subagent models, shared skills, test TMPDIR, GitHub auth, and needless approvals. Each has fire/quiet case coverage and a live scenario.

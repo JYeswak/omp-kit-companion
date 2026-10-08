@@ -1,0 +1,21 @@
+[checkins]
+interval_minutes = 120
+
+[fleet]
+report_interval_seconds = 21600
+intake_tracker = "~/Developer/omp-kit"
+repos = [
+  { name = "omp-kit-companion", path = "~/Developer/omp-kit-companion", tracker = "~/Developer/omp-kit" },
+  { name = "uds", path = "~/Developer/uds", tracker = "~/Developer/uds" },
+  { name = "jev", path = "~/Developer/jev", tracker = "~/Developer/jev" },
+  { name = "localbench", path = "~/Developer/localbench", tracker = "~/Developer/localbench" },
+  { name = "clutterfreespaces.ios", path = "~/Developer/clutterfreespaces.ios", tracker = "~/Developer/clutterfreespaces.ios" },
+]
+
+[classifier]
+mode = "shadow"
+endpoint = "http://127.0.0.1:8010/v1/systemone"
+model = "clef-flash"
+guard_script = "~/Developer/jev/scripts/local-model-guard.sh"
+max_cpu_busy_pct = 80
+timeout_ms = 10000

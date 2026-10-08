@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "database_path": "/fixture/.beads/beads.db",
+  "backup_path": "/fixture/.beads/.br_recovery/backup.db",
+  "backup_scope": "schema-migration",
+  "stage": "recovery",
+  "raw_before": "fixture-before",
+  "raw_after": "fixture-after",
+  "logical_after": "fixture-logical",
+  "error": "database is busy (recovery in progress)"
+}

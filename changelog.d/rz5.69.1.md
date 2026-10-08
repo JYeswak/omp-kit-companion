@@ -1,0 +1,1 @@
+- Add eight executable command-substitution fire cases across the Q3 rules, bringing the matcher corpus to 339 rows.
