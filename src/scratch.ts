@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 
 /**
@@ -8,9 +8,9 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
  *
  * A session directory is reapable ONLY when its six-field owner identity is gone
  * (or its PID was demonstrably reused) AND lsof reports no open descriptor.
- * Entries without that process identity (including the fleet guard's four-field
- * marker and the legacy three-field format) use idle quarantine: past 72 h they
- * move to quarantine, past 7 d quarantined they are deleted after lsof rechecks.
+ * Entries without proven process identity use idle quarantine past 72 h.
+ * Expiry after 7 d requires a verified release or fresh dead-owner/fd/identity
+ * proof; age alone never permits deletion of UNKNOWN ownership.
  * Orphan kill targets ONLY kit harness servers (ppid 1, older than 1 h,
  * mock-model.mjs / external-live.mjs argv).
  */
@@ -240,7 +240,7 @@ function readText(path: string): string | null {
 }
 export type ScratchAction = "REAP" | "QUARANTINE" | "DELETE" | "LIVE" | "SKIP";
 
-export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number }
+export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number; sourceDir?: string; undo?: string; stagingReceipt?: string; error?: string; status?: "REFUSED" | "FAILED" }
 
 const APPLY_FAILURE_REASONS: Record<string, true> = {
 	"owner-changed-after-initial-check": true, "owner-release-changed-after-initial-check": true,
@@ -253,10 +253,77 @@ const APPLY_FAILURE_REASONS: Record<string, true> = {
 
 /** A terminal SKIP that means an intended mutation did not happen. */
 export function isApplyFailure(verdict: ScratchVerdict): boolean {
-	return verdict.action === "SKIP" && APPLY_FAILURE_REASONS[verdict.reason] === true;
+	return verdict.status === "FAILED" || verdict.status !== "REFUSED" && verdict.action === "SKIP" && APPLY_FAILURE_REASONS[verdict.reason] === true;
 }
 
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; onProgress?: (verdict: ScratchVerdict) => void; lsofSnapshot?: Set<string> | null }
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; onProgress?: (verdict: ScratchVerdict) => void; onStage?: (stage: { action: string; path: string }) => void; lsofSnapshot?: Set<string> | null; skipSize?: boolean; idleHours?: number; deadlineMs?: number }
+
+export interface ScratchTreeEvidence { status: "complete" | "partial" | "unknown"; sizeBytes: number; freshestMtimeMs: number; entries: number; reason?: string }
+
+/** Bounded, no-symlink tree evidence. Partial size is never an idle/deadness proof. */
+export function measureScratchTree(dir: string, options: { deadlineMs: number; maxEntries?: number }): ScratchTreeEvidence {
+	const result: ScratchTreeEvidence = { status: "complete", sizeBytes: 0, freshestMtimeMs: 0, entries: 0 };
+	const stack = [dir];
+	while (stack.length) {
+		if (Date.now() >= options.deadlineMs || result.entries >= (options.maxEntries ?? 100_000)) {
+			return { ...result, status: "partial", reason: "tree-budget-exhausted" };
+		}
+		const path = stack.pop()!;
+		try {
+			const stat = lstatSync(path);
+			result.entries++;
+			result.freshestMtimeMs = Math.max(result.freshestMtimeMs, stat.mtimeMs);
+			if (stat.isSymbolicLink()) continue;
+			if (stat.isDirectory()) {
+				for (const entry of readdirSync(path)) stack.push(join(path, entry));
+			} else result.sizeBytes += stat.size;
+		} catch (error) {
+			return { ...result, status: "unknown", reason: `tree-probe-error: ${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+	return result;
+}
+
+/** Size snapshots are informational; neither cached size nor directory mtime authorizes staging. */
+export function readScratchSizeSnapshot(dir: string): { device: number; inode: number; sizeBytes: number; measuredAtMs: number; status: "complete" | "partial" | "unknown" } | null {
+	try {
+		const path = join(dir, ".omp-kit-size.json");
+		if (isSymlink(path)) return null;
+		const snapshot = JSON.parse(readFileSync(path, "utf8"));
+		const stat = lstatSync(dir);
+		const owner = readText(join(dir, ".owner"));
+		if (snapshot.version !== 1 || snapshot.device !== stat.dev || snapshot.inode !== stat.ino || owner === null ||
+			snapshot.ownerSha256 !== createHash("sha256").update(owner).digest("hex") ||
+			!["complete", "partial", "unknown"].includes(snapshot.status) ||
+			![snapshot.sizeBytes, snapshot.measuredAtMs].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) return null;
+		return snapshot;
+	} catch { return null; }
+}
+
+function snapshotScratchSize(dir: string): void {
+	const evidence = measureScratchTree(dir, { deadlineMs: Date.now() + 100, maxEntries: 5000 });
+	try {
+		const stat = lstatSync(dir);
+		const owner = readText(join(dir, ".owner"));
+		if (!owner) return;
+		const path = join(dir, ".omp-kit-size.json");
+		const previous = readScratchSizeSnapshot(dir);
+		if (existsSync(path) && previous === null) return;
+		const fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW | (previous === null ? constants.O_CREAT | constants.O_EXCL : 0), 0o600);
+		try {
+			const marker = fstatSync(fd);
+			const currentDir = lstatSync(dir);
+			if (!marker.isFile() || currentDir.dev !== stat.dev || currentDir.ino !== stat.ino) return;
+			ftruncateSync(fd, 0);
+			const bytes = Buffer.from(`${JSON.stringify({ version: 1, device: stat.dev, inode: stat.ino, ownerSha256: createHash("sha256").update(owner).digest("hex"), sizeBytes: evidence.sizeBytes, measuredAtMs: Date.now(), status: evidence.status })}\n`);
+			for (let offset = 0; offset < bytes.length;) {
+				const written = writeSync(fd, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error("size-snapshot-write-failed");
+				offset += written;
+			}
+		} finally { closeSync(fd); }
+	} catch { /* size-only evidence can remain UNKNOWN; eligibility never uses it */ }
+}
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -295,7 +362,7 @@ function readOwner(dir: string): { owner: ScratchOwner | null; malformed: boolea
 
 export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict {
 	const sized = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
-		({ dir, action, reason, owner, sizeBytes: dirSize(dir) });
+		({ dir, action, reason, owner, sizeBytes: deps.skipSize ? 0 : dirSize(dir) });
 	if (isSymlink(dir)) return { dir, action: "SKIP", reason: "session-is-symlink", owner: null, sizeBytes: 0 };
 	let stat;
 	try {
@@ -542,12 +609,13 @@ export interface ApplyDeps extends InspectDeps {
 
 export interface ReapEvent { event: string; dir: string; at: string; [key: string]: unknown }
 
-function appendLog(home: string, event: ReapEvent): void {
+function appendLog(home: string, event: ReapEvent): string | null {
 	try {
 		mkdirSync(dirname(reapLogPath(home)), { recursive: true, mode: 0o700 });
 		appendFileSync(reapLogPath(home), `${JSON.stringify(event)}\n`, { mode: 0o600 });
-	} catch {
-		/* logging never blocks the verdict */
+		return null;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
 	}
 }
 interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string; legacy: boolean; legacyName: string | null }
@@ -692,6 +760,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		`${stat.dev}:${stat.ino}` !== inodeOf(dir))
 		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: owner.pid };
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid });
+	snapshotScratchSize(dir);
 	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
 }
 
@@ -731,6 +800,7 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 		`${dev}:${ino}` !== inodeOf(dir))
 		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: null };
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: released.owner.pid, legacy: true, reason });
+	snapshotScratchSize(dir);
 	return { ok: true, changed: true, dir, reason: "owner-released-legacy", ownerPid: released.owner.pid };
 }
 export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string }
@@ -773,12 +843,13 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps)
 	}
 	const parsed = parseOwnerFile(ownerText);
 	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
+	snapshotScratchSize(dir);
 	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created" };
 }
 
 /** Move an owner-released session to quarantine without requiring its process to exit. */
 function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
-	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
+	const fail = (reason: string, error?: unknown): ScratchVerdict => ({ ...verdict, action: "SKIP", reason, status: error === undefined ? "REFUSED" : "FAILED", ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }) });
 	const released = readReleaseRecord(dir);
 	if (!released || dirname(dir) !== root || (released.legacy
 		? basename(dir) !== released.legacyName
@@ -793,23 +864,24 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return fail("quarantine-create-failed");
+	} catch (error) {
+		return fail("quarantine-create-failed", error);
 	}
 	const moved = join(qt, entry);
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return fail("atomic-quarantine-failed");
+	} catch (error) {
+		return fail("atomic-quarantine-failed", error);
 	}
 	const afterMove = readReleaseRecord(moved);
 	const clearAfter = lsofClearDir(deps, moved);
 	if (inodeOf(moved) !== identity || !afterMove || afterMove.markerText !== released.markerText ||
 		afterMove.ownerText !== released.ownerText || clearAfter !== true) {
 		try {
+			if (existsSync(dir) || isSymlink(dir)) throw new Error("source path was replaced; refusing to overwrite");
 			renameSync(moved, dir);
-		} catch {
-			return { ...verdict, dir: moved, action: "SKIP", reason: "final-recheck-refused" };
+		} catch (error) {
+			return { ...fail("quarantine-restore-failed", error), dir: moved, sourceDir: dir };
 		}
 		return fail("final-recheck-refused");
 	}
@@ -822,11 +894,55 @@ function ownerSnapshot(owner: ScratchOwner): string {
 	return [owner.pid, owner.processStart ?? "", owner.label, owner.repo, owner.createdAt, owner.argv0 ?? ""].join("\n");
 }
 
+/** Sweep staging only: proven dead/reused owner, complete idle tree, fresh fd and identity checks. */
+export function applyOwnedQuarantine(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps, nameRequired = true): ScratchVerdict {
+	const refuse = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", status: "REFUSED", reason });
+	const fail = (reason: string, error: unknown): ScratchVerdict => ({ ...verdict, action: "SKIP", status: "FAILED", reason, error: error instanceof Error ? error.message : String(error) });
+	if (verdict.action !== "REAP" || !verdict.owner || !verdict.reason.startsWith("owner-dead") && !verdict.reason.startsWith("owner-reused")) return refuse("dead-owner-proof-required");
+	if (dirname(dir) !== root || resolve(dir) !== dir || isSymlink(dir)) return refuse("session-outside-root");
+	const identity = inodeOf(dir);
+	const expected = ownerSnapshot(verdict.owner);
+	const deadlineMs = deps.deadlineMs ?? Date.now() + 60_000;
+	const idleBefore = (deps.now ?? Date.now()) - (deps.idleHours ?? 72) * 3600_000;
+	const fresh: ApplyDeps = { ...deps, skipSize: true, lsofSnapshot: undefined };
+	const tree = measureScratchTree(dir, { deadlineMs });
+	if (tree.status !== "complete") return refuse(tree.reason ?? "idle-proof-unavailable");
+	if (tree.freshestMtimeMs >= idleBefore) return refuse("owner-dead-but-active");
+	const before = inspectSession(dir, root, fresh, nameRequired);
+	if (!identity || before.action !== "REAP" || !before.owner || ownerSnapshot(before.owner) !== expected || inodeOf(dir) !== identity) return refuse(`final-recheck-refused:${before.reason}`);
+	if (Date.now() >= deadlineMs) return refuse("tree-budget-exhausted");
+	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
+	const moved = join(quarantineDir(deps.home), entry);
+	try {
+		mkdirSync(dirname(moved), { recursive: true, mode: 0o700 });
+		renameSync(dir, moved);
+	} catch (error) { return fail("atomic-quarantine-failed", error); }
+	const after = inspectSession(moved, dirname(moved), fresh, false);
+	const afterTree = measureScratchTree(moved, { deadlineMs });
+	if (inodeOf(moved) !== identity || after.action !== "REAP" || !after.owner || ownerSnapshot(after.owner) !== expected ||
+		afterTree.status !== "complete" || afterTree.freshestMtimeMs >= idleBefore || Date.now() >= deadlineMs) {
+		try {
+			if (existsSync(dir) || isSymlink(dir)) throw new Error("source path was replaced; refusing to overwrite");
+			renameSync(moved, dir);
+		} catch (error) { return { ...fail("quarantine-restore-failed", error), dir: moved, sourceDir: dir }; }
+		return refuse(`final-recheck-refused:${after.reason}`);
+	}
+	const quote = (path: string) => `'${path.replace(/'/g, "'\\''")}'`;
+	const undo = `test ! -e ${quote(dir)} && test ! -L ${quote(dir)} && mv ${quote(moved)} ${quote(dir)}`;
+	const loggingError = appendLog(deps.home, { event: "quarantine", dir, destination: moved, identity, at: new Date(deps.now ?? Date.now()).toISOString(), reason: "dead-owner-idle", undo, sizeBytes: tree.sizeBytes });
+	if (loggingError !== null) return { ...verdict, dir: moved, sourceDir: dir, action: "QUARANTINE", status: "FAILED", reason: "staging-receipt-write-failed", error: loggingError, sizeBytes: tree.sizeBytes, undo };
+	return { ...verdict, dir: moved, sourceDir: dir, action: "QUARANTINE", reason: "dead-owner-idle-quarantined", sizeBytes: tree.sizeBytes, undo, stagingReceipt: reapLogPath(deps.home) };
+}
+
 /** Atomic quarantine + full recheck, then delete. Returns the terminal action. */
 export function applyReap(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
-	const fail = (reason: string): ScratchVerdict => { const failed = { ...verdict, action: "SKIP" as const, reason }; appendLog(deps.home, { event: "failure", dir: failed.dir, at, action: failed.action, error: reason }); return failed; };
+	const fail = (reason: string, error?: unknown): ScratchVerdict => {
+		const failed: ScratchVerdict = { ...verdict, action: "SKIP", reason, status: error === undefined ? "REFUSED" : "FAILED", ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }) };
+		appendLog(deps.home, { event: failed.status === "FAILED" ? "failure" : "refused", dir: failed.dir, at, action: "REAP", reason, error: failed.error });
+		return failed;
+	};
 	if (!verdict.owner) return fail("owner-changed-after-initial-check");
 	const expected = ownerSnapshot(verdict.owner);
 	const identity = inodeOf(dir);
@@ -835,14 +951,14 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return fail("quarantine-create-failed");
+	} catch (error) {
+		return fail("quarantine-create-failed", error);
 	}
 	const moved = join(qt, entry);
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return fail("atomic-quarantine-failed");
+	} catch (error) {
+		return fail("atomic-quarantine-failed", error);
 	}
 	if (isSymlink(moved)) return { ...verdict, dir: moved, action: "SKIP", reason: "path-replaced-with-non-directory" };
 	if (inodeOf(moved) !== identity) return { ...verdict, dir: moved, action: "SKIP", reason: "inode-changed-before-delete" };
@@ -858,18 +974,23 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	const deleting = join(qt, `${entry}.delete-${process.pid}`);
 	try {
 		renameSync(moved, deleting);
-	} catch {
-		return { ...verdict, dir: moved, action: "SKIP", reason: "delete-quarantine-failed" };
+	} catch (error) {
+		return { ...fail("delete-quarantine-failed", error), dir: moved };
 	}
 	const finalText = readText(join(deleting, ".owner"));
 	const finalOwner = finalText === null ? null : parseOwnerFile(finalText);
-	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || lsofClearDir(deps, deleting) !== true) {
-		return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
+	const finalVerdict = inspectSession(deleting, qt, { ...deps, skipSize: true, lsofSnapshot: undefined }, false);
+	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected || finalVerdict.action !== "REAP") {
+		try {
+			if (existsSync(dir)) throw new Error("source path replaced; refusing overwrite");
+			renameSync(deleting, dir);
+		} catch (error) { return { ...fail("quarantine-restore-failed", error), dir: deleting, sourceDir: dir }; }
+		return fail("final-delete-recheck-failed");
 	}
 	try {
 		rmSync(deleting, { recursive: true, force: true });
-	} catch {
-		return { ...verdict, dir: deleting, action: "SKIP", reason: "delete-failed" };
+	} catch (error) {
+		return { ...fail("delete-failed", error), dir: deleting };
 	}
 	if (existsSync(deleting)) return { ...verdict, dir: deleting, action: "SKIP", reason: "delete-failed" };
 	appendLog(deps.home, { event: "reap", dir, at, owner: expected.split("\n")[0], sizeBytes: verdict.sizeBytes });
@@ -889,22 +1010,23 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps): Scratc
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return { ...base, reason: "quarantine-create-failed" };
+	} catch (error) {
+		return { ...base, status: "FAILED", reason: "quarantine-create-failed", error: error instanceof Error ? error.message : String(error) };
 	}
 	const moved = join(qt, entry);
 	const identity = inodeOf(dir);
 	if (identity === null) return { ...base, reason: "inode-proof-unavailable" };
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return { ...base, reason: "atomic-quarantine-failed" };
+	} catch (error) {
+		return { ...base, status: "FAILED", reason: "atomic-quarantine-failed", error: error instanceof Error ? error.message : String(error) };
 	}
 	if (inodeOf(moved) !== identity || lsofClearDir(deps, moved) !== true) {
 		try {
+			if (existsSync(dir) || isSymlink(dir)) throw new Error("source path was replaced; refusing to overwrite");
 			renameSync(moved, dir);
-		} catch {
-			return { ...base, dir: moved, reason: "final-recheck-refused" };
+		} catch (error) {
+			return { ...base, dir: moved, sourceDir: dir, status: "FAILED", reason: "quarantine-restore-failed", error: error instanceof Error ? error.message : String(error) };
 		}
 		return { ...base, reason: "final-recheck-refused" };
 	}
@@ -912,68 +1034,43 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps): Scratc
 	return { ...base, dir: moved, action: "QUARANTINE", reason: "unowned-idle-72h-quarantined", sizeBytes: dirSize(moved) };
 }
 
-/** Expired quarantine entries (>7d) are deleted after owner-release or lsof rechecks. */
+/** Expiry requires a verified release or dead owner; age alone never authorizes UNKNOWN deletion. */
 export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVerdict[] {
 	const done: ScratchVerdict[] = [];
 	const now = deps.now ?? Date.now();
-	const at = new Date(now).toISOString();
 	const qt = quarantineDir(home);
 	let entries: string[];
-	try {
-		entries = readdirSync(qt);
-	} catch {
-		return done;
-	}
+	try { entries = readdirSync(qt); } catch { return done; }
 	for (const entry of entries) {
 		if (entry.startsWith(".") || entry.endsWith(`.delete-${process.pid}`)) continue;
 		const quarantinedAt = quarantineTimeOf(entry);
 		if (quarantinedAt === null || now - quarantinedAt < QUARANTINE_TTL_MS) continue;
 		const path = join(qt, entry);
-		if (isSymlink(path)) continue;
+		deps.onStage?.({ action: "QUARANTINE_EXPIRY", path });
 		const released = readReleaseRecord(path);
-		if (released) {
-			const identity = inodeOf(path);
-			if (identity === null || lsofClearDir(deps, path) !== true) continue;
-			const rechecked = readReleaseRecord(path);
-			if (!rechecked || rechecked.markerText !== released.markerText || rechecked.ownerText !== released.ownerText ||
-				inodeOf(path) !== identity || lsofClearDir(deps, path) !== true) continue;
-			try {
-				rmSync(path, { recursive: true, force: true });
-			} catch {
-				continue;
-			}
-			if (!existsSync(path)) {
-				done.push({ dir: path, action: "DELETE", reason: "quarantine-expired-7d-owner-released", owner: released.owner, sizeBytes: 0 });
-				appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: released.owner.pid, reason: "owner-released" });
-			}
-			continue;
+		const identity = inodeOf(path);
+		const fresh: ApplyDeps = { ...deps, skipSize: true, lsofSnapshot: undefined };
+		const before = inspectSession(path, qt, fresh, false);
+		let terminal: ScratchVerdict = { ...before, action: "SKIP", status: "REFUSED", reason: "expiry-owner-or-fd-proof-unavailable" };
+		const clear = lsofClearDir(fresh, path);
+		if (identity && !isSymlink(path) && clear === true && (released || before.action === "REAP")) {
+			const finalRelease = readReleaseRecord(path);
+			const after = inspectSession(path, qt, fresh, false);
+			const releaseMatches = released && finalRelease && finalRelease.markerText === released.markerText && finalRelease.ownerText === released.ownerText;
+			const ownerMatches = !released && before.owner && after.action === "REAP" && after.owner && ownerSnapshot(after.owner) === ownerSnapshot(before.owner);
+			if (inodeOf(path) === identity && (releaseMatches || ownerMatches) && lsofClearDir(fresh, path) === true) {
+				try {
+					rmSync(path, { recursive: true, force: true });
+					if (existsSync(path)) throw new Error("delete returned with the quarantined path still present");
+					terminal = { ...before, action: "DELETE", reason: released ? "quarantine-expired-7d-owner-released" : `quarantine-expired-7d-${before.reason}` };
+				} catch (error) {
+					terminal = { ...before, action: "SKIP", status: "FAILED", reason: "delete-failed", error: error instanceof Error ? error.message : String(error) };
+				}
+			} else terminal.reason = "expiry-identity-changed";
 		}
-		const { owner, malformed } = readOwner(path);
-		if (!owner || malformed || !hasProcessIdentity(owner)) {
-			if (lsofClearDir(deps, path) !== true) continue;
-			try {
-				rmSync(path, { recursive: true, force: true });
-			} catch {
-				continue;
-			}
-			if (!existsSync(path)) {
-				done.push({ dir: path, action: "DELETE", reason: "quarantine-expired-7d", owner: null, sizeBytes: 0 });
-				appendLog(home, { event: "delete-quarantined", dir: path, at, entry });
-			}
-			continue;
-		}
-		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
-		if (state !== "dead" && state !== "reused") continue;
-		if (lsofClearDir(deps, path) !== true) continue;
-		try {
-			rmSync(path, { recursive: true, force: true });
-		} catch {
-			continue;
-		}
-		if (!existsSync(path)) {
-			done.push({ dir: path, action: "DELETE", reason: `quarantine-expired-7d-owner-${state}`, owner, sizeBytes: 0 });
-			appendLog(home, { event: "delete-quarantined", dir: path, at, entry });
-		}
+		done.push(terminal);
+		appendLog(home, { event: terminal.action === "DELETE" ? "delete-quarantined" : terminal.status === "FAILED" ? "failure" : "refused", dir: path, at: new Date(now).toISOString(), action: "DELETE", reason: terminal.reason, error: terminal.error });
+		deps.onProgress?.(terminal);
 	}
 	return done;
 }
@@ -1062,18 +1159,20 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 /** Test-run work dirs nested inside a session dir (omp-kit-integrations-* and omp-kit-work.*): visited without the name-pid suffix rule so the dead-pid rule applies wherever TMPDIR put them. Pid-less names fall through to the unowned lifecycle. */
 const NESTED_WORKDIR = /^omp-kit-(integrations-|work\.)/;
 
-function eachSessionDir(root: string, visit: (dir: string) => void, visitNested: (dir: string) => void = visit): void {
+export function eachSessionDir(root: string, visit: (dir: string) => void, visitNested: (dir: string) => void = visit, deadlineMs = Infinity): string[] {
 	let entries: string[];
 	try {
 		entries = readdirSync(root);
 	} catch {
-		return;
+		return existsSync(root) ? [root] : [];
 	}
 	for (const entry of entries) {
+		if (Date.now() >= deadlineMs) return [root];
 		if (entry === "." || entry === "..") continue;
 		visit(join(root, entry));
 	}
 	for (const entry of entries) {
+		if (Date.now() >= deadlineMs) return [root];
 		if (entry === "." || entry === "..") continue;
 		let children: string[];
 		try {
@@ -1082,9 +1181,11 @@ function eachSessionDir(root: string, visit: (dir: string) => void, visitNested:
 			continue;
 		}
 		for (const child of children) {
+			if (Date.now() >= deadlineMs) return [root];
 			if (NESTED_WORKDIR.test(child)) visitNested(join(root, entry, child));
 		}
 	}
+	return [];
 }
 
 export interface ScratchPlan { roots: string[]; sessions: ScratchVerdict[]; orphans: OrphanProcess[]; reapableBytes: number; quarantinableBytes: number; totals: ScratchTotals; unownedActiveRule: string }
@@ -1138,20 +1239,25 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const rootOf = (dir: string): string => allRoots.find(r => dir.startsWith(r + "/")) ?? dirname(dir);
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const visit = (dir: string, root: string, nameRequired = true) => {
+		deps.onStage?.({ action: "INSPECT", path: dir });
 		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
 		if (verdict === null) return;
 		sessions.push(verdict);
 		let terminal = verdict;
-		// Mutations move paths, so each action re-checks against a fresh snapshot.
-		const fresh: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+		deps.onStage?.({ action: verdict.action, path: dir });
+		// Mutations must probe the current path, including after each rename.
+		const fresh: ApplyDeps = { ...deps, lsofSnapshot: undefined };
 		if (verdict.action === "REAP") terminal = applyReap(verdict.dir, rootOf(verdict.dir), verdict, fresh);
 		else if (verdict.action === "QUARANTINE") {
 			terminal = verdict.reason === "owner-released-would-quarantine"
 				? applyReleased(verdict.dir, root, verdict, fresh)
 				: applyUnowned(verdict.dir, rootOf(verdict.dir), fresh);
 		}
+		if (terminal.action === "SKIP" && terminal.status === undefined) {
+			terminal = { ...terminal, status: ["quarantine-create-failed", "atomic-quarantine-failed", "delete-quarantine-failed", "delete-failed"].includes(terminal.reason) ? "FAILED" : "REFUSED" };
+		}
 		applied.push(terminal);
-			if (terminal.action === "SKIP") appendLog(home, { event: "failure", dir: terminal.dir, at: new Date(deps.now ?? Date.now()).toISOString(), action: terminal.action, error: terminal.reason });
+		if (terminal.action === "SKIP") appendLog(home, { event: terminal.status === "FAILED" ? "failure" : "refused", dir: terminal.dir, at: new Date(deps.now ?? Date.now()).toISOString(), action: verdict.action, reason: terminal.reason, error: terminal.error });
 		deps.onProgress?.(terminal);
 	};
 	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));

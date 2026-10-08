@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
+import { resolve } from "node:path";
+import { planInstall, renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 
 const HOME = "/fixture/user-home/test-op";
@@ -33,10 +34,12 @@ test("planted ProcessType Interactive fails contract-processtype", () => {
 	expect(statusOf(checkPlistContract("load-watch", rendered), "contract-processtype")).toBe("FAIL");
 });
 
-test("planted relative HOME fails contract-env", () => {
+test("planted relative HOME fails contract-env and is named accurately", () => {
 	const rendered = renderLaunchdPlist(HOME, goodJobDef(), LAUNCHER, null).text
 		.replace(`<key>HOME</key>\n\t\t<string>${HOME}</string>`, "<key>HOME</key>\n\t\t<string>relative/home</string>");
-	expect(statusOf(checkPlistContract("load-watch", rendered), "contract-env")).toBe("FAIL");
+	const check = checkPlistContract("load-watch", rendered).find(check => check.id === "contract-env")!;
+	expect(check.status).toBe("FAIL");
+	expect(check.message).toContain("HOME=not absolute PATH=absolute");
 });
 
 test("planted API_TOKEN env entry fails contract-no-secrets and names the key", () => {
@@ -84,4 +87,38 @@ test("unit without TimeoutStartSec fails contract-systemd-timeout", () => {
 	const rendered = renderSystemdUnits(HOME, goodJobDef(), LAUNCHER, null).service
 		.split("\n").filter(line => !line.startsWith("TimeoutStartSec=")).join("\n");
 	expect(statusOf(checkSystemdContract("load-watch", rendered), "contract-systemd-timeout")).toBe("FAIL");
+});
+
+test("relative plist PATH is reported without mislabeling absolute HOME", () => {
+	const rendered = renderLaunchdPlist(HOME, goodJobDef(), LAUNCHER, null).text
+		.replace("\t\t<key>PATH</key>\n\t\t<string>", "\t\t<key>PATH</key>\n\t\t<string>relative/bin:");
+	const check = checkPlistContract("load-watch", rendered).find(check => check.id === "contract-env")!;
+	expect(check.status).toBe("FAIL");
+	expect(check.message).toContain("HOME=absolute PATH=has relative entries");
+});
+
+test("missing systemd TMPDIR is reported separately from absolute HOME and PATH", () => {
+	const rendered = renderSystemdUnits(HOME, goodJobDef(), LAUNCHER, null).service
+		.split("\n").filter(line => !line.startsWith("Environment=TMPDIR=")).join("\n");
+	const check = checkSystemdContract("load-watch", rendered).find(check => check.id === "contract-systemd-env")!;
+	expect(check.status).toBe("FAIL");
+	expect(check.message).toContain("HOME=absolute PATH=absolute TMPDIR=(missing)");
+});
+
+test("fleet-watch plan and systemd render preserve its resolved custom config path", () => {
+	const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	const configuredPath = "custom/fleet&watch.json";
+	const expectedPath = resolve(configuredPath);
+	process.env.OMP_KIT_FLEET_WATCH_CONFIG = configuredPath;
+	try {
+		const fleetWatch = { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval" as const, intervalSeconds: 120, runAtLoad: false };
+		const preview = planInstall(HOME, fleetWatch, LAUNCHER, null, null);
+		expect(preview.plist).toContain(`<key>OMP_KIT_FLEET_WATCH_CONFIG</key>\n\t\t<string>${expectedPath.replaceAll("&", "&amp;")}</string>`);
+		const systemd = renderSystemdUnits(HOME, fleetWatch, LAUNCHER, null).service;
+		expect(systemd).toContain(`Environment=OMP_KIT_FLEET_WATCH_CONFIG="${expectedPath}"`);
+		expect(renderLaunchdPlist(HOME, goodJobDef(), LAUNCHER, null).text).not.toContain("OMP_KIT_FLEET_WATCH_CONFIG");
+	} finally {
+		if (previous === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+		else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previous;
+	}
 });

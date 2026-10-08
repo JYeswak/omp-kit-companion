@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -20,6 +21,7 @@ export interface ServiceJobDef { name: string; label: string; kind: "watch" | "i
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
+	"scratch-sweep": { name: "scratch-sweep", label: "com.omp-kit.scratch-sweep", kind: "interval", intervalSeconds: 604800, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
@@ -27,6 +29,55 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
  	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
  };
+
+export interface ScratchJobRun { status: "COMPLETE" | "TIMEOUT" | "FAILED" | "CANCELLED"; exit: number; stdout: string; stderr: string; elapsedMs: number; lastAction: { action: string; path: string } | null }
+/** External supervisor: synchronous walks/probes run in an owned process group, never on this event loop. */
+export async function superviseScratchJob(argv: readonly string[], env: NodeJS.ProcessEnv, capMs: number): Promise<ScratchJobRun> {
+	const { promise, resolve: resolveResult } = Promise.withResolvers<ScratchJobRun>();
+	const started = Date.now();
+	const child = spawn(argv[0]!, argv.slice(1), { env, cwd: env.HOME, detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+	const stdout: string[] = [], stderr: string[] = [];
+	let outputChars = 0, terminal: "TIMEOUT" | "FAILED" | "CANCELLED" | null = null;
+	let lastAction: ScratchJobRun["lastAction"] = null;
+	child.on("message", message => {
+		if (message && typeof message === "object" && "action" in message && "path" in message &&
+			typeof message.action === "string" && typeof message.path === "string") lastAction = { action: message.action, path: message.path };
+	});
+	const stop = (status: "TIMEOUT" | "FAILED" | "CANCELLED") => {
+		if (terminal !== null) return;
+		terminal = status;
+		try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already exited */ }
+		try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+	};
+	const onSignal = () => stop("CANCELLED");
+	process.once("SIGTERM", onSignal);
+	process.once("SIGINT", onSignal);
+	const timer = setTimeout(() => stop("TIMEOUT"), capMs);
+	child.stdout?.setEncoding("utf8");
+	child.stderr?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		if (terminal !== null) return;
+		if (outputChars + chunk.length > 8 * 1024 * 1024) {
+			stderr.push("scratch-worker-output-budget-exhausted");
+			stop("FAILED");
+		} else { outputChars += chunk.length; stdout.push(chunk); }
+	});
+	child.stderr?.on("data", (chunk: string) => {
+		if (terminal !== null) return;
+		if (outputChars + chunk.length > 8 * 1024 * 1024) {
+			stderr.push("scratch-worker-output-budget-exhausted");
+			stop("FAILED");
+		} else { outputChars += chunk.length; stderr.push(chunk); }
+	});
+	child.once("error", error => { terminal ??= "FAILED"; stderr.push(error.message); });
+	child.once("close", code => {
+		clearTimeout(timer);
+		process.off("SIGTERM", onSignal);
+		process.off("SIGINT", onSignal);
+		resolveResult({ status: terminal ?? (code === 0 ? "COMPLETE" : "FAILED"), exit: code ?? 1, stdout: stdout.join(""), stderr: stderr.join(""), elapsedMs: Date.now() - started, lastAction });
+	});
+	return promise;
+}
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 
@@ -189,6 +240,29 @@ function withoutTmuxTmpDir(text: string): string {
 
 export interface RenderedPlist { label: string; text: string; launcher: string; watchPath: string | null }
 
+const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
+function kitUpdateEnvironment(job: ServiceJobDef): [string, string][] {
+	if (job.name !== "kit-update" || KIT_UPDATE_ENV_KEYS.every(key => process.env[key] === undefined)) return [];
+	const enabled = process.env.OMP_KIT_UPDATE_ENABLED;
+	const index = process.env.OMP_KIT_UPDATE_INDEX;
+	const archive = process.env.OMP_KIT_UPDATE_ARCHIVE;
+	const version = process.env.OMP_KIT_UPDATE_VERSION;
+	const tag = process.env.OMP_KIT_UPDATE_SOURCE_TAG;
+	if (enabled !== "1" || !index || !archive || !version || tag !== `v${version}` ||
+		!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version) ||
+		!isAbsolute(index) || !isAbsolute(archive) || resolve(index) !== index || resolve(archive) !== archive ||
+		dirname(index) !== dirname(archive) || KIT_UPDATE_ENV_KEYS.some(key => /[\r\n\0]/.test(process.env[key] ?? ""))) {
+		throw new Error("KIT_UPDATE_LOCAL_TUPLE_REQUIRED: enabled=1, absolute same-directory index/archive, version and matching source tag are required");
+	}
+	return KIT_UPDATE_ENV_KEYS.map(key => [key, process.env[key]!]);
+}
+
+function fleetWatchConfigEnvironment(job: ServiceJobDef): [string, string][] {
+	const configuredPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	if (job.name !== "fleet-watch" || !configuredPath) return [];
+	return [["OMP_KIT_FLEET_WATCH_CONFIG", resolve(configuredPath)]];
+}
+
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
 	const lines = [
 		'<?xml version="1.0" encoding="UTF-8"?>',
@@ -215,8 +289,10 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
 			? ["\t\t<key>TMUX_TMPDIR</key>", `\t\t<string>${xml(process.env.TMUX_TMPDIR)}</string>`]
 			: []),
+		...fleetWatchConfigEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
+		...kitUpdateEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
 		"\t</dict>",
@@ -259,7 +335,9 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
 			? [`Environment=TMUX_TMPDIR=${systemdQuote(process.env.TMUX_TMPDIR)}`]
 			: []),
+		...fleetWatchConfigEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
+		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 	];
 	const service = [
 		"[Unit]",
@@ -267,7 +345,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		"",
 		"[Service]",
 		"Type=oneshot",
-		"TimeoutStartSec=600",
+		job.name === "scratch-reaper" ? "TimeoutStartSec=1805" : "TimeoutStartSec=600",
 		`ExecStart=${launcher} service run ${job.name}`,
 		...env,
 		`WorkingDirectory=${home}`,

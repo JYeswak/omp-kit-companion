@@ -636,6 +636,8 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(denied.envelope.data, invoke("schema").envelope.data.command_data.doctor)).toBe(true);
 	});
 
+
+
 	compiledTest("MCP grammar requires an existing named profile and examples mcp remains a static manual template", () => {
 		const { home, otherProject, invoke, invokeWithEnv } = compiledDiagnosticFixture();
 		expect(invoke("doctor", "--scope", "mcp").code).toBe(2);

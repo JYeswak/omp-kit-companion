@@ -42,6 +42,34 @@ If an otherwise idle pane shows `Steering · N` and `⌥↑ to edit`, Fleet Watc
 submits one queued message by sending `M-Up` then `Enter`, and logs the event.
 A busy pane is left untouched.
 
+## Persisted state
+
+Each scheduled invocation loads per-pane idle-check counts, no-decision
+throttling, and Steering deduplication from `fleet-watch-state.json` beside
+the Fleet Watch JSONL log. The state file is private and atomically replaced.
+The file lets separate service processes continue the same idle sequence and
+avoid resending the same `Steering · N` message.
+
+A busy observation or capture failure resets that pane's idle history. Capture
+failure remains `UNKNOWN`/`NO_DECISION`; it is not treated as idle and cannot
+trigger a nudge. To clear all persisted counters and deduplication state, stop
+the Fleet Watch service and remove `fleet-watch-state.json` from the JSONL
+log's directory; the next invocation starts with empty state. Do not remove or
+edit the state file while Fleet Watch is running.
+
+Malformed or unsafe state is rejected rather than silently reset. If the file
+cannot be loaded, stop the service before correcting or removing it.
+
+On each enabled tick, Fleet Watch also checks each configured repository for
+the known BusyRecovery `recovery-failed.json` receipt. It recovers only after
+the per-flag PID/process-start and tmux-session lease is absent or stale, and
+`lsof` confirms no live process has the Beads database open. A live lease,
+database holder, or unknown liveness result blocks recovery. Successful and
+blocked attempts are recorded as `RECOVERY_PROCEEDED`, `RECOVERY_BLOCKED`,
+or `RECOVERY_FAILED` events in the Fleet Watch JSONL log; they do not steer
+panes or send a coordinator message. The recovery command runs as
+`br doctor migrate-schema recover` from the configured repository.
+
 ## Install
 
 Set `TMUX_TMPDIR` to the tmux server's socket directory before rendering or

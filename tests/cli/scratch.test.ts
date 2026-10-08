@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { measureScratchTree, readScratchSizeSnapshot } from "../../src/scratch.ts";
 
 const roots: string[] = [];
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -296,8 +297,10 @@ test("apply removes a proven-dead session after quarantine and restores on an ow
   expect(restored.action).toBe("SKIP");
   expect(restored.reason).toBe("final-recheck-refused");
   expect(existsSync(raced)).toBe(true);
-  const failures = existsSync(reapLogPath(home)) ? readFileSync(reapLogPath(home), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.event === "failure") : [];
-  expect(failures.some(row => row.dir === raced && row.error === "final-recheck-refused")).toBe(true);
+  expect(restored.status).toBe("REFUSED");
+  expect(isApplyFailure(restored)).toBe(false);
+  const refusals = readFileSync(reapLogPath(home), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.event === "refused");
+  expect(refusals.some(row => row.dir === raced && row.reason === "final-recheck-refused")).toBe(true);
 });
 
 test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {
@@ -770,4 +773,67 @@ test("lsof snapshot prefix match does not confuse sibling names", () => {
 	const snap = takeLsofSnapshot(() => ({ code: 0, stdout: "p1\nn/a/bc/x\n", stderr: "" }));
 	expect(snapshotClear(snap, "/a/b")).toBe(true);
 	expect(snapshotClear(snap, "/a/bc")).toBe(false);
+});
+
+test("REAP1 mutation OS failure names action path and OS error while refusal remains nonfailure", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-reap1-"));
+  roots.push(root);
+  const pid = deadPid();
+  const dir = sessionDir(root, "finished", pid);
+  writeFileSync(join(dir, ".owner"), ownerText(deadFields("finished", pid)));
+  const deps: ApplyDeps = { ...depsFor(), home };
+  const verdict = inspectSession(dir, root, deps);
+  mkdirSync(join(process.env.XDG_STATE_HOME!, "omp-kit"), { recursive: true });
+  writeFileSync(quarantineDir(home), "not a directory");
+  const terminal = applyReap(dir, root, verdict, deps);
+  expect(terminal).toMatchObject({ dir, action: "SKIP", status: "FAILED", reason: "quarantine-create-failed" });
+  expect(terminal.error).toMatch(/EEXIST|ENOTDIR/);
+  expect(isApplyFailure(terminal)).toBe(true);
+  expect(existsSync(dir)).toBe(true);
+  const events = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(events.at(-1)).toMatchObject({ event: "failure", action: "REAP", dir, error: terminal.error });
+});
+
+test("REAP1 tree budget never promotes partial size to complete idle evidence", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-tree-"));
+  roots.push(root);
+  writeFileSync(join(root, "payload"), "size");
+  const partial = measureScratchTree(root, { deadlineMs: Date.now() + 1000, maxEntries: 1 });
+  expect(partial).toMatchObject({ status: "partial", reason: "tree-budget-exhausted" });
+  const complete = measureScratchTree(root, { deadlineMs: Date.now() + 1000 });
+  expect(complete).toMatchObject({ status: "complete", sizeBytes: 4 });
+});
+
+test("REAP1 canonical create and release publish size-only identity-bound snapshots", () => {
+  const home = useState();
+  const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-snapshot-"));
+  roots.push(repo);
+  const deps = depsFor();
+  const created = createScratch("snapshot", repo, deps);
+  expect(created.ok).toBe(true);
+  const initial = readScratchSizeSnapshot(created.dir);
+  expect(initial?.status).toBe("complete");
+  writeFileSync(join(created.dir, "payload"), "after-create");
+  process.env.OMP_KIT_SCRATCH_ROOTS = join(repo, "var", "agent-tmp");
+  const released = releaseScratch(created.dir, home, { ...deps, run: defaultRunner });
+  expect(released.ok).toBe(true);
+  expect(readScratchSizeSnapshot(created.dir)!.sizeBytes).toBeGreaterThan(initial!.sizeBytes);
+  writeFileSync(join(created.dir, ".owner"), "changed owner");
+  expect(readScratchSizeSnapshot(created.dir)).toBeNull();
+});
+
+test("REAP1 expired UNKNOWN ownership is refused rather than deleted from age alone", () => {
+  const home = useState();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const now = Date.now();
+  const unknown = join(qt, quarantineEntryFor("unknown", new Date(now - 8 * 24 * 3600_000)));
+  mkdirSync(unknown);
+  writeFileSync(join(unknown, ".owner"), "unparseable owner");
+  writeFileSync(join(unknown, "keep"), "unknown ownership is a destructive veto");
+  const terminal = applyQuarantineExpiry(home, { ...depsFor(), home, now }).find(row => row.dir === unknown);
+  expect(terminal).toMatchObject({ action: "SKIP", status: "REFUSED", reason: "expiry-owner-or-fd-proof-unavailable" });
+  expect(isApplyFailure(terminal!)).toBe(false);
+  expect(readFileSync(join(unknown, "keep"), "utf8")).toBe("unknown ownership is a destructive veto");
 });

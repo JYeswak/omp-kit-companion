@@ -1,0 +1,1 @@
+- Extension apply skips only profiles with existing unresolved imports (and reports the file, line and specifier), while healthy profiles continue; failed postchecks after a new extension name the profile and failing import step after rollback.

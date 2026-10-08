@@ -1,0 +1,1 @@
+- x5iv.1: Fleet Watch detects BusyRecovery failure receipts, uses per-flag leases bound to PID/process start and tmux session identity, blocks live or uncertain holders, and logs then recovers stale zero-holder flags. Planted stale-proceeds, live-lease-blocks, and live database-descriptor fixtures run through the Fleet Watch tick.

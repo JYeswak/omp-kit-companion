@@ -1,7 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, watch, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { superviseScratchJob } from "../../src/service.ts";
+import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
+import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 
 // Every CLI spawn below inherits this namespace, so even real launchctl calls address
@@ -680,6 +683,50 @@ test("service run maps a failing launcher to FINDINGS without losing the receipt
   expect(receipt.exit).toBe(3);
 });
 
+test("REAP1 whole scheduled scratch job preempts a synchronous owner read and releases single-flight", () => {
+  const { home } = fixture();
+  const root = join(home, "var", "agent-tmp");
+  const blocked = join(root, "blocked.59999");
+  const untouched = join(root, "unrelated");
+  mkdirSync(blocked, { recursive: true });
+  mkdirSync(untouched);
+  writeFileSync(join(untouched, "keep"), "not ours to reclaim");
+  const fifo = Bun.spawnSync(["mkfifo", join(blocked, ".owner")], { stdout: "pipe", stderr: "pipe" });
+  expect(fifo.exitCode).toBe(0);
+  const bin = join(home, ".local", "bin");
+  writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const started = Date.now();
+  const result = cli(["service", "run", "scratch-reaper"], home, {
+    OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "600",
+    PATH: `${bin}:${process.env.PATH ?? ""}`,
+  });
+  expect(Date.now() - started).toBeLessThan(3000);
+  expect(result.code).toBe(1);
+  expect(result.envelope.data.status).toBe("TIMEOUT");
+  expect(result.envelope.data.interruptedAction).toMatchObject({ action: "INSPECT", path: blocked });
+  expect(result.envelope.data.receipt).toMatchObject({ status: "TIMEOUT", exit: 1, cap_ms: 600 });
+  expect(result.envelope.errors[0].code).toBe("TIMEOUT");
+  expect(existsSync(join(blocked, ".owner"))).toBe(true);
+  expect(readFileSync(join(untouched, "keep"), "utf8")).toBe("not ours to reclaim");
+  expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.lock"))).toBe(false);
+  const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
+  expect(receipt.status).toBe("TIMEOUT");
+});
+
+test("REAP1 supervisor caps synchronous browser work and kills its owned process group", async () => {
+  const { home } = fixture();
+  const blocked = join(home, "browser-probe");
+  expect(Bun.spawnSync(["mkfifo", blocked]).exitCode).toBe(0);
+  const browserModule = resolve(import.meta.dir, "../../src/browser-doctor.ts");
+  const code = `import {collectBrowserProcesses} from ${JSON.stringify(browserModule)}; const {readFileSync,writeFileSync}=require("node:fs"); collectBrowserProcesses(() => { writeFileSync(${JSON.stringify(join(home, "entered"))},String(process.pid)); readFileSync(${JSON.stringify(blocked)}); return {exitCode:1,stdout:""}; });`;
+  const result = await superviseScratchJob([process.execPath, "-e", code], { ...process.env, HOME: home }, 500);
+  expect(result.status).toBe("TIMEOUT");
+  expect(result.elapsedMs).toBeLessThan(2000);
+  const pid = Number(readFileSync(join(home, "entered"), "utf8"));
+  expect(() => process.kill(pid, 0)).toThrow();
+  expect(existsSync(blocked)).toBe(true);
+});
+
 test("service status reports HOME-scoped install state from source", () => {
   const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
   roots.push(home);
@@ -1015,4 +1062,98 @@ test("a fixture install never takes over a foreign label, and --replace does it 
   }
   expect(realLaunchctlPath(testLabel).code).not.toBe(0);
   expect(realLaunchctlPath("com.omp-kit.omp-watch")).toEqual(prodBefore);
+});
+
+test("REAP1 contract refuses empty PATH components and relative log paths", () => {
+  const { home } = fixture();
+  const rendered = renderLaunchdPlist(home, KNOWN_JOBS["scratch-reaper"]!, join(home, ".local/bin/omp-kit"), null).text;
+  const emptyPath = rendered.replace("<key>PATH</key>\n\t\t<string>", "<key>PATH</key>\n\t\t<string>:");
+  expect(checkPlistContract("scratch-reaper", emptyPath).find(row => row.id === "contract-env")?.status).toBe("FAIL");
+  const relativeLogs = rendered.replace(join(home, "Library", "Logs", "omp-kit", "scratch-reaper.out.log"), "relative.out.log");
+  expect(checkPlistContract("scratch-reaper", relativeLogs).find(row => row.id === "contract-log-paths")?.status).toBe("FAIL");
+  const unit = renderSystemdUnits(home, KNOWN_JOBS["scratch-reaper"]!, join(home, ".local/bin/omp-kit"), null).service;
+  expect(checkSystemdContract("scratch-reaper", unit.replace("Environment=PATH=\"", "Environment=PATH=\":")).find(row => row.id === "contract-systemd-env")?.status).toBe("FAIL");
+});
+
+test("scheduled kit-update persists only its validated local tuple, not arbitrary environment", () => {
+  const { home } = fixture();
+  const tuple = {
+    OMP_KIT_UPDATE_ENABLED: "1",
+    OMP_KIT_UPDATE_INDEX: join(home, "durable&assets", "index.json"),
+    OMP_KIT_UPDATE_ARCHIVE: join(home, "durable&assets", "omp-kit.tar.gz"),
+    OMP_KIT_UPDATE_VERSION: "0.2.10",
+    OMP_KIT_UPDATE_SOURCE_TAG: "v0.2.10",
+  };
+  const keys = [...Object.keys(tuple), "NONSECRET_UNRELATED_RENDER_INPUT"];
+  const prior = keys.map(key => process.env[key]);
+  try {
+    Object.assign(process.env, tuple, { NONSECRET_UNRELATED_RENDER_INPUT: "must-not-persist" });
+    const plist = renderLaunchdPlist(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null).text;
+    expect(plist).not.toContain("must-not-persist");
+    if (process.platform === "darwin") {
+      const path = join(home, "kit-update.plist");
+      writeFileSync(path, plist);
+      const readback = Bun.spawnSync(["plutil", "-extract", "EnvironmentVariables", "json", "-o", "-", path]);
+      expect(readback.exitCode).toBe(0);
+      const installedEnvironment = JSON.parse(readback.stdout.toString());
+      for (const [key, value] of Object.entries(tuple)) expect(installedEnvironment[key]).toBe(value);
+    }
+    const systemd = renderSystemdUnits(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null).service;
+    expect(systemd).not.toContain("must-not-persist");
+    for (const [key, value] of Object.entries(tuple)) expect(systemd.split("\n")).toContain(`Environment=${key}="${value}"`);
+    process.env.OMP_KIT_UPDATE_ARCHIVE = join(home, "different-parent", "omp-kit.tar.gz");
+    expect(() => renderLaunchdPlist(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null)).toThrow("KIT_UPDATE_LOCAL_TUPLE_REQUIRED");
+    Object.assign(process.env, tuple);
+    delete process.env.OMP_KIT_UPDATE_VERSION;
+    expect(() => renderSystemdUnits(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null)).toThrow("KIT_UPDATE_LOCAL_TUPLE_REQUIRED");
+    for (const key of Object.keys(tuple)) delete process.env[key];
+    expect(renderLaunchdPlist(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null).text).not.toContain("<key>OMP_KIT_UPDATE_ENABLED</key>");
+  } finally {
+    keys.forEach((key, index) => { if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index]; });
+  }
+});
+
+test("REAP1 failed process census is explicit UNKNOWN evidence rather than an empty success", () => {
+  const inventory = collectBrowserProcesses(() => ({ exitCode: 1, stdout: "", stderr: "permission denied" }));
+  expect(inventory.probeError).toBe("browser-ps-probe-failed: exit 1; permission denied");
+  expect(inventory.processes).toEqual([]);
+  expect(inventory.clones).toEqual([]);
+});
+
+test("REAP1 concurrent actual service invocation cannot enter a blocked scratch worker", async () => {
+  const { home } = fixture();
+  const root = join(home, "var", "agent-tmp");
+  const blocked = join(root, "blocked.59999");
+  mkdirSync(blocked, { recursive: true });
+  expect(Bun.spawnSync(["mkfifo", join(blocked, ".owner")]).exitCode).toBe(0);
+  const bin = join(home, ".local", "bin");
+  writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const extraEnv = { OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1200", PATH: `${bin}:${process.env.PATH ?? ""}` };
+  // A separate CLI process exercises the real platform deadline; parent fake timers cannot drive it.
+  const jobs = join(home, ".local", "state", "omp-kit", "jobs");
+  mkdirSync(jobs, { recursive: true, mode: 0o700 });
+  const ready = Promise.withResolvers<void>();
+  const watcher = watch(jobs, { recursive: true }, () => { if (existsSync(join(jobs, "scratch-reaper.lock", "pid"))) ready.resolve(); });
+  const first = Bun.spawn([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "service", "run", "scratch-reaper", "--json"], {
+    cwd: home, env: { ...process.env, ...extraEnv, HOME: home, XDG_STATE_HOME: join(home, ".local", "state") }, stdout: "pipe", stderr: "pipe",
+  });
+  const firstOutput = new Response(first.stdout).text();
+  const firstErrors = new Response(first.stderr).text();
+  try {
+    const lock = join(jobs, "scratch-reaper.lock");
+    await Promise.race([ready.promise, first.exited.then(() => { throw new Error("first job exited before its live single-flight marker"); })]);
+    expect(existsSync(lock)).toBe(true);
+    const overlap = cli(["service", "run", "scratch-reaper"], home, extraEnv);
+    expect(overlap.envelope.data).toMatchObject({ status: "SKIPPED-OVERLAP", receipt: { status: "SKIPPED-OVERLAP" } });
+    expect(await first.exited).toBe(1);
+    const terminal = JSON.parse(await firstOutput);
+    expect(terminal.data).toMatchObject({ status: "TIMEOUT", receipt: { status: "TIMEOUT" } });
+    expect(existsSync(lock)).toBe(false);
+    expect(existsSync(join(blocked, ".owner"))).toBe(true);
+  } finally {
+    watcher.close();
+    if (first.exitCode === null) first.kill("SIGTERM");
+    await first.exited;
+    await firstErrors;
+  }
 });
