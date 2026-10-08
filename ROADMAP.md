@@ -78,7 +78,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 
 | Item | PR |
 |---|---|
-| — | — |
+| CI tests only `minimum` and `certified` OMP; hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new release through a PR with hash, diff and model findings | #67 |
 
 ## Next
 
