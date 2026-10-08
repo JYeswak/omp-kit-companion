@@ -196,6 +196,16 @@ test("A2 coverage checks are not counted as plan review rounds", async () => {
 	expect(result.metrics.plan_rounds).toMatchObject({ value: 2, status: "FAIL" });
 });
 
+test("A2b review rounds and conversions count with the commit-msg verification-level tag", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const base = passingSnapshot();
+	const tagged = base.repoCommits.map((item) => item.subject.startsWith("plan(demo): review round") ? { ...item, subject: item.subject + " [selftest]" } : item);
+	expect(api.scorePlanningSnapshot({ ...base, repoCommits: tagged }, tuning).metrics.plan_rounds).toMatchObject({ value: 4, status: "PASS" });
+	const notALevel = base.repoCommits.map((item) => item.subject.startsWith("plan(demo): review round") ? { ...item, subject: item.subject + " [wip]" } : item);
+	expect(api.scorePlanningSnapshot({ ...base, repoCommits: notALevel }, tuning).metrics.plan_rounds).toMatchObject({ value: 0, status: "FAIL" });
+});
+
 test("A3 local CI is UNKNOWN without a receipt for the declared branch head", async () => {
 	const api = await scoreApi();
 	if (!api) return;
