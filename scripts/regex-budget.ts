@@ -321,10 +321,42 @@ function parseWorkerOutput(stdout: string): WorkerSummary {
 	return summary;
 }
 
+/** Only the atomic universal matcher with discriminator-bearing write/edit scopes below scratch. */
+function isScratchScopedMatchAny(pattern: string, scope: readonly string[] | undefined): boolean {
+	if (pattern !== "[\\s\\S]" || !scope?.length) return false;
+	return scope.every(token => {
+		const prefix = token.startsWith("tool:write(") ? "tool:write("
+			: token.startsWith("tool:edit(") ? "tool:edit("
+			: undefined;
+		if (!prefix || !token.endsWith(")")) return false;
+		const segments = token.slice(prefix.length, -1).split("/");
+		if (segments.includes(".") || segments.includes("..")) return false;
+		let scratchRoot = -1;
+		for (let index = 0; index + 1 < segments.length; index++) {
+			if (segments[index] === "var" && segments[index + 1] === "agent-tmp") {
+				scratchRoot = index;
+				break;
+			}
+		}
+		if (scratchRoot < 0) return false;
+		// Wildcard syntax alone is too broad; require a literal path discriminator below scratch.
+		for (const character of segments.slice(scratchRoot + 2).join("/")) {
+			if (!"/*?[]{},".includes(character)) return true;
+		}
+		return false;
+	});
+}
+
+/** The live stream fixture represents tool:bash; path-scoped file rules do not run on it. */
+function appliesToBashStream(scope: readonly string[] | undefined): boolean {
+	return !scope?.length || scope.includes("tool:bash");
+}
+
 export async function measureCondition(input: {
 	rule: string;
 	conditionIndex: number;
 	pattern: string;
+	scope?: readonly string[];
 } & MeasureOptions): Promise<ConditionMeasurement> {
 	const literal = literalProbe(input.pattern);
 	const request: WorkerRequest = {
@@ -335,7 +367,7 @@ export async function measureCondition(input: {
 		sizes: [...(input.sizes ?? DEFAULT_SIZES)],
 		shapes: [...(input.shapes ?? DEFAULT_SHAPES)],
 		encodings: [...(input.encodings ?? DEFAULT_ENCODINGS)],
-		...(input.streamWire === undefined ? {} : { streamWire: input.streamWire }),
+		...(input.streamWire === undefined || !appliesToBashStream(input.scope) ? {} : { streamWire: input.streamWire }),
 		ompSource: OMP_SRC,
 	};
 	const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
@@ -356,7 +388,8 @@ export async function measureCondition(input: {
 	const result = parseWorkerOutput(stdout);
 	const samples = result.samples;
 	const failures: MeasurementFailure[] = [];
-	if (!literal) failures.push({ code: "NO_REQUIRED_LITERAL_PROBE", message: "no consuming literal found for rule=" + input.rule + " condition=" + input.conditionIndex });
+	// Only the proven atomic scoped case skips the literal precondition; timing checks still run.
+	if (!literal && !isScratchScopedMatchAny(input.pattern, input.scope)) failures.push({ code: "NO_REQUIRED_LITERAL_PROBE", message: "no consuming literal found for rule=" + input.rule + " condition=" + input.conditionIndex });
 	for (const sample of samples) {
 		if (failsNearMissBudget(sample.ms)) {
 			const ratio = sample.ms[sample.ms.length - 1] / Math.max(sample.ms[sample.ms.length - 2], 0.01);
@@ -444,13 +477,15 @@ export async function runGate(rulesDir: string, streamFile: string, opts: { judg
 			rule: condition.rule,
 			conditionIndex: condition.conditionIndex,
 			pattern: condition.pattern,
+			scope: condition.scope,
 			streamWire,
 			workerTimeoutMs: Math.min(DEFAULT_WORKER_TIMEOUT_MS, remaining - 500),
 		}));
 	}
 	const byRule = measurements.filter(m => typeof m.stream_ms === "number").map(m => ({ rule: m.rule, condition_index: m.condition_index, ms: m.stream_ms! }));
 	const streamTotal = byRule.reduce((sum, item) => sum + item.ms, 0);
-	const streamComplete = byRule.length === rules.length;
+	const streamConditions = rules.filter(condition => appliesToBashStream(condition.scope)).length;
+	const streamComplete = byRule.length === streamConditions;
 	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(m => m.status !== "MEASURED" || m.failures.length > 0) || failsStreamBudget(streamTotal);
 	// Load spiked mid-run: a FAIL measured under contention is suspect, so report it as INCONCLUSIVE. A PASS stays a PASS.
 	// Under --judge-regardless-of-load the verdict stands as measured and the load is recorded in note.
