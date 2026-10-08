@@ -202,7 +202,9 @@ jobs:
           "$venv/bin/regexploit-js" --help >/dev/null
       - name: Enforce ReDoS checks on changed sources and run the planted negative
         env:
-          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha }}
+          # A PR is judged against its base, covering every change in the PR. github.event.before
+          # names only the previous head, which a force-push makes unfetchable ("bad object").
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ inputs.source_sha || github.sha }}
           TMPDIR: ${{ runner.temp }}
         shell: bash
