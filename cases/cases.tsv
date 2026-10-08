@@ -363,3 +363,15 @@ kit-regex-engineering	quiet	tool	write	src/regex_doc.py	"""Regular-expression gu
 kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	The RegExp constructor can build patterns from strings.	quiet RegExp prose mention
 kit-regex-engineering	quiet	tool	write	src/regex_doc.py	# re.compile names the constructor; no call is present.	quiet API mention in Python comment
 kit-regex-engineering	quiet	tool	write	src/test_regex.ts	function testRegexConstruction() { return true; }	quiet test-name substring
+scratch-is-not-a-home	fire	tool	write	var/agent-tmp/dogfood-d0.62533/GRADER-PROMPT-R2.md	# Nonauthor grader prompt	CFS tonight
+scratch-is-not-a-home	fire	tool	write	/Users/josh/Developer/clutterfreespaces.ios/var/agent-tmp/dogfood-d0.62533/run-graders.sh	#!/bin/sh	CFS tonight, absolute path
+scratch-is-not-a-home	fire	tool	write	var/agent-tmp/dogfood-d0.62533/PACKET-D0-R4.md	# CFS dogfood D0 dispatch packet	CFS tonight
+scratch-is-not-a-home	fire	tool	write	/Users/josh/Developer/clutterfreespaces.ios/var/agent-tmp/dogfood-d0.62533/ttsr-draft/rules/owner-decision-claim.md	---	CFS tonight
+scratch-is-not-a-home	fire	tool	edit	var/agent-tmp/reality-check.20260930/wt-ops-s1/src/cli.ts	export function main	omptest shadow source tree
+scratch-is-not-a-home	fire	tool	write	var/agent-tmp/x.1/skills/method/SKILL.md	---	skill in scratch
+scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/topaz-planning.62533/census-ps.txt	PID PPID	raw capture is scratch
+scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/dogfood-d0.62533/PurplePine-W2-raw/crontab-selected.txt	15 3 * * *	raw evidence
+scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/dogfood-d0.62533/MagentaBridge-A4.md	packet: PACKET-D0-R4.md	deliverable staging, not instructional
+scratch-is-not-a-home	quiet	tool	write	scripts/twenty-backup.sh	#!/usr/bin/env bash	real repo path
+scratch-is-not-a-home	quiet	tool	write	.omp/rules/page-not-population.md	---	repo rule, versioned
+scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/dogfood-d0.62533/.owner	pid=62533	owner file

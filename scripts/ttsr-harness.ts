@@ -29,6 +29,10 @@ import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
+// Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
+// logical checkout instead, or the disposable archive path makes normal repo files look like scratch.
+const caseCwdOverride = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE;
+const CASE_CWD = caseCwdOverride ? path.resolve(caseCwdOverride) : KIT;
 // The rule loader and this harness must read the same installed omp package.
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 // A separate process is required: a pathological synchronous matcher can block JS timers.
@@ -263,8 +267,8 @@ function loadCases(file: string): { cases: Case[]; errors: string[] } {
 	return { cases, errors };
 }
 
-// Mirrors TtsrToolInspector#normalizePathCandidates (session/ttsr-outputs.ts) with the kit as cwd.
-function pathCandidates(raw: string, cwd = KIT): string[] {
+// Mirrors TtsrToolInspector#normalizePathCandidates with a stable logical case root.
+function pathCandidates(raw: string, cwd = CASE_CWD): string[] {
 	const trimmed = raw.trim();
 	if (trimmed.length === 0) return [];
 	const input = trimmed.replaceAll("\\", "/");
