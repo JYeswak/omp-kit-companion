@@ -125,15 +125,14 @@ def valid_omp_version(value):
     return isinstance(value, str) and re.fullmatch(r"\d+\.\d+\.\d+", value) is not None
 
 
-def load_omp_versions(latest):
+def load_omp_versions():
+    """The two native tracks: the supported floor and the OMP release certified by omp-certify.yml."""
     compat_path = Path(__file__).resolve().with_name("omp-compat.json")
     compat = load(compat_path)
-    if (not isinstance(compat, dict) or set(compat) != {"minimum"}
-            or not valid_omp_version(compat["minimum"])):
-        raise ValueError("scripts/omp-compat.json must contain only a stable minimum OMP version")
-    if not valid_omp_version(latest):
-        raise ValueError("latest OMP version must be a stable X.Y.Z")
-    return {"minimum": compat["minimum"], "latest": latest}
+    if (not isinstance(compat, dict) or set(compat) != {"minimum", "certified"}
+            or not all(valid_omp_version(compat[track]) for track in ("minimum", "certified"))):
+        raise ValueError("scripts/omp-compat.json must contain only stable minimum and certified OMP versions")
+    return {"minimum": compat["minimum"], "certified": compat["certified"]}
 
 
 def save(path, value):
@@ -234,7 +233,7 @@ def native(args):
         raise ValueError("unsupported native candidate")
     if not re.fullmatch("[0-9a-f]{40}", args.source_sha):
         raise ValueError("source commit must be a full Git SHA-1")
-    required_omp_versions = load_omp_versions(args.latest_omp_version)
+    required_omp_versions = load_omp_versions()
     if args.omp_track not in required_omp_versions:
         raise ValueError("unsupported native OMP certification track")
     omp_version = required_omp_versions[args.omp_track]
@@ -900,9 +899,9 @@ def candidate(args):
     source = args.source_sha
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version) or not re.fullmatch("[0-9a-f]{40}", source):
         raise ValueError("candidate identity invalid")
-    required_omp_versions = load_omp_versions(args.latest_omp_version)
+    required_omp_versions = load_omp_versions()
     minimum = required_omp_versions["minimum"]
-    latest = required_omp_versions["latest"]
+    certified_omp = required_omp_versions["certified"]
     verified_source(source)
     assets, certified, platform_omp_versions = {}, [], {}
     required_proofs = {"status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory", "memory_off",
@@ -923,7 +922,7 @@ def candidate(args):
     if not certified:
         raise ValueError(
             "no native-certified platform has both required OMP versions "
-            f"(minimum={minimum}, latest={latest}): refusing an empty release candidate"
+            f"(minimum={minimum}, certified={certified_omp}): refusing an empty release candidate"
         )
     save(Path(args.out) / "release-index.json", {"schema_version": 1, "version": version,
                                                   "source_tag": "v" + version, "assets": assets})
@@ -933,7 +932,7 @@ def candidate(args):
                                                     "platform_omp_versions": platform_omp_versions,
                                                     "publication": "NOT_AUTHORIZED"})
     print(
-        f"unpublished candidate index (OMP minimum={minimum}, latest={latest}): " + ", ".join(certified)
+        f"unpublished candidate index (OMP minimum={minimum}, certified={certified_omp}): " + ", ".join(certified)
     )
     return 0
 
@@ -945,12 +944,10 @@ def main():
     for name in ("version", "platform", "asset", "archive-dir", "source-sha", "out"):
         native_parser.add_argument("--" + name, required=True)
     native_parser.add_argument("--omp-version", required=True)
-    native_parser.add_argument("--omp-track", choices=("minimum", "latest"), required=True)
-    native_parser.add_argument("--latest-omp-version", required=True)
+    native_parser.add_argument("--omp-track", choices=("minimum", "certified"), required=True)
     candidate_parser = commands.add_parser("candidate")
     for name in ("version", "source-sha", "assets", "receipts", "out"):
         candidate_parser.add_argument("--" + name, required=True)
-    candidate_parser.add_argument("--latest-omp-version", required=True)
     args = parser.parse_args()
     try:
         return native(args) if args.command == "native" else candidate(args)
