@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise candidate indexing with detached minimum/latest OMP receipts."""
+"""Exercise candidate indexing with detached minimum/certified OMP receipts."""
 import hashlib
 import importlib.util
 import json
@@ -13,9 +13,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "native-candidate.py"
 with (ROOT / "scripts" / "omp-compat.json").open(encoding="utf-8") as source:
-    MINIMUM = json.load(source)["minimum"]
-major, minor, patch = (int(part) for part in MINIMUM.split("."))
-LATEST = f"{major}.{minor}.{patch + 1}"
+    COMPAT = json.load(source)
+MINIMUM = COMPAT["minimum"]
+CERTIFIED = COMPAT["certified"]
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
 PROOF_NAMES = {
     "status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory", "memory_off",
@@ -78,7 +78,7 @@ class CandidateReceiptTests(unittest.TestCase):
             write_json(directory / "asset.json", asset)
             self.asset_by_platform[platform] = asset
 
-    def _write_receipts(self, tracks=("minimum", "latest"), omit=None) -> None:
+    def _write_receipts(self, tracks=("minimum", "certified"), omit=None) -> None:
         for platform in PLATFORMS:
             for track in tracks:
                 if omit == (platform, track):
@@ -90,8 +90,8 @@ class CandidateReceiptTests(unittest.TestCase):
                     "platform": platform,
                     "asset": self.asset_by_platform[platform],
                     "omp_track": track,
-                    "requested_omp_version": MINIMUM if track == "minimum" else LATEST,
-                    "omp_version": MINIMUM if track == "minimum" else LATEST,
+                    "requested_omp_version": MINIMUM if track == "minimum" else CERTIFIED,
+                    "omp_version": MINIMUM if track == "minimum" else CERTIFIED,
                     "proofs": {
                         name: {"status": "PASS", "stdout_sha256": "c" * 64}
                         for name in PROOF_NAMES
@@ -110,7 +110,6 @@ class CandidateReceiptTests(unittest.TestCase):
             assets=str(self.assets),
             receipts=str(self.receipts),
             out=str(self.root / "out"),
-            latest_omp_version=LATEST,
         )
 
     def test_candidate_records_both_versions_for_each_certified_platform(self) -> None:
@@ -121,28 +120,28 @@ class CandidateReceiptTests(unittest.TestCase):
         proof = json.loads((self.root / "out" / "candidate-proof.json").read_text(encoding="utf-8"))
 
         self.assertEqual(set(release_index["assets"]), set(PLATFORMS))
-        self.assertEqual(proof["omp_versions"], {"minimum": MINIMUM, "latest": LATEST})
+        self.assertEqual(proof["omp_versions"], {"minimum": MINIMUM, "certified": CERTIFIED})
         self.assertEqual(proof["certified_platforms"], list(PLATFORMS))
         self.assertEqual(
             proof["platform_omp_versions"],
-            {platform: {"minimum": MINIMUM, "latest": LATEST} for platform in PLATFORMS},
+            {platform: {"minimum": MINIMUM, "certified": CERTIFIED} for platform in PLATFORMS},
         )
 
     def test_candidate_refuses_when_minimum_receipts_are_missing(self) -> None:
-        self._write_receipts(tracks=("latest",))
+        self._write_receipts(tracks=("certified",))
 
         with self.assertRaisesRegex(ValueError, f"minimum={MINIMUM}"):
             native_candidate.candidate(self._args())
 
-    def test_candidate_refuses_when_latest_receipts_are_missing(self) -> None:
+    def test_candidate_refuses_when_certified_receipts_are_missing(self) -> None:
         self._write_receipts(tracks=("minimum",))
 
-        with self.assertRaisesRegex(ValueError, f"latest={LATEST}"):
+        with self.assertRaisesRegex(ValueError, f"certified={CERTIFIED}"):
             native_candidate.candidate(self._args())
 
     def test_incomplete_platform_is_not_advertised_when_other_platforms_have_both_versions(self) -> None:
         incomplete = PLATFORMS[0]
-        self._write_receipts(omit=(incomplete, "latest"))
+        self._write_receipts(omit=(incomplete, "certified"))
 
         self.assertEqual(native_candidate.candidate(self._args()), 0)
         release_index = json.loads((self.root / "out" / "release-index.json").read_text(encoding="utf-8"))

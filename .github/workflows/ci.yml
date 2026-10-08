@@ -1,13 +1,18 @@
 name: CI
 
 # Every push to main runs the fast Linux gate (CLI contracts, ladder) to completion, one run per commit, so
-# every landed commit gets its own verdict (agents push after every commit). On other refs a newer push
-# cancels the older run.
+# every landed commit gets its own verdict (agents push after every commit). Pull requests into main run the
+# same fast gate; on any ref other than main a newer push cancels the older run.
 # The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
-# (workflow_call from release.yml) and daily. There is no manual dispatch: 99 manual full-native runs in
-# Oct 1-4 were most of the macOS minutes; dispatch release.yml for an intentional full run.
+# (workflow_call from release.yml), on OMP certification (workflow_call from omp-certify.yml) and daily.
+# There is no manual dispatch: 99 manual full-native runs in Oct 1-4 were most of the macOS minutes;
+# dispatch release.yml for an intentional full run.
+# OMP tracks come only from scripts/omp-compat.json: `minimum` and `certified`. This workflow never asks npm
+# for latest, so an OMP release cannot turn main red; omp-certify.yml moves `certified` through a PR.
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   schedule:
     - cron: "17 9 * * *"
@@ -15,6 +20,10 @@ on:
     inputs:
       version:
         description: Candidate release version; no public release or latest is created
+        type: string
+        required: false
+      source_sha:
+        description: Full commit SHA to test instead of github.sha (omp-certify.yml passes its candidate commit)
         type: string
         required: false
 
@@ -31,32 +40,37 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       minimum: ${{ steps.resolve.outputs.minimum }}
-      latest: ${{ steps.resolve.outputs.latest }}
+      certified: ${{ steps.resolve.outputs.certified }}
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Resolve minimum and latest OMP versions once for this run
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Read minimum and certified OMP versions from scripts/omp-compat.json
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
           package="@oh-my-pi/pi-coding-agent"
           minimum="$(jq -er '.minimum' scripts/omp-compat.json)"
-          if [[ ! "$minimum" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "invalid minimum OMP version in scripts/omp-compat.json: $minimum" >&2
+          certified="$(jq -er '.certified' scripts/omp-compat.json)"
+          for version in "$minimum" "$certified"; do
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "invalid OMP version in scripts/omp-compat.json: $version" >&2
+              exit 1
+            fi
+            echo "Validating pinned OMP version $version is published"
+            published="$(npm view "$package@$version" version)"
+            [[ "$published" == "$version" ]] || { echo "$package@$version is not published" >&2; exit 1; }
+          done
+          if [[ "$(printf '%s\n%s\n' "$minimum" "$certified" | sort -V | head -n 1)" != "$minimum" ]]; then
+            echo "certified OMP $certified is below minimum $minimum" >&2
             exit 1
           fi
-          echo "Validating configured minimum OMP version $minimum is published"
-          npm view "$package@$minimum" version >/dev/null
-          latest="$(npm view "$package" version)"
-          if [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "invalid latest OMP version returned by npm: $latest" >&2
-            exit 1
-          fi
-          matrix="$(jq -cn --arg minimum "$minimum" --arg latest "$latest" '[{track:"minimum",version:$minimum},{track:"latest",version:$latest}]')"
+          matrix="$(jq -cn --arg minimum "$minimum" --arg certified "$certified" '[{track:"minimum",version:$minimum},{track:"certified",version:$certified}]')"
           {
             printf 'minimum=%s\n' "$minimum"
-            printf 'latest=%s\n' "$latest"
+            printf 'certified=%s\n' "$certified"
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
   cli-contracts:
@@ -65,15 +79,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]') }}
+        os: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Install current latest OMP and TypeScript LSP for CLI contracts
+      - name: Install certified OMP and TypeScript LSP for CLI contracts
         env:
-          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
       - name: Install pinned br for policy-gate tests
         run: |
@@ -117,9 +133,9 @@ jobs:
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test tests/cli tests/fleet-guard
-      - name: Exercise memory readiness against the installed latest OMP source
+      - name: Exercise memory readiness against the installed certified OMP source
         run: bun test tests/cli/memory-readiness.test.ts
-      - name: Validate minimum/latest detached native receipts
+      - name: Validate minimum/certified detached native receipts
         run: python3 tests/cli/native_candidate_test.py
       - name: Run differential native-vs-kit oracle
         if: runner.os == 'Linux'
@@ -156,13 +172,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+        os: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
         omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -183,8 +200,8 @@ jobs:
           "$venv/bin/regexploit-js" --help >/dev/null
       - name: Enforce ReDoS checks on changed sources and run the planted negative
         env:
-          BASE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ inputs.source_sha || github.sha }}
           TMPDIR: ${{ runner.temp }}
         shell: bash
         run: |
@@ -227,7 +244,7 @@ jobs:
 
   build-candidates:
     needs: resolve-omp-versions
-    if: github.event.repository.private == false && github.event_name != 'push'
+    if: github.event.repository.private == false && github.event_name != 'push' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -238,6 +255,8 @@ jobs:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Install the minimum OMP (package-time manifest classification parses rules with OMP)
         env:
@@ -275,10 +294,12 @@ jobs:
       TARGET: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Install current latest OMP and TypeScript LSP for the journey
+      - name: Install certified OMP and TypeScript LSP for the journey
         env:
-          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -335,9 +356,10 @@ jobs:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
       OMP_VERSION: ${{ matrix.omp.version }}
       OMP_TRACK: ${{ matrix.omp.track }}
-      OMP_LATEST_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Install OMP ${{ matrix.omp.track }} for native behavior
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
@@ -350,12 +372,11 @@ jobs:
       - name: Certify downloaded archive on OMP ${{ matrix.omp.track }}
         env:
           TARGET: ${{ matrix.platform }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           python3 scripts/native-candidate.py native --version "$CANDIDATE_VERSION" \
             --platform "$TARGET" --source-sha "$SOURCE_SHA" \
             --omp-version "$OMP_VERSION" --omp-track "$OMP_TRACK" \
-            --latest-omp-version "$OMP_LATEST_VERSION" \
             --asset "$RUNNER_TEMP/native/$TARGET/asset.json" \
             --archive-dir "$RUNNER_TEMP/native/$TARGET" \
             --out "$RUNNER_TEMP/native-receipt/receipt.json"
@@ -370,14 +391,15 @@ jobs:
 
   candidate-index:
     needs: [build-candidates, native-certification, resolve-omp-versions]
-    if: ${{ github.event.repository.private == false && always() && github.event_name != 'push' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
+    if: ${{ github.event.repository.private == false && always() && github.event_name != 'push' && github.event_name != 'pull_request' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
-      OMP_LATEST_VERSION: ${{ needs.resolve-omp-versions.outputs.latest }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: candidate-*
@@ -386,13 +408,13 @@ jobs:
         with:
           pattern: native-receipt-*
           path: ${{ runner.temp }}/receipts
-      - name: Require minimum and latest receipts for each certified target
+      - name: Require minimum and certified receipts for each certified target
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           python3 scripts/native-candidate.py candidate --version "$CANDIDATE_VERSION" \
             --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/candidates" \
-            --receipts "$RUNNER_TEMP/receipts" --latest-omp-version "$OMP_LATEST_VERSION" \
+            --receipts "$RUNNER_TEMP/receipts" \
             --out "$RUNNER_TEMP/candidate-index"
       - name: Retain private provisional index, never publish or update latest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1,0 +1,336 @@
+name: OMP certification
+
+# OMP releases several times a day and UCA updates the operator's OMP every three hours. Main CI installs
+# only scripts/omp-compat.json `minimum` and `certified`; this workflow is the one path that moves `certified`.
+# Hourly, when npm latest is newer than `certified`, it certifies ONLY that latest release. Skipping
+# intermediate releases is intended: a certification says "the latest release at time T works"; a machine
+# still on an intermediate release sees UNVERIFIED memory in doctor, which is informational, not red.
+#   detect        npm latest vs `certified`; quiet exit when equal or when a PR already covers this
+#                 release and these source pins (dispatch with force to re-run)
+#   differential  first-fire/default-policy differential across the latest three stable releases
+#   prepare       npm-pack certified and latest, hash every pinned memory source, diff each changed pin
+#                 against the certified bytes, ask a CheaperInference model whether memory semantics
+#                 changed, bump `certified` plus only the pins the review allows, push omp-certify/<version>,
+#                 open or update its PR and close older omp-certify/* PRs as superseded
+#   suites        ci.yml (full set) on that exact commit; PRs opened with GITHUB_TOKEN trigger no other
+#                 workflow, so the evidence is produced here and written into the PR
+#   publish       PR body with findings; squash auto-merge only when suites and differential are green and
+#                 no changed pin was judged a memory-semantic change, otherwise label needs-human
+# CHEAPER_INFERENCE_API_KEY (secret) is optional: without it the run reports "no model review" and the PR
+# needs a human. OMP_REVIEW_MODEL (variable) pins a catalog model id; it is refused unless GET /v1/models lists it.
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Re-certify even when a PR already covers this release and these source pins
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-certify
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      certified: ${{ steps.detect.outputs.certified }}
+      latest: ${{ steps.detect.outputs.latest }}
+      key: ${{ steps.detect.outputs.key }}
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Compare npm latest with the certified OMP
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(bun scripts/omp-certify.ts detect)"
+          echo "$result"
+          for field in certified latest key action reason; do
+            printf '%s=%s\n' "$field" "$(jq -r --arg field "$field" '.[$field]' <<<"$result")" >> "$GITHUB_OUTPUT"
+          done
+      - name: Exit quietly unless this release still needs certification
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.detect.outputs.action }}
+          REASON: ${{ steps.detect.outputs.reason }}
+          LATEST: ${{ steps.detect.outputs.latest }}
+          KEY: ${{ steps.detect.outputs.key }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" != certify ]]; then
+            echo "$REASON" >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$FORCE" != true ]]; then
+            existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "omp-certify/$LATEST" --state all --json number,state,body |
+              jq -r --arg marker "<!-- omp-certify key=$KEY -->" '[.[] | select(.state != "MERGED" and (.body | contains($marker))) | .number] | first // empty')"
+            if [[ -n "$existing" ]]; then
+              echo "OMP $LATEST with these source pins already has certification PR #$existing; dispatch with force to re-run." >> "$GITHUB_STEP_SUMMARY"
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "$REASON; certifying OMP $LATEST." >> "$GITHUB_STEP_SUMMARY"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Select the latest three stable releases for the differential
+        id: versions
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          npm view @oh-my-pi/pi-coding-agent versions --json > versions.json
+          node -e '
+            const fs = require("node:fs");
+            const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"))
+              .filter(value => /^\d+\.\d+\.\d+$/.test(value))
+              .sort((a, b) => {
+                const left = a.split(".").map(Number), right = b.split(".").map(Number);
+                for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] - right[i];
+                return 0;
+              })
+              .slice(-3);
+            if (versions.length !== 3) throw new Error("expected three stable OMP releases, got " + versions.length);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "versions=" + JSON.stringify(versions) + "\n");
+          '
+
+  differential:
+    needs: detect
+    if: needs.detect.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        omp_version: ${{ fromJSON(needs.detect.outputs.versions) }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install selected OMP release and TypeScript LSP
+        env:
+          OMP_VERSION: ${{ matrix.omp_version }}
+        run: |
+          npm install --global "@oh-my-pi/pi-coding-agent@$OMP_VERSION" typescript-language-server@5.1.3 typescript@5.9.3
+          actual="$(omp --version)"
+          test "$actual" = "omp/$OMP_VERSION"
+          echo "### OMP $OMP_VERSION ($actual) on $(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Full rule ladder (G1-G4, planted negative) against this OMP
+        run: |
+          set -o pipefail
+          sh scripts/ladder.sh 2>&1 | tee "ladder-${{ matrix.omp_version }}.log"
+      - name: Record first-fire indices
+        run: sh scripts/runtime-adapter.sh "$GITHUB_WORKSPACE/scripts/ttsr-harness.ts" --gate-json > gate.json
+      - name: Record default-policy outcome (report-only)
+        env:
+          OMP_VERSION: ${{ matrix.omp_version }}
+        run: |
+          set +e
+          OMP_KIT_DEFAULT_TTSR=1 sh scripts/e2e-live.sh > default-policy.log 2>&1
+          rc=$?
+          set -e
+          DEFAULT_POLICY_EXIT=$rc bun -e '
+            const gate = await Bun.file("gate.json").json();
+            if (!Array.isArray(gate.cases) || gate.cases.length === 0) throw new Error("first-fire report has no cases");
+            const output = await Bun.file("default-policy.log").text();
+            const failures = [...output.matchAll(/^FAIL\s+([^\s]+)\s+::\s+FAIL:\s+(.+?)(?:\s+\(omp exit|$)/gm)]
+              .map(match => match[1] + ": " + match[2]);
+            if (Number(process.env.DEFAULT_POLICY_EXIT) !== 0 && failures.length === 0) {
+              failures.push("unclassified e2e-live exit " + process.env.DEFAULT_POLICY_EXIT);
+            }
+            const report = {
+              schema_version: 1,
+              omp_version: process.env.OMP_VERSION,
+              default_policy_exit: Number(process.env.DEFAULT_POLICY_EXIT),
+              default_policy_failures: failures,
+              first_fires: gate.cases,
+            };
+            await Bun.write("first-fire-" + process.env.OMP_VERSION + ".json", JSON.stringify(report, null, 2) + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: first-fire-${{ matrix.omp_version }}
+          path: first-fire-${{ matrix.omp_version }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  prepare:
+    needs: [detect, differential]
+    if: ${{ !cancelled() && needs.detect.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+      pr: ${{ steps.pr.outputs.number }}
+    env:
+      CERTIFIED: ${{ needs.detect.outputs.certified }}
+      LATEST: ${{ needs.detect.outputs.latest }}
+      BRANCH: omp-certify/${{ needs.detect.outputs.latest }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Review pinned memory sources (certified -> latest)
+        env:
+          CHEAPER_INFERENCE_API_KEY: ${{ secrets.CHEAPER_INFERENCE_API_KEY }}
+          OMP_REVIEW_MODEL: ${{ vars.OMP_REVIEW_MODEL }}
+          OMP_REVIEW_MAX_PRICE: ${{ vars.OMP_REVIEW_MAX_PRICE }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/findings"
+          bun scripts/omp-certify.ts review --from "$CERTIFIED" --to "$LATEST" --work "$RUNNER_TEMP/omp-certify" --out "$RUNNER_TEMP/findings/review.json"
+      - name: Bump certified and add only the source pins the review allows
+        run: bun scripts/omp-certify.ts apply --review "$RUNNER_TEMP/findings/review.json" --out "$RUNNER_TEMP/findings/apply.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: first-fire-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/first-fire
+      - name: Generate the compatibility table from the differential runs
+        continue-on-error: true
+        env:
+          OMP_VERSIONS: ${{ needs.detect.outputs.versions }}
+        run: |
+          bun -e '
+            import { compatibilityRegressions, renderCompatibilityTable } from "./scripts/omp-compatibility.ts";
+            const dir = process.env.RUNNER_TEMP + "/first-fire/";
+            const versions = JSON.parse(process.env.OMP_VERSIONS ?? "[]");
+            const reports = await Promise.all(versions.map(async version => Bun.file(dir + "first-fire-" + version + ".json").json()));
+            const table = renderCompatibilityTable(reports);
+            await Bun.write("docs/omp-compatibility.md", table);
+            await Bun.write(process.env.RUNNER_TEMP + "/findings/compatibility-table.md", table);
+            await Bun.write(process.env.RUNNER_TEMP + "/findings/compatibility-regressions.json", JSON.stringify(compatibilityRegressions(reports), null, 2) + "\n");
+          '
+      - name: Commit the candidate, open or update its PR, supersede older certification PRs
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add scripts/omp-compat.json src/memory-readiness.ts src/memory-audit.ts docs/omp-compatibility.md
+          git commit -m "[test] Certify OMP $LATEST" -m "Automated by .github/workflows/omp-certify.yml: $RUN_URL"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$number" ]]; then
+            if ! url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "[test] Certify OMP $LATEST" --body "Certification in progress: $RUN_URL")"; then
+              echo "::error::GITHUB_TOKEN could not open the PR. Enable Settings > Actions > General > 'Allow GitHub Actions to create and approve pull requests'. Branch $BRANCH is pushed."
+              exit 1
+            fi
+            number="${url##*/}"
+          else
+            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --body "Certification in progress: $RUN_URL"
+          fi
+          # The fragment names the PR, so it is amended in before ci.yml runs: the tested commit is the PR head.
+          printf -- '- Main CI and native certification install OMP %s, certified by omp-certify. (PR #%s)\n' "$LATEST" "$number" > "changelog.d/omp-certify-$LATEST.md"
+          git add "changelog.d/omp-certify-$LATEST.md"
+          git commit --amend --no-edit
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName \
+            --jq '.[] | select((.headRefName | startswith("omp-certify/")) and .headRefName != env.BRANCH) | .number' |
+            while read -r old; do
+              gh pr close "$old" --repo "$GITHUB_REPOSITORY" --delete-branch --comment "Superseded by #$number: OMP $LATEST is now npm latest, so only it is certified."
+            done
+          {
+            printf 'sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'number=%s\n' "$number"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omp-certify-findings
+          path: ${{ runner.temp }}/findings/
+          if-no-files-found: error
+          retention-days: 90
+
+  suites:
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.sha }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [detect, prepare, suites]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LATEST: ${{ needs.detect.outputs.latest }}
+      PR: ${{ needs.prepare.outputs.pr }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omp-certify-findings
+          path: ${{ runner.temp }}/findings
+      - name: Collect ci.yml job results from this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name | startswith("suites / ")) | {name, conclusion}' | jq -s . > "$RUNNER_TEMP/findings/jobs.json"
+      - name: Write findings and decide
+        env:
+          SUITES_RESULT: ${{ needs.suites.result }}
+          KEY: ${{ needs.detect.outputs.key }}
+        run: |
+          F="$RUNNER_TEMP/findings"
+          bun scripts/omp-certify.ts body --review "$F/review.json" --apply "$F/apply.json" \
+            --suites-result "$SUITES_RESULT" --suites-jobs "$F/jobs.json" \
+            --differential-table "$F/compatibility-table.md" --differential-regressions "$F/compatibility-regressions.json" \
+            --suite-sha "$SHA" --run-url "$RUN_URL" --key "$KEY" --body-out "$F/body.md" --decision-out "$F/decision.json"
+          cat "$F/body.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish findings, then auto-merge or mark needs-human
+        shell: bash
+        run: |
+          set -euo pipefail
+          F="$RUNNER_TEMP/findings"
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$F/body.md"
+          gh label create needs-human --repo "$GITHUB_REPOSITORY" --color B60205 --description "OMP certification needs a human review" --force
+          if [[ "$(jq -r .eligible "$F/decision.json")" == true ]]; then
+            body="Automated OMP $LATEST certification: $RUN_URL"$'\n\n'"[no-changelog] release note is changelog.d/omp-certify-$LATEST.md (PR #$PR)"
+            if ! gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash --match-head-commit "$SHA" \
+                --subject "[test] Certify OMP $LATEST (#$PR)" --body "$body"; then
+              gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
+              gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Every check passed, but squash auto-merge could not be enabled (repository setting 'Allow auto-merge' may be off). A human must merge: $RUN_URL"
+              echo "::error::squash auto-merge could not be enabled for PR #$PR"
+              exit 1
+            fi
+          else
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
+            gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto 2>/dev/null || true
+          fi

@@ -191,6 +191,6 @@ isolated run showing the effect counts as firing proof.
 Minimum supported OMP: 18.4.2.
 Last verified against OMP 18.4.9 on 2026-10-01 by `bun test
 tests/cli/docs.test.ts`. Refresh with `sh scripts/docs-footer.sh`; the
-scheduled compatibility workflow re-runs the same check against the
-latest OMP once a day.
+OMP certification workflow re-runs the same check against each new OMP
+release before it becomes the certified version.
 <!-- verified-ttsr-docs:end -->
