@@ -46,6 +46,11 @@ const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:f6e978edd59e67e596cb47adfcca821aceb25c735258ca51c1cf4b141a45fa09",
 	// OMP 18.7.0: default off, no-op fallback, and legacy false -> off.
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:b6667a6edd3079abe1b56c1473a9d2306ca7da6201674279d40355d338f20476",
+	// OMP 18.8.1-18.8.5: config/settings.ts only makes #deepMerge assign keys as own properties (a
+	// `__proto__` key no longer replaces the prototype); memory default off, no-op fallback, legacy false -> off unchanged.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:4e41a9b93263ea27ae3a339bfc3f30eb0d4bc8d234550d5f1443d208c0ca60cf",
+	// OMP 18.8.6: adds one reload when a live config file watch is armed; on-disk memory semantics unchanged.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:b997d3564231364d176976a02a127bb91951c82ce29fc7b241dc39ddf4a4e716",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [
 	"src/memory-backend/settings.ts",
