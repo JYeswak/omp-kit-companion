@@ -109,7 +109,7 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	const { home, installedRoot, installedBinary } = installCandidate("operator-home");
 	const fast = Bun.spawnSync([installedBinary, "test", "--json"], {
 		cwd: output, env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" },
+			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_CASE_CWD: repo },
 		stdout: "pipe", stderr: "pipe",
 	});
 	expect(fast.exitCode, fast.stdout.toString() + fast.stderr.toString()).toBe(0);
@@ -126,7 +126,7 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
 	const red = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
 		cwd: output, env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" },
+			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_CASE_CWD: repo },
 		stdout: "pipe", stderr: "pipe",
 	});
 	expect(red.exitCode, red.stdout.toString() + red.stderr.toString()).toBe(1);

@@ -64,6 +64,20 @@ function snapshotTree(root: string): string {
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
+test("isolated children retain the logical workspace root for case path scopes", () => {
+	const identity = {
+		launcher: resolve("omp/bin/omp"),
+		packageRoot: resolve("omp"),
+		source: resolve("omp/src"),
+		nativeRoot: resolve("omp/node_modules/@oh-my-pi/pi-natives"),
+	};
+	const privateRoot = resolve("private-root");
+	expect(sanitizedEnv(identity, { GITHUB_WORKSPACE: "/checkout" }, privateRoot).OMP_KIT_CASE_CWD).toBe("/checkout");
+	expect(sanitizedEnv(identity, { OMP_KIT_CASE_CWD: "var/agent-tmp/fixture", GITHUB_WORKSPACE: "/checkout" }, privateRoot).OMP_KIT_CASE_CWD)
+		.toBe(resolve("var/agent-tmp/fixture"));
+	expect(sanitizedEnv(identity, {}, privateRoot).OMP_KIT_CASE_CWD).toBe(process.cwd());
+});
+
 describe("release paths", () => {
 	test("follows the stable launcher to the moved versioned release", () => {
 		const prefix = join(fixtureRoot(), "kit");
