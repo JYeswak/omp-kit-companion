@@ -10,6 +10,10 @@ read -r local_ref local_sha remote_ref remote_sha || exit 0
 # caller-side export would otherwise skip the regex budget on main. Clear it
 # first, then set it only for scratch measurement refs.
 unset FRESH_GATE_SKIP_REGEX
+# ttsr-harness resolves repo-relative case paths against OMP_KIT_CASE_CWD (76a722f2). The
+# archive below lives under var/agent-tmp, so without this every case path looks like scratch
+# and scratch-is-not-a-home fires on real repo files (cases 375/376 RED, 2026-10-08).
+export OMP_KIT_CASE_CWD="$ROOT"
 # Scratch measurement refs skip ONLY the regex-budget judgment (the budget is
 # judged on CI for the release candidate); every other check still runs, and
 # main pushes are still fully judged.

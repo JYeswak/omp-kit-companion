@@ -1,0 +1,39 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.8.4
+
+                         Tip: `/copy code` grabs the last code block to your clipboard — `/copy
+                                        cmd` grabs the last shell/python command
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ What's New
+
+ Updated to v18.8.4 · 30 changes across 3 releases
+ 1 changed · 1 removed · 28 fixed · +2 earlier releases · Use /changelog full for history.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ MCP finished with failures. Connected: infisical-v4, mcp-agent-mail, mathlas, z3-prover, sympy-mcp. Failed:
+ wolfram-alpha [config: ~/.omp/agent/mcp.json]: MCP subprocess closed stdout before responding;
+ vmpal-0289c4db-9e1c-43ed-8143-7f72e4631… [config: ~/.omp/agent/mcp.json]: MCP subprocess closed stdout before
+ responding
+
+╭── π > ⟳ GPT-6 Luna > 📁 …er/jev/var/agent-tmp/send-consume.92486 > ⑂ main *73 +2 ?1267 > (sub) ▶───18%────╎─┃─272K───╮
+│  BrownGoose fixture: multi-line pending                                                                              │
+│  second line of the message                                                                                          │
+╰─ [kit-send-0123456789ab]                                                                                            ─╯
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -12,7 +12,7 @@ export interface SendExec {
 }
 
 export interface ProvenSend {
-	status: "OK" | "NOT_DELIVERED";
+	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED";
 	marker: string;
 	sends: number;
 	drop_path: string | null;
@@ -40,6 +40,23 @@ function dropMessage(dropDir: string, session: string, pane: string, marker: str
 	return path;
 }
 
+/**
+ * True when the marker sits in omp's input box: the lines after the last
+ * line opening with the box's top border "╭──". No border, no box: false.
+ */
+export function markerInComposer(capture: string, marker: string): boolean {
+	const lines = capture.split("\n");
+	let top = -1;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (lines[i]!.trimStart().startsWith("╭──")) {
+			top = i;
+			break;
+		}
+	}
+	if (top < 0) return false;
+	return lines.slice(top + 1).some((line) => line.includes(marker));
+}
+
 /** Send via ntm and prove the marker landed in the target pane's capture. */
 export async function proveSend(input: {
 	session: string;
@@ -60,15 +77,28 @@ export async function proveSend(input: {
 	for (let sends = 1; sends <= SEND_MAX_SENDS; sends++) {
 		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text]).code !== 0) continue;
 		const started = Date.now();
+		let entered = false;
 		while (Date.now() - started < deadlineMs) {
 			// Bare pane id: session:pane is parsed as a window and misses.
 			// -S -200 reads scrollback history: a rendered message scrolls off
 			// the visible screen but stays provable in history.
 			const got = exec.run(["tmux", "capture-pane", "-p", "-S", "-200", "-t", input.pane]);
 			if (got.code === 0 && got.out.includes(marker)) {
-				return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)` };
+				// Text typed into the input box but never submitted is not a delivery.
+				if (!markerInComposer(got.out, marker)) {
+					const how = entered ? " after one Enter" : "";
+					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}` };
+				}
+				if (!entered) {
+					exec.run(["tmux", "send-keys", "-t", input.pane, "Enter"]);
+					entered = true;
+				}
 			}
 			await wait(pollMs);
+		}
+		// The text is on the pane: resending or dropping would duplicate it.
+		if (entered) {
+			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter` };
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
