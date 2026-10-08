@@ -112,7 +112,9 @@ function parseTag(subject: string, kind: "plan" | "beads"): TaggedSubject | null
 	if (end <= prefix.length) return null;
 	const mission = subject.slice(prefix.length, end).trim();
 	if (!mission || mission.includes("/") || mission.includes("\\") || mission.includes("..")) return null;
-	return { mission, action: subject.slice(end + 2).trim() };
+	// The commit-msg verification-level hook requires one "[level]" in every subject, so a trailing
+	// level tag is part of the convention, not part of the action. Only the hook's six levels strip.
+	return { mission, action: subject.slice(end + 2).replace(/ \[(?:pending|selftest|test|mutation|oracle|live)\]$/i, "").trim() };
 }
 function mergeCommits(repoCommits: readonly PlanningCommit[], trackerCommits: readonly PlanningCommit[]): PlanningCommit[] {
 	const rows = new Map<string, PlanningCommit>();
