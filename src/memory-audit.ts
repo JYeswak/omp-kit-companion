@@ -83,6 +83,38 @@ const REVIEWED_SOURCE_PIN_SETS: readonly (readonly SourcePin[])[] = [
 		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
 		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
 	],
+	[
+		// OMP and pi-mnemopi 18.8.0-18.8.4 source tuple. Changed audited pins: mnemopi/config.ts
+		// rewrites the read-only legacy-bank cwd probe as EXISTS checks with the same safe verdict;
+		// mnemopi/state.ts counts user turns before extracting retain text. No DDL, table, or store-file change.
+		["agent", "src/mnemopi/config.ts", "604f9311920dbe886df96989f26e13652ea2dcdd9c1ade283ed1c1ab579d5d0d"],
+		["agent", "src/mnemopi/state.ts", "958c28be478ec0abc8f33e28a36815a0234ba61feaed3925a83a48cd0be42747"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
+		["mnemopi", "src/core/episodic-graph.ts", "d7d3df0530b059e85505a5d380cdfbaaaa3b5b97af7e15b2ae0d85baf0994418"],
+		["mnemopi", "src/core/query-cache.ts", "df46d468b2ba5dca9fe475702baf2d9511f9e9e2a5f86e108eb291261e091c22"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "6aad4bc4a847879a612a34a3f7768326a873c979b2d0ad5616c2d61aca49e088"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
+	[
+		// OMP and pi-mnemopi 18.8.5-18.8.6 source tuple. The sole change from 18.8.4 is
+		// episodic-graph: link candidates and their content now skip superseded or expired rows,
+		// reading the existing superseded_by/valid_until columns; schema.ts and persisted rows are unchanged.
+		["agent", "src/mnemopi/config.ts", "604f9311920dbe886df96989f26e13652ea2dcdd9c1ade283ed1c1ab579d5d0d"],
+		["agent", "src/mnemopi/state.ts", "958c28be478ec0abc8f33e28a36815a0234ba61feaed3925a83a48cd0be42747"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "f953df31825c4df7c0051186fb6ad5a50507b63dd70a068e01b70bd8be9174fd"],
+		["mnemopi", "src/core/episodic-graph.ts", "ab9e673fbdac45202886f5e92d4aec45e38b679d1fb81cc5f5f524ca8b3bc61e"],
+		["mnemopi", "src/core/query-cache.ts", "df46d468b2ba5dca9fe475702baf2d9511f9e9e2a5f86e108eb291261e091c22"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "6aad4bc4a847879a612a34a3f7768326a873c979b2d0ad5616c2d61aca49e088"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
 ];
 const CONTENT_FIELDS = ["working_memory.content", "episodic_memory.content"] as const;
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0");
