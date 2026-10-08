@@ -127,7 +127,7 @@ else
 fi
 
 # 5. every checker contract is invoked from the base archive and blocks on failure
-for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh; do
+for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh; do
 	repo=$(mkrepo "checker-$checker_test" 'echo BASE-GATE' 'echo HEAD-GATE' "$checker_test")
 	rc=$(run_adapter "$repo")
 	out=$(cat "$TMP/out")
@@ -137,6 +137,49 @@ for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.
 		fail=$((fail + 1)); printf 'FAIL checker-contract-%s: rc=%s out<<<%s>>>\n' "$checker_test" "$rc" "$out"
 	fi
 done
+
+# 6. planted: base archive carrying a failing doc-drift checker refuses, naming the surface
+driftrepo="$TMP/drift"
+rm -rf "$driftrepo"
+mkdir -p "$driftrepo/scripts" "$driftrepo/var/agent-tmp"
+git -C "$driftrepo" init -q
+git -C "$driftrepo" config user.email "test@example.invalid"
+git -C "$driftrepo" config user.name "worker-1"
+printf '#!/bin/sh\nexit 0\n' > "$driftrepo/scripts/fresh-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$driftrepo/scripts/regexploit-gate.py"
+create_checker_test_stubs "$driftrepo"
+printf '#!/bin/sh\nprintf "doc-drift: serve|flag:--port\\n" >&2\nexit 1\n' > "$driftrepo/scripts/doc-drift-check.sh"
+git -C "$driftrepo" add -A
+git -C "$driftrepo" commit -qm "[test] base with failing drift checker"
+printf '#!/bin/sh\n# head gate\nexit 0\n' > "$driftrepo/scripts/fresh-gate.sh"
+git -C "$driftrepo" add -A
+git -C "$driftrepo" commit -qm "[test] head"
+driftbase=$(git -C "$driftrepo" rev-parse HEAD~1)
+drifthead=$(git -C "$driftrepo" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$drifthead" "$driftbase" | (cd -- "$driftrepo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" != "0" ] && grep -q "RED doc-drift" "$TMP/out" && grep -q "serve|flag:--port" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL drift-wired-refuses: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
+# 7. control: a base archive with a passing doc-drift checker lets the push through
+printf '#!/bin/sh\nexit 0\n' > "$driftrepo/scripts/doc-drift-check.sh"
+git -C "$driftrepo" add -A
+git -C "$driftrepo" commit -qm "[test] base with passing drift checker"
+printf '#!/bin/sh\nexit 0\n' > "$driftrepo/scripts/fresh-gate.sh"
+git -C "$driftrepo" add -A
+git -C "$driftrepo" commit -qm "[test] head over passing drift base"
+driftbase2=$(git -C "$driftrepo" rev-parse HEAD~1)
+drifthead2=$(git -C "$driftrepo" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$drifthead2" "$driftbase2" | (cd -- "$driftrepo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && grep -q "GREEN doc-drift" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL drift-wired-passes: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
 
 # 8. GATE2 row A: base-red contract plus a candidate fix is accepted with BASE-RED named
 g2="$TMP/g2base"

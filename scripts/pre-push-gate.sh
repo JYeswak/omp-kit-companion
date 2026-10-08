@@ -145,4 +145,21 @@ elif [ -n "${base_ref:-}" ]; then
 else
 	printf 'SKIP commit-imports: no base to range against\n' >&2
 fi
+# PUB1a: a push that changes the CLI surface without touching its docs is
+# refused, naming the undocumented surface. Skipped until the base archive
+# carries the checker (first landing).
+if [ ! -f "$gate_scripts/scripts/doc-drift-check.sh" ]; then
+	printf 'SKIP doc-drift: checker absent from base archive\n' >&2
+elif [ -n "${base_ref:-}" ]; then
+	printf '== doc-drift\n'
+	if sh "$gate_scripts/scripts/doc-drift-check.sh" "$base_ref" "$local_sha" "$ROOT"; then
+		printf 'GREEN doc-drift\n'
+	else
+		rc=$?
+		printf 'RED doc-drift producer_rc=%s\n' "$rc" >&2
+		exit "$rc"
+	fi
+else
+	printf 'SKIP doc-drift: no base to range against\n' >&2
+fi
 exec sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
