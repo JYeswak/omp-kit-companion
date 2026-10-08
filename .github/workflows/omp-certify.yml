@@ -14,8 +14,9 @@ name: OMP certification
 #                 open or update its PR and close older omp-certify/* PRs as superseded
 #   suites        ci.yml (full set) on that exact commit; PRs opened with GITHUB_TOKEN trigger no other
 #                 workflow, so the evidence is produced here and written into the PR
-#   publish       PR body with findings; squash auto-merge only when suites and differential are green and
-#                 no changed pin was judged a memory-semantic change, otherwise label needs-human
+#   publish       PR body with findings; squash-merge of the tested head (auto-merge, else a direct merge
+#                 pinned by --match-head-commit) only when suites and differential are green and no changed
+#                 pin was judged a memory-semantic change; otherwise, or on any publish failure, needs-human
 # CHEAPER_INFERENCE_API_KEY (secret) is optional: without it the run reports "no model review" and the PR
 # needs a human. OMP_REVIEW_MODEL (variable) pins a catalog model id; it is refused unless GET /v1/models lists it.
 on:
@@ -111,7 +112,7 @@ jobs:
 
   differential:
     needs: detect
-    if: needs.detect.outputs.run == 'true'
+    if: github.event.repository.private == false && needs.detect.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +121,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Install selected OMP release and TypeScript LSP
         env:
@@ -171,7 +174,7 @@ jobs:
 
   prepare:
     needs: [detect, differential]
-    if: ${{ !cancelled() && needs.detect.outputs.run == 'true' }}
+    if: ${{ github.event.repository.private == false && !cancelled() && needs.detect.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -267,7 +270,7 @@ jobs:
 
   suites:
     needs: prepare
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    if: ${{ github.event.repository.private == false && !cancelled() && needs.prepare.result == 'success' }}
     uses: ./.github/workflows/ci.yml
     with:
       source_sha: ${{ needs.prepare.outputs.sha }}
@@ -276,7 +279,7 @@ jobs:
 
   publish:
     needs: [detect, prepare, suites]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    if: ${{ github.event.repository.private == false && !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -323,14 +326,23 @@ jobs:
           gh label create needs-human --repo "$GITHUB_REPOSITORY" --color B60205 --description "OMP certification needs a human review" --force
           if [[ "$(jq -r .eligible "$F/decision.json")" == true ]]; then
             body="Automated OMP $LATEST certification: $RUN_URL"$'\n\n'"[no-changelog] release note is changelog.d/omp-certify-$LATEST.md (PR #$PR)"
+            # Auto-merge waits for required checks; with none configured GitHub refuses to enable it on a clean
+            # PR, so merge directly: every gate already ran in this run and the merge is pinned to the tested head.
             if ! gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash --match-head-commit "$SHA" \
+                --subject "[test] Certify OMP $LATEST (#$PR)" --body "$body" &&
+              ! gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$SHA" \
                 --subject "[test] Certify OMP $LATEST (#$PR)" --body "$body"; then
-              gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
-              gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Every check passed, but squash auto-merge could not be enabled (repository setting 'Allow auto-merge' may be off). A human must merge: $RUN_URL"
-              echo "::error::squash auto-merge could not be enabled for PR #$PR"
+              echo "::error::every check passed but PR #$PR could be neither auto-merged nor merged (repository setting 'Allow auto-merge' or token permissions); a human must merge"
               exit 1
             fi
           else
             gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
             gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto 2>/dev/null || true
           fi
+      - name: Mark needs-human when publishing failed
+        if: failure()
+        shell: bash
+        run: |
+          gh label create needs-human --repo "$GITHUB_REPOSITORY" --color B60205 --description "OMP certification needs a human review" --force
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Certification publishing or merging failed, so a human must finish this PR: $RUN_URL"

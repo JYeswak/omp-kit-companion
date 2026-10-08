@@ -160,8 +160,8 @@ async function chooseModel(key: string): Promise<{ id: string | null; selection:
 	const response = await request("/models", { method: "GET" }, key);
 	if (!response.ok) return { id: null, selection: `GET /v1/models returned HTTP ${response.status} (x-ci-request-id ${response.headers.get("x-ci-request-id") ?? "none"})` };
 	const body = await response.json() as Catalog[] | { data?: Catalog[] };
-	const catalog = (Array.isArray(body) ? body : body.data ?? []).filter(model => model && typeof model.id === "string");
-	const chat = (model: Catalog) => model.supported_endpoints?.includes("/v1/chat/completions") ?? false;
+	// Ids end up in PR text and in source comments, so only plain identifier characters are eligible.
+	const catalog = (Array.isArray(body) ? body : body.data ?? []).filter(model => model && typeof model.id === "string" && /^[A-Za-z0-9._:@/-]+$/.test(model.id));
 	const pinned = process.env.OMP_REVIEW_MODEL?.trim();
 	if (pinned) {
 		const model = catalog.find(entry => entry.id === pinned);
@@ -206,14 +206,16 @@ async function askModel(key: string, model: string, file: PinFile, from: string,
 			method: "POST", headers: { "content-type": "application/json" },
 			body: JSON.stringify({ model, max_tokens: 16_000, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
 		}, key);
-		const requestId = response.headers.get("x-ci-request-id");
+		// Gateway-supplied identifiers reach the PR body and source comments: keep identifier characters only.
+		const requestId = response.headers.get("x-ci-request-id")?.replace(/[^A-Za-z0-9._:-]/g, "") ?? null;
 		if (!response.ok) return { status: "error", request_id: requestId, served_model: null, verdict: null, detail: `HTTP ${response.status}: ${(await response.text()).slice(0, 300)}` };
 		const body = await response.json() as { model?: string; choices?: { message?: { content?: string | null; reasoning_content?: string | null } }[] };
+		const servedModel = typeof body.model === "string" ? body.model.replace(/[^A-Za-z0-9._:@/-]/g, "") : null;
 		const message = body.choices?.[0]?.message;
 		const verdict = parseVerdict(message?.content || message?.reasoning_content || "");
 		return verdict
-			? { status: "ok", request_id: requestId, served_model: body.model ?? null, verdict, detail: "" }
-			: { status: "error", request_id: requestId, served_model: body.model ?? null, verdict: null, detail: "model reply was not the requested JSON object" };
+			? { status: "ok", request_id: requestId, served_model: servedModel, verdict, detail: "" }
+			: { status: "error", request_id: requestId, served_model: servedModel, verdict: null, detail: "model reply was not the requested JSON object" };
 	} catch (error) {
 		return { status: "error", request_id: null, served_model: null, verdict: null, detail: `request failed: ${(error as Error).message}` };
 	}
@@ -333,7 +335,7 @@ function apply(): void {
 
 // ---- body ----
 function oneLine(text: string, limit: number): string {
-	const flat = text.replace(/\s+/g, " ").replaceAll("|", "\\|").trim();
+	const flat = text.replace(/\s+/g, " ").replaceAll("|", "\\|").replaceAll("<!--", "&lt;!--").trim();
 	return flat.length > limit ? flat.slice(0, limit - 1) + "…" : flat;
 }
 function body(): void {
