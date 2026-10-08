@@ -100,6 +100,7 @@ function environment(home: string, pathValue: string): Record<string, string> {
 		XDG_STATE_HOME: join(home, "xdg-state"),
 		BUN_INSTALL: join(home, "bun-install"),
 		PATH: pathValue,
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || REPO_ROOT,
 	};
 }
 

@@ -177,6 +177,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     XDG_DATA_HOME="$XDG_DATA_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
     BUN_INSTALL="$BUN_INSTALL" \
     OMP="$OMP" OMP_BIN="$OMP" OMP_PATH="$OMP" OMP_SRC="$OMP_SRC" \
+    OMP_KIT_CASE_CWD="${OMP_KIT_CASE_CWD:-}" \
     OMP_KIT_WORK_DIR="$work_real" \
     SCEN="$scenario" LOG="$log_file" PORTFILE="$port_file" \
     BUN_BE_BUN=1 "$executable" "$script" "$@"

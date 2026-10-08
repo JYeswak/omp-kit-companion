@@ -392,7 +392,9 @@ test("update derives the N+2 fast denominator from the manifest-bound case corpu
 		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
 
 	const updated = await applyKitUpdate(plan);
-	expect(updated.status).toBe("UPDATED");
+	expect(updated.status, JSON.stringify({ reason: updated.postcheck.reason, matcher: updated.postcheck.matcher,
+		live: updated.postcheck.live, failures: updated.postcheck.report?.failures,
+		fastFailures: updated.postcheck.report?.fast.failures, stages: updated.postcheck.report?.stages })).toBe("UPDATED");
 	expect(updated.postcheck.status).toBe("PASS");
 	expect(updated.postcheck.report?.fast.proofs.G2_payload).toMatchObject({ status: "PASS",
 		expected_cases: candidate.targetCases, observed_cases: candidate.targetCases });
