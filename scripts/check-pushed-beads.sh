@@ -1,12 +1,13 @@
 #!/bin/sh
 # check-pushed-beads.sh — COMMIT1 pre-push bead check (ompkit-2w7h).
 # Usage: check-pushed-beads.sh --repo DIR --base SHA --tip SHA [--db PATH] [--br BIN]
-# Every non-merge commit in base..tip must name a bead id that exists in the
-# repo tracker, checked through scripts/commit-msg-bead.sh on the commit
-# message. Reads git objects only (git log), so commit-tree commits are
-# checked like any other; the working tree is never touched. Refuses (exit 4)
-# naming the first offending sha. Test seams: --db overrides the tracker,
-# --br overrides the br binary (both forwarded).
+# Every non-merge commit reachable from tip but not from any origin remote-tracking
+# ref must name a bead id that exists in the repo tracker. The base is diagnostic:
+# squash merges can leave already-landed origin/main commits in the pushed range.
+# Messages are checked through scripts/commit-msg-bead.sh. The checker reads git
+# objects only, so commit-tree commits are covered without touching the worktree.
+# It refuses (exit 4), naming the first offending sha. Test seams: --db overrides
+# the tracker, --br overrides the br binary (both forwarded).
 set -u
 
 REPO=""
@@ -57,7 +58,7 @@ fi
 HOOKDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 HOOK="$HOOKDIR/commit-msg-bead.sh"
 [ -f "$HOOK" ] || { printf 'check-pushed-beads: hook body missing at %s\n' "$HOOK" >&2; exit 2; }
-COMMITS=$(git -C "$REPO" rev-list --no-merges "$BASE..$TIP" 2>/dev/null) || { printf 'check-pushed-beads: cannot list %s..%s\n' "$BASE" "$TIP" >&2; exit 2; }
+COMMITS=$(git -C "$REPO" rev-list --no-merges "$TIP" --not --remotes=origin 2>/dev/null) || { printf 'check-pushed-beads: cannot list commits at tip %s outside origin remotes (base %s)\n' "$TIP" "$BASE" >&2; exit 2; }
 TMPMSG=$(mktemp "${TMPDIR:-/tmp}/pushed-beads-msg.XXXXXX") || exit 2
 trap 'rm -f "$TMPMSG"' EXIT INT TERM
 export BEADS_DB="$DB"
@@ -71,6 +72,6 @@ for sha in $COMMITS; do
 	BEADS_DB="$DB" BR_BIN="$BRBIN" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
 done
 if [ "$checked" = "0" ]; then
-	printf 'check-pushed-beads: no commits in %s..%s; nothing to check\n' "$BASE" "$TIP" >&2
+	printf 'check-pushed-beads: no unpushed commits reachable from %s; nothing to check (base %s)\n' "$TIP" "$BASE" >&2
 fi
 exit 0
