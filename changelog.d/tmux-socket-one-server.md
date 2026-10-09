@@ -1,0 +1,1 @@
+- `omp-kit doctor` lists stale entries under `$HOME/.tmux-sockets/tmux-$UID` and leaves them untouched.

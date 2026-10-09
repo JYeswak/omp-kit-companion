@@ -1047,11 +1047,47 @@ function inspectBeadDuplicates(project: string): Finding {
 		: finding("beads", "OK", "No live bead pair shares enough text to look duplicated", "No action required.", { tracker_path: trackerPath, checked_beads: tokenized.length, duplicate_pairs: pairs });
 }
 
+function inspectTmuxSockets(home: string): Finding {
+	const uid = process.getuid?.();
+	if (uid === undefined) return finding("tmux_sockets", "UNVERIFIED", "The current user ID is unavailable; tmux socket paths were not inspected", "Run doctor on macOS or Linux with a supported runtime.");
+	const directory = join(home, ".tmux-sockets", "tmux-" + uid);
+	const state = pathState(directory);
+	if (state === "missing") return finding("tmux_sockets", "OK", "No per-user tmux socket directory exists", "No action required.", { socket_directory: directory, live_sockets: [], stale_sockets: [] });
+	if (state !== "directory") return finding("tmux_sockets", "UNVERIFIED", "The per-user tmux socket path is not a readable directory", "Inspect the path without replacing it.", { socket_directory: directory });
+	let names: string[];
+	try { names = readdirSync(directory).sort(); }
+	catch { return finding("tmux_sockets", "UNVERIFIED", "The per-user tmux socket directory could not be read", "Check directory permissions, then rerun omp-kit doctor.", { socket_directory: directory }); }
+	const live: string[] = [];
+	const stale: string[] = [];
+	const uncertain: string[] = [];
+	for (const name of names) {
+		const socket = join(directory, name);
+		let info: ReturnType<typeof lstatSync>;
+		try { info = lstatSync(socket); }
+		catch { uncertain.push(socket); continue; }
+		if (info.isDirectory()) continue;
+		if (!info.isSocket()) { stale.push(socket); continue; }
+		try {
+			const probe = spawnSync("tmux", ["-S", socket, "display-message", "-p", "-F", "#{socket_path}"], { encoding: "utf8", timeout: 2000 });
+			if (probe.error) {
+				if ((probe.error as NodeJS.ErrnoException).code === "ENOENT") return finding("tmux_sockets", "UNVERIFIED", "tmux is unavailable; socket liveness could not be checked", "Install tmux or put it on PATH, then rerun omp-kit doctor.", { socket_directory: directory, live_sockets: live, stale_sockets: stale, unverified_sockets: [...uncertain, socket] });
+				uncertain.push(socket);
+			} else if (probe.status === 0) live.push(socket);
+			else if (probe.status !== null && String(probe.stderr ?? "").includes("no server running on")) stale.push(socket);
+			else uncertain.push(socket);
+		} catch { uncertain.push(socket); }
+	}
+	const status = stale.length ? "DEGRADED" : uncertain.length ? "UNVERIFIED" : "OK";
+	const reason = stale.length ? "No live tmux server owns socket path(s): " + stale.join(", ") : uncertain.length ? "Could not determine tmux socket liveness for: " + uncertain.join(", ") : "No stale tmux socket paths were found";
+	return finding("tmux_sockets", status, reason, stale.length ? "Confirm no tmux server uses the listed paths before removing stale socket entries." : uncertain.length ? "Resolve the inspection failure and rerun omp-kit doctor." : "No action required.", { socket_directory: directory, live_sockets: live, stale_sockets: stale, ...(uncertain.length ? { unverified_sockets: uncertain } : {}) });
+}
+
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
 	const rows: Finding[] = [inspectOmp(input.ompPath)];
 	const root = resolve(input.root);
 	const home = resolve(input.home);
+	rows.push(inspectTmuxSockets(home));
 	if (input.scope === "kit" || pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file") {
 		rows.push(inspectPlanningSkill(root, home));
 	}

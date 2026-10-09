@@ -685,3 +685,15 @@ test("effective-rules probe leaves the inspected HOME byte- and mtime-identical"
 	expect(snapshot(home)).toEqual(before);
 	expect(JSON.stringify(report)).toContain("native-fixture");
 }, 120_000);
+test("doctor lists tmux socket paths without a live server", async () => {
+	const f = fixture();
+	const directory = join(f.home, ".tmux-sockets", "tmux-" + process.getuid());
+	mkdirSync(directory, { recursive: true });
+	const stale = join(directory, "default");
+	writeFileSync(stale, "orphaned socket path\n");
+	const rows = await diagnose({ root: f.root, home: f.home });
+	const sockets = rows.find(row => row.component === "tmux_sockets");
+	expect(sockets?.status).toBe("DEGRADED");
+	expect(sockets?.evidence?.stale_sockets).toEqual([stale]);
+	expect(sockets?.reason).toContain(stale);
+});
