@@ -41,20 +41,18 @@ function dropMessage(dropDir: string, session: string, pane: string, marker: str
 }
 
 /**
- * True when the marker sits in omp's input box: the lines after the last
- * line opening with the box's top border "╭──". No border, no box: false.
+ * True when the marker appears in the lower-most composer region: after the
+ * latest default `╭──` border or Claude `─` rule immediately above a `❯` prompt.
  */
 export function markerInComposer(capture: string, marker: string): boolean {
 	const lines = capture.split("\n");
-	let top = -1;
-	for (let i = lines.length - 1; i >= 0; i--) {
-		if (lines[i]!.trimStart().startsWith("╭──")) {
-			top = i;
-			break;
-		}
+	let composerStart = -1;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!.trimStart();
+		if (line.startsWith("╭──")) composerStart = i + 1;
+		if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
 	}
-	if (top < 0) return false;
-	return lines.slice(top + 1).some((line) => line.includes(marker));
+	return composerStart >= 0 && lines.slice(composerStart).some((line) => line.includes(marker));
 }
 
 /** Send via ntm and prove the marker landed in the target pane's capture. */

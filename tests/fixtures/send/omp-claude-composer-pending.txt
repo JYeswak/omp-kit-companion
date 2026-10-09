@@ -1,0 +1,16 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                        │
+│ 📦 custom-message                                                                                                                                                                      │
+│                                                                                                                                                                                        │
+│ skill-topology gate: PASS (one store, N symlinks)                                                                                                                                      │
+│                                                                                                                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+MCP finished with failures. Connected: infisical-v4, mcp-agent-mail, mathlas, z3-prover, sympy-mcp. Failed: franken-harvest [config: ~/.omp/profiles/claude/agent/mcp.json]: MCP
+subprocess closed stdout before responding; googlevoice [config: ~/.omp/profiles/claude/agent/mcp.json]: MCP subprocess closed stdout before responding; wolfram-alpha [config:
+~/.omp/profiles/claude/agent/mcp.json]: MCP subprocess closed stdout before responding
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Please respond with the word OK only. [kit-send-0123456789ab]
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+π · ⟳ Opus 5.5 · 📁 ~/Developer/omp-test · ◫ 6.9%/1M ⟲ · (sub)
