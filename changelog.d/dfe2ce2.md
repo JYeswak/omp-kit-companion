@@ -1,0 +1,1 @@
+- Send refuses bead-less work dispatch with the typed BEAD_REQUIRED refusal. (commit dfe2ce2)
