@@ -1,0 +1,1 @@
+- COMMIT1's pre-push bead check now validates commits reachable from the pushed tip but not from `origin/*`, so already-landed main commits do not cause false refusals after squash merges; new bead-less commits still refuse.
