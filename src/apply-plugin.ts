@@ -140,6 +140,7 @@ export function analyzeRegexBudgetOutput(output: string): RegexBudgetSelection {
 	const names = new Set<string>();
 	const excluded = new Set<string>();
 	const measuredConditions = new Map<string, number | null>();
+	let streamTimed = 0;
 	for (const item of measurements) {
 		if (!record(item) || !validRuleName(item.rule) || typeof item.condition_index !== "number" ||
 			!Number.isInteger(item.condition_index) || item.condition_index < 0 ||
@@ -154,9 +155,11 @@ export function analyzeRegexBudgetOutput(output: string): RegexBudgetSelection {
 		if (item.stream_ms !== undefined && (!finiteNumber(item.stream_ms) || item.stream_ms < 0))
 			throw new Error("REGEX_BUDGET_REPORT_INVALID");
 		measuredConditions.set(key, finiteNumber(item.stream_ms) ? item.stream_ms : null);
+		if (finiteNumber(item.stream_ms)) streamTimed++;
 	}
 
 	const timings = new Map<string, number>();
+	const listedConditions = new Set<string>();
 	let byRuleTotal = 0;
 	for (const item of value.stream.by_rule) {
 		if (!record(item) || !validRuleName(item.rule) || typeof item.condition_index !== "number" ||
@@ -164,12 +167,15 @@ export function analyzeRegexBudgetOutput(output: string): RegexBudgetSelection {
 			!finiteNumber(item.ms) || item.ms < 0 || !names.has(item.rule))
 			throw new Error("REGEX_BUDGET_REPORT_INVALID");
 		const key = `${item.rule}#${item.condition_index}`;
-		if (measuredConditions.get(key) !== item.ms) throw new Error("REGEX_BUDGET_REPORT_INVALID");
+		if (listedConditions.has(key) || measuredConditions.get(key) !== item.ms) throw new Error("REGEX_BUDGET_REPORT_INVALID");
+		listedConditions.add(key);
 		byRuleTotal += item.ms;
 		timings.set(item.rule, (timings.get(item.rule) ?? 0) + item.ms);
 	}
-	if (Math.abs(byRuleTotal - value.stream.total_ms) > 0.01 ||
-		value.stream.complete !== (value.stream.by_rule.length === measurements.length))
+	// The tool times only conditions that run on the Bash stream; file-scoped conditions carry no stream_ms.
+	// by_rule must list every timed condition exactly once, and an incomplete stream needs an untimed condition.
+	if (Math.abs(byRuleTotal - value.stream.total_ms) > 0.01 || value.stream.by_rule.length !== streamTimed ||
+		(!value.stream.complete && streamTimed === measurements.length))
 		throw new Error("REGEX_BUDGET_REPORT_INVALID");
 
 	for (const violation of value.lint_violations) {

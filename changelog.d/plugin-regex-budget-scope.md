@@ -1,0 +1,1 @@
+`omp-kit apply plugin --regex-budget-report` now accepts real `scripts/regex-budget.ts` reports in which file-scoped conditions carry no Bash stream timing; previously every real report failed `REGEX_BUDGET_REPORT_INVALID`. The stream summary must still list every timed condition exactly once, and malformed timings are still rejected.

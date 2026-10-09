@@ -191,6 +191,55 @@ test("regex-budget output rejects missing reports and passes with no exclusions"
 	]));
 	expect(result.excluded_rules).toEqual([]);
 });
+
+// Captured from `bun scripts/regex-budget.ts` on the shipped kit rules (v0.2.15): 50 conditions, 25 of them
+// file-scoped and therefore untimed on the Bash stream. Per-sample timings were dropped and the OMP source and
+// stream file paths replaced with placeholders; every field the analyzer reads is as the tool emitted it.
+const realReport = readFileSync(join(import.meta.dir, "../fixtures/regex-budget/kit-0.2.15-pass.out"), "utf8");
+type RealMeasurement = { rule: string; condition_index: number; stream_ms?: unknown };
+type RealReport = { stream: { complete: boolean; total_ms: number; by_rule: Array<{ rule: string; condition_index: number; ms: number }> }; measurements: RealMeasurement[] };
+const tamperedRealReport = (edit: (report: RealReport) => void): string => {
+	const line = realReport.split("\n").find(entry => entry.startsWith("JSON_REPORT="));
+	if (!line) throw new Error("fixture JSON_REPORT missing");
+	// The fixture is the tool's own output; the first test pins the fields these edits rely on.
+	const report = JSON.parse(line.slice("JSON_REPORT=".length)) as RealReport;
+	edit(report);
+	return "JSON_REPORT=" + JSON.stringify(report) + "\n";
+};
+
+test("regex-budget output from the real tool passes when file-scoped conditions carry no stream timing", () => {
+	const parsed = JSON.parse(tamperedRealReport(() => {}).slice("JSON_REPORT=".length)) as RealReport;
+	expect(parsed.measurements.length).toBe(50);
+	expect(parsed.measurements.filter(item => item.stream_ms === undefined).length).toBe(25);
+	expect(parsed.stream.complete).toBe(true);
+	expect(parsed.stream.by_rule.length).toBe(25);
+	expect(analyzeRegexBudgetOutput(realReport)).toMatchObject({ status: "PASS", excluded_rules: [], stream_budget_ms: 500 });
+});
+
+test("regex-budget output still rejects a Bash-timed condition missing from by_rule or a malformed timing", () => {
+	// Drop one timed (Bash-scoped) condition from by_rule while keeping total_ms consistent with the rest.
+	expect(() => analyzeRegexBudgetOutput(tamperedRealReport(report => {
+		const dropped = report.stream.by_rule.pop();
+		if (!dropped) throw new Error("fixture by_rule empty");
+		report.stream.total_ms -= dropped.ms;
+	}))).toThrow("REGEX_BUDGET_REPORT_INVALID");
+	// Listing one timed condition twice in place of another cannot stand in for it.
+	expect(() => analyzeRegexBudgetOutput(tamperedRealReport(report => {
+		const [first, second] = report.stream.by_rule;
+		if (!first || !second) throw new Error("fixture by_rule too short");
+		report.stream.by_rule[1] = { ...first };
+		report.stream.total_ms += first.ms - second.ms;
+	}))).toThrow("REGEX_BUDGET_REPORT_INVALID");
+	const timed = (report: RealReport): RealMeasurement => {
+		const found = report.measurements.find(item => item.stream_ms !== undefined);
+		if (!found) throw new Error("fixture has no timed condition");
+		return found;
+	};
+	for (const bad of ["5", -1, null]) {
+		expect(() => analyzeRegexBudgetOutput(tamperedRealReport(report => { timed(report).stream_ms = bad; })))
+			.toThrow("REGEX_BUDGET_REPORT_INVALID");
+	}
+});
 test("runtime budget exclusions affect named profiles only and preserve user-disabled rules", () => {
 	const output = budgetReport("FAIL", { complete: true, total_ms: 250, budget_ms: 500,
 		by_rule: [{ rule: "rule-a", condition_index: 0, ms: 250 }] }, [
