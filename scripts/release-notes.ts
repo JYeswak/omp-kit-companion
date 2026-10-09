@@ -207,8 +207,15 @@ function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseT
 		if (!fragment && !line && !releasedPrs.has(pr))
 			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased`);
 	}
+	// Allow cleanup of fragments whose PRs are recorded in the base tag; unknown references still fail.
+	const baseReleaseSection = readUnreleasedSection(gitRaw(["show", `${base}:CHANGELOG.md`]));
+	const baseReleasedPrs = new Set<string>();
+	for (const line of baseReleaseSection.lines.slice(baseReleaseSection.nextHeadingIndex + 1)) {
+		for (const match of line.matchAll(/\(PR #(\d+)\)/g)) baseReleasedPrs.add(match[1]!);
+	}
+
 	for (const fragment of fragments) {
-		if (fragment.pr && !seenPrs.has(fragment.pr))
+		if (fragment.pr && !seenPrs.has(fragment.pr) && !baseReleasedPrs.has(fragment.pr))
 			fail(`fragment ${fragment.path} references PR #${fragment.pr}, absent from ${baseTag}..${headRef}`);
 	}
 	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, fragments);
@@ -230,6 +237,9 @@ function collectDirectCommitCoverage(
 		const parents = fields[index + 1]!.trim().split(/\s+/).filter(Boolean);
 		const body = fields[index + 2]!;
 		if (!hash || parents.length !== 1) continue;
+		const subject = body.split("\n", 1)[0]?.trimEnd() ?? "";
+		const squashPr = subject.match(/\(#(\d+)\)$/)?.[1];
+		if (squashPr && fragments.some(fragment => fragment.pr === squashPr)) continue;
 		const changedPaths = git([
 			"diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", hash,
 		]).split(/\r?\n/).filter(Boolean);

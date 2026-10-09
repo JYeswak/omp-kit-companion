@@ -1,1 +1,1 @@
-- `planning score` counts `plan(<mission>): review round N [level]` commits: one trailing commit-msg verification-level tag is stripped before matching, so hook-compliant review commits are no longer scored as zero rounds. (PR #64) (commit 2608bb6)
+- `planning score` counts `plan(<mission>): review round N [level]` commits: one trailing commit-msg verification-level tag is stripped before matching, so hook-compliant review commits are no longer scored as zero rounds. (PR #64)
