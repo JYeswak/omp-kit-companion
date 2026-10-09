@@ -52,7 +52,7 @@ Bun runs and compiles the TypeScript CLI (`bun build --compile`, embedded runtim
 
 ### Key Dependencies
 
-- OMP (oh-my-pi), any current release: the kit tests against whatever the operator installed. CI installs only the two versions in `scripts/omp-compat.json` (`minimum` and `certified`), never npm latest. The hourly `.github/workflows/omp-certify.yml` certifies each new npm latest through one PR that bumps `certified`, adds reviewed memory source hashes, runs `ci.yml` on that commit and regenerates the first-fire/default-policy differential in the README-linked `docs/omp-compatibility.md` table (see CONTRIBUTING.md, "OMP tracks").
+- OMP (oh-my-pi), any current release: CI installs only pinned `minimum` and `certified` versions, never npm `latest`. The hourly `.github/workflows/omp-certify.yml` tests each new npm latest and merges only after two independent reviews from different model families of changed pinned-source files plus green suites and differential; unqualified candidates get an `agent-fix` issue. See CONTRIBUTING.md, "OMP tracks".
 - `typescript-language-server` for the LSP readiness probe (CI installs it; operators keep their own).
 
 ## Code Editing Discipline

@@ -1,0 +1,1 @@
+- OMP certification now requires two independent agent reviews from different model families for changed pinned-source tuples; unqualified or failed candidates receive an `agent-fix` issue. (PR #72)
