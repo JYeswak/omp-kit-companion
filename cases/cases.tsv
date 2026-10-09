@@ -395,3 +395,32 @@ kit-no-shared-merge	quiet	tool	bash	-	omp-kit send omp-test %54 "beads-br still 
 kit-no-shared-merge	quiet	tool	bash	-	ntm send omp-test --panes=%54 "git pull --rebase"	git words are quoted message content, not a git command
 kit-no-shared-merge	quiet	tool	bash	-	echo "git pull --rebase"	git words are quoted output text, not a git command
 kit-no-shared-merge	quiet	tool	bash	-	br comments add core8-test "git pull --rebase"	git words are quoted comment content, not a git command
+kit-skill-forbidden-instruction	fire	tool	write	skills/worker-orchestration/SKILL.md	ntm spawn myproject --cc=2 --pi=1 --cod=1 --worktrees --stagger-mode=smart	worker-orchestration 357048e0^:354 teaches --worktrees
+kit-skill-forbidden-instruction	fire	tool	write	skills/worker-orchestration/SKILL.md	| Start session | `ntm spawn proj --cc=2 --pi=1 --worktrees` |	worker-orchestration 357048e0^:390 table row
+kit-skill-forbidden-instruction	fire	tool	write	skills/worker-orchestration/SKILL.md	| Close bead | `br close ID --reason "done"` |	worker-orchestration 357048e0^:395 bare-word close
+kit-skill-forbidden-instruction	fire	tool	write	skills/worker-orchestration/SKILL.md	ntm send SESSION --pane N "Run \`bd show ID\`. Do the work described. Close with \`bd close ID --reason 'done'\`."	worker-orchestration 357048e0^:122 escaped quote inside send
+kit-skill-forbidden-instruction	fire	tool	write	skills/beads-br/SKILL.md	## Session Ending Pattern\n\n```bash\ngit pull --rebase\nbr sync --flush-only	beads-br 909cb795^:111 git pull --rebase
+kit-skill-forbidden-instruction	fire	tool	write	skills/beads-br/SKILL.md	br close bd-123 --reason "Completed"	beads-br 909cb795^:104 bare-word close
+kit-skill-forbidden-instruction	fire	tool	edit	skills/beads-br/SKILL.md	br close <id> --reason "Done"        # Complete	beads-br COMMANDS line via edit
+kit-skill-forbidden-instruction	fire	tool	write	skills/coo-dispatch/references/landing.md	2. Rebase: `git fetch origin && git rebase origin/main`	skills/**/*.md reference teaches git rebase
+kit-skill-forbidden-instruction	fire	tool	write	skills/x/SKILL.md	git stash\ngit pull	bare git stash creates a stash
+kit-skill-forbidden-instruction	fire	tool	write	skills/x/SKILL.md	git stash push -m "wip"	git stash push
+kit-skill-forbidden-instruction	fire	tool	write	skills/x/SKILL.md	git worktree add ../wt main	git worktree add
+kit-skill-forbidden-instruction	fire	tool	write	skills/x/SKILL.md	git -C repo stash -u\n	git -C path stash with a flag
+kit-skill-forbidden-instruction	fire	tool	write	skills/x/SKILL.md	br close X --reason fixed\n	unquoted bare-word reason
+kit-skill-forbidden-instruction	quiet	tool	write	skills/worker-orchestration/SKILL.md	# No --worktrees: fleet rule is one canonical checkout on main (~/.agents/AGENTS.md "Working").	worker-orchestration after:355 forbids the flag
+kit-skill-forbidden-instruction	quiet	tool	write	skills/worker-orchestration/SKILL.md	| Start session | `ntm spawn proj --cc=2 --pi=1` (no worktrees) |	worker-orchestration after:392 no flag
+kit-skill-forbidden-instruction	quiet	tool	write	skills/worker-orchestration/SKILL.md	| Close bead (director only, after re-running the worker's check) | `br close ID --reason "<command> -> <result>; commit <sha>"` |	worker-orchestration after:397 evidence-shaped reason
+kit-skill-forbidden-instruction	quiet	tool	write	skills/beads-br/SKILL.md	# Shared checkout on main: never rebase, stash or `git add .beads/` wholesale (other agents' rows live there).	beads-br after:111 forbids rebase and stash
+kit-skill-forbidden-instruction	quiet	tool	write	skills/beads-br/SKILL.md	br close bd-123 --reason "<command> -> <result>; commit <sha>"   # director/verifier, with evidence	beads-br after:104 evidence-shaped reason
+kit-skill-forbidden-instruction	quiet	tool	write	skills/git-stash-janitor/subagents/keeper-applier.md	- **Never use `git stash pop` or `git stash apply`.** Always `git apply --3way` against the bundle's diff.	git-stash-janitor keeper-applier:42 never git stash pop
+kit-skill-forbidden-instruction	quiet	tool	write	skills/git-repo-janitor/references/INCIDENT-PLAYBOOK.md	5. Never `git stash` the agent's changes. Never `git restore`. Never `git checkout --`.	git-repo-janitor INCIDENT-PLAYBOOK:305 negation before a stash creation
+kit-skill-forbidden-instruction	quiet	tool	write	skills/pr/SKILL.md	| PR shows unexpected commits | Branch cut from a stale base | Rebase onto current `main` before creating |	pr:204 prose rebase, no git command
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	⛔ `git stash` IS NEVER THE ALTERNATIVE	stop mark before the act
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	git rebase --abort\n	abort leaves a rebase
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	git stash list\ngit stash drop stash@{3}\n	managing existing stashes
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	git pull --rebase=false origin main\n	rebase explicitly off
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	ntm spawn proj --no-worktrees --cc=2	negated flag
+kit-skill-forbidden-instruction	quiet	tool	write	notes/fleet.md	git stash\ngit pull --rebase\n	same text outside skill files
+kit-skill-forbidden-instruction	quiet	tool	bash	-	git stash\n	bash is out of scope
+kit-skill-forbidden-instruction	quiet	tool	write	skills/x/SKILL.md	br close X --reason "done: cargo test -> 41 passed; commit 3f9a2c1"	evidence after the word done
