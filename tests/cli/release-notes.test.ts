@@ -204,6 +204,22 @@ test("release check rejects a merged PR without a fragment or tagged Unreleased 
 	expect(missing.output).toContain("merged PR #58 has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased");
 });
 
+test("a single-parent squash PR is covered by its PR fragment", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+
+	const squashTree = treeWithFiles(releaseHead, {
+		"src/squashed.ts": "squashed source change\n",
+		"changelog.d/squash-pr.md": "- The squash is documented. (PR #58)\n",
+	});
+	const squashCommit = commitTree(squashTree, [releaseHead], "Implement squashed change (#58)", []);
+	git("update-ref", "refs/heads/main", squashCommit);
+
+	const covered = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(covered.exitCode, covered.output).toBe(0);
+	expect(covered.output).toContain("PR #58 covered by changelog.d/squash-pr.md");
+});
+
 test("release check requires direct main-commit fragments or a reasoned waiver", () => {
 	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
 	git("update-ref", "refs/heads/main", releaseHead);

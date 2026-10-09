@@ -230,6 +230,9 @@ function collectDirectCommitCoverage(
 		const parents = fields[index + 1]!.trim().split(/\s+/).filter(Boolean);
 		const body = fields[index + 2]!;
 		if (!hash || parents.length !== 1) continue;
+		const subject = body.split("\n", 1)[0]?.trimEnd() ?? "";
+		const squashPr = subject.match(/\(#(\d+)\)$/)?.[1];
+		if (squashPr && fragments.some(fragment => fragment.pr === squashPr)) continue;
 		const changedPaths = git([
 			"diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", hash,
 		]).split(/\r?\n/).filter(Boolean);

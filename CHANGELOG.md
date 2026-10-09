@@ -6,27 +6,27 @@
 
 ## 0.2.14 — 2026-10-09
 
-- Re-release of the 0.2.13 content below: the v0.2.13 tag's release-notes check counted its own release PR (#78) as uncovered, so its release workflow could not pass.
+- Re-release of the 0.2.13 content below: the v0.2.13 tag's release-notes check counted its own release PR (#78) as uncovered, so its release workflow could not pass. (PR #77) (PR #78)
 
 ## 0.2.13 — 2026-10-09
 
-- CI now tests OMP `minimum` and `certified` from `scripts/omp-compat.json` (certified 18.7.0) and never npm latest, so an OMP release can no longer turn `main` red. The hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new npm latest through one PR: it hashes and diffs the pinned memory sources, gets a model verdict on each changed file, runs the full `ci.yml` on the candidate commit, and auto-merges only when everything passed and no memory semantics changed. (PR #67) (commit 426b25f)
+- CI now tests OMP `minimum` and `certified` from `scripts/omp-compat.json` (certified 18.7.0) and never npm latest, so an OMP release can no longer turn `main` red. The hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new npm latest through one PR: it hashes and diffs the pinned memory sources, gets a model verdict on each changed file, runs the full `ci.yml` on the candidate commit, and auto-merges only when everything passed and no memory semantics changed. (PR #67)
 
-- Memory readiness and the private memory audit recognize the reviewed OMP 18.8.0-18.8.6 source hashes (two `config/settings.ts` fingerprints, two pi-mnemopi audit tuples), so `doctor memory` on current OMP reports on-disk OFF instead of UNVERIFIED and native certification on OMP latest no longer refuses; any other changed source byte still refuses. (PR #65) (commit 1a1a9e5)
+- Memory readiness and the private memory audit recognize the reviewed OMP 18.8.0-18.8.6 source hashes (two `config/settings.ts` fingerprints, two pi-mnemopi audit tuples), so `doctor memory` on current OMP reports on-disk OFF instead of UNVERIFIED and native certification on OMP latest no longer refuses; any other changed source byte still refuses. (PR #65)
 
-- `planning score` counts `plan(<mission>): review round N [level]` commits: one trailing commit-msg verification-level tag is stripped before matching, so hook-compliant review commits are no longer scored as zero rounds. (PR #64) (commit 2608bb6)
+- `planning score` counts `plan(<mission>): review round N [level]` commits: one trailing commit-msg verification-level tag is stripped before matching, so hook-compliant review commits are no longer scored as zero rounds. (PR #64)
 
 - GH3: warn on long-running GitHub Actions run polling; use the shared cached `ci status` path instead. (PR #66)
 
 - Main CI and native certification install OMP 18.8.6, certified by omp-certify. (PR #68)
 
-- COMMIT1's pre-push bead check now validates commits reachable from the pushed tip but not from `origin/*`, so already-landed main commits do not cause false refusals after squash merges; new bead-less commits still refuse. (PR #75) (commit ec641d3)
+- COMMIT1's pre-push bead check now validates commits reachable from the pushed tip but not from `origin/*`, so already-landed main commits do not cause false refusals after squash merges; new bead-less commits still refuse. (PR #75)
 
-- OMP certification now requires two independent agent reviews from different model families for changed pinned-source tuples; unqualified or failed candidates receive an `agent-fix` issue. (PR #74) (commit a955410)
+- OMP certification now requires two independent agent reviews from different model families for changed pinned-source tuples; unqualified or failed candidates receive an `agent-fix` issue. (PR #74)
 
-- Added a session-stop save guard that attributes successful `write`, `edit`, and applied `ast_edit` paths to the current session. It blocks twice for owned dirty paths or session-owned unpushed commits, then emits one warning; foreign dirty, ignored, and `var/agent-tmp/` paths stay silent, with `session_shutdown` retained as a backstop. (PR #76) (commit bbabd3c)
+- Added a session-stop save guard that attributes successful `write`, `edit`, and applied `ast_edit` paths to the current session. It blocks twice for owned dirty paths or session-owned unpushed commits, then emits one warning; foreign dirty, ignored, and `var/agent-tmp/` paths stay silent, with `session_shutdown` retained as a backstop. (PR #76)
 
-- The pre-push fresh gate no longer refuses a push range that deletes a test suite or shell script. Focused selection used `git diff --name-only`, which also lists deleted paths, so it ran `bun test` (or `shellcheck`) on a file that no longer existed and went RED. Deleted suites and shell files are now reported as not run; suites that the range modified still run. (PR #71) (commit 9bdacb1)
+- The pre-push fresh gate no longer refuses a push range that deletes a test suite or shell script. Focused selection used `git diff --name-only`, which also lists deleted paths, so it ran `bun test` (or `shellcheck`) on a file that no longer existed and went RED. Deleted suites and shell files are now reported as not run; suites that the range modified still run. (PR #71)
 
 Add scratch-is-not-a-home to keep durable instructions and rerunnable artifacts out of var/agent-tmp; preserve throwaway output there.
 
