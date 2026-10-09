@@ -64,6 +64,7 @@ import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
+import { inspectFleetScope, liveFleetIo } from "./fleet-flywheel-doctor.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
@@ -514,6 +515,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 		const scope = request.flags.get("--scope");
 		if (scope === "dicklesworthstone") {
 			findings = [await inspectDicklesworthstone()];
+		} else if (scope === "fleet") {
+			findings = inspectFleetScope(liveFleetIo());
 		} else if (scope === "reservations") {
 			findings = [inspectReservationAge(request)];
 		} else if (scope === "github") {
