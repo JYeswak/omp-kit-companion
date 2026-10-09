@@ -18,7 +18,7 @@ sh installer/install.sh --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "
 
 Needs an existing OMP install plus Python 3, git, and curl. The installer
 fetches only the selected platform archive, checks its hash, and never
-installs OMP, models, profiles, or shell edits. v0.2.13 is the latest
+installs OMP, models, profiles, or shell edits. v0.2.14 is the latest
 published release. To upgrade from any earlier version, set `KIT_VERSION` to
 the destination release and run the installer commands above. Binaries from
 v0.2.0 and v0.2.1 embed fixed test counts, so `update --apply` refuses a target
@@ -29,7 +29,7 @@ real HOME. If an earlier attempt left a pending update,
 previous release and clears it.
 
 The rules themselves can also come straight through OMP's plugin loader:
-`omp plugin install github:JYeswak/omp-kit-companion#v0.2.13`. See
+`omp plugin install github:JYeswak/omp-kit-companion#v0.2.14`. See
 [docs/usage.md](docs/usage.md) for how plugin rules rank against native and
 `~/.agents/rules` copies. An automated move off existing copies is still to come.
 

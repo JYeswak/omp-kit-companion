@@ -4,6 +4,10 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.14 — 2026-10-09
+
+- Re-release of the 0.2.13 content below: the v0.2.13 tag's release-notes check counted its own release PR (#78) as uncovered, so its release workflow could not pass.
+
 ## 0.2.13 — 2026-10-09
 
 - CI now tests OMP `minimum` and `certified` from `scripts/omp-compat.json` (certified 18.7.0) and never npm latest, so an OMP release can no longer turn `main` red. The hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new npm latest through one PR: it hashes and diffs the pinned memory sources, gets a model verdict on each changed file, runs the full `ci.yml` on the candidate commit, and auto-merges only when everything passed and no memory semantics changed. (PR #67) (commit 426b25f)
