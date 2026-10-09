@@ -64,7 +64,7 @@ import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { auditReservationAge } from "./reservation-age.ts";
-import { inspectFleetScope, liveFleetIo } from "./fleet-flywheel-doctor.ts";
+import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
@@ -2459,6 +2459,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			lock.release();
 			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
 		}
+		if (job.name === "fleet-flush") {
+			const report = flushPending(liveFleetIo(), true);
+			try { logFlushReport(join(home, ".local", "state", "omp-kit", "fleet-flush.jsonl"), report, Date.now()); } catch {}
+			lock.release();
+			return { code: report.overall === "UNAVAILABLE" ? 3 : 0, data: { job: job.name, ...report }, verification: "UNVERIFIED" };
+		}
 		if (job.name === "fleet-watch") {
 			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
 			if (!existsSync(configPath)) { lock.release(); return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled."); }
@@ -2958,6 +2964,13 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
  	return { code: 0, data: { overall: data.overall, stale_after_ms: data.stale_after_ms, repos: data.repos }, verification: "UNVERIFIED" };
  }
  registerCommandHandler("ci status", ciStatusCommand);
+async function fleetCommand(request: ParsedCommand): Promise<CliResult> {
+	if (request.command.name !== "flush-pending") return refusal("UNKNOWN_FLEET_COMMAND", `Unknown fleet subcommand: ${request.command.name}`, "Run omp-kit help fleet for exact grammar.");
+	const report = flushPending(liveFleetIo(), request.flags.has("--apply"));
+	if (report.overall === "UNAVAILABLE") return { code: 3, data: report, errors: [{ code: "TMUX_UNAVAILABLE", message: "No live tmux server answered list-panes", remediation: "Run on the fleet host; set TMUX_TMPDIR when the fleet uses a private socket directory." }], verification: "UNVERIFIED" };
+	return { code: report.panes.some((pane) => pane.result === "STILL_STUCK") ? 1 : 0, data: report, verification: report.applied ? "PERFORMED" : "UNVERIFIED" };
+}
+registerCommandHandler("fleet flush-pending", fleetCommand);
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 	const scope = "kit";
 	const applying = request.flags.has("--apply");

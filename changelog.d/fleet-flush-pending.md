@@ -1,0 +1,6 @@
+- `omp-kit doctor --scope fleet` adds three rows. All three are report-only and never send keys:
+  - `STUCK_PENDING`: an omp pane with no spinner, idle at least 60 s by its session transcript, that shows OMP's queued-messages band (`Steering · N` / `After yield · N` … `└ ⌥↑ to edit`) or text in its composer.
+  - `STALE_STEER`: a band still shown while a live turn has run at least 5 minutes.
+  - `FROZEN_TURN`: a spinner glyph over a session transcript untouched for 10 minutes and a screen identical across two captures 60 s apart.
+- New `omp-kit fleet flush-pending [--apply --yes]` plans by default. With apply it sends exactly one remedy: Alt+Up then Enter, only to an idle pane whose band sits over an empty composer, after re-reading the pane. It then reports STARTED (a spinner appeared within 15 s) or STILL_STUCK. Every other pane is reported and never sent keys, including composers holding a `[kit-send-…]` marker, human drafts, busy panes and frozen panes.
+- New service job `fleet-flush` runs `flush-pending --apply` every 60 s. Install with `omp-kit service install fleet-flush --apply --yes`; undo with `service uninstall fleet-flush --apply --yes`. Runs that find something append to `~/.local/state/omp-kit/fleet-flush.jsonl`.

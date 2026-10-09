@@ -280,6 +280,10 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 	expired: { type: "array", items: { type: "object" } },
 	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
 } };
+const flushPendingData: DataSchema = { type: "object", required: ["overall", "applied", "panes", "stale_steer", "frozen_turn"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE"] }, applied: { type: "boolean" },
+	panes: { type: "array", items: { type: "object" } }, stale_steer: { type: "array", items: { type: "object" } }, frozen_turn: { type: "array", items: { type: "object" } },
+} };
 const ciStatusData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "UNAVAILABLE"] },
 	stale_after_ms: { type: "number" },
@@ -545,6 +549,9 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
 		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
 	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+	{ name: "fleet", description: "Act on the live tmux fleet", usage: "fleet flush-pending [--apply --yes]", flags: [], subcommands: [
+		{ name: "flush-pending", description: "Find idle omp panes holding a queued band or composer text, and turns showing a band for 5+ min or frozen (spinner over an unchanged screen). Plan by default; --apply only sends Alt+Up then Enter to an idle pane whose queued band sits over an empty composer; everything else, busy and frozen panes included, is reported and never sent keys", usage: "fleet flush-pending [--apply --yes]", flags: planApply, example: "omp-kit fleet flush-pending --json", runnable: false, mutation: true, dataSchema: flushPendingData },
+	], example: "omp-kit fleet flush-pending --json", runnable: false, dataSchema: flushPendingData },
 	{ name: "ci", description: "Read-only CI status over tracked repos; never dispatches or reruns", usage: "ci status", flags: [], subcommands: [
 		{ name: "status", description: "Show cached CI status per repo; UNAVAILABLE when the cache is missing or stale", usage: "ci status", flags: [], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
 	], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
