@@ -4,6 +4,33 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.13 — 2026-10-09
+
+- CI now tests OMP `minimum` and `certified` from `scripts/omp-compat.json` (certified 18.7.0) and never npm latest, so an OMP release can no longer turn `main` red. The hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new npm latest through one PR: it hashes and diffs the pinned memory sources, gets a model verdict on each changed file, runs the full `ci.yml` on the candidate commit, and auto-merges only when everything passed and no memory semantics changed. (PR #67) (commit 426b25f)
+
+- Memory readiness and the private memory audit recognize the reviewed OMP 18.8.0-18.8.6 source hashes (two `config/settings.ts` fingerprints, two pi-mnemopi audit tuples), so `doctor memory` on current OMP reports on-disk OFF instead of UNVERIFIED and native certification on OMP latest no longer refuses; any other changed source byte still refuses. (PR #65) (commit 1a1a9e5)
+
+- `planning score` counts `plan(<mission>): review round N [level]` commits: one trailing commit-msg verification-level tag is stripped before matching, so hook-compliant review commits are no longer scored as zero rounds. (PR #64) (commit 2608bb6)
+
+- GH3: warn on long-running GitHub Actions run polling; use the shared cached `ci status` path instead. (PR #66)
+
+- Main CI and native certification install OMP 18.8.6, certified by omp-certify. (PR #68)
+
+- COMMIT1's pre-push bead check now validates commits reachable from the pushed tip but not from `origin/*`, so already-landed main commits do not cause false refusals after squash merges; new bead-less commits still refuse. (PR #75) (commit ec641d3)
+
+- OMP certification now requires two independent agent reviews from different model families for changed pinned-source tuples; unqualified or failed candidates receive an `agent-fix` issue. (PR #74) (commit a955410)
+
+- Added a session-stop save guard that attributes successful `write`, `edit`, and applied `ast_edit` paths to the current session. It blocks twice for owned dirty paths or session-owned unpushed commits, then emits one warning; foreign dirty, ignored, and `var/agent-tmp/` paths stay silent, with `session_shutdown` retained as a backstop. (PR #76) (commit bbabd3c)
+
+- The pre-push fresh gate no longer refuses a push range that deletes a test suite or shell script. Focused selection used `git diff --name-only`, which also lists deleted paths, so it ran `bun test` (or `shellcheck`) on a file that no longer existed and went RED. Deleted suites and shell files are now reported as not run; suites that the range modified still run. (PR #71) (commit 9bdacb1)
+
+Add scratch-is-not-a-home to keep durable instructions and rerunnable artifacts out of var/agent-tmp; preserve throwaway output there.
+
+RX1 permits the exact `[\s\S]` all-character condition only for literal-discriminated `tool:write`/`tool:edit` scopes below `var/agent-tmp`. It remains measured for near-miss cost, and file-only scopes do not count against the Bash stream budget; broad or unscoped match-any conditions remain rejected.
+Bundled TTSR checks preserve the logical workspace root across isolated execution, preventing `var/agent-tmp` release-fixture paths from being mistaken for source scratch paths.
+
+- `omp-kit send` no longer reports OK when the message sits unsubmitted in the recipient's input box: it presses Enter once and reports OK only when the marker appears above the box, otherwise `PENDING_SUBMIT`. (commit b3cda9a)
+
 ## 0.2.12 — 2026-10-07
 
 - SBOM attestation separates the platform-specific workflow artifact name from the local SPDX JSON path consumed by attest-sbom; the proof-derived matrix rejects unapproved platform identities while preserving the certified subset.
