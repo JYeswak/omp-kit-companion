@@ -8,17 +8,20 @@ name: OMP certification
 #   detect        npm latest vs `certified`; quiet exit when equal or when a PR already covers this
 #                 release and these source pins (dispatch with force to re-run)
 #   differential  first-fire/default-policy differential across the latest three stable releases
-#   prepare       npm-pack certified and latest, hash every pinned memory source, diff each changed pin
-#                 against the certified bytes, ask a CheaperInference model whether memory semantics
-#                 changed, bump `certified` plus only the pins the review allows, push omp-certify/<version>,
-#                 open or update its PR and close older omp-certify/* PRs as superseded
+#   prepare       npm-pack certified and latest, hash every pinned memory source and check each
+#                 candidate tuple against main. For changed files in tuples not on main, run two
+#                 independent agent passes from different model families; both must cite changed
+#                 diff lines and qualify the file. Bump `certified` and add only qualified tuples,
+#                 push omp-certify/<version>, open or update its PR, and close older `omp-certify/*` PRs as superseded
 #   suites        ci.yml (full set) on that exact commit; PRs opened with GITHUB_TOKEN trigger no other
 #                 workflow, so the evidence is produced here and written into the PR
-#   publish       PR body with findings; squash-merge of the tested head (auto-merge, else a direct merge
-#                 pinned by --match-head-commit) only when suites and differential are green and no changed
-#                 pin was judged a memory-semantic change; otherwise, or on any publish failure, needs-human
-# CHEAPER_INFERENCE_API_KEY (secret) is optional: without it the run reports "no model review" and the PR
-# needs a human. OMP_REVIEW_MODEL (variable) pins a catalog model id; it is refused unless GET /v1/models lists it.
+#   publish       merge the tested head only when suites and differential are green and every pinned
+#                 source tuple is already on main or qualified by both agent passes; otherwise keep
+#                 the PR open, label it `agent-fix`, and create or update one open agent-fix issue.
+#                 A publish failure also labels the PR and creates or updates that issue.
+# CHEAPER_INFERENCE_API_KEY (secret) is optional: without it, changed tuples absent from main cannot qualify.
+# OMP_REVIEW_MODEL and OMP_REVIEWER_MODEL (variables) pin catalog ids; both must be listed by
+# GET /v1/models and come from different model families.
 on:
   schedule:
     - cron: "41 * * * *"
@@ -197,12 +200,13 @@ jobs:
         env:
           CHEAPER_INFERENCE_API_KEY: ${{ secrets.CHEAPER_INFERENCE_API_KEY }}
           OMP_REVIEW_MODEL: ${{ vars.OMP_REVIEW_MODEL }}
+          OMP_REVIEWER_MODEL: ${{ vars.OMP_REVIEWER_MODEL }}
           OMP_REVIEW_MAX_PRICE: ${{ vars.OMP_REVIEW_MAX_PRICE }}
         run: |
           mkdir -p "$RUNNER_TEMP/findings"
           bun scripts/omp-certify.ts review --from "$CERTIFIED" --to "$LATEST" --work "$RUNNER_TEMP/omp-certify" --out "$RUNNER_TEMP/findings/review.json"
       - name: Bump certified and add only the source pins the review allows
-        run: bun scripts/omp-certify.ts apply --review "$RUNNER_TEMP/findings/review.json" --out "$RUNNER_TEMP/findings/apply.json"
+        run: bun scripts/omp-certify.ts apply --review "$RUNNER_TEMP/findings/review.json"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         continue-on-error: true
         with:
@@ -312,19 +316,39 @@ jobs:
           KEY: ${{ needs.detect.outputs.key }}
         run: |
           F="$RUNNER_TEMP/findings"
-          bun scripts/omp-certify.ts body --review "$F/review.json" --apply "$F/apply.json" \
+          bun scripts/omp-certify.ts body --review "$F/review.json" --pr "$PR" \
             --suites-result "$SUITES_RESULT" --suites-jobs "$F/jobs.json" \
             --differential-table "$F/compatibility-table.md" --differential-regressions "$F/compatibility-regressions.json" \
-            --suite-sha "$SHA" --run-url "$RUN_URL" --key "$KEY" --body-out "$F/body.md" --decision-out "$F/decision.json"
+            --suite-sha "$SHA" --run-url "$RUN_URL" --key "$KEY" \
+            --issue-out "$F/issue.json" --body-out "$F/body.md" --decision-out "$F/decision.json"
           cat "$F/body.md" >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish findings, then auto-merge or mark needs-human
+      - name: Publish findings, then merge or route to agent-fix
         shell: bash
         run: |
           set -euo pipefail
           F="$RUNNER_TEMP/findings"
+          marker="<!-- omp-certify-issue version=$LATEST -->"
+          find_agent_fix_issue() {
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body |
+              jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker)) | .number] | first // empty'
+          }
+          upsert_agent_fix_issue() {
+            local title="$1"
+            local body="$2"
+            local existing
+            existing="$(find_agent_fix_issue)"
+            if [[ -n "$existing" ]]; then
+              gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --add-label agent-fix
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label agent-fix
+            fi
+          }
+          gh label create agent-fix --repo "$GITHUB_REPOSITORY" --color F9D0C4 --description "OMP certification needs agent fixes" --force
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$F/body.md"
-          gh label create needs-human --repo "$GITHUB_REPOSITORY" --color B60205 --description "OMP certification needs a human review" --force
           if [[ "$(jq -r .eligible "$F/decision.json")" == true ]]; then
+            if [[ "$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels | any(.name == "agent-fix")')" == true ]]; then
+              gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label agent-fix
+            fi
             body="Automated OMP $LATEST certification: $RUN_URL"$'\n\n'"[no-changelog] release note is changelog.d/omp-certify-$LATEST.md (PR #$PR)"
             # Auto-merge waits for required checks; with none configured GitHub refuses to enable it on a clean
             # PR, so merge directly: every gate already ran in this run and the merge is pinned to the tested head.
@@ -332,17 +356,33 @@ jobs:
                 --subject "[test] Certify OMP $LATEST (#$PR)" --body "$body" &&
               ! gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$SHA" \
                 --subject "[test] Certify OMP $LATEST (#$PR)" --body "$body"; then
-              echo "::error::every check passed but PR #$PR could be neither auto-merged nor merged (repository setting 'Allow auto-merge' or token permissions); a human must merge"
+              echo "::error::every check passed but PR #$PR could be neither auto-merged nor merged (repository setting 'Allow auto-merge' or token permissions)"
               exit 1
             fi
           else
-            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
-            gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto 2>/dev/null || true
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label agent-fix
+            issue_title="$(jq -er .title "$F/issue.json")"
+            issue_body="$(jq -er .body "$F/issue.json")"
+            upsert_agent_fix_issue "$issue_title" "$issue_body"
+            if [[ "$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json autoMergeRequest --jq '.autoMergeRequest != null')" == true ]]; then
+              gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto
+            fi
           fi
-      - name: Mark needs-human when publishing failed
+      - name: Route publish failures to agent-fix issue
         if: failure()
         shell: bash
         run: |
-          gh label create needs-human --repo "$GITHUB_REPOSITORY" --color B60205 --description "OMP certification needs a human review" --force
-          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label needs-human
-          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Certification publishing or merging failed, so a human must finish this PR: $RUN_URL"
+          set -euo pipefail
+          marker="<!-- omp-certify-issue version=$LATEST -->"
+          title="OMP $LATEST: certification publish failed"
+          issue_body="$(printf '%s\n\nCertification publishing failed for PR #%s.\nRun: %s\n' "$marker" "$PR" "$RUN_URL")"
+          gh label create agent-fix --repo "$GITHUB_REPOSITORY" --color F9D0C4 --description "OMP certification needs agent fixes" --force
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label agent-fix
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body |
+            jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker)) | .number] | first // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$issue_body" --add-label agent-fix
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$issue_body" --label agent-fix
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Certification publishing failed; an open agent-fix issue contains the disposition. Run: $RUN_URL"
