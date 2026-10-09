@@ -37,6 +37,11 @@ sh scripts/package-release.sh --version X.Y.Z --platform darwin-arm64-none --out
 Repeat per platform. `release-index.json` lists every archive with its
 sha256; the installer (`installer/install.sh --version X.Y.Z --index URL
 --prefix DIR`) verifies the hash before installing and refuses on mismatch.
+Release candidate indexes contain exactly `darwin-arm64-none`, `linux-arm64-gnu`,
+and `linux-x64-gnu`. `darwin-x64-none` is a non-shipping CI probe and is
+excluded from published indexes and attestations. Release-mode candidate
+generation requires both minimum and certified OMP receipts for all three
+ship targets; a missing or refused ship receipt blocks attestation.
 
 ## 5. Signing (delegated)
 

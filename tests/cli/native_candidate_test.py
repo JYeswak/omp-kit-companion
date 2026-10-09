@@ -17,6 +17,7 @@ with (ROOT / "scripts" / "omp-compat.json").open(encoding="utf-8") as source:
 MINIMUM = COMPAT["minimum"]
 CERTIFIED = COMPAT["certified"]
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
+RELEASE_PLATFORMS = ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")
 PROOF_NAMES = {
     "status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory", "memory_off",
     "mnemopi_manual", "model_roles", "mcp", "mcp_readiness", "project_preflight", "lsp_deep",
@@ -150,6 +151,34 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertNotIn(incomplete, release_index["assets"])
         self.assertNotIn(incomplete, proof["platform_omp_versions"])
         self.assertEqual(set(proof["certified_platforms"]), set(PLATFORMS[1:]))
+
+    def test_release_candidate_refuses_failing_linux_x64_ship_leg(self) -> None:
+        self._write_receipts()
+        receipt_path = self.receipts / "native-receipt-linux-x64-gnu-minimum" / "receipt.json"
+        failed_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        failed_receipt["certified"] = False
+        failed_receipt["failure"] = "planted linux-x64 minimum certification failure"
+        write_json(receipt_path, failed_receipt)
+        args = self._args()
+        args.release = True
+
+        with self.assertRaisesRegex(ValueError, "linux-x64-gnu"):
+            native_candidate.candidate(args)
+
+        self.assertFalse((self.root / "out" / "release-index.json").exists())
+        self.assertFalse((self.root / "out" / "candidate-proof.json").exists())
+
+    def test_release_candidate_excludes_certified_darwin_x64(self) -> None:
+        self._write_receipts()
+        args = self._args()
+        args.release = True
+
+        self.assertEqual(native_candidate.candidate(args), 0)
+        release_index = json.loads((self.root / "out" / "release-index.json").read_text(encoding="utf-8"))
+        proof = json.loads((self.root / "out" / "candidate-proof.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(set(release_index["assets"]), set(RELEASE_PLATFORMS))
+        self.assertEqual(proof["certified_platforms"], list(RELEASE_PLATFORMS))
 
     def test_refusal_detail_names_failing_stage_and_scenarios(self) -> None:
         payload = {

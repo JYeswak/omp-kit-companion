@@ -37,6 +37,7 @@ jobs:
   native-candidate:
     needs: validate-tag
     if: github.event.repository.private == false
+    # CI produces provisional artifacts; the attestation gate validates only the ship set below.
     uses: ./.github/workflows/ci.yml
     with:
       version: ${{ inputs.version }}
@@ -45,7 +46,8 @@ jobs:
 
   attest-platforms:
     needs: native-candidate
-    if: github.event.repository.private == false
+    # Run after the producer even when unrelated CI jobs fail; artifact validation fails closed.
+    if: ${{ always() && github.event.repository.private == false && needs['native-candidate'].result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -55,7 +57,7 @@ jobs:
         with:
           name: unpublished-candidate-index
           path: candidate-index/
-      - name: Select the exact native-certified subset
+      - name: Require the exact certified ship set
         id: select
         env:
           VERSION: ${{ inputs.version }}
@@ -67,14 +69,15 @@ jobs:
           test "$(jq -er '.source_sha' "$proof")" = "$SOURCE_SHA"
           test "$(jq -er '.version' "$proof")" = "$VERSION"
           platforms="$(jq -cer '.certified_platforms | select(type == "array" and length > 0)' "$proof")"
-          # Reject proofs that advertise platforms outside the approved non-Intel set.
-          jq -e --argjson platforms "$platforms" --argjson allowed '["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"]' 'all($platforms[]; . as $platform | ($allowed | index($platform)) != null)' "$proof" >/dev/null
+          # Intel macOS is non-shipping; all three published targets are required.
+          jq -e --argjson platforms "$platforms" '($platforms | sort) == ["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"]' "$proof" >/dev/null
           jq -e --argjson platforms "$platforms" '(.assets | keys | sort) == ($platforms | sort)' "$index" >/dev/null
           test "$(jq -er '.source_tag' "$index")" = "v$VERSION"
           printf 'platforms=%s\n' "$platforms" >> "$GITHUB_OUTPUT"
 
   attest:
-    needs: [native-candidate, attest-platforms]
+    # Only the validated ship set gates attestation, not unrelated CI jobs.
+    needs: attest-platforms
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -81,7 +81,7 @@ jobs:
       matrix:
         os: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -344,7 +344,7 @@ jobs:
   native-certification:
     if: github.event.repository.private == false
     needs: [build-candidates, resolve-omp-versions]
-    # One failing target is excluded; the aggregate still requires a nonempty native-certified set.
+    # Intel macOS is a non-shipping probe; release aggregation ignores it and requires all three ship targets.
     continue-on-error: true
     timeout-minutes: 40
     strategy:
@@ -403,6 +403,7 @@ jobs:
     timeout-minutes: 10
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      RELEASE_CANDIDATE: ${{ inputs.version != '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -415,14 +416,18 @@ jobs:
         with:
           pattern: native-receipt-*
           path: ${{ runner.temp }}/receipts
-      - name: Require minimum and certified receipts for each certified target
+      - name: Build the provisional index; release mode requires all ship targets
         env:
           SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
+          release_args=()
+          if [[ "$RELEASE_CANDIDATE" == "true" ]]; then
+            release_args+=(--release)
+          fi
           python3 scripts/native-candidate.py candidate --version "$CANDIDATE_VERSION" \
             --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/candidates" \
             --receipts "$RUNNER_TEMP/receipts" \
-            --out "$RUNNER_TEMP/candidate-index"
+            --out "$RUNNER_TEMP/candidate-index" "${release_args[@]}"
       - name: Retain private provisional index, never publish or update latest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -14,6 +14,8 @@ import sys
 import tempfile
 
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
+# Intel macOS remains a CI-only probe; release candidates ship these three targets.
+RELEASE_PLATFORMS = ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")
 
 
 def digest(path):
@@ -903,11 +905,13 @@ def candidate(args):
     minimum = required_omp_versions["minimum"]
     certified_omp = required_omp_versions["certified"]
     verified_source(source)
+    release_mode = getattr(args, "release", False)
+    platforms = RELEASE_PLATFORMS if release_mode else PLATFORMS
     assets, certified, platform_omp_versions = {}, [], {}
     required_proofs = {"status", "doctor", "fast", "full", "lsp", "lsp_setup", "memory", "memory_off",
                        "mnemopi_manual", "model_roles", "mcp", "mcp_readiness", "project_preflight", "lsp_deep",
                        "memory_audit", "redactor_warning"}
-    for platform in PLATFORMS:
+    for platform in platforms:
         asset_dir = Path(args.assets) / ("candidate-" + platform)
         asset_path = asset_dir / "asset.json"
         if not asset_path.is_file():
@@ -919,6 +923,10 @@ def candidate(args):
         assets[platform] = asset
         certified.append(platform)
         platform_omp_versions[platform] = versions
+    if release_mode:
+        missing = [platform for platform in platforms if platform not in certified]
+        if missing:
+            raise ValueError("release candidate missing certified ship platform(s): " + ", ".join(missing))
     if not certified:
         raise ValueError(
             "no native-certified platform has both required OMP versions "
@@ -948,6 +956,8 @@ def main():
     candidate_parser = commands.add_parser("candidate")
     for name in ("version", "source-sha", "assets", "receipts", "out"):
         candidate_parser.add_argument("--" + name, required=True)
+    candidate_parser.add_argument("--release", action="store_true",
+                                  help="require the exact native-certified ship platform set")
     args = parser.parse_args()
     try:
         return native(args) if args.command == "native" else candidate(args)
