@@ -1,0 +1,1 @@
+- Squash-merged pull requests are covered by their matching PR changelog fragment; direct commits still need explicit coverage. (PR #79)
