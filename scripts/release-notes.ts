@@ -218,8 +218,11 @@ function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseT
 		if (fragment.pr && !seenPrs.has(fragment.pr) && !baseReleasedPrs.has(fragment.pr))
 			fail(`fragment ${fragment.path} references PR #${fragment.pr}, absent from ${baseTag}..${headRef}`);
 	}
-	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, fragments);
-	return { mergedPrs, fragments, byPr, unreleasedByPr, directCommits };
+	// Do not re-emit historical notes when their fragments are edited after the base release.
+	const currentFragments = fragments.filter(fragment => !fragment.pr || !baseReleasedPrs.has(fragment.pr));
+	for (const pr of baseReleasedPrs) byPr.delete(pr);
+	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, currentFragments);
+	return { mergedPrs, fragments: currentFragments, byPr, unreleasedByPr, directCommits };
 }
 function collectDirectCommitCoverage(
 	git: Git,

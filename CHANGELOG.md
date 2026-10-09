@@ -4,6 +4,35 @@
 
 <!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
 
+## 0.2.15 — 2026-10-09
+
+- Carried stranded companion work onto main (fleet-lessons, lessons, tracker-recovery, watch-actuator, shared-merge rule) with live coverage for kit-no-shared-merge. (PR #77)
+
+- Squash-merged pull requests are covered by their matching PR changelog fragment; direct commits still need explicit coverage. (PR #79)
+
+- Extension apply skips only profiles with existing unresolved imports (and reports the file, line and specifier), while healthy profiles continue; failed postchecks after a new extension name the profile and failing import step after rollback.
+
+- Fleet Watch now persists per-pane idle-check counts, last decisions, and Steering deduplication state in a private atomic state file beside its JSONL log. Busy panes and capture failures reset the persisted idle history.
+
+- x5iv.1: Fleet Watch detects BusyRecovery failure receipts, uses per-flag leases bound to PID/process start and tmux session identity, blocks live or uncertain holders, and logs then recovers stale zero-holder flags. Planted stale-proceeds, live-lease-blocks, and live database-descriptor fixtures run through the Fleet Watch tick.
+
+- Added `omp-kit planning score` for per-mission or fleet scoring from git, beads, and CI evidence; packaged the planning skill and defaults, added repo-level overrides, and made `doctor --scope beads` flag acceptance criteria left in descriptions.
+- Corrected health diagnostics to inspect the optional planning-skill row only in kit scope or when the packaged skill file exists; kept N+2 candidate fixtures aligned with packaged `config/` and `skills/` roots.
+- Added `omp-kit planning convert --plan PATH --mission M --dry-run --db DIR [--json]` to translate fenced plan items into native beads in an isolated database, with parent/plan dependency edges, native lint and cycle results, WHAT-letter coverage, and planning-score metrics.
+- Initialize the isolated native beads workspace with `br init` under its private `.beads/` directory before creating converted beads; this matches pinned br 0.7.4 behavior on Linux.
+
+- SEND1 proven send (part 2): `omp-kit send SESSION PANE MESSAGE` wraps ntm with a marker poll (15 s), one retry and a state-root drop-folder fallback; the exit code is delivery (OK 0, NOT_DELIVERED 1), never the send call.
+- SEND1 composer detection: recognize Claude `❯` input boundaries so submitted messages are not misreported as `PENDING_SUBMIT`.
+
+Added 12 non-blocking kit teach rules for false alarms, negative outcomes, check-ins, fleet gaps, verified sends, acceptance criteria, planning protocol, named subagent models, shared skills, test TMPDIR, GitHub auth, and needless approvals. Each has fire/quiet case coverage and a live scenario.
+
+- RT1 Homebrew formula source of truth: `packaging/homebrew/omp-kit.rb` pinned to the published v0.2.5 archives (per-platform URL+sha256 from release-index.json), with `brew test` on `--version`; CONTRIBUTING Releases gains the per-release refresh step (tap publication gated on the recorded owner). Local `brew audit/test` blocked: this machine's brew crashes in its vendored json gem (all commands); verification needs a healthy runner or the second Mac.
+- Owner gate satisfied 2026-10-06: tap is `JYeswak/homebrew-tap` (`brew install JYeswak/tap/omp-kit`), recorded on the bead; tap repo creation is Josh's. README install section stages the brew line for that name.
+
+- Add eight executable command-substitution fire cases across the Q3 rules, bringing the matcher corpus to 339 rows.
+
+Added Mission Protocol v0.1 validation with canonical SHA-256 registrations, the `omp-kit mission validate` CLI command, and a learning check routed through `omp-kit heavy`.
+
 ## 0.2.14 — 2026-10-09
 
 - Re-release of the 0.2.13 content below: the v0.2.13 tag's release-notes check counted its own release PR (#78) as uncovered, so its release workflow could not pass. (PR #77) (PR #78)

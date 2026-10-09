@@ -234,6 +234,22 @@ test("release check accepts a refreshed fragment for a PR already released at th
 	expect(check.exitCode, check.output).toBe(0);
 });
 
+test("release assembly omits refreshed fragments for PRs in the base tag", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+
+	const refreshedTree = treeWithFiles(releaseHead, {
+		"changelog.d/rz5.50.md": "- REFRESHED PRIOR RELEASE NOTE (PR #50)\n",
+	});
+	const refreshedCommit = commitTree(refreshedTree, [releaseHead], "Refresh an old PR fragment [test]", []);
+	git("update-ref", "refs/heads/main", refreshedCommit);
+
+	const assembled = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD", "--version", "0.2.3", "--date", "2026-10-09", "--output", "assembled.md");
+	expect(assembled.exitCode, assembled.output).toBe(0);
+	const changelog = readFileSync(join(fixture, "assembled.md"), "utf8");
+	expect(changelog).not.toContain("REFRESHED PRIOR RELEASE NOTE");
+	expect(changelog).toContain("Fleet-guard installation skips unmanaged extension collisions");
+});
 test("release check rejects a fragment for an unknown PR", () => {
 	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
 	git("update-ref", "refs/heads/main", releaseHead);
