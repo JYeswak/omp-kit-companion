@@ -1,0 +1,1 @@
+- `omp-kit send` no longer reports OK when the message sits unsubmitted in the recipient's input box: it presses Enter once and reports OK only when the marker appears above the box, otherwise `PENDING_SUBMIT`. (commit b3cda9a)
