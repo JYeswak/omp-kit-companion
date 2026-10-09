@@ -207,8 +207,15 @@ function collectHistory(git: Git, gitRaw: Git, base: string, head: string, baseT
 		if (!fragment && !line && !releasedPrs.has(pr))
 			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased`);
 	}
+	// Allow cleanup of fragments whose PRs are recorded in the base tag; unknown references still fail.
+	const baseReleaseSection = readUnreleasedSection(gitRaw(["show", `${base}:CHANGELOG.md`]));
+	const baseReleasedPrs = new Set<string>();
+	for (const line of baseReleaseSection.lines.slice(baseReleaseSection.nextHeadingIndex + 1)) {
+		for (const match of line.matchAll(/\(PR #(\d+)\)/g)) baseReleasedPrs.add(match[1]!);
+	}
+
 	for (const fragment of fragments) {
-		if (fragment.pr && !seenPrs.has(fragment.pr))
+		if (fragment.pr && !seenPrs.has(fragment.pr) && !baseReleasedPrs.has(fragment.pr))
 			fail(`fragment ${fragment.path} references PR #${fragment.pr}, absent from ${baseTag}..${headRef}`);
 	}
 	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, fragments);

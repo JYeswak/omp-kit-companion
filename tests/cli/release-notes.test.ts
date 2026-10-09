@@ -220,6 +220,35 @@ test("a single-parent squash PR is covered by its PR fragment", () => {
 	expect(covered.output).toContain("PR #58 covered by changelog.d/squash-pr.md");
 });
 
+test("release check accepts a refreshed fragment for a PR already released at the base tag", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+
+	const existingTree = treeWithFiles(releaseHead, {
+		"changelog.d/rz5.50.md": "- Updated published note. (PR #50)\n",
+	});
+	const existingCommit = commitTree(existingTree, [releaseHead], "Refresh PR #50 fragment [test]", []);
+	git("update-ref", "refs/heads/main", existingCommit);
+
+	const check = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(check.exitCode, check.output).toBe(0);
+});
+
+test("release check rejects a fragment for an unknown PR", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+
+	const unknownTree = treeWithFiles(releaseHead, {
+		"changelog.d/unknown-pr.md": "- An unrelated future note. (PR #99)\n",
+	});
+	const unknownCommit = commitTree(unknownTree, [releaseHead], "Add unknown PR fragment [test]", []);
+	git("update-ref", "refs/heads/main", unknownCommit);
+
+	const check = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(check.exitCode).toBe(1);
+	expect(check.output).toContain("fragment changelog.d/unknown-pr.md references PR #99, absent from v0.2.2..HEAD");
+});
+
 test("release check requires direct main-commit fragments or a reasoned waiver", () => {
 	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
 	git("update-ref", "refs/heads/main", releaseHead);
