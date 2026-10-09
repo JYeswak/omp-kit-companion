@@ -178,7 +178,12 @@ gate_focused() {
 			tests/cli/migrate.test.ts)
 				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
 			tests/cli/migrate-history.test.ts|tests/cli/*.test.ts|tests/fleet-guard/*.test.ts)
-				focus_tests="$focus_tests $file" ;;
+				# A range that deletes a suite has nothing to run for it.
+				if [ -e "$ARCHIVE_DIR/$file" ]; then
+					focus_tests="$focus_tests $file"
+				else
+					echo "focused: $file deleted in range; not run"
+				fi ;;
 			src/migrate.ts)
 				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
 			src/kit-update.ts)
@@ -198,7 +203,11 @@ gate_focused() {
 			for file in $CHANGED; do
 				case "$file" in
 					scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
-						shellcheck "$ARCHIVE_DIR/$file" ;;
+						if [ -e "$ARCHIVE_DIR/$file" ]; then
+							shellcheck "$ARCHIVE_DIR/$file"
+						else
+							echo "focused: $file deleted in range; not shellchecked"
+						fi ;;
 				esac
 			done
 		else

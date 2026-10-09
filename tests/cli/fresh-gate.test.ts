@@ -101,6 +101,46 @@ test("scratch skip prints NOT JUDGED while other skips keep SKIPPED", () => {
 	}
 });
 
+test("focused selection skips suites and shell files the range deleted, and still runs modified ones", () => {
+	const script = readFileSync(gate, "utf8");
+	const start = script.indexOf("gate_focused() {");
+	expect(start).toBeGreaterThan(-1);
+	const end = script.indexOf("\n}\n", start);
+	expect(end).toBeGreaterThan(start);
+	const dir = fixture();
+	try {
+		mkdirSync(join(dir, "tests/cli"), { recursive: true });
+		writeFileSync(join(dir, "tests/cli/kept.test.ts"), "");
+		writeFileSync(join(dir, "scripts/kept.sh"), "#!/bin/sh\n");
+		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
+		const fakeBin = join(dir, "bin");
+		mkdirSync(fakeBin);
+		writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\n[ -e \"$1\" ] || { echo \"shellcheck: missing $1\" >&2; exit 2; }\necho \"SHELLCHECK $1\"\n");
+		chmodSync(join(fakeBin, "shellcheck"), 0o755);
+		const probe = join(dir, "focused-probe.sh");
+		writeFileSync(probe, `run_bun_suite() { [ -e "$ARCHIVE_DIR/$1" ] || { echo "bun test: missing $1" >&2; return 1; }; echo "RAN $1"; }\n${script.slice(start, end + 3)}\ngate_focused\n`);
+		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, CHANGED: changed },
+			stdout: "pipe", stderr: "pipe",
+		});
+		const deleted = focused("tests/cli/gone.test.ts\nscripts/gone.sh");
+		const deletedOut = deleted.stdout.toString() + deleted.stderr.toString();
+		expect(deleted.exitCode).toBe(0);
+		expect(deletedOut).not.toContain("missing");
+		expect(deletedOut).toContain("focused: tests/cli/gone.test.ts deleted in range; not run");
+		expect(deletedOut).toContain("focused suites: none selected for changed paths");
+		const mixed = focused("tests/cli/gone.test.ts\ntests/cli/kept.test.ts\nscripts/gone.sh\nscripts/kept.sh");
+		const mixedOut = mixed.stdout.toString() + mixed.stderr.toString();
+		expect(mixed.exitCode).toBe(0);
+		expect(mixedOut).toContain("RAN tests/cli/kept.test.ts");
+		expect(mixedOut).toContain(`SHELLCHECK ${join(dir, "scripts/kept.sh")}`);
+		expect(mixedOut).not.toContain("RAN tests/cli/gone.test.ts");
+		expect(mixedOut).not.toContain("missing");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 
 test("fresh gate selftest refuses a deleted gate function", () => {
 	const dir = fixture();
