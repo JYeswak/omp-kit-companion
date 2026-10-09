@@ -59,6 +59,7 @@ import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, exe
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
+import { runPlanningConvert } from "./planning-convert.ts";
 import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
@@ -172,7 +173,11 @@ function parse(args: readonly string[]): ParseResult {
 		}
 		const [rawName, attached] = token.split("=", 2);
 		const known = [...GLOBAL_FLAGS, ...COMMANDS.flatMap((item) => item.flags), ...COMMANDS.flatMap((item) => item.subcommands?.flatMap((child) => child.flags) ?? [])];
-		const flag = known.find((candidate) => candidate.name === rawName || candidate.aliases?.includes(rawName ?? ""));
+		const matchesFlag = (candidate: Flag): boolean => candidate.name === rawName || candidate.aliases?.includes(rawName ?? "") === true;
+		const commandFlag = parent && command
+			? parent.flags.find(matchesFlag) ?? command.flags.find(matchesFlag)
+			: command?.flags.find(matchesFlag);
+		const flag = commandFlag ?? GLOBAL_FLAGS.find(matchesFlag) ?? known.find(matchesFlag);
 		const name = flag?.name ?? rawName;
 		if (!flag) {
 			const hint = nearest(rawName ?? token, known.flatMap((entry) => [entry.name, ...(entry.aliases ?? [])]));
@@ -2990,6 +2995,21 @@ function planningScoreCommand(request: ParsedCommand): CliResult {
 	return runPlanningScore({ kitRoot, ...(typeof repoFlag === "string" ? { repoPath: repoFlag } : {}), fleet: request.flags.has("--fleet"), cwd: process.cwd(), home: process.env.HOME });
 }
 registerCommandHandler("planning score", planningScoreCommand);
+function planningConvertCommand(request: ParsedCommand): CliResult {
+	const planFlag = request.flags.get("--plan");
+	const missionFlag = request.flags.get("--mission");
+	const databaseFlag = request.flags.get("--db");
+	if (!request.flags.has("--dry-run"))
+		return refusal("DRY_RUN_REQUIRED", "Planning conversion requires --dry-run and never writes to the configured tracker.", "Pass --dry-run and a fresh isolated --db directory.");
+	if (typeof planFlag !== "string" || !planFlag.trim())
+		return refusal("INVALID_FLAG", "--plan requires a non-empty Markdown path", "Use omp-kit planning convert --plan PATH --mission M --dry-run --db DIR.");
+	if (typeof missionFlag !== "string" || !missionFlag.trim())
+		return refusal("INVALID_FLAG", "--mission requires a non-empty slug", "Use omp-kit planning convert --plan PATH --mission M --dry-run --db DIR.");
+	if (typeof databaseFlag !== "string" || !databaseFlag.trim())
+		return refusal("INVALID_FLAG", "--db requires a non-empty isolated directory", "Use a fresh path under var/agent-tmp with an .owner file.");
+	return runPlanningConvert({ planPath: planFlag, mission: missionFlag, dbDir: databaseFlag, cwd: process.cwd() });
+}
+registerCommandHandler("planning convert", planningConvertCommand);
 function missionValidateCommand(request: ParsedCommand): CliResult {
 	const projectFlag = request.flags.get("--project");
 	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
