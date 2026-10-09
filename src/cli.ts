@@ -2570,11 +2570,18 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("INVALID_DROP_DIR", "The drop folder requires a canonical absolute path",
 			"Pass an absolute --drop-dir; nothing was sent.");
 	}
-	const result = await proveSend({ session, pane, message: messageParts.join(" "), dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop") });
-	if (result.status === "OK") {
-		return { code: 0, data: { overall: "OK", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail }, verification: "UNVERIFIED" };
+	const reasonFlag = request.flags.get("--no-bead-reason");
+	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
+		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop") });
+	if (result.status === "BEAD_REQUIRED") {
+		return refusal("BEAD_REQUIRED", "A work dispatch must cite a bead id (kernel inv 4: beads are the execution substrate)",
+			"Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\".");
 	}
-	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail }, verification: "UNVERIFIED",
+	const beads = { bead_ids: result.bead_ids, no_bead_reason: result.no_bead_reason };
+	if (result.status === "OK") {
+		return { code: 0, data: { overall: "OK", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED" };
+	}
+	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail, ...beads }, verification: "UNVERIFIED",
 		errors: [{ code: "NOT_DELIVERED", message: result.detail,
 			remediation: result.drop_path ? `Relay the message manually; the full text is at ${result.drop_path}.` : "Retry the send; no drop file was written." }] };
 }
