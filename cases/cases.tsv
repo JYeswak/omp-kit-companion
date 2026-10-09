@@ -375,6 +375,8 @@ scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/dogfood-d0.62533/MagentaBri
 scratch-is-not-a-home	quiet	tool	write	scripts/twenty-backup.sh	#!/usr/bin/env bash	real repo path
 scratch-is-not-a-home	quiet	tool	write	.omp/rules/page-not-population.md	---	repo rule, versioned
 scratch-is-not-a-home	quiet	tool	write	var/agent-tmp/dogfood-d0.62533/.owner	pid=62533	owner file
+scratch-is-not-a-home	fire	tool	write	/Users/josh/Developer/clutterfreespaces.ios/var/agent-tmp/main-cutover.78706/symlink-root-fixture/scripts/check-cfs-root-seam-fixture.mjs	// one-run comment-only root probe fixture	AM kit-send-7028eef2bdc9; scratch `scripts/**` remains a fire per measured path policy
+scratch-is-not-a-home	quiet	tool	write	scripts/audit-cfs-gate-wiring.test.mjs	// CFS root seam fixture resides in tracked test file	Decision: reusable fixture is stored in the owning repo test file, outside scratch scope
 kit-no-gh-poll	fire	tool	bash	-	gh run watch 37416392819 -R JYeswak/omp-kit-companion --exit-status	Observed in pane %54; artifact 4576:1799-1806
 kit-no-gh-poll	fire	tool	bash	-	for i in $(seq 1 40); do if gh workflow run release.yml -R JYeswak/omp-kit-companion --ref v0.2.6 -f version=0.2.6 >/dev/null 2>&1; then echo "dispatched attempt=$i"; sleep 10; gh run list -R JYeswak/omp-kit-companion -w "Unpublished release candidate" -L 1; exit 0; fi; sleep 30; done; echo "still 403 after 20 min"	Observed in pane %54; artifact 4576:7791-7797
 kit-no-gh-poll	quiet	tool	bash	-	cd ~/Developer/omp-kit-companion && gh run list -R JYeswak/omp-kit-companion -b main -L 8 --json headSha,conclusion --jq '.[]|"\(.headSha[:10]) \(.conclusion)"'; git log --oneline -3 origin/main -- rules/kit-test-skip.md	One-shot list in pane %54; artifact 4576:24987-24991
