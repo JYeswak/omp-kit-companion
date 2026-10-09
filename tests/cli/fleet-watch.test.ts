@@ -82,6 +82,8 @@ test("planted: idle Steering · 1 submits M-Up then Enter once and logs the even
 		expect(keySends).toEqual([{ session: "omp-test", pane: "%1", keys: ["M-Up", "Enter"] }]);
 		expect(textSends).toEqual([]);
 		expect(readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line).kind)).toEqual(["STEERING_SUBMITTED"]);
+		expect(runFleetWatchOnce(duplicatePaneConfig, deps)).toEqual([]);
+		expect(keySends).toHaveLength(1);
 	} finally {
 		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
 	}
@@ -94,6 +96,7 @@ test("planted: busy Steering · 1 pane receives no recovery keys", () => {
 		send: () => {},
 		sendKeys: (_session, _pane, keys) => keySends.push([...keys]),
 		logPath: "/dev/null",
+		statePath: null,
 	});
 	expect(actions).toEqual([]);
 	expect(keySends).toEqual([]);
@@ -114,4 +117,51 @@ test("healthy captures nudge the worker once at the idle threshold", () => {
 	expect(runFleetWatchOnce(watchConfig, deps, watcher).map(action => action.kind)).toEqual(["NUDGED"]);
 	expect(sent).toHaveLength(1);
 	expect(sent[0]).toContain("idle for 4+ minutes");
+});
+
+
+test("runFleetWatchOnce restores idle and decision-throttle state across fresh invocations", () => {
+	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(scratchParent, { recursive: true });
+	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-state."));
+	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const logPath = join(scratch, "actions.jsonl");
+	const watchConfig = { ...config, noDecisionChecks: 2 };
+	let now = 0;
+	let capture = { code: 0, stdout: "idle", stderr: "" };
+	const deps = {
+		capture: () => capture,
+		send: () => {},
+		sendKeys: () => {},
+		logPath,
+		now: () => now,
+		recoverTracker: () => null,
+	};
+	try {
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual([]);
+		now = 120_000;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["NUDGED", "NO_DECISION"]);
+		now = 120_001;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual([]);
+		now = 240_000;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["NO_DECISION"]);
+		now = 240_001;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["ESCALATED"]);
+		capture = { code: 0, stdout: "⠋ busy", stderr: "" };
+		now = 240_002;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual([]);
+		capture = { code: 0, stdout: "idle", stderr: "" };
+		now = 240_003;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual([]);
+		capture = { code: 1, stdout: "", stderr: "capture failed" };
+		now = 240_004;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["NO_DECISION"]);
+		capture = { code: 0, stdout: "idle", stderr: "" };
+		now = 240_005;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual([]);
+		now = 240_006;
+		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["NUDGED"]);
+	} finally {
+		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+	}
 });

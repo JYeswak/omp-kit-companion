@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "lease_id": "live-holder-fixture",
+  "pid": 424242,
+  "process_start": "Mon Oct  5 12:00:00 2026",
+  "session": "worker-live",
+  "session_id": "$11",
+  "acquired_at": "2026-10-06T12:00:00.000Z"
+}

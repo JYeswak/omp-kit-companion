@@ -57,6 +57,18 @@ reports all six `contract-*` checks. `service doctor --all` on Josh's machine
 still needs stale installs reinstalled (drifted plists report
 `plist-matches-renderer` until `--fix` rewrites them).
 
+## Fleet-watch render inputs
+
+When `OMP_KIT_FLEET_WATCH_CONFIG` is set while rendering `fleet-watch`, the
+launchd plist and systemd unit carry the resolved absolute config path, so the
+preflighted custom file is the one the scheduled job reads. When unset, the
+job uses the default path under `HOME`. `--dry-run` includes the rendered
+definition as a preview only; it does not write the config or install the
+service.
+
+The service contract reports `HOME`, `PATH`, and (for systemd) `TMPDIR`
+separately, so a path failure is attributed to the field that failed.
+
 ## Jobs shipping through this contract
 
 Each row ships in its own bead, whose acceptance names SVC1: value-table
