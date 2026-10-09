@@ -12,11 +12,47 @@ export interface SendExec {
 }
 
 export interface ProvenSend {
-	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED";
+	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED";
 	marker: string;
 	sends: number;
 	drop_path: string | null;
 	detail: string;
+	bead_ids: string[];
+	no_bead_reason: string | null;
+}
+
+/**
+ * Tracker id shape across the fleet's .beads stores (72k ids checked):
+ * `<prefix>-<seg>[-<seg>...][.<n>...]`, e.g. ompkit-xa5s, cfs-9yrif,
+ * core8-h9l.31, beads_rust-abc. Matched against a whole whitespace token so
+ * URLs and paths (`https://x/y-z`, `src/kit-flywheel.ts`) never qualify.
+ * Linear: every repeated group starts with a distinct literal.
+ */
+export const BEAD_ID = /^[a-z][a-z0-9_]*(?:-[a-z0-9]+)+(?:\.[0-9]+)*$/;
+const TOKEN_EDGE = /^[(\[{"'`<]+|[)\]}"'`>,;:!?.]+$/g;
+
+/**
+ * Kernel inv 4: beads are the execution substrate. A work dispatch is a
+ * message whose first token is `D` (DISPATCH.md pane line `D AM<id> <slug>`)
+ * or that has a line starting `queue:`. Slugs are not beads: the D line's
+ * slug position and the names after `queue:` do not count as citations.
+ */
+export function dispatchBeads(message: string): { dispatch: boolean; bead_ids: string[] } {
+	const lines = message.split("\n");
+	const dLine = /^\s*D /.test(message);
+	const queue = lines.some((line) => /^\s*queue:/.test(line));
+	const bead_ids: string[] = [];
+	lines.forEach((line, index) => {
+		let tokens = line.trim().split(/\s+/);
+		if (index === 0 && dLine) tokens = tokens.slice(3);
+		const queueAt = tokens.findIndex((token) => token.startsWith("queue:"));
+		if (queueAt >= 0) tokens = tokens.slice(0, queueAt);
+		for (const token of tokens) {
+			const bare = token.replace(TOKEN_EDGE, "");
+			if (BEAD_ID.test(bare) && !bead_ids.includes(bare)) bead_ids.push(bare);
+		}
+	});
+	return { dispatch: dLine || queue, bead_ids };
 }
 
 function defaultExec(): SendExec {
@@ -55,17 +91,28 @@ export function markerInComposer(capture: string, marker: string): boolean {
 	return composerStart >= 0 && lines.slice(composerStart).some((line) => line.includes(marker));
 }
 
-/** Send via ntm and prove the marker landed in the target pane's capture. */
+/**
+ * Send via ntm and prove the marker landed in the target pane's capture.
+ * A work dispatch citing no bead is refused before anything reaches tmux
+ * unless `noBeadReason` records the exception.
+ */
 export async function proveSend(input: {
 	session: string;
 	pane: string;
 	message: string;
 	dropDir: string;
+	noBeadReason?: string;
 	exec?: SendExec;
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
 }): Promise<ProvenSend> {
+	const { dispatch, bead_ids } = dispatchBeads(input.message);
+	const no_bead_reason = dispatch && bead_ids.length === 0 ? input.noBeadReason?.trim() || null : null;
+	if (dispatch && bead_ids.length === 0 && !no_bead_reason) {
+		return { status: "BEAD_REQUIRED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason,
+			detail: "work dispatch cites no bead id; nothing was sent" };
+	}
 	const exec = input.exec ?? defaultExec();
 	const pollMs = input.pollMs ?? SEND_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? SEND_DEADLINE_MS;
@@ -85,7 +132,7 @@ export async function proveSend(input: {
 				// Text typed into the input box but never submitted is not a delivery.
 				if (!markerInComposer(got.out, marker)) {
 					const how = entered ? " after one Enter" : "";
-					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}` };
+					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}`, bead_ids, no_bead_reason };
 				}
 				if (!entered) {
 					exec.run(["tmux", "send-keys", "-t", input.pane, "Enter"]);
@@ -96,9 +143,9 @@ export async function proveSend(input: {
 		}
 		// The text is on the pane: resending or dropping would duplicate it.
 		if (entered) {
-			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter` };
+			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason };
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}` };
+	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}`, bead_ids, no_bead_reason };
 }
