@@ -454,7 +454,7 @@ function safeDbDirectory(path: string, cwd: string): { directory: string; databa
 	} catch (error) {
 		return { error: "--db directory cannot be inspected: " + (error instanceof Error ? error.message : String(error)) };
 	}
-	return { directory, database: join(directory, "beads.db") };
+	return { directory, database: join(directory, ".beads", "beads.db") };
 }
 
 function runBr(args: string[], database: string, cwd: string, input?: string): CapturedCommand {
@@ -705,7 +705,16 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 	let parentId: string | null = null;
 	const created: CreatedItem[] = [];
 	const createFailures: CreateFailure[] = [];
-	if (itemsToCreate.length) {
+	const initialization = itemsToCreate.length
+		? runBr(["init", "--prefix", "core8"], database.database, database.directory)
+		: null;
+	const initializationError = initialization && (initialization.exit_code !== 0 || initialization.error !== null)
+		? initialization.error ?? (initialization.stderr.trim() || "br init exited with status " + initialization.exit_code)
+		: null;
+	if (initialization && initializationError !== null)
+		createFailures.push({ slug: "core8-database-init", line: null, exit_code: initialization.exit_code,
+			stdout: initialization.stdout, stderr: initialization.stderr, error: initializationError });
+	if (itemsToCreate.length && initializationError === null) {
 		const parentDescription = "## Success Criteria\nAll parsed plan items are children of this isolated core8 dry-run epic; no real tracker is modified.";
 		const parent = runBr(["create", "--title", "core8 isolated plan conversion", "--type", "epic", "--priority", "0",
 			"--labels", "plan:core8,mission:core8", "--description-file", "-", "--acceptance-criteria", "- [ ] Every parsed plan item is parented under this isolated epic."],

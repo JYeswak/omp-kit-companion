@@ -22,7 +22,7 @@ function runCli(args: string[]) {
 }
 
 function nativeOutput(args: string[], dbDir: string): string {
-	const result = Bun.spawnSync(["br", ...args, "--db", join(dbDir, "beads.db"), "--no-auto-import", "--no-auto-flush", "--no-daemon", "--json", "--no-color"], {
+	const result = Bun.spawnSync(["br", ...args, "--db", join(dbDir, ".beads", "beads.db"), "--no-auto-import", "--no-auto-flush", "--no-daemon", "--json", "--no-color"], {
 		cwd: dbDir, env: childEnv, stdout: "pipe", stderr: "pipe",
 	});
 	if (result.exitCode !== 0) throw new Error("br command failed: " + result.stdout.toString() + result.stderr.toString());
