@@ -379,7 +379,7 @@ kit-no-gh-poll	fire	tool	bash	-	gh run watch 37416392819 -R JYeswak/omp-kit-comp
 kit-no-gh-poll	fire	tool	bash	-	for i in $(seq 1 40); do if gh workflow run release.yml -R JYeswak/omp-kit-companion --ref v0.2.6 -f version=0.2.6 >/dev/null 2>&1; then echo "dispatched attempt=$i"; sleep 10; gh run list -R JYeswak/omp-kit-companion -w "Unpublished release candidate" -L 1; exit 0; fi; sleep 30; done; echo "still 403 after 20 min"	Observed in pane %54; artifact 4576:7791-7797
 kit-no-gh-poll	quiet	tool	bash	-	cd ~/Developer/omp-kit-companion && gh run list -R JYeswak/omp-kit-companion -b main -L 8 --json headSha,conclusion --jq '.[]|"\(.headSha[:10]) \(.conclusion)"'; git log --oneline -3 origin/main -- rules/kit-test-skip.md	One-shot list in pane %54; artifact 4576:24987-24991
 kit-no-gh-poll	quiet	tool	bash	-	nice -n 10 bun src/cli.ts ci status --json	Pane %112; artifact 4578:6958-6970; rc=1, parser location src/cli.ts:2932:2; no cache read occurred
-kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	NavyDuck B2 merge refused today (ort over peer dirt)
+kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	CFS true-positive control; direct git merge invocation remains blocked
 kit-no-shared-merge	fire	tool	bash	-	git fetch origin && git merge --no-edit origin/main	compound shape of the same refused merge
 kit-no-shared-merge	fire	tool	bash	-	git pull	peer pull occurrence shape per coordinator 2026-10-06
 kit-no-shared-merge	fire	tool	bash	-	git pull origin main	peer pull occurrence shape per coordinator 2026-10-06
@@ -391,3 +391,7 @@ kit-no-shared-merge	quiet	tool	bash	-	cd var/agent-tmp/x && git merge --no-edit 
 kit-no-shared-merge	quiet	tool	bash	-	git stash push -m wip	stash not covered by this rule
 kit-no-shared-merge	quiet	tool	bash	-	git log --oneline origin/main -1	ordinary read-only git
 kit-no-shared-merge	quiet	tool	bash	-	echo legit merge	word-embedding boundary
+kit-no-shared-merge	quiet	tool	bash	-	omp-kit send omp-test %54 "beads-br still says git pull --rebase" --json	CFS reproduced false fire: git wording is quoted report text passed to omp-kit send
+kit-no-shared-merge	quiet	tool	bash	-	ntm send omp-test --panes=%54 "git pull --rebase"	git words are quoted message content, not a git command
+kit-no-shared-merge	quiet	tool	bash	-	echo "git pull --rebase"	git words are quoted output text, not a git command
+kit-no-shared-merge	quiet	tool	bash	-	br comments add core8-test "git pull --rebase"	git words are quoted comment content, not a git command
