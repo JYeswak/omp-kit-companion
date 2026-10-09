@@ -127,6 +127,32 @@ const planningScoreData: DataSchema = { type: "object", required: ["kind", "stat
 	status: { enum: ["PASS", "FAIL", "UNKNOWN", "NOT_APPLICABLE"] }, weighted_score: { type: ["number", "null"] },
 	metrics: { type: "object" }, repositories: { type: "array" }, mission_count: { type: "number" },
 } };
+const planningConvertData: DataSchema = { type: "object", required: ["kind", "overall", "mission", "plan_path", "db_dir", "candidate_blocks", "items_parsed", "beads_created", "total_beads_created", "created_items", "create_failures", "dependency_edges", "dependency_failures", "dependency_cycles", "uncovered_what_letters", "unparseable_blocks", "item_findings", "br_lint_exit_code", "br_lint_finding_count", "br_lint_clean", "br_lint_parse_error", "br_lint_stdout", "br_lint_stderr", "br_cycle_exit_code", "br_cycle_count", "br_cycle_clean", "br_cycle_parse_error", "br_cycle_stdout", "planning_score_bead_metrics", "text"], properties: {
+	kind: { enum: ["planning-convert"] }, overall: { enum: ["CLEAN", "FINDINGS", "REFUSED", "UNAVAILABLE"] },
+	mission: { type: "string" }, plan_path: { type: "string" }, db_dir: { type: "string" }, database_path: { type: "string" }, db_refusal: { type: "string" },
+	candidate_blocks: { type: "number" }, items_parsed: { type: "number" }, beads_created: { type: "number" }, total_beads_created: { type: "number" }, parent_epic_id: { type: ["string", "null"] },
+	created_items: { type: "array", items: { type: "object", required: ["slug", "title", "id", "line", "external_ref"], properties: { slug: { type: "string" }, title: { type: "string" }, id: { type: "string" }, line: { type: "number" }, external_ref: { type: "string" } } } },
+	create_failures: { type: "array", items: { type: "object", required: ["slug", "line", "exit_code", "stdout", "stderr", "error"], properties: { slug: { type: "string" }, line: { type: ["number", "null"] }, exit_code: { type: ["number", "null"] }, stdout: { type: "string" }, stderr: { type: "string" }, error: { type: ["string", "null"] } } } },
+	dependency_edges: { type: "array", items: { type: "object", required: ["slug", "target", "status", "issue_id", "depends_on_id"], properties: { slug: { type: "string" }, target: { type: "string" }, status: { enum: ["ADDED", "SKIPPED_CYCLE"] }, issue_id: { type: "string" }, depends_on_id: { type: "string" } } } },
+	dependency_failures: { type: "array", items: { type: "object", required: ["slug", "target", "message"], properties: { slug: { type: "string" }, target: { type: "string" }, message: { type: "string" }, exit_code: { type: ["number", "null"] } } } },
+	dependency_cycles: { type: "array", items: { type: "object", required: ["slugs", "path"], properties: { slugs: { type: "array", items: { type: "string" } }, path: { type: "array", items: { type: "string" } } } } },
+	uncovered_what_letters: { type: "array", items: { type: "object", required: ["slug", "line", "letter", "missing_positive", "missing_planted_negative"], properties: { slug: { type: "string" }, line: { type: "number" }, letter: { type: "string" }, missing_positive: { type: "boolean" }, missing_planted_negative: { type: "boolean" } } } },
+	unparseable_blocks: { type: "array", items: {
+		type: "object", required: ["line", "slug", "heading", "reasons"],
+		properties: { line: { type: "number" }, slug: { type: ["string", "null"] }, heading: { type: "string" }, reasons: { type: "array", items: { type: "string" } } },
+	} },
+	item_findings: { type: "array", items: {
+		type: "object", required: ["code", "message"],
+		properties: { line: { type: "number" }, slug: { type: "string" }, code: { type: "string" }, message: { type: "string" } },
+	} },
+	br_lint_exit_code: { type: ["number", "null"] }, br_lint_finding_count: { type: ["number", "null"] }, br_lint_clean: { type: ["boolean", "null"] }, br_lint_parse_error: { type: ["string", "null"] },
+	br_lint_stdout: { type: "string" }, br_lint_stderr: { type: "string" }, br_lint_error: { type: ["string", "null"] },
+	br_cycle_exit_code: { type: ["number", "null"] }, br_cycle_count: { type: ["number", "null"] }, br_cycle_clean: { type: ["boolean", "null"] }, br_cycle_parse_error: { type: ["string", "null"] },
+	br_cycle_stdout: { type: "string" }, br_cycle_stderr: { type: "string" }, br_cycle_error: { type: ["string", "null"] },
+	br_list_exit_code: { type: ["number", "null"] }, br_list_error: { type: ["string", "null"] },
+	planning_score_bead_metrics: { type: "object", required: ["median_description_chars", "planning_score_median_chars", "acceptance_share", "deps_per_bead", "mission_beads"], properties: { median_description_chars: { type: ["number", "null"] }, planning_score_median_chars: { type: ["number", "null"] }, acceptance_share: { type: ["number", "null"] }, deps_per_bead: { type: ["number", "null"] }, mission_beads: { type: ["number", "null"] } } },
+	text: { type: "string" },
+} };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
 	overall: { enum: ["DEGRADED", "UNVERIFIED"] }, report: lspReportData,
 	instructions: { type: "array", items: { type: "object", required: ["server", "status", "command", "note"], properties: {
@@ -278,11 +304,17 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
-	{ name: "planning", description: "Score planning history, beads and CI evidence", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [], example: "omp-kit planning score --fleet --json", subcommands: [
+	{ name: "planning", description: "Score planning evidence or convert a plan into isolated native beads", usage: "planning score|convert", flags: [], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run", subcommands: [
 		{ name: "score", description: "Score mission planning evidence without writing repository state", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [
 			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },
 			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
 		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
+		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in a fresh isolated database; dry-run only", usage: "planning convert --plan PATH --mission M --dry-run --db DIR [--json]", flags: [
+			{ name: "--plan", value: "PATH", description: "Read the planning document; never modify it" },
+			{ name: "--mission", value: "M", description: "Mission slug to assign and score" },
+			{ name: "--dry-run", description: "Required; write only to a fresh isolated --db directory" },
+			{ name: "--db", value: "DIR", description: "Fresh isolated database directory; an existing directory may contain only .owner" },
+		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, dataSchema: planningConvertData },
 	], runnable: false },
 	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate [--project PATH] [--json]", flags: [], subcommands: [
 		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { proveSend, type SendExec } from "../../src/send.ts";
 
 // Planted RED (G24a, Agent Mail 48369): a marker sitting UNSUBMITTED in omp's
-// input box is not a delivery. Fixtures are real omp 18.8.4 captures.
+// input box is not a delivery. Claude frame excerpts are OMP 18.8.6 --profile claude captures.
 const repoRoot = resolve(import.meta.dir, "../..");
 const fixtures = join(repoRoot, "tests", "fixtures", "send");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -91,6 +91,30 @@ test("GREEN: one Enter submits the composer text; marker above the box is OK", a
 	const enters = argvLog.filter((argv) => argv[1] === "send-keys");
 	expect(enters).toEqual([["tmux", "send-keys", "-t", "%1", "Enter"]]);
 	expect(argvLog.filter((argv) => argv[0] === "ntm").length).toBe(1);
+});
+
+test("CLAUDE: submitted marker above the current `❯` composer is OK without Enter", async () => {
+	const { exec, argvLog } = fixturePane("omp-claude-submitted-answered.txt");
+	const got = await run(exec);
+	expect(got.status).toBe("OK");
+	expect(argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([]);
+});
+
+test("CLAUDE: marker left in the `❯` composer remains PENDING_SUBMIT", async () => {
+	const { exec, argvLog } = fixturePane("omp-claude-composer-pending.txt");
+	const got = await run(exec);
+	expect(got.status as string).toBe("PENDING_SUBMIT");
+	expect(got.status).not.toBe("OK");
+	expect(argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", "%1", "Enter"]]);
+});
+
+test("CLAUDE: one Enter moves the composer marker into submitted history", async () => {
+	const { exec, argvLog } = fixturePane("omp-claude-composer-pending.txt", (marker) =>
+		readFileSync(join(fixtures, "omp-claude-submitted-answered.txt"), "utf8").replace(MARKER, marker),
+	);
+	const got = await run(exec);
+	expect(got.status).toBe("OK");
+	expect(argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", "%1", "Enter"]]);
 });
 
 test.todo("CONSUMED: consumption reader confirms the marker in a role:user row of the target's omp session JSONL");

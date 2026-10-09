@@ -1,2 +1,4 @@
 - Added `omp-kit planning score` for per-mission or fleet scoring from git, beads, and CI evidence; packaged the planning skill and defaults, added repo-level overrides, and made `doctor --scope beads` flag acceptance criteria left in descriptions.
 - Corrected health diagnostics to inspect the optional planning-skill row only in kit scope or when the packaged skill file exists; kept N+2 candidate fixtures aligned with packaged `config/` and `skills/` roots.
+- Added `omp-kit planning convert --plan PATH --mission M --dry-run --db DIR [--json]` to translate fenced plan items into native beads in an isolated database, with parent/plan dependency edges, native lint and cycle results, WHAT-letter coverage, and planning-score metrics.
+- Initialize the isolated native beads workspace with `br init` under its private `.beads/` directory before creating converted beads; this matches pinned br 0.7.4 behavior on Linux.

@@ -1,1 +1,2 @@
 - SEND1 proven send (part 2): `omp-kit send SESSION PANE MESSAGE` wraps ntm with a marker poll (15 s), one retry and a state-root drop-folder fallback; the exit code is delivery (OK 0, NOT_DELIVERED 1), never the send call.
+- SEND1 composer detection: recognize Claude `❯` input boundaries so submitted messages are not misreported as `PENDING_SUBMIT`.
