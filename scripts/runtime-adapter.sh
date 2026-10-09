@@ -109,6 +109,7 @@ case "$script" in
   "$ROOT/scripts/rule-class.ts"|\
   "$ROOT/scripts/ttsr-harness.ts"|\
   "$ROOT/scripts/regex-budget.ts"|\
+  "$ROOT/scripts/check-flywheel-invariants.ts"|\
   "$ROOT/tests/live/lib.mjs"|\
   "$ROOT/tests/live/mock-model.mjs") ;;
   *) die "refusing unlisted packaged script: $script" ;;
