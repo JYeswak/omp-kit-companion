@@ -54,6 +54,15 @@ fi
 
 step harness-gate "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --gate
 step harness-selftest "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --selftest
+# Agent Flywheel Guide invariants: every kernel invariant and anti-pattern maps to a shipped
+# mechanism with fire and quiet proof (docs/flywheel-invariants.tsv). Prose is not a mechanism.
+if [ -d "$HERE/src" ]; then
+  step flywheel-invariants "$OMP_KIT_BUN" "$HERE/scripts/check-flywheel-invariants.ts" --root "$HERE"
+elif [ -f "$HERE/docs/flywheel-invariants.tsv" ] && [ -f "$HERE/scripts/check-flywheel-invariants.ts" ]; then
+  step flywheel-invariants "$OMP_KIT_BUN" "$HERE/scripts/check-flywheel-invariants.ts" --root "$HERE" --packaged
+else
+  echo "NOT_RUN flywheel-invariants: map/gate not in this package (ships with ompkit-n2s6 package list); source CI runs it"
+fi
 # Regex cost gate: every rule condition timed in Bun on near-miss shapes and a
 # realistic live stream (RX1). Red names the rule, shape and encoding.
 # On CI runners the budget is judged regardless of machine load (CI is the
