@@ -12,7 +12,8 @@ by the tmux server.
 
 Each session entry names the worker tmux session, the coordinator session and
 pane, the repository used for ready-work lookup, and the worker panes to
-monitor. Replace the repo-path placeholder with the dispatcher-local repository path before enabling. Pane IDs are scoped to their tmux session.
+monitor. Replace the repo-path placeholder with the dispatcher-local repository path before enabling. Worker panes are tmux pane ids (`%12`, unique on the tmux server) or
+session-scoped `window.pane` selectors (`0.1`).
 
 ```json
 {

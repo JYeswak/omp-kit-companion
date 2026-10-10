@@ -24,7 +24,7 @@ import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
 import { inspectOmpSessions } from "./session-doctor.ts";
 import { censusLoad } from "./load-doctor.ts";
-import { loadFleetWatchConfig, runFleetWatchOnce } from "./fleet-watch.ts";
+import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -2475,9 +2475,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				const config = loadFleetWatchConfig(configPath);
 				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
 				const result = runFleetWatchOnce(config, {
-					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", session + ":" + pane]),
+					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", paneTarget(session, pane)]),
 					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
-					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", session + ":" + pane, ...keys]); },
+					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", paneTarget(session, pane), ...keys]); },
 					logPath,
 				});
 				lock.release();

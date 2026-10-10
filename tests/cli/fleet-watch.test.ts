@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { FleetWatcher, paneIsBusy, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
+import { FleetWatcher, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
 const session: FleetWatchSession = { session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"], readyCommand: "br ready --json", skipLabels: ["directive"] };
 const config: FleetWatchConfig = { enabled: true, intervalSeconds: 60, noDecisionChecks: 5, sessions: [session] };
 
@@ -163,5 +165,34 @@ test("runFleetWatchOnce restores idle and decision-throttle state across fresh i
 		expect(runFleetWatchOnce(watchConfig, deps).map(action => action.kind)).toEqual(["NUDGED"]);
 	} finally {
 		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+	}
+});
+
+test("pane ids target the server-unique pane; other selectors stay scoped to the session", () => {
+	expect(paneTarget("workers", "%12")).toBe("%12");
+	expect(paneTarget("workers", "0.1")).toBe("workers:0.1");
+	expect(paneTarget("workers", "2")).toBe("workers:2");
+	expect(paneTarget("workers", "%")).toBe("workers:%");
+	expect(paneTarget("workers", "%1a")).toBe("workers:%1a");
+});
+
+const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
+test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where session:%id is refused", () => {
+	const dir = mkdtempSync(join(tmpdir(), "fleet-watch-tmux-"));
+	const socket = join(dir, "sock");
+	const tmux = (...args: string[]) => spawnSync("tmux", ["-S", socket, ...args], { encoding: "utf8" });
+	try {
+		expect(tmux("new-session", "-d", "-s", "workers", "-x", "80", "-y", "24").status).toBe(0);
+		expect(tmux("split-window", "-t", "workers:0").status).toBe(0);
+		const paneId = tmux("display", "-p", "-t", "workers:0.1", "#{pane_id}").stdout.trim();
+		expect(paneId).toMatch(/^%\d+$/);
+		expect(tmux("capture-pane", "-p", "-t", `workers:${paneId}`).status).not.toBe(0);
+		for (const pane of [paneId, "0.1"]) {
+			const capture = tmux("capture-pane", "-p", "-t", paneTarget("workers", pane));
+			expect({ pane, status: capture.status, stderr: capture.stderr }).toEqual({ pane, status: 0, stderr: "" });
+		}
+	} finally {
+		tmux("kill-server");
+		rmSync(dir, { recursive: true, force: true });
 	}
 });

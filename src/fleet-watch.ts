@@ -84,6 +84,15 @@ export function paneIsBusy(paneText: string): boolean {
 	return paneText.split("\n").slice(-6).some(line => SPINNER.test(line));
 }
 
+/**
+ * The tmux target for a configured worker pane. A pane id (`%12`) is server-unique and must be passed
+ * alone: tmux reads `session:%12` as a window named `%12` and fails with "can't find window". Any other
+ * selector (`0.1`, `window.pane`) is scoped to the session.
+ */
+export function paneTarget(session: string, pane: string): string {
+	return /^%\d+$/.test(pane) ? pane : `${session}:${pane}`;
+}
+
 export function nudgeText(config: FleetWatchSession, pane: string): string {
 	const skip = config.skipLabels?.length ? ` Skip any bead labelled ${config.skipLabels.join(",")} (those are Josh's).` : "";
 	const ready = config.readyCommand ?? "br ready --json";

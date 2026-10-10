@@ -1,0 +1,1 @@
+- Fleet Watch captures and steers a worker pane configured by tmux pane id (`%12`) directly; tmux read `session:%12` as a window name, so every pane configured as the docs showed failed capture and was never watched.
