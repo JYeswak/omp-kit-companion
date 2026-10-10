@@ -168,6 +168,31 @@ test("runFleetWatchOnce restores idle and decision-throttle state across fresh i
 	}
 });
 
+test("runFleetWatchOnce submits one queued steering message per pending count across fresh invocations", () => {
+	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(scratchParent, { recursive: true });
+	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-steering."));
+	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	let pane = "Steering · 1\n⌥↑ to edit\n";
+	const keys: string[][] = [];
+	const deps = {
+		capture: () => ({ code: 0, stdout: pane, stderr: "" }),
+		send: () => {},
+		sendKeys: (_session: string, _pane: string, sent: readonly string[]) => { keys.push([...sent]); },
+		logPath: join(scratch, "actions.jsonl"),
+		recoverTracker: () => null,
+	};
+	try {
+		expect(runFleetWatchOnce(config, deps).map(action => action.kind)).toEqual(["STEERING_SUBMITTED"]);
+		expect(runFleetWatchOnce(config, deps).map(action => action.kind)).toEqual([]);
+		pane = "Steering · 2\n⌥↑ to edit\n";
+		expect(runFleetWatchOnce(config, deps).map(action => action.kind)).toEqual(["STEERING_SUBMITTED"]);
+		expect(keys).toEqual([["M-Up", "Enter"], ["M-Up", "Enter"]]);
+	} finally {
+		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+	}
+});
+
 test("pane ids target the server-unique pane; other selectors stay scoped to the session", () => {
 	expect(paneTarget("workers", "%12")).toBe("%12");
 	expect(paneTarget("workers", "0.1")).toBe("workers:0.1");
