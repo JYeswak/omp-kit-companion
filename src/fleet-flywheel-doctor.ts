@@ -8,6 +8,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
+import { tmuxSocketArgs } from "./tmux-socket.ts";
+export { tmuxSocketArgs } from "./tmux-socket.ts";
 
 export const DIRECTOR_IDLE_LIMIT_MS = 20 * 60_000;
 export const PURGATORY_WINDOW_MS = 2 * 60 * 60_000;
@@ -416,12 +418,6 @@ function run(command: string, args: readonly string[], env?: NodeJS.ProcessEnv):
 	return result.status === 0 ? result.stdout : null;
 }
 
-/** TMUX_TMPDIR wins; else ~/.tmux-sockets when it holds a live server; else the tmux default. */
-export function tmuxSocketArgs(env: NodeJS.ProcessEnv = process.env, probe: (args: readonly string[]) => boolean = (args) => run("tmux", [...args, "list-sessions"]) !== null): string[] {
-	if (env.TMUX_TMPDIR) return [];
-	const socket = join(env.HOME ?? homedir(), ".tmux-sockets", `tmux-${process.getuid?.() ?? 0}`, "default");
-	return existsSync(socket) && probe(["-S", socket]) ? ["-S", socket] : [];
-}
 
 export function liveFleetIo(env: NodeJS.ProcessEnv = process.env): FleetIo {
 	const socket = tmuxSocketArgs(env);

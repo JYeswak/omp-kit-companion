@@ -2,23 +2,25 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { resolveTmuxSocket } from "./tmux-socket.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
 export const SEND_MAX_SENDS = 2;
 
 export interface SendExec {
-	run(argv: string[]): { code: number; out: string };
+	run(argv: string[], env?: NodeJS.ProcessEnv): { code: number; out: string };
 }
 
 export interface ProvenSend {
-	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED";
+	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED" | "TMUX_AMBIGUOUS";
 	marker: string;
 	sends: number;
 	drop_path: string | null;
 	detail: string;
 	bead_ids: string[];
 	no_bead_reason: string | null;
+	tmux_socket: string | null;
 }
 
 /**
@@ -106,8 +108,9 @@ export function fleetBeadPrefixes(env: NodeJS.ProcessEnv, dirs: readonly string[
 
 function defaultExec(): SendExec {
 	return {
-		run(argv) {
-			const run = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+		run(argv, env) {
+			const options = { encoding: "utf8" as const, maxBuffer: 4 * 1024 * 1024, ...(env ? { env } : {}) };
+			const run = spawnSync(argv[0]!, argv.slice(1), options);
 			return { code: run.status ?? 1, out: String(run.stdout ?? "") };
 		},
 	};
@@ -154,43 +157,64 @@ export async function proveSend(input: {
 	/** Tracker prefixes a cited id must carry; default: fleetBeadPrefixes over the sender cwd and the target pane cwd. */
 	knownPrefixes?: ReadonlySet<string>;
 	exec?: SendExec;
+	env?: NodeJS.ProcessEnv;
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
 }): Promise<ProvenSend> {
 	const exec = input.exec ?? defaultExec();
-	// Prefix lookup reads trackers and asks tmux for the pane cwd, so only dispatches pay for it.
-	const knownPrefixes = !dispatchBeads(input.message).dispatch ? new Set<string>()
-		: input.knownPrefixes ?? fleetBeadPrefixes(process.env, [process.cwd(),
-			exec.run(["tmux", "display-message", "-p", "-t", input.pane, "#{pane_current_path}"]).out.trim()].filter(dir => dir.startsWith("/")));
+	const env = input.env ?? process.env;
+	const selection = resolveTmuxSocket(env, (socket, probeEnv) =>
+		exec.run(["tmux", "-S", socket, "list-sessions"], probeEnv).code === 0);
+	const tmuxArgs = selection.status === "RESOLVED" ? selection.tmuxArgs : [];
+	const sendEnv = selection.status === "RESOLVED" && selection.tmuxTmpdir
+		? { ...env, TMUX_TMPDIR: selection.tmuxTmpdir }
+		: env;
+	const runTmux = (args: string[]) => exec.run(["tmux", ...tmuxArgs, ...args], sendEnv);
+	const isDispatch = dispatchBeads(input.message).dispatch;
+	const paneDir = isDispatch && !input.knownPrefixes && selection.status === "RESOLVED"
+		? runTmux(["display-message", "-p", "-t", input.pane, "#{pane_current_path}"]).out.trim()
+		: "";
+	const knownPrefixes = !isDispatch ? new Set<string>()
+		: input.knownPrefixes ?? fleetBeadPrefixes(env, [process.cwd(), paneDir].filter(dir => dir.startsWith("/")));
 	const { dispatch, bead_ids } = dispatchBeads(input.message, knownPrefixes);
 	const no_bead_reason = dispatch && bead_ids.length === 0 ? input.noBeadReason?.trim() || null : null;
+	const tmux_socket = selection.status === "RESOLVED" ? selection.socket : null;
 	if (dispatch && bead_ids.length === 0 && !no_bead_reason) {
-		return { status: "BEAD_REQUIRED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason,
+		return { status: "BEAD_REQUIRED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason, tmux_socket,
 			detail: `work dispatch cites no bead id${knownPrefixes.size ? ` (tracker prefixes: ${[...knownPrefixes].sort().join(", ")})` : ""}; nothing was sent` };
+	}
+	if (selection.status === "AMBIGUOUS") {
+		return { status: "TMUX_AMBIGUOUS", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason, tmux_socket: null,
+			detail: `multiple live tmux servers found (${selection.sockets.join(", ")}); nothing was sent` };
 	}
 	const pollMs = input.pollMs ?? SEND_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? SEND_DEADLINE_MS;
 	const wait = input.wait ?? waitFor;
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const text = `${input.message}\n[${marker}]`;
+	if (selection.status === "UNAVAILABLE") {
+		const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+		return { status: "NOT_DELIVERED", marker, sends: 0, drop_path: dropPath, bead_ids, no_bead_reason, tmux_socket: null,
+			detail: `no live tmux server found; candidates checked: ${selection.candidates.join(", ")}; message written to ${dropPath}` };
+	}
 	for (let sends = 1; sends <= SEND_MAX_SENDS; sends++) {
-		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text]).code !== 0) continue;
+		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text], sendEnv).code !== 0) continue;
 		const started = Date.now();
 		let entered = false;
 		while (Date.now() - started < deadlineMs) {
 			// Bare pane id: session:pane is parsed as a window and misses.
 			// -S -200 reads scrollback history: a rendered message scrolls off
 			// the visible screen but stays provable in history.
-			const got = exec.run(["tmux", "capture-pane", "-p", "-S", "-200", "-t", input.pane]);
+			const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
 			if (got.code === 0 && got.out.includes(marker)) {
 				// Text typed into the input box but never submitted is not a delivery.
 				if (!markerInComposer(got.out, marker)) {
 					const how = entered ? " after one Enter" : "";
-					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}`, bead_ids, no_bead_reason };
+					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}`, bead_ids, no_bead_reason, tmux_socket };
 				}
 				if (!entered) {
-					exec.run(["tmux", "send-keys", "-t", input.pane, "Enter"]);
+					runTmux(["send-keys", "-t", input.pane, "Enter"]);
 					entered = true;
 				}
 			}
@@ -198,9 +222,9 @@ export async function proveSend(input: {
 		}
 		// The text is on the pane: resending or dropping would duplicate it.
 		if (entered) {
-			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason };
+			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason, tmux_socket };
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}`, bead_ids, no_bead_reason };
+	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}`, bead_ids, no_bead_reason, tmux_socket };
 }
