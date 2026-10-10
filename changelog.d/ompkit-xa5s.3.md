@@ -1,0 +1,1 @@
+kit-save-guard now detects edits that predate or exceed this session's own hunk and prescribes a private-index save instead of a whole-file `git commit --only`. It accepts a recorded bead-comment or Agent Mail candidate only when the referenced Git tree or commit contains the session's hunk; regression coverage includes the cfsios 188/27 fixture and the wholly-owned-path prompt.

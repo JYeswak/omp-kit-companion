@@ -103,6 +103,65 @@ function reasonOf(result: unknown): string {
 	}
 	return result.reason;
 }
+async function startSession(fake: FakeSaveGuard): Promise<void> {
+	await fake.emit("session_start", { type: "session_start" });
+}
+
+function numberedLines(label: string, count: number): string {
+	return Array.from({ length: count }, (_, index) => `${label} ${index + 1}\n`).join("");
+}
+
+function cfsiosFixture(): { root: string; file: string; base: string; held: string } {
+	const root = repo({ remote: true });
+	const file = join(root, "AGENTS.md");
+	const base = numberedLines("base", 27);
+	const held = numberedLines("held", 188);
+	writeFileSync(file, base);
+	sh(root, "add", "AGENTS.md");
+	sh(root, "commit", "-m", "base AGENTS [test]");
+	sh(root, "push");
+	writeFileSync(file, held);
+	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("188\t27\tAGENTS.md");
+	return { root, file, base, held };
+}
+
+function candidateTree(root: string, relativePath: string, contents: string, label: string): string {
+	const indexPath = join(root, ".git", `candidate-${label}.index`);
+	const candidatePath = join(root, ".git", `candidate-${label}.txt`);
+	writeFileSync(candidatePath, contents);
+	const blob = sh(root, "hash-object", "-w", candidatePath).stdout.trim();
+	const runWithIndex = (...args: string[]): string => {
+		const child = Bun.spawnSync(["env", `GIT_INDEX_FILE=${indexPath}`, "git", ...args],
+			{ cwd: root, stdout: "pipe", stderr: "pipe" });
+		if (child.exitCode !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${child.stderr.toString().slice(0, 300)}`);
+		}
+		return child.stdout.toString().trim();
+	};
+	runWithIndex("read-tree", "HEAD");
+	runWithIndex("update-index", "--add", "--cacheinfo", "100644", blob, relativePath);
+	return runWithIndex("write-tree");
+}
+
+async function recordMailCandidate(fake: FakeSaveGuard, sha: string, relativePath: string): Promise<void> {
+	const toolName = "mcp__mcp_agent_mail_send_message";
+	const toolCallId = `receipt-${sha}`;
+	const body = `private-index candidate tree ${sha} for ${relativePath}; recorded as AM49247`;
+	await fake.emit("tool_call", {
+		type: "tool_call",
+		toolCallId,
+		toolName,
+		input: { thread_id: "48536", body },
+	});
+	await fake.emit("tool_execution_end", {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName,
+		result: { details: { messageId: "AM49247" } },
+		isError: false,
+	});
+}
+
 
 test("session_stop drains in-flight path attribution before checking owned work", async () => {
 	const root = repo({ remote: true });
@@ -292,4 +351,72 @@ test("shutdown warns about owned dirty work when no stop hook runs", async () =>
 	expect(fake.notices).toHaveLength(1);
 	expect(fake.notices[0]?.type).toBe("warning");
 	expect(fake.notices[0]?.message).toContain("shutdown-only.txt");
+});
+test("cfsios mixed AGENTS.md hunk uses a private-index prompt", async () => {
+	const { root, file, held } = cfsiosFixture();
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	const insertionPoint = held.indexOf("held 95\n");
+	writeFileSync(file, `${held.slice(0, insertionPoint)}session-owned line\n${held.slice(insertionPoint)}`);
+	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("189\t27\tAGENTS.md");
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "+session-owned line",
+	}));
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	const reason = reasonOf(result);
+	expect(reason).toContain("private GIT_INDEX_FILE");
+	expect(reason).toContain("stage only this session's hunk");
+	expect(reason).toContain("GIT_INDEX_FILE=<private-index> git write-tree");
+	expect(reason).not.toContain("git commit --only");
+});
+
+test("a recorded candidate must contain the hunk before it clears mixed work", async () => {
+	const { root, file, base, held } = cfsiosFixture();
+	const invalidTree = candidateTree(root, "AGENTS.md", base, "invalid");
+	const validTree = candidateTree(root, "AGENTS.md", `${base}session-owned line\n`, "valid");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	const insertionPoint = held.indexOf("held 95\n");
+	writeFileSync(file, `${held.slice(0, insertionPoint)}session-owned line\n${held.slice(insertionPoint)}`);
+	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("189\t27\tAGENTS.md");
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "+session-owned line",
+	}));
+
+	await recordMailCandidate(fake, invalidTree, "AGENTS.md");
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+
+	await recordMailCandidate(fake, validTree, "AGENTS.md");
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("a wholly owned tracked file keeps the plain commit-only prompt", async () => {
+	const root = repo({ remote: true });
+	const file = join(root, "AGENTS.md");
+	const base = "base line\n";
+	writeFileSync(file, base);
+	sh(root, "add", "AGENTS.md");
+	sh(root, "commit", "-m", "base AGENTS [test]");
+	sh(root, "push");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	writeFileSync(file, `${base}session-owned line\n`);
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "+session-owned line",
+	}));
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	const reason = reasonOf(result);
+	expect(reason).toContain("git commit --only -m");
+	expect(reason).not.toContain("private GIT_INDEX_FILE");
 });

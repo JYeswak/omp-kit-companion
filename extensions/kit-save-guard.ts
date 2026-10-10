@@ -25,6 +25,18 @@ export interface SaveGuardContext {
 	ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
 }
 
+
+export interface SaveGuardSessionStartEvent {
+	type: "session_start";
+}
+
+export interface SaveGuardToolCallEvent {
+	type?: "tool_call";
+	toolCallId: string;
+	toolName: string;
+	input: unknown;
+}
+
 export interface SaveGuardToolExecutionEndEvent {
 	type: "tool_execution_end";
 	toolCallId: string;
@@ -46,6 +58,11 @@ export interface SaveGuardSessionStopResult {
 
 /** The slice of omp's ExtensionAPI this guard touches. */
 export interface SaveGuardApi {
+	on(event: "session_start",
+		handler: (event: SaveGuardSessionStartEvent, ctx: SaveGuardContext) => unknown): void;
+	on(event: "tool_call",
+		handler: (event: SaveGuardToolCallEvent, ctx: SaveGuardContext) => unknown): void;
+
 	on(event: "tool_execution_end",
 		handler: (event: SaveGuardToolExecutionEndEvent, ctx: SaveGuardContext) => unknown): void;
 	on(event: "session_stop",
@@ -61,39 +78,65 @@ export const SAVE_GUARD_GIT_TIMEOUT_MS = 1000;
 
 const MAX_REPROMPTS_PER_TURN = 2;
 
+interface PatchDelta {
+	added: string[];
+	removed: string[];
+	known: boolean;
+}
+
+interface CandidateReceipt {
+	sha: string;
+	text: string;
+}
+
 interface OwnedRepository {
 	root: string;
 	paths: Set<string>;
 	baselineHead: string | null;
+	baselineDirtyPaths: Set<string>;
+	baselineStatusKnown: boolean;
+	sessionDeltas: Map<string, PatchDelta>;
+	candidateReceipts: CandidateReceipt[];
 }
 
 interface SessionState {
 	repositories: Map<string, OwnedRepository>;
 	rootByDirectory: Map<string, string>;
 	pendingToolPathWork: Promise<void>;
+	pendingCandidateCalls: Map<string, CandidateReceipt>;
+	candidateReceipts: CandidateReceipt[];
 	rePrompts: number;
 	warningEmitted: boolean;
 }
+
+interface ToolPathChange {
+	path: string;
+	diff?: string;
+}
+
 
 export interface SaveGuardFinding {
 	root: string;
 	paths: string[];
 	aheadCount: number | null;
+	privateIndexPaths?: string[];
+
 }
 
-function addLocalPath(paths: string[], value: unknown): void {
-	if (typeof value === "string" && value.length > 0 && !value.includes("://")) paths.push(value);
+function addLocalPath(paths: ToolPathChange[], value: unknown, diff?: string): void {
+	if (typeof value === "string" && value.length > 0 && !value.includes("://")) paths.push({ path: value, diff });
 }
 
-function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string): string[] {
+function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string): ToolPathChange[] {
 	const result = event.result;
 	if (typeof result !== "object" || result === null || !("details" in result)) return [];
 	const details = result.details;
 	if (typeof details !== "object" || details === null) return [];
 
-	const paths: string[] = [];
+	const paths: ToolPathChange[] = [];
+	const sharedDiff = "diff" in details && typeof details.diff === "string" ? details.diff : undefined;
 	if (event.toolName === "write") {
-		if (!event.isError && "resolvedPath" in details) addLocalPath(paths, details.resolvedPath);
+		if (!event.isError && "resolvedPath" in details) addLocalPath(paths, details.resolvedPath, sharedDiff);
 		return paths;
 	}
 	if (event.toolName === "edit") {
@@ -101,16 +144,19 @@ function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string):
 			for (const fileResult of details.perFileResults) {
 				if (typeof fileResult !== "object" || fileResult === null) continue;
 				if ("isError" in fileResult && fileResult.isError === true) continue;
-				if ("path" in fileResult) addLocalPath(paths, fileResult.path);
-				if ("sourcePath" in fileResult) addLocalPath(paths, fileResult.sourcePath);
-				if ("move" in fileResult) addLocalPath(paths, fileResult.move);
+				const diff = "diff" in fileResult && typeof fileResult.diff === "string"
+					? fileResult.diff
+					: sharedDiff;
+				if ("path" in fileResult) addLocalPath(paths, fileResult.path, diff);
+				if ("sourcePath" in fileResult) addLocalPath(paths, fileResult.sourcePath, diff);
+				if ("move" in fileResult) addLocalPath(paths, fileResult.move, diff);
 			}
 			return paths;
 		}
 		if (!event.isError) {
-			if ("path" in details) addLocalPath(paths, details.path);
-			if ("sourcePath" in details) addLocalPath(paths, details.sourcePath);
-			if ("move" in details) addLocalPath(paths, details.move);
+			if ("path" in details) addLocalPath(paths, details.path, sharedDiff);
+			if ("sourcePath" in details) addLocalPath(paths, details.sourcePath, sharedDiff);
+			if ("move" in details) addLocalPath(paths, details.move, sharedDiff);
 		}
 		return paths;
 	}
@@ -121,9 +167,15 @@ function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string):
 		for (const replacement of details.fileReplacements) {
 			if (typeof replacement !== "object" || replacement === null || !("path" in replacement) ||
 				typeof replacement.path !== "string" || replacement.path.includes("://")) continue;
-			paths.push(path.isAbsolute(replacement.path)
-				? path.resolve(replacement.path)
-				: path.resolve(base, replacement.path));
+			const diff = "diff" in replacement && typeof replacement.diff === "string"
+				? replacement.diff
+				: sharedDiff;
+			paths.push({
+				path: path.isAbsolute(replacement.path)
+					? path.resolve(replacement.path)
+					: path.resolve(base, replacement.path),
+				diff,
+			});
 		}
 	}
 	return paths;
@@ -153,6 +205,113 @@ async function runGit(
 	return exec("git", args, { cwd, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
 }
 
+function parsePatch(diff: string): PatchDelta {
+	const added: string[] = [];
+	const removed: string[] = [];
+	for (let line of diff.split("\n")) {
+		if (line.endsWith("\r")) line = line.slice(0, -1);
+		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (line.startsWith("+")) added.push(line.slice(1));
+		else if (line.startsWith("-")) removed.push(line.slice(1));
+	}
+	return { added, removed, known: added.length + removed.length > 0 };
+}
+
+function recordSessionDelta(repository: OwnedRepository, repoPath: string, diff: string | undefined): void {
+	const existing = repository.sessionDeltas.get(repoPath);
+	if (!existing) {
+		repository.sessionDeltas.set(repoPath, diff === undefined
+			? { added: [], removed: [], known: false }
+			: parsePatch(diff));
+		return;
+	}
+	if (!existing.known || diff === undefined) {
+		existing.known = false;
+		return;
+	}
+	const next = parsePatch(diff);
+	if (!next.known) {
+		existing.known = false;
+		return;
+	}
+	existing.added.push(...next.added);
+	existing.removed.push(...next.removed);
+}
+
+function inputStrings(value: unknown, output: string[] = [], depth = 0): string[] {
+	if (output.length >= 16 || depth > 4) return output;
+	if (typeof value === "string") {
+		output.push(value.slice(0, 10_000));
+		return output;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value.slice(0, 16)) inputStrings(item, output, depth + 1);
+	} else if (typeof value === "object" && value !== null) {
+		for (const item of Object.values(value).slice(0, 16)) inputStrings(item, output, depth + 1);
+	}
+	return output;
+}
+
+function isHexSha(value: string): boolean {
+	if (value.length !== 40 && value.length !== 64) return false;
+	for (const character of value.toLowerCase()) {
+		if (!"0123456789abcdef".includes(character)) return false;
+	}
+	return true;
+}
+
+function candidateSha(text: string): string | null {
+	const words: string[] = [];
+	let word = "";
+	for (const character of text) {
+		const lower = character.toLowerCase();
+		if ((lower >= "a" && lower <= "z") || (character >= "0" && character <= "9")) {
+			word += character;
+		} else if (word.length > 0) {
+			words.push(word);
+			word = "";
+		}
+	}
+	if (word.length > 0) words.push(word);
+	for (let index = 0; index < words.length; index += 1) {
+		if (words[index]?.toLowerCase() !== "candidate") continue;
+		for (let next = index + 1; next < Math.min(words.length, index + 5); next += 1) {
+			if (isHexSha(words[next] ?? "")) return words[next]!.toLowerCase();
+		}
+	}
+	return null;
+}
+
+function receiptFromToolCall(event: SaveGuardToolCallEvent): CandidateReceipt | null {
+	const toolName = event.toolName.toLowerCase();
+	const mailRecord = toolName.includes("agent_mail") &&
+		(toolName.includes("send_message") || toolName.includes("reply_message"));
+	const beadComment = (toolName === "bash" || toolName === "exec") &&
+		inputStrings(event.input).some(value => value.includes("br comments add"));
+	if (!mailRecord && !beadComment) return null;
+	const text = inputStrings(event.input).join("\n").slice(0, 20_000);
+	const sha = candidateSha(text);
+	return sha ? { sha, text } : null;
+}
+
+function newOwnedRepository(
+	root: string,
+	baselineHead: string | null,
+	baselineDirtyPaths = new Set<string>(),
+	baselineStatusKnown = false,
+	candidateReceipts: CandidateReceipt[] = [],
+): OwnedRepository {
+	return {
+		root,
+		paths: new Set(),
+		baselineHead,
+		baselineDirtyPaths,
+		baselineStatusKnown,
+		sessionDeltas: new Map(),
+		candidateReceipts: candidateReceipts.slice(),
+	};
+}
+
 function sessionStateFor(states: Map<string, SessionState>, sessionId: string): SessionState {
 	let state = states.get(sessionId);
 	if (!state) {
@@ -160,6 +319,8 @@ function sessionStateFor(states: Map<string, SessionState>, sessionId: string): 
 			repositories: new Map(),
 			rootByDirectory: new Map(),
 			pendingToolPathWork: Promise.resolve(),
+			pendingCandidateCalls: new Map(),
+			candidateReceipts: [],
 			rePrompts: 0,
 			warningEmitted: false,
 		};
@@ -167,6 +328,7 @@ function sessionStateFor(states: Map<string, SessionState>, sessionId: string): 
 	}
 	return state;
 }
+
 
 async function waitForToolPathWork(state: SessionState): Promise<void> {
 	while (true) {
@@ -182,23 +344,52 @@ function isWithinDirectory(directory: string, target: string): boolean {
 		!relative.startsWith(`..${path.sep}`));
 }
 
+async function recordSessionStart(
+	exec: SaveGuardApi["exec"],
+	state: SessionState,
+	cwd: string,
+): Promise<void> {
+	const directory = path.resolve(cwd);
+	const top = await runGit(exec, directory, ["rev-parse", "--show-toplevel"]);
+	if (top.code !== 0) return;
+	const root = path.resolve(gitLine(top.stdout));
+	if (root.length === 0) return;
+	state.rootByDirectory.set(directory, root);
+	if (state.repositories.has(root)) return;
+	const head = await runGit(exec, root, ["rev-parse", "--verify", "HEAD"]);
+	const status = await runGit(exec, root, [
+		"--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+	]);
+	const statusKnown = status.code === 0;
+	state.repositories.set(root, newOwnedRepository(
+		root,
+		head.code === 0 ? gitLine(head.stdout) : null,
+		statusKnown ? new Set(statusEntries(status.stdout).keys()) : new Set(),
+		statusKnown,
+		state.candidateReceipts,
+	));
+}
+
 async function recordToolPaths(
 	exec: SaveGuardApi["exec"],
 	state: SessionState,
 	cwd: string,
-	toolPaths: string[],
+	toolPaths: ToolPathChange[],
 ): Promise<void> {
-	for (const rawPath of toolPaths) {
-		const absolutePath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(cwd, rawPath);
+	for (const change of toolPaths) {
+		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
 		const lookupDirectory = isWithinDirectory(cwd, absolutePath) ? cwd : path.dirname(absolutePath);
 		let root = state.rootByDirectory.get(lookupDirectory);
 		if (root === undefined) {
 			const top = await runGit(exec, lookupDirectory, ["rev-parse", "--show-toplevel"]);
 			if (top.code !== 0) continue;
-			root = path.resolve(gitLine(top.stdout));
-			if (root.length === 0) continue;
-			state.rootByDirectory.set(lookupDirectory, root);
+			const discoveredRoot: string = String(path.resolve(gitLine(top.stdout)));
+			if (discoveredRoot.length === 0) continue;
+			root = discoveredRoot;
+			state.rootByDirectory.set(lookupDirectory, discoveredRoot);
 		}
+
+		if (root === undefined) continue;
 
 		const relative = path.relative(root, absolutePath);
 		if (relative.length === 0 || path.isAbsolute(relative) || relative === ".." ||
@@ -209,33 +400,102 @@ async function recordToolPaths(
 		let repository = state.repositories.get(root);
 		if (!repository) {
 			const head = await runGit(exec, root, ["rev-parse", "--verify", "HEAD"]);
-			repository = {
+			repository = newOwnedRepository(
 				root,
-				paths: new Set(),
-				baselineHead: head.code === 0 ? gitLine(head.stdout) : null,
-			};
+				head.code === 0 ? gitLine(head.stdout) : null,
+				new Set(),
+				false,
+				state.candidateReceipts,
+			);
 			state.repositories.set(root, repository);
 		}
 		repository.paths.add(repoPath);
+		recordSessionDelta(repository, repoPath, change.diff);
 	}
 }
 
-function statusPaths(stdout: string): Set<string> {
+function statusEntries(stdout: string): Map<string, string> {
 	const entries = stdout.split("\0");
-	const paths = new Set<string>();
+	const statuses = new Map<string, string>();
 	for (let index = 0; index < entries.length; index += 1) {
 		const entry = entries[index];
 		if (entry.length < 4) continue;
-		paths.add(entry.slice(3));
-		if (entry[0] === "R" || entry[0] === "C" || entry[1] === "R" || entry[1] === "C") {
+		const status = entry.slice(0, 2);
+		statuses.set(entry.slice(3), status);
+		if (status.includes("R") || status.includes("C")) {
 			const sourcePath = entries[index + 1];
-			if (sourcePath) paths.add(sourcePath);
+			if (sourcePath) statuses.set(sourcePath, status);
 			index += 1;
 		}
 	}
-	return paths;
+	return statuses;
 }
 
+
+function sameLines(left: string[], right: string[]): boolean {
+	if (left.length !== right.length) return false;
+	const sortedLeft = left.slice().sort();
+	const sortedRight = right.slice().sort();
+	return sortedLeft.every((line, index) => line === sortedRight[index]);
+}
+
+function samePatch(left: PatchDelta, right: PatchDelta): boolean {
+	return left.known && right.known &&
+		sameLines(left.added, right.added) && sameLines(left.removed, right.removed);
+}
+
+function containsPatch(candidate: PatchDelta, expected: PatchDelta): boolean {
+	if (!candidate.known || !expected.known) return false;
+	const candidateAdded = candidate.added.slice();
+	const candidateRemoved = candidate.removed.slice();
+	for (const line of expected.added) {
+		const index = candidateAdded.indexOf(line);
+		if (index < 0) return false;
+		candidateAdded.splice(index, 1);
+	}
+	for (const line of expected.removed) {
+		const index = candidateRemoved.indexOf(line);
+		if (index < 0) return false;
+		candidateRemoved.splice(index, 1);
+	}
+	return true;
+}
+
+
+async function diffFromBaseline(
+	exec: SaveGuardApi["exec"],
+	repository: OwnedRepository,
+	repoPath: string,
+): Promise<PatchDelta | null> {
+	if (!repository.baselineHead) return null;
+	const diff = await runGit(exec, repository.root, [
+		"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
+		repository.baselineHead, "--", repoPath,
+	]);
+	return diff.code === 0 ? parsePatch(diff.stdout) : null;
+}
+
+async function hasSavedCandidate(
+	exec: SaveGuardApi["exec"],
+	repository: OwnedRepository,
+	repoPath: string,
+): Promise<boolean> {
+	const expected = repository.sessionDeltas.get(repoPath);
+	if (!expected?.known || !repository.baselineHead) return false;
+	for (const receipt of repository.candidateReceipts) {
+		if (!receipt.text.includes(repoPath) &&
+			!receipt.text.includes(path.resolve(repository.root, repoPath))) continue;
+		const type = await runGit(exec, repository.root, ["cat-file", "-t", receipt.sha]);
+		const objectType = type.code === 0 ? gitLine(type.stdout) : "";
+		if (objectType !== "commit" && objectType !== "tree") continue;
+		const diff = await runGit(exec, repository.root, [
+			"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
+			repository.baselineHead, receipt.sha, "--", repoPath,
+		]);
+		if (diff.code === 0 && containsPatch(parsePatch(diff.stdout), expected)) return true;
+	}
+	return false;
+}
 
 export async function checkSaveState(
 	exec: SaveGuardApi["exec"],
@@ -250,10 +510,9 @@ export async function checkSaveState(
 	]);
 	if (status.code !== 0) return null;
 
+	const statuses = statusEntries(status.stdout);
 	const ownedPathSet = new Set(ownedPaths);
-	const dirtyPaths = Array.from(statusPaths(status.stdout))
-		.filter(path => ownedPathSet.has(path))
-		.sort();
+	const dirtyPaths = Array.from(statuses.keys()).filter(path => ownedPathSet.has(path)).sort();
 	const upstream = await runGit(exec, repository.root, ["rev-parse", "--verify", "@{u}"]);
 	const exclusions: string[] = [];
 	if (repository.baselineHead) exclusions.push(repository.baselineHead);
@@ -271,13 +530,47 @@ export async function checkSaveState(
 		if (!Number.isSafeInteger(count) || count < 0) return null;
 		aheadCount = count;
 	}
-	if (dirtyPaths.length === 0 && (aheadCount === null || aheadCount === 0)) return null;
 
-	const pendingPaths = new Set(dirtyPaths);
-	if (aheadCount !== null && aheadCount > 0) {
-		for (const ownedPath of ownedPaths) pendingPaths.add(ownedPath);
+	const pendingPaths = new Set<string>();
+	const privateIndexPaths = new Set<string>();
+	const savedPaths = new Set<string>();
+	for (const repoPath of dirtyPaths) {
+		const actual = await diffFromBaseline(exec, repository, repoPath);
+		const expected = repository.sessionDeltas.get(repoPath);
+		const untracked = statuses.get(repoPath) === "??" && !repository.baselineDirtyPaths.has(repoPath);
+		const mixed = repository.baselineDirtyPaths.has(repoPath) ||
+			(!repository.baselineStatusKnown && !untracked) ||
+			(!untracked && (!actual || !expected?.known || !samePatch(actual, expected)));
+		if (mixed && await hasSavedCandidate(exec, repository, repoPath)) {
+			savedPaths.add(repoPath);
+			continue;
+		}
+		pendingPaths.add(repoPath);
+		if (mixed) privateIndexPaths.add(repoPath);
 	}
-	return { root: repository.root, paths: Array.from(pendingPaths).sort(), aheadCount };
+	if (aheadCount !== null && aheadCount > 0) {
+		for (const repoPath of ownedPaths) {
+			if (savedPaths.has(repoPath)) continue;
+			const actual = await diffFromBaseline(exec, repository, repoPath);
+			const expected = repository.sessionDeltas.get(repoPath);
+			const mixed = repository.baselineDirtyPaths.has(repoPath) ||
+				(!repository.baselineStatusKnown && actual !== null) ||
+				(actual !== null && (!expected?.known || !samePatch(actual, expected)));
+			if (mixed && await hasSavedCandidate(exec, repository, repoPath)) {
+				savedPaths.add(repoPath);
+				continue;
+			}
+			pendingPaths.add(repoPath);
+			if (mixed) privateIndexPaths.add(repoPath);
+		}
+	}
+	if (pendingPaths.size === 0) return null;
+	return {
+		root: repository.root,
+		paths: Array.from(pendingPaths).sort(),
+		aheadCount,
+		privateIndexPaths: Array.from(privateIndexPaths).sort(),
+	};
 }
 
 function shellQuote(value: string): string {
@@ -287,17 +580,37 @@ function shellQuote(value: string): string {
 function formatFinding(finding: SaveGuardFinding): string {
 	const paths = finding.paths.map(path => JSON.stringify(path)).join(", ");
 	const ahead = finding.aheadCount === null ? "unknown" : String(finding.aheadCount);
-	return `repo ${JSON.stringify(finding.root)} paths [${paths}] ahead=${ahead}`;
+	const privatePaths = finding.privateIndexPaths ?? [];
+	const saveMode = privatePaths.length > 0
+		? ` private-index-required=[${privatePaths.map(path => JSON.stringify(path)).join(", ")}]`
+		: "";
+	return `repo ${JSON.stringify(finding.root)} paths [${paths}] ahead=${ahead}${saveMode}`;
 }
 
 function formatSavePrompt(findings: SaveGuardFinding[]): string {
 	const details = findings.map(formatFinding).join("; ");
-	const steps = findings.map(finding => {
-		const paths = finding.paths.map(path => JSON.stringify(path)).join(", ");
-		const commandPaths = finding.paths.map(shellQuote).join(" ");
-		return `repo ${JSON.stringify(finding.root)}: reserve ${paths}; run git commit --only -m "<msg> [level]" -- ${commandPaths}; git push (set upstream if needed); release the reservation`;
-	}).join("; ");
-	return `Unsaved session-owned work remains (${details}). Save before ending: ${steps}.`;
+	const steps: string[] = [];
+	for (const finding of findings) {
+		const privatePaths = new Set(finding.privateIndexPaths ?? []);
+		const plainPaths = finding.paths.filter(path => !privatePaths.has(path));
+		if (plainPaths.length > 0) {
+			const paths = plainPaths.map(path => JSON.stringify(path)).join(", ");
+			const commandPaths = plainPaths.map(shellQuote).join(" ");
+			steps.push(`repo ${JSON.stringify(finding.root)}: reserve ${paths}; run git commit --only -m "<msg> [level]" -- ${commandPaths}; git push (set upstream if needed); release the reservation`);
+		}
+		if (privatePaths.size > 0) {
+			const paths = Array.from(privatePaths).map(path => JSON.stringify(path)).join(", ");
+			const commandPaths = Array.from(privatePaths).map(shellQuote).join(" ");
+			steps.push([
+				`repo ${JSON.stringify(finding.root)}: reserve ${paths};`,
+				"fetch origin and initialize a private GIT_INDEX_FILE from fresh origin/main with GIT_INDEX_FILE=<private-index> git read-tree origin/main;",
+				`stage only this session's hunk with GIT_INDEX_FILE=<private-index> git add -p -- ${commandPaths};`,
+				"write the tree with GIT_INDEX_FILE=<private-index> git write-tree and create a candidate commit with git commit-tree <tree> -p origin/main;",
+				"record the candidate commit/tree SHA in a bead comment or Agent Mail message; push the candidate through the guarded repo flow; release the reservation",
+			].join(" "));
+		}
+	}
+	return `Unsaved session-owned work remains (${details}). Save before ending: ${steps.join("; ")}.`;
 }
 
 function formatWarning(findings: SaveGuardFinding[]): string {
@@ -306,17 +619,45 @@ function formatWarning(findings: SaveGuardFinding[]): string {
 
 export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	const sessions = new Map<string, SessionState>();
-	pi.on("tool_execution_end", async (event, ctx) => {
-		if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") return;
-		const paths = pathsFromToolEvent(event, ctx.cwd);
-		if (paths.length === 0) return;
+	pi.on("session_start", async (_event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
 		const state = sessionStateFor(sessions, sessionId);
 		state.pendingToolPathWork = state.pendingToolPathWork
-			.then(() => recordToolPaths(pi.exec.bind(pi), state, ctx.cwd, paths))
+			.then(() => recordSessionStart(pi.exec.bind(pi), state, ctx.cwd))
 			.catch(() => undefined);
 		await state.pendingToolPathWork;
+	});
+
+	pi.on("tool_call", (event, ctx) => {
+		const receipt = receiptFromToolCall(event);
+		if (!receipt || event.toolCallId.length === 0) return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (sessionId.length === 0) return;
+		sessionStateFor(sessions, sessionId).pendingCandidateCalls.set(event.toolCallId, receipt);
+	});
+
+	pi.on("tool_execution_end", async (event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
+		const receipt = state?.pendingCandidateCalls.get(event.toolCallId);
+		if (state && receipt) {
+			state.pendingCandidateCalls.delete(event.toolCallId);
+			if (!event.isError) {
+				state.candidateReceipts.push(receipt);
+				for (const repository of state.repositories.values()) {
+					repository.candidateReceipts.push(receipt);
+				}
+			}
+		}
+		if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") return;
+		const paths = pathsFromToolEvent(event, ctx.cwd);
+		if (paths.length === 0 || sessionId.length === 0) return;
+		const currentState = state ?? sessionStateFor(sessions, sessionId);
+		currentState.pendingToolPathWork = currentState.pendingToolPathWork
+			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths))
+			.catch(() => undefined);
+		await currentState.pendingToolPathWork;
 	});
 
 	pi.on("session_stop", async (event, ctx) => {
