@@ -95,13 +95,15 @@ jobs:
           name: candidate-${{ matrix.platform }}
           path: candidate/
       - name: Generate SBOM for the candidate archive
-        uses: anchore/sbom-action@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        # v0.9.0 bundled @actions/artifact 0.6 (retired v1 API): every SBOM step failed with "Create Artifact
+        # Container failed" in 0.2.10, 0.2.11 and 0.2.16. v0.24.3 uses @actions/artifact 6 and declares output-file.
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: candidate/
           format: spdx-json
           artifact-name: sbom-${{ matrix.platform }}
-          # Pinned code reads output-file although action.yml omits it.
           output-file: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
+          upload-release-assets: false
       - name: Attest build provenance for the candidate archive
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:

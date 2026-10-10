@@ -1,0 +1,1 @@
+- Release attestation can run again: the SBOM step uses anchore/sbom-action v0.24.3 (the pinned v0.9.0 used the retired artifact API and failed in every release that reached it), and the macOS-only realpath tests in rule-class-source no longer fail on runners whose temp dir sits under /var.
