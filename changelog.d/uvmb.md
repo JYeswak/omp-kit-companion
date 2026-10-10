@@ -1,0 +1,1 @@
+- Rule classification (the manifest and the pre-push gate) finds omp's source when the `omp` on PATH is a compiled standalone binary: it takes the same version's package from a later `omp` on PATH or bun's global install, and refuses any other version; OMP_SRC still wins.

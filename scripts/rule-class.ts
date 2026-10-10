@@ -11,26 +11,73 @@
  * Usage: bun scripts/rule-class.ts <rule.md>...   prints `name<TAB>class` per file.
  * Env:   OMP_SRC (omp TypeScript source dir), as for ttsr-harness.ts.
  */
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
-function ompSource(): string {
-	if (process.env.OMP_SRC) return process.env.OMP_SRC;
-	const executable = Bun.which("omp");
-	if (!executable) throw new Error("omp not found on PATH; install omp or set OMP_SRC to its source directory");
-	for (let dir = path.dirname(fs.realpathSync(executable)); ; dir = path.dirname(dir)) {
+const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
+
+function packageSourceAbove(start: string): { src: string; version: string } | null {
+	for (let dir = path.dirname(start); ; dir = path.dirname(dir)) {
 		const pkg = path.join(dir, "package.json");
-		if (fs.existsSync(pkg) && JSON.parse(fs.readFileSync(pkg, "utf8")).name === "@oh-my-pi/pi-coding-agent") {
-			const src = path.join(dir, "src");
-			if (fs.existsSync(src)) return src;
-			throw new Error(`${executable} belongs to omp but ${src} is missing; set OMP_SRC to its source directory`);
+		if (fs.existsSync(pkg)) {
+			const manifest = JSON.parse(fs.readFileSync(pkg, "utf8")) as { name?: unknown; version?: unknown };
+			if (manifest.name === PACKAGE_NAME) {
+				const src = path.join(dir, "src");
+				return fs.existsSync(src) ? { src, version: String(manifest.version) } : null;
+			}
 		}
-		if (path.dirname(dir) === dir) break;
+		if (path.dirname(dir) === dir) return null;
 	}
-	throw new Error(`cannot locate the omp package for ${executable}; set OMP_SRC to its source directory`);
 }
 
-export const OMP_SRC = ompSource();
+export interface OmpSourceLookup {
+	env: NodeJS.ProcessEnv;
+	/** Version printed by `<launcher> --version`, e.g. "18.8.8"; null when it cannot be read. */
+	launcherVersion(launcher: string): string | null;
+}
+
+const defaultLookup: OmpSourceLookup = {
+	env: process.env,
+	launcherVersion(launcher) {
+		const run = spawnSync(launcher, ["--version"], { encoding: "utf8", timeout: 15_000 });
+		return run.status === 0 ? /(\d+\.\d+\.\d+)/.exec(run.stdout)?.[1] ?? null : null;
+	},
+};
+
+/**
+ * The TypeScript source of the omp that `omp` on PATH runs. The first launcher usually lives inside
+ * its package. A compiled standalone launcher does not, so the same version's package is then taken
+ * from another `omp` on PATH or from bun's global install; a package of any other version is refused,
+ * because classifying rules with a different omp's parser is exactly the drift this file prevents.
+ */
+export function resolveOmpSource(lookup: OmpSourceLookup = defaultLookup): string {
+	const { env } = lookup;
+	if (env.OMP_SRC) return env.OMP_SRC;
+	const launchers: string[] = [];
+	for (const dir of (env.PATH ?? "").split(path.delimiter)) {
+		const candidate = path.join(dir || ".", "omp");
+		try {
+			fs.accessSync(candidate, fs.constants.X_OK);
+			if (fs.statSync(candidate).isFile()) launchers.push(fs.realpathSync(candidate));
+		} catch {}
+	}
+	const executable = launchers[0];
+	if (!executable) throw new Error("omp not found on PATH; install omp or set OMP_SRC to its source directory");
+	const own = packageSourceAbove(executable);
+	if (own) return own.src;
+	const version = lookup.launcherVersion(executable);
+	const bunRoot = env.BUN_INSTALL ?? path.join(env.HOME ?? os.homedir(), ".bun");
+	const others = [...launchers.slice(1), path.join(bunRoot, "install", "global", "node_modules", PACKAGE_NAME, "package.json")];
+	for (const other of others) {
+		const found = packageSourceAbove(other);
+		if (found && version !== null && found.version === version) return found.src;
+	}
+	throw new Error(`cannot locate the omp ${version ?? "(unknown version)"} package source for ${executable}; set OMP_SRC to its src directory (…/${PACKAGE_NAME}/src)`);
+}
+
+export const OMP_SRC = resolveOmpSource();
 // OMP_SRC follows whichever omp is installed, so these specifiers cannot be static imports.
 const helpersMod = await import(path.join(OMP_SRC, "discovery/helpers.ts"));
 const utilsMod = await import(Bun.resolveSync("@oh-my-pi/pi-utils", path.join(OMP_SRC, "discovery/helpers.ts")));
