@@ -1,0 +1,1 @@
+- Releases can be rehearsed before a version is spent: `gh workflow run release.yml --ref main -f version=X.Y.Z -f rehearsal=true` runs the whole release pipeline from main on a throwaway `X.Y.Z-rehearsal.RUN.ATTEMPT` version, refuses an already-tagged version, creates no tag or release, and skips the two signing steps.

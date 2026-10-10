@@ -28,6 +28,21 @@ Tags are `vX.Y.Z` on the exact certified commit. The release workflow
 (`.github/workflows/release.yml`) refuses anything else: exact tag shape,
 tag on HEAD, tag commit equals HEAD.
 
+### 3a. Rehearse before spending the version
+
+A tag cannot be reused, so a release that fails after tagging abandons its
+version. Rehearse the identical pipeline from main first:
+
+```sh
+gh workflow run release.yml --ref main -f version=X.Y.Z -f rehearsal=true
+```
+
+The rehearsal runs the changelog check, the whole CI candidate, `attest-platforms`
+and the attest SBOM on the throwaway version `X.Y.Z-rehearsal.RUN.ATTEMPT`. It
+refuses when `vX.Y.Z` already exists, creates no tag or release, and skips the two
+signing steps (build provenance, SBOM attestation), which only a real run
+exercises. Green: tag the same SHA and dispatch for real. Red: no version spent.
+
 ## 4. Build platform archives with sha256
 
 ```sh
