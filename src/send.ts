@@ -53,7 +53,7 @@ export function dispatchBeads(message: string, knownPrefixes?: ReadonlySet<strin
 			const bare = token.replace(TOKEN_EDGE, "");
 			if (!BEAD_ID.test(bare) || bead_ids.includes(bare)) continue;
 			// Shape alone admits ordinary hyphenated words (follow-up, one-line, diff-check0).
-			if (knownPrefixes && knownPrefixes.size > 0 && !knownPrefixes.has(bare.slice(0, bare.indexOf("-")))) continue;
+			if (!knownPrefixes?.has(bare.slice(0, bare.indexOf("-")))) continue;
 			bead_ids.push(bare);
 		}
 	});

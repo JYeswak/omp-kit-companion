@@ -84,8 +84,9 @@ test("SEND1 capture uses the bare pane id with scrollback history", async () => 
 	}
 });
 
-// Explicit empty prefix set: the id-shape fallback, independent of this machine's trackers.
-const send = (message: string, noBeadReason?: string, knownPrefixes: ReadonlySet<string> = new Set()) => {
+// Use explicit fixture prefixes; tests never depend on host tracker configuration.
+const TEST_TRACKER_PREFIXES = new Set<string>(["ompkit", "cfs", "core8", "jev", "kit", "beads_rust"]);
+const send = (message: string, noBeadReason?: string, knownPrefixes: ReadonlySet<string> = TEST_TRACKER_PREFIXES) => {
 	const pane = echoPane(1);
 	return proveSend({ session: "s", pane: "%1", message, noBeadReason, knownPrefixes, dropDir: dropDir(), exec: pane.exec, env: testEnv, pollMs: 1, deadlineMs: 50, wait: noWait })
 		.then((result) => ({ result, taken: pane.taken }));
@@ -144,7 +145,7 @@ test("BEAD5: URLs, paths and the D-line slug are not bead ids", () => {
 	expect(urls).toEqual({ dispatch: true, bead_ids: [] });
 	expect(dispatchBeads("D AM1 cfs-9yrif: go").bead_ids).toEqual([]);
 	expect(dispatchBeads("D AM1 x: bead=ompkit-xa5s").bead_ids).toEqual([]);
-	expect(dispatchBeads("D AM1 x: cfs-9yrif, ompkit-rc-epic-land-fix-release-dogfood-rz5.125;").bead_ids).toEqual(["cfs-9yrif", "ompkit-rc-epic-land-fix-release-dogfood-rz5.125"]);
+	expect(dispatchBeads("D AM1 x: cfs-9yrif, ompkit-rc-epic-land-fix-release-dogfood-rz5.125;", new Set(["cfs", "ompkit"])).bead_ids).toEqual(["cfs-9yrif", "ompkit-rc-epic-land-fix-release-dogfood-rz5.125"]);
 });
 
 test("BEAD5 regex: real fleet ids match, near-misses do not, long near-miss is linear", () => {
@@ -154,6 +155,12 @@ test("BEAD5 regex: real fleet ids match, near-misses do not, long near-miss is l
 	const started = performance.now();
 	expect(BEAD_ID.test(nearMiss)).toBe(false);
 	expect(performance.now() - started).toBeLessThan(200);
+});
+
+test("BEAD6 planted: no known tracker prefix means a shaped id is not accepted", async () => {
+	const unconfigured = await send("D omp-test:0.1 %999 ompkit-xa5s fix", undefined, new Set());
+	expect(unconfigured.result.status).toBe("BEAD_REQUIRED");
+	expect(unconfigured.taken.sends).toBe(0);
 });
 
 test("BEAD6: with fleet tracker prefixes, hyphenated words are not bead ids; real ids still are", async () => {
