@@ -7,6 +7,45 @@ const RECOVERY_ROOT = [".beads", ".br_recovery", "schema-migrations"] as const;
 const RECOVERY_MARKER = "recovery-failed.json";
 const LEASE_FILE = ".omp-kit-recovery-lease.json";
 const BUSY_RECOVERY_ERROR = "database is busy (recovery in progress)";
+const RATE_RECEIPT = ".omp-kit-last-recover.json";
+
+/**
+ * ompkit-x5iv.2 RECOV2: at most one recover command per repo per window.
+ * Twenty minutes of 120 s ticks must not run twenty recovers; an hour of
+ * headroom still retries a genuinely stuck latch. br's own files already
+ * coexist with our dotfiles in this directory.
+ */
+export const RECOVER_RATE_WINDOW_MS = 60 * 60_000;
+
+function rateReceiptPath(repo: string): string {
+	return join(resolve(repo, ...RECOVERY_ROOT), RATE_RECEIPT);
+}
+
+function defaultReadRateReceipt(repo: string): number | null {
+	let raw: string;
+	try {
+		raw = readFileSync(rateReceiptPath(repo), "utf8");
+	} catch {
+		return null;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return null;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("at_ms" in parsed)) return null;
+	const atMs: unknown = parsed.at_ms;
+	return typeof atMs === "number" && Number.isFinite(atMs) && atMs >= 0 ? atMs : null;
+}
+
+function defaultWriteRateReceipt(repo: string, atMs: number, kind: string): void {
+	try {
+		writeFileSync(rateReceiptPath(repo), `${JSON.stringify({ schema_version: 1, at_ms: atMs, kind })}\n`, { mode: 0o600 });
+	} catch {
+		// A broken recovery area fails closed downstream via the lease checks.
+	}
+}
 
 /**
  * ompkit-bj08.5.1: unresolved recovery flags for a repo: run directories
@@ -39,6 +78,12 @@ export interface TrackerRecoveryDeps {
 	 * refusal blocks with zero effects. Absent, the legacy checks run.
 	 */
 	admission?: AdmissionInput;
+	/** ompkit-x5iv.2: rate window override; default RECOVER_RATE_WINDOW_MS. */
+	recoverRateWindowMs?: number;
+	/** ompkit-x5iv.2: last recover attempt ms, or null when none. */
+	readRateReceipt?: (repo: string) => number | null;
+	/** ompkit-x5iv.2: record a recover attempt receipt. */
+	writeRateReceipt?: (repo: string, atMs: number, kind: string) => void;
 }
 
 interface RecoveryLease {
@@ -76,7 +121,14 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 	if (!ownerStart) return blocked("current holder PID start time is unavailable");
 	if (ownerSessionId === null) return blocked(`session ${session} is not live`);
 	if (ownerSessionId === undefined) return blocked(`session ${session} liveness is unknown`);
-
+	const windowMs = deps.recoverRateWindowMs ?? RECOVER_RATE_WINDOW_MS;
+	const lastRecover = (deps.readRateReceipt ?? defaultReadRateReceipt)(repo);
+	const attemptAt = now();
+	if (lastRecover !== null && attemptAt - lastRecover < windowMs) {
+		const waitMin = Math.ceil((windowMs - (attemptAt - lastRecover)) / 60_000);
+		return blocked(`recovery attempt rate-limited (last attempt ${Math.max(0, Math.floor((attemptAt - lastRecover) / 1000))}s ago, window ${Math.round(windowMs / 60_000)}m, next eligible in ~${waitMin}m); no recover command ran`);
+	}
+	(deps.writeRateReceipt ?? defaultWriteRateReceipt)(repo, attemptAt, "attempted");
 	const owner: RecoveryLease = {
 		schema_version: 1,
 		lease_id: (deps.leaseId ?? randomUUID)(),
@@ -139,32 +191,60 @@ function findBusyFlags(root: string): { flags: BusyFlag[]; error?: string } {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { flags: [] };
 		return { flags: [], error: errorMessage(error) };
 	}
-	const flags: BusyFlag[] = [];
+	const candidates: { runDirectory: string; dirName: string; markerMs: number }[] = [];
+	const completes: { dirName: string; ms: number }[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		const runDirectory = join(root, entry.name);
 		const marker = join(runDirectory, RECOVERY_MARKER);
 		try {
 			if (lstatSync(runDirectory).isSymbolicLink()) return { flags: [], error: `recovery run ${entry.name} is a symbolic link` };
+			try {
+				const completeStat = lstatSync(join(runDirectory, COMPLETE_MARKER));
+				if (!completeStat.isSymbolicLink() && completeStat.isFile()) completes.push({ dirName: entry.name, ms: completeStat.mtimeMs });
+			} catch {
+				// Absent or unreadable complete is not evidence; markers below still count.
+			}
 			const markerStat = lstatSync(marker);
 			if (markerStat.isSymbolicLink() || !markerStat.isFile()) return { flags: [], error: `recovery marker ${entry.name} is not a regular file` };
+			let receipt: unknown;
+			try {
+				receipt = JSON.parse(readFileSync(marker, "utf8"));
+			} catch (error) {
+				return { flags: [], error: `invalid recovery marker ${entry.name}: ${errorMessage(error)}` };
+			}
+			if (receipt && typeof receipt === "object" && !Array.isArray(receipt)
+				&& "error" in receipt && typeof receipt.error === "string"
+				&& receipt.error.includes(BUSY_RECOVERY_ERROR)) {
+				candidates.push({ runDirectory, dirName: entry.name, markerMs: markerStat.mtimeMs });
+			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
 			return { flags: [], error: errorMessage(error) };
 		}
-		let receipt: unknown;
-		try {
-			receipt = JSON.parse(readFileSync(marker, "utf8"));
-		} catch (error) {
-			return { flags: [], error: `invalid recovery marker ${entry.name}: ${errorMessage(error)}` };
-		}
-		if (receipt && typeof receipt === "object" && !Array.isArray(receipt)
-			&& typeof (receipt as Record<string, unknown>).error === "string"
-			&& ((receipt as Record<string, string>).error).includes(BUSY_RECOVERY_ERROR)) {
-			flags.push({ runDirectory });
-		}
 	}
-	return { flags };
+	return { flags: currentFlags(candidates, completes) };
+}
+
+const COMPLETE_MARKER = "recovery-complete.json";
+
+/**
+ * ompkit-x5iv.2 RECOV2: br never deletes BusyRecovery failed markers, so a
+ * marker counts only while it is evidence of a live latch: no run dir sorted
+ * after its own holds a recovery-complete.json, and the marker is newer than
+ * the newest complete anywhere. A PROCEEDED attempt writes no marker state
+ * itself; br's own complete record is what retires old markers.
+ */
+function currentFlags(
+	candidates: { runDirectory: string; dirName: string; markerMs: number }[],
+	completes: { dirName: string; ms: number }[],
+): BusyFlag[] {
+	const newestCompleteMs = completes.length > 0 ? Math.max(...completes.map((complete) => complete.ms)) : null;
+	return candidates
+		.filter((candidate) =>
+			!completes.some((complete) => complete.dirName > candidate.dirName) &&
+			(newestCompleteMs === null || candidate.markerMs > newestCompleteMs))
+		.map((candidate) => ({ runDirectory: candidate.runDirectory }));
 }
 
 function claimLease(path: string, owner: RecoveryLease, repo: string, liveness: LivenessDeps,

@@ -1,0 +1,1 @@
+- Tracker recovery no longer fires on stale BusyRecovery markers: a marker counts only with no later recovery-complete run and a newer timestamp than the last complete, and recover commands are rate-bounded to one per repo per hour with a receipt, so scheduled ticks cannot storm the tracker beside live workers.
