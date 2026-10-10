@@ -1,0 +1,1 @@
+- Main CI and native certification install OMP 18.8.7, certified by omp-certify. (PR #80)
