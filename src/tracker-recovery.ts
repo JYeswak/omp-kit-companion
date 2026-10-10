@@ -241,11 +241,21 @@ function releaseLeases(paths: readonly string[], leaseId: string): string[] {
 	return errors;
 }
 
-function defaultSessionId(session: string, cwd: string): string | null | undefined {
-	const result = defaultRun(["tmux", "display-message", "-p", "-t", `=${session}`, "#{session_id}"], cwd);
-	const value = result.stdout.trim();
-	if (result.code === 0 && value !== "") return value;
-	if (/can't find session|session not found|no server running|no sessions/i.test(`${result.stdout}\n${result.stderr}`)) return null;
+/**
+ * Live tmux session id, null when the session is gone, undefined when tmux gave no usable answer. Reads
+ * `list-sessions` and matches the name exactly: on tmux 3.6a `display-message -t =<name>` prints an empty line
+ * with exit 0 both for a live session and for a missing one, which made every session's liveness read as unknown.
+ */
+export function defaultSessionId(session: string, cwd: string, run: (args: readonly string[], cwd: string) => TrackerRecoveryCommandResult = defaultRun): string | null | undefined {
+	const result = run(["tmux", "list-sessions", "-F", "#{session_id} #{session_name}"], cwd);
+	if (result.code === 0) {
+		for (const line of result.stdout.split("\n")) {
+			const space = line.indexOf(" ");
+			if (space > 0 && line.slice(space + 1) === session) return line.slice(0, space);
+		}
+		return null;
+	}
+	if (/no server running|no sessions|error connecting to/i.test(`${result.stdout}\n${result.stderr}`)) return null;
 	return undefined;
 }
 

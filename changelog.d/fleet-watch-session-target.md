@@ -1,0 +1,1 @@
+- Fleet Watch tracker recovery recognizes live tmux sessions on tmux 3.6: the session probe reads `list-sessions` with an exact name match instead of `display-message -t =<name>`, which printed nothing for both live and missing sessions and blocked every recovery as "liveness is unknown".

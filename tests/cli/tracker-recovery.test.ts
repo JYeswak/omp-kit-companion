@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
-import { recoverBusyTracker, type TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
+import { defaultSessionId, recoverBusyTracker, type TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import type { LivenessDeps } from "../../src/scratch.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -111,5 +113,22 @@ test("live database descriptor blocks a stale lease-free flag", () => {
 		expect(deps.lsofCalls).toEqual([["lsof", "-nP", "-t", "--", join(planted.repo, ".beads", "beads.db")]]);
 	} finally {
 		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("the session probe returns a live tmux session id and null for a missing session", () => {
+	const dir = mkdtempSync(join(tmpdir(), "fw-sid-"));
+	const socket = join(dir, "s");
+	const tmux = (args: readonly string[]) => {
+		const result = spawnSync(args[0]!, ["-S", socket, ...args.slice(1)], { encoding: "utf8" });
+		return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+	};
+	try {
+		expect(tmux(["tmux", "new-session", "-d", "-s", "omp-test", "-x", "80", "-y", "24"]).code).toBe(0);
+		expect(defaultSessionId("omp-test", dir, tmux)).toMatch(/^\$\d+$/);
+		expect(defaultSessionId("no-such-session", dir, tmux)).toBeNull();
+	} finally {
+		tmux(["tmux", "kill-server"]);
+		rmSync(dir, { recursive: true, force: true });
 	}
 });
