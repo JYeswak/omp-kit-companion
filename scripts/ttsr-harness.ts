@@ -29,10 +29,10 @@ import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
-// Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
-// logical checkout instead, or the disposable archive path makes normal repo files look like scratch.
+// Case corpus paths are logical fixtures; a stable root keeps archive locations out of scope matching.
+// Callers that need a real workspace can provide OMP_KIT_CASE_CWD or GITHUB_WORKSPACE.
 const caseCwdOverride = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE;
-const CASE_CWD = caseCwdOverride ? path.resolve(caseCwdOverride) : KIT;
+const CASE_CWD = caseCwdOverride ? path.resolve(caseCwdOverride) : path.resolve("/", "omp-kit-case-root");
 // The rule loader and this harness must read the same installed omp package.
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 // A separate process is required: a pathological synchronous matcher can block JS timers.

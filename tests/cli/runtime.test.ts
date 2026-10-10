@@ -75,7 +75,7 @@ test("isolated children retain the logical workspace root for case path scopes",
 	expect(sanitizedEnv(identity, { GITHUB_WORKSPACE: "/checkout" }, privateRoot).OMP_KIT_CASE_CWD).toBe("/checkout");
 	expect(sanitizedEnv(identity, { OMP_KIT_CASE_CWD: "var/agent-tmp/fixture", GITHUB_WORKSPACE: "/checkout" }, privateRoot).OMP_KIT_CASE_CWD)
 		.toBe(resolve("var/agent-tmp/fixture"));
-	expect(sanitizedEnv(identity, {}, privateRoot).OMP_KIT_CASE_CWD).toBe(process.cwd());
+	expect(sanitizedEnv(identity, {}, privateRoot).OMP_KIT_CASE_CWD).toBe(resolve("/", "omp-kit-case-root"));
 });
 
 describe("release paths", () => {

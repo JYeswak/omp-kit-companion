@@ -215,12 +215,14 @@ supportedTest("reviewed audit source bytes ignore release version, but a byte ch
 	expect(covered.status).toBe("NO_MATCHES_IN_COVERED_CLASSES");
 	expect(covered.version).toBe("99.0.0");
 
-	const changed = fixture(); changed.bank();
-	const changedOmp = seedReviewedOmp(join(changed.root, "omp-changed"), "100.0.0", "mnemopi/src/core/query-cache.ts");
-	const refused = await auditMemoryAtRest({ ...changed.args, ompPath: changedOmp });
-	expect(refused.status).toBe("UNVERIFIED");
-	expect(refused.reason).toBe("UNSUPPORTED_SOURCE");
-	expect(refused.coverage).toBeNull();
+	for (const changedSource of ["mnemopi/src/core/query-cache.ts", "mnemopi/src/db.ts", "mnemopi/src/core/episodic-graph.ts"]) {
+		const changed = fixture(); changed.bank();
+		const changedOmp = seedReviewedOmp(join(changed.root, "omp-changed"), "100.0.0", changedSource);
+		const refused = await auditMemoryAtRest({ ...changed.args, ompPath: changedOmp });
+		expect(refused.status).toBe("UNVERIFIED");
+		expect(refused.reason).toBe("UNSUPPORTED_SOURCE");
+		expect(refused.coverage).toBeNull();
+	}
 });
 
 supportedTest("compiled private audit requires separate consent and exposes only covered counts without mutating the selected HOME", () => {

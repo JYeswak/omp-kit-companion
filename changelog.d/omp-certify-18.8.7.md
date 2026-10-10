@@ -1,1 +1,2 @@
 - Main CI and native certification install OMP 18.8.7, certified by omp-certify. (PR #80)
+- Memory audit pins include OMP 18.8.7's transaction-only Mnemopi update; matcher defaults use a stable logical root so archive paths do not trigger scratch-scoped rules.

@@ -83,8 +83,8 @@ export function sanitizedEnv(
 	env.OMP_BIN = identity.launcher;
 	env.OMP_PATH = identity.launcher;
 	env.OMP_SRC = identity.source;
-	// The harness runs from the packaged release; path scopes need the caller's workspace root.
-	const caseCwd = inherited.OMP_KIT_CASE_CWD || inherited.GITHUB_WORKSPACE || process.cwd();
+	// Default to a stable logical root; explicit case or workspace roots remain supported.
+	const caseCwd = inherited.OMP_KIT_CASE_CWD || inherited.GITHUB_WORKSPACE || resolve("/", "omp-kit-case-root");
 	env.OMP_KIT_CASE_CWD = isAbsolute(caseCwd) ? caseCwd : resolve(caseCwd);
 	return env;
 }
