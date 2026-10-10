@@ -246,7 +246,9 @@ function capturePrivate(socket: string, pane: string): string {
 	return result.stdout;
 }
 
-test("TMUX1: without socket environment, send selects the sole live private server and reports its socket", async () => {
+// Real private tmux servers; macOS CI runners ship no tmux (same guard as fleet-watch and tracker-recovery).
+const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
+test.skipIf(!tmuxAvailable)("TMUX1: without socket environment, send selects the sole live private server and reports its socket", async () => {
 	const home = socketFixtureRoot;
 	const tmp = join(socketFixtureRoot, "tmp");
 	const socket = join(home, ".tmux-sockets", `tmux-${tmuxUid}`, "default");
@@ -264,7 +266,7 @@ test("TMUX1: without socket environment, send selects the sole live private serv
 	}
 });
 
-test("TMUX1 planted: two live private servers refuse with both sockets and do not change either pane", async () => {
+test.skipIf(!tmuxAvailable)("TMUX1 planted: two live private servers refuse with both sockets and do not change either pane", async () => {
 	const home = socketFixtureRoot;
 	const tmp = join(socketFixtureRoot, "tmp");
 	const homeSocket = join(home, ".tmux-sockets", `tmux-${tmuxUid}`, "default");
@@ -286,7 +288,7 @@ test("TMUX1 planted: two live private servers refuse with both sockets and do no
 	}
 });
 
-test("TMUX1 unchanged: explicit TMUX_TMPDIR is honored and its socket is reported", async () => {
+test.skipIf(!tmuxAvailable)("TMUX1 unchanged: explicit TMUX_TMPDIR is honored and its socket is reported", async () => {
 	const home = socketFixtureRoot;
 	const socketRoot = join(socketFixtureRoot, "custom");
 	const socket = join(socketRoot, `tmux-${tmuxUid}`, "default");
