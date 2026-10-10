@@ -54,7 +54,9 @@ sha256; the installer (`installer/install.sh --version X.Y.Z --index URL
 --prefix DIR`) verifies the hash before installing and refuses on mismatch.
 Release candidate indexes contain exactly `darwin-arm64-none`, `linux-arm64-gnu`,
 and `linux-x64-gnu`. `darwin-x64-none` is a non-shipping CI probe and is
-excluded from published indexes and attestations. Release-mode candidate
+excluded from published indexes and attestations. Release runs certify it
+after the candidate (`intel-probe` in release.yml): reported, never gating, and
+holding no macOS slot while the ship targets certify. Release-mode candidate
 generation requires both minimum and certified OMP receipts for all three
 ship targets; a missing or refused ship receipt blocks attestation.
 

@@ -1,0 +1,1 @@
+- Release rehearsals and releases certify only the three shipping targets before indexing; Intel macOS certification runs afterward as a non-gating probe, freeing its queued runner slots during ship-target certification.
