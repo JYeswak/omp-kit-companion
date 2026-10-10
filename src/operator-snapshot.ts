@@ -7,6 +7,30 @@ const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.jso
 const MAX_ENTRIES_PER_ROOT = 20_000;
 const MAX_BYTES_PER_ROOT = 512 * 1024 * 1024;
 
+/**
+ * Children of the kit state root that the kit's own scheduled service jobs write on their own clock:
+ * ci-poller (ci-runs.json), load-watch and heavy (load/), every job's lock and status (jobs/),
+ * fleet-flush and fleet-watch logs and state, scratch-reaper (scratch-quarantine/, scratch-reap-log.jsonl),
+ * the service TMPDIR (service-tmp/) and claude-save receipts. They change during any isolated test on a
+ * machine running those jobs, and scratch-quarantine alone can hold over a million entries, so watching
+ * them made every live update postcheck fail. Everything else under the state root stays watched,
+ * including any new top-level file a run creates.
+ */
+const SERVICE_OWNED_STATE: Record<string, true> = {
+	"ci-runs.json": true, load: true, jobs: true, "fleet-flush.jsonl": true, "fleet-watch.jsonl": true,
+	"fleet-watch-state.json": true, "scratch-quarantine": true, "scratch-reap-log.jsonl": true, "service-tmp": true,
+};
+const SERVICE_OWNED_STATE_FILE = /^claude-save-[A-Za-z0-9._-]+\.json$/;
+
+/** True when `path` is, or lies under, a service-owned child of `stateRoot`. */
+export function isServiceOwnedState(stateRoot: string, path: string): boolean {
+	const rel = relative(stateRoot, path);
+	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false;
+	const top = rel.split("/")[0]!;
+	return SERVICE_OWNED_STATE[top] === true || (top === rel && SERVICE_OWNED_STATE_FILE.test(top));
+}
+
+export type WatchedPaths = string[] & { stateRoot?: string };
 export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[] };
 export type WatchedComparison = { unchanged: boolean; complete: boolean; watched: number; changed_paths: string[]; incomplete_paths: string[] };
 
@@ -15,21 +39,21 @@ export type WatchedComparison = { unchanged: boolean; complete: boolean; watched
  * directories, installed plugins, and the kit state root. Live scenarios run in a private HOME, so these
  * must be byte-identical before and after; everything else in the operator HOME may change concurrently.
  */
-export function operatorWatchedPaths(home: string, stateRoot: string | null): string[] {
+export function operatorWatchedPaths(home: string, stateRoot: string | null): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
 	try {
 		for (const name of readdirSync(join(home, ".omp", "profiles")).sort())
 			profileDirs.push(join(home, ".omp", "profiles", name, "agent"));
 	} catch { /* no named profiles */ }
-	const paths = [join(home, ".omp", "settings.json"), join(home, ".agents", "rules"), join(home, ".agents", "omp-kit-ownership.json"),
+	const paths: WatchedPaths = [join(home, ".omp", "settings.json"), join(home, ".agents", "rules"), join(home, ".agents", "omp-kit-ownership.json"),
 		join(home, ".omp", "omp-extensions"), join(home, ".omp", "plugins")];
 	for (const dir of profileDirs) paths.push(...PROFILE_FILES.map(name => join(dir, name)), join(dir, "rules"));
-	if (stateRoot) paths.push(stateRoot);
+	if (stateRoot) { paths.push(stateRoot); paths.stateRoot = stateRoot; }
 	return paths;
 }
 
 /** Content and mode only: an mtime-only touch is not a change. An absent path is a recorded state, not an error. */
-export function snapshotWatched(paths: readonly string[]): WatchedSnapshot {
+export function snapshotWatched(paths: readonly string[] & { stateRoot?: string }): WatchedSnapshot {
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
 	for (const root of paths) {
@@ -37,6 +61,7 @@ export function snapshotWatched(paths: readonly string[]): WatchedSnapshot {
 		let count = 0, bytes = 0, overflow = false;
 		const visit = (path: string): void => {
 			if (overflow) return;
+			if (paths.stateRoot && isServiceOwnedState(paths.stateRoot, path)) return;
 			let stat;
 			try { stat = lstatSync(path); }
 			catch (error) {

@@ -51,3 +51,19 @@ test("a ladder that skips the flywheel-invariants stage is an order failure, not
  expect(result.stages["flywheel-invariants"].status).toBe("NOT_RUN");
  expect(result.failures).toContain("Ladder stage order, identity, or producer rc mismatch");
 });
+
+test("a newer release's added stage is accepted when GREEN, and every known stage is still required", () => {
+ const withAdded = [...names.slice(0, 4), "future-stage", ...names.slice(4)].map(name => `GREEN ${name} producer_rc=0`).join("\n");
+ const result = sample(`${live}\n${planted}\n${withAdded}\nLADDER: GREEN`);
+ expect(result.failures).toEqual([]);
+ expect(Object.values(result.stages).every(stage => stage.status === "PASS")).toBe(true);
+ const droppedKnown = [...names.slice(0, 4), "future-stage", ...names.slice(5)].map(name => `GREEN ${name} producer_rc=0`).join("\n");
+ expect(sample(`${live}\n${planted}\n${droppedKnown}\nLADDER: GREEN`).failures).toContain("Ladder stage order, identity, or producer rc mismatch");
+});
+
+test("a newer release's added stage that is RED fails under its own name", () => {
+ const redAdded = [...names.slice(0, 4).map(name => `GREEN ${name} producer_rc=0`), "RED   future-stage producer_rc=4"].join("\n");
+ const result = sample(redAdded, 1);
+ expect(result.failures).toContain("Stage future-stage returned producer_rc=4");
+ expect(result.stages["regex-budget"].status).toBe("NOT_RUN");
+});

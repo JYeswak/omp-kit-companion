@@ -73,25 +73,34 @@ function snapshot(root: string | undefined, release: boolean): Snapshot {
  return { digest: hash.digest("hex"), complete };
 }
 
-/** Parse exactly the ordered live rows shipped by the selected release; a passing shell rc alone is insufficient. */
+/**
+ * Parse exactly the ordered live rows shipped by the selected release; a passing shell rc alone is insufficient.
+ * The installed kit validates the TARGET release's ladder during an update, so a stage name this version does not
+ * know is a newer release's stage: it must be GREEN and is accepted. Every stage this version knows must still
+ * appear, GREEN, in this order; a known stage that is skipped or reordered is a failure.
+ */
 export function classifyLadder(result: BundledRunResult, ids: readonly string[]): {
  stages: Record<FullStageName, FullStage>; live_scenarios: FullTestReport["live_scenarios"]; failures: string[];
 } {
  const stages = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null }])) as Record<FullStageName, FullStage>;
+ const isKnown = (name: string): name is FullStageName => (STAGES as readonly string[]).includes(name);
  const failures: string[] = [];
  const lines = result.stdout.split(/\r?\n/);
  let next = 0;
  for (const line of lines) {
   const match = /^(GREEN|RED)\s+(\S+) producer_rc=(\d+)(?:\s|$)/.exec(line);
   if (!match) continue;
-  const expected = STAGES[next];
-  if (match[2] !== expected || (match[1] === "GREEN" && match[3] !== "0") || (match[1] === "RED" && match[3] === "0")) {
+  const name = match[2]!;
+  const rcMismatch = (match[1] === "GREEN" && match[3] !== "0") || (match[1] === "RED" && match[3] === "0");
+  if (rcMismatch || (isKnown(name) && name !== STAGES[next])) {
    failures.push("Ladder stage order, identity, or producer rc mismatch");
    break;
   }
-  stages[expected] = { status: match[1] === "GREEN" ? "PASS" : "FAIL", producer_rc: Number(match[3]) };
-  next++;
-  if (match[1] === "RED") { failures.push(`Stage ${expected} returned producer_rc=${match[3]}`); break; }
+  if (isKnown(name)) {
+   stages[name] = { status: match[1] === "GREEN" ? "PASS" : "FAIL", producer_rc: Number(match[3]) };
+   next++;
+  }
+  if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`); break; }
  }
  const ordinary = lines.filter(line => line.startsWith("ok    ")).map(line => line.slice(6));
  const observed = new Set(ordinary);

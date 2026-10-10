@@ -85,3 +85,29 @@ test("absent watched paths are a recorded state; creating one is a change", () =
 	mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true });
 	expect(compareWatched(before, snapshotWatched(paths), home).changed_paths).toEqual(["~/.local/state/omp-kit"]);
 });
+
+test("writes by the kit's own service jobs under the state root are not changes; any other state write is", () => {
+	const { home, paths } = operatorHome();
+	const state = join(home, ".local", "state", "omp-kit");
+	mkdirSync(join(state, "load"), { recursive: true });
+	mkdirSync(join(state, "scratch-quarantine", "big"), { recursive: true });
+	mkdirSync(join(state, "receipts"), { recursive: true });
+	writeFileSync(join(state, "ci-runs.json"), "{}\n");
+	writeFileSync(join(state, "receipts", "r1.json"), "{}\n");
+	const before = snapshotWatched(paths);
+	writeFileSync(join(state, "ci-runs.json"), "{\"polled\":1}\n");
+	appendFileSync(join(state, "load", "census.jsonl"), "{}\n");
+	writeFileSync(join(state, "fleet-watch-state.json"), "{}\n");
+	writeFileSync(join(state, "claude-save-abc123.json"), "{}\n");
+	for (let file = 0; file < 25_000; file++) writeFileSync(join(state, "scratch-quarantine", "big", `f${file}`), "");
+	const quiet = compareWatched(before, snapshotWatched(paths), home);
+	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
+	writeFileSync(join(state, "receipts", "r1.json"), "{\"tampered\":true}\n");
+	writeFileSync(join(state, "new-top-level.json"), "{}\n");
+	writeFileSync(join(state, "claude-save-abc123.json.bak"), "{}\n");
+	expect(compareWatched(before, snapshotWatched(paths), home).changed_paths).toEqual([
+		"~/.local/state/omp-kit/claude-save-abc123.json.bak",
+		"~/.local/state/omp-kit/new-top-level.json",
+		"~/.local/state/omp-kit/receipts/r1.json",
+	]);
+}, 120_000);
