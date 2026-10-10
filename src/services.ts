@@ -39,12 +39,37 @@ export interface RequiredResult {
 	detail: string;
 }
 
+export interface ServiceLauncher {
+	label: string;
+	pid: number;
+	program: string;
+}
+
+export interface ServicesAdmission {
+	/** Observed launcher members: every inventoried row with a live pid. */
+	launchers: ServiceLauncher[];
+	/** No pause declaration source is bound in this scope; recorded, never assumed. */
+	authority: { state: "UNKNOWN"; confirmed: false; generation: null; reason: string };
+}
+
 export interface ServicesReport {
 	status: "OK" | "DEGRADED" | "UNVERIFIED";
 	rows: ServiceRow[];
 	duplicates: { program: string; labels: string[] }[];
 	required: RequiredResult[];
 	reason: string;
+	admission: ServicesAdmission;
+}
+
+function servicesAdmission(rows: ServiceRow[]): ServicesAdmission {
+	const launchers: ServiceLauncher[] = [];
+	for (const row of rows) {
+		if (row.pid !== null) launchers.push({ label: row.label, pid: row.pid, program: row.program });
+	}
+	return {
+		launchers,
+		authority: { state: "UNKNOWN", confirmed: false, generation: null, reason: "services scope observes launchd liveness only; no pause declaration source is bound here" },
+	};
 }
 
 export interface ServicesInput {
@@ -352,6 +377,7 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 	const listed = deps.listAll();
 	if (listed.code !== 0) {
 		return { status: "UNVERIFIED", rows: [], duplicates: [], required: [],
+			admission: servicesAdmission([]),
 			reason: "launchctl list is unavailable on this machine; service inventory needs launchd" };
 	}
 	const loaded = parseLaunchdList(listed.stdout);
@@ -481,13 +507,13 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 			? `${row.label} (LOADED_PATH_MISMATCH: loaded ${row.loaded_plist ?? "?"} != ${row.plist ?? "?"})`
 			: `${row.label} (${row.class})`).join(", ")}`);
 		if (systemUnverified) parts.push("system domain loaded state is UNVERIFIED without elevated privileges");
-		return { status: "DEGRADED", rows, duplicates, required, reason: parts.join("; ") };
+		return { status: "DEGRADED", rows, duplicates, required, admission: servicesAdmission(rows), reason: parts.join("; ") };
 	}
 	if (systemUnverified) {
-		return { status: "UNVERIFIED", rows, duplicates, required,
+		return { status: "UNVERIFIED", rows, duplicates, required, admission: servicesAdmission(rows),
 			reason: "System domain loaded state is UNVERIFIED without elevated privileges; user-domain rows are exact" };
 	}
-	return { status: "OK", rows, duplicates, required,
+	return { status: "OK", rows, duplicates, required, admission: servicesAdmission(rows),
 		reason: required.length > 0 ? "Every declared job is healthy" : "No failing or broken OMP-related jobs" };
 }
 

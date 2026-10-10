@@ -5,6 +5,7 @@ import { admitActuator, type AdmissionInput } from "../../src/actuator-admission
 // [a]/[b] decision boundary plus the planted negatives. No I/O, no clocks.
 
 const BASE: AdmissionInput = {
+	launcherBinding: "keeper",
 	authority: "ACTIVE",
 	authorityConfirmed: true,
 	authorityGeneration: "gen-7",
@@ -130,4 +131,30 @@ test("[b] recovery with its own live custody admits one action", () => {
 	});
 	expect(decision.verdict).toBe("ADMIT");
 	expect(decision.admittedAction).toBe("tracker-recovery");
+});
+// Binding mode: branches with no keeper surface stay bound by authority,
+// generation, recovery and resend rules; the missing surface is recorded.
+test("[a] mode none admits with the missing keeper surface recorded", () => {
+	const decision = admitActuator({ ...BASE, launcherBinding: "none", launchers: [], keeper: null });
+	expect(decision.verdict).toBe("ADMIT");
+	expect(decision.admittedAction).toBe("nudge");
+	expect(decision.reason).toContain("no keeper surface");
+});
+
+test("[a] planted: mode none still refuses a paused authority", () => {
+	const decision = admitActuator({ ...BASE, launcherBinding: "none", launchers: [], keeper: null, authority: "PAUSED" });
+	expect(decision.verdict).toBe("REFUSE");
+	expect(decision.admittedAction).toBeNull();
+});
+
+test("[a] planted: mode none still refuses a stale generation", () => {
+	const decision = admitActuator({
+		...BASE,
+		launcherBinding: "none",
+		launchers: [],
+		keeper: null,
+		packet: { action: "nudge", ownedAction: "nudge", generation: "gen-6" },
+	});
+	expect(decision.verdict).toBe("REFUSE");
+	expect(decision.admittedAction).toBeNull();
 });

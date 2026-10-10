@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
+import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { defaultLiveness, probeOwner, type LivenessDeps, type OwnerState } from "./scratch.ts";
-
 const RECOVERY_ROOT = [".beads", ".br_recovery", "schema-migrations"] as const;
 const RECOVERY_MARKER = "recovery-failed.json";
 const LEASE_FILE = ".omp-kit-recovery-lease.json";
@@ -18,6 +18,12 @@ export interface TrackerRecoveryDeps {
 	sessionId?: (session: string, cwd: string) => string | null | undefined;
 	now?: () => number;
 	leaseId?: () => string;
+	/**
+	 * ompkit-bj08.5: pause/custody admission snapshot. When present it is
+	 * consulted before any lease file is written or any command runs; a
+	 * refusal blocks with zero effects. Absent, the legacy checks run.
+	 */
+	admission?: AdmissionInput;
 }
 
 interface RecoveryLease {
@@ -37,6 +43,9 @@ type HolderResult = { state: "clear" } | { state: "held"; pid: number } | { stat
 
 /** Recover only the known BusyRecovery receipt after proving both lease and database holders are gone. */
 export function recoverBusyTracker(repo: string, session: string, deps: TrackerRecoveryDeps = {}): TrackerRecoveryResult | null {
+	if (deps.admission !== undefined && admitActuator({ ...deps.admission, packet: { ...deps.admission.packet, action: "tracker-recovery" } }).verdict === "REFUSE") {
+		return { kind: "RECOVERY_BLOCKED", text: "Fleet Watch: tracker recovery refused by pause/custody admission; zero effects." };
+	}
 	if (!repo.trim() || !session.trim()) return { kind: "RECOVERY_BLOCKED", text: "Fleet Watch: tracker recovery skipped because repo or session identity is empty." };
 	const root = resolve(repo, ...RECOVERY_ROOT);
 	const scan = findBusyFlags(root);

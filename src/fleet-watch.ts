@@ -1,3 +1,4 @@
+import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { recoverBusyTracker, type TrackerRecoveryResult } from "./tracker-recovery.ts";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, lstatSync, readFileSync, renameSync, unlinkSync, type Stats } from "node:fs";
@@ -173,7 +174,18 @@ export type FleetWatchOnceDeps = {
 	statePath?: string | null;
 	now?: () => number;
 	recoverTracker?: (repo: string, session: string) => TrackerRecoveryResult | null;
+	/**
+	 * ompkit-bj08.5: pause/custody admission snapshot. Every send, sendKeys
+	 * and tracker-recovery effect consults it first; a refusal performs zero
+	 * effects and is recorded in the log. Absent, the legacy path runs.
+	 */
+	admission?: AdmissionInput;
 };
+
+function admittedEffect(admission: AdmissionInput | undefined, action: string): boolean {
+	if (admission === undefined) return true;
+	return admitActuator({ ...admission, packet: { ...admission.packet, action } }).verdict !== "REFUSE";
+}
 export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
 	if (!config.enabled) return [];
 	const statePath = deps.statePath === undefined
@@ -185,6 +197,10 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 	for (const session of config.sessions) {
 		if (recoveredRepos.has(session.repo)) continue;
 		recoveredRepos.add(session.repo);
+		if (!admittedEffect(deps.admission, "tracker-recovery")) {
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane: "tracker", checks: 0, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
+			continue;
+		}
 		const recovery = (deps.recoverTracker ?? recoverBusyTracker)(session.repo, session.session);
 		if (!recovery) continue;
 		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text };
@@ -205,6 +221,11 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			}
 		}
 		for (const action of decisions) {
+			const effect = action.kind === "STEERING_SUBMITTED" ? "send-keys" : "send";
+			if (!admittedEffect(deps.admission, effect)) {
+				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane, checks: action.checks, text: `admission refused ${action.kind}; nothing was sent` }) + "\n");
+				continue;
+			}
 			if (action.kind === "STEERING_SUBMITTED") deps.sendKeys(session.session, pane, ["M-Up", "Enter"]);
 			else deps.send(action.kind === "NUDGED" ? session.session : session.coordinatorSession, action.kind === "NUDGED" ? pane : session.coordinatorPane, action.text);
 			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");

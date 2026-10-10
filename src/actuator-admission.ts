@@ -1,12 +1,18 @@
 // ompkit-bj08.5: inherited-actuator admission boundary.
 //
 // One deterministic admission check every effects branch must pass before
-// issuing product work: bind the complete observed launcher set (never the
-// keeper pid-file alone), the immutable authorized packet, the current
-// authority and the recipient/session generation. PAUSED, OFF, protected,
-// unconfirmed, stale-generation or unknown authority refuses with zero
-// governed effects. Recovery proceeds only on its own recovery custody, and
-// a STARTED flush without a footer spinner authorizes no resend.
+// issuing product work: bind the immutable authorized packet, the current
+// authority and the recipient/session generation. Branches WITH a keeper
+// surface (launcherBinding "keeper") additionally bind the complete observed
+// launcher set against the keeper pid-file claim: any live launcher outside
+// the claim refuses. Branches with no keeper surface (launcherBinding
+// "none", recorded in the decision reason) are bound by authority,
+// generation, recovery custody and resend rules only; their callers attest
+// same-tick mint and the missing keeper surface stays explicit, never
+// silently assumed. PAUSED, OFF, protected, unconfirmed, stale-generation or
+// unknown authority refuses with zero governed effects. Recovery proceeds
+// only on its own recovery custody, and a STARTED flush without a footer
+// spinner authorizes no resend.
 //
 // Pure evaluation: refusing or admitting here performs no effects itself.
 
@@ -46,6 +52,13 @@ export interface ResendRequest {
 }
 
 export interface AdmissionInput {
+	/**
+	 * "keeper": the branch binds the complete observed launcher set against
+	 * the keeper pid-file claim. "none": the branch has no keeper surface;
+	 * authority, generation, recovery and resend rules still bind, and the
+	 * missing keeper surface is recorded in the decision reason.
+	 */
+	launcherBinding: "keeper" | "none";
 	authority: AuthorityState;
 	/** False when the authority state itself is unconfirmed or unknown. */
 	authorityConfirmed: boolean;
@@ -92,14 +105,16 @@ export function admitActuator(input: AdmissionInput): AdmissionDecision {
 	if (input.packet.generation !== input.authorityGeneration) {
 		return refuse("stale packet generation: decision belongs to another generation");
 	}
-	if (input.keeper === null) {
-		return refuse("keeper claim absent: live launchers cannot be bound without it");
-	}
-	const uncovered = input.launchers.filter(
-		(member) => member.pid !== input.keeper!.pid || member.command !== input.keeper!.command,
-	);
-	if (uncovered.length > 0) {
-		return refuse(`launcher set exceeds keeper claim: ${uncovered.length} live launcher(s) outside the keeper pid-file`);
+	if (input.launcherBinding === "keeper") {
+		if (input.keeper === null) {
+			return refuse("keeper claim absent: live launchers cannot be bound without it");
+		}
+		const uncovered = input.launchers.filter(
+			(member) => member.pid !== input.keeper!.pid || member.command !== input.keeper!.command,
+		);
+		if (uncovered.length > 0) {
+			return refuse(`launcher set exceeds keeper claim: ${uncovered.length} live launcher(s) outside the keeper pid-file`);
+		}
 	}
 	if (input.recovery !== undefined) {
 		if (!input.recovery.ownerLive) return refuse("dead-owner observation: recovery proceeds on no custody");
@@ -115,6 +130,8 @@ export function admitActuator(input: AdmissionInput): AdmissionDecision {
 	return {
 		verdict: "ADMIT",
 		admittedAction: input.packet.ownedAction,
-		reason: "bound launcher set, current generation and live authority admit the packet's one owned action",
+		reason: input.launcherBinding === "keeper"
+			? "bound launcher set, current generation and live authority admit the packet's one owned action"
+			: "no keeper surface on this branch (recorded): current generation and live authority admit the packet's one owned action",
 	};
 }

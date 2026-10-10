@@ -120,6 +120,27 @@ export function forgeLockForTest(jobsDir: string, job: string, pid: number, star
 	writeFileSync(join(dir, "pid"), JSON.stringify({ pid, startedAt }), { mode: 0o600 });
 }
 
+export interface RunClaim {
+	pid: number;
+	startedAt: number;
+}
+
+/**
+ * ompkit-bj08.5: read the current single-flight claim for admission binding.
+ * Returns the holder incarnation, or null when absent or unreadable (fail
+ * closed downstream). Never throws. The admission double-read compares two
+ * reads of this claim: a changed holder between gate and body refuses.
+ */
+export function readRunClaim(jobsDir: string, job: string, nowMs: number = Date.now()): RunClaim | null {
+	const claim = readClaim(join(jobsDir, `${job}.lock`), nowMs);
+	return claim === null ? null : { pid: claim.pid, startedAt: claim.startedAt };
+}
+
+/** Stable incarnation token for a lock holder: pid bound to process start. */
+export function claimIncarnation(claim: RunClaim): string {
+	return `${claim.pid}:${claim.startedAt}`;
+}
+
 export const LOAD_GATE_FACTOR = 2.5;
 export const SKIPPED_LOAD_EXIT = 4;
 

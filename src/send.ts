@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
+import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -13,7 +14,7 @@ export interface SendExec {
 }
 
 export interface ProvenSend {
-	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED" | "TMUX_AMBIGUOUS";
+	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED" | "TMUX_AMBIGUOUS" | "ADMISSION_REFUSED";
 	marker: string;
 	sends: number;
 	drop_path: string | null;
@@ -161,7 +162,21 @@ export async function proveSend(input: {
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
+	/**
+	 * ompkit-bj08.5: pause/custody admission snapshot from the caller. When
+	 * present it is consulted before anything reaches tmux; a refusal sends
+	 * nothing, writes no drop file and performs zero exec calls. Absent, the
+	 * legacy path runs (operator invocation carries no pause declaration).
+	 */
+	admission?: AdmissionInput;
 }): Promise<ProvenSend> {
+	if (input.admission !== undefined) {
+		const decision = admitActuator(input.admission);
+		if (decision.verdict === "REFUSE") {
+			return { status: "ADMISSION_REFUSED", marker: "", sends: 0, drop_path: null, bead_ids: [], no_bead_reason: null, tmux_socket: null,
+				detail: `admission refused the send: ${decision.reason}; nothing was sent` };
+		}
+	}
 	const exec = input.exec ?? defaultExec();
 	const env = input.env ?? process.env;
 	const selection = resolveTmuxSocket(env, (socket, probeEnv) =>

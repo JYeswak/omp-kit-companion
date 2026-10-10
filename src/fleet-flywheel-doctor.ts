@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Finding } from "./diagnostics.ts";
+import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 import { tmuxSocketArgs } from "./tmux-socket.ts";
 export { tmuxSocketArgs } from "./tmux-socket.ts";
@@ -301,7 +302,7 @@ export function inspectStuckPending(io: FleetIo): Finding[] {
 	return rows;
 }
 
-export type FlushResult = PendingPane & { result: "PLANNED" | "STARTED" | "STILL_STUCK" | "ALERTED" | "REPORTED" | "SKIPPED_CHANGED"; keys_sent: string[] };
+export type FlushResult = PendingPane & { result: "PLANNED" | "STARTED" | "STILL_STUCK" | "ALERTED" | "REPORTED" | "SKIPPED_CHANGED" | "ADMISSION_REFUSED"; keys_sent: string[] };
 export type FlushReport = { overall: "OK" | "CHANGED" | "FINDINGS" | "UNAVAILABLE"; applied: boolean; panes: FlushResult[]; stale_steer: StaleSteer[]; frozen_turn: FrozenTurn[] };
 
 /**
@@ -309,12 +310,15 @@ export type FlushReport = { overall: "OK" | "CHANGED" | "FINDINGS" | "UNAVAILABL
  * idle pane whose queued band sits over an empty composer, re-read just before
  * sending. Busy, frozen and composer-text panes are reported, never touched.
  */
-export function flushPending(io: FleetIo, apply: boolean): FlushReport {
+export function flushPending(io: FleetIo, apply: boolean, admission?: AdmissionInput): FlushReport {
 	const scan = scanPending(io);
 	if (scan === null) return { overall: "UNAVAILABLE", applied: apply, panes: [], stale_steer: [], frozen_turn: [] };
 	const panes: FlushResult[] = scan.pending.map((pane) => {
 		if (!apply) return { ...pane, result: "PLANNED", keys_sent: [] };
 		if (pane.action !== "FLUSH") return { ...pane, result: pane.action === "ALERT" ? "ALERTED" : "REPORTED", keys_sent: [] };
+		if (admission !== undefined && admitActuator({ ...admission, packet: { ...admission.packet, action: "flush" } }).verdict === "REFUSE") {
+			return { ...pane, result: "ADMISSION_REFUSED", keys_sent: [] };
+		}
 		const now = viewPane(io, pane.pane_id);
 		if (!now || now.busyMs !== null || pendingAction(now) !== "FLUSH") return { ...pane, result: "SKIPPED_CHANGED", keys_sent: [] };
 		const sent: string[] = [];

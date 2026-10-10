@@ -25,6 +25,19 @@ export interface SessionInstall {
 	installed_at_epoch_ms: number | null;
 }
 
+export interface SessionLauncher {
+	pid: number;
+	command: string;
+	pane: string | null;
+}
+
+export interface SessionAdmission {
+	/** Observed launcher members: every inventoried process, bound by the caller. */
+	launchers: SessionLauncher[];
+	/** No pause declaration source is bound in this scope; recorded, never assumed. */
+	authority: { state: "UNKNOWN"; confirmed: false; generation: null; reason: string };
+}
+
 export interface SessionReport {
 	scope: "sessions";
 	overall: "REPORT";
@@ -32,6 +45,7 @@ export interface SessionReport {
 	components: SessionInstall[];
 	sessions: SessionEntry[];
 	text: string;
+	admission: SessionAdmission;
 }
 
 export interface SessionEntry {
@@ -265,7 +279,11 @@ export function inspectOmpSessions(input: SessionDoctorInput = {}): SessionRepor
 		: snapshot?.parent_by_pid ?? new Map<number, number>(processes.map((process) => [process.pid, process.ppid]));
 	const paneByPid = new Map<number, SessionPane>(panes.map((pane) => [pane.pid, pane]));
 	const sessions = processes.map((process) => entryFor(process, parentByPid, paneByPid, components));
-	const partial = { scope: "sessions" as const, overall: "REPORT" as const, checked_at_epoch_ms: now, components, sessions };
+	const admission: SessionAdmission = {
+		launchers: sessions.map((session) => ({ pid: session.pid, command: session.command, pane: session.pane })),
+		authority: { state: "UNKNOWN", confirmed: false, generation: null, reason: "sessions scope observes process liveness only; no pause declaration source is bound here" },
+	};
+	const partial = { scope: "sessions" as const, overall: "REPORT" as const, checked_at_epoch_ms: now, components, sessions, admission };
 	return { ...partial, text: renderText(partial) };
 }
 
