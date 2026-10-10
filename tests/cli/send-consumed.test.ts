@@ -12,6 +12,12 @@ mkdirSync(scratchRoot, { recursive: true });
 const scratch = mkdtempSync(join(scratchRoot, "send-consumed-test." + process.pid + "."));
 writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-consumed-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
 
+// Hermetic tmux selection: without this, proveSend reads the runner's env, and a CI
+// runner outside tmux probes every candidate socket through the fake exec (all "live")
+// and refuses TMUX_AMBIGUOUS before sending.
+const testEnv: NodeJS.ProcessEnv = { ...process.env, TMUX_TMPDIR: join(scratch, "managed") };
+delete testEnv.TMUX;
+
 const noWait = async (_ms: number) => {};
 const MARKER = /kit-send-[0-9a-f]{12}/;
 
@@ -59,7 +65,7 @@ function dropDir(): string {
 }
 
 const run = (exec: SendExec) =>
-	proveSend({ session: "s", pane: "%1", message: "fixture probe line one", dropDir: dropDir(), exec, pollMs: 1, deadlineMs: 20, wait: noWait });
+	proveSend({ session: "s", pane: "%1", message: "fixture probe line one", dropDir: dropDir(), exec, env: testEnv, pollMs: 1, deadlineMs: 20, wait: noWait });
 
 test("RED-1: marker unsubmitted in the composer is PENDING_SUBMIT, not OK", async () => {
 	const { exec, sentMarkers } = fixturePane("omp-idle-composer-pending.txt");
