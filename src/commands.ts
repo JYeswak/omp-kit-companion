@@ -120,6 +120,7 @@ const sessionData: DataSchema = { type: "object", required: ["scope", "overall",
 	components: { type: "array", items: { type: "object", required: ["label", "path", "version", "installed_at_epoch_ms"], properties: { label: { type: "string" }, path: { type: "string" }, version: { type: ["string", "null"] }, installed_at_epoch_ms: { type: ["number", "null"] } } } },
 	sessions: { type: "array", items: { type: "object", required: ["pid", "ppid", "command", "start_epoch_ms", "start_time", "pane", "pane_pid", "pane_start_command", "verdict", "predates"], properties: { pid: { type: "number" }, ppid: { type: "number" }, command: { type: "string" }, start_epoch_ms: { type: ["number", "null"] }, start_time: { type: ["string", "null"] }, pane: { type: ["string", "null"] }, pane_pid: { type: ["number", "null"] }, pane_start_command: { type: ["string", "null"] }, verdict: { enum: ["CURRENT", "STALE", "UNVERIFIED"] }, predates: { type: "array", items: { type: "string" } }, reason: { type: "string" } } } },
 	text: { type: "string" },
+	admission: { type: "object" },
 } };
 const doctorData: DataSchema = { ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] }, mcp_sources: { type: "object" } } };
 const planningScoreData: DataSchema = { type: "object", required: ["kind", "status", "metrics"], properties: {
