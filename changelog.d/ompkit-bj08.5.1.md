@@ -1,0 +1,1 @@
+- Fleet-watch nudges are now eligibility-gated: before any nudge, the watcher checks the tracker write path (unresolved recovery flags with a non-proceeded recovery latch) and the claimable-leaf frontier (open, unassigned, non-epic, unskipped rows); latched, leaf-less or unknown states suppress the nudge and report once per state change (WRITE_LATCHED, NO_FREE_LEAF, UNKNOWN).

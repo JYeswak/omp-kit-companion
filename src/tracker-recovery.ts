@@ -8,6 +8,21 @@ const RECOVERY_MARKER = "recovery-failed.json";
 const LEASE_FILE = ".omp-kit-recovery-lease.json";
 const BUSY_RECOVERY_ERROR = "database is busy (recovery in progress)";
 
+/**
+ * ompkit-bj08.5.1: unresolved recovery flags for a repo: run directories
+ * holding a matching recovery-failed.json marker, or null when the recovery
+ * area is unreadable (UNKNOWN, never permission). Never throws.
+ */
+export function recoveryFlagDirs(repo: string): string[] | null {
+	let scan: { flags: BusyFlag[]; error?: string };
+	try {
+		scan = findBusyFlags(resolve(repo, ...RECOVERY_ROOT));
+	} catch {
+		return null;
+	}
+	if (scan.error) return null;
+	return scan.flags.map((flag) => flag.runDirectory);
+}
 export type TrackerRecoveryKind = "RECOVERY_PROCEEDED" | "RECOVERY_BLOCKED" | "RECOVERY_FAILED";
 export interface TrackerRecoveryResult { kind: TrackerRecoveryKind; text: string }
 export interface TrackerRecoveryCommandResult { code: number | null; stdout: string; stderr: string }
