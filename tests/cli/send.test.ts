@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { BEAD_ID, dispatchBeads, proveSend, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, dispatchBeads, fleetBeadPrefixes, proveSend, trackerPrefix, type SendExec } from "../../src/send.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -77,9 +77,10 @@ test("SEND1 capture uses the bare pane id with scrollback history", async () => 
 	}
 });
 
-const send = (message: string, noBeadReason?: string) => {
+// Explicit empty prefix set: the id-shape fallback, independent of this machine's trackers.
+const send = (message: string, noBeadReason?: string, knownPrefixes: ReadonlySet<string> = new Set()) => {
 	const pane = echoPane(1);
-	return proveSend({ session: "s", pane: "%1", message, noBeadReason, dropDir: dropDir(), exec: pane.exec, pollMs: 1, deadlineMs: 50, wait: noWait })
+	return proveSend({ session: "s", pane: "%1", message, noBeadReason, knownPrefixes, dropDir: dropDir(), exec: pane.exec, pollMs: 1, deadlineMs: 50, wait: noWait })
 		.then((result) => ({ result, taken: pane.taken }));
 };
 
@@ -146,4 +147,41 @@ test("BEAD5 regex: real fleet ids match, near-misses do not, long near-miss is l
 	const started = performance.now();
 	expect(BEAD_ID.test(nearMiss)).toBe(false);
 	expect(performance.now() - started).toBeLessThan(200);
+});
+
+test("BEAD6: with fleet tracker prefixes, hyphenated words are not bead ids; real ids still are", async () => {
+	const fleet = new Set(["ompkit", "cfs", "jev", "kit"]);
+	// Field case 2026-10-10: this passed the gate on 0.2.16 with bead_ids [follow-up, one-line, diff-check0].
+	const words = await send("D omp-test:0.1 %999 fix the follow-up in the one-line diff-check0 helper", undefined, fleet);
+	expect(words.result.status).toBe("BEAD_REQUIRED");
+	expect(words.taken.sends).toBe(0);
+	expect(words.result.detail).toContain("cfs, jev, kit, ompkit");
+	for (const [message, id] of [
+		["D omp-test:0.1 %999 ompkit-xa5s fix", "ompkit-xa5s"],
+		["D jev:0.1 %18 jev-dadu fix", "jev-dadu"],
+		["D cfsios:0.1 %47 cfs-twenty-app-portfolio-hgub5.87 read-only first", "cfs-twenty-app-portfolio-hgub5.87"],
+	] as const) {
+		const cited = await send(message, undefined, fleet);
+		expect(cited.result.status).toBe("OK");
+		expect(cited.result.bead_ids).toEqual([id]);
+	}
+});
+
+test("BEAD6 discovery: prefixes come from the env list, fleet-watch repos and the nearest tracker", () => {
+	const root = join(scratch, "prefixes-" + Math.random().toString(36).slice(2));
+	const configured = join(root, "configured", ".beads");
+	const derived = join(root, "derived", ".beads");
+	const nested = join(root, "nested", ".beads");
+	for (const dir of [configured, derived, nested, join(root, "nested", "src", "deep"), join(root, "home", ".config", "omp-kit")]) mkdirSync(dir, { recursive: true });
+	writeFileSync(join(configured, "config.yaml"), "issue_prefix: uds\n");
+	writeFileSync(join(derived, "config.yaml"), "# issue_prefix: ignored\n");
+	writeFileSync(join(derived, "issues.jsonl"), '{"id":"kit-p5wn.1","title":"x"}\n');
+	writeFileSync(join(nested, "issues.jsonl"), '{"id":"cfs-9yrif","title":"x"}\n');
+	writeFileSync(join(root, "home", ".config", "omp-kit", "fleet-watch.json"),
+		JSON.stringify({ sessions: [{ repo: join(root, "configured") }, { repo: join(root, "derived") }, { repo: join(root, "missing") }] }));
+	const env = { HOME: join(root, "home"), OMP_KIT_BEAD_PREFIXES: "core8, Bad-Name ,beads_rust" };
+	expect([...fleetBeadPrefixes(env, [join(root, "nested", "src", "deep")])].sort()).toEqual(["beads_rust", "cfs", "core8", "kit", "uds"]);
+	expect(trackerPrefix(derived)).toBe("kit");
+	expect(trackerPrefix(join(root, "missing", ".beads"))).toBeNull();
+	expect(fleetBeadPrefixes({ HOME: join(root, "nowhere") }, []).size).toBe(0);
 });

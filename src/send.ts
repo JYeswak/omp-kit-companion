@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 export const SEND_POLL_MS = 1500;
@@ -37,7 +37,7 @@ const TOKEN_EDGE = /^[(\[{"'`<]+|[)\]}"'`>,;:!?.]+$/g;
  * or that has a line starting `queue:`. Slugs are not beads: the D line's
  * slug position and the names after `queue:` do not count as citations.
  */
-export function dispatchBeads(message: string): { dispatch: boolean; bead_ids: string[] } {
+export function dispatchBeads(message: string, knownPrefixes?: ReadonlySet<string>): { dispatch: boolean; bead_ids: string[] } {
 	const lines = message.split("\n");
 	const dLine = /^\s*D /.test(message);
 	const queue = lines.some((line) => /^\s*queue:/.test(line));
@@ -49,10 +49,59 @@ export function dispatchBeads(message: string): { dispatch: boolean; bead_ids: s
 		if (queueAt >= 0) tokens = tokens.slice(0, queueAt);
 		for (const token of tokens) {
 			const bare = token.replace(TOKEN_EDGE, "");
-			if (BEAD_ID.test(bare) && !bead_ids.includes(bare)) bead_ids.push(bare);
+			if (!BEAD_ID.test(bare) || bead_ids.includes(bare)) continue;
+			// Shape alone admits ordinary hyphenated words (follow-up, one-line, diff-check0).
+			if (knownPrefixes && knownPrefixes.size > 0 && !knownPrefixes.has(bare.slice(0, bare.indexOf("-")))) continue;
+			bead_ids.push(bare);
 		}
 	});
 	return { dispatch: dLine || queue, bead_ids };
+}
+
+/** A tracker's id prefix: an uncommented `issue_prefix:` in .beads/config.yaml, else the first issue id's prefix. */
+export function trackerPrefix(beadsDir: string): string | null {
+	try {
+		const config = readFileSync(join(beadsDir, "config.yaml"), "utf8");
+		const configured = /^issue_prefix:[ \t]*"?([a-z][a-z0-9_]*)"?[ \t]*$/m.exec(config)?.[1];
+		if (configured) return configured;
+	} catch {}
+	try {
+		const head = readFileSync(join(beadsDir, "issues.jsonl"), "utf8").slice(0, 65_536);
+		const id = /"id":"([a-z][a-z0-9_]*)-/.exec(head)?.[1];
+		return id ?? null;
+	} catch {
+		return null;
+	}
+}
+
+function nearestBeads(start: string): string | null {
+	for (let dir = start; ; dir = dirname(dir)) {
+		if (existsSync(join(dir, ".beads"))) return join(dir, ".beads");
+		if (dirname(dir) === dir) return null;
+	}
+}
+
+/**
+ * Prefixes of the trackers this send can be about: OMP_KIT_BEAD_PREFIXES (comma list), every repo in the
+ * fleet-watch config, and the nearest tracker above each given directory (sender and target pane). Empty
+ * when none is found; then dispatchBeads falls back to the id shape alone.
+ */
+export function fleetBeadPrefixes(env: NodeJS.ProcessEnv, dirs: readonly string[]): Set<string> {
+	const prefixes = new Set<string>();
+	for (const name of (env.OMP_KIT_BEAD_PREFIXES ?? "").split(",")) if (/^[a-z][a-z0-9_]*$/.test(name.trim())) prefixes.add(name.trim());
+	const home = env.HOME ?? "";
+	const configPath = env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "omp-kit", "fleet-watch.json");
+	const repos: string[] = [];
+	try {
+		const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { sessions?: { repo?: unknown }[] };
+		for (const session of parsed.sessions ?? []) if (typeof session.repo === "string") repos.push(session.repo);
+	} catch {}
+	for (const beads of [...repos.map(repo => join(repo, ".beads")), ...dirs.map(nearestBeads)]) {
+		if (!beads) continue;
+		const prefix = trackerPrefix(beads);
+		if (prefix) prefixes.add(prefix);
+	}
+	return prefixes;
 }
 
 function defaultExec(): SendExec {
@@ -102,18 +151,24 @@ export async function proveSend(input: {
 	message: string;
 	dropDir: string;
 	noBeadReason?: string;
+	/** Tracker prefixes a cited id must carry; default: fleetBeadPrefixes over the sender cwd and the target pane cwd. */
+	knownPrefixes?: ReadonlySet<string>;
 	exec?: SendExec;
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
 }): Promise<ProvenSend> {
-	const { dispatch, bead_ids } = dispatchBeads(input.message);
+	const exec = input.exec ?? defaultExec();
+	// Prefix lookup reads trackers and asks tmux for the pane cwd, so only dispatches pay for it.
+	const knownPrefixes = !dispatchBeads(input.message).dispatch ? new Set<string>()
+		: input.knownPrefixes ?? fleetBeadPrefixes(process.env, [process.cwd(),
+			exec.run(["tmux", "display-message", "-p", "-t", input.pane, "#{pane_current_path}"]).out.trim()].filter(dir => dir.startsWith("/")));
+	const { dispatch, bead_ids } = dispatchBeads(input.message, knownPrefixes);
 	const no_bead_reason = dispatch && bead_ids.length === 0 ? input.noBeadReason?.trim() || null : null;
 	if (dispatch && bead_ids.length === 0 && !no_bead_reason) {
 		return { status: "BEAD_REQUIRED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason,
-			detail: "work dispatch cites no bead id; nothing was sent" };
+			detail: `work dispatch cites no bead id${knownPrefixes.size ? ` (tracker prefixes: ${[...knownPrefixes].sort().join(", ")})` : ""}; nothing was sent` };
 	}
-	const exec = input.exec ?? defaultExec();
 	const pollMs = input.pollMs ?? SEND_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? SEND_DEADLINE_MS;
 	const wait = input.wait ?? waitFor;
