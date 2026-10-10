@@ -47,7 +47,9 @@ export interface ClaudeSaveDeps {
 
 const DENIED_BASENAMES: Record<string, true> = { "cc-router-local.json": true, "settings.json": true };
 
-/** Gitlink allowlist snapshotted from ~/.claude 2026-10-06 (5 entries). */
+/** Gitlinks snapshotted from ~/.claude 2026-10-06 (5 entries). Gitlinks already committed at HEAD
+ * are tolerated too, so a committed move of one of them (git mv) does not refuse every later save;
+ * only a gitlink that is neither here nor at HEAD is new. */
 export const CLAUDE_SAVE_BASELINE_GITLINKS: readonly string[] = [
 	"external-skills/app-store-connect-skill",
 	"external-skills/claude-code-apple-skills",
@@ -125,14 +127,20 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 		if (extra.length > 0) return record(ctx, fail(ctx, "NEW_BRANCH", `new branches outside the main-only baseline: ${extra.join(", ")}`));
 		const index = git(["ls-files", "-s"]);
 		if (index.code !== 0) return record(ctx, fail(ctx, "INDEX_READ_FAILED", index.stderr.trim()));
+		const headTree = git(["ls-tree", "-r", "--full-tree", "HEAD"]);
+		if (headTree.code !== 0) return record(ctx, fail(ctx, "HEAD_TREE_READ_FAILED", headTree.stderr.trim()));
 		const allowGitlinks = new Set(CLAUDE_SAVE_BASELINE_GITLINKS);
+		for (const line of headTree.stdout.split("\n")) {
+			const match = /^160000 commit [0-9a-f]{40}\t(.*)$/.exec(line);
+			if (match) allowGitlinks.add(match[1]!);
+		}
 		const gitlinks: string[] = [];
 		for (const line of index.stdout.split("\n")) {
 			const match = /^160000 [0-9a-f]{40} \d+\t(.*)$/.exec(line);
 			if (match) gitlinks.push(match[1]!);
 		}
 		const novel = gitlinks.filter(path => !allowGitlinks.has(path));
-		if (novel.length > 0) return record(ctx, fail(ctx, "NEW_GITLINK", `gitlinks outside the 5-entry allowlist: ${novel.join(", ")}`));
+		if (novel.length > 0) return record(ctx, fail(ctx, "NEW_GITLINK", `gitlinks neither in the baseline nor committed at HEAD: ${novel.join(", ")}`));
 		const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
 		if (status.code !== 0) return record(ctx, fail(ctx, "STATUS_FAILED", status.stderr.trim()));
 		const dirtyTracked: string[] = [];

@@ -136,6 +136,26 @@ test("new gitlink refuses while baseline gitlinks are tolerated", async () => {
 	expect(headSha(repo)).toBe(before);
 });
 
+test("a gitlink moved and committed at HEAD is tolerated; an uncommitted new one still refuses", async () => {
+	// Field case 2026-10-09: ~/.claude committed `git mv skills/.archived-non-skills-20261001 skill-archive/...`,
+	// so the 2026-10-06 path snapshot no longer matched and every hourly save refused NEW_GITLINK.
+	const { repo } = fixtureRepo();
+	const blob = sh(repo, "hash-object", "-w", "--stdin").stdout.trim();
+	sh(repo, "update-index", "--add", "--cacheinfo", `160000,${blob},skill-archive/.archived-non-skills-20261001/rawr-slides`);
+	sh(repo, "commit", "-m", "move archived gitlink");
+	sh(repo, "push", "origin", "main");
+	writeFileSync(join(repo, "notes.md"), "moved\n");
+	const ok = await run(repo, join(repo, "..", "state"));
+	expect(ok.status).toBe("PUSHED");
+	sh(repo, "update-index", "--add", "--cacheinfo", `160000,${blob},skill-archive/brand-new-thing`);
+	const before = headSha(repo);
+	const refused = await run(repo, join(repo, "..", "state"));
+	expect(refused).toMatchObject({ status: "REFUSED", refusal: "NEW_GITLINK" });
+	expect(refused.reason).toContain("skill-archive/brand-new-thing");
+	expect(refused.reason).not.toContain("rawr-slides");
+	expect(headSha(repo)).toBe(before);
+});
+
 test("admitted edit commits with all 5 allowlisted gitlinks tracked (verdict leg)", async () => {
 	const { repo } = fixtureRepo();
 	const blob = sh(repo, "hash-object", "-w", "--stdin").stdout.trim();
