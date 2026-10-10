@@ -3,7 +3,7 @@ import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, rea
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
 import { runFullTest, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
-import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt } from "./mutations.ts";
+import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt, writePrivate } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
 import { parseRuleManifest } from "./diagnostics.ts";
@@ -366,5 +366,43 @@ export function undoKitUpdate(input: KitUndoInput): { status: "RESTORED"; receip
  } catch (error) {
   const message = error instanceof Error ? error.message : "KIT_UNDO_REFUSED";
   throw new Error(/^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UNDO_REFUSED");
+ } finally { heldLock.release(); }
+}
+
+export interface KitReconcileVerified { target: string; binary: string; sha256: string; version: string }
+export interface KitReconcileResult {
+ status: "RECONCILED"; receiptId: string; activeVersion: string; verified: KitReconcileVerified;
+}
+
+/**
+ * ompkit-3isy.1 UPDREC1: resolve a PARTIAL update whose postimages are in fact
+ * correct (false postcheck). Marks RECONCILED — the bead's COMPENSATED/ACCEPTED —
+ * only when the live install still matches the receipt's recorded postimage:
+ * symlink target, binary path and binary bytes. Anything else refuses with the
+ * pending receipt intact, so a later update stays blocked until a real fix.
+ * Writes a reconcile record naming exactly what was verified.
+ */
+export function reconcilePendingUpdate(input: { stateRoot: string; prefix: string; id: string }): KitReconcileResult {
+ const heldLock = acquireKitUpdateLock(input.stateRoot);
+ try {
+  const pending = inspectPendingKitUpdate(input.stateRoot);
+  if (!pending || pending.id !== input.id) throw new Error("KIT_RECEIPT_INVALID");
+  let receipt;
+  try {
+   receipt = readReceipt(input.stateRoot, input.id);
+  } catch (error) {
+   if (error instanceof Error && "code" in error && error.code === "ENOENT") throw new Error("KIT_RECEIPT_INVALID");
+   throw error;
+  }
+  if (receipt.state !== "READY") throw new Error("KIT_RECEIPT_INVALID");
+  const verified: KitReconcileVerified = { target: receipt.after.target, binary: receipt.after.binary,
+   sha256: receipt.after.sha256, version: receipt.after.version };
+  reconcileKitUpdateReceipt(input.stateRoot, heldLock, input.id, () => matches(input.prefix, receipt.after));
+  writePrivate(join(input.stateRoot, `kit-reconcile-${input.id}.json`),
+   JSON.stringify({ schema_version: 1, id: input.id, state: "RECONCILED", scope: pending.scope, verified }));
+  return { status: "RECONCILED", receiptId: input.id, activeVersion: receipt.after.version, verified };
+ } catch (error) {
+  const message = error instanceof Error ? error.message : "KIT_RECONCILE_REFUSED";
+  throw new Error(/^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_RECONCILE_REFUSED");
  } finally { heldLock.release(); }
 }

@@ -34,7 +34,7 @@ import { parseCallSpec, parseExpectSpec, probeMcpProfiles, type McpCallSpec } fr
 import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./services.ts";
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
-import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
+import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import { runKitUpdateJob } from "./kit-update-job.ts";
 import { claudeSaveJobEnabled, runClaudeSaveJob } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
@@ -2979,6 +2979,35 @@ async function fleetCommand(request: ParsedCommand): Promise<CliResult> {
 	return { code: report.panes.some((pane) => pane.result === "STILL_STUCK") ? 1 : 0, data: report, verification: report.applied ? "PERFORMED" : "UNVERIFIED" };
 }
 registerCommandHandler("fleet flush-pending", fleetCommand);
+/**
+ * ompkit-3isy.1 UPDREC1: resolve a PARTIAL update receipt whose postimages
+ * verify. Requires --yes: the operator attests they inspected the audit and
+ * postimages, exactly what the PENDING_RECOVERY remediation asks for.
+ */
+async function reconcileUpdateCommand(stateRoot: string, release: string, id: string, confirmed: boolean): Promise<CliResult> {
+	if (!confirmed)
+		return refusal("CONSENT_REQUIRED", "Reconciling a pending update receipt resolves it; pass --yes after inspecting the audit and postimages",
+			"Run omp-kit audit --json, verify both component postimages, then re-run with --yes; nothing was changed.");
+	if (!/^[a-f0-9-]+$/.test(id))
+		return refusal("INVALID_RECEIPT", "The reconcile target must name a pending receipt id",
+			"Pass the receipt id from the PARTIAL update output; nothing was changed.");
+	try {
+		const result = reconcilePendingUpdate({ stateRoot, prefix: dirname(dirname(release)), id });
+		return { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,
+			active_version: result.activeVersion, verified: result.verified }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const code = error instanceof Error ? error.message : "";
+		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope: "kit", action: "REFUSED", receipt_id: id },
+			errors: [{ code, message: "Recorded postimage does not match the live install; the receipt stays pending",
+				remediation: "Inspect omp-kit audit and the live postimages; reconcile only a false PARTIAL, or undo the update." }], verification: "UNVERIFIED" };
+		if (code === "KIT_RECEIPT_INVALID") return refusal("KIT_RECEIPT_INVALID", "No pending update receipt with that id, or its activation record is missing or moved on",
+			"List pending receipts with omp-kit audit --json; nothing was changed.");
+		if (code === "LOCK_BUSY") return refusal("LOCK_BUSY", "Another kit update holds the update lock",
+			"Wait for it to finish, then retry; nothing was changed.");
+		return refusal("KIT_RECONCILE_REFUSED", "The pending receipt could not be reconciled",
+			"Inspect omp-kit audit and the private receipt; nothing was changed.");
+	}
+}
 async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 	const scope = "kit";
 	const applying = request.flags.has("--apply");
@@ -2986,6 +3015,8 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 	if (!home || !isAbsolute(home) || !stateRoot || !release)
 		return refusal("UPDATE_CONTEXT_UNAVAILABLE", "An installed kit and canonical absolute HOME/state root are required",
 			"Install a verified local kit archive, then set a canonical HOME and XDG_STATE_HOME.");
+	const reconcileId = request.flags.get("--reconcile");
+	if (typeof reconcileId === "string") return reconcileUpdateCommand(stateRoot, release, reconcileId, request.flags.has("--yes"));
 	const version = request.flags.get("--version"), indexPath = request.flags.get("--index"), archivePath = request.flags.get("--archive");
 	if (typeof version !== "string" || typeof indexPath !== "string" || typeof archivePath !== "string" ||
 		![indexPath, archivePath].every(path => isAbsolute(path) && resolve(path) === path))

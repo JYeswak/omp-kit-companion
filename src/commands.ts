@@ -425,11 +425,12 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit review reduce --rules /absolute/rules --fixture /absolute/fixture.json --json",
 			runnable: false, dataSchema: falseFireData },
 	], example: "omp-kit help review rules", runnable: true },
-	{ name: "update", description: "Preview or guardedly update the kit; OMP updates are managed externally", usage: "update [--plan|--apply] --version X.Y.Z --index PATH --archive PATH", flags: [
+	{ name: "update", description: "Preview or guardedly update the kit; OMP updates are managed externally", usage: "update [--plan|--apply] --version X.Y.Z --index PATH --archive PATH | update --reconcile RECEIPT --yes", flags: [
 		...planApply,
 		{ name: "--version", value: "X.Y.Z", description: "Exact kit version; never infer latest from an unverified source" },
 		{ name: "--index", value: "PATH", description: "Absolute local release index carrying kit archive integrity hashes" },
 		{ name: "--archive", value: "PATH", description: "Absolute local release archive matching the selected index" },
+		{ name: "--reconcile", value: "RECEIPT", description: "Resolve a PARTIAL update receipt whose postimages verify; marks RECONCILED only on match" },
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions|plugin|mcp [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },

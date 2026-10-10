@@ -70,3 +70,14 @@ sha256 index plus the tag-bound workflow are the integrity story.
 
 Publish the GitHub release from the tag, then install from the published
 index on a machine that did not build it (fresh HOME where possible).
+
+### Pending update receipts
+
+If an update ends PARTIAL on a false postcheck while the new release is in
+fact active, later updates refuse with PENDING_RECOVERY and no command
+clears it. Inspect `omp-kit audit --json` and both component postimages,
+then run `omp-kit update --reconcile RECEIPT --yes`: it rescans the active
+kit symlink, release bytes and the receipt's recorded postimages and marks
+the receipt RECONCILED only when all three match, recording what was
+verified. A mismatch refuses and the receipt stays pending; undo or a real
+fix is the way out, never a forced install.
