@@ -1,0 +1,1 @@
+- Actuator admission is now a tested boundary: every effects branch binds the observed launcher set, the authorized packet, the current authority and the generation before acting; paused, off, protected, unconfirmed or stale-generation input refuses with zero effects, and recovery needs its own live custody.
