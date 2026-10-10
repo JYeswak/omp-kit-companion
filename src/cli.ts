@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { isatty } from "node:tty";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
+import { RELEASE_DATA } from "./release-assets.ts";
 import { audit, undo, why } from "./audit.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
@@ -1922,7 +1923,7 @@ export async function repeatTestCommand(request: ParsedCommand): Promise<CliResu
 	const scenario = typeof scenarioRaw === "string" ? scenarioRaw : undefined;
 	if (scenario) {
 		let ids: unknown;
-		try { ids = JSON.parse(readFileSync(join(identity.release.root, "tests", "live", "scenarios.json"), "utf8")); } catch {
+		try { ids = JSON.parse(readFileSync(join(identity.release.root, RELEASE_DATA.liveScenarios), "utf8")); } catch {
 			return refusal("SCENARIO_INVENTORY_UNAVAILABLE", "The live scenario inventory could not be read",
 				"Run from an intact release; no scenario was run.");
 		}

@@ -1,14 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
 const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
 const output = mkdtempSync(join(scratch, "p21-release-"));
+writeFileSync(join(output, ".owner"), `pid=${process.pid}\nlabel=p21-release\nrepo=omp-kit-companion\ncreated=${new Date().toISOString()}\n`);
 const platform: ReleasePlatform = { os: process.platform as "darwin" | "linux", arch: process.arch as "arm64" | "x64", libc: process.platform === "darwin" ? "none" : "gnu" };
 const key = `${platform.os}-${platform.arch}-${platform.libc}`;
 const indexPath = join(output, "release-index.json");
@@ -30,6 +32,9 @@ function copyReleaseSource(destination: string): void {
 		const source = join(repo, file);
 		if (existsSync(source)) cpSync(source, join(destination, file));
 	}
+	const docs = join(destination, "docs");
+	mkdirSync(docs);
+	cpSync(join(repo, "docs/flywheel-invariants.tsv"), join(docs, "flywheel-invariants.tsv"));
 	writeFileSync(join(destination, "MANIFEST.tsv"), "stale generated manifest sentinel\n");
 	appendFileSync(join(destination, "rules", "kit-close-needs-evidence.md"), "\n<!-- package-time manifest fixture -->\n");
 }
@@ -38,7 +43,7 @@ beforeAll(() => {
 	const source = join(output, "source");
 	copyReleaseSource(source);
 	const built = Bun.spawnSync(["sh", join(source, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
-		cwd: source, env: { ...process.env, TMPDIR: scratch }, stdout: "pipe", stderr: "pipe",
+		cwd: source, env: { ...process.env, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
 	expect(readFileSync(join(source, "MANIFEST.tsv"), "utf8")).toBe("stale generated manifest sentinel\n");
@@ -79,6 +84,10 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
 		expect(staged.files).toContain(essential);
+	expect(staged.files).toContain("tests/live/integrations.json");
+	expect(staged.files).toContain("scripts/check-flywheel-invariants.ts");
+	expect(staged.files).toContain("docs/flywheel-invariants.tsv");
+
 	const shippedFleetGuard = readFileSync(join(staged.root, "extensions", "fleet-guard.ts"), "utf8");
 	expect(shippedFleetGuard).not.toContain("../src/fleet-guard/");
 	expect(shippedFleetGuard).toContain("export");
@@ -100,11 +109,61 @@ function installCandidate(name: string): { home: string; installedRoot: string; 
 	const prefix = join(home, ".local", "opt", "omp-kit");
 	const installed = Bun.spawnSync(["sh", join(repo, "installer", "install.sh"), "--version", "1.2.3",
 		"--index", indexPath, "--offline", join(output, asset.filename), "--prefix", prefix], {
-		cwd: output, env: { ...process.env, HOME: home, TMPDIR: scratch }, stdout: "pipe", stderr: "pipe",
+		cwd: output, env: { ...process.env, HOME: home, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(installed.exitCode, installed.stdout.toString() + installed.stderr.toString()).toBe(0);
 	return { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") };
 }
+
+test("installed integrations and invariant gate run from the package; absent integration data refuses", () => {
+	const { home, installedRoot, installedBinary } = installCandidate("integrations-home");
+	const agentDir = join(home, ".omp", "profiles", "packaging-probe", "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "config.yml"), "extensions:\n");
+	const stubBin = join(output, "omp-stub");
+	mkdirSync(stubBin, { recursive: true });
+	const stubOmp = join(stubBin, "omp");
+	writeFileSync(stubOmp, "#!/bin/sh\nprintf 'omp stub\\n'\n");
+	chmodSync(stubOmp, 0o755);
+	const args = [installedBinary, "test", "--integrations", "--profile", "packaging-probe", "--json"];
+	const env = { ...process.env, HOME: home, TMPDIR: output, TMP: output, TEMP: output, PATH: stubBin,
+		OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
+	const installed = Bun.spawnSync(args, { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+	const stdout = installed.stdout.toString();
+	expect(installed.exitCode, `${stdout}\n${installed.stderr.toString()}`).toBe(0);
+	const report = JSON.parse(stdout) as {
+		data?: {
+			overall?: string;
+			integrations?: { matrix?: Array<{ profile: string; integration: string; verdict: string }> };
+		};
+	};
+	const matrix = report.data?.integrations?.matrix ?? [];
+	expect(report.data?.overall).toBe("OK");
+	expect(matrix.some(row => row.profile === "packaging-probe" && row.integration === "dcg" && row.verdict === "ABSENT")).toBe(true);
+	expect(matrix.every(row => row.profile === "packaging-probe" && row.verdict === "ABSENT")).toBe(true);
+	const ompIdentity = resolveOmpIdentity(process.env);
+	const ladderPath = [join(home, ".local", "opt", "omp-kit", "bin"), process.env.PATH ?? ""].join(delimiter);
+	const full = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
+		cwd: home,
+		env: { ...process.env, HOME: home, TMPDIR: output, TMP: output, TEMP: output,
+			XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
+			OMP_KIT_CASE_CWD: caseCwd, PATH: ladderPath,
+			OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
+			OMP_PATH: ompIdentity.launcher, OMP_SRC: ompIdentity.source },
+		stdout: "pipe", stderr: "pipe",
+	});
+	const fullOutput = `${full.stdout.toString()}\n${full.stderr.toString()}`;
+	expect(full.exitCode, fullOutput).toBe(0);
+	const fullReport = JSON.parse(full.stdout.toString()).data.test;
+	expect(fullReport.producer.stdout).toContain("GREEN flywheel-invariants");
+	expect(fullReport.stages.manifest.status).toBe("PASS");
+
+	rmSync(join(installedRoot, "tests/live/integrations.json"));
+	const missing = Bun.spawnSync(args, { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+	expect(missing.exitCode).toBe(3);
+	const failure = JSON.parse(missing.stdout.toString()) as { errors?: Array<{ code: string }> };
+	expect(failure.errors?.[0]?.code).toBe("INTEGRATIONS_UNAVAILABLE");
+}, 180_000);
 
 test("installed candidate fast proof and planted rule drift fail the full check without live execution or mutation", () => {
 	const { home, installedRoot, installedBinary } = installCandidate("operator-home");

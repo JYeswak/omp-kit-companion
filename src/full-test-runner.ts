@@ -5,6 +5,7 @@ import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComp
 import { resolveOmpIdentity } from "./paths.ts";
 import { runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
+import { RELEASE_DATA } from "./release-assets.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
@@ -130,7 +131,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
    live_scenarios: { expected_ids: [], observed_ids: [], status: "NOT_RUN" }, snapshots,
    producer: empty, failures, proof_scope: "ISOLATED_FIXTURE_ONLY" };
  }
- const parsed: unknown = JSON.parse(readFileSync(join(input.root, "tests/live/scenarios.json"), "utf8"));
+ const parsed: unknown = JSON.parse(readFileSync(join(input.root, RELEASE_DATA.liveScenarios), "utf8"));
  if (!Array.isArray(parsed) || !parsed.length || !parsed.every(row =>
   row && typeof row === "object" && typeof row.id === "string" && (row.plant === undefined || typeof row.plant === "boolean")))
   throw new Error("INVALID_LIVE_SCENARIOS");

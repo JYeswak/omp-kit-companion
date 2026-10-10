@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { RELEASE_DATA } from "./release-assets.ts";
 export type IntegrationCell =
 	| "WIRED"
 	| "CONFIGURED_NOT_FIRING"
@@ -83,7 +84,7 @@ interface ScenarioDef {
 }
 
 function loadScenarios(root: string): ScenarioDef[] {
-	const parsed: unknown = JSON.parse(readFileSync(join(root, "tests/live/integrations.json"), "utf8"));
+	const parsed: unknown = JSON.parse(readFileSync(join(root, RELEASE_DATA.integrationScenarios), "utf8"));
 	if (typeof parsed !== "object" || parsed === null || !Array.isArray((parsed as { scenarios?: unknown }).scenarios)) {
 		throw new IntegrationsInputError("INTEGRATIONS_UNAVAILABLE", "Integration scenarios file has the wrong shape");
 	}
@@ -328,7 +329,7 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 	const ompPath = input.ompPath ?? "omp";
 	const ompCommand = containedOmpCommand(input, ompPath, ["--profile", input.profile, "-p", "--no-session",
 		"--model", "mock/mock", "--approval-mode", "yolo", "go"], integration);
-	const mock = Bun.spawn([process.execPath, join(input.root, "tests/live/mock-model.mjs")], {
+	const mock = Bun.spawn([process.execPath, join(input.root, RELEASE_DATA.liveMockModel)], {
 		cwd: input.root,
 		env: { HOME: home, TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir,
 			SCEN: scenarioFile, LOG: mockLog, PORTFILE: portFile },

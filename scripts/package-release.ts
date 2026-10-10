@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
+import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
 
 const root = resolve(import.meta.dir, "..");
 const platformTargets: Record<string, string> = {
@@ -16,11 +17,15 @@ const platformTargets: Record<string, string> = {
 	"aarch64-unknown-linux-gnu": "bun-linux-arm64",
 	"x86_64-unknown-linux-gnu": "bun-linux-x64",
 };
-const roots = ["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills"];
+const roots = new Set(["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills"]);
+for (const file of RELEASE_DATA_FILES) {
+	const directory = dirname(file);
+	if (directory !== ".") roots.add(directory);
+}
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
-	"scripts/ttsr-harness.ts", "scripts/external-live.mjs", "tests/live/scenarios.json", "tests/live/lib.mjs", "tests/live/mock-model.mjs"];
+	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fail = (reason: string): never => { throw new Error(reason); };
 const octal = (header: Buffer, offset: number, width: number, value: number) => {
@@ -119,7 +124,7 @@ async function run(): Promise<void> {
 			cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: process.env.TMPDIR ?? out },
 		});
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
-		const names = [...files];
+		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
 		for (const path of roots) expand(path, names);
 		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv");
 		names.sort();
