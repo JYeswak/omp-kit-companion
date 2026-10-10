@@ -311,7 +311,8 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 		return sized("SKIP", "owner-label-invalid", owner);
 	}
 	const name = dir.slice(root.length + 1);
-	if (nameRequired && !name.endsWith(`.${owner.pid}`)) return sized("SKIP", "session-name-owner-mismatch", owner);
+	// Owner pid must be one whole `.`-delimited segment after the label: `label.pid` or `label.pid.suffix`.
+	if (nameRequired && !name.split(".").slice(1).includes(String(owner.pid))) return sized("SKIP", "session-name-owner-mismatch", owner);
 	if (!hasProcessIdentity(owner)) {
 		if (!deps.liveness.signalAlive(owner.pid) && !deps.liveness.psVisible(owner.pid)) {
 			// Dead pid with an identity-free (one-line or legacy JSON) owner file:

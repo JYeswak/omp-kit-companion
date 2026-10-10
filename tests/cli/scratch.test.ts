@@ -685,6 +685,28 @@ test("every verdict carries its size, including mismatches", () => {
 	expect(verdict.sizeBytes).toBeGreaterThanOrEqual(8192);
 });
 
+test("owner pid as a whole middle dot segment is accepted; looser matches stay mismatched", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const plant = (name: string, fields: Record<string, string>) => {
+		const dir = join(root, name);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".owner"), ownerText(fields));
+		return dir;
+	};
+	const pid = deadPid();
+	const deps = depsFor();
+	const dead = inspectSession(plant(`x.${pid}.2f08b213`, deadFields("x", pid)), root, deps);
+	expect(dead.action).toBe("REAP");
+	expect(dead.reason).toBe("owner-dead-no-open-fds");
+	expect(inspectSession(plant(`y.${process.pid}.suffix`, liveFields("y")), root, deps).action).toBe("LIVE");
+	for (const name of [`a.${pid}1.y`, `b-${pid}`, `${pid}.c`]) {
+		expect(inspectSession(plant(name, deadFields("n", pid)), root, deps).reason).toBe("session-name-owner-mismatch");
+	}
+	const other = plant("doctor-parser-16985", { pid: "25601", label: "doctor-parser", repo: "test", created: "2026-10-01T00:00:00Z" });
+	expect(inspectSession(other, root, deps).reason).toBe("session-name-owner-mismatch");
+});
+
 test("plan totals count a planted gigabyte dir whatever its verdict", () => {
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
 	roots.push(root);
