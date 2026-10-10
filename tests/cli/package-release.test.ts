@@ -163,7 +163,8 @@ test("installed integrations and invariant gate run from the package; absent int
 	expect(missing.exitCode).toBe(3);
 	const failure = JSON.parse(missing.stdout.toString()) as { errors?: Array<{ code: string }> };
 	expect(failure.errors?.[0]?.code).toBe("INTEGRATIONS_UNAVAILABLE");
-}, 180_000);
+// The full ladder runs the complete e2e-live suite (~200 s locally); same budget as kit-update's N+2 journey.
+}, 900_000);
 
 test("installed candidate fast proof and planted rule drift fail the full check without live execution or mutation", () => {
 	const { home, installedRoot, installedBinary } = installCandidate("operator-home");
