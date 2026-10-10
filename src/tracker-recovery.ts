@@ -213,6 +213,8 @@ function databaseHolders(databasePath: string, repo: string,
 	} catch (error) {
 		return { state: "unknown", reason: errorMessage(error) };
 	}
+	// lsof exits 1 with no output when no process holds the file: that is the clear case, not an error.
+	if (result.code === 1 && result.stdout.trim() === "" && result.stderr.trim() === "") return { state: "clear" };
 	if (result.code !== 0 || result.stderr.trim() !== "" || /(?:^|\n)lsof:/m.test(`${result.stdout}\n${result.stderr}`)) {
 		return { state: "unknown", reason: (result.stderr || result.stdout).trim().slice(0, 200) || `lsof exited ${String(result.code)}` };
 	}

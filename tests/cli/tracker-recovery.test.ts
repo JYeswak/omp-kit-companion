@@ -25,7 +25,7 @@ function plantedTracker(name: "stale-proceeds" | "live-blocks" | "no-lease") {
 	return { scratch, repo, logPath: join(scratch, "fleet-watch.jsonl") };
 }
 
-function recoveryDeps(options: { dbHolders?: string } = {}) {
+function recoveryDeps(options: { dbHolders?: string; lsof?: { code: number; stdout: string; stderr: string } } = {}) {
 	const brCalls: string[][] = [];
 	const lsofCalls: string[][] = [];
 	const leaseSnapshots: Record<string, unknown>[] = [];
@@ -39,7 +39,7 @@ function recoveryDeps(options: { dbHolders?: string } = {}) {
 		liveness,
 		sessionId: candidate => candidate === "worker-live" ? "$11" : candidate === session ? "$22" : null,
 		run: (args, cwd) => {
-			if (args[0] === "lsof") { lsofCalls.push([...args]); return { code: 0, stdout: options.dbHolders ?? "", stderr: "" }; }
+			if (args[0] === "lsof") { lsofCalls.push([...args]); return options.lsof ?? { code: 0, stdout: options.dbHolders ?? "", stderr: "" }; }
 			if (args[0] === "br") {
 				brCalls.push([...args, `cwd=${cwd}`]);
 				leaseSnapshots.push(JSON.parse(readFileSync(join(cwd, ".beads", ".br_recovery", "schema-migrations", "planted-run", ".omp-kit-recovery-lease.json"), "utf8")));
@@ -111,6 +111,31 @@ test("live database descriptor blocks a stale lease-free flag", () => {
 		expect(actions[0]?.text).toContain("database holder PID 424242");
 		expect(deps.brCalls).toEqual([]);
 		expect(deps.lsofCalls).toEqual([["lsof", "-nP", "-t", "--", join(planted.repo, ".beads", "beads.db")]]);
+	} finally {
+		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("real lsof with no holder (exit 1, no output) is clear and recovery proceeds", () => {
+	const planted = plantedTracker("no-lease");
+	const deps = recoveryDeps({ lsof: { code: 1, stdout: "", stderr: "" } });
+	try {
+		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
+		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_PROCEEDED"]);
+		expect(deps.brCalls).toEqual([["br", "doctor", "migrate-schema", "recover", `cwd=${planted.repo}`]]);
+	} finally {
+		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("lsof exit 1 with an error message stays unknown and blocks recovery", () => {
+	const planted = plantedTracker("no-lease");
+	const deps = recoveryDeps({ lsof: { code: 1, stdout: "", stderr: "lsof: status error on beads.db: Permission denied" } });
+	try {
+		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
+		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_BLOCKED"]);
+		expect(actions[0]?.text).toContain("database holder liveness is unknown");
+		expect(deps.brCalls).toEqual([]);
 	} finally {
 		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
 	}
