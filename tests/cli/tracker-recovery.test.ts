@@ -116,7 +116,8 @@ test("live database descriptor blocks a stale lease-free flag", () => {
 	}
 });
 
-test("the session probe returns a live tmux session id and null for a missing session", () => {
+const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
+test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id and null for a missing session", () => {
 	const dir = mkdtempSync(join(tmpdir(), "fw-sid-"));
 	const socket = join(dir, "s");
 	const tmux = (args: readonly string[]) => {

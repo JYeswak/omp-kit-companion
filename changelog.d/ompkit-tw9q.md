@@ -1,1 +1,2 @@
-`omp-kit send` discovers and reports the sole live tmux socket when `TMUX` and `TMUX_TMPDIR` are unset. It refuses with `TMUX_AMBIGUOUS` when multiple candidate servers are live and reports checked candidates when none are available.
+`omp-kit send` discovers and reports the sole live tmux socket when `TMUX` and `TMUX_TMPDIR` are unset. It refuses with `TMUX_AMBIGUOUS` when multiple candidate servers are live and reports checked candidates when none are available. (commit ce65f1c)
+`omp-kit send --json` reports the resolved `tmux_socket`, and an ambiguous server choice exits 1 as `REFUSED` with `TMUX_AMBIGUOUS` and the TMUX/TMUX_TMPDIR remedy; nothing is sent. (commit cb461b7)
