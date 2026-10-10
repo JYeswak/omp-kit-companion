@@ -1,0 +1,1 @@
+- The scratch reaper accepts `<label>.<pid>.<suffix>` directory names when the owner pid is one whole dot-delimited segment, so dead-owner dirs written that way are reaped instead of skipped as name mismatches (on this Mac: 4323 -> 1122 skipped, 24.6 MB -> 2.78 GB reapable). (commit 0cb6739)
