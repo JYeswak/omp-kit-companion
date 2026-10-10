@@ -321,6 +321,54 @@ describe("OMP installation identity", () => {
 
 		expect(() => resolveOmpIdentity({ PATH: dirname(launcher) })).toThrow(/source|matcher/i);
 	});
+
+	describe("a compiled standalone launcher outside any package", () => {
+		function compiledOmp(root: string, version: string): string {
+			const bin = join(root, "compiled-bin");
+			mkdirSync(bin, { recursive: true });
+			writeFileSync(join(bin, "omp"), `#!/bin/sh\necho omp/${version}\n`);
+			chmodSync(join(bin, "omp"), 0o755);
+			return join(bin, "omp");
+		}
+		function versionedOmp(prefix: string, version: string): { launcher: string; source: string } {
+			const install = createOmp(prefix, "v" + version);
+			writeFileSync(join(install.source, "..", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+			return install;
+		}
+
+		test("takes the same version's package from a later omp on PATH and keeps the compiled launcher", () => {
+			const root = fixtureRoot();
+			const compiled = compiledOmp(root, "9.9.1");
+			const pkg = versionedOmp(join(root, "omp-pkg"), "9.9.1");
+			const resolved = resolveOmpIdentity({ PATH: `${dirname(compiled)}:${dirname(pkg.launcher)}`, BUN_INSTALL: join(root, "no-bun") });
+
+			expect(resolved.launcher).toBe(realpathSync(compiled));
+			expect(resolved.source).toBe(realpathSync(pkg.source));
+			expect(resolveOmpIdentity({ PATH: `${dirname(compiled)}:${dirname(pkg.launcher)}`, BUN_INSTALL: join(root, "no-bun"), OMP_BIN: compiled }).launcher)
+				.toBe(realpathSync(compiled));
+		});
+
+		test("falls back to bun's global install of the same version", () => {
+			const root = fixtureRoot();
+			const compiled = compiledOmp(root, "9.9.1");
+			const pkg = versionedOmp(join(root, "omp-pkg"), "9.9.1");
+			const bunGlobal = join(root, "bun", "install", "global", "node_modules", "@oh-my-pi");
+			mkdirSync(bunGlobal, { recursive: true });
+			symlinkSync(realpathSync(join(pkg.source, "..")), join(bunGlobal, "pi-coding-agent"));
+
+			expect(resolveOmpIdentity({ PATH: dirname(compiled), BUN_INSTALL: join(root, "bun") }).source).toBe(realpathSync(pkg.source));
+		});
+
+		test("refuses a package of another version, even when OMP_SRC names it", () => {
+			const root = fixtureRoot();
+			const compiled = compiledOmp(root, "9.9.1");
+			const other = versionedOmp(join(root, "omp-other"), "9.9.0");
+			const env = { PATH: `${dirname(compiled)}:${dirname(other.launcher)}`, BUN_INSTALL: join(root, "no-bun") };
+
+			expect(() => resolveOmpIdentity(env)).toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.1 for OMP launcher");
+			expect(() => resolveOmpIdentity({ ...env, OMP_SRC: other.source })).toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.1");
+		});
+	});
 });
 
 test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () => {

@@ -99,6 +99,8 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
+	mkdirSync(join(destination, "docs"), { recursive: true });
+	copyFileSync(join(sourceRoot, "docs", "flywheel-invariants.tsv"), join(destination, "docs", "flywheel-invariants.tsv"));
 	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
