@@ -3,14 +3,14 @@
 
 First-fire indexes and default-policy outcomes are compared with the earliest release in this run. Default-policy results are from `OMP_KIT_DEFAULT_TTSR=1 sh scripts/e2e-live.sh`; GREEN means the observed outcome matches the baseline, not that the policy passed. Any RED cell names the differing check.
 
-| Check | 18.8.4 | 18.8.5 | 18.8.6 |
+| Check | 18.8.6 | 18.8.7 | 18.8.8 |
 | --- | --- | --- | --- |
 | First-fire differential | GREEN — matches earliest tested release | GREEN — matches earliest tested release | GREEN — matches earliest tested release |
 | Default-policy differential | GREEN — matches baseline exit 1; 1 failing scenario(s) | GREEN — matches baseline exit 1; 1 failing scenario(s) | GREEN — matches baseline exit 1; 1 failing scenario(s) |
 
 Default-policy scenarios:
-- OMP 18.8.4 (exit 1): nv-repeat: rule kit-no-verify named 1x, want >=3; marker .ran_nv-repeat present: the command ran
-- OMP 18.8.5 (exit 1): nv-repeat: rule kit-no-verify named 1x, want >=3; marker .ran_nv-repeat present: the command ran
 - OMP 18.8.6 (exit 1): nv-repeat: rule kit-no-verify named 1x, want >=3; marker .ran_nv-repeat present: the command ran
+- OMP 18.8.7 (exit 1): nv-repeat: rule kit-no-verify named 1x, want >=3; marker .ran_nv-repeat present: the command ran
+- OMP 18.8.8 (exit 1): nv-repeat: rule kit-no-verify named 1x, want >=3; marker .ran_nv-repeat present: the command ran
 
 This matrix covers only the listed stock OMP releases and these checks; it does not certify other versions or OMP main.
