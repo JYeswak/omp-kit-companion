@@ -48,6 +48,10 @@ function idleDeps(logPath: string, admission: AdmissionInput | undefined, recove
 				recoveries.push(repo);
 				return null;
 			},
+			preassignProbes: {
+				findRecoveryFlags: () => [],
+				listReadyRows: () => [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }],
+			},
 			...(admission === undefined ? {} : { admission }),
 		},
 	};
