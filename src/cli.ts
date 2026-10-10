@@ -2587,10 +2587,15 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\".");
 	}
 	const beads = { bead_ids: result.bead_ids, no_bead_reason: result.no_bead_reason };
-	if (result.status === "OK") {
-		return { code: 0, data: { overall: "OK", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED" };
+	if (result.status === "TMUX_AMBIGUOUS") {
+		return { code: 1, data: { overall: "REFUSED", session, pane, status: result.status, tmux_socket: null, marker: "", sends: 0, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED",
+			errors: [{ code: "TMUX_AMBIGUOUS", message: result.detail,
+				remediation: "Set TMUX or TMUX_TMPDIR to select the intended server; nothing was sent." }] };
 	}
-	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail, ...beads }, verification: "UNVERIFIED",
+	if (result.status === "OK") {
+		return { code: 0, data: { overall: "OK", session, pane, status: result.status, tmux_socket: result.tmux_socket, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED" };
+	}
+	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, tmux_socket: result.tmux_socket, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail, ...beads }, verification: "UNVERIFIED",
 		errors: [{ code: "NOT_DELIVERED", message: result.detail,
 			remediation: result.drop_path ? `Relay the message manually; the full text is at ${result.drop_path}.` : "Retry the send; no drop file was written." }] };
 }
