@@ -1,0 +1,1 @@
+- Coordinator observation seam is now a tested contract: `selectCoordinatorObservation` reports CONSUMED only for a packet-bound coordinator decision with matching generation, a live delivery cursor distinct from the message identity, and a receiving-side delivery event; everything else stays UNKNOWN with pending references preserved (custodian CB1).
