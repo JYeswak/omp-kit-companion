@@ -41,12 +41,28 @@ type NativeIssue = {
 	dependency_count: number;
 	external_ref: string | null;
 };
+type NativeIssueDetails = NativeIssue & { updated_at: string; parent: string | null; notes: string };
+type NativeDependency = { issue_id: string; depends_on_id: string; type: string; status: string };
+type ApplyWrite = {
+	kind: "EPIC_CREATED" | "ITEM_CREATED" | "AMENDED" | "DEPENDENCY_ADDED";
+	id: string;
+	slug?: string;
+	slugs?: string[];
+	target?: string;
+	external_ref?: string;
+	acceptance_added?: string[];
+	contributions_added?: string[];
+};
+type AmendedTarget = { id: string; slugs: string[]; acceptance_added: string[]; contributions_added: string[]; status: "AMENDED" | "UNCHANGED" };
+type ForeignTarget = { status: "FOREIGN"; id: string; slug: string };
+type ApplyFailure = { step: string; message: string; exit_code: number | null; stdout: string; stderr: string; reconciliation_error?: string };
+type ApplyReconciliation = { writes: ApplyWrite[]; error: string | null };
 type NativeList = { issues: NativeIssue[]; error: string | null };
 type Priority = 0 | 1 | 2 | 3 | 4;
 type BeadScoreMetrics = { median_chars: number | null; acceptance_share: number | null; deps_per_bead: number | null; mission_beads: number | null };
 type PlanningBeadMetrics = { median_description_chars: number | null; planning_score_median_chars: number | null; acceptance_share: number | null; deps_per_bead: number | null; mission_beads: number | null };
 type CreateFailure = { slug: string; line: number | null; exit_code: number | null; stdout: string; stderr: string; error: string | null };
-type DependencyEdge = { slug: string; target: string; status: "ADDED" | "SKIPPED_CYCLE"; issue_id: string; depends_on_id: string };
+type DependencyEdge = { slug: string; target: string; status: "ADDED" | "SKIPPED_CYCLE" | "ALREADY_PRESENT" | "SKIPPED_FOREIGN"; issue_id: string; depends_on_id: string };
 type DependencyFailure = { slug: string; target: string; message: string; exit_code?: number | null };
 type ConvertReport = {
 	kind: "planning-convert";
@@ -86,6 +102,15 @@ type ConvertReport = {
 	planning_score_bead_metrics: PlanningBeadMetrics;
 	database_path?: string;
 	db_refusal?: string;
+	apply?: boolean;
+	tracker_root?: string;
+	reused_items?: CreatedItem[];
+	amended_targets?: AmendedTarget[];
+	foreign_targets?: ForeignTarget[];
+	writes_landed?: ApplyWrite[];
+	apply_preflight_error?: string;
+	apply_failure?: ApplyFailure;
+	merged_dependency_cycles?: string[][];
 	text?: string;
 };
 type BrExitCode = 0 | 1 | 2 | 3 | 4;
@@ -457,6 +482,48 @@ function safeDbDirectory(path: string, cwd: string): { directory: string; databa
 	return { directory, database: join(directory, ".beads", "beads.db") };
 }
 
+function safeTrackerRoot(path: string, cwd: string): { trackerRoot: string; commandCwd: string; database: string } | { error: string } {
+	if (!path.trim()) return { error: "--tracker-root requires a non-empty directory" };
+	const trackerRoot = resolve(cwd, path);
+	let current = parse(trackerRoot).root;
+	for (const component of trackerRoot.slice(current.length).split(sep)) {
+		if (!component) continue;
+		current = join(current, component);
+		try {
+			if (lstatSync(current).isSymbolicLink()) return { error: "--tracker-root path contains a symbolic link" };
+		} catch (error) {
+			return { error: "--tracker-root path cannot be safely inspected: " + (error instanceof Error ? error.message : String(error)) };
+		}
+	}
+	try {
+		const rootStat = lstatSync(trackerRoot);
+		if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return { error: "--tracker-root must be a real directory, not a file or link" };
+		const isBeadsDirectory = parse(trackerRoot).base === ".beads";
+		const beadsDirectory = isBeadsDirectory ? trackerRoot : join(trackerRoot, ".beads");
+		const beadsStat = isBeadsDirectory ? rootStat : lstatSync(beadsDirectory);
+		if (beadsStat.isSymbolicLink() || !beadsStat.isDirectory()) return { error: "--tracker-root must contain a real `.beads` directory" };
+		const database = join(beadsDirectory, "beads.db");
+		const databaseStat = lstatSync(database);
+		if (databaseStat.isSymbolicLink() || !databaseStat.isFile()) return { error: "--tracker-root must contain a regular `.beads/beads.db` file" };
+		return { trackerRoot, commandCwd: isBeadsDirectory ? parse(trackerRoot).dir : trackerRoot, database };
+	} catch (error) {
+		return { error: "--tracker-root cannot be safely inspected: " + (error instanceof Error ? error.message : String(error)) };
+	}
+}
+
+function runApplyBr(args: string[], database: string, cwd: string, write: boolean, input?: string): CapturedCommand {
+	try {
+		const options = ["--no-auto-import", ...(write ? [] : ["--no-auto-flush"]), "--no-daemon", "--no-color", "--json"];
+		const result = spawnSync("br", [...args, "--db", database, ...options], {
+			cwd, input, encoding: "utf8", timeout: BR_TIMEOUT_MS, maxBuffer: BR_MAX_BUFFER,
+			env: { ...process.env, RUST_LOG: "warn" },
+		});
+		return { exit_code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "", error: result.error?.message ?? null };
+	} catch (error) {
+		return { exit_code: null, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 function runBr(args: string[], database: string, cwd: string, input?: string): CapturedCommand {
 	try {
 		const result = spawnSync("br", [...args, "--db", database, ...ACTOR_ARGS, "--json"], {
@@ -514,6 +581,65 @@ function decodeNativeList(stdout: string): NativeList {
 	return { issues, error: null };
 }
 
+function decodeNativeShow(stdout: string, requestedId: string): { issue: NativeIssueDetails | null; error: string | null } {
+	let value: unknown;
+	try { value = JSON.parse(stdout); }
+	catch (error) { return { issue: null, error: "br show returned invalid JSON: " + (error instanceof Error ? error.message : String(error)) }; }
+	if (!Array.isArray(value) || value.length !== 1) return { issue: null, error: "br show did not return exactly one issue" };
+	const row = value[0];
+	if (typeof row !== "object" || row === null || Array.isArray(row)) return { issue: null, error: "br show issue has an invalid shape" };
+	const record = row as Record<string, unknown>;
+	if (record.id !== requestedId) return { issue: null, error: "br show returned a different issue id" };
+	if (typeof record.title !== "string" || typeof record.description !== "string" ||
+		typeof record.acceptance_criteria !== "string" || typeof record.status !== "string" ||
+		typeof record.priority !== "number" || !ALLOWED_PRIORITIES.includes(record.priority as Priority) ||
+		typeof record.issue_type !== "string" || !Array.isArray(record.labels))
+		return { issue: null, error: "br show issue has an invalid field shape" };
+	if (typeof record.updated_at !== "string") return { issue: null, error: "br show issue has no updated_at value" };
+	if ("parent" in record && record.parent !== null && typeof record.parent !== "string")
+		return { issue: null, error: "br show issue has an invalid parent value" };
+	if ("notes" in record && record.notes !== null && typeof record.notes !== "string")
+		return { issue: null, error: "br show issue has invalid notes" };
+	const labels: string[] = [];
+	for (const label of record.labels) {
+		if (typeof label !== "string") return { issue: null, error: "br show issue has a non-string label" };
+		labels.push(label);
+	}
+	if ("external_ref" in record && record.external_ref !== null && typeof record.external_ref !== "string")
+		return { issue: null, error: "br show issue has an invalid external_ref" };
+	return {
+		issue: {
+			id: requestedId, title: record.title, description: record.description,
+			acceptance_criteria: record.acceptance_criteria, status: record.status,
+			priority: record.priority as Priority, issue_type: record.issue_type, labels,
+			dependency_count: 0, external_ref: typeof record.external_ref === "string" ? record.external_ref : null,
+			updated_at: record.updated_at, parent: typeof record.parent === "string" ? record.parent : null,
+			notes: typeof record.notes === "string" ? record.notes : "",
+		},
+		error: null,
+	};
+}
+
+function decodeNativeDependencies(stdout: string, issueId: string): { dependencies: NativeDependency[]; error: string | null } {
+	let value: unknown;
+	try { value = JSON.parse(stdout); }
+	catch (error) { return { dependencies: [], error: "br dep list returned invalid JSON: " + (error instanceof Error ? error.message : String(error)) }; }
+	if (!Array.isArray(value)) return { dependencies: [], error: "br dep list JSON was not an array" };
+	const dependencies: NativeDependency[] = [];
+	for (let index = 0; index < value.length; index++) {
+		const row = value[index];
+		if (typeof row !== "object" || row === null || Array.isArray(row) ||
+			!("issue_id" in row) || typeof row.issue_id !== "string" ||
+			!("depends_on_id" in row) || typeof row.depends_on_id !== "string" ||
+			!("type" in row) || typeof row.type !== "string" ||
+			!("status" in row) || typeof row.status !== "string")
+			return { dependencies: [], error: "br dep list row " + index + " has an invalid shape" };
+		if (row.issue_id !== issueId) return { dependencies: [], error: "br dep list returned an edge for a different issue" };
+		dependencies.push({ issue_id: row.issue_id, depends_on_id: row.depends_on_id, type: row.type, status: row.status });
+	}
+	return { dependencies, error: null };
+}
+
 type NativeCount = { count: number | null; error: string | null };
 
 function nativeCount(output: string, label: string, arrayKeys: string[], countKeys: string[]): NativeCount {
@@ -565,7 +691,7 @@ function reportText(data: ConvertReport): string {
 		"Planning conversion: " + data.overall,
 		"Mission: " + data.mission,
 		"Plan: " + data.plan_path,
-		"Isolated database directory: " + data.db_dir,
+		data.apply ? "Tracker root: " + (data.tracker_root ?? data.db_dir) : "Isolated database directory: " + data.db_dir,
 		"Items parsed: " + data.items_parsed,
 		"Plan beads created: " + data.beads_created + "; total beads including parent epic: " + data.total_beads_created,
 		"Parent epic: " + (data.parent_epic_id ?? "not created"),
@@ -620,12 +746,29 @@ function reportText(data: ConvertReport): string {
 		for (const failure of data.dependency_failures) lines.push("- " + failure.slug + " -> " + failure.target + ": " + failure.message);
 	}
 	if (data.br_list_error) lines.push("br list error: " + data.br_list_error);
+	if (data.apply) {
+		lines.push("", "Apply writes landed: " + (data.writes_landed?.length ?? 0));
+		if (data.writes_landed?.length) for (const write of data.writes_landed) lines.push("- " + JSON.stringify(write));
+		if (data.reused_items?.length) for (const item of data.reused_items) lines.push("- REUSED " + item.id + " (" + item.slug + ")");
+		if (data.amended_targets?.length) for (const target of data.amended_targets)
+			lines.push("- " + target.status + " " + target.id + " (" + target.slugs.join(", ") + ")");
+		if (data.foreign_targets?.length) for (const target of data.foreign_targets)
+			lines.push("- FOREIGN " + target.id + " + " + target.slug);
+		if (data.merged_dependency_cycles?.length) for (const cycle of data.merged_dependency_cycles)
+			lines.push("- merged tracker: " + cycle.join(" -> "));
+		if (data.apply_preflight_error) lines.push("Apply preflight refused: " + data.apply_preflight_error);
+		if (data.apply_failure) lines.push("Apply failed at " + data.apply_failure.step + ": " + data.apply_failure.message);
+		if (data.apply_failure?.reconciliation_error) lines.push("Apply write reconciliation: " + data.apply_failure.reconciliation_error);
+	}
 	return lines.join("\n");
 }
 
 function finish(data: ConvertReport, code: BrExitCode): PresentationResult {
 	data.text = reportText(data);
-	return { code, data, verification: code === 0 ? "PERFORMED" : "UNVERIFIED", commands: ["omp-kit planning convert --plan PATH --mission M --dry-run --db DIR"] };
+	const command = data.apply
+		? "omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR"
+		: "omp-kit planning convert --plan PATH --mission M --dry-run --db DIR";
+	return { code, data, verification: code === 0 ? "PERFORMED" : "UNVERIFIED", commands: [command] };
 }
 
 function baseReport(planPath: string, mission: string, dbDir: string): ConvertReport {
@@ -658,13 +801,471 @@ function createArgs(item: PlanItem, parentId: string, planPath: string, candidat
 	};
 }
 
-export type PlanningConvertOptions = { planPath: string; mission: string; dbDir: string; cwd?: string };
+type ApplyTarget = { kind: "existing" | "new" | "foreign"; id: string | null; reused: boolean; details?: NativeIssueDetails };
+type ApplyDependency = { item: PlanItem; targetSlug: string; foreign: boolean };
+
+function mergedGraphCycles(adjacency: Map<string, string[]>): string[][] {
+	const nodes = new Set<string>(adjacency.keys());
+	for (const targets of adjacency.values()) for (const target of targets) nodes.add(target);
+	const state = new Map<string, number>();
+	const stack: string[] = [];
+	const cycles = new Map<string, string[]>();
+	const visit = (node: string): void => {
+		state.set(node, 1);
+		stack.push(node);
+		for (const target of adjacency.get(node) ?? []) {
+			const targetState = state.get(target) ?? 0;
+			if (targetState === 0) visit(target);
+			else if (targetState === 1) {
+				const cycle = stack.slice(stack.lastIndexOf(target)).concat(target);
+				cycles.set(cycleKey(cycle), cycle);
+			}
+		}
+		stack.pop();
+		state.set(node, 2);
+	};
+	for (const node of nodes) if ((state.get(node) ?? 0) === 0) visit(node);
+	return [...cycles.values()];
+}
+
+function runPlanningConvertApply(
+	data: ConvertReport,
+	items: PlanItem[],
+	candidateSlugs: Set<string>,
+	cwd: string,
+	trackerRoot: string,
+): PresentationResult {
+	data.writes_landed = [];
+	data.created_items = [];
+	data.reused_items = [];
+	data.amended_targets = [];
+	data.foreign_targets = [];
+	data.merged_dependency_cycles = [];
+	const refuse = (message: string): PresentationResult => {
+		data.overall = "REFUSED";
+		data.apply_preflight_error = message;
+		return finish(data, 1);
+	};
+	if (data.unparseable_blocks.length || data.item_findings.length || data.uncovered_what_letters.length || data.dependency_cycles.length)
+		return refuse("the plan has parse, validation, coverage, or dependency-cycle findings");
+	if (!items.length) return refuse("the plan contains no applicable items");
+
+	const tracker = safeTrackerRoot(trackerRoot, cwd);
+	if ("error" in tracker) return refuse(tracker.error);
+	data.tracker_root = tracker.trackerRoot;
+	data.db_dir = tracker.trackerRoot;
+	data.database_path = tracker.database;
+
+	const listResult = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+	data.br_list_exit_code = listResult.exit_code;
+	if (listResult.exit_code !== 0 || listResult.error)
+		return refuse(listResult.error ?? (listResult.stderr.trim() || "br list failed"));
+	const decodedList = decodeNativeList(listResult.stdout);
+	if (decodedList.error) {
+		data.br_list_error = decodedList.error;
+		return refuse(decodedList.error);
+	}
+	const issuesById = new Map(decodedList.issues.map((issue) => [issue.id, issue]));
+	const detailsById = new Map<string, NativeIssueDetails>();
+	let detailsError: string | null = null;
+	const loadDetails = (id: string): NativeIssueDetails | null => {
+		const cached = detailsById.get(id);
+		if (cached) return cached;
+		const result = runApplyBr(["show", id], tracker.database, tracker.commandCwd, false);
+		if (result.exit_code !== 0 || result.error) {
+			detailsError = result.error ?? (result.stderr.trim() || "br show exited with status " + result.exit_code);
+			return null;
+		}
+		const decoded = decodeNativeShow(result.stdout, id);
+		if (decoded.error || !decoded.issue) {
+			detailsError = decoded.error ?? "br show did not return issue details";
+			return null;
+		}
+		detailsById.set(id, decoded.issue);
+		return decoded.issue;
+	};
+
+	const targetBySlug = new Map<string, ApplyTarget>();
+	const foreignTargets: ForeignTarget[] = [];
+	for (const item of items) {
+		if (item.existing !== "(new)") {
+			const existingId = item.existing.endsWith(" (amend)") ? item.existing.slice(0, -8) : item.existing;
+			const issue = issuesById.get(existingId);
+			if (!issue) {
+				targetBySlug.set(item.slug, { kind: "foreign", id: existingId, reused: false });
+				foreignTargets.push({ status: "FOREIGN", id: existingId, slug: item.slug });
+				data.foreign_targets = foreignTargets;
+				continue;
+			}
+			const details = loadDetails(issue.id);
+			if (!details) return refuse("cannot preflight target " + issue.id + ": " + (detailsError ?? "br show failed"));
+			if (details.status === "closed" || details.status === "tombstone")
+				return refuse("target " + issue.id + " is terminal and cannot be amended");
+			const contribution = "core8:" + item.slug;
+			const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", contribution], tracker.database, tracker.commandCwd, false);
+			if (noteSearch.exit_code !== 0 || noteSearch.error)
+				return refuse(noteSearch.error ?? (noteSearch.stderr.trim() || "cannot search contribution notes for " + contribution));
+			const noteList = decodeNativeList(noteSearch.stdout);
+			if (noteList.error) return refuse(noteList.error);
+			for (const candidate of noteList.issues) {
+				const candidateDetails = loadDetails(candidate.id);
+				if (!candidateDetails) return refuse("cannot preflight contribution " + contribution + ": " + (detailsError ?? "br show failed"));
+				if (candidate.id !== issue.id && splitLines(candidateDetails.notes).some((line) => line.trim() === contribution))
+					return refuse("contribution " + contribution + " already belongs to tracker issue " + candidate.id);
+			}
+			targetBySlug.set(item.slug, { kind: "existing", id: issue.id, reused: false, details });
+			continue;
+		}
+
+		const token = "core8:" + item.slug;
+		const byExternalRef = decodedList.issues.filter((issue) => issue.external_ref === token);
+		const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", token], tracker.database, tracker.commandCwd, false);
+		if (noteSearch.exit_code !== 0 || noteSearch.error)
+			return refuse(noteSearch.error ?? (noteSearch.stderr.trim() || "cannot search contribution notes for " + token));
+		const noteList = decodeNativeList(noteSearch.stdout);
+		if (noteList.error) return refuse(noteList.error);
+		const byNote: NativeIssue[] = [];
+		for (const candidate of noteList.issues) {
+			const details = loadDetails(candidate.id);
+			if (!details) return refuse("cannot preflight note match for " + token + ": " + (detailsError ?? "br show failed"));
+			if (splitLines(details.notes).some((line) => line.trim() === token)) byNote.push(candidate);
+		}
+		const matches = new Map<string, NativeIssue>();
+		for (const issue of [...byExternalRef, ...byNote]) matches.set(issue.id, issue);
+		if (matches.size > 1) return refuse("multiple tracker issues match " + token + " by external_ref or contribution note");
+		const matched = matches.values().next().value as NativeIssue | undefined;
+		if (!matched) {
+			targetBySlug.set(item.slug, { kind: "new", id: null, reused: false });
+			continue;
+		}
+		if (matched.issue_type !== item.type) return refuse("reused target " + matched.id + " has type " + matched.issue_type + ", expected " + item.type);
+		const details = loadDetails(matched.id);
+		if (!details) return refuse("cannot preflight reused target " + matched.id + ": " + (detailsError ?? "br show failed"));
+		if (details.status === "closed" || details.status === "tombstone")
+			return refuse("reused target " + matched.id + " is terminal");
+		targetBySlug.set(item.slug, { kind: "existing", id: matched.id, reused: true, details });
+		data.reused_items.push({
+			slug: item.slug, title: item.title, id: matched.id, line: item.line,
+			external_ref: matched.external_ref ?? token,
+		});
+	}
+	data.foreign_targets = foreignTargets;
+	const needsCore8Epic = items.some((item) => item.existing === "(new)");
+	const newItems = items.filter((item) => targetBySlug.get(item.slug)?.kind === "new");
+
+	const epicMatches = needsCore8Epic ? decodedList.issues.filter((issue) => issue.external_ref === "core8") : [];
+	if (epicMatches.length > 1) return refuse("multiple tracker issues use external_ref core8");
+	if (epicMatches.length === 1 && epicMatches[0]!.issue_type !== "epic")
+		return refuse("external_ref core8 is already used by a non-epic issue");
+	let parentId = epicMatches[0]?.id ?? null;
+	if (parentId) {
+		const parentDetails = loadDetails(parentId);
+		if (!parentDetails) return refuse("cannot preflight core8 epic " + parentId + ": " + (detailsError ?? "br show failed"));
+		if (parentDetails.status === "closed" || parentDetails.status === "tombstone")
+			return refuse("core8 epic " + parentId + " is terminal");
+	}
+	for (const item of items) {
+		const target = targetBySlug.get(item.slug)!;
+		if (target.reused && target.details && (!parentId || target.details.parent !== parentId))
+			return refuse("reused target " + target.id + " is not beneath the tracker core8 epic");
+	}
+	if (parentId) data.parent_epic_id = parentId;
+
+	const graphNode = (slug: string): string | null => {
+		const target = targetBySlug.get(slug);
+		if (!target || target.kind === "foreign") return null;
+		return target.kind === "existing" ? target.id : "__core8_new__" + slug;
+	};
+	const graphAdjacency = new Map<string, string[]>();
+	const existingBlockEdges = new Set<string>();
+	const graphQueue = [...new Set(items.map((item) => {
+		const target = targetBySlug.get(item.slug);
+		return target?.kind === "existing" ? target.id : null;
+	}).filter((id): id is string => id !== null))];
+	for (let index = 0; index < graphQueue.length; index++) {
+		const id = graphQueue[index]!;
+		if (graphAdjacency.has(id)) continue;
+		const result = runApplyBr(["dep", "list", id], tracker.database, tracker.commandCwd, false);
+		if (result.exit_code !== 0 || result.error)
+			return refuse(result.error ?? (result.stderr.trim() || "cannot preflight dependencies for " + id));
+		const decoded = decodeNativeDependencies(result.stdout, id);
+		if (decoded.error) return refuse(decoded.error);
+		const dependencies = decoded.dependencies.filter((edge) => edge.type === "blocks");
+		graphAdjacency.set(id, dependencies.map((edge) => edge.depends_on_id));
+		for (const edge of dependencies) {
+			existingBlockEdges.add(edge.issue_id + "\u0000" + edge.depends_on_id);
+			if (issuesById.has(edge.depends_on_id) && !graphAdjacency.has(edge.depends_on_id)) graphQueue.push(edge.depends_on_id);
+		}
+	}
+	const plannedDependencies: ApplyDependency[] = [];
+	for (const item of items) {
+		for (const targetSlug of item.dependsOn) {
+			if (!candidateSlugs.has(targetSlug)) continue;
+			const source = targetBySlug.get(item.slug);
+			const target = targetBySlug.get(targetSlug);
+			if (!source || !target) return refuse("dependency target " + targetSlug + " has no preflight resolution");
+			const foreign = source.kind === "foreign" || target.kind === "foreign";
+			plannedDependencies.push({ item, targetSlug, foreign });
+			if (foreign) continue;
+			const sourceNode = graphNode(item.slug)!;
+			const targetNode = graphNode(targetSlug)!;
+			const edges = graphAdjacency.get(sourceNode) ?? [];
+			if (!edges.includes(targetNode)) edges.push(targetNode);
+			graphAdjacency.set(sourceNode, edges);
+			if (!graphAdjacency.has(targetNode)) graphAdjacency.set(targetNode, []);
+		}
+	}
+	const placeholders = new Map(items.filter((item) => targetBySlug.get(item.slug)?.kind === "new")
+		.map((item) => ["__core8_new__" + item.slug, "new:" + item.slug]));
+	const mergedCycles = mergedGraphCycles(graphAdjacency).map((cycle) => cycle.map((id) => placeholders.get(id) ?? id));
+	if (mergedCycles.length) {
+		data.merged_dependency_cycles = mergedCycles;
+		return refuse("planned native dependency edges would create a cycle in the merged tracker graph");
+	}
+
+	const writeFailure = (
+		step: string,
+		result: CapturedCommand,
+		fallback: string,
+		reconcile?: () => ApplyReconciliation,
+	): PresentationResult => {
+		data.overall = "FINDINGS";
+		const failure: ApplyFailure = {
+			step, message: result.error ?? (result.stderr.trim() || result.stdout.trim() || fallback),
+			exit_code: result.exit_code, stdout: result.stdout, stderr: result.stderr,
+		};
+		if (!reconcile) failure.reconciliation_error = "no operation-specific readback is available";
+		else {
+			const readback = reconcile();
+			if (readback.error) failure.reconciliation_error = readback.error;
+			else for (const write of readback.writes) {
+				data.writes_landed!.push(write);
+				if (write.kind === "EPIC_CREATED") {
+					parentCreated = true;
+					parentId = write.id;
+					data.parent_epic_id = write.id;
+				} else if (write.kind === "ITEM_CREATED" && write.slug) {
+					const item = items.find((candidate) => candidate.slug === write.slug);
+					if (item && !data.created_items.some((created) => created.id === write.id)) {
+						targetBySlug.set(item.slug, { kind: "existing", id: write.id, reused: false });
+						data.created_items.push({ slug: item.slug, title: item.title, id: write.id, line: item.line, external_ref: write.external_ref ?? "core8:" + item.slug });
+					}
+				} else if (write.kind === "AMENDED") {
+					data.amended_targets!.push({
+						id: write.id, slugs: write.slugs ?? [], acceptance_added: write.acceptance_added ?? [],
+						contributions_added: write.contributions_added ?? [], status: "AMENDED",
+					});
+				} else if (write.kind === "DEPENDENCY_ADDED" && write.slug && write.target) {
+					const target = targetBySlug.get(write.target);
+					if (target?.id) data.dependency_edges.push({
+						slug: write.slug, target: write.target, status: "ADDED", issue_id: write.id, depends_on_id: target.id,
+					});
+				}
+			}
+		}
+		data.apply_failure = failure;
+		data.beads_created = data.created_items.length;
+		data.total_beads_created = data.created_items.length + (parentCreated ? 1 : 0);
+		return finish(data, 1);
+	};
+	const reconcileCreated = (externalRef: string, item?: PlanItem): (() => ApplyReconciliation) => () => {
+		const result = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+		if (result.exit_code !== 0 || result.error)
+			return { writes: [], error: result.error ?? (result.stderr.trim() || "br list reconciliation failed") };
+		const decoded = decodeNativeList(result.stdout);
+		if (decoded.error) return { writes: [], error: decoded.error };
+		const matches = decoded.issues.filter((issue) => issue.external_ref === externalRef);
+		if (matches.length > 1) return { writes: [], error: "multiple issues now match external_ref " + externalRef };
+		const issue = matches[0];
+		if (!issue) return { writes: [], error: null };
+		return {
+			writes: [item
+				? { kind: "ITEM_CREATED", id: issue.id, slug: item.slug, external_ref: externalRef }
+				: { kind: "EPIC_CREATED", id: issue.id, external_ref: externalRef }],
+			error: null,
+		};
+	};
+
+	let parentCreated = false;
+	if (newItems.length && !parentId) {
+		const result = runApplyBr(["create", "--title", "core8 applied plan", "--type", "epic", "--priority", "0",
+			"--labels", "plan:core8,mission:core8", "--external-ref", "core8", "--description-file", "-",
+			"--acceptance-criteria", "- [ ] Every locally applied plan item is parented under this epic."],
+		tracker.database, tracker.commandCwd, true,
+		"## Success Criteria\nAll locally created plan items are children of this core8 epic; foreign targets remain untouched.");
+		const id = createdId(result.stdout);
+		if (result.exit_code !== 0 || result.error || !id)
+			return writeFailure("create-core8-epic", result, "br create did not return a parent epic id", reconcileCreated("core8"));
+		parentId = id;
+		parentCreated = true;
+		data.parent_epic_id = id;
+		data.writes_landed.push({ kind: "EPIC_CREATED", id, external_ref: "core8" });
+	}
+	for (const item of newItems) {
+		if (!parentId) return refuse("new plan items have no core8 parent epic");
+		const request = createArgs(item, parentId, data.plan_path, candidateSlugs);
+		const result = runApplyBr(request.args, tracker.database, tracker.commandCwd, true, request.input);
+		const id = createdId(result.stdout);
+		if (result.exit_code !== 0 || result.error || !id)
+			return writeFailure("create-" + item.slug, result, "br create did not return an issue id", reconcileCreated("core8:" + item.slug, item));
+		targetBySlug.set(item.slug, { kind: "existing", id, reused: false });
+		const created = { slug: item.slug, title: item.title, id, line: item.line, external_ref: "core8:" + item.slug };
+		data.created_items.push(created);
+		data.writes_landed.push({ kind: "ITEM_CREATED", id, slug: item.slug, external_ref: created.external_ref });
+	}
+
+	const amendmentGroups = new Map<string, { details: NativeIssueDetails; items: PlanItem[] }>();
+	for (const item of items) {
+		if (item.existing === "(new)") continue;
+		const target = targetBySlug.get(item.slug);
+		if (!target || target.kind !== "existing" || !target.id || !target.details) continue;
+		const group = amendmentGroups.get(target.id) ?? { details: target.details, items: [] };
+		group.items.push(item);
+		amendmentGroups.set(target.id, group);
+	}
+	for (const [id, group] of amendmentGroups) {
+		const noteLines = splitLines(group.details.notes).map((line) => line.trim());
+		const acceptanceAdded: string[] = [];
+		const contributionsAdded: string[] = [];
+		for (const item of group.items) {
+			const token = "core8:" + item.slug;
+			if (noteLines.includes(token)) continue;
+			for (const box of acceptanceBoxes(item.acceptance))
+				acceptanceAdded.push("[" + box.letter + "] " + box.text);
+			contributionsAdded.push(token);
+		}
+		const amended: AmendedTarget = {
+			id, slugs: group.items.map((item) => item.slug), acceptance_added: acceptanceAdded,
+			contributions_added: contributionsAdded, status: acceptanceAdded.length || contributionsAdded.length ? "AMENDED" : "UNCHANGED",
+		};
+		if (!acceptanceAdded.length && !contributionsAdded.length) {
+			data.amended_targets.push(amended);
+			continue;
+		}
+		const args = ["update", id, "--if-unchanged", group.details.updated_at];
+		for (const criterion of acceptanceAdded) args.push("--add-acceptance", criterion);
+		for (const token of contributionsAdded) args.push("--append-notes", token);
+		const result = runApplyBr(args, tracker.database, tracker.commandCwd, true);
+		if (result.exit_code !== 0 || result.error)
+			return writeFailure("amend-" + id, result, "br update failed", () => {
+				const check = runApplyBr(["show", id], tracker.database, tracker.commandCwd, false);
+				if (check.exit_code !== 0 || check.error)
+					return { writes: [], error: check.error ?? (check.stderr.trim() || "br show reconciliation failed") };
+				const after = decodeNativeShow(check.stdout, id);
+				if (after.error || !after.issue) return { writes: [], error: after.error ?? "br show reconciliation returned no issue" };
+				const beforeTexts = acceptanceBoxes(group.details.acceptance_criteria).map((box) => box.text);
+				const afterTexts = acceptanceBoxes(after.issue.acceptance_criteria).map((box) => box.text);
+				const counts = new Map<string, number>();
+				for (const text of afterTexts) counts.set(text, (counts.get(text) ?? 0) + 1);
+				for (const text of beforeTexts) counts.set(text, (counts.get(text) ?? 0) - 1);
+				const observedAcceptance: string[] = [];
+				for (const text of acceptanceAdded) {
+					const count = counts.get(text) ?? 0;
+					if (count > 0) {
+						observedAcceptance.push(text);
+						counts.set(text, count - 1);
+					}
+				}
+				const beforeNotes = splitLines(group.details.notes).map((line) => line.trim());
+				const afterNotes = splitLines(after.issue.notes).map((line) => line.trim());
+				const observedContributions = contributionsAdded.filter((token) => !beforeNotes.includes(token) && afterNotes.includes(token));
+				if (!observedAcceptance.length && !observedContributions.length) return { writes: [], error: null };
+				return {
+					writes: [{
+						kind: "AMENDED", id, slugs: amended.slugs,
+						acceptance_added: observedAcceptance, contributions_added: observedContributions,
+					}],
+					error: null,
+				};
+			});
+		data.amended_targets.push(amended);
+		data.writes_landed.push({ kind: "AMENDED", id, slugs: amended.slugs, acceptance_added: acceptanceAdded, contributions_added: contributionsAdded });
+	}
+
+	for (const dependency of plannedDependencies) {
+		const source = targetBySlug.get(dependency.item.slug)!;
+		const target = targetBySlug.get(dependency.targetSlug)!;
+		if (dependency.foreign) {
+			data.dependency_edges.push({
+				slug: dependency.item.slug, target: dependency.targetSlug, status: "SKIPPED_FOREIGN",
+				issue_id: source.id ?? "", depends_on_id: target.id ?? "",
+			});
+			continue;
+		}
+		const sourceId = source.id!;
+		const targetId = target.id!;
+		const edgeKey = sourceId + "\u0000" + targetId;
+		if (existingBlockEdges.has(edgeKey)) {
+			data.dependency_edges.push({ slug: dependency.item.slug, target: dependency.targetSlug, status: "ALREADY_PRESENT", issue_id: sourceId, depends_on_id: targetId });
+			continue;
+		}
+		const result = runApplyBr(["dep", "add", sourceId, targetId], tracker.database, tracker.commandCwd, true);
+		if (result.exit_code !== 0 || result.error)
+			return writeFailure("dependency-" + dependency.item.slug + "-" + dependency.targetSlug, result, "br dep add failed", () => {
+				const check = runApplyBr(["dep", "list", sourceId], tracker.database, tracker.commandCwd, false);
+				if (check.exit_code !== 0 || check.error)
+					return { writes: [], error: check.error ?? (check.stderr.trim() || "br dep list reconciliation failed") };
+				const decoded = decodeNativeDependencies(check.stdout, sourceId);
+				if (decoded.error) return { writes: [], error: decoded.error };
+				const landed = decoded.dependencies.some((edge) => edge.type === "blocks" && edge.depends_on_id === targetId);
+				return {
+					writes: landed ? [{ kind: "DEPENDENCY_ADDED", id: sourceId, slug: dependency.item.slug, target: dependency.targetSlug }] : [],
+					error: null,
+				};
+			});
+		existingBlockEdges.add(edgeKey);
+		data.dependency_edges.push({ slug: dependency.item.slug, target: dependency.targetSlug, status: "ADDED", issue_id: sourceId, depends_on_id: targetId });
+		data.writes_landed.push({ kind: "DEPENDENCY_ADDED", id: sourceId, slug: dependency.item.slug, target: dependency.targetSlug });
+	}
+
+	const finalList = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+	data.br_list_exit_code = finalList.exit_code;
+	if (finalList.exit_code !== 0 || finalList.error)
+		return writeFailure("final-readback", finalList, "br list readback failed");
+	const finalDecoded = decodeNativeList(finalList.stdout);
+	if (finalDecoded.error) {
+		data.br_list_error = finalDecoded.error;
+		data.overall = "FINDINGS";
+		data.apply_failure = {
+			step: "final-readback", message: finalDecoded.error, exit_code: finalList.exit_code,
+			stdout: finalList.stdout, stderr: finalList.stderr,
+		};
+		data.beads_created = data.created_items.length;
+		data.total_beads_created = data.created_items.length + (parentCreated ? 1 : 0);
+		return finish(data, 1);
+	}
+	const scoreBeads: PlanningBead[] = finalDecoded.issues.map((issue) => ({
+		...issue, dependencies: Array.from({ length: issue.dependency_count }, () => ({})),
+	}));
+	const score = scorePlanningSnapshot({
+		repoPath: cwd, trackerPath: tracker.trackerRoot, mission: data.mission, planPath: null,
+		planExists: null, repoCommits: null, trackerCommits: null, beads: scoreBeads, nowEpochSeconds: null, ci: {},
+	}, { targets: {}, weights: {} });
+	const scoreMetrics = metricValue(score);
+	const missionRows = finalDecoded.issues.filter((issue) => issue.issue_type !== "epic" && issue.labels.includes("mission:" + data.mission));
+	data.planning_score_bead_metrics = {
+		median_description_chars: median(missionRows.map((issue) => issue.description.length)),
+		planning_score_median_chars: scoreMetrics.median_chars, acceptance_share: scoreMetrics.acceptance_share,
+		deps_per_bead: scoreMetrics.deps_per_bead, mission_beads: scoreMetrics.mission_beads,
+	};
+	data.beads_created = data.created_items.length;
+	data.total_beads_created = data.created_items.length + (parentCreated ? 1 : 0);
+	data.overall = "CLEAN";
+	return finish(data, 0);
+}
+
+export type PlanningConvertOptions = { planPath: string; mission: string; cwd?: string } & (
+	| { apply: true; trackerRoot: string; dbDir?: never }
+	| { apply?: false; dbDir: string; trackerRoot?: never }
+);
 export function runPlanningConvert(options: PlanningConvertOptions): PresentationResult {
 	const cwd = resolve(options.cwd ?? process.cwd());
 	const planPath = resolve(cwd, options.planPath);
 	const mission = options.mission.trim();
-	const requestedDb = options.dbDir;
+	const requestedDb = options.apply ? options.trackerRoot : options.dbDir;
 	const initial = baseReport(planPath, mission, requestedDb);
+	initial.apply = options.apply === true;
+	if (options.apply) initial.tracker_root = options.trackerRoot;
 	if (!mission || !isSlug(mission)) {
 		initial.overall = "REFUSED";
 		initial.item_findings = [{ code: "INVALID_MISSION", message: "--mission must be a lowercase slug" }];
@@ -693,6 +1294,7 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		uncovered_what_letters: coverage,
 		dependency_cycles: graph.cycles,
 	});
+	if (options.apply) return runPlanningConvertApply(initial, items, parsed.candidateSlugs, cwd, options.trackerRoot);
 	const database = safeDbDirectory(requestedDb, cwd);
 	if ("error" in database) {
 		initial.overall = "REFUSED";

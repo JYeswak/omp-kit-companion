@@ -229,7 +229,9 @@ function parse(args: readonly string[]): ParseResult {
 			return { failure: refusal("INVALID_VALUE", `Unknown scope: ${scope}`, `Use --scope ${grammar}.`), json };
 		}
 	}
-	if (flags.has("--plan") && flags.has("--apply")) return { failure: refusal("CONFLICTING_FLAGS", "--plan and --apply cannot be combined", `Choose one mode for ${command.name}.`), json };
+	const planIsInputFile = parent?.name === "planning" && command.name === "convert";
+	if (flags.has("--plan") && flags.has("--apply") && !planIsInputFile)
+		return { failure: refusal("CONFLICTING_FLAGS", "--plan and --apply cannot be combined", `Choose one mode for ${command.name}.`), json };
 	if (flags.has("--deep") && !flags.has("--yes")) return { failure: refusal("CONSENT_REQUIRED", "doctor --deep requires explicit --yes", "Review the guarded deep probe, then supply --yes."), json };
 	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, ...(childArgs ? { commandArgs: childArgs } : {}), json, robot: flags.has("--robot") } };
 }
@@ -3022,13 +3024,29 @@ registerCommandHandler("planning score", planningScoreCommand);
 function planningConvertCommand(request: ParsedCommand): CliResult {
 	const planFlag = request.flags.get("--plan");
 	const missionFlag = request.flags.get("--mission");
-	const databaseFlag = request.flags.get("--db");
-	if (!request.flags.has("--dry-run"))
-		return refusal("DRY_RUN_REQUIRED", "Planning conversion requires --dry-run and never writes to the configured tracker.", "Pass --dry-run and a fresh isolated --db directory.");
+	const dryRun = request.flags.has("--dry-run");
+	const apply = request.flags.has("--apply");
+	if (dryRun && apply)
+		return refusal("MODE_CONFLICT", "Choose exactly one of --dry-run or --apply.", "Use --dry-run with --db DIR or --apply with --tracker-root DIR.");
+	if (!dryRun && !apply)
+		return refusal("MODE_REQUIRED", "Planning conversion requires either --dry-run or --apply.", "Use --dry-run with --db DIR or --apply with --tracker-root DIR.");
 	if (typeof planFlag !== "string" || !planFlag.trim())
-		return refusal("INVALID_FLAG", "--plan requires a non-empty Markdown path", "Use omp-kit planning convert --plan PATH --mission M --dry-run --db DIR.");
+		return refusal("INVALID_FLAG", "--plan requires a non-empty Markdown path", "Use omp-kit planning convert --plan PATH --mission M with one explicit mode.");
 	if (typeof missionFlag !== "string" || !missionFlag.trim())
-		return refusal("INVALID_FLAG", "--mission requires a non-empty slug", "Use omp-kit planning convert --plan PATH --mission M --dry-run --db DIR.");
+		return refusal("INVALID_FLAG", "--mission requires a non-empty slug", "Use omp-kit planning convert --plan PATH --mission M with one explicit mode.");
+	if (apply) {
+		if (request.flags.has("--db"))
+			return refusal("INVALID_FLAG", "--db is valid only with --dry-run.", "Use --apply with --tracker-root DIR.");
+		const trackerRoot = request.flags.get("--tracker-root");
+		if (typeof trackerRoot !== "string" || !trackerRoot.trim())
+			return refusal("INVALID_FLAG", "--tracker-root requires a non-empty selected tracker path", "Use omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR.");
+		return runPlanningConvert({ planPath: planFlag, mission: missionFlag, apply: true, trackerRoot, cwd: process.cwd() });
+	}
+	if (request.flags.has("--tracker-root"))
+		return refusal("INVALID_FLAG", "--tracker-root is valid only with --apply.", "Use --dry-run with --db DIR.");
+	if (request.flags.has("--yes"))
+		return refusal("INVALID_FLAG", "--yes is valid only with --apply.", "Use --dry-run with --db DIR, or choose --apply to confirm a tracker write.");
+	const databaseFlag = request.flags.get("--db");
 	if (typeof databaseFlag !== "string" || !databaseFlag.trim())
 		return refusal("INVALID_FLAG", "--db requires a non-empty isolated directory", "Use a fresh path under var/agent-tmp with an .owner file.");
 	return runPlanningConvert({ planPath: planFlag, mission: missionFlag, dbDir: databaseFlag, cwd: process.cwd() });

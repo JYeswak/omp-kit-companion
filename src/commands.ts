@@ -133,7 +133,7 @@ const planningConvertData: DataSchema = { type: "object", required: ["kind", "ov
 	candidate_blocks: { type: "number" }, items_parsed: { type: "number" }, beads_created: { type: "number" }, total_beads_created: { type: "number" }, parent_epic_id: { type: ["string", "null"] },
 	created_items: { type: "array", items: { type: "object", required: ["slug", "title", "id", "line", "external_ref"], properties: { slug: { type: "string" }, title: { type: "string" }, id: { type: "string" }, line: { type: "number" }, external_ref: { type: "string" } } } },
 	create_failures: { type: "array", items: { type: "object", required: ["slug", "line", "exit_code", "stdout", "stderr", "error"], properties: { slug: { type: "string" }, line: { type: ["number", "null"] }, exit_code: { type: ["number", "null"] }, stdout: { type: "string" }, stderr: { type: "string" }, error: { type: ["string", "null"] } } } },
-	dependency_edges: { type: "array", items: { type: "object", required: ["slug", "target", "status", "issue_id", "depends_on_id"], properties: { slug: { type: "string" }, target: { type: "string" }, status: { enum: ["ADDED", "SKIPPED_CYCLE"] }, issue_id: { type: "string" }, depends_on_id: { type: "string" } } } },
+	dependency_edges: { type: "array", items: { type: "object", required: ["slug", "target", "status", "issue_id", "depends_on_id"], properties: { slug: { type: "string" }, target: { type: "string" }, status: { enum: ["ADDED", "SKIPPED_CYCLE", "ALREADY_PRESENT", "SKIPPED_FOREIGN"] }, issue_id: { type: "string" }, depends_on_id: { type: "string" } } } },
 	dependency_failures: { type: "array", items: { type: "object", required: ["slug", "target", "message"], properties: { slug: { type: "string" }, target: { type: "string" }, message: { type: "string" }, exit_code: { type: ["number", "null"] } } } },
 	dependency_cycles: { type: "array", items: { type: "object", required: ["slugs", "path"], properties: { slugs: { type: "array", items: { type: "string" } }, path: { type: "array", items: { type: "string" } } } } },
 	uncovered_what_letters: { type: "array", items: { type: "object", required: ["slug", "line", "letter", "missing_positive", "missing_planted_negative"], properties: { slug: { type: "string" }, line: { type: "number" }, letter: { type: "string" }, missing_positive: { type: "boolean" }, missing_planted_negative: { type: "boolean" } } } },
@@ -151,6 +151,13 @@ const planningConvertData: DataSchema = { type: "object", required: ["kind", "ov
 	br_cycle_stdout: { type: "string" }, br_cycle_stderr: { type: "string" }, br_cycle_error: { type: ["string", "null"] },
 	br_list_exit_code: { type: ["number", "null"] }, br_list_error: { type: ["string", "null"] },
 	planning_score_bead_metrics: { type: "object", required: ["median_description_chars", "planning_score_median_chars", "acceptance_share", "deps_per_bead", "mission_beads"], properties: { median_description_chars: { type: ["number", "null"] }, planning_score_median_chars: { type: ["number", "null"] }, acceptance_share: { type: ["number", "null"] }, deps_per_bead: { type: ["number", "null"] }, mission_beads: { type: ["number", "null"] } } },
+	apply: { type: "boolean" }, tracker_root: { type: "string" },
+	reused_items: { type: "array", items: { type: "object", required: ["slug", "title", "id", "line", "external_ref"], properties: { slug: { type: "string" }, title: { type: "string" }, id: { type: "string" }, line: { type: "number" }, external_ref: { type: "string" } } } },
+	amended_targets: { type: "array", items: { type: "object", required: ["id", "slugs", "acceptance_added", "contributions_added", "status"], properties: { id: { type: "string" }, slugs: { type: "array", items: { type: "string" } }, acceptance_added: { type: "array", items: { type: "string" } }, contributions_added: { type: "array", items: { type: "string" } }, status: { enum: ["AMENDED", "UNCHANGED"] } } } },
+	foreign_targets: { type: "array", items: { type: "object", required: ["status", "id", "slug"], properties: { status: { enum: ["FOREIGN"] }, id: { type: "string" }, slug: { type: "string" } } } },
+	writes_landed: { type: "array", items: { type: "object", required: ["kind", "id"], properties: { kind: { enum: ["EPIC_CREATED", "ITEM_CREATED", "AMENDED", "DEPENDENCY_ADDED"] }, id: { type: "string" }, slug: { type: "string" }, slugs: { type: "array", items: { type: "string" } }, target: { type: "string" }, external_ref: { type: "string" }, acceptance_added: { type: "array", items: { type: "string" } }, contributions_added: { type: "array", items: { type: "string" } } } } },
+	apply_preflight_error: { type: "string" }, apply_failure: { type: "object", required: ["step", "message", "exit_code", "stdout", "stderr"], properties: { step: { type: "string" }, message: { type: "string" }, exit_code: { type: ["number", "null"] }, stdout: { type: "string" }, stderr: { type: "string" }, reconciliation_error: { type: "string" } } },
+	merged_dependency_cycles: { type: "array", items: { type: "array", items: { type: "string" } } },
 	text: { type: "string" },
 } };
 const lspPlanData: DataSchema = { type: "object", required: ["overall", "report", "instructions"], properties: {
@@ -309,17 +316,20 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
-	{ name: "planning", description: "Score planning evidence or convert a plan into isolated native beads", usage: "planning score|convert", flags: [], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run", subcommands: [
+	{ name: "planning", description: "Score planning evidence or convert a plan into native beads in an isolated database or selected tracker", usage: "planning score|convert", flags: [], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run", subcommands: [
 		{ name: "score", description: "Score mission planning evidence without writing repository state", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [
 			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },
 			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
 		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
-		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in a fresh isolated database; dry-run only", usage: "planning convert --plan PATH --mission M --dry-run --db DIR [--json]", flags: [
+		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in an isolated database or selected tracker", usage: "planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR) [--yes] [--json]", flags: [
 			{ name: "--plan", value: "PATH", description: "Read the planning document; never modify it" },
 			{ name: "--mission", value: "M", description: "Mission slug to assign and score" },
-			{ name: "--dry-run", description: "Required; write only to a fresh isolated --db directory" },
-			{ name: "--db", value: "DIR", description: "Fresh isolated database directory; an existing directory may contain only .owner" },
-		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, dataSchema: planningConvertData },
+			{ name: "--dry-run", description: "Create native beads only in the fresh isolated --db directory" },
+			{ name: "--db", value: "DIR", description: "Fresh isolated database directory; valid only with --dry-run" },
+			{ name: "--apply", description: "Apply to the selected existing native tracker after full preflight; requires confirmation" },
+			{ name: "--tracker-root", value: "DIR", description: "Selected native tracker root; valid only with --apply" },
+			{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
+		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, mutation: true, dataSchema: planningConvertData },
 	], runnable: false },
 	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate [--project PATH] [--json]", flags: [], subcommands: [
 		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [

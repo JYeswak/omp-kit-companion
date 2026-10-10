@@ -13,7 +13,9 @@ const validPlan = join(import.meta.dir, "../fixtures/planning-convert/valid.md")
 const negativePlan = join(import.meta.dir, "../fixtures/planning-convert/negative.md");
 const childEnv = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
 
-function runCli(args: string[]) {
+type CliRunResult = { exitCode: number; stdout: string; stderr: string };
+
+function runCli(args: string[]): Promise<CliRunResult> {
 	const child = Bun.spawn([process.execPath, cli, ...args], { cwd: repoRoot, env: childEnv, stdout: "pipe", stderr: "pipe" });
 	return Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]).then(([exitCode, stdout, stderr]) => {
 		if (!stdout.trim()) throw new Error("planning convert returned no stdout; stderr=" + stderr);
@@ -84,12 +86,233 @@ function median(values: number[]): number | null {
 	const middle = Math.floor(ordered.length / 2);
 	return ordered.length % 2 ? ordered[middle]! : (ordered[middle - 1]! + ordered[middle]!) / 2;
 }
+type ApplyPlanItem = { slug: string; existing: string; dependsOn?: string[] };
 
-test("planning convert is a public dry-run command with the required explicit flags", () => {
+function planSource(items: ApplyPlanItem[]): string {
+	return items.map((item) => [
+		"```text",
+		"### " + item.slug + " — " + item.slug.replaceAll("-", " "),
+		"type: task priority: 1",
+		"labels: plan:core8, mission:core8, test:planning-convert",
+		"depends-on: " + (item.dependsOn?.join(", ") || "(none)"),
+		"existing: " + item.existing,
+		"discovered-from: planning-convert-test",
+		"WHAT: (a) " + item.slug + " is applied to the selected tracker.",
+		"WHY: The selected tracker must retain unrelated state.",
+		"ACCEPTANCE:",
+		"- [a] " + item.slug + " contributes its positive acceptance criterion.",
+		"- [a] Planted negative: " + item.slug + " is not applied twice.",
+		"NO-CLAIM: This fixture does not certify unrelated tracker state.",
+		"```",
+	].join("\n")).join("\n\n");
+}
+
+function writePlan(name: string, items: ApplyPlanItem[]): string {
+	const path = join(scratch, name + ".md");
+	writeFileSync(path, planSource(items));
+	return path;
+}
+
+function initializeTracker(trackerRoot: string): void {
+	mkdirSync(trackerRoot, { recursive: true });
+	nativeOutput(["init", "--prefix", "core8"], trackerRoot);
+}
+
+function createNativeIssue(trackerRoot: string, title: string, options: {
+	externalRef?: string; parent?: string; acceptance?: string; type?: string;
+} = {}): string {
+	const args = ["create", "--title", title, "--type", options.type ?? "task", "--priority", "1",
+		"--labels", "mission:core8,test:planning-convert", "--description", "Seeded for planning-convert apply tests",
+		"--acceptance-criteria", options.acceptance ?? "- [ ] Original tracker acceptance."];
+	if (options.parent) args.push("--parent", options.parent);
+	if (options.externalRef) args.push("--external-ref", options.externalRef);
+	const result = nativeJson(args, trackerRoot);
+	const row = Array.isArray(result) ? result[0] : result;
+	if (typeof row !== "object" || row === null || !("id" in row) || typeof row.id !== "string")
+		throw new Error("br create did not return an issue id");
+	return row.id;
+}
+
+function showNativeIssue(trackerRoot: string, id: string): Record<string, unknown> {
+	const result = nativeJson(["show", id], trackerRoot);
+	const row = Array.isArray(result) ? result[0] : result;
+	if (typeof row !== "object" || row === null || Array.isArray(row))
+		throw new Error("br show did not return an issue");
+	return row as Record<string, unknown>;
+}
+
+function applyResult(result: CliRunResult): Record<string, any> {
+	return JSON.parse(result.stdout).data;
+}
+
+function applyArgs(plan: string, trackerRoot: string): string[] {
+	return ["planning", "convert", "--plan", plan, "--mission", "core8", "--apply", "--tracker-root", trackerRoot, "--yes", "--json"];
+}
+
+test("planning convert apply preserves prior acceptance while grouping repeated contributions", async () => {
+	const trackerRoot = join(scratch, "apply-grouped-tracker");
+	initializeTracker(trackerRoot);
+	const parentId = createNativeIssue(trackerRoot, "Existing parent", { externalRef: "core8", type: "epic" });
+	const unrelatedId = createNativeIssue(trackerRoot, "Unrelated dependency");
+	const firstId = createNativeIssue(trackerRoot, "Existing target", {
+		externalRef: "preserved:external-ref", parent: parentId, acceptance: "- [ ] Preserve this prior acceptance.",
+	});
+	const secondId = createNativeIssue(trackerRoot, "Second target", { acceptance: "- [ ] Keep second prior criterion." });
+	nativeOutput(["dep", "add", firstId, unrelatedId], trackerRoot);
+	const plan = writePlan("apply-grouped", [
+		{ slug: "first-a", existing: firstId },
+		{ slug: "first-b", existing: firstId },
+		{ slug: "first-c", existing: firstId },
+		{ slug: "first-d", existing: firstId },
+		{ slug: "second-a", existing: secondId },
+		{ slug: "second-b", existing: secondId },
+	]);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).toBe(0);
+	const report = applyResult(result);
+	expect(report.overall).toBe("CLEAN");
+	expect(report.amended_targets).toHaveLength(2);
+	expect(report.amended_targets.find((target: { id: string }) => target.id === firstId).slugs).toEqual(["first-a", "first-b", "first-c", "first-d"]);
+	expect(report.amended_targets.find((target: { id: string }) => target.id === secondId).slugs).toEqual(["second-a", "second-b"]);
+
+	const first = showNativeIssue(trackerRoot, firstId);
+	expect(first.acceptance_criteria).toContain("Preserve this prior acceptance.");
+	for (const slug of ["first-a", "first-b", "first-c", "first-d"])
+		expect(first.acceptance_criteria).toContain(slug + " contributes its positive acceptance criterion.");
+	expect(first.external_ref).toBe("preserved:external-ref");
+	expect(first.parent).toBe(parentId);
+	expect(JSON.stringify(first.dependencies)).toContain(unrelatedId);
+	expect(first.notes).toContain("core8:first-a");
+	expect(first.notes).toContain("core8:first-d");
+});
+
+test("planning convert apply second run creates no duplicate issues, notes, acceptance, or edges", async () => {
+	const trackerRoot = join(scratch, "apply-idempotent-tracker");
+	initializeTracker(trackerRoot);
+	const existingId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
+	const plan = writePlan("apply-idempotent", [
+		{ slug: "existing-target", existing: existingId, dependsOn: ["new-target"] },
+		{ slug: "new-target", existing: "(new)" },
+	]);
+
+	const first = await runCli(applyArgs(plan, trackerRoot));
+	expect(first.exitCode).toBe(0);
+	const firstReport = applyResult(first);
+	expect(firstReport.writes_landed.length).toBeGreaterThan(0);
+	const rowsAfterFirst = issueRows(trackerRoot);
+	const created = rowsAfterFirst.filter((row) => row.external_ref === "core8:new-target");
+	expect(created).toHaveLength(1);
+
+	const second = await runCli(applyArgs(plan, trackerRoot));
+	expect(second.exitCode).toBe(0);
+	const secondReport = applyResult(second);
+	expect(secondReport.overall).toBe("CLEAN");
+	expect(secondReport.writes_landed).toEqual([]);
+	const rowsAfterSecond = issueRows(trackerRoot);
+	expect(rowsAfterSecond).toHaveLength(rowsAfterFirst.length);
+	expect(rowsAfterSecond.filter((row) => row.external_ref === "core8:new-target")).toHaveLength(1);
+	const updated = showNativeIssue(trackerRoot, existingId);
+	expect(String(updated.acceptance_criteria).split("existing-target contributes its positive acceptance criterion").length - 1).toBe(1);
+	expect(updated.notes).toBe("core8:existing-target");
+	const dependencies = JSON.stringify(nativeJson(["dep", "list", existingId], trackerRoot));
+	expect(dependencies.split(created[0]!.id).length - 1).toBe(1);
+});
+
+test("planning convert apply reports foreign targets without writing them", async () => {
+	const trackerRoot = join(scratch, "apply-foreign-tracker");
+	initializeTracker(trackerRoot);
+	const plan = writePlan("apply-foreign", [{ slug: "foreign-target", existing: "uds-81kq" }]);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).toBe(0);
+	const report = applyResult(result);
+	expect(report.foreign_targets).toEqual([{ status: "FOREIGN", id: "uds-81kq", slug: "foreign-target" }]);
+	expect(report.writes_landed).toEqual([]);
+	expect(issueRows(trackerRoot)).toHaveLength(0);
+});
+
+test("planning convert apply preflights every block before writing any target", async () => {
+	const trackerRoot = join(scratch, "apply-preflight-tracker");
+	initializeTracker(trackerRoot);
+	const plan = writePlan("apply-preflight", [{ slug: "valid-new", existing: "(new)" }]);
+	writeFileSync(plan, readFileSync(plan, "utf8") + [
+		"",
+		"```text",
+		"### malformed-item — Malformed",
+		"type: task priority: 1",
+		"labels: plan:core8, mission:core8, test:planning-convert",
+		"depends-on: (none)",
+		"existing: (new)",
+		"discovered-from: planning-convert-test",
+		"WHAT: (a) This block has incomplete acceptance.",
+		"WHY: It must refuse before creating the valid target.",
+		"ACCEPTANCE:",
+		"- [a] Only a positive criterion.",
+		"NO-CLAIM: Planted negative is missing.",
+		"```",
+	].join("\n"));
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).not.toBe(0);
+	const report = applyResult(result);
+	expect(report.overall).toBe("REFUSED");
+	expect(report.writes_landed).toEqual([]);
+	expect(issueRows(trackerRoot)).toHaveLength(0);
+});
+
+
+test("planning convert apply refuses a cycle introduced by the merged tracker graph before writes", async () => {
+	const trackerRoot = join(scratch, "apply-cycle-tracker");
+	initializeTracker(trackerRoot);
+	const parentId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+	const existingId = createNativeIssue(trackerRoot, "Existing target", { parent: parentId, acceptance: "- [ ] Keep this criterion." });
+	const reusedId = createNativeIssue(trackerRoot, "Previously created target", {
+		externalRef: "core8:new-target", parent: parentId,
+	});
+	nativeOutput(["dep", "add", reusedId, existingId], trackerRoot);
+	const plan = writePlan("apply-merged-cycle", [
+		{ slug: "existing-target", existing: existingId, dependsOn: ["new-target"] },
+		{ slug: "new-target", existing: "(new)" },
+	]);
+	const beforeExisting = showNativeIssue(trackerRoot, existingId);
+	const beforeReused = showNativeIssue(trackerRoot, reusedId);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).not.toBe(0);
+	const report = applyResult(result);
+	expect(report.overall).toBe("REFUSED");
+	expect(report.writes_landed).toEqual([]);
+	expect(showNativeIssue(trackerRoot, existingId)).toEqual(beforeExisting);
+	expect(showNativeIssue(trackerRoot, reusedId)).toEqual(beforeReused);
+});
+
+test("planning convert apply creates new targets beneath one core8 epic and reports the foreign target", async () => {
+	const trackerRoot = join(scratch, "apply-new-tracker");
+	initializeTracker(trackerRoot);
+	const result = await runCli(applyArgs(validPlan, trackerRoot));
+	expect(result.exitCode).toBe(0);
+	const report = applyResult(result);
+	expect(report.overall).toBe("CLEAN");
+	expect(report.foreign_targets).toEqual([{ status: "FOREIGN", id: "example.tracker.42", slug: "child-bug" }]);
+	const rows = issueRows(trackerRoot);
+	expect(rows.filter((row) => row.external_ref === "core8")).toHaveLength(1);
+	expect(rows.filter((row) => row.external_ref?.startsWith("core8:"))).toHaveLength(2);
+	expect(rows.some((row) => row.external_ref === "core8:child-bug")).toBe(false);
+	const created = report.created_items as Array<{ id: string; slug: string }>;
+	expect(created).toHaveLength(2);
+	for (const item of created) expect(showNativeIssue(trackerRoot, item.id).parent).toBe(report.parent_epic_id);
+	const plannedEdges = report.dependency_edges as Array<{ status: string; slug: string; target: string }>;
+	expect(plannedEdges.every((edge) => edge.status !== "ADDED" || (edge.slug !== "child-bug" && edge.target !== "child-bug"))).toBe(true);
+});
+
+
+test("planning convert is a public dry-run and apply command with explicit mode flags", () => {
 	const planning = COMMANDS.find((command) => command.name === "planning");
 	const convert = planning?.subcommands?.find((command) => command.name === "convert");
-	expect(convert?.usage).toBe("planning convert --plan PATH --mission M --dry-run --db DIR [--json]");
-	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db"]);
+	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR) [--yes] [--json]");
+	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db", "--apply", "--tracker-root", "--yes"]);
+	expect(convert?.mutation).toBe(true);
 });
 
 test("valid plan creates native parented beads and refuses a duplicate database", async () => {
@@ -165,8 +388,20 @@ test("planted negatives are named and the human report survives a nonzero exit",
 	expect(result.stdout).toContain(lint);
 });
 
-test("missing --dry-run refuses before creating the requested database directory", async () => {
-	const dbDir = join(scratch, "no-dry-run-db");
+test("planning convert rejects conflicting modes without creating either target", async () => {
+	const dbDir = join(scratch, "conflicting-mode-db");
+	const trackerRoot = join(scratch, "conflicting-mode-tracker");
+	const result = await runCli([
+		"planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir,
+		"--apply", "--tracker-root", trackerRoot, "--yes", "--json",
+	]);
+	expect(result.exitCode).not.toBe(0);
+	expect(JSON.parse(result.stdout).data.overall).toBe("NOT_RUN");
+	expect(existsSync(dbDir)).toBe(false);
+	expect(existsSync(trackerRoot)).toBe(false);
+});
+test("missing explicit mode refuses before creating the requested database directory", async () => {
+	const dbDir = join(scratch, "no-mode-db");
 	const result = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--db", dbDir, "--json"]);
 	expect(result.exitCode).not.toBe(0);
 	expect(JSON.parse(result.stdout).data.overall).toBe("NOT_RUN");
