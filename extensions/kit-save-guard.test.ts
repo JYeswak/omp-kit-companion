@@ -73,14 +73,28 @@ function fakePi(cwd: string): FakeSaveGuard {
 }
 
 
-function writeEvent(toolName: string, details: unknown, isError = false): unknown {
+function writeEvent(toolName: string, details: unknown, isError = false, toolCallId = `${toolName}-1`): unknown {
 	return {
 		type: "tool_execution_end",
-		toolCallId: `${toolName}-1`,
+		toolCallId,
 		toolName,
 		result: { details },
 		isError,
 	};
+}
+
+async function emitPathToolCall(
+	fake: FakeSaveGuard,
+	toolName: string,
+	file: string,
+	toolCallId: string,
+): Promise<void> {
+	await fake.emit("tool_call", {
+		type: "tool_call",
+		toolCallId,
+		toolName,
+		input: { path: file },
+	});
 }
 
 async function stop(fake: FakeSaveGuard, stopHookActive = false): Promise<unknown> {
@@ -358,13 +372,13 @@ test("cfsios mixed AGENTS.md hunk uses a private-index prompt", async () => {
 	await kitSaveGuard(fake.pi);
 	await startSession(fake);
 	const insertionPoint = held.indexOf("held 95\n");
+	await emitPathToolCall(fake, "edit", file, "cfsios-edit");
 	writeFileSync(file, `${held.slice(0, insertionPoint)}session-owned line\n${held.slice(insertionPoint)}`);
 	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("189\t27\tAGENTS.md");
 	await fake.emit("tool_execution_end", writeEvent("edit", {
 		path: file,
 		diff: "+session-owned line",
-	}));
-
+	}, false, "cfsios-edit"));
 	const result = await stop(fake);
 	expect(result).toMatchObject({ decision: "block" });
 	const reason = reasonOf(result);
@@ -372,6 +386,7 @@ test("cfsios mixed AGENTS.md hunk uses a private-index prompt", async () => {
 	expect(reason).toContain("stage only this session's hunk");
 	expect(reason).toContain("GIT_INDEX_FILE=<private-index> git write-tree");
 	expect(reason).not.toContain("git commit --only");
+	expect(reason).toContain("candidate <sha> for <repo-relative path>");
 });
 
 test("a recorded candidate must contain the hunk before it clears mixed work", async () => {
@@ -382,13 +397,13 @@ test("a recorded candidate must contain the hunk before it clears mixed work", a
 	await kitSaveGuard(fake.pi);
 	await startSession(fake);
 	const insertionPoint = held.indexOf("held 95\n");
+	await emitPathToolCall(fake, "edit", file, "candidate-edit");
 	writeFileSync(file, `${held.slice(0, insertionPoint)}session-owned line\n${held.slice(insertionPoint)}`);
 	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("189\t27\tAGENTS.md");
 	await fake.emit("tool_execution_end", writeEvent("edit", {
 		path: file,
 		diff: "+session-owned line",
-	}));
-
+	}, false, "candidate-edit"));
 	await recordMailCandidate(fake, invalidTree, "AGENTS.md");
 	expect(await stop(fake)).toMatchObject({ decision: "block" });
 
@@ -408,15 +423,137 @@ test("a wholly owned tracked file keeps the plain commit-only prompt", async () 
 	const fake = fakePi(root);
 	await kitSaveGuard(fake.pi);
 	await startSession(fake);
+	await emitPathToolCall(fake, "edit", file, "plain-edit");
 	writeFileSync(file, `${base}session-owned line\n`);
 	await fake.emit("tool_execution_end", writeEvent("edit", {
 		path: file,
 		diff: "+session-owned line",
-	}));
+	}, false, "plain-edit"));
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	const reason = reasonOf(result);
+	expect(reason).toContain("git commit --only -m");
+	expect(reason).not.toContain("private GIT_INDEX_FILE");
+});
+test("sequential edits compose to the final content and keep the plain commit-only prompt", async () => {
+	const root = repo({ remote: true });
+	const file = join(root, "sequential.txt");
+	writeFileSync(file, "");
+	sh(root, "add", "sequential.txt");
+	sh(root, "commit", "-m", "base sequential file [test]");
+	sh(root, "push");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+
+	await emitPathToolCall(fake, "edit", file, "sequential-alpha");
+	writeFileSync(file, "alpha\n");
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "@@ -0,0 +1 @@\n+alpha",
+	}, false, "sequential-alpha"));
+
+	await emitPathToolCall(fake, "edit", file, "sequential-beta");
+	writeFileSync(file, "beta\n");
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "@@ -1 +1 @@\n-alpha\n+beta",
+	}, false, "sequential-beta"));
 
 	const result = await stop(fake);
 	expect(result).toMatchObject({ decision: "block" });
 	const reason = reasonOf(result);
 	expect(reason).toContain("git commit --only -m");
 	expect(reason).not.toContain("private GIT_INDEX_FILE");
+});
+
+test("candidate with the final sequential content clears a mixed path", async () => {
+	const { root, file, base, held } = cfsiosFixture();
+	const candidate = candidateTree(root, "AGENTS.md", `${base}beta\n`, "sequential-final");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+
+	const insertionPoint = held.indexOf("held 95\n");
+	await emitPathToolCall(fake, "edit", file, "mixed-alpha");
+	writeFileSync(file, `${held.slice(0, insertionPoint)}alpha\n${held.slice(insertionPoint)}`);
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "@@ -95,0 +96 @@\n+alpha",
+	}, false, "mixed-alpha"));
+
+	await emitPathToolCall(fake, "edit", file, "mixed-beta");
+	writeFileSync(file, `${held.slice(0, insertionPoint)}beta\n${held.slice(insertionPoint)}`);
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "@@ -96 +96 @@\n-alpha\n+beta",
+	}, false, "mixed-beta"));
+
+	await recordMailCandidate(fake, candidate, "AGENTS.md");
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("an unreported foreign write beyond this session's hunk requires a private index", async () => {
+	const root = repo({ remote: true });
+	const file = join(root, "foreign-after-session.txt");
+	const baseline = "base\n";
+	writeFileSync(file, baseline);
+	sh(root, "add", "foreign-after-session.txt");
+	sh(root, "commit", "-m", "base foreign-after-session [test]");
+	sh(root, "push");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+
+	await emitPathToolCall(fake, "edit", file, "owned-hunk");
+	writeFileSync(file, `${baseline}session hunk\n`);
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "+session hunk",
+	}, false, "owned-hunk"));
+
+	// No tool_call or tool_execution_end represents this second writer.
+	writeFileSync(file, `${baseline}session hunk\nforeign write\n`);
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	const reason = reasonOf(result);
+	expect(reason).toContain("private GIT_INDEX_FILE");
+	expect(reason).toContain("foreign-after-session.txt");
+	expect(reason).not.toContain("git commit --only");
+});
+
+test("a br comments add candidate receipt clears matching owned work", async () => {
+	const { root, file, base, held } = cfsiosFixture();
+	const tree = candidateTree(root, "AGENTS.md", `${base}session hunk\n`, "comment-receipt");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+
+	const insertionPoint = held.indexOf("held 95\n");
+	await emitPathToolCall(fake, "edit", file, "comment-receipt-edit");
+	writeFileSync(file, `${held.slice(0, insertionPoint)}session hunk\n${held.slice(insertionPoint)}`);
+	await fake.emit("tool_execution_end", writeEvent("edit", {
+		path: file,
+		diff: "+session hunk",
+	}, false, "comment-receipt-edit"));
+	const commentToolCallId = "bead-comment-receipt";
+	const command = `br comments add ompkit-xa5s.3 "candidate ${tree} for AGENTS.md"`;
+	await fake.emit("tool_call", {
+		type: "tool_call",
+		toolCallId: commentToolCallId,
+		toolName: "bash",
+		input: { command },
+	});
+	await fake.emit("tool_execution_end", {
+		type: "tool_execution_end",
+		toolCallId: commentToolCallId,
+		toolName: "bash",
+		result: { details: {} },
+		isError: false,
+	});
+
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
 });

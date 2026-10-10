@@ -8,6 +8,7 @@
  * and bounded.
  */
 import * as path from "node:path";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 
 export interface SaveGuardExecResult {
 	stdout: string;
@@ -83,6 +84,16 @@ interface PatchDelta {
 	removed: string[];
 	known: boolean;
 }
+interface FileSnapshot {
+	known: boolean;
+	contents: string | null;
+}
+
+interface SessionFileContents {
+	baseline: string | null;
+	current: string | null;
+	known: boolean;
+}
 
 interface CandidateReceipt {
 	sha: string;
@@ -96,6 +107,7 @@ interface OwnedRepository {
 	baselineDirtyPaths: Set<string>;
 	baselineStatusKnown: boolean;
 	sessionDeltas: Map<string, PatchDelta>;
+	sessionFileContents: Map<string, SessionFileContents>;
 	candidateReceipts: CandidateReceipt[];
 }
 
@@ -103,6 +115,7 @@ interface SessionState {
 	repositories: Map<string, OwnedRepository>;
 	rootByDirectory: Map<string, string>;
 	pendingToolPathWork: Promise<void>;
+	pendingToolPathSnapshots: Map<string, Map<string, FileSnapshot>>;
 	pendingCandidateCalls: Map<string, CandidateReceipt>;
 	candidateReceipts: CandidateReceipt[];
 	rePrompts: number;
@@ -111,7 +124,6 @@ interface SessionState {
 
 interface ToolPathChange {
 	path: string;
-	diff?: string;
 }
 
 
@@ -123,8 +135,8 @@ export interface SaveGuardFinding {
 
 }
 
-function addLocalPath(paths: ToolPathChange[], value: unknown, diff?: string): void {
-	if (typeof value === "string" && value.length > 0 && !value.includes("://")) paths.push({ path: value, diff });
+function addLocalPath(paths: ToolPathChange[], value: unknown): void {
+	if (typeof value === "string" && value.length > 0 && !value.includes("://")) paths.push({ path: value });
 }
 
 function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string): ToolPathChange[] {
@@ -134,9 +146,8 @@ function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string):
 	if (typeof details !== "object" || details === null) return [];
 
 	const paths: ToolPathChange[] = [];
-	const sharedDiff = "diff" in details && typeof details.diff === "string" ? details.diff : undefined;
 	if (event.toolName === "write") {
-		if (!event.isError && "resolvedPath" in details) addLocalPath(paths, details.resolvedPath, sharedDiff);
+		if (!event.isError && "resolvedPath" in details) addLocalPath(paths, details.resolvedPath);
 		return paths;
 	}
 	if (event.toolName === "edit") {
@@ -144,19 +155,16 @@ function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string):
 			for (const fileResult of details.perFileResults) {
 				if (typeof fileResult !== "object" || fileResult === null) continue;
 				if ("isError" in fileResult && fileResult.isError === true) continue;
-				const diff = "diff" in fileResult && typeof fileResult.diff === "string"
-					? fileResult.diff
-					: sharedDiff;
-				if ("path" in fileResult) addLocalPath(paths, fileResult.path, diff);
-				if ("sourcePath" in fileResult) addLocalPath(paths, fileResult.sourcePath, diff);
-				if ("move" in fileResult) addLocalPath(paths, fileResult.move, diff);
+				if ("path" in fileResult) addLocalPath(paths, fileResult.path);
+				if ("sourcePath" in fileResult) addLocalPath(paths, fileResult.sourcePath);
+				if ("move" in fileResult) addLocalPath(paths, fileResult.move);
 			}
 			return paths;
 		}
 		if (!event.isError) {
-			if ("path" in details) addLocalPath(paths, details.path, sharedDiff);
-			if ("sourcePath" in details) addLocalPath(paths, details.sourcePath, sharedDiff);
-			if ("move" in details) addLocalPath(paths, details.move, sharedDiff);
+			if ("path" in details) addLocalPath(paths, details.path);
+			if ("sourcePath" in details) addLocalPath(paths, details.sourcePath);
+			if ("move" in details) addLocalPath(paths, details.move);
 		}
 		return paths;
 	}
@@ -167,18 +175,66 @@ function pathsFromToolEvent(event: SaveGuardToolExecutionEndEvent, cwd: string):
 		for (const replacement of details.fileReplacements) {
 			if (typeof replacement !== "object" || replacement === null || !("path" in replacement) ||
 				typeof replacement.path !== "string" || replacement.path.includes("://")) continue;
-			const diff = "diff" in replacement && typeof replacement.diff === "string"
-				? replacement.diff
-				: sharedDiff;
 			paths.push({
 				path: path.isAbsolute(replacement.path)
 					? path.resolve(replacement.path)
 					: path.resolve(base, replacement.path),
-				diff,
 			});
 		}
 	}
 	return paths;
+}
+
+const INPUT_PATH_KEYS: Readonly<Record<string, true>> = {
+	path: true,
+	filePath: true,
+	file_path: true,
+	sourcePath: true,
+	source_path: true,
+	move: true,
+};
+
+function inputPaths(value: unknown, output: string[] = [], depth = 0): string[] {
+	if (output.length >= 16 || depth > 4) return output;
+	if (Array.isArray(value)) {
+		let count = 0;
+		for (const item of value) {
+			if (output.length >= 16 || count >= 16) break;
+			count += 1;
+			inputPaths(item, output, depth + 1);
+		}
+	} else if (typeof value === "object" && value !== null) {
+		const record = value as Record<string, unknown>;
+		let count = 0;
+		for (const key in record) {
+			if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+			if (output.length >= 16 || count >= 16) break;
+			count += 1;
+			const item = record[key];
+			if (Object.prototype.hasOwnProperty.call(INPUT_PATH_KEYS, key)) {
+				if (typeof item === "string" && item.length > 0 && !item.includes("://")) output.push(item);
+			} else if (typeof item === "object" && item !== null) {
+				inputPaths(item, output, depth + 1);
+			}
+		}
+	}
+	return output;
+}
+
+function pathsFromToolCall(event: SaveGuardToolCallEvent, cwd: string): Map<string, FileSnapshot> {
+	if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") {
+		return new Map();
+	}
+	const inputCwd = typeof event.input === "object" && event.input !== null &&
+		"cwd" in event.input && typeof event.input.cwd === "string"
+		? path.resolve(cwd, event.input.cwd)
+		: cwd;
+	const snapshots = new Map<string, FileSnapshot>();
+	for (const value of inputPaths(event.input)) {
+		const absolutePath = path.isAbsolute(value) ? path.resolve(value) : path.resolve(inputCwd, value);
+		snapshots.set(absolutePath, snapshotFile(absolutePath));
+	}
+	return snapshots;
 }
 
 
@@ -217,25 +273,70 @@ function parsePatch(diff: string): PatchDelta {
 	return { added, removed, known: added.length + removed.length > 0 };
 }
 
-function recordSessionDelta(repository: OwnedRepository, repoPath: string, diff: string | undefined): void {
-	const existing = repository.sessionDeltas.get(repoPath);
-	if (!existing) {
-		repository.sessionDeltas.set(repoPath, diff === undefined
-			? { added: [], removed: [], known: false }
-			: parsePatch(diff));
+function snapshotFile(filePath: string): FileSnapshot {
+	try {
+		const stat = lstatSync(filePath);
+		if (stat.isSymbolicLink()) return { known: true, contents: readlinkSync(filePath) };
+		if (!stat.isFile()) return { known: false, contents: null };
+		return { known: true, contents: readFileSync(filePath, "utf8") };
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+			return { known: true, contents: null };
+		}
+		return { known: false, contents: null };
+	}
+}
+
+function contentLines(contents: string | null): string[] {
+	if (contents === null || contents.length === 0) return [];
+	const lines = contents.split("\n");
+	if (lines[lines.length - 1] === "") lines.pop();
+	return lines.map(line => line.endsWith("\r") ? line.slice(0, -1) : line);
+}
+
+function diffContents(before: string | null, after: string | null): PatchDelta {
+	const remaining = new Map<string, number>();
+	for (const line of contentLines(before)) remaining.set(line, (remaining.get(line) ?? 0) + 1);
+	const added: string[] = [];
+	for (const line of contentLines(after)) {
+		const count = remaining.get(line) ?? 0;
+		if (count === 0) added.push(line);
+		else if (count === 1) remaining.delete(line);
+		else remaining.set(line, count - 1);
+	}
+	const removed: string[] = [];
+	for (const [line, count] of remaining) {
+		for (let index = 0; index < count; index += 1) removed.push(line);
+	}
+	return { added, removed, known: added.length + removed.length > 0 };
+}
+
+function recordSessionDelta(
+	repository: OwnedRepository,
+	repoPath: string,
+	before: FileSnapshot | undefined,
+	after: FileSnapshot,
+): void {
+	if (!before?.known || !after.known) {
+		const existing = repository.sessionFileContents.get(repoPath);
+		if (existing) existing.known = false;
+		else repository.sessionFileContents.set(repoPath, { baseline: null, current: null, known: false });
+		repository.sessionDeltas.set(repoPath, { added: [], removed: [], known: false });
 		return;
 	}
-	if (!existing.known || diff === undefined) {
-		existing.known = false;
-		return;
+	let contents = repository.sessionFileContents.get(repoPath);
+	if (!contents) {
+		contents = { baseline: before.contents, current: after.contents, known: true };
+		repository.sessionFileContents.set(repoPath, contents);
+	} else {
+		if (!contents.known || contents.current !== before.contents) {
+			contents.known = false;
+			repository.sessionDeltas.set(repoPath, { added: [], removed: [], known: false });
+			return;
+		}
+		contents.current = after.contents;
 	}
-	const next = parsePatch(diff);
-	if (!next.known) {
-		existing.known = false;
-		return;
-	}
-	existing.added.push(...next.added);
-	existing.removed.push(...next.removed);
+	repository.sessionDeltas.set(repoPath, diffContents(contents.baseline, contents.current));
 }
 
 function inputStrings(value: unknown, output: string[] = [], depth = 0): string[] {
@@ -308,6 +409,7 @@ function newOwnedRepository(
 		baselineDirtyPaths,
 		baselineStatusKnown,
 		sessionDeltas: new Map(),
+		sessionFileContents: new Map(),
 		candidateReceipts: candidateReceipts.slice(),
 	};
 }
@@ -321,6 +423,7 @@ function sessionStateFor(states: Map<string, SessionState>, sessionId: string): 
 			pendingToolPathWork: Promise.resolve(),
 			pendingCandidateCalls: new Map(),
 			candidateReceipts: [],
+			pendingToolPathSnapshots: new Map(),
 			rePrompts: 0,
 			warningEmitted: false,
 		};
@@ -375,6 +478,7 @@ async function recordToolPaths(
 	state: SessionState,
 	cwd: string,
 	toolPaths: ToolPathChange[],
+	snapshots: Map<string, FileSnapshot> | undefined,
 ): Promise<void> {
 	for (const change of toolPaths) {
 		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
@@ -410,7 +514,7 @@ async function recordToolPaths(
 			state.repositories.set(root, repository);
 		}
 		repository.paths.add(repoPath);
-		recordSessionDelta(repository, repoPath, change.diff);
+		recordSessionDelta(repository, repoPath, snapshots?.get(absolutePath), snapshotFile(absolutePath));
 	}
 }
 
@@ -606,7 +710,7 @@ function formatSavePrompt(findings: SaveGuardFinding[]): string {
 				"fetch origin and initialize a private GIT_INDEX_FILE from fresh origin/main with GIT_INDEX_FILE=<private-index> git read-tree origin/main;",
 				`stage only this session's hunk with GIT_INDEX_FILE=<private-index> git add -p -- ${commandPaths};`,
 				"write the tree with GIT_INDEX_FILE=<private-index> git write-tree and create a candidate commit with git commit-tree <tree> -p origin/main;",
-				"record the candidate commit/tree SHA in a bead comment or Agent Mail message; push the candidate through the guarded repo flow; release the reservation",
+				"record `candidate <sha> for <repo-relative path>` (use the 40- or 64-character object ID) in a bead comment via `br comments add` or an Agent Mail message; push the candidate through the guarded repo flow; release the reservation",
 			].join(" "));
 		}
 	}
@@ -630,16 +734,22 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		const receipt = receiptFromToolCall(event);
-		if (!receipt || event.toolCallId.length === 0) return;
+		if (event.toolCallId.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
-		sessionStateFor(sessions, sessionId).pendingCandidateCalls.set(event.toolCallId, receipt);
+		const receipt = receiptFromToolCall(event);
+		const snapshots = pathsFromToolCall(event, ctx.cwd);
+		if (!receipt && snapshots.size === 0) return;
+		const state = sessionStateFor(sessions, sessionId);
+		if (receipt) state.pendingCandidateCalls.set(event.toolCallId, receipt);
+		if (snapshots.size > 0) state.pendingToolPathSnapshots.set(event.toolCallId, snapshots);
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
+		const pathSnapshots = state?.pendingToolPathSnapshots.get(event.toolCallId);
+		if (state) state.pendingToolPathSnapshots.delete(event.toolCallId);
 		const receipt = state?.pendingCandidateCalls.get(event.toolCallId);
 		if (state && receipt) {
 			state.pendingCandidateCalls.delete(event.toolCallId);
@@ -655,7 +765,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		if (paths.length === 0 || sessionId.length === 0) return;
 		const currentState = state ?? sessionStateFor(sessions, sessionId);
 		currentState.pendingToolPathWork = currentState.pendingToolPathWork
-			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths))
+			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots))
 			.catch(() => undefined);
 		await currentState.pendingToolPathWork;
 	});
