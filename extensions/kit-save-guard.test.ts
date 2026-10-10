@@ -557,3 +557,47 @@ test("a br comments add candidate receipt clears matching owned work", async () 
 	expect(await stop(fake)).toBeUndefined();
 	expect(fake.notices).toEqual([]);
 });
+
+function landOnUpstream(root: string, relativePath: string, contents: string, label: string): void {
+	const tree = candidateTree(root, relativePath, contents, label);
+	const commit = sh(root, "commit-tree", tree, "-p", "HEAD", "-m", `${label} [test]`).stdout.trim();
+	sh(root, "push", "origin", `${commit}:refs/heads/main`);
+	sh(root, "fetch", "origin");
+}
+
+async function sessionEditsTrackedFile(): Promise<{ root: string; file: string; fake: FakeSaveGuard; landed: string }> {
+	const root = repo({ remote: true });
+	const file = join(root, "AGENTS.md");
+	const base = "base line\n";
+	writeFileSync(file, base);
+	sh(root, "add", "AGENTS.md");
+	sh(root, "commit", "-m", "base AGENTS [test]");
+	sh(root, "push");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	await emitPathToolCall(fake, "edit", file, "landed-edit");
+	const landed = `${base}session-owned line\n`;
+	writeFileSync(file, landed);
+	await fake.emit("tool_execution_end", writeEvent("edit", { path: file, diff: "+session-owned line" }, false, "landed-edit"));
+	return { root, file, fake, landed };
+}
+
+test("owned work already published on upstream stays silent while local main lags behind", async () => {
+	const { root, fake, landed } = await sessionEditsTrackedFile();
+	landOnUpstream(root, "AGENTS.md", landed, "landed");
+	expect(sh(root, "rev-list", "--count", "HEAD..@{u}").stdout.trim()).toBe("1");
+
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("a further edit after publishing upstream still blocks", async () => {
+	const { root, file, fake, landed } = await sessionEditsTrackedFile();
+	landOnUpstream(root, "AGENTS.md", landed, "landed-then-edited");
+	writeFileSync(file, `${landed}unpublished line\n`);
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain("AGENTS.md");
+});

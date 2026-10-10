@@ -601,6 +601,24 @@ async function hasSavedCandidate(
 	return false;
 }
 
+/**
+ * True when the working-tree file is byte-identical to the upstream branch's copy. The work is then
+ * already published (for example landed through a private index while this shared checkout's local
+ * branch lags behind), and committing it again would put the same change on the branch twice.
+ */
+async function publishedUpstream(
+	exec: SaveGuardApi["exec"],
+	root: string,
+	upstreamHead: string,
+	repoPath: string,
+): Promise<boolean> {
+	if (upstreamHead.length === 0) return false;
+	const published = await runGit(exec, root, ["rev-parse", "--verify", "--quiet", `${upstreamHead}:${repoPath}`]);
+	if (published.code !== 0) return false;
+	const local = await runGit(exec, root, ["--literal-pathspecs", "hash-object", "--", repoPath]);
+	return local.code === 0 && gitLine(local.stdout) === gitLine(published.stdout);
+}
+
 export async function checkSaveState(
 	exec: SaveGuardApi["exec"],
 	repository: OwnedRepository,
@@ -618,12 +636,10 @@ export async function checkSaveState(
 	const ownedPathSet = new Set(ownedPaths);
 	const dirtyPaths = Array.from(statuses.keys()).filter(path => ownedPathSet.has(path)).sort();
 	const upstream = await runGit(exec, repository.root, ["rev-parse", "--verify", "@{u}"]);
+	const upstreamHead = upstream.code === 0 ? gitLine(upstream.stdout) : "";
 	const exclusions: string[] = [];
 	if (repository.baselineHead) exclusions.push(repository.baselineHead);
-	if (upstream.code === 0) {
-		const upstreamHead = gitLine(upstream.stdout);
-		if (upstreamHead.length > 0) exclusions.push(upstreamHead);
-	}
+	if (upstreamHead.length > 0) exclusions.push(upstreamHead);
 	const aheadArgs = ["--literal-pathspecs", "rev-list", "--count", "HEAD"];
 	if (exclusions.length > 0) aheadArgs.push("--not", ...exclusions);
 	aheadArgs.push("--", ...ownedPaths);
@@ -639,6 +655,10 @@ export async function checkSaveState(
 	const privateIndexPaths = new Set<string>();
 	const savedPaths = new Set<string>();
 	for (const repoPath of dirtyPaths) {
+		if (await publishedUpstream(exec, repository.root, upstreamHead, repoPath)) {
+			savedPaths.add(repoPath);
+			continue;
+		}
 		const actual = await diffFromBaseline(exec, repository, repoPath);
 		const expected = repository.sessionDeltas.get(repoPath);
 		const untracked = statuses.get(repoPath) === "??" && !repository.baselineDirtyPaths.has(repoPath);

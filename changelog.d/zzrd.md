@@ -1,0 +1,1 @@
+- The save guard no longer asks a session to commit and push work whose bytes already match the upstream branch, as when a change was landed through a private index while the shared checkout's local branch lags behind; a later edit to that file still blocks.
