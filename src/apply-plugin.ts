@@ -415,9 +415,14 @@ export function planPlugin(
 		if (!refusalReason && before?.snapshot_issue) refusalReason = before.snapshot_issue;
 		if (!refusalReason && before && (before.plugins_dir_hash === null || before.lock_hash === null))
 			refusalReason = "PROFILE_SNAPSHOT_UNVERIFIED";
+		// A symlink is current only when it points at this store: releases ship byte-identical
+		// package.json/rules/extensions, so an equal content hash on a symlink to an older release
+		// would leave every profile on that release (ompkit-fp72.18). Copied directories have no
+		// target to compare, so their content hash still decides.
 		let action: PluginStep["action"] = "LINK";
 		if (!refusalReason && before?.installed &&
-			(before.target === storePath || (options.package_hash !== undefined && before.package_hash === options.package_hash)))
+			(before.target === storePath || (before.link_kind !== "SYMLINK" &&
+				options.package_hash !== undefined && before.package_hash === options.package_hash)))
 			action = "UNCHANGED";
 		if (!refusalReason && action === "LINK" && before?.lock_kind &&
 			before.lock_kind !== "ABSENT" && before.lock_kind !== "FILE")

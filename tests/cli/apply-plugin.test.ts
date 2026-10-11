@@ -272,6 +272,21 @@ test("same version with different package contents is not treated as loaded", ()
 	expect(plan.steps[0]?.action).toBe("LINK");
 	expect(plan.steps[0]?.refusal_reason).toBeUndefined();
 });
+test("a symlink to an older release with identical rules and extensions is relinked to the store", () => {
+	const before = { ...runner().runner.snapshot("default"), installed: true, target: "/fixture/releases/0.2.19",
+		version: "0.2.15", package_hash: "same-content", link_kind: "SYMLINK" as const };
+	const plan = planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }],
+		new Map([["default", before]]), { store_version: "0.2.15", package_hash: "same-content" });
+	expect(plan.steps[0]?.action).toBe("LINK");
+	expect(plan.steps[0]?.refusal_reason).toBeUndefined();
+});
+test("a symlink already pointing at the store is unchanged", () => {
+	const before = { ...runner().runner.snapshot("default"), installed: true, target: resolve(store),
+		version: "0.2.15", package_hash: "same-content", link_kind: "SYMLINK" as const };
+	const plan = planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }],
+		new Map([["default", before]]), { store_version: "0.2.15", package_hash: "same-content" });
+	expect(plan.steps[0]?.action).toBe("UNCHANGED");
+});
 
 test("receipt undo restores runtime exclusions and refuses changed postimages", () => {
 	const stateRoot = makeStateRoot("policy-undo");

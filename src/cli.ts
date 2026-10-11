@@ -1160,7 +1160,7 @@ function createPluginRunner(omp: string, home: string, profiles: readonly Plugin
 		postcheck: profile => {
 			const current = snapshot(profile);
 			return current.snapshot_issue === undefined && current.installed &&
-				(current.target === store || current.package_hash === storeHash)
+				(current.target === store || (current.link_kind !== "SYMLINK" && current.package_hash === storeHash))
 				? { ok: true }
 				: { ok: false, reason: current.snapshot_issue ?? "POSTCHECK_PARTIAL:PLUGIN_PACKAGE_MISMATCH" };
 		},
