@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ensureOmpSource as ensureOmpSourceType } from "../src/omp-source-cache.ts";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
 
@@ -36,7 +37,14 @@ export interface OmpSourceLookup {
 	env: NodeJS.ProcessEnv;
 	/** Version printed by `<launcher> --version`, e.g. "18.8.8"; null when it cannot be read. */
 	launcherVersion(launcher: string): string | null;
+	/** Package root of exactly `version` from the kit source cache, installing it if absent; null when unavailable. */
+	sourceCache?(version: string, env: NodeJS.ProcessEnv): string | null;
 }
+
+// The cache module lives in the repo's src/; a packaged release ships this script without src/ and
+// always passes OMP_SRC, so the cache is only reachable (and only needed) from a checkout.
+const CACHE_MODULE = path.join(import.meta.dir, "..", "src", "omp-source-cache.ts");
+type EnsureOmpSource = typeof ensureOmpSourceType;
 
 const defaultLookup: OmpSourceLookup = {
 	env: process.env,
@@ -45,13 +53,20 @@ const defaultLookup: OmpSourceLookup = {
 		const run = spawnSync(launcher, ["--version"], { cwd: path.dirname(launcher), encoding: "utf8", timeout: 15_000 });
 		return run.status === 0 ? /(\d+\.\d+\.\d+)/.exec(run.stdout)?.[1] ?? null : null;
 	},
+	sourceCache(version, env) {
+		if (!fs.existsSync(CACHE_MODULE)) return null;
+		const { ensureOmpSource } = require(CACHE_MODULE) as { ensureOmpSource: EnsureOmpSource };
+		return ensureOmpSource(version, env);
+	},
 };
 
 /**
  * The TypeScript source of the omp that `omp` on PATH runs. The first launcher usually lives inside
- * its package. A compiled standalone launcher does not, so the same version's package is then taken
- * from another `omp` on PATH or from bun's global install; a package of any other version is refused,
- * because classifying rules with a different omp's parser is exactly the drift this file prevents.
+ * its package. A compiled standalone launcher (Tern's omp) does not, so the same version's package is
+ * then taken from another `omp` on PATH, from bun's global install, or from the kit's exact-version
+ * source cache (`lookup.sourceCache`, repo checkouts only: a packaged release passes OMP_SRC instead).
+ * A package of any other version is refused, because classifying rules with a different omp's parser
+ * is exactly the drift this file prevents.
  */
 export function resolveOmpSource(lookup: OmpSourceLookup = defaultLookup): string {
 	const { env } = lookup;
@@ -75,6 +90,8 @@ export function resolveOmpSource(lookup: OmpSourceLookup = defaultLookup): strin
 		const found = packageSourceAbove(other);
 		if (found && version !== null && found.version === version) return found.src;
 	}
+	const cached = version !== null && lookup.sourceCache ? lookup.sourceCache(version, env) : null;
+	if (cached) return path.join(cached, "src");
 	throw new Error(`cannot locate the omp ${version ?? "(unknown version)"} package source for ${executable}; set OMP_SRC to its src directory (…/${PACKAGE_NAME}/src)`);
 }
 

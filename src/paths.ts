@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { ensureOmpSource, ompSourceCacheRoot } from "./omp-source-cache.ts";
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -111,8 +112,9 @@ function launcherVersion(launcher: string, env: Record<string, string | undefine
 
 /**
  * A launcher inside its package owns that package. A compiled standalone launcher (for example
- * ~/.local/bin/omp) has no package around it, so the package of exactly the version it reports is
- * taken from a later `omp` on PATH or from bun's global install. Any other version is refused:
+ * Tern's omp, or ~/.local/bin/omp) has no package around it, so the package of exactly the version
+ * it reports is taken from a later `omp` on PATH, from bun's global install, or else from the kit's
+ * own exact-version source cache (installed from npm on first use). Any other version is refused:
  * matching rules with a different OMP's source is the drift the identity check exists to stop.
  */
 function packageRootFor(launcher: string, env: Record<string, string | undefined>): string {
@@ -126,7 +128,13 @@ function packageRootFor(launcher: string, env: Record<string, string | undefined
 		const found = enclosingPackage(candidate);
 		if (found && version !== null && found.version === version) return found.root;
 	}
-	throw new Error(`cannot locate ${PACKAGE_NAME} ${version ?? "(unknown version)"} for OMP launcher ${launcher}`);
+	const refusal = `cannot locate ${PACKAGE_NAME} ${version ?? "(unknown version)"} for OMP launcher ${launcher}`;
+	if (version === null || !ompSourceCacheRoot(env)) throw new Error(refusal);
+	try {
+		return realpath(ensureOmpSource(version, env), "OMP source cache package");
+	} catch (error) {
+		throw new Error(`${refusal}; source cache: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+	}
 }
 
 function nativePackageRoot(source: string): string {
