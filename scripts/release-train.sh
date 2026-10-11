@@ -44,7 +44,7 @@ decide)
 			*) echo "decide: unknown argument: $1" >&2; exit 2 ;;
 		esac
 	done
-	[ -n "$conclusion" ] && [ -n "$status" ] && [ -n "$sha" ] && [ -n "$head" ] || { echo "decide: --conclusion, --run-status, --sha and --head are required" >&2; exit 2; }
+	if ! { [ -n "$conclusion" ] && [ -n "$status" ] && [ -n "$sha" ] && [ -n "$head" ]; }; then echo "decide: --conclusion, --run-status, --sha and --head are required" >&2; exit 2; fi
 	case "$sha" in *[!0-9a-f]*|"" ) echo "decide: --sha must be a hex commit" >&2; exit 2 ;; esac
 	case "$head" in *[!0-9a-f]*|"" ) echo "decide: --head must be a hex commit" >&2; exit 2 ;; esac
 	if [ "$conclusion" != "success" ]; then
@@ -101,16 +101,18 @@ verify-candidate)
 			*) echo "verify-candidate: unknown argument: $1" >&2; exit 2 ;;
 		esac
 	done
-	[ -n "$proof" ] && [ -n "$index" ] && [ -n "$version" ] && [ -n "$sha" ] || { echo "verify-candidate: --proof, --index, --version and --sha are required" >&2; exit 2; }
+	if ! { [ -n "$proof" ] && [ -n "$index" ] && [ -n "$version" ] && [ -n "$sha" ]; }; then echo "verify-candidate: --proof, --index, --version and --sha are required" >&2; exit 2; fi
 	command -v jq >/dev/null 2>&1 || { echo "verify-candidate: jq is required" >&2; exit 3; }
-	[ -f "$proof" ] && [ -f "$index" ] || { echo "verify-candidate: proof or index file is missing" >&2; exit 4; }
+	if ! { [ -f "$proof" ] && [ -f "$index" ]; }; then echo "verify-candidate: proof or index file is missing" >&2; exit 4; fi
 	probe=$(jq -e --arg v "$version" --arg sha "$sha" '
 		(.source_sha == $sha) and (.version == $v)
 		and ((.certified_platforms | sort) == ["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"])
-	' "$proof" 2>/dev/null) && [ "$probe" = "true" ] || { echo "verify-candidate: proof binds a different sha, version, or ship set" >&2; exit 4; }
+	' "$proof" 2>/dev/null) || probe=""
+	if ! [ "$probe" = "true" ]; then echo "verify-candidate: proof binds a different sha, version, or ship set" >&2; exit 4; fi
 	check=$(jq -e --arg v "$version" --arg tag "v$version" '
 		(.source_tag == $tag) and ((.assets | keys | sort) == ["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"])
-	' "$index" 2>/dev/null) && [ "$check" = "true" ] || { echo "verify-candidate: index tag or asset map does not match the ship set" >&2; exit 4; }
+	' "$index" 2>/dev/null) || check=""
+	if ! [ "$check" = "true" ]; then echo "verify-candidate: index tag or asset map does not match the ship set" >&2; exit 4; fi
 	printf 'CANDIDATE=verified version=%s sha=%s\n' "$version" "$sha"; exit 0
 	;;
 latest-flag)
@@ -122,7 +124,7 @@ latest-flag)
 			*) echo "latest-flag: unknown argument: $1" >&2; exit 2 ;;
 		esac
 	done
-	[ -n "$version" ] && [ -n "$max" ] || { echo "latest-flag: --version and --max-version are required" >&2; exit 2; }
+	if ! { [ -n "$version" ] && [ -n "$max" ]; }; then echo "latest-flag: --version and --max-version are required" >&2; exit 2; fi
 	if [ "$version" = "$max" ]; then printf '%s\n' "--latest"; else printf '%s\n' "--latest=false"; fi
 	exit 0
 	;;
