@@ -2,4 +2,4 @@
 - Wired into the branches: `omp-kit send`, fleet-watch send/sendKeys, flush key-sending and tracker recovery consult the admission before acting, the service-run lock claim exposes its holder incarnation for binding, and the services/sessions scopes emit launcher members with explicitly unbound authority refs.
 - Round 2: entrypoint refusal proof through the real CLI — declared pause, unreadable lock source, disabled fleet-watch and missing fleet-watch config each refuse with zero effects.
 - Admission branch tests inject ready pre-assignment probes so each suite isolates the boundary it owns.
-- Entrypoint wiring: send, fleet-watch and service-run build pause/custody snapshots at the CLI boundary and refuse with zero governed effects.
+- Entrypoint wiring: send, fleet-watch and service-run build pause/custody snapshots at the CLI boundary and refuse with zero governed effects. (commit 9687bc3)
