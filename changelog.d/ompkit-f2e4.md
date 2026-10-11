@@ -1,1 +1,0 @@
-- Pre-push gate matches CI: test preload strips the tmux session pin, the gate checks release-notes coverage for the pushed range, and rule/live changes run live-scenario coverage.

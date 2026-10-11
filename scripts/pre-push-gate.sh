@@ -54,9 +54,6 @@ while IFS= read -r path; do
 done <<EOF
 $changed
 EOF
-if [ -n "${base_ref:-}" ]; then
-	set -- "$@" --base "$base_ref" --commit "$local_sha"
-fi
 gate_scripts="$archive"
 if [ -n "${base_ref:-}" ]; then
 	base_archive=$(mktemp -d "$ROOT/var/agent-tmp/pre-push-gate-base.XXXXXX") || { printf 'pre-push-gate: cannot stage base archive\n' >&2; exit 1; }

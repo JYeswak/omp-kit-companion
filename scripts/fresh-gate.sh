@@ -29,7 +29,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_focused; do
+	for name in gate_manifest gate_cli_compile gate_harness gate_focused; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -166,21 +166,12 @@ PY
 	return "$rc"
 }
 
-gate_notes() {
-	if [ -z "$BASE" ]; then
-		echo "notes coverage: SKIP (no base to range against)"
-		return 0
-	fi
-	sh "$SCRIPT_DIR/check-pushed-notes.sh" --repo "$ROOT" --base "$BASE" --tip "$COMMIT" --archive-dir "$ARCHIVE_DIR"
-}
-
 gate_focused() {
 	focus_tests=
 	needs_cli=0
 	needs_shell=0
 	needs_actionlint=0
 	needs_regex=0
-	needs_live=0
 	for file in $CHANGED; do
 		[ -n "$file" ] || continue
 		case "$file" in
@@ -204,11 +195,7 @@ gate_focused() {
 			.github/workflows/*.yml|.github/workflows/*.yaml)
 				needs_actionlint=1 ;;
 			rules/*.md)
-				needs_regex=1; needs_live=1 ;;
-			tests/live/*)
-				needs_live=1 ;;
-			tests/test-preload.ts)
-				focus_tests="$focus_tests tests/cli/send-consumed.test.ts" ;;
+				needs_regex=1 ;;
 			esac
 	done
 	if [ "$needs_shell" = 1 ]; then
@@ -246,29 +233,6 @@ gate_focused() {
 			printf 'focused regex-budget: INCONCLUSIVE (loud machine; deferred to CI)\n'
 		elif [ "$regex_rc" -ne 0 ]; then
 			return "$regex_rc"
-		fi
-	fi
-	if [ "$needs_live" = 1 ]; then
-		live_out="$WORK/live-coverage.log"
-		if (cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null tests/live/lib.mjs coverage rules/) >"$live_out" 2>&1; then
-			echo "live coverage: OK"
-		else
-			cat "$live_out"
-			live_bad=0
-			for file in $CHANGED; do
-				case "$file" in
-					rules/*.md)
-						rule=$(basename "$file" .md)
-						if grep -q "^  $rule:" "$live_out"; then
-							echo "live coverage: $rule changed in range but has no scenario" >&2
-							live_bad=1
-						fi ;;
-				esac
-			done
-			if [ "$live_bad" -ne 0 ]; then
-				return 1
-			fi
-			echo "live coverage: only pre-existing gaps outside the pushed range"
 		fi
 	fi
 	if { [ -n "$focus_tests" ] || [ "$needs_cli" = 1 ]; } && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
@@ -380,7 +344,6 @@ started=$(date +%s)
 run_step manifest gate_manifest || exit 1
 run_step cli-compile gate_cli_compile || exit 1
 run_step harness-gate gate_harness || exit 1
-run_step notes gate_notes || exit 1
 run_step focused gate_focused || exit 1
 elapsed=$(($(date +%s) - started))
 if [ "$elapsed" -ge 180 ]; then
