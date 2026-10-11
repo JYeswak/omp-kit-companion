@@ -97,19 +97,35 @@ def beads(repo, run_fn=run, today=None):
             "closed_today": None if closed is None else sum(1 for r in closed if str(r.get("closed_at") or "").startswith(today))}
 
 
-def ci(repo):
-    rc, url, _ = run(["git", "-C", repo, "remote", "get-url", "origin"])
+def ci(repo, run_fn=run):
+    """Every workflow run on main's current HEAD commit, and one verdict over them. Picking "the latest
+    run" misreports: repos name their CI differently and skip some pushes, so on 2026-10-11 the latest
+    run was a days-old failure (omp-kit-private) or a Dependabot run (uds), neither on HEAD."""
+    rc, url, _ = run_fn(["git", "-C", repo, "remote", "get-url", "origin"])
     m = GITHUB_RE.match(url.strip()[:500])
     if rc != 0 or not m:
         return {"error": "no github origin"}
-    rc, out, err = run(["gh", "run", "list", "--repo", m.group(1), "--branch", "main", "--limit", "8",
-                        "--json", "workflowName,headSha,status,conclusion"])
+    rc, out, _ = run_fn(["git", "-C", repo, "ls-remote", "origin", "refs/heads/main"])
+    if rc != 0 or not out.strip():
+        return {"repo": m.group(1), "error": "cannot read origin main"}
+    head = out.split()[0]
+    rc, out, err = run_fn(["gh", "run", "list", "--repo", m.group(1), "--commit", head, "--limit", "50",
+                           "--json", "workflowName,status,conclusion"])
     if rc != 0:
-        return {"error": err.strip()[:200]}
-    runs = json.loads(out)
-    head = next((r for r in runs if r["workflowName"].lower() == "ci"), runs[0] if runs else None)
-    return {"repo": m.group(1), "workflow": head and head["workflowName"], "sha": head and head["headSha"][:9],
-            "status": head and head["status"], "conclusion": head and head["conclusion"]}
+        return {"repo": m.group(1), "main_head": head[:9], "error": err.strip()[:200]}
+    latest = {}
+    for r in json.loads(out):  # newest first: keep each workflow's latest attempt on HEAD
+        latest.setdefault(r["workflowName"], r["conclusion"] or r["status"])
+    states = set(latest.values())
+    if not latest:
+        verdict = "NO_RUNS_ON_HEAD"
+    elif states & {"failure", "timed_out", "startup_failure", "action_required"}:
+        verdict = "FAILING"
+    elif states - {"success", "skipped", "neutral"}:
+        verdict = "RUNNING"
+    else:
+        verdict = "GREEN"
+    return {"repo": m.group(1), "main_head": head[:9], "verdict": verdict, "workflows": latest}
 
 
 def toplevel(path):
@@ -176,6 +192,26 @@ def selftest():
     ok = b["closed_today"] == 3 and b["open"] == 1 and b["ready"] == 0
     print("%s closed_today from the closed query: %r" % ("PASS" if ok else "FAIL", b))
     fails += [] if ok else ["closed_today"]
+    # planted negatives: verdict is over every workflow on HEAD; no run on HEAD is not "green"
+    def fake_ci(runs_on_head):
+        def fn(argv, cwd=None):
+            if argv[3:5] == ["remote", "get-url"]:
+                return 0, "https://github.com/o/r.git\n", ""
+            if argv[0] == "gh":
+                return 0, json.dumps(runs_on_head), ""
+            return 0, "a" * 40 + "\trefs/heads/main\n", ""
+        return fn
+    ok_run = {"workflowName": "Dependabot Updates", "status": "completed", "conclusion": "success"}
+    cases_ci = [([], "NO_RUNS_ON_HEAD"),
+                ([ok_run], "GREEN"),
+                ([ok_run, {"workflowName": "CI", "status": "completed", "conclusion": "failure"}], "FAILING"),
+                ([{"workflowName": "CI", "status": "in_progress", "conclusion": ""}, ok_run], "RUNNING"),
+                ([{"workflowName": "CI", "status": "completed", "conclusion": "success"},
+                  {"workflowName": "CI", "status": "completed", "conclusion": "failure"}], "GREEN")]  # newest attempt wins
+    for runs_on_head, want in cases_ci:
+        got = ci("/x", run_fn=fake_ci(runs_on_head))["verdict"]
+        print("%s CI verdict %s for %s" % ("PASS" if got == want else "FAIL", got, [r["conclusion"] or r["status"] for r in runs_on_head]))
+        fails += [] if got == want else ["ci " + want]
     print("selftest: %s (%d failing)" % ("PASS" if not fails else "FAIL", len(fails)))
     return 1 if fails else 0
 
