@@ -376,6 +376,10 @@ if [ -z "$CHANGED" ] && [ -n "$BASE" ]; then
 elif [ -z "$CHANGED" ]; then
 	CHANGED=$(git -C "$ROOT" diff-tree --root --no-commit-id --name-only -r "$COMMIT")
 fi
+# ompkit-hecp: the harness resolves repo-relative case paths against OMP_KIT_CASE_CWD; the
+# archive lives under var/agent-tmp, so without this every case path looks like scratch.
+: "${OMP_KIT_CASE_CWD:=$ROOT}"
+export OMP_KIT_CASE_CWD
 started=$(date +%s)
 run_step manifest gate_manifest || exit 1
 run_step cli-compile gate_cli_compile || exit 1
