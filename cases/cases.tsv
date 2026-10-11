@@ -452,3 +452,13 @@ kit-ast-parsing-engineering	quiet	tool	write	extensions/kit-ping-guard.ts	const 
 kit-ast-parsing-engineering	quiet	tool	write	var/agent-tmp/rx6-inventory.ts	const text=readFileSync(file,"utf8"); const sf=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true);	native TS parser (correct path); src ~/.omp/profiles/codex/agent/sessions/-Developer-omp-test/2026-10-01T22-18-04-803Z_01a0f98b-d083-751b-8395-0a4bec2eb688.jsonl:23091 (2026-10-03)
 kit-ast-parsing-engineering	quiet	tool	edit	crates/contabo-reclaim/src/model.rs	';' | '&' | '|' | '`' | '$' | '>' | '<' | '\'' | '"' | '*' | '?' | '!' | '~'	Rust matches! char class, no lexer state; src ~/.omp/profiles/muse/agent/sessions/-Developer-omp-orchestrator/2026-09-12T15-12-23-335Z_01a0962d-4127-7015-a050-8cd748f87f84.jsonl:7924 (2026-09-13)
 kit-ast-parsing-engineering	quiet	tool	write	candidates/edge-library/skills/ast-guided-fuzzing/SKILL.md	2. AST-parse the decompiled source (Python `ast`, tree-sitter, or the	Markdown parser mention, out of scope; src ~/.omp/profiles/muse/agent/sessions/-tmp/2026-10-09T04-52-04-602Z_01a11f01-0b7a-7530-872c-b59c555b2fc3.jsonl:62 (2026-10-09)
+kit-no-double-quoted-substitution	fire	tool	bash	-	br comments add ompkit-tw9q --no-auto-flush "restore point `hostname` ok"	20:41Z shape: double-quoted comment with backticks executes
+kit-no-double-quoted-substitution	fire	tool	bash	-	br create --description "status `??` grid"	23:55Z shape: double-quoted description with backticked token
+kit-no-double-quoted-substitution	fire	tool	bash	-	br update ompkit-3zi7 --reason "caused by $(whoami)"	$( inside a double-quoted reason executes
+kit-no-double-quoted-substitution	fire	tool	bash	-	git commit -m "release $(date -u)"	$( inside git commit -m executes
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br comments add t 'text with `tick` inside singles'	single quotes run nothing
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br create --description "escaped \`tick\` stays"	escaped backtick is literal
+kit-no-double-quoted-substitution	quiet	tool	bash	-	git commit -m "plain message"	no substitution present
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "path $TMPDIR/x"	bare $VAR without paren is not substitution
+kit-no-double-quoted-substitution	fire	tool	bash	-	br update t --reason "slash \\ and `tick` fires"	escaped backslash then raw tick still substitutes
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "cost \$(5) stays"	escaped dollar-paren is literal

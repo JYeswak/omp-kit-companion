@@ -1,0 +1,1 @@
+- New kit reminder `kit-no-double-quoted-substitution`: passing a double-quoted argument containing a backtick or `$(` to `br comments add`, `br create`, `br update` or `git commit -m` runs command substitution before the command sees it. Single-quote the argument or drop the substitution.
