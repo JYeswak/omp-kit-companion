@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { proveSend, type SendExec } from "../../src/send.ts";
 
@@ -123,6 +123,81 @@ test("CLAUDE: one Enter moves the composer marker into submitted history", async
 	expect(argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", "%1", "Enter"]]);
 });
 
-test.todo("CONSUMED: consumption reader confirms the marker in a role:user row of the target's omp session JSONL");
-test.todo("QUEUED_STUCK: marker in a `Steering · N` queue on an idle pane");
-test.todo("QUEUED: marker queued while the target pane is busy");
+/** Fake pane serving one capture screen per capture-pane call (last repeats); send-keys recorded, never acted on. */
+function sequencePane(screens: ((marker: string) => string)[]): { exec: SendExec; argvLog: string[][]; ntmCount: () => number } {
+	const argvLog: string[][] = [];
+	let ntm = 0;
+	let marker = "";
+	let captures = 0;
+	return {
+		argvLog,
+		ntmCount: () => ntm,
+		exec: {
+			run(argv: string[]) {
+				argvLog.push(argv);
+				if (argv[0] === "ntm") {
+					ntm++;
+					const m = /\[(kit-send-[0-9a-f]{12})\]$/.exec(argv[argv.length - 1] ?? "");
+					if (m) marker = m[1]!;
+					return { code: 0, out: "sent" };
+				}
+				if (argv[1] === "send-keys") return { code: 0, out: "" };
+				const screen = screens[Math.min(captures++, screens.length - 1)]!;
+				return { code: 0, out: marker ? screen(marker) : "" };
+			},
+		},
+	};
+}
+
+/** ompkit-rq59 screen pair: busy composer (receiver working) then self-cleared. Reads both fixtures once so the pair stays in lockstep. */
+function rq59Screens(): { busy: (marker: string) => string; cleared: (marker: string) => string } {
+	const pending = readFileSync(join(fixtures, "omp-claude-composer-pending.txt"), "utf8");
+	const answered = readFileSync(join(fixtures, "omp-claude-submitted-answered.txt"), "utf8");
+	return {
+		busy: (marker: string) => pending.replace(MARKER, marker) + "\n⠋ Working…",
+		cleared: (marker: string) => answered.replace(MARKER, marker),
+	};
+}
+
+// ompkit-rq59: the receiver picked the text up fast (composer cleared, turn
+// running) while the marker poll was still watching. That is a submitted
+// delivery, not PENDING_SUBMIT -- and it must cost zero Enters.
+test("FAST_PICKUP: busy pane clears the composer itself; OK without Enter, one ntm send", async () => {
+	const screens = rq59Screens();
+	const pane = sequencePane([screens.busy, screens.cleared]);
+	const got = await run(pane.exec);
+	expect(got.status).toBe("OK");
+	expect(got.drop_path).toBeNull();
+	expect(got.detail).toContain("receiver active");
+	expect(pane.argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([]);
+	expect(pane.ntmCount()).toBe(1);
+});
+
+// Planted negative: the pane stays busy with the marker in its composer, so
+// the send is unproven. Enter is withheld (no double submit into a live
+// turn); the same marker key goes to the drop file, and there is no second
+// blind send of text the agent may already hold.
+test("BUSY_STUCK: marker held in a busy composer; NOT_DELIVERED with drop, no Enter, no resend", async () => {
+	const stuck = rq59Screens();
+	const pane = sequencePane([stuck.busy]);
+	const dir = dropDir();
+	const got = await proveSend({ session: "s", pane: "%1", message: "fixture probe line one", dropDir: dir, exec: pane.exec, pollMs: 1, deadlineMs: 20, wait: noWait });
+	expect(got.status).toBe("NOT_DELIVERED");
+	expect(got.drop_path).not.toBeNull();
+	expect(readdirSync(dir).length).toBe(1);
+	expect(existsSync(got.drop_path!)).toBe(true);
+	expect(pane.argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([]);
+	expect(pane.ntmCount()).toBe(1);
+});
+
+// A `Steering · N` queue line on an otherwise idle pane changes nothing: no
+// spinner means the idle path still applies (one bounded Enter), and the
+// queue text must not corrupt the composer classification.
+test("STEERING_IDLE: queue line without a spinner keeps the idle path; still PENDING_SUBMIT after one Enter", async () => {
+	const queued = (marker: string) =>
+		readFileSync(join(fixtures, "omp-idle-composer-pending.txt"), "utf8").replace(MARKER, marker) + "\nSteering · 2";
+	const pane = sequencePane([queued]);
+	const got = await run(pane.exec);
+	expect(got.status as string).toBe("PENDING_SUBMIT");
+	expect(pane.argvLog.filter((argv) => argv[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", "%1", "Enter"]]);
+});

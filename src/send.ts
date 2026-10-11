@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
+import { paneIsBusy } from "./fleet-watch.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -217,18 +218,29 @@ export async function proveSend(input: {
 		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text], sendEnv).code !== 0) continue;
 		const started = Date.now();
 		let entered = false;
+		let markerSeen = false;
+		let receiverActive = false;
 		while (Date.now() - started < deadlineMs) {
 			// Bare pane id: session:pane is parsed as a window and misses.
 			// -S -200 reads scrollback history: a rendered message scrolls off
 			// the visible screen but stays provable in history.
 			const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
 			if (got.code === 0 && got.out.includes(marker)) {
+				markerSeen = true;
 				// Text typed into the input box but never submitted is not a delivery.
 				if (!markerInComposer(got.out, marker)) {
 					const how = entered ? " after one Enter" : "";
-					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}`, bead_ids, no_bead_reason, tmux_socket };
+					const active = receiverActive || paneIsBusy(got.out) ? ", receiver active" : "";
+					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}${active}`, bead_ids, no_bead_reason, tmux_socket };
 				}
-				if (!entered) {
+				// ompkit-rq59: a fast pickup clears the composer on its own.
+				// Never force Enter into a working pane: that submits into
+				// the agent's live turn and the static scrollback then reads
+				// as forever-pending. Only a truly idle pane gets the single
+				// bounded Enter; a busy pane is watched for a self-clear.
+				if (paneIsBusy(got.out)) {
+					receiverActive = true;
+				} else if (!entered) {
 					runTmux(["send-keys", "-t", input.pane, "Enter"]);
 					entered = true;
 				}
@@ -238,6 +250,14 @@ export async function proveSend(input: {
 		// The text is on the pane: resending or dropping would duplicate it.
 		if (entered) {
 			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason, tmux_socket };
+		}
+		// Marker visible but the pane stayed busy: the receiver owns the
+		// composer now and Enter was withheld, so this send is unproven.
+		// Report NOT_DELIVERED under the same marker key (no second blind
+		// submit) with a recovery copy instead of a duplicate delivery.
+		if (markerSeen && receiverActive) {
+			const busyDropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+			return { status: "NOT_DELIVERED", marker, sends, drop_path: busyDropPath, detail: `marker stayed in ${input.pane} composer while the pane was busy; Enter withheld to avoid a double submit; recovery copy written to ${busyDropPath}`, bead_ids, no_bead_reason, tmux_socket };
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
