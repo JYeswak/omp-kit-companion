@@ -47,7 +47,7 @@ jobs:
 
   intel-probe:
     needs: resolve-candidate
-    if: ${{ needs['resolve-candidate'].outputs.has_probe == 'true' }}
+    if: ${{ github.event.repository.private == false && needs['resolve-candidate'].outputs.has_probe == 'true' }}
     continue-on-error: true
     runs-on: macos-15-intel
     timeout-minutes: 40

@@ -73,7 +73,7 @@ jobs:
 
   reuse-candidate-evidence:
     needs: reuse-preflight
-    if: ${{ needs['reuse-preflight'].outputs.candidate_run_id != '' }}
+    if: ${{ github.event.repository.private == false && needs['reuse-preflight'].outputs.candidate_run_id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
