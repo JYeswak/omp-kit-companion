@@ -255,11 +255,18 @@ export function secretShapedName(name: string): boolean {
 const LOWERCASE_HYPHEN_SLUG = /^[a-z]+(?:-[a-z]+)*$/;
 const URL_WITH_CREDENTIALS = /^[a-z][a-z0-9+.-]{0,20}:\/\/[^\s/:@]{1,200}:[^\s@]{1,500}@/i;
 
-/** Keep provider-name slugs out of the digest set without exempting real tokens under the same key. */
+/** Omit public client keys and provider slugs; service-role keys remain credentials. */
 export function addSecretValueToDigestSet(set: DigestSet, name: string, value: string, label: string): void {
-	const isProviderSlug = name.endsWith("_PROVIDER_CONFIG_KEY") && LOWERCASE_HYPHEN_SLUG.test(value.trim());
+	const normalizedName = name.toUpperCase();
+	const isPublicKeyName = normalizedName.endsWith("_ANON_KEY")
+		|| normalizedName.endsWith("_PUBLISHABLE_KEY")
+		|| normalizedName.startsWith("NEXT_PUBLIC_")
+		|| normalizedName.startsWith("EXPO_PUBLIC_");
+	if (isPublicKeyName) return;
+	const isProviderSlug = normalizedName.endsWith("_PROVIDER_CONFIG_KEY") && LOWERCASE_HYPHEN_SLUG.test(value.trim());
+	const isServiceRoleKey = normalizedName === "SERVICE_ROLE_KEY" || normalizedName.endsWith("_SERVICE_ROLE_KEY");
 	const isCredentialUrl = URL_WITH_CREDENTIALS.test(value);
-	if ((!isProviderSlug && secretShapedName(name)) || isCredentialUrl) addValue(set, value, label);
+	if ((!isProviderSlug && (secretShapedName(name) || isServiceRoleKey)) || isCredentialUrl) addValue(set, value, label);
 }
 
 /** `tmux show-environment -g` lines: NAME=value or -NAME (removed). Returns the offending NAMEs only. */

@@ -2,3 +2,4 @@
 - `--staged` scans only the index; `scripts/pre-commit-secret-scan.sh` wraps it as a pre-commit hook that blocks a staged vault value and warns (does not block) when Infisical is unreachable. Install: `cp scripts/pre-commit-secret-scan.sh "$(git rev-parse --git-path hooks)/pre-commit"` (Agent Mail chains: `hooks.d/pre-commit/20-omp-kit-secret-scan`).
 - New rule kit-no-plaintext-secret: interrupts a bash/write/edit call that puts a literal credential into an rc, .env, JSON/TOML/YAML/shell config or command line; `$(cf-secret NAME)`, `${VAR}`, `!cf-secret` values, placeholders and bare names stay quiet (ompkit-l8h5).
 - Provider-config values that are pure lowercase-hyphen slugs stay out of the digest set; token-shaped values under the same names remain covered.
+- Public client-key names ending in `_ANON_KEY` or `_PUBLISHABLE_KEY`, and names prefixed `NEXT_PUBLIC_` or `EXPO_PUBLIC_`, stay out of the secret digest set; `_SERVICE_ROLE_KEY` remains scanned (ompkit-l8h5).

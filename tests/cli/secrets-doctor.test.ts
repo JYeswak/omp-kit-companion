@@ -79,3 +79,17 @@ test("provider slugs are excluded while credential tokens under the same name re
 	expect(findSecretNames(slug, set)).toEqual([]);
 	expect(findSecretNames(mixedToken, set)).toEqual([label]);
 });
+test("public key names stay out of the digest set while service-role keys remain", () => {
+	const value = `${"Ab3".repeat(10)}X9`;
+	const names = [
+		"ALPS_SUPABASE_STAGING_ANON_KEY",
+		"SUPABASE_PUBLISHABLE_KEY",
+		"NEXT_PUBLIC_SUPABASE_API_KEY",
+		"EXPO_PUBLIC_SUPABASE_API_KEY",
+		"ALPS_SUPABASE_STAGING_SERVICE_ROLE_KEY",
+	];
+	const set = { digests: new Map<string, Set<string>>(), lengths: new Set<number>(), source: "test", projects: 0, failed: [] };
+	for (const name of names) addSecretValueToDigestSet(set, name, value, `alps/prod:${name}`);
+
+	expect(findSecretNames(value, set)).toEqual(["alps/prod:ALPS_SUPABASE_STAGING_SERVICE_ROLE_KEY"]);
+});
