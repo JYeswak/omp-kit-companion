@@ -1,0 +1,1 @@
+- `omp-kit send` no longer presses Enter into a busy pane's composer: when the marker sits unsubmitted while the receiver is working it waits for the receiver to pick it up (OK, receiver active) or reports NOT_DELIVERED with a recovery copy, with no Enter and no second send. Idle panes keep the existing one-Enter path and PENDING_SUBMIT. (commit 59d788c)

@@ -1,1 +1,1 @@
-- A false PARTIAL update no longer freezes the machine: `omp-kit update --reconcile RECEIPT --yes` rescans the active install against the receipt's recorded postimages and marks it RECONCILED only on a full match.
+- A false PARTIAL update no longer freezes the machine: `omp-kit update --reconcile RECEIPT --yes` rescans the active install against the receipt's recorded postimages and marks it RECONCILED only on a full match. (commit 2f5fa7f) (commit a8903c2)
