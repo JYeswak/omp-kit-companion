@@ -1,1 +1,0 @@
-- Fleet Watch now persists per-pane idle-check counts, last decisions, and Steering deduplication state in a private atomic state file beside its JSONL log. Busy panes and capture failures reset the persisted idle history.

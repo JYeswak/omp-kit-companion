@@ -1,1 +1,0 @@
-- Report effective kit rule sources and plugin versions per OMP profile through `doctor --scope rules`; native overlays are listed, legacy `~/.agents/rules` copies are not treated as installed kit rules.

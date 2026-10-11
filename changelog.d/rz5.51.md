@@ -1,1 +1,0 @@
-- Fleet-guard installation plans skip unmanaged extension collisions with `SKIPPED_UNMANAGED`, preserve operator-owned bytes, and still install `fleet-guard.ts`. (PR #56)

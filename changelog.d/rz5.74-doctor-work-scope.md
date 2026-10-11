@@ -1,1 +1,0 @@
-- `omp-kit doctor --scope work` works again, and native certification takes its rule count from the release manifest rather than a fixed number (commit 3e93596).

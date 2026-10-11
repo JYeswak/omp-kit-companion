@@ -1,1 +1,0 @@
-- Bash rules prefilter the command boundary before long quoted-argument lookbehinds. Large positive Bash `--observe` probes report the verified terminal match without replaying every prefix; full G2/G3 gate sweeps remain exhaustive.

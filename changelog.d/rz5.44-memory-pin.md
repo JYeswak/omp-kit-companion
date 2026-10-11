@@ -1,1 +1,0 @@
-- The memory audit pins the hash of the reviewed OMP 18.5.1 source, so any changed `query-cache.ts` still blocks certification (commit d641d21).

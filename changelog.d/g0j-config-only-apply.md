@@ -1,1 +1,0 @@
-- Extension apply now bundles the fleet guard with its imports, rolls back extensions whose installed imports do not resolve, and skips the import postcheck when an apply only changes configuration (commit dc2fdec) (commit 10f7050).

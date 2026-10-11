@@ -1,1 +1,0 @@
-- `doctor --scope work` reports timed-out Git probes as `TIMED_OUT` with all state metrics unknown, never inventing zero dirty/stale counts or detached state. The check remains read-only; the 30-minute stale-age default and `OMP_KIT_WORK_STALE_EDIT_MINUTES` override are unchanged.

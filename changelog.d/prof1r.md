@@ -1,1 +1,0 @@
-- Deploy the kit plugin package across OMP profiles with verified profile hashes, report-derived named-profile RX2 exclusions, durable per-profile receipt rows, and exact plugin/lock rollback data.

@@ -1,1 +1,0 @@
-- CI uploads ladder reports as a seven-day artifact on failure and uploads nothing on successful runs. (PR #51)

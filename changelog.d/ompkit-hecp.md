@@ -1,1 +1,0 @@
-- `scripts/fresh-gate.sh` run directly no longer reports false scratch-is-not-a-home fires: it resolves case paths against the repo root, as the pre-push gate already did.

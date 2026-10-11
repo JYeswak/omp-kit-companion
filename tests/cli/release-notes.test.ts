@@ -9,7 +9,6 @@ const fixture = join(workspace, "repo");
 const bead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.75";
 const pointer = "<!-- Add one fragment per release-note change under changelog.d/. -->";
 let indexNumber = 0;
-let assembledChangelog = "";
 let headChangelog = "";
 let releaseHead = "";
 
@@ -121,74 +120,143 @@ test("release check reports merged PRs and their fragment or legacy-line coverag
 	expect(check.output).toContain("PR #56 covered by changelog.d/rz5.51.md");
 });
 
-test("default assembly prints a preview without changing CHANGELOG.md", () => {
-	const changelogPath = join(fixture, "CHANGELOG.md");
-	const sourceChangelog = readFileSync(changelogPath, "utf8");
-	const assembled = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03");
-	expect(assembled.exitCode, assembled.output).toBe(0);
-	expect(assembled.output).toContain("## 0.2.3 — 2026-10-03");
-	expect(readFileSync(changelogPath, "utf8")).toBe(sourceChangelog);
-	assembledChangelog = assembled.output;
+// fold/promote/notes run against the working tree of their own small fixture repo.
+function changelogFixture(name: string, changelog: string, fragments: Record<string, string>): string {
+	const dir = join(workspace, name);
+	mkdirSync(join(dir, "changelog.d"), { recursive: true });
+	writeFileSync(join(dir, "CHANGELOG.md"), changelog);
+	writeFileSync(join(dir, "package.json"), `{\n\t"name": "omp-kit-companion",\n\t"version": "0.2.2",\n\t"omp": {\n\t\t"name": "omp-kit-companion",\n\t\t"version": "0.2.2"\n\t}\n}\n`);
+	for (const [path, content] of Object.entries(fragments)) writeFileSync(join(dir, "changelog.d", path), content);
+	Bun.spawnSync(["git", "init", "-q", dir]);
+	return dir;
+}
 
-	const previewPath = join(workspace, "CHANGELOG.preview.md");
-	const preview = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03", "--output", previewPath);
+function releaseIn(dir: string, ...args: string[]): { exitCode: number | null; output: string } {
+	const child = Bun.spawnSync(["sh", join(repo, "scripts", "release-notes.sh"), ...args], {
+		cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch },
+	});
+	return { exitCode: child.exitCode, output: `${child.stdout.toString()}${child.stderr.toString()}` };
+}
+
+const releasedChangelog = `# Changelog
+
+## [Unreleased]
+
+### Added
+
+- Existing unreleased addition.
+
+## [0.2.2] - 2026-10-02
+
+### Fixed
+
+- Already released fix.
+`;
+
+test("fold drains fragments into [Unreleased] buckets; only --write applies and removes them", () => {
+	const dir = changelogFixture("fold", releasedChangelog, {
+		"a-fix.md": "### Fixed\n- The doctor no longer crashes on an empty config.\n  It reports the missing file instead.\n",
+		"b-plain.md": "A paragraph fragment without a bullet\nspanning two lines.\n",
+		"c-dup.md": "### Fixed\n- Already released fix.\n",
+	});
+	const preview = releaseIn(dir, "fold");
 	expect(preview.exitCode, preview.output).toBe(0);
-	expect(readFileSync(previewPath, "utf8")).toBe(assembledChangelog);
-	expect(readFileSync(changelogPath, "utf8")).toBe(sourceChangelog);
+	expect(preview.output).toContain("### Added\n\n- Existing unreleased addition.\n\n### Changed\n\n- A paragraph fragment without a bullet spanning two lines.\n\n### Fixed\n\n- The doctor no longer crashes on an empty config.\n  It reports the missing file instead.\n\n## [0.2.2] - 2026-10-02");
+	expect(preview.output).toContain("FOLDED fragments=3 entries_added=2 duplicates_dropped=1 (preview");
+	expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(releasedChangelog);
+	expect(existsSync(join(dir, "changelog.d/a-fix.md"))).toBe(true);
 
-	const section = assembledChangelog.match(/## 0\.2\.3 — 2026-10-03\n([\s\S]*?)(?=\n## |$)/)?.[1];
-	expect(section).toBeDefined();
-	expect(section).toContain("Existing in-progress release note.");
-	expect(section).toContain("OMP minimum and latest compatibility are certified. (PR #25)");
-	expect(section).toContain("The metamorphic ratchet fails on any break. (PR #55)");
-	expect(section).toContain("The work doctor inventories configured repositories. (PR #57)");
-	expect(section).toContain("Fleet-guard installation skips unmanaged extension collisions");
-	expect(section).toContain("CI retains ladder reports as artifacts on failure");
-	expect(section).toContain("resolves hook imports from the extension's real path");
-	expect(section).toContain("Release notes use per-bead fragments");
-	expect(section).not.toContain("<!--");
-	expect(assembledChangelog).toContain(`## Unreleased\n\n${pointer}`);
-	expect(assembledChangelog).toContain("## 0.2.2 — 2026-10-02");
-
-	const notedPullRequests = [...section!.matchAll(/\(PR #(\d+)\)/g)].map(match => match[1]!).sort();
-	expect(notedPullRequests).toEqual(["25", "51", "52", "55", "56", "57"]);
-});
-
-test("only --write updates CHANGELOG.md and it refuses local edits", () => {
-	const changelogPath = join(fixture, "CHANGELOG.md");
-	const notWritten = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03", "--output", "CHANGELOG.md");
-	expect(notWritten.exitCode).toBe(1);
-	expect(notWritten.output).toContain("writing CHANGELOG.md requires --write");
-	expect(readFileSync(changelogPath, "utf8")).not.toContain("## 0.2.3 — 2026-10-03");
-	writeFileSync(changelogPath, headChangelog);
-
-	const written = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03", "--write");
+	const written = releaseIn(dir, "fold", "--write");
 	expect(written.exitCode, written.output).toBe(0);
-	expect(readFileSync(changelogPath, "utf8")).toBe(assembledChangelog);
-
-	const repeated = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03", "--write");
-	expect(repeated.exitCode, repeated.output).toBe(0);
-	expect(readFileSync(changelogPath, "utf8")).toBe(assembledChangelog);
-
-	writeFileSync(changelogPath, `${assembledChangelog}\n- Local uncommitted note.\n`);
-	const refused = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD",
-		"--version", "0.2.3", "--date", "2026-10-03", "--write");
-	expect(refused.exitCode).toBe(1);
-	expect(refused.output).toContain("differs from --head; refusing to overwrite local edits");
-	expect(readFileSync(changelogPath, "utf8")).toContain("Local uncommitted note.");
-	writeFileSync(changelogPath, headChangelog);
+	const folded = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+	expect(folded).toContain("- The doctor no longer crashes on an empty config.");
+	expect(folded.match(/Already released fix/g)?.length).toBe(1);
+	for (const name of ["a-fix.md", "b-plain.md", "c-dup.md"]) expect(existsSync(join(dir, "changelog.d", name))).toBe(false);
+	const again = releaseIn(dir, "fold", "--write");
+	expect(again.exitCode, again.output).toBe(0);
+	expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(folded);
 });
 
-test("the tag-time check passes on the assembled release commit, as release.yml runs it", () => {
-	const releaseCommit = commitWithFiles(git("rev-parse", "HEAD"), "release v0.2.3", { "CHANGELOG.md": assembledChangelog });
-	git("update-ref", "refs/heads/main", releaseCommit);
+test("fold refuses a fragment with an unknown category or a stray heading, naming it", () => {
+	const unknown = releaseIn(changelogFixture("fold-unknown", releasedChangelog, { "x.md": "### Improved\n- Something.\n" }), "fold");
+	expect(unknown.exitCode).toBe(1);
+	expect(unknown.output).toContain('changelog.d/x.md: unknown category "Improved"');
+	const heading = releaseIn(changelogFixture("fold-heading", releasedChangelog, { "y.md": "# Title\n- Something.\n" }), "fold");
+	expect(heading.exitCode).toBe(1);
+	expect(heading.output).toContain("changelog.d/y.md: only one optional leading");
+});
+
+test("promote refuses (exit 4) when there is nothing to release: no Unreleased entries and no fragments", () => {
+	const empty = releasedChangelog.replace("### Added\n\n- Existing unreleased addition.\n\n", "");
+	const dir = changelogFixture("promote-empty", empty, {});
+	const refused = releaseIn(dir, "promote", "--version", "0.2.3", "--date", "2026-10-12", "--write");
+	expect(refused.exitCode).toBe(4);
+	expect(refused.output).toContain("REFUSED: nothing to release");
+	expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(empty);
+	expect(readFileSync(join(dir, "package.json"), "utf8")).toContain('"version": "0.2.2"');
+	const notes = releaseIn(dir, "notes", "--version", "0.2.3");
+	expect(notes.exitCode).toBe(4);
+	expect(notes.output).toContain("REFUSED: CHANGELOG.md has no ## [0.2.3] section");
+});
+
+test("promote folds, cuts ## [X.Y.Z] - DATE under a fresh [Unreleased], bumps package.json and refuses reuse", () => {
+	const dir = changelogFixture("promote", releasedChangelog, { "z.md": "### Fixed\n- Promoted fix.\n" });
+	const preview = releaseIn(dir, "promote", "--version", "0.2.3", "--date", "2026-10-12");
+	expect(preview.exitCode, preview.output).toBe(0);
+	expect(preview.output).toContain("PROMOTED version=0.2.3 date=2026-10-12 entries=2 fragments=1 package_version=0.2.2->0.2.3 (preview");
+	expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(releasedChangelog);
+
+	const written = releaseIn(dir, "promote", "--version", "0.2.3", "--date", "2026-10-12", "--write");
+	expect(written.exitCode, written.output).toBe(0);
+	const promoted = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+	expect(promoted).toMatch(/^# Changelog\n\n## \[Unreleased\]\n\n<!-- New notes go in changelog\.d\/<bead>\.md[^\n]*-->\n\n## \[0\.2\.3\] - 2026-10-12\n\n### Added\n\n- Existing unreleased addition\.\n\n### Fixed\n\n- Promoted fix\.\n\n## \[0\.2\.2\] - 2026-10-02\n/);
+	const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+	expect([pkg.version, pkg.omp.version]).toEqual(["0.2.3", "0.2.3"]);
+	expect(existsSync(join(dir, "changelog.d/z.md"))).toBe(false);
+
+	const reused = releaseIn(dir, "promote", "--version", "0.2.3", "--date", "2026-10-12");
+	expect(reused.exitCode).toBe(1);
+	expect(reused.output).toContain("release section already exists: ## [0.2.3]");
+	const older = releaseIn(dir, "promote", "--version", "0.2.1", "--date", "2026-10-12");
+	expect(older.exitCode).toBe(1);
+	expect(older.output).toContain("must be greater than the newest released section 0.2.3");
+});
+
+test("notes renders the release body from CHANGELOG sections; --floor aggregates unpublished tags", () => {
+	const changelog = `# Changelog\n\n## [Unreleased]\n\n## [0.2.4] - 2026-10-13\n\n### Fixed\n\n- Fix in four.\n- Shared line.\n\n## [0.2.3] - 2026-10-12\n\n### Added\n\n- Add in three.\n\n### Fixed\n\n- Shared line.\n\n## [0.2.2] - 2026-10-02\n\n### Fixed\n\n- Old fix.\n\n## [0.2.1] - 2026-10-01\n\n<!-- nothing -->\n`;
+	const dir = changelogFixture("notes", changelog, {});
+	const single = releaseIn(dir, "notes", "--version", "0.2.4");
+	expect(single.exitCode, single.output).toBe(0);
+	expect(single.output).toBe("### Fixed\n\n- Fix in four.\n- Shared line.\n");
+	const aggregated = releaseIn(dir, "notes", "--version", "0.2.4", "--floor", "0.2.2", "--output", "notes.md");
+	expect(aggregated.exitCode, aggregated.output).toBe(0);
+	expect(readFileSync(join(dir, "notes.md"), "utf8")).toBe("### Added\n\n- Add in three.\n\n### Fixed\n\n- Fix in four.\n- Shared line.\n");
+	const empty = releaseIn(dir, "notes", "--version", "0.2.1");
+	expect(empty.exitCode).toBe(4);
+	expect(empty.output).toContain("REFUSED: CHANGELOG.md ## [0.2.1] has no entries; an empty release body is refused");
+});
+
+test("the tag-time check passes on a promoted bump commit whose fragments were folded away", () => {
+	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
+	git("update-ref", "refs/heads/main", releaseHead);
+	const directBead = "ompkit-rc-epic-land-fix-release-dogfood-rz5.98";
+	const direct = commitTree(treeWithFiles(releaseHead, {
+		"src/folded.ts": "folded\n",
+		"changelog.d/rz5.98.md": "### Fixed\n- A folded direct change.\n",
+	}), [releaseHead], "Direct change with fragment [test]", [`Bead: ${directBead}`]);
+	const promoted = headChangelog.replace(`## Unreleased\n\n- Existing in-progress release note.\n`, `## [Unreleased]\n\n## [0.2.3] - 2026-10-12\n\n- Existing in-progress release note.\n\n### Fixed\n\n- A folded direct change.\n`);
+	expect(promoted).not.toBe(headChangelog);
+	const index = join(workspace, `index.${++indexNumber}`);
+	gitWithEnv({ GIT_INDEX_FILE: index }, "read-tree", direct);
+	gitWithEnv({ GIT_INDEX_FILE: index }, "rm", "--cached", "-q", "changelog.d/rz5.98.md");
+	const blob = join(workspace, `blob.${indexNumber}.changelog`);
+	writeFileSync(blob, promoted);
+	gitWithEnv({ GIT_INDEX_FILE: index }, "update-index", "--add", "--cacheinfo", "100644", git("hash-object", "-w", blob), "CHANGELOG.md");
+	const bump = commitTree(gitWithEnv({ GIT_INDEX_FILE: index }, "write-tree"), [direct], "chore: bump version to 0.2.3", ["[no-changelog] release bump"]);
+	git("update-ref", "refs/heads/main", bump);
 	const atRelease = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
 	expect(atRelease.exitCode, atRelease.output).toBe(0);
+	expect(atRelease.output).toContain(`Direct commit ${direct.slice(0, 7)} (Bead: ${directBead}) covered by changelog.d/rz5.98.md`);
 	expect(atRelease.output).toContain("covered by the release section in CHANGELOG.md");
 	git("update-ref", "refs/heads/main", releaseHead);
 });
@@ -201,7 +269,7 @@ test("release check rejects a merged PR without a fragment or tagged Unreleased 
 	git("update-ref", "refs/heads/main", missingMerge);
 	const missing = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
 	expect(missing.exitCode).toBe(1);
-	expect(missing.output).toContain("merged PR #58 has no changelog.d fragment or tagged line in CHANGELOG.md ## Unreleased");
+	expect(missing.output).toContain("merged PR #58 has no changelog.d fragment or tagged line in CHANGELOG.md ## [Unreleased]");
 });
 
 test("a single-parent squash PR is covered by its PR fragment", () => {
@@ -234,22 +302,6 @@ test("release check accepts a refreshed fragment for a PR already released at th
 	expect(check.exitCode, check.output).toBe(0);
 });
 
-test("release assembly omits refreshed fragments for PRs in the base tag", () => {
-	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
-	git("update-ref", "refs/heads/main", releaseHead);
-
-	const refreshedTree = treeWithFiles(releaseHead, {
-		"changelog.d/rz5.50.md": "- REFRESHED PRIOR RELEASE NOTE (PR #50)\n",
-	});
-	const refreshedCommit = commitTree(refreshedTree, [releaseHead], "Refresh an old PR fragment [test]", []);
-	git("update-ref", "refs/heads/main", refreshedCommit);
-
-	const assembled = release("assemble", "--base-tag", "v0.2.2", "--head", "HEAD", "--version", "0.2.3", "--date", "2026-10-09", "--output", "assembled.md");
-	expect(assembled.exitCode, assembled.output).toBe(0);
-	const changelog = readFileSync(join(fixture, "assembled.md"), "utf8");
-	expect(changelog).not.toContain("REFRESHED PRIOR RELEASE NOTE");
-	expect(changelog).toContain("Fleet-guard installation skips unmanaged extension collisions");
-});
 test("release check rejects a fragment for an unknown PR", () => {
 	writeFileSync(join(fixture, "CHANGELOG.md"), headChangelog);
 	git("update-ref", "refs/heads/main", releaseHead);

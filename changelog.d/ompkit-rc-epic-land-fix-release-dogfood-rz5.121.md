@@ -1,1 +1,0 @@
-- `doctor --scope kit` contract lists the `planning_skill` finding: PLAN1 added it to the kit scope components, and the grammar/refusal test pins the exact list.

@@ -1,1 +1,0 @@
-- Add read-only load census attribution for agent panes, system groups, LSP counts, and the `jobs/<id>.json` heavy-job ledger; absent ledger state reports `heavy jobs: none registered (LOAD1 not installed)`.

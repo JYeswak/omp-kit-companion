@@ -1,1 +1,0 @@
-- Send supports --no-bead-reason and returns a typed BEAD_REQUIRED refusal. (commit a8de6af)

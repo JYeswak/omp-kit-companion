@@ -1,10 +1,132 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
-<!-- New PR notes go in changelog.d/<bead>.md; legacy Unreleased bullets must end with (PR #NN). -->
+<!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
-## 0.2.15 — 2026-10-09
+### Added
+
+- Release train: every green `main` commit is tagged as the next patch and released automatically, and the `kit-update` service installs published releases within minutes (`OMP_KIT_UPDATE_POLL=github`); a manual cut is still available as a fallback.
+- New `kit-no-double-quoted-substitution` reminder: warns when a double-quoted argument to `br comments add`, `br create`, `br update` or `git commit -m` contains a backtick or `$(`.
+- New `fleet-restart` skill: a repeatable fleet restart that runs as a dry-run plan by default and only sends after operator approval bound to the manifest hash. It refuses busy panes, mismatched launch flags and stale plugin links.
+- `fleet-restart` sitrep: a parsed JSON fleet report covering pane state, bead counts, closes today, and a CI verdict over every workflow on `main`'s HEAD.
+- `omp-kit doctor --scope secrets` reports Infisical vault values that appear in plaintext in config, rc, LaunchAgent and repo files without ever printing the value. `--staged` checks only the git index.
+- `scripts/pre-commit-secret-scan.sh` pre-commit hook blocks a commit that stages a vault value.
+- New `kit-no-plaintext-secret` rule interrupts a call that writes a literal credential into an rc, `.env`, config file or command line.
+
+### Changed
+
+- Release workflows reuse green CI and rehearsal evidence for the same commit instead of re-running the full candidate. The non-shipping Intel macOS probe runs in a separate workflow so it no longer delays publication.
+- The `kit-update` service's launchd plist is re-rendered after every update, and the polling interval is now 300 s.
+- The secret scan skips provider slugs and public client keys (`_ANON_KEY`, `_PUBLISHABLE_KEY`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`).
+
+### Fixed
+
+- `omp-kit update` and `omp-kit apply plugin` now relink a profile whose plugin symlink still points at an older release.
+- `service run kit-update` accepts a poll-only config instead of refusing with `KIT_UPDATE_JOB_CONFIG`.
+- Tern-managed (compiled) `omp` now works with `omp-kit test` and the pre-push gate: the kit fetches the matching OMP source version into a local cache (disable with `OMP_KIT_OMP_SRC_FETCH=0`).
+- `fleet-restart` now detects panes running Tern's compiled `omp` as agents.
+- The sitrep CI verdict now covers every workflow run on `main`'s HEAD instead of "the latest run", and its close counts are no longer always zero.
+- Running `scripts/fresh-gate.sh` directly no longer reports false scratch-path fires.
+- `kit-no-plaintext-secret` stays quiet when `echo` or `printf` only prints double-quoted text.
+- `omp-kit doctor --scope memory` and native certification recognize the reviewed OMP 18.9.2 memory sources.
+- The release train's wait for an idle release lane authenticates to GitHub.
+
+## [0.2.20] - 2026-10-10
+
+### Changed
+
+- The pre-push gate now matches CI: it checks release-notes coverage for the pushed range and runs live-scenario coverage when rules change.
+- `omp-kit send` sends slash commands verbatim with no appended marker, never presses Enter into them, and confirms delivery from the command's effect.
+
+### Fixed
+
+- `omp-kit send` accepts a known-prefix bead id in the D-line slug slot as the dispatch citation (Agent Mail ids never count).
+
+## [0.2.19] - 2026-10-10
+
+### Added
+
+- `omp-kit update --reconcile RECEIPT --yes` rescans an install against a PARTIAL update receipt and marks it RECONCILED on a full match. `--prefix` overrides the install prefix.
+- New `kit-ast-parsing-engineering` reminder for hand-written quote-aware scanners and tokenizers.
+
+### Changed
+
+- Fleet Watch nudges are suppressed when the tracker is write-latched, no claimable leaf exists or the state is unknown. Each suppression state (`WRITE_LATCHED`, `NO_FREE_LEAF`, `UNKNOWN`) is reported once per change.
+- Tracker recovery acts only on fresh BusyRecovery markers and is rate-limited to one recovery per repo per hour.
+- `omp-kit send`, fleet-watch and service runs check pause and custody state at the CLI entrypoint and refuse with no effects.
+
+### Fixed
+
+- `omp-kit send` no longer presses Enter into a busy pane: it waits for the receiver to pick up the message or reports `NOT_DELIVERED` with a recovery copy.
+- `claude-save` refuses to commit when a Gitleaks scan times out, fails or produces no valid report, and reports `REFUSED` instead of `OK`.
+
+## [0.2.18] - 2026-10-10
+
+### Added
+
+- Release rehearsal: `gh workflow run release.yml --ref main -f version=X.Y.Z -f rehearsal=true` runs the full pipeline on a throwaway version, with no tag, no release and no signing.
+- Actuator admission: `omp-kit send`, fleet-watch, flush and tracker recovery refuse with no effects when the fleet is paused, off, protected, unconfirmed or on a stale generation.
+- `omp-kit send --json` reports the resolved `tmux_socket`.
+
+### Changed
+
+- `omp-kit send` uses the only live tmux socket when `TMUX`/`TMUX_TMPDIR` are unset, and refuses with `TMUX_AMBIGUOUS` when several servers are live.
+- `omp-kit send` refuses shaped bead ids it cannot trace to a known tracker instead of trusting them.
+- Releases certify Intel macOS after the shipping targets are indexed, as a non-gating probe.
+
+### Fixed
+
+- Release attestation runs again: the SBOM step was updated off a retired GitHub artifact API.
+- The `omp-kit update` postcheck no longer fails healthy machines when a newer release adds a ladder stage, or when the kit's own scheduled jobs write state during the check.
+- Fleet Watch tracker recovery detects live tmux sessions on tmux 3.6.
+- Fleet Watch tracker recovery treats a silent `lsof` exit 1 as "no database holder" instead of blocking.
+- The scratch reaper recognizes `<label>.<pid>.<suffix>` directories and reaps them when their owning process is gone.
+
+## [0.2.17] - 2026-10-10
+
+### Added
+
+- `omp-kit planning convert --apply --tracker-root DIR` writes a converted plan into an existing tracker after a full preflight.
+
+### Changed
+
+- `kit-save-guard` prescribes a private-index save, not a whole-file commit, when a file holds edits from outside this session.
+- `omp-kit send` counts a bead citation only when its prefix belongs to a known tracker, so words like `follow-up` no longer satisfy the dispatch gate.
+
+### Fixed
+
+- `claude-save` no longer refuses every save after a committed `git mv` of an allowlisted gitlink.
+- Release archives include the runtime test data and the flywheel-invariants gate, so installed integration tests run.
+- `kit-save-guard` no longer asks a session to commit work that already matches the upstream branch.
+- Fleet Watch now watches worker panes configured by tmux pane id (`%12`).
+- `omp-kit test --full` and the update postcheck accept the `flywheel-invariants` ladder stage.
+- The kit and the pre-push gate find OMP's source when `omp` on PATH is a compiled binary, without `OMP_SRC`.
+
+## [0.2.16] - 2026-10-09
+
+### Added
+
+- `omp-kit send` refuses a work dispatch that cites no bead with `BEAD_REQUIRED`. `--no-bead-reason "<why>"` sends a recorded exception.
+- `omp-kit doctor --scope fleet` reports `DIRECTOR_DOING_WORK` and `COMMUNICATION_PURGATORY`.
+- `omp-kit doctor --scope fleet` reports `STUCK_PENDING`, `STALE_STEER` and `FROZEN_TURN` panes.
+- `omp-kit fleet flush-pending [--apply --yes]` submits queued messages, but only in idle panes. A new `fleet-flush` service runs it every 60 s.
+- New `kit-flywheel-guard` extension: it reminds agents to reread AGENTS.md and their bead after compaction, and blocks an agent from closing its own bead.
+- New `kit-skill-forbidden-instruction` reminder flags skill files that teach worktrees, rebase, stash or a bare-word bead close.
+- New `flywheel-invariants` ladder gate: every Flywheel Guide invariant and anti-pattern must map to a shipped mechanism with fire and quiet proof.
+- `omp-kit doctor` lists stale tmux sockets without removing them.
+
+### Changed
+
+- Releases require all three shipping targets, and Intel macOS becomes a CI-only probe.
+
+### Fixed
+
+- `omp-kit apply plugin --regex-budget-report` accepts real reports with file-scoped conditions.
+- Quoted git command text no longer triggers the shared-merge guard.
+- `kit-skill-forbidden-instruction` matches commands continued with a trailing backslash.
+
+## [0.2.15] - 2026-10-09
 
 - Carried stranded companion work onto main (fleet-lessons, lessons, tracker-recovery, watch-actuator, shared-merge rule) with live coverage for kit-no-shared-merge. (PR #77)
 
@@ -33,11 +155,11 @@ Added 12 non-blocking kit teach rules for false alarms, negative outcomes, check
 
 Added Mission Protocol v0.1 validation with canonical SHA-256 registrations, the `omp-kit mission validate` CLI command, and a learning check routed through `omp-kit heavy`.
 
-## 0.2.14 — 2026-10-09
+## [0.2.14] - 2026-10-09
 
 - Re-release of the 0.2.13 content below: the v0.2.13 tag's release-notes check counted its own release PR (#78) as uncovered, so its release workflow could not pass. (PR #77) (PR #78)
 
-## 0.2.13 — 2026-10-09
+## [0.2.13] - 2026-10-09
 
 - CI now tests OMP `minimum` and `certified` from `scripts/omp-compat.json` (certified 18.7.0) and never npm latest, so an OMP release can no longer turn `main` red. The hourly `omp-certify.yml` (replaces `omp-latest.yml`) certifies each new npm latest through one PR: it hashes and diffs the pinned memory sources, gets a model verdict on each changed file, runs the full `ci.yml` on the candidate commit, and auto-merges only when everything passed and no memory semantics changed. (PR #67)
 
@@ -64,16 +186,16 @@ Bundled TTSR checks preserve the logical workspace root across isolated executio
 
 - `omp-kit send` no longer reports OK when the message sits unsubmitted in the recipient's input box: it presses Enter once and reports OK only when the marker appears above the box, otherwise `PENDING_SUBMIT`. (commit b3cda9a)
 
-## 0.2.12 — 2026-10-07
+## [0.2.12] - 2026-10-07
 
 - SBOM attestation separates the platform-specific workflow artifact name from the local SPDX JSON path consumed by attest-sbom; the proof-derived matrix rejects unapproved platform identities while preserving the certified subset.
 
-## 0.2.11 — 2026-10-07
+## [0.2.11] - 2026-10-07
 
 - Release attestation derives its matrix from candidate-proof certified_platforms, validates source/version/index membership, and uses the verified actions/download-artifact v4.3.0 pin. It preserves the existing certified subset and does not enable excluded Intel platforms.
 - Publishability fixtures construct planted credential, home-path, private-IP, and LAN-host values at runtime; the shared DSR template omits dispatcher-local absolute local_path and documents its registration requirement.
 
-## 0.2.10 — 2026-10-07
+## [0.2.10] - 2026-10-07
 
 - COMMIT1 bead lookup prioritizes recognized tracker-shaped tokens before the 20 local `br show` lookup cap; a 36-token long-message regression proves a resolvable id past position 20 passes while unknown ids remain refused (14/14 contract cases).
 <!-- release coverage: (commit 4401ad2) -->
@@ -145,7 +267,7 @@ Bundled TTSR checks preserve the logical workspace root across isolated executio
 - RT1 installer verifies release origin: `verify_attestation()` in `installer/install.py` checks the release-published `<archive>.sigstore.json` bundle via `gh attestation verify --owner` (seams: `GH_BIN`, `OMP_KIT_ATTEST_OWNER`). A failing bundle refuses; a missing bundle warns hash-only so offline installs keep working. Planted: tampered archive refused, bad attestation refused, no-bundle warns and passes (4/4 `tests/cli/install-verify.test.sh`).
 - RT1 release workflow attests every candidate: `release.yml` gains an `attest` matrix job (one per platform) that downloads the `candidate-<platform>` artifact, generates an SPDX SBOM (anchore/sbom-action), and records SLSA build-provenance plus SBOM attestations via GitHub OIDC (all actions SHA-pinned). Tag-dispatched only, like the rest of the workflow. The installer check is wired into CI (`install-verify.test.sh` in shellcheck and the ladder). Bundle publication alongside archives at promotion time remains a P25 step.
 
-## 0.2.9 — 2026-10-06
+## [0.2.9] - 2026-10-06
 
 - Commit index for 0.2.9: every shipped-path commit since v0.2.8 that had no fragment of its own, grouped by bead.
 
@@ -157,7 +279,7 @@ Bundled TTSR checks preserve the logical workspace root across isolated executio
 
 - RT1 installer verifies release origin: `verify_attestation()` in `installer/install.py` checks the release-published `<archive>.sigstore.json` bundle via `gh attestation verify --owner` (seams: `GH_BIN`, `OMP_KIT_ATTEST_OWNER`). A failing bundle refuses; a missing bundle warns hash-only so offline installs keep working. Planted: tampered archive refused, bad attestation refused, no-bundle warns and passes (4/4 `tests/cli/install-verify.test.sh`).
 
-## 0.2.8 — 2026-10-06
+## [0.2.8] - 2026-10-06
 
 - COMMIT1 bead-id hook: `scripts/commit-msg-bead.sh` refuses commits naming no tracker-existing bead id (full `ompkit-<id>` or `rz5.<n>`, merge/template exempt, trackerless repos skipped), installed via `scripts/install-commit-msg-bead.sh` into the hooks chain; 7/7 contract tests with stubbed br plus live real-tracker proof.
 - COMMIT1 installer takes an optional repo argument, absolutizes relative hooks paths, and refuses non-repos; cfsios installed and verified live per-tracker (foreign ids refused).
@@ -176,7 +298,7 @@ Bundled TTSR checks preserve the logical workspace root across isolated executio
 
 - RELEASE BLOCKER A2: the CI-judge signal survives into nested ladders. `cert_env()` in `scripts/native-candidate.py` passes GITHUB_ACTIONS through when the parent run sets it (local runs stay fail-closed); `scripts/runtime-adapter.sh` forwards it in the scrubbed child env; `scripts/ladder.sh` judges regex-budget regardless of load only under that signal. Planted: cert_env contains the key iff set (RED on unfixed code).
 
-## 0.2.7 — 2026-10-06
+## [0.2.7] - 2026-10-06
 
 - FLY2-1 linkage fix: `src/flywheel-score.ts` BEAD_ID accepts the dotted numeric suffix in bead ids (rz5.113); without it every dotted commit counted unlinked (linkage read 1/50). Linear-time pattern (word-bounded, exclusive classes, no nested quantifiers). Planted test: dotted ids link, truncated prefixes do not; landing-hygiene covered too.
 - FLY2-1 bare resolution: realIds also accepts bare rz5.NNN exactly like the COMMIT1 hook, resolving against known tracker ids by unique suffix; unknown or ambiguous suffixes never link. Planted: resolving bare links, unknown bare does not, duplicate-suffix fixture does not.
@@ -212,7 +334,7 @@ The daily OMP compatibility workflow now tests the latest three stable releases,
 
 - RELEASE BLOCKER A: `runEffectiveRuleProbe` (sync + async) in `src/diagnostics.ts` spawns OMP against an isolated probe HOME carrying only small non-database configs from `.omp/agent` and the probed profile; OMP's SQLite state init lands in throwaway and findings match real-HOME runs byte for byte. Planted test asserts an inspected HOME stays byte- and mtime-identical (RED on unfixed code, GREEN fixed).
 
-## 0.2.6 — 2026-10-06
+## [0.2.6] - 2026-10-06
 
 - F2 no-egress tripwire (box 6): `tests/cli/corpus.test.ts` runs the full corpus with all proxy vars poisoned to unroutable endpoints and asserts the seeded counts; a positive control proves the poison is lethal in the running runtime (a future runtime that ignores proxy env fails the control, never silently vacuous). Scope: CLI parent layer via the standard proxy-respecting stack; the harness child runs under runtime.ts's proxy-free allowlisted env, so any future child egress would be direct-dial.
 
@@ -446,7 +568,7 @@ The daily OMP compatibility workflow now tests the latest three stable releases,
 
 - Add `omp-kit heavy` for bounded, machine-wide load admission with nice-10 execution, per-pane exclusion, queue status, and `--no-wait` deferral; route ladder and fresh-gate heavy work through it.
 
-## 0.2.5 — 2026-10-04
+## [0.2.5] - 2026-10-04
 
 Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed its release-notes check before any build and was never published; this release carries everything since 0.2.3.
 
@@ -480,7 +602,7 @@ Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed i
 - The release-notes check accepts fragments that name commits, and covers tag-time release commits.
 - `omp-kit corpus` refuses missing `--sessions` roots and unknown schema versions with named errors.
 
-## 0.2.3 — 2026-10-03
+## [0.2.3] - 2026-10-03
 
 - doctor --scope work inventories configured developer repositories read-only: dirty files, upstream/ahead state, stashes, detached worktrees, last-commit age, active worktrees, bounded per-repo timeouts, risk sorting, JSON envelopes and human tables. It never fetches or writes. (PR #57)
 - Packaged test isolation falls back to OS-approved temporary roots when `TMPDIR` points outside them, keeping stage adapters within their system-temp boundary.
@@ -524,7 +646,7 @@ Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed i
 
 - The release-notes check passes on the assembled release commit, where legacy Unreleased lines have moved into the new version section.
 
-## 0.2.2 — 2026-10-02
+## [0.2.2] - 2026-10-02
 
 - `doctor --scope services` inventories launchd jobs and validates declared required jobs without loading or writing services. (PR #24)
 - `omp-kit service` manages launchd and systemd user jobs with idempotent install, backup-first replacement, status, doctor, logs, and run; `omp-watch` remains render-only. (PR #27)
@@ -549,7 +671,7 @@ Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed i
 - The cold-start LSP probe removes an unproven reference retry and cleans up while retaining failure-only diagnostics. (PR #49)
 - The metamorphic corpus now covers seven env-prefix anchors; the corresponding rule fixes and baseline updates ship together. (PR #50)
 - Quoting and line-continuation false-fire fixes bring the metamorphic ratchet baseline from 161 to 0. (PR #53)
-## 0.2.1 — 2026-10-01
+## [0.2.1] - 2026-10-01
 
 - The rule pack installs as a native OMP plugin: the repository root carries an `omp` manifest, so `omp plugin install github:JYeswak/omp-kit-companion#v0.2.1` delivers the rules and the guard extension through OMP's own plugin loader, with no copies in `~/.agents/rules`. `scripts/plugin-lifecycle.sh` proves install, live blocking, disable, uninstall, git install and upgrade on the installed OMP.
 - `doctor --scope context` reports what each profile lists into the prompt (skills, context files, rules, tool descriptors), measured with OMP's own loaders. `test --capabilities FILE` checks that a declared set of required skills, tools, rules and LSP languages still resolves, and exits 1 naming any that are missing.
@@ -564,7 +686,7 @@ Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed i
 - Four agent-procedure rules enforce `~/.agents/AGENTS.md`: `kit-scratch-tmp` (writes under `/tmp` by write tool or shell redirect; reads and `$TMPDIR`-under-`var/agent-tmp` stay quiet), `kit-no-pattern-kill` (`pkill`/`killall`; PID kills and quoted mentions stay quiet), `kit-no-ask-rmrf` (assistant text asking the human to clear scratch; refusals and backticked mentions stay quiet), and `kit-no-force-push` (bare `--force`/`-f`; `--force-with-lease` stays quiet). Each cites its AGENTS.md section and carries fire plus quiet near-miss rows; quotes that merely mention a pattern do not fire. Corpus now 22 rules, 295 cases, 78 live scenarios.
 - Session-end save guard: the plugin's new `extensions/kit-save-guard.ts` listens for OMP's `session_shutdown` event and runs read-only git inspection in the session repo, emitting one warning line for uncommitted files, commits ahead of upstream, or a missing upstream. Installing the plugin is the opt-in; it never commits, stashes, or pushes, and stays silent for clean repos, non-repos, and every error.
 
-## 0.2.0 — 2026-10-01
+## [0.2.0] - 2026-10-01
 
 - A real-HOME journey (52,000-file HOME, edited rules, legacy 0755 state root, a concurrent writer) runs the install-to-update path on macOS and Linux CI with a JSONL step log. It would have caught every real-machine failure fixed in this release.
 - The README is a 60-second start; usage, configuration and a native-OMP guide live under `docs/`, and their verified command blocks run in the test suite against the installed OMP.
@@ -587,12 +709,12 @@ Certified on OMP 18.4.2 (minimum) and 18.6.0 (latest). The `v0.2.4` tag failed i
 - The settings-mutation reminder offers installed-only read-only plans when the selected profile permits them, otherwise an explicit owner-approval handoff. A real OMP continuation case now checks the tool result rather than a scripted model claim; it never auto-applies profile changes.
 - The explicitly consented `doctor --scope lsp --deep` path exercises OMP's real `lsp` tool against a private TypeScript fixture and loopback mock model. It refuses workspace-local/custom commands, preserves static-readiness semantics, reports distinct failure classes and input/runtime snapshots, and stops only the private LSP mux; it does not certify every server type or the target workspace runtime.
 
-## 0.1.1 — 2026-09-29
+## [0.1.1] - 2026-09-29
 
 - The standalone installer now prevents its Python subprocesses from writing standard-library bytecode into a fresh macOS HOME. Offline and online dry runs, and a failed online archive download, leave the isolated HOME untouched; the real-archive regression also runs on native macOS CI.
 - Rebuild and recertify all four native release targets against the exact tagged source. The `v0.1.0` assets remain immutable; upgrade only by explicitly choosing `v0.1.1`'s reviewed local index and archive.
 
-## 0.1.0 — 2026-09-29
+## [0.1.0] - 2026-09-29
 
 - First public source-only root for the compiled `omp-kit` companion. The original working repository and its prior history remain private; this root does not inherit those commits. The [MIT license](LICENSE) and [release assets](https://github.com/JYeswak/omp-kit-companion/releases/tag/v0.1.0) describe the published boundary.
 - The CLI inspects OMP, checks 18 rules against 274 fire/quiet cases and streamed prefixes, runs isolated live/mock-model scenarios, previews guarded rule/policy/extension changes, records receipts, and offers read-only profile, LSP and MCP examples. Installed checks do not certify a user's effective profile.

@@ -1,1 +1,0 @@
-- claude-save tolerates gitlinks already committed at HEAD, so a committed `git mv` of an allowlisted gitlink no longer refuses every hourly save with NEW_GITLINK; a gitlink that is neither in the baseline nor at HEAD still refuses. (commit 5c4080b)

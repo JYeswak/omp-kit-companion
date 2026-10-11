@@ -1,1 +1,0 @@
-- ID1 doctor finder: `inspectPaneIdentity` classifies live panes via `am resolve-pane` (shared name FAIL, missing file and week-idle registrations DEGRADED); live fleet run resolves all 8 omp-test panes with no collisions.

@@ -31,16 +31,12 @@ fi
 
 fragments=$(mktemp -d "$ARCHIVE_DIR/../pushed-notes.XXXXXX") || exit 1
 trap 'rm -rf "$fragments"' EXIT HUP INT TERM
-found=0
+# changelog.d/ is an inbox the release train drains into CHANGELOG.md, so it may be
+# empty; a commit that needs a fragment still fails below, naming the missing file.
 for frag in "$ARCHIVE_DIR"/changelog.d/*.md; do
 	[ -f "$frag" ] || continue
-	found=1
 	cp "$frag" "$fragments/"
 done
-if [ "$found" -ne 1 ]; then
-	echo "notes coverage: no changelog.d fragments in candidate tree" >&2
-	exit 1
-fi
 
 fail=0
 for commit in $(git -C "$REPO" rev-list --first-parent "$BASE..$TIP"); do

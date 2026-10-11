@@ -1,1 +1,0 @@
-- Added a persistent differential fuzz runner, `scripts/differential-fuzz.ts`, that compares native rule matching against the reference over thousands of generated inputs and reports per-rule fire counts and worker errors (commit 9a91486).

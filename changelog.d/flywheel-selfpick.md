@@ -1,1 +1,0 @@
-- FLY2-2 self-pick rule: `skills/jeff-planning-enhanced/SKILL.md` section 7 now says claim from `bv --robot-next` (RERUN-REQUEST grades first) and hold at most one bead at a time, closing the gap where marching orders implied it but neither document stated it.

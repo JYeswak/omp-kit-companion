@@ -1,1 +1,0 @@
-- Adds a six-hour `fleet-lessons` service job with run-at-load behavior.

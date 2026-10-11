@@ -1,1 +1,0 @@
-- SBOM attestation separates the platform-specific workflow artifact name from the local SPDX JSON path consumed by attest-sbom; the proof-derived matrix rejects unapproved platform identities while preserving the certified subset.

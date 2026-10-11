@@ -1,6 +1,0 @@
-- TOOL1 toolchain pins (part 1): `src/infra.ts` parses the pin file fail-closed and diffs installed versions into DRIFT rows, with planted negatives in `tests/cli/infra.test.ts`. Live pin file, `infra check`/`promote` and doctor wiring follow.
-- TOOL1 candidate check: `checkInfraCandidate` runs the ladder with the candidate prefix leading PATH and reports PASS or the failing stage (machine toolchain untouched; per-tool acquisition URLs still open).
-- TOOL1 guarded promote: `promoteInfra` refuses without human authorization and without a PASSING check for the exact candidate, installs via injection, updates the pin and writes the receipt; `undoPromote` promotes back (readback in pins). Same planted REFUSED/FAILED coverage.
-- TOOL1 CLI registration: `infra pin|check|promote|undo` commands with guarded promote (human + passing check + installed readback) and pin backup/restore; candidate staging verifies the binary reports the candidate version.
-- TOOL1 quiet-machine rule: `loadGate` refuses ladder work above 1.5x cores and a forced run reports INCONCLUSIVE (never PASS/FAIL), with planted tests; CLI gate + wait + origin/main export follow when `src/cli.ts` frees.
-- TOOL1 quiet wiring: `infra check` refuses above 1.5x cores (or waits with `--wait`, or runs forced as INCONCLUSIVE) and runs the ladder from an export of origin/main, never the dirty tree.

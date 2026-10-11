@@ -1,1 +1,0 @@
-- REAP2: scratch plan parent rows exclude nested plan rows' bytes (each byte counted once); planted nested fixture proves parent reads own bytes only.

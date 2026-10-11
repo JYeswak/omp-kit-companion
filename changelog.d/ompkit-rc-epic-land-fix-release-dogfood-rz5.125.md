@@ -1,1 +1,0 @@
-- SEND1 capture proof: marker check uses the bare pane id with scrollback history (session:pane misparses as a window; rendered messages scroll off the visible screen).

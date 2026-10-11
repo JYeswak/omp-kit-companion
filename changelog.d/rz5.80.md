@@ -1,1 +1,0 @@
-- Failed full live postchecks now report missing scenario IDs alongside stage failures, making incomplete scenario runs diagnosable without reducing the full-suite gate.

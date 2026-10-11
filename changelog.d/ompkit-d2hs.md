@@ -1,1 +1,0 @@
-- Release workflows reuse only green exact-SHA CI and complete rehearsal evidence; missing or stale proof runs the full candidate. The non-shipping Intel probe runs in a sibling workflow so it cannot delay release-train publication.

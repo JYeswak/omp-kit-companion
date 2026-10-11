@@ -1,1 +1,0 @@
-- PUB1f doctor scope: `doctor --scope layout --project` reports standard layout deviations (OK when clean, DEGRADED naming each).

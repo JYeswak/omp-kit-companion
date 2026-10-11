@@ -1,1 +1,0 @@
-- Doc status gate (`scripts/doc-status-check.sh`, `tests/cli/doc-status.test.sh`): every doc carries front-matter status; dangling superseded-by and missing status are refused; `docs/INDEX.md` regenerates deterministically. Front matter added to the kit docs (README follows when its holder lands).

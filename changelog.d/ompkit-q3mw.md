@@ -1,1 +1,0 @@
-- Slash-command sends go out verbatim with no appended marker; delivery is proved by the command effect, and no Enter is ever pressed into a slash command.

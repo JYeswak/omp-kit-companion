@@ -1,1 +1,0 @@
-- Added explicit `allow_bypass: false` to the shared Beads policy template and a known-bad fixture; fresh-context gate providers no longer bypass the implementer-identity guard.

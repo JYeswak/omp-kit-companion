@@ -1,1 +1,0 @@
-- Fleet doctor reports STUCK_PENDING, STALE_STEER, and FROZEN_TURN; fleet-flush-pending sends only to idle queued bands. (commit db6d1ca)

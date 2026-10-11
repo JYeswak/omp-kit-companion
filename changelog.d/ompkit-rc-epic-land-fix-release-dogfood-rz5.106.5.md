@@ -1,1 +1,0 @@
-- PUB1e doctor scope: `doctor --scope public-files --project` lists missing standard public files (OK when complete, DEGRADED naming each).
