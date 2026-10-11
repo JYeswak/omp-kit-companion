@@ -1,0 +1,1 @@
+- Added the `kit-ast-parsing-engineering` TTSR reminder for hand-written quote-aware scanners/tokenizers, backed by fleet fire/quiet cases, and linked regex-as-parser guidance to the `ast-parsing-engineering` skill.
