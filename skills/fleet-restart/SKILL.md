@@ -136,7 +136,8 @@ After the operator's go: `approval-template` → fill → `send --role director 
 ### 8. VERIFY callbacks and sitrep
 
 - Every director replies with one callback line; DONE needs a sha on origin/main, BLOCKED needs the blocker. A prose-only reply is not a callback; ask once, then record it as BLOCKED.
-- `$FR snapshot --out "$RUN/snapshot-after"` and `$FR plan …`: count idle vs busy, any pane still `HOLD_*`.
+- Read the fleet only through the parser, never by eye: `python3 $SKILL/scripts/sitrep.py --repo <tracker repo with no agent pane> --out "$RUN/sitrep.json"`. It returns, per agent pane: state, flags, MCP versions and the last parsed callback. Per repo it returns open, in-progress and ready counts, closes today, and main CI. Every number in the handoff sitrep must trace to a field of that JSON (its `sha256` names the receipt). `python3 $SKILL/scripts/sitrep.py --selftest` must pass first.
+- Two traps the parser handles: `br list --json` without `--status` omits closed beads (so a close count built on it is always 0), and real callbacks carry `;` inside the evidence (the split is on the last `; NEXT`).
 - Append the sitrep to the handoff: restarted/verified counts, callbacks received, beads closed or reopened, panes still queued, defects filed.
 
 ## Done-bar
