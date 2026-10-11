@@ -13,7 +13,7 @@ it:
 sh scripts/release-notes.sh check --base-tag vX.Y.Z --head REF
 ```
 
-A commit touching shipped paths with neither fails the check.
+A commit touching shipped paths with neither fails the check. The pre-push gate runs the same coverage for the pushed range first (`scripts/check-pushed-notes.sh` via `fresh-gate.sh`), so a missing trailer, reason or naming fragment refuses the push, not the release.
 
 ## 2. Assemble the changelog
 
