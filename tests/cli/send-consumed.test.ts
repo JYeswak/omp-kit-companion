@@ -181,7 +181,7 @@ test("BUSY_STUCK: marker held in a busy composer; NOT_DELIVERED with drop, no En
 	const stuck = rq59Screens();
 	const pane = sequencePane([stuck.busy]);
 	const dir = dropDir();
-	const got = await proveSend({ session: "s", pane: "%1", message: "fixture probe line one", dropDir: dir, exec: pane.exec, pollMs: 1, deadlineMs: 20, wait: noWait });
+	const got = await proveSend({ session: "s", pane: "%1", message: "fixture probe line one", dropDir: dir, exec: pane.exec, env: testEnv, pollMs: 1, deadlineMs: 20, wait: noWait });
 	expect(got.status).toBe("NOT_DELIVERED");
 	expect(got.drop_path).not.toBeNull();
 	expect(readdirSync(dir).length).toBe(1);
