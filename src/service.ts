@@ -20,7 +20,7 @@ export interface ServiceJobDef { name: string; label: string; kind: "watch" | "i
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
-	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
+	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
  	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },

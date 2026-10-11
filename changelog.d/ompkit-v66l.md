@@ -1,0 +1,1 @@
+- Release train: every green main commit is tagged the next patch and released automatically (newest green wins); the `kit-update` service installs published releases within minutes with plugin relink (`OMP_KIT_UPDATE_POLL=github`). Manual cut remains the fallback.

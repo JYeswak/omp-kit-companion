@@ -85,3 +85,49 @@ machine); pass an explicit `--prefix PATH` only to point at a relocated
 install, and it is validated the same way, by matching. A mismatch refuses
 and the receipt stays pending; undo or a real
 fix is the way out, never a forced install.
+
+## 7. Release train (RELTRAIN1, automatic; manual cut is the fallback)
+
+Every green main commit becomes the next patch release and installs itself;
+newest green wins, with no human cut. The manual cut (sections 2-6) remains
+the documented fallback for train outages.
+
+Trigger and queue (`.github/workflows/release-train.yml`, decisions in
+`scripts/release-train.sh`, covered by `tests/cli/release-train.test.sh`):
+
+- When the CI push run completes on main, the train decides. Red CI is
+  never tagged; a still-running CI is never tagged; a SHA that is no
+  longer main's head is left to the newer train.
+- One train at a time (concurrency group, cancel-in-progress false). Each
+  train waits for the release lane to go idle and re-decides after the
+  wait, so three greens during one release produce exactly one queued
+  train: the newest. Red main never releases.
+- The winner gets the next patch tag `vX.Y.(Z+1)` on that exact SHA, and
+  `release.yml` is dispatched at the tag. The release reuses the CI
+  evidence for the same SHA (ompkit-d2hs) and publishes automatically
+  when every gating job is green: the publish leg reads the version and
+  SHA back out of the verified candidate proof, re-verifies the ship set
+  (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`), and creates
+  the GitHub release. A train finishing late publishes without taking
+  `Latest` from a newer release. Rehearsal dispatches publish nothing.
+
+Install on publish (existing `kit-update` service, no new daemon):
+
+- With `OMP_KIT_UPDATE_ENABLED=1`, `OMP_KIT_UPDATE_POLL=github` and
+  `OMP_KIT_UPDATE_REPO=owner/repo`, each service tick fetches the newest
+  published release; only a version newer than the live install is
+  downloaded (index plus platform archive into one private directory)
+  and applied under the existing update receipt and reconcile path
+  (`src/kit-update-job.ts`, covered by `tests/cli/kit-update-job.test.ts`).
+- After an update the service relinks the kit plugin package with the new
+  binary itself (`apply plugin --apply`) and reports one line. A failed
+  postcheck leaves the prior version active and reports the undo; a
+  failed relink keeps the good update and reports BLOCKED with the
+  receipt. The service ticks every 300 s, so a published release lands
+  within minutes.
+
+Budgets: the 20-minute commit-to-published box and the 15-minute release
+wall both ride on the release-job diet (ompkit-d2hs); the train itself
+adds about a minute (tag, dispatch, publish). CI wall time (~22 min for
+the fast gate) is outside the train: end-to-end push-to-published stays
+above 20 min until CI is dieted too.

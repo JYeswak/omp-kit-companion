@@ -1,0 +1,220 @@
+name: Release train
+
+# RELTRAIN1 (ompkit-v66l): every green main commit becomes the next patch
+# release, newest green wins, with no human cut. The manual cut in
+# docs/release-procedure.md remains the documented fallback.
+#
+# How it works:
+# - A CI push run completing on main -> train job decides
+#   (scripts/release-train.sh): red CI is never tagged, and a SHA that is no
+#   longer main's head is left to the newer train. One train at a time
+#   (concurrency group, cancel-in-progress false); each train waits for the
+#   release lane to go idle and re-decides after the wait, so three greens
+#   during one release produce exactly one queued train: the newest.
+# - The winning SHA gets the next patch tag vX.Y.(Z+1) on that exact commit,
+#   and release.yml is dispatched at the tag. The release itself is owned by
+#   ompkit-d2hs (same-SHA CI evidence reuse); this workflow never edits it.
+# - The candidate release completing green -> publish job reads the version
+#   and SHA back out of the verified candidate proof (never out of branch
+#   names), verifies the unpublished candidate index for exactly that version
+#   and SHA, and creates the GitHub release. Rehearsal runs publish nothing.
+#   A train finishing late publishes without taking Latest from a newer
+#   release.
+# - Red main never releases: decide refuses anything but a green head, and
+#   scheduled (non-push) CI runs never enter the train.
+
+on:
+  workflow_run:
+    workflows: ["CI", "Unpublished release candidate"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Green main SHA to release (must still be main head)
+        required: true
+        type: string
+      version:
+        description: Patch version override (default next after max tag)
+        required: false
+        type: string
+      rehearsal:
+        description: Rehearse the release without tagging or publishing
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-train
+  cancel-in-progress: false
+
+jobs:
+  train:
+    if: >-
+      github.event.repository.private == false &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.name == 'CI' &&
+        github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Resolve the candidate SHA and its CI verdict
+        id: event
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            sha="${{ inputs.sha }}"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a 40-hex commit" >&2; exit 2; }
+            echo "sha=$sha"
+            echo "conclusion=success"
+            echo "status=completed"
+          else
+            echo "sha=${{ github.event.workflow_run.head_sha }}"
+            echo "conclusion=${{ github.event.workflow_run.conclusion }}"
+            # A completed workflow_run event carries only finished runs.
+            echo "status=completed"
+          fi
+          echo "head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.event.outputs.sha }}
+          fetch-depth: 1
+      - name: Decide whether this SHA may tag
+        run: |
+          set -euo pipefail
+          set +e
+          sh scripts/release-train.sh decide \
+            --conclusion "${{ steps.event.outputs.conclusion }}" \
+            --run-status "${{ steps.event.outputs.status }}" \
+            --sha "${{ steps.event.outputs.sha }}" \
+            --head "${{ steps.event.outputs.head }}" | tee decide.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat decide.out)"; exit 0; fi
+          [[ "$rc" -eq 0 ]] || exit "$rc"
+          grep -q '^DECIDE=tag' decide.out
+      - name: Wait for the release lane to go idle
+        run: |
+          set -euo pipefail
+          sh scripts/release-train.sh wait-release-idle \
+            --repo "${{ github.repository }}" --timeout 7200 --poll 60
+      - name: Re-decide after the wait (latest green still wins)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head="$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)"
+          set +e
+          sh scripts/release-train.sh decide \
+            --conclusion "${{ steps.event.outputs.conclusion }}" \
+            --run-status "${{ steps.event.outputs.status }}" \
+            --sha "${{ steps.event.outputs.sha }}" \
+            --head "$head" | tee redecide.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat redecide.out)"; exit 0; fi
+          [[ "$rc" -eq 0 ]] || exit "$rc"
+          grep -q '^DECIDE=tag' redecide.out
+      - name: Select the next patch version
+        id: version
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$VERSION_OVERRIDE" ]]; then
+            [[ "$VERSION_OVERRIDE" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "version override must be X.Y.Z" >&2; exit 2; }
+            git ls-remote --tags origin | grep -q "refs/tags/v$VERSION_OVERRIDE$" && { echo "v$VERSION_OVERRIDE is already tagged" >&2; exit 4; }
+            version="$VERSION_OVERRIDE"
+          else
+            version="$(git ls-remote --tags origin | sh scripts/release-train.sh next-version)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "selected $version"
+      - name: Tag the exact green SHA and dispatch the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.event.outputs.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+        run: |
+          set -euo pipefail
+          if [[ "$REHEARSAL" == "true" ]]; then
+            # Tagless rehearsal from main: the version must still be unspent.
+            git ls-remote --tags origin | grep -q "refs/tags/v$VERSION$" && { echo "v$VERSION is already tagged; a rehearsal needs an unspent version" >&2; exit 4; }
+            gh workflow run release.yml --ref main -f version="$VERSION" -f rehearsal=true
+          else
+            git push origin "$SHA:refs/tags/v$VERSION"
+            gh workflow run release.yml --ref "v$VERSION" -f version="$VERSION"
+          fi
+
+  publish:
+    if: >-
+      github.event.repository.private == false &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Unpublished release candidate' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: release-train-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Fetch the candidate proof and read back its version and SHA
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-index archives
+          gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+            -n unpublished-candidate-index -D candidate-index/
+          version="$(jq -er .version candidate-index/candidate-proof.json)"
+          sha="$(jq -er .source_sha candidate-index/candidate-proof.json)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-rehearsal.* ]]; then echo "rehearsal=true" >> "$GITHUB_OUTPUT"; else echo "rehearsal=false" >> "$GITHUB_OUTPUT"; fi
+          for platform in $(jq -r '.certified_platforms[]' candidate-index/candidate-proof.json); do
+            gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              -n "candidate-$platform" -D "archives/$platform/"
+          done
+      - name: Publish nothing for a rehearsal run
+        if: steps.candidate.outputs.rehearsal == 'true'
+        run: |
+          echo "rehearsal ${{ steps.candidate.outputs.version }} verified and skipped: nothing published"
+      - name: Verify the candidate, then create the GitHub release
+        if: steps.candidate.outputs.rehearsal != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # The tag the train created must name exactly this SHA, or nothing publishes.
+          [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]] || { echo "v$VERSION does not name $SHA" >&2; exit 4; }
+          sh scripts/release-train.sh verify-candidate \
+            --proof candidate-index/candidate-proof.json \
+            --index candidate-index/release-index.json \
+            --version "$VERSION" --sha "$SHA"
+          max="$(git ls-remote --tags origin | grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's#refs/tags/v##' | sort -V | tail -1)"
+          latest_flag="$(sh scripts/release-train.sh latest-flag --version "$VERSION" --max-version "$max")"
+          files=(candidate-index/release-index.json)
+          for tar in archives/*/*.tar; do files+=("$tar"); done
+          # shellcheck disable=SC2086
+          gh release create "v$VERSION" --repo "${{ github.repository }}" \
+            --target "$SHA" --title "v$VERSION" --generate-notes $latest_flag \
+            "${files[@]}"
