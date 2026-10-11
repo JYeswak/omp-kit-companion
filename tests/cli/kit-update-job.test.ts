@@ -21,9 +21,10 @@ test("fake newer certified release becomes UPDATED, relinks the plugin and notif
 		plan: async () => ({ ...value, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY", current: { version: "1.2.3", sha256: "a".repeat(64), target: "../releases/1.2.3/bin/omp-kit", binary: "/x" }, release: {} } as never),
 		apply: async () => { applied = true; return { status: "UPDATED", exitCode: 0, receiptId: "r1", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }; },
 		relink: async binary => { expect(binary).toBe(join(value.prefix, "bin", "omp-kit")); return { ok: true, detail: "linked" }; },
+		reconcile: async binary => { expect(binary).toBe(join(value.prefix, "bin", "omp-kit")); return { ok: true, detail: "reconciled" }; },
 		notify: message => { notes.push(message); },
 	});
-	expect(applied).toBe(true); expect(result).toMatchObject({ status: "UPDATED", receiptId: "r1", activeVersion: "1.2.4", notification: true, relink: "APPLIED" });
+	expect(applied).toBe(true); expect(result).toMatchObject({ status: "UPDATED", receiptId: "r1", activeVersion: "1.2.4", notification: true, relink: "APPLIED", service: "APPLIED" });
 	expect(notes).toHaveLength(1); expect(notes[0]).toContain("1.2.4"); expect(notes[0]).toContain("r1");
 	expect(readdirSync(value.stateRoot)).toHaveLength(1);
 });
@@ -51,6 +52,19 @@ test("planted: relink failure keeps the update, reports BLOCKED and keeps the re
 	});
 	expect(result).toMatchObject({ status: "UPDATED", receiptId: "r3", activeVersion: "1.2.4", notification: true, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED" });
 	expect(notes).toHaveLength(1); expect(notes[0]).toContain("BLOCKED"); expect(notes[0]).toContain("r3");
+});
+
+test("planted: reconcile failure keeps the update, reports BLOCKED and keeps the receipt", async () => {
+	const value = config(); const notes: string[] = [];
+	const result = await runKitUpdateJob(value, {
+		plan: async () => ({ ...value, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+		apply: async () => ({ status: "UPDATED", exitCode: 0, receiptId: "r5", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }),
+		notify: message => { notes.push(message); },
+		relink: async () => ({ ok: true, detail: "" }),
+		reconcile: async () => ({ ok: false, detail: "exit 1: bootstrap refused" }),
+	});
+	expect(result).toMatchObject({ status: "UPDATED", receiptId: "r5", activeVersion: "1.2.4", notification: true, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED" });
+	expect(notes).toHaveLength(1); expect(notes[0]).toContain("BLOCKED"); expect(notes[0]).toContain("r5");
 });
 
 function installSymlink(root: string, version: string): void {
@@ -130,5 +144,48 @@ test("planted: poll refuses a missing repo slug instead of querying blindly", as
 		const value = config();
 		await expect(pollPublishedRelease(value.prefix, value.stateRoot, value.platform,
 			{ exec: async () => { throw new Error("network must not be touched"); } })).rejects.toThrow("KIT_UPDATE_POLL_CONFIG");
+	});
+});
+
+test("planted: poll-only with the published tag equal to installed returns CURRENT with no download", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.4");
+		value.pollRelease = async () => null;
+		let downloads = 0;
+		const result = await runKitUpdateJob(value, {
+			exec: async argv => {
+				if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+				downloads++;
+				return { exit: 0, stdout: "", stderr: "" };
+			},
+			plan: async () => { throw new Error("plan must not run with no source"); },
+		});
+		expect(downloads).toBe(0);
+		expect(result).toMatchObject({ status: "CURRENT", activeVersion: "1.2.4", notification: false, relink: "NOT_RUN", service: "NOT_RUN" });
+	});
+});
+
+test("poll-only install uses the published tuple when the static fallback is null", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		value.pollRelease = async () => null;
+		const seen: string[] = [];
+		const result = await runKitUpdateJob(value, {
+			exec: async argv => {
+				if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+				const dir = argv[argv.indexOf("--dir") + 1]!;
+				mkdirSync(dir, { recursive: true });
+				writeFileSync(join(dir, "release-index.json"), "{}");
+				writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
+				return { exit: 0, stdout: "", stderr: "" };
+			},
+			plan: async input => { seen.push(input.version); return { ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never; },
+			apply: async () => ({ status: "UPDATED", exitCode: 0, receiptId: "r6", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }),
+			relink: async () => ({ ok: true, detail: "" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			notify: () => {},
+		});
+		expect(seen).toEqual(["1.2.4"]);
+		expect(result).toMatchObject({ status: "UPDATED", receiptId: "r6", activeVersion: "1.2.4", relink: "APPLIED", service: "APPLIED" });
 	});
 });

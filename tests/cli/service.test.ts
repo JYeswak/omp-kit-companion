@@ -680,6 +680,36 @@ test("service run maps a failing launcher to FINDINGS without losing the receipt
   expect(receipt.exit).toBe(3);
 });
 
+function kitUpdateLauncher(home: string): void {
+  const bin = join(home, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\necho '{\"ok\":true}'\nexit 0\n", { mode: 0o755 });
+  chmodSync(join(bin, "omp-kit"), 0o755);
+  mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
+  chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
+}
+
+test("planted: service run kit-update with no tuple and no poll refuses KIT_UPDATE_JOB_CONFIG", () => {
+  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  roots.push(home);
+  kitUpdateLauncher(home);
+  const result = cli(["service", "run", "kit-update"], home, { OMP_KIT_LOAD_OVERRIDE: "0/1" });
+  // Refusals exit 2 by CLI-wide contract (refusal()); the bead text says 1 but
+  // every refusal code, including this one, maps to 2. The stable pin is the error code.
+  expect(result.code).toBe(2);
+  expect(result.envelope.errors[0].code).toBe("KIT_UPDATE_JOB_CONFIG");
+}, 60000);
+
+test("service run kit-update with poll-only config reaches the job instead of refusing", () => {
+  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  roots.push(home);
+  kitUpdateLauncher(home);
+  const result = cli(["service", "run", "kit-update"], home,
+    { OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_UPDATE_POLL: "github", OMP_KIT_UPDATE_REPO: "o/r" });
+  expect(result.code).toBe(0);
+  expect(result.envelope.data).toMatchObject({ overall: "OK", job: "kit-update", status: "DISABLED" });
+}, 60000);
+
 test("service status reports HOME-scoped install state from source", () => {
   const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
   roots.push(home);
@@ -1015,4 +1045,60 @@ test("a fixture install never takes over a foreign label, and --replace does it 
   }
   expect(realLaunchctlPath(testLabel).code).not.toBe(0);
   expect(realLaunchctlPath("com.omp-kit.omp-watch")).toEqual(prodBefore);
+});
+
+test("scheduled kit-update persists a validated poll-only config without a static tuple", () => {
+  const { home } = fixture();
+  const keys = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO",
+    "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"];
+  const prior = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, { OMP_KIT_UPDATE_ENABLED: "1", OMP_KIT_UPDATE_POLL: "github", OMP_KIT_UPDATE_REPO: "o/r" });
+    const plist = renderLaunchdPlist(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null).text;
+    expect(plist).toContain("<key>OMP_KIT_UPDATE_POLL</key>");
+    expect(plist).toContain("<key>OMP_KIT_UPDATE_REPO</key>");
+    expect(plist).not.toContain("OMP_KIT_UPDATE_INDEX");
+    const systemd = renderSystemdUnits(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null).service;
+    expect(systemd.split("\n")).toContain(`Environment=OMP_KIT_UPDATE_REPO="o/r"`);
+    expect(systemd).not.toContain("OMP_KIT_UPDATE_INDEX");
+    process.env.OMP_KIT_UPDATE_REPO = "not a slug!";
+    expect(() => renderLaunchdPlist(home, KNOWN_JOBS["kit-update"]!, join(home, ".local/bin/omp-kit"), null)).toThrow("KIT_UPDATE_LOCAL_TUPLE_REQUIRED");
+  } finally {
+    keys.forEach((key, index) => { if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index]; });
+  }
+});
+
+test("kit-update ticks every 300 s and a stale 3600 plist is rewritten on install", () => {
+  expect(KNOWN_JOBS["kit-update"]!.intervalSeconds).toBe(300);
+  const { home, launcher } = fixture();
+  const keys = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO",
+    "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"];
+  const prior = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, { OMP_KIT_UPDATE_ENABLED: "1", OMP_KIT_UPDATE_POLL: "github", OMP_KIT_UPDATE_REPO: "o/r" });
+    const jobDef = KNOWN_JOBS["kit-update"]!;
+    const rendered = renderLaunchdPlist(home, jobDef, launcher, null).text;
+    expect(rendered).toContain("<key>StartInterval</key>\n\t<integer>300</integer>");
+    const stale = rendered.replace("<key>StartInterval</key>\n\t<integer>300</integer>",
+      "<key>StartInterval</key>\n\t<integer>3600</integer>");
+    const plan = planInstall(home, jobDef, launcher, null, { path: "x", text: stale });
+    expect(plan.alreadyInstalled).toBe(false);
+    expect(plan.diff).not.toEqual([]);
+    const calls: string[][] = [];
+    const dest = join(home, "Library", "LaunchAgents", `${jobDef.label}.plist`);
+    const run = runner(calls, args => {
+      if (args[1] === "print") return { code: 0, stdout: healthyPrint(dest), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const result = installService(home, jobDef, launcher, null, { path: "x", text: stale },
+      { loaded: false, path: null, state: null, pid: null, runs: null, lastExit: null }, run);
+    expect(result).toMatchObject({ ok: true, changed: true });
+    const onDisk = readFileSync(dest, "utf8");
+    expect(onDisk).toContain("<key>StartInterval</key>\n\t<integer>300</integer>");
+    expect(onDisk).not.toContain("<integer>3600</integer>");
+  } finally {
+    keys.forEach((key, index) => { if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index]; });
+  }
 });

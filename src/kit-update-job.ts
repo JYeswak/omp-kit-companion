@@ -6,7 +6,12 @@ import { applyKitUpdate, planKitUpdate, type KitUpdateInput, type KitUpdatePlan,
 
 export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag"> & {
 	enabled: boolean;
-	pollRelease: () => Promise<Pick<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag">>;
+	/**
+	 * Certified static fallback; null when the job is poll-only (no local
+	 * tuple configured). A null fallback with nothing newer published is
+	 * CURRENT, not a refusal.
+	 */
+	pollRelease: () => Promise<Pick<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag"> | null>;
 };
 export type KitUpdateJobDependencies = {
 	plan?: (input: KitUpdateInput) => Promise<KitUpdatePreview>;
@@ -15,9 +20,13 @@ export type KitUpdateJobDependencies = {
 	/** Test seam for `gh` and the relinked binary. Production uses spawnSync. */
 	exec?: (argv: readonly string[]) => Promise<{ exit: number; stdout: string; stderr: string }>;
 	relink?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
+	/** Test seam for the new binary's `service install kit-update --apply --yes`. Production uses spawnSync. */
+	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
 };
-export type KitUpdateJobResult = { status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "UNDONE" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string; relink?: "APPLIED" | "FAILED" | "NOT_RUN" };
+export type KitUpdateJobResult = { status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "UNDONE" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string; relink?: "APPLIED" | "FAILED" | "NOT_RUN"; service?: "APPLIED" | "FAILED" | "NOT_RUN" };
 
+/** owner/repo slug for OMP_KIT_UPDATE_REPO; shared by the service renderer and the CLI gate. */
+export const KIT_UPDATE_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const PLATFORMS: Record<string, string> = {
 	"darwin/arm64/none": "darwin-arm64-none",
@@ -61,7 +70,7 @@ export type PublishedTuple = Pick<KitUpdateInput, "indexPath" | "archivePath" | 
 export async function pollPublishedRelease(prefix: string, stateRoot: string, platform: KitUpdateInput["platform"], dependencies: KitUpdateJobDependencies = {}): Promise<PublishedTuple | null> {
 	if (process.env.OMP_KIT_UPDATE_POLL !== "github") return null;
 	const repo = process.env.OMP_KIT_UPDATE_REPO;
-	if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("KIT_UPDATE_POLL_CONFIG: OMP_KIT_UPDATE_REPO must be owner/repo");
+	if (!repo || !KIT_UPDATE_REPO_PATTERN.test(repo)) throw new Error("KIT_UPDATE_POLL_CONFIG: OMP_KIT_UPDATE_REPO must be owner/repo");
 	const exec = dependencies.exec ?? defaultExec;
 	const tagOut = await exec(["gh", "release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName"]);
 	if (tagOut.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + tagOut.stderr.trim().slice(0, 200));
@@ -97,12 +106,19 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const out = (ran.stdout + ran.stderr).trim().slice(-500);
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});
+	const reconcile = dependencies.reconcile ?? (async (binary: string) => {
+		const ran = await defaultExec([binary, "service", "install", "kit-update", "--apply", "--yes"]);
+		const out = (ran.stdout + ran.stderr).trim().slice(-500);
+		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
+	});
 	let runId = randomUUID();
 	try {
 		// Install-on-publish: a newer published release replaces the static tuple.
 		// Anything else (disabled poll, nothing newer) keeps today's static path.
 		const published = await pollPublishedRelease(config.prefix, config.stateRoot, config.platform, dependencies);
 		const source = published ?? await config.pollRelease();
+		// Poll-only with nothing newer: nothing to install, nothing to refuse.
+		if (!source) return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" });
 		const preview = await plan({ ...config, ...source });
 		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" });
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
@@ -117,8 +133,15 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${result.activeVersion} (receipt ${result.receiptId}); kit is on ${result.activeVersion}, rerun \`omp-kit apply plugin --apply\`: ${link.detail}`);
 			return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED" });
 		}
+		// The new release may carry a new tick interval: re-render the installed
+		// plist with the new binary itself so StartInterval tracks the code.
+		const reconciled = await reconcile(binary);
+		if (!reconciled.ok) {
+			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${result.activeVersion} (receipt ${result.receiptId}); kit is on ${result.activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
+			return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED" });
+		}
 		await dependencies.notify?.(`omp-kit updated to ${result.activeVersion} (receipt ${result.receiptId}); plugin relink applied`);
-		return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "APPLIED" });
+		return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "APPLIED", service: "APPLIED" });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		await dependencies.notify?.("omp-kit update job failed: " + reason);

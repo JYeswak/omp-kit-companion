@@ -4,6 +4,7 @@ import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
 import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
+import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -188,6 +189,32 @@ function withoutTmuxTmpDir(text: string): string {
 		.replace(/^Environment=TMUX_TMPDIR=.*\n?/m, "");
 }
 
+const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
+function kitUpdateEnvironment(job: ServiceJobDef): [string, string][] {
+	if (job.name !== "kit-update" || KIT_UPDATE_ENV_KEYS.every(key => process.env[key] === undefined)) return [];
+	const enabled = process.env.OMP_KIT_UPDATE_ENABLED;
+	const index = process.env.OMP_KIT_UPDATE_INDEX;
+	const archive = process.env.OMP_KIT_UPDATE_ARCHIVE;
+	const version = process.env.OMP_KIT_UPDATE_VERSION;
+	const tag = process.env.OMP_KIT_UPDATE_SOURCE_TAG;
+	const poll = process.env.OMP_KIT_UPDATE_POLL;
+	const repo = process.env.OMP_KIT_UPDATE_REPO;
+	// Only validated inputs persist: a bad slug never rides along with a good tuple.
+	const clean = KIT_UPDATE_ENV_KEYS.every(key => !/[\r\n\0]/.test(process.env[key] ?? ""));
+	const staticValid = enabled === "1" && !!index && !!archive && !!version && tag === `v${version}` &&
+		/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version) &&
+		isAbsolute(index) && isAbsolute(archive) && resolve(index) === index && resolve(archive) === archive &&
+		dirname(index) === dirname(archive) && clean;
+	const pollValid = enabled === "1" && poll === "github" && !!repo && KIT_UPDATE_REPO_PATTERN.test(repo) && clean;
+	if (!staticValid && !pollValid) {
+		throw new Error("KIT_UPDATE_LOCAL_TUPLE_REQUIRED: enabled=1 plus POLL=github with REPO=owner/repo, or absolute same-directory index/archive, version and matching source tag, are required");
+	}
+	const persisted: [string, string][] = [["OMP_KIT_UPDATE_ENABLED", "1"]];
+	if (pollValid) persisted.push(["OMP_KIT_UPDATE_POLL", poll!], ["OMP_KIT_UPDATE_REPO", repo!]);
+	if (staticValid) persisted.push(["OMP_KIT_UPDATE_INDEX", index!], ["OMP_KIT_UPDATE_ARCHIVE", archive!], ["OMP_KIT_UPDATE_VERSION", version!], ["OMP_KIT_UPDATE_SOURCE_TAG", tag!]);
+	return persisted;
+}
+
 export interface RenderedPlist { label: string; text: string; launcher: string; watchPath: string | null }
 
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
@@ -218,6 +245,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 			: []),
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
+		...kitUpdateEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
 		"\t</dict>",
@@ -260,6 +288,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
 			? [`Environment=TMUX_TMPDIR=${systemdQuote(process.env.TMUX_TMPDIR)}`]
 			: []),
+		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
 	const service = [
