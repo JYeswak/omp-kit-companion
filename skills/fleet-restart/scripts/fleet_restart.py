@@ -21,6 +21,11 @@ import sys
 DEFAULT_PROTECT = ["uds--burn-down:0.0"]
 FORBIDDEN_CWDS = ["/private/tmp", "/tmp"]
 OMP_RE = re.compile(r"(?:^|\s)\S*bun\s+(\S*/\.bun/bin/omp|\S*/pi-coding-agent/dist/cli\.js)(?=\s|$)")
+# Tern (by OMP's authors) installs omp as one compiled binary; ps shows the name it was invoked by
+# ("omp --profile x", "/opt/homebrew/bin/omp -p", measured 2026-10-11) or its versioned path, which
+# contains a space ("…/Application Support/Tern/omp/versions/18.9.2 …").
+TERN_MARK = "/Tern/omp/versions/"
+TERN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 MCP_RE = re.compile(r"(?:^|\s)(@?[\w./-]+)@(\d+\.\d+\.\d+)\s+mcp(?:\s|$)")
 STATUS_MARK = "📁"  # omp status line: "<π|spinner> · <glyph> <model> · 📁 <cwd> ..." ('·' or ' > ' separators, maybe boxed)
 STATUS_DEPTH = 6  # the status bar is within the last few non-blank lines; older ones are scrollback
@@ -91,12 +96,23 @@ def same_flags(a, b):
 
 
 def omp_match(args):
+    """Flags of an omp agent process, or None. Bun-run omp anywhere in the line (the launcher may be
+    wrapped); a compiled omp only as the process's own first token, so a `zsh -lc '… && omp …'`
+    wrapper or `omp-kit` never counts."""
     if "__omp_worker" in args:
         return None
     m = OMP_RE.search(args)
-    if not m:
-        return None
-    return shlex.split(args[m.end():])
+    if m:
+        return shlex.split(args[m.end():])
+    first, _, rest = args.partition(" ")
+    if os.path.basename(first) == "omp":
+        return shlex.split(rest)
+    at = args.find(TERN_MARK)
+    if args.startswith("/") and at != -1:
+        version, _, rest = args[at + len(TERN_MARK):].partition(" ")
+        if TERN_VERSION_RE.match(version):
+            return shlex.split(rest)
+    return None
 
 
 def descendants(procs, root):

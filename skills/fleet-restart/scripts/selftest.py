@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_restart as fr  # noqa: E402
@@ -158,6 +159,21 @@ def main():
     case("NEG protected pane -> SKIP_PROTECTED", rows["uds--burn-down:0.0"]["action"] == "SKIP_PROTECTED", rows["uds--burn-down:0.0"]["action"])
     case("NEG chief pane -> SKIP_CHIEF", rows["omp-test:0.1"]["action"] == "SKIP_CHIEF", rows["omp-test:0.1"]["action"])
     case("NEG /private/tmp cwd -> HOLD_CWD", rows["modeltest:0.2"]["action"] == "HOLD_CWD", rows["modeltest:0.2"]["action"])
+    # --- Tern compiled omp (measured ps shapes 2026-10-11): an agent by its own first token or versioned path
+    tern = "/Users/josh/Library/Application Support/Tern/omp/versions/18.9.2"
+    for args, want in [("omp --profile codex --model gpt-6-luna", ["--profile", "codex", "--model", "gpt-6-luna"]),
+                       ("/opt/homebrew/bin/omp -p --profile claude", ["-p", "--profile", "claude"]),
+                       (tern + " --profile muse --thinking high", ["--profile", "muse", "--thinking", "high"]),
+                       ("omp", [])]:
+        got = fr.omp_match(args)
+        case("CTL Tern compiled omp detected, flags kept: %s" % args[:40], got == want, json.dumps(got))
+    for args in ["zsh -lc cd /Users/josh/Developer/jev && omp --profile glm; exec zsh -l",
+                 "omp-kit status --json", "/opt/homebrew/bin/omp-kit test", "omp __omp_worker_daemon_broker",
+                 tern + "-rc.1 --profile x", "grep omp", tern.replace("/Tern/", "/Other/") + " --profile x"]:
+        case("NEG not an omp agent: %s" % args[:48], fr.omp_match(args) is None, json.dumps(fr.omp_match(args)))
+    t0 = time.perf_counter()
+    fr.omp_match("x " + "bun " * 20000 + "/x/.bun/bin/ompz")
+    case("NEG long near-miss process line stays fast", time.perf_counter() - t0 < 0.05, "%.4fs" % (time.perf_counter() - t0))
     case("NEG unknown screen state -> HOLD_UNKNOWN_STATE", fr.parse_screen(["garbage"])["state"] == "UNKNOWN")
     case("NEG old omp status in shell scrollback is not read as IDLE", fr.parse_screen(SHELL_WITH_OLD_STATUS)["state"] == "UNKNOWN",
          str(fr.parse_screen(SHELL_WITH_OLD_STATUS)))
