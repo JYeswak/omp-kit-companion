@@ -56,7 +56,7 @@ jobs:
           fi
           if [[ -n "$REQUESTED_RUN_ID" && "$REQUESTED_RUN_ID" != *[!0-9]* ]]; then
             if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED_RUN_ID" > "$candidate_run" \
-              && gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED_RUN_ID/artifacts" -f per_page=100 > "$artifacts"; then
+              && gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED_RUN_ID/artifacts" -f per_page=100 > "$artifacts"; then
               :
             else
               printf '{"id":0}\n' > "$candidate_run"
