@@ -37,9 +37,11 @@ const TOKEN_EDGE = /^[(\[{"'`<]+|[)\]}"'`>,;:!?.]+$/g;
 
 /**
  * Kernel inv 4: beads are the execution substrate. A work dispatch is a
- * message whose first token is `D` (DISPATCH.md pane line `D AM<id> <slug>`)
- * or that has a line starting `queue:`. Slugs are not beads: the D line's
- * slug position and the names after `queue:` do not count as citations.
+ * message whose first token is `D` (docs/DISPATCH.md pane line
+ * `D AM<id> <slug>`) or that has a line starting `queue:`. The AM id token
+ * is a mail reference and never counts; every other token scans, so a
+ * known-prefix bead id in the slug position (or in the AM slot) counts as
+ * the citation. The names after `queue:` do not count.
  */
 export function dispatchBeads(message: string, knownPrefixes?: ReadonlySet<string>): { dispatch: boolean; bead_ids: string[] } {
 	const lines = message.split("\n");
@@ -48,7 +50,11 @@ export function dispatchBeads(message: string, knownPrefixes?: ReadonlySet<strin
 	const bead_ids: string[] = [];
 	lines.forEach((line, index) => {
 		let tokens = line.trim().split(/\s+/);
-		if (index === 0 && dLine) tokens = tokens.slice(3);
+		if (index === 0 && dLine) {
+			// SENDBIND1 (ompkit-plii): skip only the D marker and mail ids.
+			// A known-prefix bead id in the slug (or AM) slot counts below.
+			tokens = tokens.filter((token, tokenIndex) => tokenIndex === 0 || !/^AM[0-9]+$/.test(token.replace(TOKEN_EDGE, "")));
+		}
 		const queueAt = tokens.findIndex((token) => token.startsWith("queue:"));
 		if (queueAt >= 0) tokens = tokens.slice(0, queueAt);
 		for (const token of tokens) {

@@ -1,0 +1,1 @@
+- A known-prefix bead id in the D-line slug (or AM) slot counts as the dispatch citation; mail ids never do.
