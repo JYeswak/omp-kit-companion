@@ -41,7 +41,7 @@ const OLD = { settings: "export const backend = \"off\";\n", resolve: "export co
 const NEW_CONFIG = `${CHANGED_LINE}\n`;
 
 /** A throwaway repo: the real script, a compat file, pin sources in the product's layout, and two npm-pack-shaped releases. */
-function fixture(name: string, reviewedConfigs: string[]): string {
+function fixture(name: string, reviewedConfigs: string[], nextConfig = NEW_CONFIG): string {
 	const repo = join(root, name);
 	mkdirSync(join(repo, "scripts"), { recursive: true });
 	mkdirSync(join(repo, "src"), { recursive: true });
@@ -55,7 +55,7 @@ function fixture(name: string, reviewedConfigs: string[]): string {
 	].join("\n"));
 	writeFileSync(join(repo, "src", "memory-audit.ts"),
 		`const REVIEWED_SOURCE_PIN_SETS: readonly (readonly SourcePin[])[] = [\n\t[\n\t\t["mnemopi", "src/db.ts", "${sha(OLD.db)}"],\n\t],\n];\nfunction matchesReviewedSourcePins() {}\n`);
-	for (const [version, config] of [["1.0.0", OLD.config], ["1.1.0", NEW_CONFIG]] as const) {
+	for (const [version, config] of [["1.0.0", OLD.config], ["1.1.0", nextConfig]] as const) {
 		const files: Record<string, Record<string, string>> = {
 			agent: { [READINESS_FILES[0]!]: OLD.settings, [READINESS_FILES[1]!]: OLD.resolve, [READINESS_FILES[2]!]: config, "src/memory-backend/redact.ts": OLD.redact,
 				"package.json": JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }) },
@@ -151,4 +151,55 @@ test("a failed suite blocks the merge even when both families qualify the change
 	expect(outcome.eligible).toBe(false);
 	expect(outcome.reasons).toEqual(["ci.yml suites on the candidate tree: failure"]);
 	expect(outcome.issue!.title).toBe("OMP 1.1.0: certification blocked (ci.yml suites on the candidate tree)");
+});
+
+// The certification issue lifecycle (ompkit-issue-pr-autopilot-w159): one open certification issue at a time, closed by
+// the run that passes. Issues #81-#91 were six per-release copies of one blocked certification that nothing closed.
+interface Plan { create: { title: string; body: string } | null; update: { number: number; title: string; body: string } | null; close: { number: number; reason: string; comment: string }[] }
+async function plan(repo: string, open: { number: number; title: string; body: string | null }[]): Promise<Plan> {
+	writeFileSync(join(repo, "open-issues.json"), JSON.stringify(open));
+	await script(repo, ["issues", "--decision", join(repo, "decision.json"), "--issue", join(repo, "issue.json"), "--open", join(repo, "open-issues.json"),
+		"--version", "1.1.0", "--pr", "7", "--run-url", "https://example.invalid/run", "--out", join(repo, "plan.json")]);
+	return JSON.parse(readFileSync(join(repo, "plan.json"), "utf8")) as Plan;
+}
+const unrelated = { number: 5, title: "a person's bug report", body: "steps to reproduce" };
+
+test("N1: a release that changes no pinned memory source certifies and files no issue", async () => {
+	const repo = fixture("n1-no-diff", [OLD.config], OLD.config);
+	const outcome = await certify(repo, { CHEAPER_INFERENCE_API_KEY: undefined });
+	expect(outcome).toMatchObject({ eligible: true, reasons: [], issue: null });
+	expect(await plan(repo, [unrelated])).toEqual({ create: null, update: null, close: [] });
+});
+
+test("N2: a passing certification closes the earlier blocked run's issue with the green run", async () => {
+	mode = "disagree";
+	const blocked = fixture("n2-blocked", [OLD.config]);
+	await certify(blocked);
+	const filed = await plan(blocked, [unrelated]);
+	expect(filed.create!.title).toBe("OMP 1.1.0: memory semantics changed in src/config/settings.ts");
+	const open = [unrelated, { number: 81, title: filed.create!.title, body: filed.create!.body },
+		{ number: 60, title: "OMP 18.9.2: memory semantics changed", body: "<!-- omp-certify-issue version=18.9.2 -->\nlegacy" }];
+	const passing = fixture("n2-passing", [OLD.config, NEW_CONFIG]);
+	expect((await certify(passing)).eligible).toBe(true);
+	const resolved = await plan(passing, open);
+	expect(resolved.create).toBeNull();
+	expect(resolved.update).toBeNull();
+	expect(resolved.close.map(entry => [entry.number, entry.reason])).toEqual([[60, "completed"], [81, "completed"]]);
+	expect(resolved.close[0]!.comment).toContain("https://example.invalid/run");
+});
+
+test("N3: a blocked certification filed again, or for a newer release, leaves exactly one open issue", async () => {
+	mode = "disagree";
+	const repo = fixture("n3-dedupe", [OLD.config]);
+	await certify(repo);
+	const first = await plan(repo, []);
+	expect(first.create).not.toBeNull();
+	const filed = { number: 83, title: first.create!.title, body: first.create!.body };
+	expect(await plan(repo, [filed])).toEqual({ create: null, update: { number: 83, title: first.create!.title, body: first.create!.body }, close: [] });
+	const older = { number: 81, title: "OMP 1.0.9: memory semantics changed", body: "<!-- omp-certify-issue version=1.0.9 -->\nolder release" };
+	const newer = await plan(repo, [older, unrelated, filed]);
+	expect(newer.create).toBeNull();
+	expect(newer.update!.number).toBe(83);
+	expect(newer.close).toEqual([{ number: 81, reason: "not planned",
+		comment: "Superseded by #83: OMP 1.1.0 is now the release under certification, and only npm latest is certified. Run: https://example.invalid/run" }]);
 });

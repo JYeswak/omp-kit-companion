@@ -13,6 +13,10 @@
  *                               changed file in it
  *   body --review FILE --pr N ... --body-out FILE --decision-out FILE --issue-out FILE
  *                               render the PR body, the merge / agent-fix decision, and the agent-fix issue
+ *   issues --decision FILE [--issue FILE] --open FILE --version V --pr N --run-url URL --out FILE
+ *                               plan the certification issue: one open at a time, keyed by a stable marker.
+ *                               A merge closes every open certification issue with the green run; a blocked
+ *                               run updates the newest and closes the rest as superseded, or creates one
  *
  * Trust model: a pinned-source tuple qualifies when it is already on main (landed by a reviewed PR), or when two
  * model families independently agree the change is not a memory-semantic change and cite the changed lines. The
@@ -485,7 +489,7 @@ function body(): void {
 	const title = blockedFiles.length
 		? `OMP ${reviewed.to}: memory semantics changed in ${blockedFiles.map(file => file.path).join(", ")}`
 		: `OMP ${reviewed.to}: certification blocked (${reasons.map(reason => reason.split(":")[0]).join("; ")})`;
-	const issue: string[] = [`<!-- omp-certify-issue version=${reviewed.to} -->`, `Certification of OMP ${reviewed.to} (from ${reviewed.from}) did not qualify. PR #${pr} (branch \`omp-certify/${reviewed.to}\`) stays open with label \`agent-fix\`; push the fix to that branch. Run: ${runUrl}`, "", "## Why", ""];
+	const issue: string[] = [ISSUE_MARKER, `Certification of OMP ${reviewed.to} (from ${reviewed.from}) did not qualify. PR #${pr} (branch \`omp-certify/${reviewed.to}\`) stays open with label \`agent-fix\`; push the fix to that branch, or land it on main (the next hourly run re-certifies when the pins on main change). This issue closes itself when a certification merges. Run: ${runUrl}`, "", "## Why", ""];
 	for (const reason of reasons) issue.push(`- ${oneLine(reason, 600)}`);
 	issue.push("", "## What to change", "");
 	for (const gate of blockedGates) issue.push(`- **${gate}** (${ROLE[gate]}): ${codePaths(gate).join(", ") || "see the gate's pins"}. Confirm the semantics against the diff below, adapt the consumer code if they changed, then add the ${reviewed.to} tuple.`);
@@ -505,9 +509,47 @@ function body(): void {
 	console.log(`omp-certify body: agent-fix (${reasons.length} reason(s))`);
 }
 
+// ---- issues ----
+// One open certification issue at a time (RoboOMP's queue dedupes on a stable key, python/robomp/src/queue.py), and
+// a passing run closes it as completed (python/robomp/src/autoclose.py). Only npm latest is ever certified, so an
+// issue about an older release is superseded by the current one, never a separate work item.
+const ISSUE_MARKER = "<!-- omp-certify-issue -->";
+/** Also matches the version-keyed markers (`<!-- omp-certify-issue version=X -->`) that issues filed before this key carry. */
+const ISSUE_MARKER_PREFIX = "<!-- omp-certify-issue";
+interface OpenIssue { number: number; title: string; body: string | null }
+interface IssuePlan {
+	create: { title: string; body: string } | null;
+	update: { number: number; title: string; body: string } | null;
+	close: { number: number; reason: "completed" | "not planned"; comment: string }[];
+}
+function planIssues(input: { eligible: boolean; issue: { title: string; body: string } | null; open: OpenIssue[]; version: string; pr: string; runUrl: string }): IssuePlan {
+	const certification = input.open.filter(entry => (entry.body ?? "").includes(ISSUE_MARKER_PREFIX)).sort((a, b) => a.number - b.number);
+	if (input.eligible) {
+		return { create: null, update: null, close: certification.map(entry => ({ number: entry.number, reason: "completed" as const,
+			comment: `Resolved: OMP ${input.version} certification passed every gate, and PR #${input.pr} is merged (or set to auto-merge) at its tested head. Green run: ${input.runUrl}` })) };
+	}
+	if (!input.issue) fail("issues: a blocked certification needs --issue");
+	const keep = certification.at(-1);
+	const close = certification.slice(0, -1).map(entry => ({ number: entry.number, reason: "not planned" as const,
+		comment: `Superseded by #${keep!.number}: OMP ${input.version} is now the release under certification, and only npm latest is certified. Run: ${input.runUrl}` }));
+	return keep
+		? { create: null, update: { number: keep.number, title: input.issue.title, body: input.issue.body }, close }
+		: { create: { title: input.issue.title, body: input.issue.body }, update: null, close };
+}
+function issues(): void {
+	const decision = JSON.parse(readFileSync(arg("decision"), "utf8")) as { eligible: boolean };
+	const issuePath = optionalArg("issue");
+	const issue = !decision.eligible && issuePath && existsSync(issuePath) ? JSON.parse(readFileSync(issuePath, "utf8")) as { title: string; body: string } : null;
+	const open = JSON.parse(readFileSync(arg("open"), "utf8")) as OpenIssue[];
+	const plan = planIssues({ eligible: decision.eligible === true, issue, open, version: arg("version"), pr: arg("pr"), runUrl: arg("run-url") });
+	writeFileSync(arg("out"), JSON.stringify(plan, null, 2) + "\n");
+	console.log(`omp-certify issues: create ${plan.create ? 1 : 0}, update ${plan.update ? `#${plan.update.number}` : "none"}, close ${plan.close.map(entry => `#${entry.number}`).join(" ") || "none"}`);
+}
+
 const command = process.argv[2];
 if (command === "detect") detect();
 else if (command === "review") await review();
 else if (command === "apply") apply();
 else if (command === "body") body();
-else { console.error("usage: bun scripts/omp-certify.ts detect | review --from V --to V --work DIR --out FILE | apply --review FILE | body ..."); process.exit(2); }
+else if (command === "issues") issues();
+else { console.error("usage: bun scripts/omp-certify.ts detect | review --from V --to V --work DIR --out FILE | apply --review FILE | body ... | issues ..."); process.exit(2); }

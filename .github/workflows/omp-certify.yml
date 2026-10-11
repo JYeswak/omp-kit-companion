@@ -17,8 +17,10 @@ name: OMP certification
 #                 workflow, so the evidence is produced here and written into the PR
 #   publish       merge the tested head only when suites and differential are green and every pinned
 #                 source tuple is already on main or qualified by both agent passes; otherwise keep
-#                 the PR open, label it `agent-fix`, and create or update one open agent-fix issue.
-#                 A publish failure also labels the PR and creates or updates that issue.
+#                 the PR open, label it `agent-fix`, and keep exactly one open certification issue (the
+#                 newest is updated, older ones close as superseded). A merge closes every open certification
+#                 issue with the green run. A publish failure also labels the PR and updates that one issue.
+#                 scripts/agent-fix-beads.sh (control-plane cron lane) turns each open agent-fix issue into a bead.
 # CHEAPER_INFERENCE_API_KEY (secret) is optional: without it, changed tuples absent from main cannot qualify.
 # OMP_REVIEW_MODEL and OMP_REVIEWER_MODEL (variables) pin catalog ids; both must be listed by
 # GET /v1/models and come from different model families.
@@ -327,21 +329,23 @@ jobs:
         run: |
           set -euo pipefail
           F="$RUNNER_TEMP/findings"
-          marker="<!-- omp-certify-issue version=$LATEST -->"
-          find_agent_fix_issue() {
-            gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body |
-              jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker)) | .number] | first // empty'
-          }
-          upsert_agent_fix_issue() {
-            local title="$1"
-            local body="$2"
-            local existing
-            existing="$(find_agent_fix_issue)"
-            if [[ -n "$existing" ]]; then
-              gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --add-label agent-fix
-            else
-              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label agent-fix
+          # One open certification issue at a time: scripts/omp-certify.ts `issues` plans it from every open issue
+          # carrying the omp-certify-issue marker (old version-keyed markers included); this step only applies the plan.
+          apply_issue_plan() {
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title,body > "$F/open-issues.json"
+            bun scripts/omp-certify.ts issues --decision "$F/decision.json" --issue "$F/issue.json" --open "$F/open-issues.json" \
+              --version "$LATEST" --pr "$PR" --run-url "$RUN_URL" --out "$F/issue-plan.json"
+            if [[ "$(jq -r '.update != null' "$F/issue-plan.json")" == true ]]; then
+              gh issue edit "$(jq -r .update.number "$F/issue-plan.json")" --repo "$GITHUB_REPOSITORY" \
+                --title "$(jq -r .update.title "$F/issue-plan.json")" --body "$(jq -r .update.body "$F/issue-plan.json")" --add-label agent-fix
             fi
+            if [[ "$(jq -r '.create != null' "$F/issue-plan.json")" == true ]]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$(jq -r .create.title "$F/issue-plan.json")" \
+                --body "$(jq -r .create.body "$F/issue-plan.json")" --label agent-fix
+            fi
+            jq -c '.close[]' "$F/issue-plan.json" | while read -r entry; do
+              gh issue close "$(jq -r .number <<<"$entry")" --repo "$GITHUB_REPOSITORY" --reason "$(jq -r .reason <<<"$entry")" --comment "$(jq -r .comment <<<"$entry")"
+            done
           }
           gh label create agent-fix --repo "$GITHUB_REPOSITORY" --color F9D0C4 --description "OMP certification needs agent fixes" --force
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$F/body.md"
@@ -359,11 +363,10 @@ jobs:
               echo "::error::every check passed but PR #$PR could be neither auto-merged nor merged (repository setting 'Allow auto-merge' or token permissions)"
               exit 1
             fi
+            apply_issue_plan
           else
             gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label agent-fix
-            issue_title="$(jq -er .title "$F/issue.json")"
-            issue_body="$(jq -er .body "$F/issue.json")"
-            upsert_agent_fix_issue "$issue_title" "$issue_body"
+            apply_issue_plan
             if [[ "$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json autoMergeRequest --jq '.autoMergeRequest != null')" == true ]]; then
               gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto
             fi
@@ -373,16 +376,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          marker="<!-- omp-certify-issue version=$LATEST -->"
-          title="OMP $LATEST: certification publish failed"
-          issue_body="$(printf '%s\n\nCertification publishing failed for PR #%s.\nRun: %s\n' "$marker" "$PR" "$RUN_URL")"
+          F="$RUNNER_TEMP/findings"
+          mkdir -p "$F"
+          jq -n '{eligible: false, reasons: ["certification publish failed"]}' > "$F/decision.json"
+          jq -n --arg title "OMP $LATEST: certification publish failed" \
+            --arg body "$(printf '<!-- omp-certify-issue -->\n\nCertification publishing failed for PR #%s. This issue closes itself when a certification merges.\nRun: %s\n' "$PR" "$RUN_URL")" \
+            '{title: $title, body: $body}' > "$F/issue.json"
           gh label create agent-fix --repo "$GITHUB_REPOSITORY" --color F9D0C4 --description "OMP certification needs agent fixes" --force
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label agent-fix
-          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body |
-            jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker)) | .number] | first // empty')"
-          if [[ -n "$existing" ]]; then
-            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$issue_body" --add-label agent-fix
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title,body > "$F/open-issues.json"
+          bun scripts/omp-certify.ts issues --decision "$F/decision.json" --issue "$F/issue.json" --open "$F/open-issues.json" \
+            --version "$LATEST" --pr "$PR" --run-url "$RUN_URL" --out "$F/issue-plan.json"
+          if [[ "$(jq -r '.update != null' "$F/issue-plan.json")" == true ]]; then
+            gh issue edit "$(jq -r .update.number "$F/issue-plan.json")" --repo "$GITHUB_REPOSITORY" \
+              --title "$(jq -r .update.title "$F/issue-plan.json")" --body "$(jq -r .update.body "$F/issue-plan.json")" --add-label agent-fix
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$issue_body" --label agent-fix
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$(jq -r .create.title "$F/issue-plan.json")" \
+              --body "$(jq -r .create.body "$F/issue-plan.json")" --label agent-fix
           fi
+          jq -c '.close[]' "$F/issue-plan.json" | while read -r entry; do
+            gh issue close "$(jq -r .number <<<"$entry")" --repo "$GITHUB_REPOSITORY" --reason "$(jq -r .reason <<<"$entry")" --comment "$(jq -r .comment <<<"$entry")"
+          done
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "Certification publishing failed; an open agent-fix issue contains the disposition. Run: $RUN_URL"
