@@ -192,7 +192,10 @@ export async function proveSend(input: {
 	const sendEnv = selection.status === "RESOLVED" && selection.tmuxTmpdir
 		? { ...env, TMUX_TMPDIR: selection.tmuxTmpdir }
 		: env;
+	const firstToken = input.message.trimStart().split(/\s+/, 1)[0] ?? "";
+	const isSlash = firstToken.startsWith("/");
 	const runTmux = (args: string[]) => exec.run(["tmux", ...tmuxArgs, ...args], sendEnv);
+	const slashBaseline = isSlash ? runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]).out : "";
 	const isDispatch = dispatchBeads(input.message).dispatch;
 	const paneDir = isDispatch && !input.knownPrefixes && selection.status === "RESOLVED"
 		? runTmux(["display-message", "-p", "-t", input.pane, "#{pane_current_path}"]).out.trim()
@@ -214,7 +217,12 @@ export async function proveSend(input: {
 	const deadlineMs = input.deadlineMs ?? SEND_DEADLINE_MS;
 	const wait = input.wait ?? waitFor;
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
-	const text = `${input.message}\n[${marker}]`;
+	// SENDRESUME1 (ompkit-q3mw): a slash command must reach the pane verbatim.
+	// Send it with no appended marker (the marker stays out of band in the
+	// drop record); delivery is proved by the command effect below, never by
+	// marker text echoed in the composer. Never press Enter into a slash
+	// command: that would execute it twice.
+	const text = isSlash ? input.message : `${input.message}\n[${marker}]`;
 	if (selection.status === "UNAVAILABLE") {
 		const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
 		return { status: "NOT_DELIVERED", marker, sends: 0, drop_path: dropPath, bead_ids, no_bead_reason, tmux_socket: null,
@@ -231,8 +239,11 @@ export async function proveSend(input: {
 			// -S -200 reads scrollback history: a rendered message scrolls off
 			// the visible screen but stays provable in history.
 			const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
-			if (got.code === 0 && got.out.includes(marker)) {
+			if (got.code === 0 && (isSlash ? got.out !== slashBaseline : got.out.includes(marker))) {
 				markerSeen = true;
+				if (isSlash) {
+					return { status: "OK", marker, sends, drop_path: null, detail: `command effect observed in ${input.pane} history after ${sends} send(s)`, bead_ids, no_bead_reason, tmux_socket };
+				}
 				// Text typed into the input box but never submitted is not a delivery.
 				if (!markerInComposer(got.out, marker)) {
 					const how = entered ? " after one Enter" : "";
@@ -246,7 +257,7 @@ export async function proveSend(input: {
 				// bounded Enter; a busy pane is watched for a self-clear.
 				if (paneIsBusy(got.out)) {
 					receiverActive = true;
-				} else if (!entered) {
+				} else if (!entered && !isSlash) {
 					runTmux(["send-keys", "-t", input.pane, "Enter"]);
 					entered = true;
 				}
@@ -267,5 +278,6 @@ export async function proveSend(input: {
 		}
 	}
 	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: `marker never appeared in ${input.pane} history; message written to ${dropPath}`, bead_ids, no_bead_reason, tmux_socket };
+	const tailDetail = isSlash ? `no command effect observed in ${input.pane} history; message written to ${dropPath}` : `marker never appeared in ${input.pane} history; message written to ${dropPath}`;
+	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: tailDetail, bead_ids, no_bead_reason, tmux_socket };
 }
