@@ -69,7 +69,7 @@ No `*_v2`, `*_new`, or duplicate modules. One canonical implementation per conce
 
 ## Backwards Compatibility
 
-Clean cutover: when a command or format changes, migrate every caller, test and document in the same change and remove the old path. No compatibility aliases or shims. Record user-visible changes in `CHANGELOG.md` under "Unreleased".
+Clean cutover: when a command or format changes, migrate every caller, test and document in the same change and remove the old path. No compatibility aliases or shims. Record user-visible changes as a `changelog.d/<bead>.md` fragment (one-line, user-facing `- ` bullets; optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds fragments into `CHANGELOG.md` `## [Unreleased]` and promotes it to the release section (upstream oh-my-pi shape; released sections are immutable). A CLI command or doctor scope change also updates README.md's `## Command reference`: `bun scripts/readme-check.ts` (fresh-gate step `readme`, CI) refuses a README missing any registry command or scope, or pinning a release version.
 
 ## Compiler Checks
 

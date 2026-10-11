@@ -29,7 +29,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_focused; do
+	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_readme gate_focused; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -172,6 +172,15 @@ gate_notes() {
 		return 0
 	fi
 	sh "$SCRIPT_DIR/check-pushed-notes.sh" --repo "$ROOT" --base "$BASE" --tip "$COMMIT" --archive-dir "$ARCHIVE_DIR"
+}
+
+# README currency: every registry command and doctor scope documented, no pinned
+# release version, readme-update gate when installed (scripts/readme-check.ts).
+gate_readme() {
+	(
+		cd "$ARCHIVE_DIR"
+		bun run --no-env-file --config=/dev/null scripts/readme-check.ts --root "$ARCHIVE_DIR"
+	)
 }
 
 gate_focused() {
@@ -385,6 +394,7 @@ run_step manifest gate_manifest || exit 1
 run_step cli-compile gate_cli_compile || exit 1
 run_step harness-gate gate_harness || exit 1
 run_step notes gate_notes || exit 1
+run_step readme gate_readme || exit 1
 run_step focused gate_focused || exit 1
 elapsed=$(($(date +%s) - started))
 if [ "$elapsed" -ge 180 ]; then

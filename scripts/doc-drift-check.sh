@@ -1,7 +1,8 @@
 #!/bin/sh
 # doc-drift-check.sh — PUB1a doc-drift gate
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.1).
-# A push that changes the CLI surface without touching its docs is refused,
+# A push that changes the CLI surface without touching its docs (docs/ or
+# README.md, whose command reference lists every command) is refused,
 # naming the undocumented surface. The surface is derived from the command
 # registry (src/commands.ts COMMANDS export) at each revision via throwaway
 # git worktrees — never from grep of source text. A pure-internal change
@@ -66,10 +67,10 @@ if [ -z "$added" ]; then
 	printf 'doc-drift: OK (no surface change)\n'
 	exit 0
 fi
-docs_changed=$(git -C "$REPO" diff --name-only "$BASE" "$HEAD" -- docs/ 2>/dev/null | head -1) || true
+docs_changed=$(git -C "$REPO" diff --name-only "$BASE" "$HEAD" -- docs/ README.md 2>/dev/null | head -1) || true
 if [ -n "$docs_changed" ]; then
 	printf 'doc-drift: OK (surface changed, docs touched)\n'
 	exit 0
 fi
 printf 'undocumented surface:\n%s\n' "$added" >&2
-refuse "CLI surface changed with no docs/ change in $BASE..$HEAD"
+refuse "CLI surface changed with no docs/ or README.md change in $BASE..$HEAD"

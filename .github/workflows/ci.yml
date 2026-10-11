@@ -145,6 +145,13 @@ jobs:
         run: python3 tests/cli/native_candidate_test.py
       - name: Test exact-SHA release reuse validation
         run: python3 tests/scripts/release_reuse_test.py
+      - name: Check README currency (every command and doctor scope documented, no pinned release version)
+        run: bun scripts/readme-check.ts
+      - name: Exercise the release train, release-bump and doc-drift contracts
+        run: |
+          mkdir -p var/agent-tmp
+          sh tests/cli/release-train.test.sh
+          sh tests/cli/doc-drift.test.sh
       - name: Run differential native-vs-kit oracle
         if: runner.os == 'Linux'
         run: bun scripts/differential-oracle.ts

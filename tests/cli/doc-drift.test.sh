@@ -41,6 +41,8 @@ mkrepo() {
 	if [ "$docs" = "docs" ]; then
 		mkdir -p "$repo/docs"
 		printf '# new flag\n' > "$repo/docs/usage.md"
+	elif [ "$docs" = "readme" ]; then
+		printf '# fixture\n\n## Command reference\n\nomp-kit serve --port PORT\n' > "$repo/README.md"
 	elif [ "$docs" = "internal" ]; then
 		printf '# internal refactor note\n' > "$repo/notes.txt"
 	fi
@@ -65,6 +67,14 @@ if sh "$CHECK" HEAD~1 HEAD "$repo" > "$TMP/out" 2>&1; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL documented: rc=%s\n' "$(cat "$TMP/out")"
+fi
+
+# 2b. same surface change documented only in README.md -> passes (README.md is a doc)
+repo=$(mkrepo readme-documented ',\n  { name: "serve", usage: "serve [--port PORT]", flags: [{ name: "--port" }] }' readme)
+if sh "$CHECK" HEAD~1 HEAD "$repo" > "$TMP/out" 2>&1 && grep -q "docs touched" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL readme-documented: rc=%s\n' "$(cat "$TMP/out")"
 fi
 
 # 3. pure-internal change (identical surface) with no docs -> quiet
