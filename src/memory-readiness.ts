@@ -51,6 +51,10 @@ const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:4e41a9b93263ea27ae3a339bfc3f30eb0d4bc8d234550d5f1443d208c0ca60cf",
 	// OMP 18.8.6: adds one reload when a live config file watch is armed; on-disk memory semantics unchanged.
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:b997d3564231364d176976a02a127bb91951c82ce29fc7b241dc39ddf4a4e716",
+	// OMP 18.9.2: config/settings.ts only adds a read-only getConfigFiles() accessor over the existing #configFiles;
+	// memory default off, no-op fallback and legacy false -> off unchanged. Agent-reviewed for omp-certify PR #90
+	// (ompkit-issue-pr-autopilot-w159).
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:6a4b300e8b14ceb406aed6dbd5d9d518183195744249fb054084e107b3b326a0",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [
 	"src/memory-backend/settings.ts",
