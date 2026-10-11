@@ -7,6 +7,14 @@ on:
         description: Existing vX.Y.Z tag to certify (for a rehearsal, the intended next X.Y.Z, which must have no tag yet); publication is a separate gated operation
         required: true
         type: string
+      sha:
+        description: Exact source commit SHA selected by the release train
+        required: false
+        type: string
+      reuse_candidate_run_id:
+        description: Prior successful same-SHA rehearsal run whose full candidate may be replayed
+        required: false
+        type: string
       rehearsal:
         description: Dispatch from main with no tag; runs the whole pipeline on a throwaway X.Y.Z-rehearsal.RUN.ATTEMPT version and signs nothing
         required: false
@@ -15,34 +23,129 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  validate-tag:
+  reuse-preflight:
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      version: ${{ steps.identity.outputs.version }}
+      reuse_fast_ci: ${{ steps.select.outputs.reuse_fast_ci }}
+      candidate_run_id: ${{ steps.select.outputs.candidate_run_id }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+      - name: Select exact-SHA green CI and complete prior candidates
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
+          BASE_VERSION: ${{ inputs.version }}
+          REQUESTED_RUN_ID: ${{ inputs.reuse_candidate_run_id }}
+        run: |
+          set -euo pipefail
+          ci_runs="$RUNNER_TEMP/ci-runs.json"
+          candidate_run="$RUNNER_TEMP/candidate-run.json"
+          artifacts="$RUNNER_TEMP/candidate-artifacts.json"
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$SOURCE_SHA" -f branch=main -f event=push -f per_page=100 > "$ci_runs"; then
+            printf '{"workflow_runs":[]}\n' > "$ci_runs"
+          fi
+          if [[ -n "$REQUESTED_RUN_ID" && "$REQUESTED_RUN_ID" != *[!0-9]* ]]; then
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED_RUN_ID" > "$candidate_run" \
+              && gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED_RUN_ID/artifacts" -f per_page=100 > "$artifacts"; then
+              :
+            else
+              printf '{"id":0}\n' > "$candidate_run"
+              printf '{"artifacts":[]}\n' > "$artifacts"
+            fi
+          else
+            printf '{"id":0}\n' > "$candidate_run"
+            printf '{"artifacts":[]}\n' > "$artifacts"
+          fi
+          python3 scripts/release_reuse.py preflight \
+            --ci-runs "$ci_runs" --candidate-run "$candidate_run" --artifacts "$artifacts" \
+            --source-sha "$SOURCE_SHA" --base-version "$BASE_VERSION" \
+            --requested-run-id "$REQUESTED_RUN_ID" --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+  reuse-candidate-evidence:
+    needs: reuse-preflight
+    if: ${{ needs['reuse-preflight'].outputs.candidate_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidate_run_id: ${{ steps.validate.outputs.run_id }}
+      candidate_version: ${{ steps.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: unpublished-candidate-index
+          path: candidate-index/
+          run-id: ${{ needs['reuse-preflight'].outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the saved candidate index before skipping candidate generation
+        id: validate
+        continue-on-error: true
+        env:
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
+          BASE_VERSION: ${{ inputs.version }}
+          CANDIDATE_RUN_ID: ${{ needs['reuse-preflight'].outputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_reuse.py validate-index \
+            --proof candidate-index/candidate-proof.json \
+            --index candidate-index/release-index.json \
+            --omp-config scripts/omp-compat.json \
+            --source-sha "$SOURCE_SHA" --base-version "$BASE_VERSION" \
+            --run-id "$CANDIDATE_RUN_ID" >> "$GITHUB_OUTPUT"
+  validate-tag:
+    needs: [reuse-preflight, reuse-candidate-evidence]
+    if: ${{ always() && github.event.repository.private == false && needs['reuse-preflight'].result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 0
       - name: Require an exact, already-selected release tag, or a tagless rehearsal from main
         id: identity
         env:
           VERSION: ${{ inputs.version }}
           REHEARSAL: ${{ inputs.rehearsal }}
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
+          SOURCE_SHA_INPUT: ${{ inputs.sha }}
+          REUSE_VERSION: ${{ needs['reuse-candidate-evidence'].outputs.candidate_version }}
         run: |
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          if [[ "$REHEARSAL" == "true" ]]; then
-            # The rehearsed SHA is main's head, the commit a tag would name; the real version must still be unspent.
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          printf 'source_sha=%s\n' "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          if [[ "$REHEARSAL" == "true" || -n "$SOURCE_SHA_INPUT" ]]; then
             test "$GITHUB_REF" = "refs/heads/main"
             if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-              echo "v$VERSION is already tagged; a rehearsal needs a version no tag has spent" >&2
+              echo "v$VERSION is already tagged; a candidate needs an unspent version" >&2
               exit 1
             fi
-            printf 'version=%s-rehearsal.%s.%s\n' "$VERSION" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+            if [[ -n "$REUSE_VERSION" ]]; then
+              printf 'version=%s\n' "$REUSE_VERSION" >> "$GITHUB_OUTPUT"
+            elif [[ "$REHEARSAL" == "true" ]]; then
+              printf 'version=%s-rehearsal.%s.%s\n' "$VERSION" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+            else
+              printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+            fi
           else
             test "$GITHUB_REF" = "refs/tags/v$VERSION"
             test "$(git rev-parse "refs/tags/v$VERSION^{commit}")" = "$GITHUB_SHA"
@@ -55,86 +158,55 @@ jobs:
           sh scripts/release-notes.sh check --base-tag "$previous_tag" --head "$GITHUB_SHA"
 
   native-candidate:
-    needs: validate-tag
-    if: github.event.repository.private == false
+    needs: [validate-tag, reuse-preflight, reuse-candidate-evidence]
+    if: ${{ always() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['reuse-candidate-evidence'].outputs.candidate_run_id == '' }}
     # CI produces provisional artifacts; the attestation gate validates only the ship set below.
     uses: ./.github/workflows/ci.yml
     with:
       version: ${{ needs.validate-tag.outputs.version }}
+      source_sha: ${{ needs.validate-tag.outputs.source_sha }}
+      reuse_fast_ci: ${{ needs['reuse-preflight'].outputs.reuse_fast_ci == 'true' }}
     permissions:
       contents: read
 
-  intel-probe:
-    # Non-shipping Intel macOS probe: reported, but it cannot gate candidate-index or attestation.
-    needs: [validate-tag, native-candidate]
-    if: ${{ always() && github.event.repository.private == false && needs['native-candidate'].result != 'skipped' }}
-    continue-on-error: true
-    runs-on: macos-15-intel
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        track: [minimum, certified]
-    env:
-      CANDIDATE_VERSION: ${{ needs.validate-tag.outputs.version }}
-      TARGET: darwin-x64-none
-      OMP_TRACK: ${{ matrix.track }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - name: Resolve the OMP ${{ matrix.track }} version from scripts/omp-compat.json
-        run: echo "OMP_VERSION=$(jq -er ".$OMP_TRACK" scripts/omp-compat.json)" >> "$GITHUB_ENV"
-      - name: Install OMP ${{ matrix.track }} for native behavior
-        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
-      - name: Install pinned TypeScript LSP for native route proof
-        run: npm install --global typescript-language-server@5.1.3 typescript@5.9.3
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: candidate-darwin-x64-none
-          path: ${{ runner.temp }}/native/darwin-x64-none
-      - name: Certify downloaded archive on OMP ${{ matrix.track }}
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-        run: |
-          python3 scripts/native-candidate.py native --version "$CANDIDATE_VERSION" \
-            --platform "$TARGET" --source-sha "$SOURCE_SHA" \
-            --omp-version "$OMP_VERSION" --omp-track "$OMP_TRACK" \
-            --asset "$RUNNER_TEMP/native/$TARGET/asset.json" \
-            --archive-dir "$RUNNER_TEMP/native/$TARGET" \
-            --out "$RUNNER_TEMP/native-receipt/receipt.json"
-      - name: Preserve only detached bounded proof, including refusal
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: probe-receipt-darwin-x64-none-${{ matrix.track }}
-          path: ${{ runner.temp }}/native-receipt/receipt.json
-          if-no-files-found: warn
-          retention-days: 7
 
   attest-platforms:
-    needs: [validate-tag, native-candidate]
+    needs: [validate-tag, native-candidate, reuse-preflight, reuse-candidate-evidence]
     # Run after the producer even when unrelated CI jobs fail; artifact validation fails closed.
-    if: ${{ always() && github.event.repository.private == false && needs['native-candidate'].result != 'skipped' }}
+    if: ${{ always() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && (needs['reuse-candidate-evidence'].outputs.candidate_run_id != '' || needs['native-candidate'].result != 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       platforms: ${{ steps.select.outputs.platforms }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate-tag.outputs.source_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: unpublished-candidate-index
           path: candidate-index/
+          run-id: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Require the exact certified ship set
         id: select
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.validate-tag.outputs.source_sha }}
+          BASE_VERSION: ${{ inputs.version }}
+          CANDIDATE_RUN_ID: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id }}
         run: |
           set -euo pipefail
           proof=candidate-index/candidate-proof.json
           index=candidate-index/release-index.json
+          if [[ -n "$CANDIDATE_RUN_ID" ]]; then
+            python3 scripts/release_reuse.py validate-index \
+              --proof "$proof" --index "$index" \
+              --omp-config scripts/omp-compat.json \
+              --source-sha "$SOURCE_SHA" --base-version "$BASE_VERSION" \
+              --run-id "$CANDIDATE_RUN_ID" >/dev/null
+          fi
           test "$(jq -er '.source_sha' "$proof")" = "$SOURCE_SHA"
           test "$(jq -er '.version' "$proof")" = "$VERSION"
           platforms="$(jq -cer '.certified_platforms | select(type == "array" and length > 0)' "$proof")"
@@ -143,11 +215,19 @@ jobs:
           jq -e --argjson platforms "$platforms" '(.assets | keys | sort) == ($platforms | sort)' "$index" >/dev/null
           test "$(jq -er '.source_tag' "$index")" = "v$VERSION"
           printf 'platforms=%s\n' "$platforms" >> "$GITHUB_OUTPUT"
+      - name: Re-publish the validated candidate index for release consumers
+        if: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unpublished-candidate-index
+          path: candidate-index/
+          if-no-files-found: error
+          retention-days: 7
 
   attest:
     # Only the validated ship set gates attestation, not unrelated CI jobs.
-    needs: attest-platforms
-    if: github.event.repository.private == false
+    needs: [attest-platforms, reuse-candidate-evidence]
+    if: ${{ always() && github.event.repository.private == false && needs['attest-platforms'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -156,13 +236,38 @@ jobs:
         platform: ${{ fromJSON(needs['attest-platforms'].outputs.platforms) }}
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
           path: candidate/
+          run-id: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unpublished-candidate-index
+          path: candidate-index/
+          run-id: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify archive bytes against the exact candidate index
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: python3 scripts/release_reuse.py verify-archive --index candidate-index/release-index.json --platform "$PLATFORM" --archive-dir candidate/
+      - name: Re-publish the verified candidate archive for release consumers
+        if: ${{ needs['reuse-candidate-evidence'].outputs.candidate_run_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-${{ matrix.platform }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
       - name: Generate SBOM for the candidate archive
         # v0.9.0 bundled @actions/artifact 0.6 (retired v1 API): every SBOM step failed with "Create Artifact
         # Container failed" in 0.2.10, 0.2.11 and 0.2.16. v0.24.3 uses @actions/artifact 6 and declares output-file.

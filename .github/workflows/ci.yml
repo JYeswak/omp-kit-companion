@@ -26,6 +26,11 @@ on:
         description: Full commit SHA to test instead of github.sha (omp-certify.yml passes its candidate commit)
         type: string
         required: false
+      reuse_fast_ci:
+        description: Reuse exact-SHA green main CI by skipping only Ubuntu CLI and ladder legs
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -79,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]') }}
+        os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -138,6 +143,8 @@ jobs:
         run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/certified detached native receipts
         run: python3 tests/cli/native_candidate_test.py
+      - name: Test exact-SHA release reuse validation
+        run: python3 tests/scripts/release_reuse_test.py
       - name: Run differential native-vs-kit oracle
         if: runner.os == 'Linux'
         run: bun scripts/differential-oracle.ts
@@ -173,7 +180,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+        os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-latest"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]')) }}
         omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
