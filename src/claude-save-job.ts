@@ -10,8 +10,23 @@
  * stash, branch creation, or force-push: a non-fast-forward push is reported.
  * Tests run on scratch repos only, never ~/.claude itself.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+export const GITLEAKS_TIMEOUT_MS = 15_000;
+
+export type ClaudeSaveGitEnv = Readonly<Record<string, string>>;
+
+export interface GitleaksScanRequest {
+	target: string;
+	treeId: string;
+}
+
+export type GitleaksScanResult =
+	| { disposition: "COMPLETED"; command: readonly string[]; target: string; treeId: string; exitCode: number; report: string; stderr: string }
+	| { disposition: "NOT_RUN"; command: readonly string[]; target: string; reason: "TIMEOUT" | "SPAWN_FAILED" | "SIGNALLED"; timeoutMs: number; detail: string };
+
+export type GitleaksScanner = (request: GitleaksScanRequest) => GitleaksScanResult;
 
 export type ClaudeSaveStatus = "DISABLED" | "CLEAN" | "PUSHED" | "REFUSED" | "PUSH_FAILED" | "FAILED";
 
@@ -37,9 +52,8 @@ export interface ClaudeSaveGit {
 }
 
 export interface ClaudeSaveDeps {
-	git?: (args: readonly string[]) => ClaudeSaveGit;
-	/** Return exit code 1 with finding text on any leak; throw/return nonzero. */
-	gitleaks?: (repo: string) => { code: number; output: string };
+	git?: (args: readonly string[], env?: ClaudeSaveGitEnv) => ClaudeSaveGit;
+	gitleaks?: GitleaksScanner;
 	notify?: (message: string) => void;
 	runId?: string;
 	nowIso?: string;
@@ -76,10 +90,44 @@ function basename(path: string): string {
 export function checkSkillLibrary(trackedFiles: string[]): string[] {
 	return trackedFiles.filter(path => basename(path) === "SKILL.md" && path !== "skills/SKILL.md" && !path.startsWith("skills/"));
 }
+export function runGitleaksScan(executable: string, request: GitleaksScanRequest, timeoutMs = GITLEAKS_TIMEOUT_MS): GitleaksScanResult {
+	const command = [executable, "detect", "--source", request.target, "--no-git", "--report-format", "json", "--report-path", "/dev/stdout", "--no-banner", "--redact"];
+	try {
+		const out = Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe", timeout: timeoutMs });
+		if (out.exitCode === null) {
+			return {
+				disposition: "NOT_RUN",
+				command,
+				target: request.target,
+				reason: out.signalCode === "SIGTERM" ? "TIMEOUT" : "SIGNALLED",
+				timeoutMs,
+				detail: `scanner terminated by ${out.signalCode ?? "unknown signal"}`
+			};
+		}
+		return {
+			disposition: "COMPLETED",
+			command,
+			target: request.target,
+			treeId: request.treeId,
+			exitCode: out.exitCode,
+			report: out.stdout.toString(),
+			stderr: out.stderr.toString()
+		};
+	} catch (error) {
+		return {
+			disposition: "NOT_RUN",
+			command,
+			target: request.target,
+			reason: "SPAWN_FAILED",
+			timeoutMs,
+			detail: error instanceof Error ? error.message : String(error)
+		};
+	}
+}
 
 interface Ctx {
-	git: (args: readonly string[]) => ClaudeSaveGit;
-	gitleaks?: (repo: string) => { code: number; output: string };
+	git: (args: readonly string[], env?: ClaudeSaveGitEnv) => ClaudeSaveGit;
+	gitleaks?: GitleaksScanner;
 	notify?: (message: string) => void;
 	repo: string;
 	stateRoot: string;
@@ -90,6 +138,26 @@ interface Ctx {
 function fail(ctx: Ctx, refusal: string, reason: string): ClaudeSaveResult {
 	ctx.notify?.(`claude-save refused: ${refusal}: ${reason}`);
 	return { status: "REFUSED", receiptId: null, committed: false, pushed: false, refusal, reason };
+}
+
+function materializeGitleaksTree(ctx: Ctx, treeId: string): { root: string; target: string } {
+	mkdirSync(ctx.stateRoot, { recursive: true, mode: 0o700 });
+	const root = mkdtempSync(join(ctx.stateRoot, "claude-save-gitleaks-"));
+	const target = join(root, "source");
+	const env = { GIT_INDEX_FILE: join(root, "index") };
+	try {
+		mkdirSync(target, { mode: 0o700 });
+		const readTree = ctx.git(["read-tree", treeId], env);
+		if (readTree.code !== 0) throw new Error(`temporary index read-tree failed: ${readTree.stderr.trim()}`);
+		const writtenTree = ctx.git(["write-tree"], env);
+		if (writtenTree.code !== 0 || writtenTree.stdout.trim() !== treeId) throw new Error("temporary index tree did not match the candidate tree");
+		const checkout = ctx.git(["checkout-index", "--all", `--prefix=${target}/`], env);
+		if (checkout.code !== 0) throw new Error(`candidate tree checkout failed: ${checkout.stderr.trim()}`);
+		return { root, target };
+	} catch (error) {
+		rmSync(root, { recursive: true, force: true });
+		throw error;
+	}
 }
 
 function record(ctx: Ctx, result: ClaudeSaveResult): ClaudeSaveResult {
@@ -107,8 +175,8 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 	const runId = deps.runId ?? Math.random().toString(36).slice(2, 10);
 	const nowIso = deps.nowIso ?? new Date().toISOString();
 	if (!config.enabled) return { status: "DISABLED", receiptId: null, committed: false, pushed: false };
-	const git = deps.git ?? ((args: readonly string[]) => {
-		const out = Bun.spawnSync(["git", "-C", config.repo, ...args], { stdout: "pipe", stderr: "pipe" });
+	const git = deps.git ?? ((args: readonly string[], env?: ClaudeSaveGitEnv) => {
+		const out = Bun.spawnSync(["git", "-C", config.repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
 		return { code: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
 	});
 	const ctx: Ctx = { git, gitleaks: deps.gitleaks, notify: deps.notify, repo: config.repo, stateRoot: config.stateRoot, runId, nowIso };
@@ -191,22 +259,81 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 			const result: ClaudeSaveResult = { status: "CLEAN", receiptId: null, committed: false, pushed: false, reason: "candidates reduced to nothing after staging audit" };
 			return record(ctx, result);
 		}
-		if (!deps.gitleaks) return record(ctx, fail(ctx, "GITLEAKS_UNAVAILABLE", "no gitleaks scanner injected; refusing rather than committing unscanned"));
-		let leak: { code: number; output: string };
+		if (!deps.gitleaks) {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_UNAVAILABLE", "no gitleaks scanner injected; refusing rather than committing unscanned"));
+		}
+		const candidateTree = git(["write-tree"]);
+		if (candidateTree.code !== 0 || candidateTree.stdout.trim() === "") {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_TREE_UNAVAILABLE", candidateTree.stderr.trim() || "candidate tree could not be read; index reset"));
+		}
+		const candidateTreeId = candidateTree.stdout.trim();
+		let snapshot: { root: string; target: string };
 		try {
-			leak = deps.gitleaks(config.repo);
+			snapshot = materializeGitleaksTree(ctx, candidateTreeId);
 		} catch (error) {
 			git(["reset", "-q"]);
-			return record(ctx, fail(ctx, "GITLEAKS_FAILED", error instanceof Error ? error.message : String(error)));
+			return record(ctx, fail(ctx, "GITLEAKS_SNAPSHOT_FAILED", error instanceof Error ? error.message : String(error)));
 		}
-		if (leak.code !== 0) {
+		let scan: GitleaksScanResult | undefined;
+		let scannerFailure: string | undefined;
+		try {
+			scan = deps.gitleaks({ target: snapshot.target, treeId: candidateTreeId });
+		} catch (error) {
+			scannerFailure = error instanceof Error ? error.message : String(error);
+		}
+		try {
+			rmSync(snapshot.root, { recursive: true, force: true });
+		} catch (error) {
 			git(["reset", "-q"]);
-			return record(ctx, fail(ctx, "GITLEAKS_HIT", `gitleaks refused the tree; index reset. ${leak.output.slice(0, 200)}`));
+			return record(ctx, fail(ctx, "GITLEAKS_SNAPSHOT_CLEANUP_FAILED", error instanceof Error ? error.message : String(error)));
+		}
+		if (scannerFailure !== undefined || scan === undefined) {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_FAILED", scannerFailure ?? "scanner returned no result; scan not completed"));
+		}
+		if (scan.disposition === "NOT_RUN") {
+			git(["reset", "-q"]);
+			const refusal = scan.reason === "TIMEOUT" ? "GITLEAKS_TIMEOUT" : "GITLEAKS_FAILED";
+			const reason = scan.reason === "TIMEOUT"
+				? `gitleaks timed out after ${scan.timeoutMs}ms; scan did not complete (not run to completion). ${scan.detail}`
+				: `gitleaks did not complete (${scan.reason}); scan not run. ${scan.detail}`;
+			return record(ctx, fail(ctx, refusal, reason));
+		}
+		if (scan.target !== snapshot.target || scan.treeId !== candidateTreeId) {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_TREE_MISMATCH", "scanner result was not bound to the exact candidate tree; index reset"));
+		}
+		let findings: unknown[];
+		try {
+			const report: unknown = JSON.parse(scan.report);
+			if (!Array.isArray(report)) throw new Error("report is not a JSON array");
+			findings = report;
+		} catch (error) {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_REPORT_INVALID", `gitleaks report was missing, truncated or invalid; index reset. ${error instanceof Error ? error.message : String(error)}`));
+		}
+		if (findings.length > 0 || scan.exitCode !== 0) {
+			git(["reset", "-q"]);
+			const refusal = findings.length > 0 ? "GITLEAKS_HIT" : "GITLEAKS_FAILED";
+			return record(ctx, fail(ctx, refusal, `gitleaks exit code ${scan.exitCode}; findings=${findings.length}; index reset. ${scan.stderr.slice(0, 200)}`));
+		}
+		const verifiedTree = git(["write-tree"]);
+		if (verifiedTree.code !== 0 || verifiedTree.stdout.trim() !== candidateTreeId) {
+			git(["reset", "-q"]);
+			return record(ctx, fail(ctx, "GITLEAKS_TREE_CHANGED", "candidate index changed during scan; index reset"));
 		}
 		const commit = git(["commit", "-m", `claude-save: ${nowIso} (${staged.length} files)`]);
 		if (commit.code !== 0) {
 			git(["reset", "-q"]);
 			return record(ctx, fail(ctx, "COMMIT_FAILED", commit.stderr.trim().slice(0, 200)));
+		}
+		const committedTree = git(["rev-parse", "HEAD^{tree}"]);
+		if (committedTree.code !== 0 || committedTree.stdout.trim() !== candidateTreeId) {
+			const result: ClaudeSaveResult = { status: "FAILED", receiptId: null, committed: true, pushed: false, refusal: "GITLEAKS_TREE_CHANGED", reason: "committed tree differs from the scanned candidate; push refused" };
+			ctx.notify?.(`claude-save refused: ${result.refusal}: ${result.reason}`);
+			return record(ctx, result);
 		}
 		const push = git(["push", "origin", "main"]);
 		if (push.code !== 0) {

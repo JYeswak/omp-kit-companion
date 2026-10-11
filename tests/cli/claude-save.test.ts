@@ -1,19 +1,19 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkSkillLibrary, claudeSaveJobEnabled, runClaudeSaveJob, type ClaudeSaveConfig, type ClaudeSaveGit } from "../../src/claude-save-job.ts";
+import { checkSkillLibrary, claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 function sh(repo: string, ...args: string[]): ClaudeSaveGit {
 	const out = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: repo } });
-	return { code: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
+	return { code: out.exitCode ?? 1, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
 }
 
 /** Scratch repo on main with a file:// origin; never ~/.claude itself. */
 function fixtureRepo(): { repo: string; origin: string } {
-	const base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/save1-"));
+	const base = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "save1-"));
 	dirs.push(base);
 	const repo = join(base, "work");
 	const origin = join(base, "origin.git");
@@ -31,9 +31,32 @@ function fixtureRepo(): { repo: string; origin: string } {
 	return { repo, origin };
 }
 
-function run(repo: string, stateRoot: string, gitleaks: { code: number; output: string } = { code: 0, output: "" }) {
+type CompletedScan = Extract<GitleaksScanResult, { disposition: "COMPLETED" }>;
+
+function completeScan(request: GitleaksScanRequest, overrides: Partial<CompletedScan> = {}): CompletedScan {
+	return {
+		disposition: "COMPLETED",
+		command: ["gitleaks", "detect", "--source", request.target, "--no-git", "--report-format", "json", "--report-path", "/dev/stdout", "--no-banner", "--redact"],
+		target: request.target,
+		treeId: request.treeId,
+		exitCode: 0,
+		report: "[]",
+		stderr: "",
+		...overrides
+	};
+}
+
+function run(repo: string, stateRoot: string, gitleaks: GitleaksScanner = request => completeScan(request)) {
 	const config: ClaudeSaveConfig = { enabled: true, repo, stateRoot };
-	return runClaudeSaveJob(config, { git: args => sh(repo, ...args), gitleaks: () => gitleaks, runId: "t1", nowIso: "2026-10-06T00:00:00Z" });
+	return runClaudeSaveJob(config, {
+		git: (args, env) => {
+			const out = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: repo, ...env } });
+			return { code: out.exitCode ?? 1, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
+		},
+		gitleaks,
+		runId: "t1",
+		nowIso: "2026-10-06T00:00:00Z"
+	});
 }
 
 function headSha(repo: string): string {
@@ -60,11 +83,20 @@ test("clean tree commits nothing", async () => {
 	expect(headSha(repo)).toBe(before);
 });
 
-test("admitted change commits and pushes origin main", async () => {
+test("admitted change scans the exact candidate tree before commit and push", async () => {
 	const { repo, origin } = fixtureRepo();
 	writeFileSync(join(repo, "notes.md"), "hello\nmore\n");
-	const result = await run(repo, join(repo, "..", "state"));
+	const scans: GitleaksScanRequest[] = [];
+	const result = await run(repo, join(repo, "..", "state"), request => {
+		scans.push(request);
+		expect(request.target).not.toBe(repo);
+		expect(request.treeId).toBe(sh(repo, "write-tree").stdout.trim());
+		expect(readFileSync(join(request.target, "notes.md"), "utf8")).toBe("hello\nmore\n");
+		return completeScan(request);
+	});
 	expect(result).toMatchObject({ status: "PUSHED", committed: true, pushed: true });
+	expect(scans).toHaveLength(1);
+	expect(existsSync(scans[0]!.target)).toBe(false);
 	expect(sh(repo, "log", "--oneline", "origin/main").stdout).toContain("claude-save:");
 	expect(sh(origin, "--git-dir=" + origin, "log", "--oneline", "main").stdout).toContain("claude-save:");
 });
@@ -181,11 +213,11 @@ test("dirty settings.json refuses and stays unstaged", async () => {
 	expect(sh(repo, "diff", "--cached", "--name-only").stdout).not.toContain("settings.json");
 });
 
-test("gitleaks hit resets the index and refuses", async () => {
+test("gitleaks finding report resets the index and refuses", async () => {
 	const { repo } = fixtureRepo();
 	writeFileSync(join(repo, "notes.md"), "x\n");
 	const before = headSha(repo);
-	const result = await run(repo, join(repo, "..", "state"), { code: 1, output: "found 1 leak in notes.md" });
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { exitCode: 1, report: '[{"RuleID":"test"}]' }));
 	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_HIT" });
 	expect(headSha(repo)).toBe(before);
 	expect(sh(repo, "diff", "--cached", "--name-only").stdout.trim()).toBe("");
@@ -198,6 +230,80 @@ test("missing scanner fails closed", async () => {
 	const result = await runClaudeSaveJob({ enabled: true, repo, stateRoot: join(repo, "..", "state") },
 		{ git: args => sh(repo, ...args), runId: "t1", nowIso: "2026-10-06T00:00:00Z" });
 	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_UNAVAILABLE" });
+	expect(headSha(repo)).toBe(before);
+	expect(sh(repo, "diff", "--cached", "--name-only").stdout.trim()).toBe("");
+});
+
+test("timed-out Gitleaks scan is not run to completion and cannot land", async () => {
+	const { repo, origin } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const slowScanner = join(join(repo, ".."), "slow-gitleaks.sh");
+	writeFileSync(slowScanner, "#!/bin/sh\nexec /bin/sleep 5\n");
+	chmodSync(slowScanner, 0o700);
+	const result = await run(repo, join(repo, "..", "state"), request => runGitleaksScan(slowScanner, request, 100));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_TIMEOUT", committed: false, pushed: false });
+	expect(result.reason).toContain("100ms");
+	expect(headSha(repo)).toBe(before);
+	expect(sh(repo, "ls-remote", "origin", "refs/heads/main").stdout.split("\t")[0]).toBe(before);
+	expect(sh(repo, "diff", "--cached", "--name-only").stdout.trim()).toBe("");
+});
+
+test("scanner spawn failure cannot land", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const missing = join(repo, "missing-gitleaks");
+	const result = await run(repo, join(repo, "..", "state"), request => runGitleaksScan(missing, request, 100));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_FAILED", committed: false, pushed: false });
+	expect(result.reason).toContain("SPAWN_FAILED");
+	expect(headSha(repo)).toBe(before);
+});
+
+test("nonzero scan with an empty report cannot be clean", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { exitCode: 2 }));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_FAILED", committed: false, pushed: false });
+	expect(headSha(repo)).toBe(before);
+});
+
+test("empty Gitleaks output is not a completed clean scan", async () => {
+	const { repo, origin } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { report: "" }));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_REPORT_INVALID" });
+	expect(headSha(repo)).toBe(before);
+	expect(sh(repo, "ls-remote", "origin", "refs/heads/main").stdout.split("\t")[0]).toBe(before);
+	expect(sh(repo, "diff", "--cached", "--name-only").stdout.trim()).toBe("");
+});
+
+test("truncated Gitleaks output is not a completed clean scan", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { report: "[{" }));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_REPORT_INVALID" });
+	expect(headSha(repo)).toBe(before);
+});
+
+test("Gitleaks result bound to another tree cannot land", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { treeId: "another-tree" }));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_TREE_MISMATCH", committed: false, pushed: false });
+	expect(headSha(repo)).toBe(before);
+});
+
+test("Gitleaks result from another target cannot land", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "changed\n");
+	const before = headSha(repo);
+	const result = await run(repo, join(repo, "..", "state"), request => completeScan(request, { target: join(request.target, "other") }));
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_TREE_MISMATCH", committed: false, pushed: false });
 	expect(headSha(repo)).toBe(before);
 });
 
