@@ -64,10 +64,11 @@ import { runPlanningConvert } from "./planning-convert.ts";
 import { validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
+import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
-import { acquireRunLock, bunCapExec, gateRunLoad, OVERLAP_EXIT, readJobOff, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
 import { readLessonsConfig, runFleetLessonsOnce } from "./fleet-lessons.ts";
 
@@ -2374,6 +2375,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const lock = claimed.lock;
 		// OMP_KIT_LOAD_OVERRIDE is a test-only seam (load1/ncpu); production reads the machine.
+		// ompkit-bj08.5: holder incarnation at gate time; bodies re-read the
+		// claim and refuse when the lock changed hands in between.
+		const gateClaim = readRunClaim(jobsDir, job.name);
+		const gateVersion = gateClaim === null ? null : claimIncarnation(gateClaim);
 		const loadOverride = process.env.OMP_KIT_LOAD_OVERRIDE;
 		let load1: number, ncpu: number;
 		if (loadOverride !== undefined) {
@@ -2395,6 +2400,30 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 						remediation: "Repair the state root; the job did not run." }], verification: "UNVERIFIED" };
 			}
 			return { code: gate.exit, data: { overall: "OK", job: job.name, status: gate.status, detail: gate.detail, receipt }, verification: "UNVERIFIED" };
+		}
+		// ompkit-bj08.5: bind the lock holder incarnation across the gate-to-body
+		// gap; a changed or unreadable claim refuses with zero effects.
+		const bodyClaim = readRunClaim(jobsDir, job.name);
+		const bodyVersion = bodyClaim === null ? null : claimIncarnation(bodyClaim);
+		const runAdmission: AdmissionInput = {
+			launcherBinding: "keeper",
+			authority: "ACTIVE",
+			authorityConfirmed: true,
+			authorityGeneration: bodyVersion,
+			launchers: bodyClaim === null ? [] : [{ pid: bodyClaim.pid, command: `service run ${job.name}` }],
+			keeper: bodyClaim === null ? null : { pid: bodyClaim.pid, command: `service run ${job.name}` },
+			packet: { action: "service-run", ownedAction: "service-run", generation: gateVersion },
+			governedActions: ["service-run"],
+		};
+		if (admitActuator(runAdmission).verdict === "REFUSE") {
+			lock.release();
+			const admissionReceipt = { started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit: OVERLAP_EXIT, omp_version: null, status: "SKIPPED-ADMISSION" };
+			if (!recordJobReceipt(home, job.name, admissionReceipt)) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root; the job did not run." }], verification: "UNVERIFIED" };
+			}
+			return { code: OVERLAP_EXIT, data: { overall: "OK", job: job.name, status: "SKIPPED-ADMISSION", receipt: admissionReceipt }, verification: "UNVERIFIED" };
 		}
 		// OMP_KIT_RUN_CAP_MS is a test-only seam; production uses RUN_TIME_CAPS_MS.
 		const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
@@ -2472,11 +2501,23 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			try {
 				const config = loadFleetWatchConfig(configPath);
 				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
+				const watchClaim = readRunClaim(jobsDir, job.name);
+				const watchVersion = watchClaim === null ? null : claimIncarnation(watchClaim);
 				const result = runFleetWatchOnce(config, {
 					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", paneTarget(session, pane)]),
 					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
 					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", paneTarget(session, pane), ...keys]); },
 					logPath,
+					admission: {
+						launcherBinding: "keeper",
+						authority: "ACTIVE",
+						authorityConfirmed: true,
+						authorityGeneration: watchVersion,
+						launchers: watchClaim === null ? [] : [{ pid: watchClaim.pid, command: "service run fleet-watch" }],
+						keeper: watchClaim === null ? null : { pid: watchClaim.pid, command: "service run fleet-watch" },
+						packet: { action: "nudge", ownedAction: "nudge", generation: gateVersion },
+						governedActions: ["send", "send-keys", "tracker-recovery"],
+					},
 				});
 				lock.release();
 				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
@@ -2579,10 +2620,23 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	const reasonFlag = request.flags.get("--no-bead-reason");
 	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
-		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop") });
+		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
+		admission: {
+			launcherBinding: "none",
+			authority: "ACTIVE",
+			authorityConfirmed: true,
+			authorityGeneration: `send/${session}/${pane}`,
+			launchers: [],
+			keeper: null,
+			packet: { action: "send", ownedAction: "send", generation: `send/${session}/${pane}` },
+			governedActions: ["send"],
+		} });
 	if (result.status === "BEAD_REQUIRED") {
 		return refusal("BEAD_REQUIRED", "A work dispatch must cite a bead id (kernel inv 4: beads are the execution substrate)",
 			"Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\".");
+	}
+	if (result.status === "ADMISSION_REFUSED") {
+		return refusal("ADMISSION_REFUSED", result.detail, "The send was refused by pause/custody admission; nothing was sent.");
 	}
 	const beads = { bead_ids: result.bead_ids, no_bead_reason: result.no_bead_reason };
 	if (result.status === "TMUX_AMBIGUOUS") {
