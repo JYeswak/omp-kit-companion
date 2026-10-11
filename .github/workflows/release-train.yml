@@ -103,6 +103,8 @@ jobs:
           [[ "$rc" -eq 0 ]] || exit "$rc"
           grep -q '^DECIDE=tag' decide.out
       - name: Wait for the release lane to go idle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sh scripts/release-train.sh wait-release-idle \
