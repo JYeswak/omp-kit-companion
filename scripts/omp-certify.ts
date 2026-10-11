@@ -11,7 +11,15 @@
  *                               plus the certified bytes, both required to cite changed diff lines
  *   apply --review FILE         bump `certified`; insert a gate's tuple only when both passes qualified every
  *                               changed file in it
- *   body --review FILE --pr N ... --body-out FILE --decision-out FILE --issue-out FILE
+ *   changelog --from V --to V --out FILE [--md-out FILE] [--bodies DIR] [--kit-root DIR] [--reviews FILE]
+ *                               collect OMP's release notes for every release after `from` up to `to` (GitHub
+ *                               release bodies, else packages/<dir>/CHANGELOG.md at the tag), parse them by markdown
+ *                               structure, and classify each Breaking Changes / Removed / Changed entry against
+ *                               kit surfaces whose match terms are derived from the kit's code. A Breaking or
+ *                               Removed entry that hits a surface blocks the merge until a review is recorded
+ *                               in scripts/omp-certify-reviews.json under the entry's hash
+ *   surfaces [--kit-root DIR]   print the derived kit surfaces and the source line of every match term
+ *   body --review FILE --changelog FILE --pr N ... --body-out FILE --decision-out FILE --issue-out FILE
  *                               render the PR body, the merge / agent-fix decision, and the agent-fix issue
  *   issues --decision FILE [--issue FILE] --open FILE --version V --pr N --run-url URL --out FILE
  *                               plan the certification issue: one open at a time, keyed by a stable marker.
@@ -29,7 +37,7 @@
  * Exit codes: 0 done, 1 refused or infrastructure failure, 2 usage.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const AGENT = "@oh-my-pi/pi-coding-agent";
@@ -134,7 +142,9 @@ function detect(): void {
 	const { minimum, certified } = readCompat();
 	const latest = npmLatest();
 	const order = compareVersions(latest, certified);
-	const key = createHash("sha256").update([latest, readFileSync(join(REPO, READINESS), "utf8"), readFileSync(join(REPO, AUDIT), "utf8")].join("\0")).digest("hex").slice(0, 16);
+	// A review recorded for an OMP changelog entry changes the outcome, so it re-opens certification of the same release.
+	const reviews = existsSync(join(REPO, REVIEWS)) ? readFileSync(join(REPO, REVIEWS), "utf8") : "";
+	const key = createHash("sha256").update([latest, readFileSync(join(REPO, READINESS), "utf8"), readFileSync(join(REPO, AUDIT), "utf8"), reviews].join("\0")).digest("hex").slice(0, 16);
 	const action = order > 0 ? "certify" : "none";
 	const reason = order === 0 ? `npm latest ${latest} is already certified` : order < 0
 		? `npm latest ${latest} is older than certified ${certified}; nothing to certify` : `npm latest ${latest} is newer than certified ${certified}`;
@@ -394,6 +404,531 @@ function apply(): void {
 	console.log(`omp-certify apply: certified ${compat.certified} -> ${reviewed.to}; inserted tuples: ${inserted.join(", ") || "none"}`);
 }
 
+// ---- changelog ----
+// OMP's own release notes are part of certification. Every release strictly after `certified` up to the candidate is
+// read (intermediate releases included), parsed by markdown structure (`## @oh-my-pi/<pkg>` or `## [X.Y.Z]`, then
+// `### <section>`, then bullets), and each Breaking Changes / Removed / Changed entry is matched against kit surfaces.
+// Match terms are derived from the kit's own code by deriveSurfaces(); the only fixed part per surface is a short
+// keyword list that flags an entry as "needs review" without blocking. The parser and matcher use no regex on the
+// release text (it is untrusted input): headings, bullets and code spans are recognized with string operations.
+const OMP_REPO = "can1357/oh-my-pi";
+const REVIEWS = "scripts/omp-certify-reviews.json";
+type Section = "breaking" | "removed" | "changed" | "added" | "fixed" | "other";
+const SECTIONS: Record<string, Section> = { "breaking changes": "breaking", breaking: "breaking", removed: "removed", changed: "changed", added: "added", fixed: "fixed" };
+const SECTION_TITLE: Record<Section, string> = { breaking: "Breaking Changes", removed: "Removed", changed: "Changed", added: "Added", fixed: "Fixed", other: "Other" };
+const CLASSIFIED: readonly Section[] = ["breaking", "removed", "changed"];
+const BLOCKING: readonly Section[] = ["breaking", "removed"];
+type SurfaceId = "settings" | "ttsr" | "extension-api" | "rpc" | "memory" | "cli";
+/** exact: the term itself appears; prefix: a key inside a settings group the kit reads or writes as a whole; package: any entry of that package. */
+type TermKind = "exact" | "prefix" | "package";
+interface Term { text: string; kind: TermKind; where: string; plain: boolean }
+interface Surface { id: SurfaceId; label: string; derivation: string; keywords: string[]; terms: Term[] }
+interface Hit { surface: SurfaceId; term: string; kind: TermKind | "keyword"; where: string }
+type Verdict = "affected" | "needs review" | "not affected";
+interface EntryReview { hash: string; verdict: "not-affected" | "adapted"; evidence: string; reviewer: string }
+interface Entry {
+	version: string; package: string; section: Section; text: string; source: string; url: string; line: number; hash: string;
+	hits: Hit[]; verdict: Verdict | null; review: EntryReview | null; blocking: boolean;
+}
+interface ReleaseNotes { version: string; status: "parsed" | "unavailable"; source: string; url: string; detail: string; counts: Record<Section, number>; review: EntryReview | null }
+interface ChangelogReview {
+	schema_version: 1; from: string; to: string; releases: ReleaseNotes[]; entries: Entry[];
+	surfaces: Surface[]; reasons: string[];
+}
+const SURFACE_DEFS: Omit<Surface, "terms">[] = [
+	{ id: "settings", label: "settings keys", keywords: ["setting", "settings", "config key", "config keys"],
+		derivation: "keys in `omp config get|set` argv arrays (TS) and command lines (shell); `setting(data, \"group\", \"key\")` reads; dotted string literals of a known group in files that call `omp config` (file names excluded). A group the kit writes through a variable (`ttsr.$k`) or reads whole (`for (const group of [...])`) is a group term (marked *): any key in it is needs review, and blocks in a Breaking Changes / Removed entry" },
+	{ id: "ttsr", label: "TTSR rule loading", keywords: ["ttsr", "rule", "rules"],
+		derivation: "front-matter keys and `tool:<name>` scopes used by rules/*.md, i.e. what the kit's rules ask OMP's TTSR loader to read" },
+	{ id: "extension-api", label: "extension API", keywords: ["extension", "extensions", "extension api", "hook", "hooks"],
+		derivation: "event names passed to `on(...)` and members read from `pi.`, `ctx.` and `event.` in extensions/*.ts" },
+	{ id: "rpc", label: "`omp --mode rpc` / slash commands", keywords: ["rpc", "slash command", "slash commands"],
+		derivation: "in files that spawn `omp --mode rpc`: command `type`s sent and event `type`s and fields awaited; slash commands sent as literals (`/mcp test`, `/skill:`); tmux keys that fleet tools send to omp panes" },
+	{ id: "memory", label: "mnemopi memory (memory audit)", keywords: ["mnemopi", "memories", "memory backend", "memory store"],
+		derivation: "table names the memory audit accepts (STANDARD_TABLES), store file names, the pinned OMP and pi-mnemopi source paths, and every entry of a package whose sources the audit pins" },
+	{ id: "cli", label: "omp CLI flags", keywords: ["cli flag", "cli flags", "command-line", "subcommand"],
+		derivation: "flags and subcommands in argv arrays that start with the omp binary or go through `invoke(...)`, and in shell `omp` / `$OMP` / `run_omp` command lines" },
+];
+const SURFACE_LABEL = Object.fromEntries(SURFACE_DEFS.map(def => [def.id, def.label])) as Record<SurfaceId, string>;
+
+interface KitFile { path: string; text: string }
+function kitFiles(root: string): KitFile[] {
+	const out: KitFile[] = [];
+	const walk = (dir: string, accept: (name: string) => boolean, recurse: boolean) => {
+		let entries;
+		try { entries = readdirSync(join(root, dir), { withFileTypes: true }); } catch { return; }
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			const path = `${dir}/${entry.name}`;
+			if (entry.isDirectory()) { if (recurse) walk(path, accept, true); }
+			else if (entry.isFile() && accept(entry.name)) out.push({ path, text: readFileSync(join(root, path), "utf8") });
+		}
+	};
+	const code = (name: string) => name.endsWith(".ts") && !name.endsWith(".test.ts");
+	walk("src", code, true);
+	walk("extensions", code, false);
+	// This script is the reader of OMP changelogs, not a consumer of OMP surfaces.
+	walk("scripts", name => (code(name) || name.endsWith(".sh")) && name !== "omp-certify.ts", false);
+	walk("rules", name => name.endsWith(".md"), false);
+	return out;
+}
+const lineAt = (text: string, index: number) => text.slice(0, index).split("\n").length;
+/**
+ * Split the top-level elements of a TS array literal or argument list that starts at `start`, up to its closing
+ * bracket. Grammar subset: "…", '…' and `…` strings with backslash escapes (a template's `${…}` is part of its
+ * string), and ()[]{} nesting. Anything else that leaves the list unclosed within 2000 characters fails visibly
+ * with its source line, so an omp invocation is never silently dropped from the CLI surface.
+ */
+function elements(text: string, start: number, where: string): string[] {
+	const out: string[] = [];
+	let depth = 0, quote = "", from = start;
+	for (let i = start; i < text.length && i < start + 2000; i++) {
+		const c = text[i]!;
+		if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+		if (c === "\"" || c === "'" || c === "`") quote = c;
+		else if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") {
+			if (depth === 0) return [...out, text.slice(from, i).trim()].filter(Boolean);
+			depth--;
+		} else if (c === "," && depth === 0) { out.push(text.slice(from, i).trim()); from = i + 1; }
+	}
+	fail(`${where}: cannot split the omp argv list (unclosed within 2000 characters); the CLI surface would be incomplete`);
+}
+const FLAG = /^-{1,2}[a-z][a-z0-9-]*$/;
+const WORD_TOKEN = /^[a-z][a-z-]*$/;
+/** A dotted literal ending in one of these is a file name (`policy/ttsr.json`), not a settings key. */
+const FILE_EXTENSIONS = ["json", "jsonl", "yml", "yaml", "md", "ts", "js", "db", "sh", "toml", "txt", "lock", "log"];
+const LITERAL = /^"([^"\\\n]*)"$/;
+function deriveSurfaces(root: string): Surface[] {
+	const files = kitFiles(root);
+	const surfaces = SURFACE_DEFS.map(def => ({ ...def, terms: [] as Term[] }));
+	// A plain lowercase word (`scope`, `exec`) is too common to match alone: it counts only inside a code span of an entry
+	// that also names the surface by keyword. Identifiers, dotted keys, flags and slash commands match anywhere.
+	const add = (id: SurfaceId, text: string, where: string, kind: TermKind = "exact") => {
+		const surface = surfaces.find(entry => entry.id === id)!;
+		if (text && !surface.terms.some(term => term.text === text && term.kind === kind))
+			surface.terms.push({ text, kind, where, plain: kind === "exact" && (/^[a-z]+$/.test(text) || (text.length < 4 && !text.startsWith("-") && !text.startsWith("/"))) });
+	};
+	const ts = files.filter(file => file.path.endsWith(".ts")), sh = files.filter(file => file.path.endsWith(".sh"));
+	const each = (file: KitFile, pattern: RegExp, visit: (match: RegExpExecArray, where: string) => void) => {
+		for (const match of file.text.matchAll(pattern)) visit(match, `${file.path}:${lineAt(file.text, match.index)}`);
+	};
+
+	// settings
+	const KEY = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*$/;
+	const groups = new Map<string, string>();
+	const keyGroup = (key: string, where: string) => { if (key.includes(".") && !groups.has(key.split(".")[0]!)) groups.set(key.split(".")[0]!, where); };
+	const configFiles = new Set<string>();
+	for (const file of ts) {
+		each(file, /"config",\s*"(?:get|set)",\s*"([^"\n]+)"/g, (match, where) => { if (KEY.test(match[1]!)) { add("settings", match[1]!, where); keyGroup(match[1]!, where); } });
+		if (file.text.includes("\"config\", \"get\"") || file.text.includes("\"config\", \"set\"")) configFiles.add(file.path);
+		each(file, /\bsetting\([^,()\n]*,\s*"([A-Za-z]\w*)",\s*"([A-Za-z]\w*)"\)/g, (match, where) => { add("settings", `${match[1]}.${match[2]}`, where); keyGroup(`${match[1]}.${match[2]}`, where); });
+		each(file, /\bfor \(const group of \[([^\]\n]*)\]\)/g, (match, where) => { for (const name of match[1]!.matchAll(/"([A-Za-z]\w*)"/g)) if (!groups.has(name[1]!)) groups.set(name[1]!, where); });
+	}
+	for (const file of sh) each(file, /\bconfig (?:get|set) "?([^\s"]+)/g, (match, where) => {
+		const token = match[1]!;
+		const variable = token.indexOf("$");
+		if (variable < 0) { if (KEY.test(token)) { add("settings", token, where); keyGroup(token, where); } }
+		else if (/^[A-Za-z][A-Za-z0-9]*\.$/.test(token.slice(0, variable)) && !groups.has(token.slice(0, variable - 1))) groups.set(token.slice(0, variable - 1), where);
+	});
+	for (const file of ts.filter(entry => configFiles.has(entry.path)))
+		each(file, /"([a-z][A-Za-z0-9]*)\.([A-Za-z][A-Za-z0-9]*)"/g, (match, where) => { if (groups.has(match[1]!) && !FILE_EXTENSIONS.includes(match[2]!)) add("settings", `${match[1]}.${match[2]}`, where); });
+	for (const [group, where] of groups) add("settings", `${group}.`, where, "prefix");
+
+	// TTSR rule loading
+	for (const file of files.filter(entry => entry.path.startsWith("rules/"))) {
+		const lines = file.text.split("\n");
+		const end = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+		for (let i = 1; i < end; i++) {
+			const key = /^([A-Za-z][A-Za-z0-9_]*):/.exec(lines[i]!);
+			if (key) add("ttsr", key[1]!, `${file.path}:${i + 1}`);
+			for (const scope of lines[i]!.matchAll(/\btool:([a-z_]+)/g)) add("ttsr", `tool:${scope[1]}`, `${file.path}:${i + 1}`);
+		}
+	}
+
+	// extension API
+	for (const file of ts.filter(entry => entry.path.startsWith("extensions/"))) {
+		each(file, /\bon\((?:event: )?"([a-z_]+)"/g, (match, where) => add("extension-api", match[1]!, where));
+		each(file, /\b(?:pi|ctx|event)\.([A-Za-z_][A-Za-z0-9_]*)/g, (match, where) => add("extension-api", match[1]!, where));
+	}
+
+	// omp --mode rpc, slash commands, keys sent to omp panes
+	for (const file of ts) {
+		if (file.text.includes("\"--mode\", \"rpc\"")) {
+			each(file, /"--mode", "rpc"/g, (_, where) => add("rpc", "--mode rpc", where));
+			each(file, /\.send\(\{[^\n]*?\btype: "([a-z_]+)"/g, (match, where) => add("rpc", match[1]!, where));
+			each(file, /\.type === "([a-z_]+)"/g, (match, where) => add("rpc", match[1]!, where));
+			each(file, /\bevent\.([A-Za-z]+) ===/g, (match, where) => add("rpc", match[1]!, where));
+		}
+		if (!file.path.startsWith("scripts/")) each(file, /["'`](\/[a-z][a-z-]*)[ :]/g, (match, where) => add("rpc", match[1]!, where));
+		// Only modifier chords: a bare key name (`Enter`) is ordinary changelog prose.
+		each(file, /\bsendKeys\([^\n]*?\[([^\]\n]*)\]/g, (match, where) => {
+			for (const key of match[1]!.matchAll(/"([MC]-[^"\n]+)"/g)) {
+				add("rpc", key[1]!, where);
+				add("rpc", (key[1]![0] === "M" ? "Alt+" : "Ctrl+") + key[1]!.slice(2), where);
+			}
+		});
+	}
+
+	// mnemopi memory as the memory audit reads it
+	for (const file of ts.filter(entry => entry.path === AUDIT || entry.path === READINESS)) {
+		if (file.path === AUDIT) {
+			const start = file.text.indexOf("const STANDARD_TABLES");
+			const end = start < 0 ? -1 : file.text.indexOf("\n};", start);
+			if (start < 0 || end < 0) fail(`${AUDIT}: cannot find STANDARD_TABLES`);
+			for (const match of file.text.slice(start, end).matchAll(/\b([a-z_]+): true/g)) add("memory", match[1]!, `${file.path}:${lineAt(file.text, start + match.index)}`);
+		}
+		each(file, /"([A-Za-z0-9_-]+\.db)"/g, (match, where) => add("memory", match[1]!, where));
+	}
+	const readiness = files.find(file => file.path === READINESS), audit = files.find(file => file.path === AUDIT);
+	if (!readiness || !audit) fail(`${root}: kit sources ${READINESS} and ${AUDIT} are required to derive the memory surface`);
+	const pins = parsePins(readiness.text, audit.text);
+	const pinWhere = (file: KitFile, path: string) => `${file.path}:${lineAt(file.text, Math.max(0, file.text.indexOf(`"${path}"`)))}`;
+	for (const path of pins.readinessFiles) add("memory", path, pinWhere(readiness, path));
+	add("memory", REDACTOR, `${READINESS}:${lineAt(readiness.text, Math.max(0, readiness.text.indexOf("REDACTOR_SOURCE_SHA256")))}`);
+	for (const [pkg, path] of pins.auditSets[0]!) {
+		add("memory", path, pinWhere(audit, path));
+		if (pkg === "mnemopi") add("memory", MNEMOPI, pinWhere(audit, path), "package");
+	}
+
+	// omp CLI flags and subcommands
+	const invocation = (elementsAfterBinary: string[], where: string) => {
+		const literals = elementsAfterBinary.map(element => LITERAL.exec(element)?.[1] ?? null);
+		for (const [index, element] of elementsAfterBinary.entries()) {
+			if (literals[index] !== null) { if (FLAG.test(literals[index]!)) add("cli", literals[index]!, where); }
+			else if (element.startsWith("...")) for (const inner of element.matchAll(/"(-{1,2}[a-z][a-z0-9-]*)"/g)) add("cli", inner[1]!, where);
+		}
+		const words: string[] = [];
+		for (const [index, element] of elementsAfterBinary.entries()) {
+			if (element.startsWith("...")) { if (words.length) break; continue; }
+			if (literals[index] === null || !WORD_TOKEN.test(literals[index]!) || words.length === 2) break;
+			words.push(literals[index]!);
+		}
+		if (literals.includes("--mode") && literals[literals.indexOf("--mode") + 1] === "rpc") add("rpc", "--mode rpc", where);
+		if (words.length) add("cli", `omp ${words[0]}`, where);
+		if (words.length === 2) add("cli", words.join(" "), where);
+	};
+	for (const file of ts) {
+		// `[omp, …]` / `[input.ompPath, …]` / `["omp", …]`, `wrapper(…, ompPath, [ … ])`, and `invoke(profile, [ … ])`.
+		each(file, /\[\s*(?:"omp"|\b(?:[A-Za-z_]+\.)?omp(?:Path)?)\s*,/g, (match, where) => invocation(elements(file.text, match.index + match[0].length, where), where));
+		each(file, /\b(?:[A-Za-z_]+\.)?omp(?:Path)?,\s*\[/g, (match, where) => invocation(elements(file.text, match.index + match[0].length, where), where));
+		each(file, /\binvoke\([^,()\n]*,\s*\[/g, (match, where) => invocation(elements(file.text, match.index + match[0].length, where), where));
+	}
+	for (const file of sh) {
+		let heredoc: string | null = null;
+		file.text.split("\n").forEach((line, index) => {
+			if (heredoc !== null) { if (line.trim() === heredoc) heredoc = null; return; }
+			if (line.trimStart().startsWith("#")) return;
+			const code = shellCode(line);
+			const opener = /<<-?\s*'?"?([A-Za-z_][A-Za-z0-9_]*)/.exec(line);
+			if (opener && code[opener.index]) heredoc = opener[1]!;
+			for (const match of line.matchAll(/"\$OMP"|\$OMP\b|\brun_omp "?\$[A-Za-z0-9_]+"?|\bomp(?=\s)/g)) {
+				if (!code[match.index]) continue;
+				if (!match[0].includes("$OMP")) {
+					// A bare `omp` / `run_omp` must be in command position: `omp --version` runs omp, `command -v omp` does not.
+					const before = line.slice(0, match.index).trimEnd();
+					const previous = before.split(/[\s;|&({]/).at(-1) ?? "";
+					if (before && !";|&({".includes(before.at(-1)!) && !["then", "do", "else", "if", "while", "until", "exec", "time", "!"].includes(previous)) continue;
+				}
+				const rest = line.slice(match.index + match[0].length);
+				const stop = [...rest].findIndex((c, offset) => "|;&<>)".includes(c) && code[match.index + match[0].length + offset]);
+				const tokens = (stop < 0 ? rest : rest.slice(0, stop)).trim().split(/\s+/).filter(Boolean).map(token => token.replace(/^"|"$/g, ""));
+				const where = `${file.path}:${index + 1}`;
+				let at = tokens[0] === "--profile" ? 2 : 0;
+				const words: string[] = [];
+				while (at < tokens.length && words.length < 2 && WORD_TOKEN.test(tokens[at]!)) words.push(tokens[at++]!);
+				if (words.length) add("cli", `omp ${words[0]}`, where);
+				if (words.length === 2) add("cli", words.join(" "), where);
+				for (const token of tokens) { const flag = token.split("=")[0]!; if (FLAG.test(flag)) add("cli", flag, where); }
+			}
+		});
+	}
+	return surfaces;
+}
+/**
+ * Which characters of one shell line are code: outside quotes, or inside `$(…)` (also within double quotes).
+ * Grammar subset: '…', "…", backslash escapes, `$(…)` and `(…)` nesting; heredoc bodies are skipped by the caller.
+ */
+function shellCode(line: string): boolean[] {
+	const code: boolean[] = [];
+	const stack: string[] = [];
+	for (let i = 0; i < line.length; i++) {
+		const top = stack.at(-1), c = line[i]!;
+		code[i] = top === undefined || top === "$(" || top === "(";
+		if (top === "'") { if (c === "'") stack.pop(); continue; }
+		if (c === "\\") { code[i + 1] = code[i]!; i++; continue; }
+		if (c === "$" && line[i + 1] === "(") { stack.push("$("); code[i + 1] = code[i]!; i++; continue; }
+		if (top === "\"") { if (c === "\"") stack.pop(); continue; }
+		if (c === "'" || c === "\"" || c === "(") stack.push(c);
+		else if (c === ")" && (top === "$(" || top === "(")) stack.pop();
+	}
+	return code;
+}
+
+/**
+ * Code spans and the remaining prose of one markdown entry. As in CommonMark, a run of N backticks opens a span that
+ * the next run of exactly N backticks closes; a run with no such closer is literal text. Linear in the entry length:
+ * every run's closer is precomputed in one backward pass.
+ */
+function codeSpans(text: string): { spans: string[]; prose: string } {
+	const runs: { start: number; end: number }[] = [];
+	for (let at = text.indexOf("`"); at >= 0; at = text.indexOf("`", at)) {
+		const start = at;
+		while (text[at] === "`") at++;
+		runs.push({ start, end: at });
+	}
+	const closer: number[] = [], latest = new Map<number, number>();
+	for (let i = runs.length - 1; i >= 0; i--) {
+		const length = runs[i]!.end - runs[i]!.start;
+		closer[i] = latest.get(length) ?? -1;
+		latest.set(length, i);
+	}
+	const spans: string[] = [];
+	let prose = "", from = 0;
+	for (let i = 0; i < runs.length; i++) {
+		if (closer[i]! < 0) continue;
+		const open = runs[i]!, close = runs[closer[i]!]!;
+		spans.push(text.slice(open.end, close.start).trim());
+		prose += text.slice(from, open.start) + " ";
+		from = close.end;
+		i = closer[i]!;
+	}
+	return { spans, prose: prose + text.slice(from) };
+}
+const wordChar = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_");
+/** `term` occurs in `text` as a whole token. A prefix term (`ttsr.`) must be followed by a key; a dotted key must not be a suffix of a longer key. */
+function hasTerm(text: string, term: string, prefix = false): boolean {
+	const dashed = term.startsWith("-") || term.startsWith("/");
+	for (let at = text.indexOf(term); at >= 0; at = text.indexOf(term, at + 1)) {
+		const before = text[at - 1], after = text[at + term.length];
+		if (wordChar(before) || (term.includes(".") && before === ".") || (dashed && (before === "-" || before === "/"))) continue;
+		if (prefix ? wordChar(after) : !(wordChar(after) || (dashed && after === "-"))) return true;
+	}
+	return false;
+}
+/**
+ * Match one entry against every surface. Where a term may match:
+ * - flags (`--json`) only as a code span that is the flag (`--json`, `--mode rpc`) or an omp command line (`omp x --json`),
+ *   so `jq --version` is not omp's `--version`;
+ * - multi-word terms (`config get`, `omp plugin`) and plain words only inside code spans; plain words also need a keyword;
+ * - other identifiers, dotted keys and slash commands anywhere in the entry, as whole tokens.
+ * A keyword (searched in the prose outside code spans) without a term hit marks a Breaking Changes / Removed entry
+ * "needs review", never blocking; Changed entries are listed only when they hit a term.
+ */
+function classify(entry: Pick<Entry, "text" | "package" | "section">, surfaces: Surface[]): Hit[] {
+	const { spans, prose } = codeSpans(entry.text);
+	const lower = prose.toLowerCase();
+	const hits: Hit[] = [];
+	for (const surface of surfaces) {
+		const keyword = surface.keywords.find(word => hasTerm(lower, word));
+		const found = surface.terms.filter(term =>
+			term.kind === "package" ? entry.package === term.text
+			: term.kind === "prefix" ? spans.some(span => hasTerm(span, term.text, true))
+			: term.text.startsWith("-") ? spans.some(span => span === term.text || span.startsWith(term.text + "=") || span.startsWith(term.text + " ") || (span.startsWith("omp ") && hasTerm(span, term.text)))
+			: term.plain ? keyword !== undefined && spans.some(span => hasTerm(span, term.text))
+			: term.text.includes(" ") ? spans.some(span => hasTerm(span, term.text))
+			: hasTerm(entry.text, term.text));
+		// Drop a group (prefix) hit when an exact key of the same group already matched.
+		for (const term of found) if (!(term.kind === "prefix" && found.some(other => other.kind === "exact" && other.text.startsWith(term.text))))
+			hits.push({ surface: surface.id, term: term.text, kind: term.kind, where: term.where });
+		if (keyword && !found.length && BLOCKING.includes(entry.section)) hits.push({ surface: surface.id, term: keyword, kind: "keyword", where: "keyword" });
+	}
+	return hits;
+}
+
+/** Parse release-body or CHANGELOG.md markdown into entries. `pkg` is the package for text before any `## @scope/pkg` heading. */
+function parseNotes(markdown: string, version: string, pkg: string | null, source: string, url: string, firstLine = 1): Entry[] {
+	const entries: Entry[] = [];
+	let current: Pick<Entry, "package" | "section" | "line"> & { lines: string[] } | null = null;
+	let scope: string | null = pkg, section: Section | null = null;
+	const flush = () => {
+		if (current) {
+			const text = current.lines.join(" ").replace(/\s+/g, " ").trim();
+			if (text) entries.push({ version, package: current.package, section: current.section, text, source, url, line: current.line,
+				hash: createHash("sha256").update(`${current.package}\n${current.section}\n${text}`).digest("hex").slice(0, 16), hits: [], verdict: null, review: null, blocking: false });
+		}
+		current = null;
+	};
+	markdown.split("\n").forEach((raw, index) => {
+		const line = raw.trimEnd();
+		if (line.startsWith("## ")) {
+			flush();
+			const heading = line.slice(3).trim();
+			// `## @oh-my-pi/<pkg>` opens a package; `## [X.Y.Z]` is a CHANGELOG.md version heading (same package);
+			// anything else (`## What's Changed`, `## New Contributors`) is not release notes.
+			scope = heading.startsWith("@") ? heading : heading.startsWith("[") ? scope : null;
+			section = null;
+		} else if (line.startsWith("### ")) {
+			flush();
+			section = SECTIONS[line.slice(4).trim().toLowerCase()] ?? "other";
+		} else if ((line.startsWith("- ") || line.startsWith("* ")) && scope && section) {
+			flush();
+			current = { package: scope, section, line: firstLine + index, lines: [line.slice(2)] };
+		} else if (current && line && (raw.startsWith(" ") || raw.startsWith("\t"))) current.lines.push(line.trim());
+		else if (line) flush();
+	});
+	flush();
+	return entries;
+}
+/** The `## [version]` section of a package CHANGELOG.md, with the line number it starts on. */
+function versionSection(markdown: string, version: string): { text: string; line: number } | null {
+	const lines = markdown.split("\n");
+	const start = lines.findIndex(line => line.startsWith(`## [${version}]`));
+	if (start < 0) return null;
+	const next = lines.findIndex((line, index) => index > start && line.startsWith("## "));
+	return { text: lines.slice(start + 1, next < 0 ? undefined : next).join("\n"), line: start + 2 };
+}
+
+interface NotesSource {
+	versions(): string[];
+	body(version: string): { text: string; source: string; url: string } | string;
+	changelogs(version: string): { pkg: string; text: string; line: number; source: string; url: string }[] | string;
+}
+/** Offline source (tests, replays): DIR/<version>.md release bodies and DIR/packages/<dir>/CHANGELOG.md files. */
+function directorySource(dir: string): NotesSource {
+	const packages = (() => { try { return readdirSync(join(dir, "packages")).sort(); } catch { return []; } })()
+		.filter(name => existsSync(join(dir, "packages", name, "CHANGELOG.md")))
+		.map(name => ({ name, text: readFileSync(join(dir, "packages", name, "CHANGELOG.md"), "utf8") }));
+	return {
+		versions: () => [...new Set([...readdirSync(dir).filter(name => name.endsWith(".md")).map(name => name.slice(0, -3)),
+			...packages.flatMap(entry => entry.text.split("\n").filter(line => line.startsWith("## [")).map(line => line.slice(4, line.indexOf("]"))))])].filter(value => STABLE.test(value)),
+		body: version => existsSync(join(dir, `${version}.md`))
+			? { text: readFileSync(join(dir, `${version}.md`), "utf8"), source: `${version}.md`, url: join(dir, `${version}.md`) } : `no ${version}.md`,
+		changelogs: version => packages.map(entry => ({ entry, section: versionSection(entry.text, version) })).filter(item => item.section)
+			.map(({ entry, section }) => ({ pkg: `packages/${entry.name}`, text: section!.text, line: section!.line, source: `packages/${entry.name}/CHANGELOG.md`, url: join(dir, "packages", entry.name, "CHANGELOG.md") })),
+	};
+}
+/** Live source: npm lists the releases; GitHub release bodies are the notes, packages/<dir>/CHANGELOG.md at the tag the fallback. */
+function githubSource(): NotesSource {
+	return {
+		versions: () => {
+			const view = run(["npm", "view", AGENT, "versions", "--json"]);
+			if (view.code !== 0) fail(`npm view ${AGENT} versions failed: ${view.stderr.trim()}`);
+			return (JSON.parse(view.stdout) as string[]).filter(value => STABLE.test(value));
+		},
+		body: version => {
+			const release = run(["gh", "release", "view", `v${version}`, "-R", OMP_REPO, "--json", "body", "--jq", ".body"]);
+			return release.code === 0 && release.stdout.trim()
+				? { text: release.stdout, source: `release v${version}`, url: `https://github.com/${OMP_REPO}/releases/tag/v${version}` }
+				: `gh release view v${version}: ${release.stderr.trim().split("\n")[0] || "empty body"}`;
+		},
+		changelogs: version => {
+			const listing = run(["gh", "api", `repos/${OMP_REPO}/contents/packages?ref=v${version}`, "--jq", ".[] | select(.type == \"dir\") | .name"]);
+			if (listing.code !== 0) return `packages at v${version}: ${listing.stderr.trim().split("\n")[0]}`;
+			return listing.stdout.split("\n").filter(Boolean).flatMap(dir => {
+				const file = run(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${OMP_REPO}/contents/packages/${dir}/CHANGELOG.md?ref=v${version}`]);
+				const section = file.code === 0 ? versionSection(file.stdout, version) : null;
+				return section ? [{ pkg: `packages/${dir}`, text: section.text, line: section.line, source: `packages/${dir}/CHANGELOG.md at v${version}`,
+					url: `https://github.com/${OMP_REPO}/blob/v${version}/packages/${dir}/CHANGELOG.md#L${section.line}` }] : [];
+			});
+		},
+	};
+}
+
+/** Reviews of changelog entries, keyed by entry hash (or `v<version>` for release notes that could not be read). */
+function readReviews(path: string): Map<string, EntryReview> {
+	const reviews = new Map<string, EntryReview>();
+	if (!existsSync(path)) return reviews;
+	let data: { schema_version?: unknown; reviews?: unknown };
+	try { data = JSON.parse(readFileSync(path, "utf8")); } catch { fail(`${path}: not valid JSON`); }
+	if (data.schema_version !== 1 || !Array.isArray(data.reviews)) fail(`${path}: expected {"schema_version": 1, "reviews": [...]}`);
+	for (const value of data.reviews as Partial<EntryReview>[]) {
+		const valid = value && typeof value.hash === "string" && (/^[0-9a-f]{16}$/.test(value.hash) || (value.hash.startsWith("v") && STABLE.test(value.hash.slice(1)))) &&
+			(value.verdict === "not-affected" || value.verdict === "adapted") && typeof value.evidence === "string" && value.evidence.trim().length >= 10 &&
+			typeof value.reviewer === "string" && value.reviewer.trim().length > 0;
+		if (!valid) fail(`${path}: every review needs hash (16 hex or v<version>), verdict not-affected|adapted, evidence (>= 10 chars) and reviewer: ${JSON.stringify(value).slice(0, 200)}`);
+		reviews.set(value.hash!, value as EntryReview);
+	}
+	return reviews;
+}
+
+function collectChangelog(input: { from: string; to: string; source: NotesSource; surfaces: Surface[]; reviews: Map<string, EntryReview> }): ChangelogReview {
+	const { from, to } = input;
+	const versions = [...new Set(input.source.versions())].filter(value => compareVersions(value, from) > 0 && compareVersions(value, to) <= 0).sort(compareVersions);
+	if (!versions.includes(to)) versions.push(to);
+	const releases: ReleaseNotes[] = [], entries: Entry[] = [];
+	for (const version of versions) {
+		const counts: Record<Section, number> = { breaking: 0, removed: 0, changed: 0, added: 0, fixed: 0, other: 0 };
+		let parsed: Entry[] = [], source = "", url = "", detail = "";
+		const body = input.source.body(version);
+		if (typeof body !== "string") {
+			({ source, url } = body);
+			parsed = parseNotes(body.text, version, null, source, url);
+		}
+		if (!parsed.length) {
+			const changelogs = input.source.changelogs(version);
+			if (typeof changelogs === "string") detail = [typeof body === "string" ? body : "release body has no package sections", changelogs].join("; ");
+			else {
+				parsed = changelogs.flatMap(notes => parseNotes(notes.text, version, notes.pkg, notes.source, notes.url, notes.line));
+				if (parsed.length) { source = "packages/<dir>/CHANGELOG.md"; url = changelogs[0]!.url; }
+				else detail = [typeof body === "string" ? body : "release body has no package sections", "no CHANGELOG.md section for this version"].join("; ");
+			}
+		}
+		for (const entry of parsed) {
+			counts[entry.section]++;
+			if (!CLASSIFIED.includes(entry.section)) continue;
+			entry.hits = classify(entry, input.surfaces);
+			entry.verdict = entry.hits.some(hit => hit.kind === "exact") ? "affected" : entry.hits.length ? "needs review" : "not affected";
+			entry.review = input.reviews.get(entry.hash) ?? null;
+			entry.blocking = BLOCKING.includes(entry.section) && entry.hits.some(hit => hit.kind !== "keyword") && !entry.review;
+		}
+		entries.push(...parsed);
+		releases.push({ version, status: parsed.length ? "parsed" : "unavailable", source, url, detail, counts, review: parsed.length ? null : input.reviews.get(`v${version}`) ?? null });
+	}
+	const reasons: string[] = [];
+	for (const release of releases.filter(entry => entry.status === "unavailable" && !entry.review))
+		reasons.push(`OMP changelog for ${release.version} could not be read (${release.detail}); read it and record a review for v${release.version} in ${REVIEWS}`);
+	const blocking = entries.filter(entry => entry.blocking);
+	if (blocking.length) reasons.push(`OMP changelog: ${blocking.length} Breaking Changes/Removed entr${blocking.length === 1 ? "y hits" : "ies hit"} a kit surface with no recorded review: ` +
+		blocking.map(entry => `${entry.version} ${entry.package} (${entry.hits.filter(hit => hit.kind !== "keyword").map(hit =>
+			`${SURFACE_LABEL[hit.surface]} \`${hit.term}\` (${hit.kind === "prefix" ? "group" : hit.kind === "package" ? "package" : hit.where})`).join(", ")})`).join("; "));
+	return { schema_version: 1, from, to, releases, entries, surfaces: input.surfaces, reasons };
+}
+
+/** The certification table: every Breaking Changes / Removed entry, and every Changed entry that touches a kit surface. */
+function renderChangelog(review: ChangelogReview, all = false): string {
+	const classified = review.entries.filter(entry => entry.verdict !== null);
+	const shown = classified.filter(entry => all || BLOCKING.includes(entry.section) || entry.verdict !== "not affected");
+	const lines = [`OMP release notes after ${review.from} up to ${review.to}: ` + review.releases.map(release => release.status === "parsed"
+		? `${release.version} (${release.source}: ${(Object.entries(release.counts) as [Section, number][]).filter(([, count]) => count).map(([section, count]) => `${count} ${SECTION_TITLE[section]}`).join(", ") || "no entries"})`
+		: `${release.version} (UNREAD${release.review ? `, reviewed by ${release.review.reviewer}` : ""}: ${oneLine(release.detail, 160)})`).join("; ") + ".", ""];
+	const blocking = classified.filter(entry => entry.blocking).length;
+	lines.push(`${classified.length} Breaking Changes / Removed / Changed entries classified against ${review.surfaces.reduce((sum, surface) => sum + surface.terms.length, 0)} kit surface terms derived from the kit's code; ` +
+		`**${blocking} blocking**. A Breaking Changes or Removed entry that hits a surface term blocks the merge until a review keyed by its hash is recorded in \`${REVIEWS}\`; keyword-only and Changed entries are listed, not blocking.`, "");
+	lines.push("| Entry | Package | Kit surface | Verdict | Blocks | Source |", "| --- | --- | --- | --- | --- | --- |");
+	for (const entry of shown) {
+		const surfaces = entry.hits.map(hit => hit.kind === "keyword" ? `${SURFACE_LABEL[hit.surface]}: keyword "${hit.term}"`
+			: `${SURFACE_LABEL[hit.surface]}: \`${hit.term}\`${hit.kind === "prefix" ? " (group)" : hit.kind === "package" ? " (package)" : ` (${hit.where})`}`).join("<br>") || "—";
+		const verdict = entry.review ? `${entry.verdict}; reviewed ${entry.review.verdict} by ${oneLine(entry.review.reviewer, 60)}: ${oneLine(entry.review.evidence, 200)}` : entry.verdict;
+		const blocks = entry.blocking ? "**yes**" : entry.review ? "reviewed" : "no";
+		lines.push(`| ${entry.version} ${SECTION_TITLE[entry.section]}: ${oneLine(entry.text, 300)} | ${entry.package} | ${surfaces} | ${verdict} | ${blocks} | [${entry.source} L${entry.line}](${entry.url}) \`${entry.hash}\` |`);
+	}
+	if (!shown.length) lines.push("| — | — | — | — | — | — |");
+	const hidden = classified.length - shown.length;
+	if (hidden) lines.push("", `${hidden} Changed entr${hidden === 1 ? "y touches" : "ies touch"} no kit surface (full list: \`changelog.md\` in the run's findings artifact).`);
+	lines.push("", "<details><summary>How each kit surface's match terms are derived</summary>", "");
+	for (const surface of review.surfaces) {
+		const sample = surface.terms.slice(0, 14).map(term => `\`${term.text}\`${term.kind === "prefix" ? "*" : ""}`).join(", ");
+		lines.push(`- **${surface.label}** (${surface.terms.length} terms): ${surface.derivation}. Keywords (needs review, never blocking): ${surface.keywords.map(word => `"${word}"`).join(", ")}. Terms: ${sample}${surface.terms.length > 14 ? ", …" : ""}`);
+	}
+	lines.push("", "Every term and the kit source line it came from: `bun scripts/omp-certify.ts surfaces`.", "</details>");
+	return lines.join("\n");
+}
+
+function changelog(): void {
+	const from = arg("from"), to = arg("to"), out = arg("out");
+	if (!STABLE.test(from) || !STABLE.test(to) || compareVersions(from, to) >= 0) fail("--from and --to must be stable x.y.z versions with from < to");
+	const bodies = optionalArg("bodies");
+	const review = collectChangelog({ from, to, source: bodies ? directorySource(resolve(bodies)) : githubSource(),
+		surfaces: deriveSurfaces(resolve(optionalArg("kit-root") ?? REPO)), reviews: readReviews(resolve(optionalArg("reviews") ?? join(REPO, REVIEWS))) });
+	writeFileSync(out, JSON.stringify(review, null, 2) + "\n");
+	const mdOut = optionalArg("md-out");
+	if (mdOut) writeFileSync(mdOut, renderChangelog(review, true) + "\n");
+	const classified = review.entries.filter(entry => entry.verdict !== null);
+	console.log(`omp-certify changelog ${from} -> ${to}: ${review.releases.filter(release => release.status === "parsed").length}/${review.releases.length} release(s) parsed, ` +
+		`${classified.length} classified entr${classified.length === 1 ? "y" : "ies"}, ${classified.filter(entry => entry.verdict === "affected").length} affected, ` +
+		`${classified.filter(entry => entry.blocking).length} blocking`);
+}
+
 // ---- body ----
 function oneLine(text: string, limit: number): string {
 	const flat = text.replace(/\s+/g, " ").replaceAll("|", "\\|").replaceAll("<!--", "&lt;!--").trim();
@@ -436,11 +971,18 @@ function body(): void {
 	let table: string | null = null, regressions: { version: string; checks: string[] }[] | null = null;
 	try { if (tablePath && regressionsPath) { table = readFileSync(tablePath, "utf8"); regressions = JSON.parse(readFileSync(regressionsPath, "utf8")); } }
 	catch { table = null; regressions = null; }
+	// The changelog classification is required evidence: a missing or unreadable file blocks the merge.
+	const changelogPath = arg("changelog");
+	let notes: ChangelogReview | null = null;
+	try { notes = JSON.parse(readFileSync(changelogPath, "utf8")) as ChangelogReview; } catch { notes = null; }
+	if (notes?.schema_version !== 1) notes = null;
 
 	const reasons: string[] = [];
 	if (suitesResult !== "success") reasons.push(`ci.yml suites on the candidate tree: ${suitesResult}`);
 	if (!regressions) reasons.push("first-fire/default-policy differential was not produced");
 	else if (regressions.length) reasons.push(`first-fire/default-policy differential is RED for ${regressions.map(entry => entry.version).join(", ")}`);
+	if (!notes) reasons.push("OMP changelog classification was not produced");
+	else reasons.push(...notes.reasons);
 	const blockedGates = (["readiness", "audit", "redactor"] as const).filter(gate => !reviewed.tuples[gate].qualified);
 	for (const gate of blockedGates) reasons.push(`${gate} tuple of OMP ${reviewed.to}: ${reviewed.tuples[gate].reason}`);
 	const eligible = reasons.length === 0;
@@ -451,7 +993,7 @@ function body(): void {
 	lines.push(`<!-- omp-certify key=${key} -->`, `## Certify OMP ${reviewed.to}`, "");
 	lines.push(`Moves \`certified\` in \`${COMPAT}\` from ${reviewed.from} to ${reviewed.to} (npm \`latest\`). Main CI installs \`certified\`, never npm latest, so an OMP release cannot turn \`main\` red; this PR is how a release becomes certified.`, "");
 	lines.push(eligible
-		? "**Verdict: merge.** Suites green, differential green, and every pinned memory source tuple is either already on main or qualified by two independent agent reviews."
+		? "**Verdict: merge.** Suites green, differential green, every pinned memory source tuple is either already on main or qualified by two independent agent reviews, and no OMP Breaking Changes / Removed entry hits a kit surface without a recorded review."
 		: "**Verdict: agent-fix.** Not merged; the fleet's agents pick this up from the linked `agent-fix` issue because:", "");
 	for (const reason of reasons) lines.push(`- ${oneLine(reason, 400)}`);
 	if (reasons.length) lines.push("");
@@ -468,6 +1010,7 @@ function body(): void {
 		lines.push(`| ${file.gate} | \`${file.pkg === "mnemopi" ? "pi-mnemopi/" : ""}${file.path}\` | \`${file.from_sha.slice(0, 12)}\` | \`${file.to_sha.slice(0, 12)}\`${file.changed ? " (changed)" : ""} | ${file.known ? "reviewed" : "unreviewed"} | ${passes} |`);
 	}
 	lines.push("", ...(["readiness", "audit", "redactor"] as const).map(gate => `- ${gate}: ${oneLine(reviewed.tuples[gate].reason, 300)}`), "");
+	lines.push(`### OMP changelog (${reviewed.from} → ${reviewed.to})`, "", notes ? renderChangelog(notes) : "Not produced; see the run.", "");
 	lines.push("### Agent review", "", `Advisory \`${reviewed.models.advisory.id ?? "none"}\` (family ${reviewed.models.advisory.family ?? "—"}): ${oneLine(reviewed.models.advisory.selection, 300)}.`,
 		`Reviewer \`${reviewed.models.reviewer.id ?? "none"}\` (family ${reviewed.models.reviewer.family ?? "—"}): ${oneLine(reviewed.models.reviewer.selection, 300)}.`, "");
 	if (!reviewedFiles.length) lines.push("No file needed agent review.", "");
@@ -494,6 +1037,17 @@ function body(): void {
 	issue.push("", "## What to change", "");
 	for (const gate of blockedGates) issue.push(`- **${gate}** (${ROLE[gate]}): ${codePaths(gate).join(", ") || "see the gate's pins"}. Confirm the semantics against the diff below, adapt the consumer code if they changed, then add the ${reviewed.to} tuple.`);
 	if (reasons.some(reason => reason.startsWith("ci.yml"))) issue.push(`- Suites failed on the candidate commit; reproduce with OMP ${reviewed.to} installed and fix the failing contract.`);
+	const blockingNotes = notes?.entries.filter(entry => entry.blocking) ?? [];
+	if (!notes || notes.reasons.length) {
+		issue.push(`- **OMP changelog**: for each entry below, read it against the named kit code, adapt the kit if it is affected, then add {"hash", "verdict": "adapted" | "not-affected", "evidence", "reviewer"} to \`${REVIEWS}\` on main (the next run re-certifies). A release whose notes could not be read takes hash \`v<version>\`.`);
+		issue.push("", "## OMP changelog entries that hit kit surfaces", "");
+		if (!notes) issue.push("_The changelog step did not produce `changelog.json`; see the run._");
+		for (const release of notes?.releases.filter(entry => entry.status === "unavailable" && !entry.review) ?? [])
+			issue.push(`- OMP ${release.version}: notes not readable (${oneLine(release.detail, 300)}); review hash \`v${release.version}\``);
+		for (const entry of blockingNotes)
+			issue.push(`- \`${entry.hash}\` OMP ${entry.version} ${entry.package} ${SECTION_TITLE[entry.section]} (${entry.source} L${entry.line}): ${oneLine(entry.text, 600)}`,
+				...entry.hits.filter(hit => hit.kind !== "keyword").map(hit => `  - ${SURFACE_LABEL[hit.surface]} \`${hit.term}\`: ${hit.kind === "prefix" ? `a key in a group the kit reads or writes (${hit.where})` : hit.kind === "package" ? `the memory audit pins this package's sources (${hit.where})` : `kit code at \`${hit.where}\``}`));
+	}
 	issue.push("", "## Changed pinned files", "");
 	let budget = 45_000;
 	for (const file of blockedFiles) {
@@ -552,4 +1106,6 @@ else if (command === "review") await review();
 else if (command === "apply") apply();
 else if (command === "body") body();
 else if (command === "issues") issues();
-else { console.error("usage: bun scripts/omp-certify.ts detect | review --from V --to V --work DIR --out FILE | apply --review FILE | body ... | issues ..."); process.exit(2); }
+else if (command === "changelog") changelog();
+else if (command === "surfaces") console.log(JSON.stringify(deriveSurfaces(resolve(optionalArg("kit-root") ?? REPO)), null, 2));
+else { console.error("usage: bun scripts/omp-certify.ts detect | review --from V --to V --work DIR --out FILE | apply --review FILE | changelog --from V --to V --out FILE ... | surfaces | body ... | issues ..."); process.exit(2); }

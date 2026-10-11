@@ -5,19 +5,24 @@ name: OMP certification
 # Hourly, when npm latest is newer than `certified`, it certifies ONLY that latest release. Skipping
 # intermediate releases is intended: a certification says "the latest release at time T works"; a machine
 # still on an intermediate release sees UNVERIFIED memory in doctor, which is informational, not red.
+# OMP's release notes are read for every release in between, though: a breaking change in any of them counts.
 #   detect        npm latest vs `certified`; quiet exit when equal or when a PR already covers this
-#                 release and these source pins (dispatch with force to re-run)
+#                 release, these source pins and these changelog reviews (dispatch with force to re-run)
 #   differential  first-fire/default-policy differential across the latest three stable releases
 #   prepare       npm-pack certified and latest, hash every pinned memory source and check each
 #                 candidate tuple against main. For changed files in tuples not on main, run two
 #                 independent agent passes from different model families; both must cite changed
-#                 diff lines and qualify the file. Bump `certified` and add only qualified tuples,
-#                 push omp-certify/<version>, open or update its PR, and close older `omp-certify/*` PRs as superseded
+#                 diff lines and qualify the file. Read OMP's changelog for every release after `certified`
+#                 up to latest and classify each Breaking Changes / Removed / Changed entry against kit
+#                 surfaces derived from kit code (scripts/omp-certify.ts changelog). Bump `certified` and add
+#                 only qualified tuples, push omp-certify/<version> (recreated from main when an older branch of
+#                 that name predates main), open or update its PR, and close older `omp-certify/*` PRs as superseded
 #   suites        ci.yml (full set) on that exact commit; PRs opened with GITHUB_TOKEN trigger no other
 #                 workflow, so the evidence is produced here and written into the PR
-#   publish       merge the tested head only when suites and differential are green and every pinned
-#                 source tuple is already on main or qualified by both agent passes; otherwise keep
-#                 the PR open, label it `agent-fix`, and keep exactly one open certification issue (the
+#   publish       merge the tested head only when suites and differential are green, every pinned
+#                 source tuple is already on main or qualified by both agent passes, and no Breaking Changes /
+#                 Removed changelog entry hits a kit surface without a review in scripts/omp-certify-reviews.json;
+#                 otherwise keep the PR open, label it `agent-fix`, and keep exactly one open certification issue (the
 #                 newest is updated, older ones close as superseded). A merge closes every open certification
 #                 issue with the green run. A publish failure also labels the PR and updates that one issue.
 #                 scripts/agent-fix-beads.sh (control-plane cron lane) turns each open agent-fix issue into a bead.
@@ -207,6 +212,12 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/findings"
           bun scripts/omp-certify.ts review --from "$CERTIFIED" --to "$LATEST" --work "$RUNNER_TEMP/omp-certify" --out "$RUNNER_TEMP/findings/review.json"
+      - name: Classify OMP changelog entries (every release after certified up to latest) against kit surfaces
+        # Not produced (e.g. npm unreachable) means publish fails closed: the body step blocks the merge on a missing file.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/omp-certify.ts changelog --from "$CERTIFIED" --to "$LATEST" --out "$RUNNER_TEMP/findings/changelog.json" --md-out "$RUNNER_TEMP/findings/changelog.md"
       - name: Bump certified and add only the source pins the review allows
         run: bun scripts/omp-certify.ts apply --review "$RUNNER_TEMP/findings/review.json"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -242,6 +253,20 @@ jobs:
           git switch -c "$BRANCH"
           git add scripts/omp-compat.json src/memory-readiness.ts src/memory-audit.ts docs/omp-compatibility.md
           git commit -m "[test] Certify OMP $LATEST" -m "Automated by .github/workflows/omp-certify.yml: $RUN_URL"
+          # Force-updating an existing omp-certify/<version> branch that predates main makes GITHUB_TOKEN push main's
+          # newer workflow files onto that ref, which GitHub refuses without the workflows permission (run 38182628254:
+          # "refusing to allow a GitHub App to create or update workflow"). A stale branch is deleted, and its open PR
+          # closed, so the push below creates the ref fresh from main.
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            git fetch --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+            if ! git merge-base --is-ancestor HEAD^ "refs/remotes/origin/$BRANCH"; then
+              stale="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+              if [[ -n "$stale" ]]; then
+                gh pr close "$stale" --repo "$GITHUB_REPOSITORY" --comment "Branch $BRANCH predates main, so it is recreated from main instead of force-updated; a new certification PR follows. Run: $RUN_URL"
+              fi
+              git push origin --delete "$BRANCH"
+            fi
+          fi
           git push --force origin "HEAD:refs/heads/$BRANCH"
           number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
           if [[ -z "$number" ]]; then
@@ -321,7 +346,7 @@ jobs:
           bun scripts/omp-certify.ts body --review "$F/review.json" --pr "$PR" \
             --suites-result "$SUITES_RESULT" --suites-jobs "$F/jobs.json" \
             --differential-table "$F/compatibility-table.md" --differential-regressions "$F/compatibility-regressions.json" \
-            --suite-sha "$SHA" --run-url "$RUN_URL" --key "$KEY" \
+            --changelog "$F/changelog.json" --suite-sha "$SHA" --run-url "$RUN_URL" --key "$KEY" \
             --issue-out "$F/issue.json" --body-out "$F/body.md" --decision-out "$F/decision.json"
           cat "$F/body.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish findings, then merge or route to agent-fix

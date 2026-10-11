@@ -1,0 +1,3 @@
+### Changed
+- OMP certification now reads OMP's release notes for every release since the certified one and lists each Breaking Changes, Removed and Changed entry against what the kit uses (settings keys, TTSR rule loading, the extension API, `omp --mode rpc` and slash commands, mnemopi memory, omp CLI flags; terms derived from the kit's code). A Breaking Changes or Removed entry that hits one blocks the merge until a review is recorded in `scripts/omp-certify-reviews.json`.
+- Certification recreates a stale `omp-certify/<version>` branch from `main` instead of force-updating it, so it keeps working after workflow changes on `main`.

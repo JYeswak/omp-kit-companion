@@ -85,9 +85,13 @@ async function certify(repo: string, env: Record<string, string | undefined> = {
 	await script(repo, ["apply", "--review", join(repo, "review.json")]);
 	writeFileSync(join(repo, "table.md"), "| Check | 1.1.0 |\n");
 	writeFileSync(join(repo, "regressions.json"), "[]");
+	// Release notes that touch no kit surface; tests/cli/omp-certify-changelog.test.ts covers the changelog gate.
+	mkdirSync(join(repo, "notes"), { recursive: true });
+	writeFileSync(join(repo, "notes", "1.1.0.md"), "## @oh-my-pi/pi-tui\n\n### Fixed\n\n- Fixed a flicker.\n");
+	await script(repo, ["changelog", "--from", "1.0.0", "--to", "1.1.0", "--bodies", join(repo, "notes"), "--kit-root", REPO_ROOT, "--out", join(repo, "changelog.json")]);
 	await script(repo, ["body", "--review", join(repo, "review.json"), "--pr", "7", "--suites-result", suites, "--suite-sha", "0".repeat(40),
 		"--run-url", "https://example.invalid/run", "--key", "k", "--differential-table", join(repo, "table.md"),
-		"--differential-regressions", join(repo, "regressions.json"), "--body-out", join(repo, "body.md"),
+		"--differential-regressions", join(repo, "regressions.json"), "--changelog", join(repo, "changelog.json"), "--body-out", join(repo, "body.md"),
 		"--decision-out", join(repo, "decision.json"), "--issue-out", join(repo, "issue.json")]);
 	const decision = JSON.parse(readFileSync(join(repo, "decision.json"), "utf8")) as { eligible: boolean; reasons: string[] };
 	let issue: Outcome["issue"] = null;
