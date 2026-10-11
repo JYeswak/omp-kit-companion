@@ -50,7 +50,7 @@ jobs:
           ci_runs="$RUNNER_TEMP/ci-runs.json"
           candidate_run="$RUNNER_TEMP/candidate-run.json"
           artifacts="$RUNNER_TEMP/candidate-artifacts.json"
-          if ! gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+          if ! gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
             -f head_sha="$SOURCE_SHA" -f branch=main -f event=push -f per_page=100 > "$ci_runs"; then
             printf '{"workflow_runs":[]}\n' > "$ci_runs"
           fi
