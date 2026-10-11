@@ -462,3 +462,15 @@ kit-no-double-quoted-substitution	quiet	tool	bash	-	git commit -m "plain message
 kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "path $TMPDIR/x"	bare $VAR without paren is not substitution
 kit-no-double-quoted-substitution	fire	tool	bash	-	br update t --reason "slash \\ and `tick` fires"	escaped backslash then raw tick still substitutes
 kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "cost \$(5) stays"	escaped dollar-paren is literal
+kit-no-plaintext-secret	fire	tool	bash	-	echo 'export OPENAI_API_KEY=sk-test4f8a2b9c1d7e6f5a3b2c' >> ~/.zshrc	literal key appended to an rc file
+kit-no-plaintext-secret	fire	tool	write	.env	{"path": ".env", "content": "STRIPE_SECRET_KEY=stk-fake9a8b7c6d5e4f3a2b1c0d\n"}	KEY=<long token> written into a .env
+kit-no-plaintext-secret	fire	tool	write	.mcp.json	{"path": ".mcp.json", "content": "{\"mcpServers\": {\"gh\": {\"headers\": {\"Authorization\": \"Bearer ghp_fake1234567890abcdefABCDEF\"}}}}"}	mcp.json bearer header with a literal token
+kit-no-plaintext-secret	fire	tool	write	config/mcp.json	{"path": "config/mcp.json", "content": "{\"env\": {\"X_TOKEN\": \"xt-0fake9b8c7d6e5f4a3b2c1d\"}}"}	JSON env block with a literal token
+kit-no-plaintext-secret	fire	tool	edit	deploy.sh	export GITHUB_PAT=ghp1fake2abc3def4ghi5jkl6	edit adding an exported literal PAT
+kit-no-plaintext-secret	quiet	tool	bash	-	export OPENAI_API_KEY="$(cf-secret OPENAI_API_KEY)"	sourced from Infisical at point of use
+kit-no-plaintext-secret	quiet	tool	write	.env	{"path": ".env", "content": "STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}\n"}	variable reference, not a value
+kit-no-plaintext-secret	quiet	tool	write	.mcp.json	{"path": ".mcp.json", "content": "{\"headers\": {\"Authorization\": \"Bearer ${GH_TOKEN}\"}}"}	bearer header from an env reference
+kit-no-plaintext-secret	quiet	tool	write	config/mcp.json	{"path": "config/mcp.json", "content": "{\"env\": {\"X_TOKEN\": \"!cf-secret X_TOKEN\"}}"}	command value resolved at launch
+kit-no-plaintext-secret	quiet	tool	write	.env.example	{"path": ".env.example", "content": "OPENAI_API_KEY=<your-key>\nANTHROPIC_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxx\nDB_PASSWORD=changeme\n"}	placeholders, not secrets
+kit-no-plaintext-secret	quiet	tool	bash	-	grep -rn OPENAI_API_KEY ~/.config 2>&1 | wc -l	a name with no value
+kit-no-plaintext-secret	quiet	tool	write	config.toml	{"path": "config.toml", "content": "APPLE_ASC_API_KEY_ID=ABC123DEF456GHI789JKL0\nSSH_KEY=/Users/me/.ssh/id_ed25519_2024\n"}	key id and key path are pointers, not secrets
