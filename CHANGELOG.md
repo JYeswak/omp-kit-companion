@@ -4,6 +4,8 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.22] - 2026-10-11
+
 ### Added
 
 - Release train: every green `main` commit is tagged as the next patch and released automatically, and the `kit-update` service installs published releases within minutes (`OMP_KIT_UPDATE_POLL=github`); a manual cut is still available as a fallback.
@@ -13,12 +15,19 @@
 - `omp-kit doctor --scope secrets` reports Infisical vault values that appear in plaintext in config, rc, LaunchAgent and repo files without ever printing the value. `--staged` checks only the git index.
 - `scripts/pre-commit-secret-scan.sh` pre-commit hook blocks a commit that stages a vault value.
 - New `kit-no-plaintext-secret` rule interrupts a call that writes a literal credential into an rc, `.env`, config file or command line.
+- `scripts/release-notes.sh fold`, `promote` and `notes`: drain fragments into `[Unreleased]`, cut a release section, and print a release body from `CHANGELOG.md`.
+- `bun scripts/readme-check.ts` fails the pre-push gate and CI when README.md misses a registry command or doctor scope or pins a release version.
 
 ### Changed
 
 - Release workflows reuse green CI and rehearsal evidence for the same commit instead of re-running the full candidate. The non-shipping Intel macOS probe runs in a separate workflow so it no longer delays publication.
 - The `kit-update` service's launchd plist is re-rendered after every update, and the polling interval is now 300 s.
 - The secret scan skips provider slugs and public client keys (`_ANON_KEY`, `_PUBLISHABLE_KEY`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`).
+- Releases are `chore: bump version to X.Y.Z` commits that fold `changelog.d/` into `CHANGELOG.md` and set the package.json version, so the installed plugin reports the version it was tagged with; a green commit with no release notes is not released.
+- Each GitHub release body is that release's `CHANGELOG.md` section; a release whose section is missing or empty is refused.
+- `CHANGELOG.md` follows the upstream oh-my-pi format (`## [Unreleased]`, `## [X.Y.Z] - DATE`, Added/Changed/Fixed buckets).
+- README.md resolves the latest release at install time instead of pinning a version, and its command reference lists every command and doctor scope.
+- The pre-push doc-drift check accepts a README.md change as documentation for a new command or flag.
 
 ### Fixed
 
