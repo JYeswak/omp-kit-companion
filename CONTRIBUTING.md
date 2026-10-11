@@ -27,18 +27,20 @@ Every push to `main` and every pull request into `main` runs the fast Linux gate
 
 ## Releases
 
-The maintainer ([JYeswak](https://github.com/JYeswak)) cuts releases. A merged user-visible change ships in a release within 7 days.
+The release train cuts releases: every green `main` commit that has release notes becomes the next patch release (`docs/release-procedure.md` section 7). The maintainer ([JYeswak](https://github.com/JYeswak)) owns the manual fallback.
 
-Each new merged PR adds one Markdown bullet to `changelog.d/<bead>.md`, ending in `(PR #NN)`. Keep PR notes in separate files rather than editing `CHANGELOG.md`. For a direct non-merge commit on `main`'s first-parent history since the previous tag that changes `src/`, `rules/`, `scripts/`, `extensions/`, or `installer/`, add one bullet to `changelog.d/<bead-suffix>.md`, where `<bead-suffix>` is the final component of its `Bead:` trailer (for example, `...-rz5.74` maps to `rz5.74`). Alternatively, include `[no-changelog] <reason>` in the commit body when a direct change needs no release note. The check requires coverage for every merged PR and every such direct commit, and prints each coverage source.
+`CHANGELOG.md` follows the upstream oh-my-pi shape: entries live under `## [Unreleased]` in `### Breaking Changes`, `### Added`, `### Changed`, `### Fixed` and `### Removed`; a release turns them into `## [X.Y.Z] - YYYY-MM-DD`; released sections are immutable. Entries are one line, brief and user-facing: lead with what the user sees or can now do; root cause and implementation detail belong in the commit.
 
-Before the release commit, run `sh scripts/release-notes.sh assemble --base-tag v<previous-version> --head HEAD --version <release-version> --date YYYY-MM-DD` to print the generated changelog to stdout; assembly does not modify files by default. Add `--output PATH` to save a preview elsewhere. Use `--write` only when deliberately updating `CHANGELOG.md`; it refuses local edits that differ from `--head`. Check completeness locally with `sh scripts/release-notes.sh check --base-tag v<previous-version> --head HEAD`.
+Write notes as `changelog.d/<bead>.md` fragments rather than editing `CHANGELOG.md`, so concurrent agents never conflict on one file. A fragment is one or more `- ` bullets, optionally preceded by one `### Added|Changed|Fixed|Removed|Breaking Changes` line (default `Changed`). Each merged PR adds a fragment ending in `(PR #NN)`. For a direct non-merge commit on `main`'s first-parent history since the previous tag that changes `src/`, `rules/`, `scripts/`, `extensions/`, or `installer/`, add `changelog.d/<bead-suffix>.md`, where `<bead-suffix>` is the final component of its `Bead:` trailer (for example, `...-rz5.74` maps to `rz5.74`). Alternatively, include `[no-changelog] <reason>` in the commit body when a direct change needs no release note. The check requires coverage for every merged PR and every such direct commit, and prints each coverage source: `sh scripts/release-notes.sh check --base-tag v<previous-version> --head HEAD`.
+
+`sh scripts/release-notes.sh fold` previews draining every fragment into `## [Unreleased]` (exact duplicates of existing entries are dropped); `--write` applies it and removes the fragments. `sh scripts/release-notes.sh promote --version X.Y.Z --date YYYY-MM-DD` previews the release section; with `--write` it folds, renames `[Unreleased]` to the version, opens a fresh `[Unreleased]`, and sets both package.json version fields. It refuses (exit 4) when there is nothing to release. `sh scripts/release-notes.sh notes --version X.Y.Z [--floor X.Y.Z]` prints the GitHub release body from the CHANGELOG section(s) and refuses (exit 4) an absent or empty section.
 
 A release is:
 
-1. A commit on `main` that runs the fragment assembler, moves `CHANGELOG.md` "Unreleased" under the new version, updates the README install pin, and the package.json version (both fields).
-2. A `vX.Y.Z` tag on that commit.
-3. The "Unpublished release candidate" workflow (`release.yml`) run against the tag. It builds the four native archives and certifies each one on its own runner.
-4. Publication of the certified archives and `release-index.json` as a GitHub release, then a fresh-HOME install from the published index.
+1. A `chore: bump version to X.Y.Z` commit on `main`, made by `promote --write`: the folded `## [X.Y.Z] - DATE` section and both package.json version fields.
+2. A `vX.Y.Z` tag on that commit, pushed atomically with it.
+3. The "Unpublished release candidate" workflow (`release.yml`) run against the tag. It refuses a tag whose package.json version differs, builds the native archives and certifies each one on its own runner.
+4. Publication of the certified archives and `release-index.json` as a GitHub release whose body is the CHANGELOG section, then a fresh-HOME install from the published index.
 
 A target that fails native certification is not published. One documented rerun of its job is allowed only when its receipt names a known, tracked upstream defect.
 

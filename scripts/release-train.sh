@@ -26,9 +26,21 @@
 #     Blocks until no in_progress/queued release.yml run remains, so two
 #     trains never dispatch overlapping releases. GH_BIN overrides the gh
 #     binary (test seam).
+#   bump --version V --date YYYY-MM-DD [--repo DIR]
+#     The upstream oh-my-pi release commit (scripts/release.ts): fold
+#     changelog.d/ into CHANGELOG.md [Unreleased], promote it to
+#     `## [V] - DATE`, set both package.json versions, and commit
+#     `chore: bump version to V` on the checked-out SHA. Nothing to release
+#     (no Unreleased entries, no fragments) is a refusal: no commit, no tag,
+#     never an empty release body.
+#   evidence-sha --sha SHA [--repo DIR]
+#     The SHA whose green CI a release at SHA may reuse: SHA itself, or the
+#     parent of a release bump commit whose only changes are the CHANGELOG
+#     promotion, removed changelog.d fragments and the two package.json
+#     version fields (anything more gets no inherited evidence).
 set -u
 
-usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|latest-flag|wait-release-idle ..." >&2; exit 2; }
+usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|latest-flag|wait-release-idle|bump|evidence-sha ..." >&2; exit 2; }
 
 cmd=${1:-}; [ -n "$cmd" ] || usage; shift
 
@@ -150,6 +162,62 @@ wait-release-idle)
 		[ "$(date +%s)" -ge "$deadline" ] && { echo "wait-release-idle: timed out with $busy release run(s) still active" >&2; exit 4; }
 		sleep "$poll"
 	done
+	;;
+bump)
+	version=""; date=""; repo="."
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--version) version=${2:-}; shift 2 ;;
+			--date) date=${2:-}; shift 2 ;;
+			--repo) repo=${2:-}; shift 2 ;;
+			*) echo "bump: unknown argument: $1" >&2; exit 2 ;;
+		esac
+	done
+	if ! { [ -n "$version" ] && [ -n "$date" ]; }; then echo "bump: --version and --date are required" >&2; exit 2; fi
+	SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+	if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then echo "bump: tracked files are modified" >&2; exit 1; fi
+	promoted=$(cd "$repo" && sh "$SCRIPT_DIR/release-notes.sh" promote --version "$version" --date "$date" --write 2>&1)
+	rc=$?
+	printf '%s\n' "$promoted"
+	if [ "$rc" -eq 4 ]; then printf 'BUMP=skip REASON=nothing-to-release version=%s\n' "$version"; exit 4; fi
+	[ "$rc" -eq 0 ] || { echo "bump: promote failed (rc=$rc)" >&2; exit 1; }
+	# The tree was clean, and promote only rewrites/removes tracked files, so -u stages exactly its result.
+	git -C "$repo" add -u -- .
+	git -C "$repo" commit -q -m "chore: bump version to $version" \
+		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set." \
+		-m "[no-changelog] release bump commit; its notes are the promoted CHANGELOG section" || { echo "bump: commit failed" >&2; exit 1; }
+	printf 'BUMP=committed version=%s sha=%s\n' "$version" "$(git -C "$repo" rev-parse HEAD)"; exit 0
+	;;
+evidence-sha)
+	sha=""; repo="."
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--sha) sha=${2:-}; shift 2 ;;
+			--repo) repo=${2:-}; shift 2 ;;
+			*) echo "evidence-sha: unknown argument: $1" >&2; exit 2 ;;
+		esac
+	done
+	case "$sha" in *[!0-9a-f]*|"" ) echo "evidence-sha: --sha must be a hex commit" >&2; exit 2 ;; esac
+	command -v jq >/dev/null 2>&1 || { echo "evidence-sha: jq is required" >&2; exit 3; }
+	subject=$(git -C "$repo" log -1 --format=%s "$sha" 2>/dev/null) || { echo "evidence-sha: unknown commit $sha" >&2; exit 2; }
+	version=${subject#chore: bump version to }
+	if [ "$version" = "$subject" ]; then printf 'EVIDENCE_SHA=%s REASON=exact\n' "$sha"; exit 0; fi
+	shape=ok
+	case "$version" in *[!0-9.]*|""|.*|*.|*..*) shape=bad ;; esac
+	parents=$(git -C "$repo" rev-list --parents -n 1 "$sha" | wc -w | tr -d '[:space:]')
+	[ "$parents" -eq 2 ] || shape=bad
+	if [ "$shape" = ok ]; then
+		parent=$(git -C "$repo" rev-parse "$sha^")
+		changes=$(git -C "$repo" diff-tree --no-commit-id --no-renames --name-status -r "$sha")
+		bad_paths=$(printf '%s\n' "$changes" | grep -Ev '^(M	CHANGELOG\.md|M	package\.json|D	changelog\.d/[a-z0-9.-]+\.md)$' || true)
+		[ -z "$bad_paths" ] || shape=bad
+		now=$(git -C "$repo" show "$sha:package.json" | jq -S 'del(.version, .omp.version)' 2>/dev/null) || shape=bad
+		before=$(git -C "$repo" show "$parent:package.json" | jq -S 'del(.version, .omp.version)' 2>/dev/null) || shape=bad
+		[ "$now" = "$before" ] || shape=bad
+		git -C "$repo" show "$sha:package.json" | jq -e --arg v "$version" '.version == $v and .omp.version == $v' >/dev/null 2>&1 || shape=bad
+	fi
+	if [ "$shape" = ok ]; then printf 'EVIDENCE_SHA=%s REASON=release-bump-parent bump=%s\n' "$parent" "$sha"; exit 0; fi
+	printf 'EVIDENCE_SHA=%s REASON=bump-shape-mismatch\n' "$sha"; exit 0
 	;;
 *) usage ;;
 esac

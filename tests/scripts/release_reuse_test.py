@@ -133,6 +133,19 @@ class ReleaseReuseTest(unittest.TestCase):
         self.assertEqual(result["reuse_fast_ci"], "false")
         self.assertEqual(result["candidate_run_id"], "")
 
+    def test_release_bump_reuses_only_the_named_parent_ci(self) -> None:
+        parent = "c" * 40
+        inherited = release_reuse.select_reuse(
+            green_ci_runs(parent), None, None, source_sha=SOURCE_SHA, base_version=BASE_VERSION,
+            requested_run_id="", repository=REPOSITORY, ci_sha=parent,
+        )
+        self.assertEqual(inherited["reuse_fast_ci"], "true")
+        other = release_reuse.select_reuse(
+            green_ci_runs(parent), None, None, source_sha=SOURCE_SHA, base_version=BASE_VERSION,
+            requested_run_id="", repository=REPOSITORY, ci_sha="d" * 40,
+        )
+        self.assertEqual(other["reuse_fast_ci"], "false")
+
     def test_malformed_source_sha_fails_closed(self) -> None:
         result = release_reuse.select_reuse(
             green_ci_runs(),

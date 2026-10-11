@@ -37,6 +37,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Select exact-SHA green CI and complete prior candidates
         id: select
@@ -50,8 +51,12 @@ jobs:
           ci_runs="$RUNNER_TEMP/ci-runs.json"
           candidate_run="$RUNNER_TEMP/candidate-run.json"
           artifacts="$RUNNER_TEMP/candidate-artifacts.json"
+          # A train release tags a `chore: bump version to X.Y.Z` commit that never gets a push CI
+          # run; a pure bump (CHANGELOG + fragments + package.json versions) reuses its parent's.
+          ci_sha="$(sh scripts/release-train.sh evidence-sha --sha "$SOURCE_SHA" | tee /dev/stderr | sed -n 's/^EVIDENCE_SHA=\([0-9a-f]*\) .*/\1/p')"
+          [[ "$ci_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "evidence-sha printed no SHA" >&2; exit 1; }
           if ! gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f head_sha="$SOURCE_SHA" -f branch=main -f event=push -f per_page=100 > "$ci_runs"; then
+            -f head_sha="$ci_sha" -f branch=main -f event=push -f per_page=100 > "$ci_runs"; then
             printf '{"workflow_runs":[]}\n' > "$ci_runs"
           fi
           if [[ -n "$REQUESTED_RUN_ID" && "$REQUESTED_RUN_ID" != *[!0-9]* ]]; then
@@ -68,7 +73,7 @@ jobs:
           fi
           python3 scripts/release_reuse.py preflight \
             --ci-runs "$ci_runs" --candidate-run "$candidate_run" --artifacts "$artifacts" \
-            --source-sha "$SOURCE_SHA" --base-version "$BASE_VERSION" \
+            --source-sha "$SOURCE_SHA" --ci-sha "$ci_sha" --base-version "$BASE_VERSION" \
             --requested-run-id "$REQUESTED_RUN_ID" --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
 
   reuse-candidate-evidence:
@@ -156,6 +161,15 @@ jobs:
         run: |
           previous_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^")"
           sh scripts/release-notes.sh check --base-tag "$previous_tag" --head "$GITHUB_SHA"
+      - name: Require package.json and a non-empty CHANGELOG section for the tagged version
+        if: ${{ !inputs.rehearsal && inputs.sha == '' }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          jq -e --arg v "$VERSION" '.version == $v and .omp.version == $v' package.json >/dev/null \
+            || { echo "package.json version $(jq -r '.version + "/" + .omp.version' package.json) does not match tag v$VERSION" >&2; exit 4; }
+          sh scripts/release-notes.sh notes --version "$VERSION" --output "$RUNNER_TEMP/release-notes.md"
 
   native-candidate:
     needs: [validate-tag, reuse-preflight, reuse-candidate-evidence]

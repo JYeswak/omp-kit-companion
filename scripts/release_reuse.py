@@ -136,8 +136,11 @@ def select_reuse(
     base_version: str,
     requested_run_id: str,
     repository: str,
+    ci_sha: str | None = None,
 ) -> dict[str, str]:
-    reuse_fast_ci = has_green_main_ci(ci_runs, source_sha)
+    # ci_sha is the parent of a pure release bump commit (scripts/release-train.sh
+    # evidence-sha); the bump itself never has a push CI run.
+    reuse_fast_ci = has_green_main_ci(ci_runs, ci_sha or source_sha)
     candidate_version = ""
     candidate_run_id = ""
     if reuse_fast_ci and requested_run_id:
@@ -267,6 +270,7 @@ def _preflight(args: argparse.Namespace) -> int:
         base_version=args.base_version,
         requested_run_id=args.requested_run_id,
         repository=args.repository,
+        ci_sha=args.ci_sha or None,
     )
     if values["reuse_fast_ci"] != "true":
         print("No successful main push CI exists for this exact SHA; running the full candidate matrix.", file=sys.stderr)
@@ -324,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     preflight.add_argument("--base-version", required=True)
     preflight.add_argument("--requested-run-id", default="")
     preflight.add_argument("--repository", required=True)
+    preflight.add_argument("--ci-sha", default="")
     preflight.set_defaults(func=_preflight)
 
     validate = commands.add_parser("validate-index")

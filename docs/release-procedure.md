@@ -5,28 +5,48 @@ the reference implementation; uds adopts this same procedure next.
 
 ## 1. Fragments, every commit
 
-Each change ships with `changelog.d/<bead>.md` (one line or more), or a
-`[no-changelog]` reason in the commit message. The release workflow enforces
-it:
+`CHANGELOG.md` has the upstream oh-my-pi shape (can1357/oh-my-pi AGENTS.md
+"Changelog"): `## [Unreleased]`, then `## [X.Y.Z] - YYYY-MM-DD` sections with
+`### Breaking Changes|Added|Changed|Fixed|Removed` buckets, one user-facing line
+per entry; released sections are immutable. Notes reach `[Unreleased]` through
+`changelog.d/<bead>.md` fragments (bullets, optional first line
+`### Category`, default Changed), so concurrent agents never edit one file.
+
+Each change ships with a fragment, or a `[no-changelog]` reason in the commit
+message. The release workflow enforces it:
 
 ```sh
 sh scripts/release-notes.sh check --base-tag vX.Y.Z --head REF
 ```
 
-A commit touching shipped paths with neither fails the check. The pre-push gate runs the same coverage for the pushed range first (`scripts/check-pushed-notes.sh` via `fresh-gate.sh`), so a missing trailer, reason or naming fragment refuses the push, not the release.
+A commit touching shipped paths with neither fails the check. The pre-push gate runs the same coverage for the pushed range first (`scripts/check-pushed-notes.sh` via `fresh-gate.sh`), so a missing trailer, reason or naming fragment refuses the push, not the release. A fragment folded into `CHANGELOG.md` later in the range still covers its commit.
 
-## 2. Assemble the changelog
+## 2. Fold and promote the changelog (the release bump commit)
 
 ```sh
-sh scripts/release-notes.sh assemble --base-tag vX.Y.Z --head main \
-  --version X.Y.Z --date YYYY-MM-DD --write
+sh scripts/release-notes.sh fold            # preview: fragments -> [Unreleased]; --write applies
+sh scripts/release-train.sh bump --version X.Y.Z --date YYYY-MM-DD
 ```
+
+`bump` runs `release-notes.sh promote --write` (fold, rename `[Unreleased]` to
+`## [X.Y.Z] - DATE`, open a fresh `[Unreleased]`, set package.json `version` and
+`omp.version`) and commits `chore: bump version to X.Y.Z`, the upstream
+`scripts/release.ts` commit. With no entries and no fragments it refuses
+(exit 4): there is nothing to release and no empty release body is ever cut.
+`release-notes.sh notes --version X.Y.Z [--floor X.Y.Z]` prints the GitHub
+release body from the CHANGELOG section(s), like upstream
+`scripts/ci-release-notes.ts`, and refuses an absent or empty section.
 
 ## 3. Tag semver
 
-Tags are `vX.Y.Z` on the exact certified commit. The release workflow
-(`.github/workflows/release.yml`) refuses anything else: exact tag shape,
-tag on HEAD, tag commit equals HEAD.
+Tags are `vX.Y.Z` on the bump commit, pushed atomically with it
+(`git push --atomic origin BUMP:refs/heads/main BUMP:refs/tags/vX.Y.Z`). The
+release workflow (`.github/workflows/release.yml`) refuses anything else: exact
+tag shape, tag on HEAD, tag commit equals HEAD, package.json version equal to
+the tag, and a non-empty `## [X.Y.Z]` CHANGELOG section. The bump commit has
+no push CI run of its own; `release-train.sh evidence-sha` lets a pure bump
+(CHANGELOG.md, removed fragments, the two package.json version fields, nothing
+else) reuse its parent's green CI.
 
 ### 3a. Rehearse before spending the version
 
@@ -88,9 +108,11 @@ fix is the way out, never a forced install.
 
 ## 7. Release train (RELTRAIN1, automatic; manual cut is the fallback)
 
-Every green main commit becomes the next patch release and installs itself;
-newest green wins, with no human cut. The manual cut (sections 2-6) remains
-the documented fallback for train outages.
+Every green main commit that has release notes becomes the next patch
+release and installs itself; newest green wins, with no human cut. A green
+commit with no notes (empty `[Unreleased]`, empty `changelog.d/`) is not
+released; it ships with the next commit that has notes. The manual cut
+(sections 2-6) remains the documented fallback for train outages.
 
 Trigger and queue (`.github/workflows/release-train.yml`, decisions in
 `scripts/release-train.sh`, covered by `tests/cli/release-train.test.sh`):
@@ -102,14 +124,18 @@ Trigger and queue (`.github/workflows/release-train.yml`, decisions in
   train waits for the release lane to go idle and re-decides after the
   wait, so three greens during one release produce exactly one queued
   train: the newest. Red main never releases.
-- The winner gets the next patch tag `vX.Y.(Z+1)` on that exact SHA, and
-  `release.yml` is dispatched at the tag. The release reuses the CI
-  evidence for the same SHA (ompkit-d2hs) and publishes automatically
-  when every gating job is green: the publish leg reads the version and
-  SHA back out of the verified candidate proof, re-verifies the ship set
-  (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`), and creates
-  the GitHub release. A train finishing late publishes without taking
-  `Latest` from a newer release. Rehearsal dispatches publish nothing.
+- The winner gets the release bump commit (section 2) on that exact SHA,
+  pushed to main atomically with the next patch tag `vX.Y.(Z+1)` (skipped
+  when main moved meanwhile), and `release.yml` is dispatched at the tag.
+  The release reuses the CI evidence of the bump's parent (ompkit-d2hs,
+  `evidence-sha`) and publishes automatically when every gating job is
+  green: the publish leg reads the version and SHA back out of the verified
+  candidate proof, re-verifies the ship set (`darwin-arm64-none`,
+  `linux-arm64-gnu`, `linux-x64-gnu`), and creates the GitHub release with
+  the tag's CHANGELOG section as its body (`release-notes.sh notes`, which
+  refuses an absent or empty section). A train finishing late publishes
+  without taking `Latest` from a newer release. Rehearsal dispatches
+  publish nothing.
 
 Install on publish (existing `kit-update` service, no new daemon):
 

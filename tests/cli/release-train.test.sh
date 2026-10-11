@@ -114,5 +114,54 @@ printf '#!/bin/sh\necho 2\n' > "$TMP/bin/gh"; chmod +x "$TMP/bin/gh"
 out=$(GH_BIN="$TMP/bin/gh" sh "$TRAIN" wait-release-idle --repo R --poll 1 --timeout 2 2>&1); rc=$?
 check "wait-release-idle: busy blocks" 4 "$rc" "$out" "timed out"
 
+# Release bump fixture: CHANGELOG [Unreleased] + one fragment + package.json at the old version.
+R="$TMP/bump-repo"
+mkdir -p "$R/changelog.d" "$R/src"
+git -C "$R" init -q
+git -C "$R" config user.email "train@example.invalid"
+# The train commits on a CI runner; this machine's global commit-msg hooks do not apply to it.
+git -C "$R" config core.hooksPath /dev/null
+git -C "$R" config user.name "release-train-test"
+printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.20] - 2026-10-10\n\n### Fixed\n\n- Old fix.\n' > "$R/CHANGELOG.md"
+printf '{\n\t"name": "omp-kit-companion",\n\t"version": "0.2.15",\n\t"omp": {\n\t\t"name": "omp-kit-companion",\n\t\t"version": "0.2.15"\n\t}\n}\n' > "$R/package.json"
+printf '### Added\n- A shipped feature.\n' > "$R/changelog.d/feat.md"
+printf 'code\n' > "$R/src/a.ts"
+git -C "$R" add -A && git -C "$R" commit -q -m "feat: a [test]"
+green=$(git -C "$R" rev-parse HEAD)
+
+# 18. bump folds, promotes, sets package.json and commits on the green SHA
+out=$(sh "$TRAIN" bump --version 0.2.21 --date 2026-10-12 --repo "$R" 2>&1); rc=$?
+check "bump: commits the release" 0 "$rc" "$out" "BUMP=committed version=0.2.21" "PROMOTED version=0.2.21"
+bump=$(git -C "$R" rev-parse HEAD)
+meta="$(git -C "$R" log -1 --format=%s "$bump") parent=$(git -C "$R" rev-parse "$bump^") $(jq -r '.version + "/" + .omp.version' "$R/package.json") $(grep -c '^## \[0.2.21\] - 2026-10-12$' "$R/CHANGELOG.md") $(find "$R/changelog.d" -type f | wc -l | tr -d ' ')"
+check "bump: subject, parent, versions, section, drained inbox" 0 0 "$meta" "chore: bump version to 0.2.21" "parent=$green" "0.2.21/0.2.21" " 1 0"
+check "bump: notes are the promoted section" 0 0 "$(cd "$R" && sh "$(dirname "$TRAIN")/release-notes.sh" notes --version 0.2.21 2>&1)" "### Added" "- A shipped feature."
+out=$(cd "$R" && sh "$(dirname "$TRAIN")/release-notes.sh" notes --version 0.2.22 2>&1); rc=$?
+check "notes: planted missing section refused" 4 "$rc" "$out" "REFUSED: CHANGELOG.md has no ## \[0.2.22\] section"
+# 19. a pure bump commit inherits its parent's CI evidence
+out=$(sh "$TRAIN" evidence-sha --sha "$bump" --repo "$R" 2>&1); rc=$?
+check "evidence-sha: bump inherits parent" 0 "$rc" "$out" "EVIDENCE_SHA=$green REASON=release-bump-parent"
+# 20. an ordinary commit uses its own evidence
+out=$(sh "$TRAIN" evidence-sha --sha "$green" --repo "$R" 2>&1); rc=$?
+check "evidence-sha: ordinary commit exact" 0 "$rc" "$out" "EVIDENCE_SHA=$green REASON=exact"
+# 21. planted: a bump-shaped commit (CHANGELOG + both versions) that also changes source inherits nothing
+jq --tab '.version = "0.2.22" | .omp.version = "0.2.22"' "$R/package.json" > "$TMP/pkg" && cp "$TMP/pkg" "$R/package.json"
+printf '\n## [0.2.22] - 2026-10-13\n\n### Fixed\n\n- Sneak.\n' >> "$R/CHANGELOG.md"
+printf 'sneaked\n' > "$R/src/a.ts"
+git -C "$R" commit -q -am "chore: bump version to 0.2.22"
+sneak=$(git -C "$R" rev-parse HEAD)
+out=$(sh "$TRAIN" evidence-sha --sha "$sneak" --repo "$R" 2>&1); rc=$?
+check "evidence-sha: planted source change refused inheritance" 0 "$rc" "$out" "EVIDENCE_SHA=$sneak REASON=bump-shape-mismatch"
+# 21b. planted: a bump that changes package.json beyond the two version fields inherits nothing
+jq --tab '.version = "0.2.23" | .omp.version = "0.2.23" | .description = "sneaked"' "$R/package.json" > "$TMP/pkg" && cp "$TMP/pkg" "$R/package.json"
+git -C "$R" commit -q -am "chore: bump version to 0.2.23"
+out=$(sh "$TRAIN" evidence-sha --sha "$(git -C "$R" rev-parse HEAD)" --repo "$R" 2>&1); rc=$?
+check "evidence-sha: planted extra package.json field refused inheritance" 0 "$rc" "$out" "REASON=bump-shape-mismatch"
+# 22. planted: nothing to release -> refused, no commit, no tag
+before=$(git -C "$R" rev-parse HEAD)
+out=$(sh "$TRAIN" bump --version 0.2.24 --date 2026-10-12 --repo "$R" 2>&1); rc=$?
+check "bump: planted nothing-to-release refused" 4 "$rc" "$out" "BUMP=skip REASON=nothing-to-release" "REFUSED: nothing to release"
+check "bump: refusal left HEAD and package.json alone" 0 0 "$(git -C "$R" rev-parse HEAD) $(jq -r .version "$R/package.json")" "$before 0.2.23"
+
 printf '%s pass, %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
