@@ -96,46 +96,62 @@ jobs:
           ref: ${{ steps.event.outputs.sha }}
           # promote reads changelog.d/ and CHANGELOG.md; the bump commit needs the SHA's parentage.
           fetch-depth: 0
+      # The train's scripts come from the same commit as this workflow file, not from the candidate:
+      # a candidate older than the workflow (the first train after a train change) would otherwise
+      # run a release-train.sh that lacks the subcommands this file calls.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: .train-tools
+          persist-credentials: false
       - name: Decide whether this SHA may tag
+        id: decide
         run: |
           set -euo pipefail
           set +e
-          sh scripts/release-train.sh decide \
+          sh .train-tools/scripts/release-train.sh decide \
             --conclusion "${{ steps.event.outputs.conclusion }}" \
             --run-status "${{ steps.event.outputs.status }}" \
             --sha "${{ steps.event.outputs.sha }}" \
             --head "${{ steps.event.outputs.head }}" | tee decide.out
           rc=${PIPESTATUS[0]}
           set -e
-          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat decide.out)"; exit 0; fi
+          # A step's `exit 0` does not stop the job: later steps gate on this output.
+          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat decide.out)"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           [[ "$rc" -eq 0 ]] || exit "$rc"
           grep -q '^DECIDE=tag' decide.out
+          echo "go=true" >> "$GITHUB_OUTPUT"
       - name: Wait for the release lane to go idle
+        if: steps.decide.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          sh scripts/release-train.sh wait-release-idle \
+          sh .train-tools/scripts/release-train.sh wait-release-idle \
             --repo "${{ github.repository }}" --timeout 7200 --poll 60
       - name: Re-decide after the wait (latest green still wins)
+        id: redecide
+        if: steps.decide.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           head="$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)"
           set +e
-          sh scripts/release-train.sh decide \
+          sh .train-tools/scripts/release-train.sh decide \
             --conclusion "${{ steps.event.outputs.conclusion }}" \
             --run-status "${{ steps.event.outputs.status }}" \
             --sha "${{ steps.event.outputs.sha }}" \
             --head "$head" | tee redecide.out
           rc=${PIPESTATUS[0]}
           set -e
-          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat redecide.out)"; exit 0; fi
+          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat redecide.out)"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           [[ "$rc" -eq 0 ]] || exit "$rc"
           grep -q '^DECIDE=tag' redecide.out
+          echo "go=true" >> "$GITHUB_OUTPUT"
       - name: Select the next patch version
         id: version
+        if: steps.redecide.outputs.go == 'true'
         env:
           VERSION_OVERRIDE: ${{ inputs.version }}
         run: |
@@ -145,13 +161,15 @@ jobs:
             git ls-remote --tags origin | grep -q "refs/tags/v$VERSION_OVERRIDE$" && { echo "v$VERSION_OVERRIDE is already tagged" >&2; exit 4; }
             version="$VERSION_OVERRIDE"
           else
-            version="$(git ls-remote --tags origin | sh scripts/release-train.sh next-version)"
+            version="$(git ls-remote --tags origin | sh .train-tools/scripts/release-train.sh next-version)"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "selected $version"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: steps.redecide.outputs.go == 'true'
       - name: Fold the changelog and commit the release bump (upstream oh-my-pi scripts/release.ts shape)
         id: bump
+        if: steps.redecide.outputs.go == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -159,7 +177,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           set +e
-          sh scripts/release-train.sh bump --version "$VERSION" --date "$(date -u +%F)" | tee bump.out
+          sh .train-tools/scripts/release-train.sh bump --version "$VERSION" --date "$(date -u +%F)" | tee bump.out
           rc=${PIPESTATUS[0]}
           set -e
           if [[ "$rc" -eq 4 ]]; then
@@ -169,7 +187,7 @@ jobs:
             exit 0
           fi
           [[ "$rc" -eq 0 ]] || exit "$rc"
-          sh scripts/release-notes.sh notes --version "$VERSION" --output "$RUNNER_TEMP/release-notes.md"
+          sh .train-tools/scripts/release-notes.sh notes --version "$VERSION" --output "$RUNNER_TEMP/release-notes.md"
           cat "$RUNNER_TEMP/release-notes.md"
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
