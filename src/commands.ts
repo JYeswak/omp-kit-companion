@@ -431,6 +431,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--index", value: "PATH", description: "Absolute local release index carrying kit archive integrity hashes" },
 		{ name: "--archive", value: "PATH", description: "Absolute local release archive matching the selected index" },
 		{ name: "--reconcile", value: "RECEIPT", description: "Resolve a PARTIAL update receipt whose postimages verify; marks RECONCILED only on match" },
+		{ name: "--prefix", value: "PATH", description: "Explicit install prefix for reconcile; validated by matching, otherwise derived from the receipt" },
 	], example: "omp-kit update --plan --version 1.2.3 --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json", runnable: false, mutation: true },
 	{ name: "apply", description: "Plan or apply a named kit component", usage: "apply rules|policy|extensions|plugin|mcp [--plan|--apply]", flags: [], subcommands: [
 		{ name: "rules", description: "Manage kit-owned rules", usage: "apply rules [--plan|--apply]", flags: planApply, example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },

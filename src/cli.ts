@@ -2984,7 +2984,7 @@ registerCommandHandler("fleet flush-pending", fleetCommand);
  * verify. Requires --yes: the operator attests they inspected the audit and
  * postimages, exactly what the PENDING_RECOVERY remediation asks for.
  */
-async function reconcileUpdateCommand(stateRoot: string, release: string, id: string, confirmed: boolean): Promise<CliResult> {
+async function reconcileUpdateCommand(stateRoot: string, release: string, id: string, confirmed: boolean, prefixFlag: unknown): Promise<CliResult> {
 	if (!confirmed)
 		return refusal("CONSENT_REQUIRED", "Reconciling a pending update receipt resolves it; pass --yes after inspecting the audit and postimages",
 			"Run omp-kit audit --json, verify both component postimages, then re-run with --yes; nothing was changed.");
@@ -2992,7 +2992,14 @@ async function reconcileUpdateCommand(stateRoot: string, release: string, id: st
 		return refusal("INVALID_RECEIPT", "The reconcile target must name a pending receipt id",
 			"Pass the receipt id from the PARTIAL update output; nothing was changed.");
 	try {
-		const result = reconcilePendingUpdate({ stateRoot, prefix: dirname(dirname(release)), id });
+		let prefix: string | undefined;
+		if (prefixFlag !== undefined) {
+			if (typeof prefixFlag !== "string" || !isAbsolute(prefixFlag) || resolve(prefixFlag) !== prefixFlag)
+				return refusal("INVALID_PREFIX", "The reconcile prefix must be a canonical absolute install prefix",
+					"Pass the absolute kit prefix holding releases/, or omit --prefix to derive it from the receipt postimage; nothing was changed.");
+			prefix = prefixFlag;
+		}
+		const result = reconcilePendingUpdate({ stateRoot, prefix, id });
 		return { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,
 			active_version: result.activeVersion, verified: result.verified }, verification: "UNVERIFIED" };
 	} catch (error) {
@@ -3016,7 +3023,7 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("UPDATE_CONTEXT_UNAVAILABLE", "An installed kit and canonical absolute HOME/state root are required",
 			"Install a verified local kit archive, then set a canonical HOME and XDG_STATE_HOME.");
 	const reconcileId = request.flags.get("--reconcile");
-	if (typeof reconcileId === "string") return reconcileUpdateCommand(stateRoot, release, reconcileId, request.flags.has("--yes"));
+	if (typeof reconcileId === "string") return reconcileUpdateCommand(stateRoot, release, reconcileId, request.flags.has("--yes"), request.flags.get("--prefix"));
 	const version = request.flags.get("--version"), indexPath = request.flags.get("--index"), archivePath = request.flags.get("--archive");
 	if (typeof version !== "string" || typeof indexPath !== "string" || typeof archivePath !== "string" ||
 		![indexPath, archivePath].every(path => isAbsolute(path) && resolve(path) === path))

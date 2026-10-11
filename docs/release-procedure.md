@@ -79,5 +79,9 @@ clears it. Inspect `omp-kit audit --json` and both component postimages,
 then run `omp-kit update --reconcile RECEIPT --yes`: it rescans the active
 kit symlink, release bytes and the receipt's recorded postimages and marks
 the receipt RECONCILED only when all three match, recording what was
-verified. A mismatch refuses and the receipt stays pending; undo or a real
+verified. The install prefix is derived from the receipt postimage itself,
+never from the running binary (which predates the command on a stuck
+machine); pass an explicit `--prefix PATH` only to point at a relocated
+install, and it is validated the same way, by matching. A mismatch refuses
+and the receipt stays pending; undo or a real
 fix is the way out, never a forced install.
