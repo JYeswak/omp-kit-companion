@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { sha256, secretShapedName, tmuxSecretNames, digestSetFromFile } from "../../src/secrets-doctor.ts";
+import { sha256, secretShapedName, tmuxSecretNames, digestSetFromFile, addSecretValueToDigestSet, findSecretNames } from "../../src/secrets-doctor.ts";
 
 // Synthetic values only, minted per run: never a vault value, never in source text.
 const fake = `fk${randomBytes(12).toString("hex")}`;
@@ -66,4 +66,16 @@ test("--staged scans index blobs only: staged plant blocks, clean staging passes
 	const red = doctor({}, ["--staged"], repo);
 	expect(red.code).toBe(1);
 	expect(red.data.hits).toEqual([{ path: "mcp.json", names: ["fake/prod:DEMO_API_KEY"] }]);
+});
+test("provider slugs are excluded while credential tokens under the same name remain digestible", () => {
+	const name = "NANGO_GOOGLE_PROVIDER_CONFIG_KEY";
+	const label = `nango/prod:${name}`;
+	const slug = "google-calendar-app";
+	const mixedToken = `${"Ab3".repeat(10)}X9`;
+	const set = { digests: new Map<string, Set<string>>(), lengths: new Set<number>(), source: "test", projects: 0, failed: [] };
+	addSecretValueToDigestSet(set, name, slug, label);
+	addSecretValueToDigestSet(set, name, mixedToken, label);
+
+	expect(findSecretNames(slug, set)).toEqual([]);
+	expect(findSecretNames(mixedToken, set)).toEqual([label]);
 });

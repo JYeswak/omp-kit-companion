@@ -132,7 +132,7 @@ export function liveDigestSource(home = process.env.HOME ?? ""): DigestResult {
 			// A URL carrying user:password@ is a credential whatever its name (DATABASE_URL).
 			for (const group of groups) if (Array.isArray(group)) for (const secret of group) {
 				if (!record(secret) || typeof secret.secretKey !== "string" || typeof secret.secretValue !== "string") continue;
-				if (secretShapedName(secret.secretKey) || /^[a-z][a-z0-9+.-]{0,20}:\/\/[^\s/:@]{1,200}:[^\s@]{1,500}@/i.test(secret.secretValue)) addValue(set, secret.secretValue, `${projects.get(id) ?? id}/${env}:${secret.secretKey}`);
+				addSecretValueToDigestSet(set, secret.secretKey, secret.secretValue, `${projects.get(id) ?? id}/${env}:${secret.secretKey}`);
 			}
 			okProjects.add(id);
 		} catch { /* An unparsable body counts as an unread project/env. */ }
@@ -250,6 +250,16 @@ const POINTER_PART = flagTable(["ID", "PATH", "FILE", "NAME", "URL", "DIR", "TTL
 export function secretShapedName(name: string): boolean {
 	const parts = name.toUpperCase().split("_");
 	return parts.some(part => SECRET_PART[part] === true) && !parts.some(part => POINTER_PART[part] === true);
+}
+
+const LOWERCASE_HYPHEN_SLUG = /^[a-z]+(?:-[a-z]+)*$/;
+const URL_WITH_CREDENTIALS = /^[a-z][a-z0-9+.-]{0,20}:\/\/[^\s/:@]{1,200}:[^\s@]{1,500}@/i;
+
+/** Keep provider-name slugs out of the digest set without exempting real tokens under the same key. */
+export function addSecretValueToDigestSet(set: DigestSet, name: string, value: string, label: string): void {
+	const isProviderSlug = name.endsWith("_PROVIDER_CONFIG_KEY") && LOWERCASE_HYPHEN_SLUG.test(value.trim());
+	const isCredentialUrl = URL_WITH_CREDENTIALS.test(value);
+	if ((!isProviderSlug && secretShapedName(name)) || isCredentialUrl) addValue(set, value, label);
 }
 
 /** `tmux show-environment -g` lines: NAME=value or -NAME (removed). Returns the offending NAMEs only. */
