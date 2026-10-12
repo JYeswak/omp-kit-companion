@@ -4,6 +4,16 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.31] - 2026-10-12
+
+### Added
+
+- `omp-kit drain close-queue --db PATH --repo DIR [--json]`: lists open beads named by a landing commit with no grader verdict since (landing SHA cited); `drain stale-claims --db PATH [--json]` flags in-progress beads with no worker or no recent evidence, each with its reclaim command. Both read the tracker read-only and are repo-scoped; `doctor --scope beads` gains the stale-claim finding.
+
+### Changed
+
+- `omp-kit send` verifies delivery against the pane it typed into: SESSION+PANE resolves once to a global pane id (already-global or qualified targets pass through; failed resolution falls back to the qualified form) and every capture/Enter uses it, so an index target in another session can no longer report NOT_DELIVERED while its text sits in the real composer.
+
 ## [0.2.30] - 2026-10-12
 
 ### Changed

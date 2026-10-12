@@ -1,1 +1,0 @@
-- `omp-kit send` verifies delivery against the pane it typed into: SESSION+PANE resolves once to a global pane id (already-global or qualified targets pass through; failed resolution falls back to the qualified form) and every capture/Enter uses it, so an index target in another session can no longer report NOT_DELIVERED while its text sits in the real composer.

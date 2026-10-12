@@ -1,2 +1,0 @@
-### Added
-- `omp-kit drain close-queue --db PATH --repo DIR [--json]`: lists open beads named by a landing commit with no grader verdict since (landing SHA cited); `drain stale-claims --db PATH [--json]` flags in-progress beads with no worker or no recent evidence, each with its reclaim command. Both read the tracker read-only and are repo-scoped; `doctor --scope beads` gains the stale-claim finding.
