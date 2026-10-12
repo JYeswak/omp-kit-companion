@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.30] - 2026-10-12
+
+### Changed
+
+- `omp-kit send` empty-composer admission reads only to the next separator line: an idle pane's separator and status footer no longer count as draft text, so admission passes on truly empty composers (previously it waited out the whole bound on every idle pane).
+
 ## [0.2.29] - 2026-10-12
 
 ### Added
