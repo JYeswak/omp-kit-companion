@@ -190,3 +190,18 @@ test("poll-only install uses the published tuple when the static fallback is nul
 		expect(result).toMatchObject({ status: "UPDATED", receiptId: "r6", activeVersion: "1.2.4", relink: "APPLIED", service: "APPLIED" });
 	});
 });
+
+test("planted: the default relink covers all profiles including default", async () => {
+	const value = config();
+	const calls: string[][] = [];
+	const result = await runKitUpdateJob(value, {
+		plan: async () => ({ ...value, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+		apply: async () => ({ status: "UPDATED", exitCode: 0, receiptId: "r7", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }),
+		exec: async argv => { calls.push([...argv]); return { exit: 0, stdout: "linked", stderr: "" }; },
+		reconcile: async () => ({ ok: true, detail: "" }),
+		notify: () => {},
+	});
+	expect(result).toMatchObject({ status: "UPDATED", receiptId: "r7", relink: "APPLIED", service: "APPLIED" });
+	const relink = calls.find(argv => argv.includes("plugin"));
+	expect(relink).toEqual([join(value.prefix, "bin", "omp-kit"), "apply", "plugin", "--apply", "--profiles", "all", "--include-default"]);
+});

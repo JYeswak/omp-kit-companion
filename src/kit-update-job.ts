@@ -101,8 +101,9 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 	if (!config.enabled) return { status: "DISABLED", receiptId: null, activeVersion: null, notification: false };
 	const plan = dependencies.plan ?? planKitUpdate;
 	const apply = dependencies.apply ?? applyKitUpdate;
+	const exec = dependencies.exec ?? defaultExec;
 	const relink = dependencies.relink ?? (async (binary: string) => {
-		const ran = await defaultExec([binary, "apply", "plugin", "--apply"]);
+		const ran = await exec([binary, "apply", "plugin", "--apply", "--profiles", "all", "--include-default"]);
 		const out = (ran.stdout + ran.stderr).trim().slice(-500);
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});
