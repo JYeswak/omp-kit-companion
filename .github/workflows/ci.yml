@@ -262,7 +262,7 @@ jobs:
 
   build-candidates:
     needs: resolve-omp-versions
-    if: github.event.repository.private == false && github.event_name != 'push' && github.event_name != 'pull_request'
+    if: github.event.repository.private == false && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -409,7 +409,7 @@ jobs:
 
   candidate-index:
     needs: [build-candidates, native-certification, resolve-omp-versions]
-    if: ${{ github.event.repository.private == false && always() && github.event_name != 'push' && github.event_name != 'pull_request' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
+    if: ${{ github.event.repository.private == false && always() && github.event_name != 'pull_request' && needs.build-candidates.result == 'success' && needs.resolve-omp-versions.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
