@@ -4,6 +4,16 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.28] - 2026-10-12
+
+### Changed
+
+- Bound plugin apply receipts and operator snapshots to the OMP package link, installed-plugin registry, and lock; undo restores registry bytes and ignores unrelated cache trees.
+
+### Fixed
+
+- Fleet Watch no longer parks idle workers with NO_TRIAGE_PICK when bv's top-N recommendations hold no focus leaf but `br ready` does: it falls through to the first claimable focus ready leaf, naming the reason `bv top-N has no focus leaf` (ompkit-fp72.28).
+
 ## [0.2.27] - 2026-10-12
 
 ### Changed
