@@ -69,6 +69,14 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 archive_root=$(owned_dir pre-push-gate) || { printf 'pre-push-gate: cannot stage archive\n' >&2; exit 1; }
+# Both owned dirs are made here, in the shell that owns the trap: the body below runs in a subshell,
+# and cleanup must know every dir it has to remove.
+if [ -n "${base_ref:-}" ]; then
+	base_root=$(owned_dir pre-push-gate-base) || { printf 'pre-push-gate: cannot stage base archive\n' >&2; exit 1; }
+fi
+# Everything from here to the gate runs in gate_body, whose whole output (every checker, not only
+# fresh-gate) streams to the terminal and to archive_root/gate.log; a red at any step keeps the log.
+gate_body() {
 archive="$archive_root/tree"
 git -C "$ROOT" archive "$local_sha" | tar -xf - -C "$archive"
 set -- --archive-dir "$archive"
@@ -87,7 +95,6 @@ if [ -n "${base_ref:-}" ]; then
 fi
 gate_scripts="$archive"
 if [ -n "${base_ref:-}" ]; then
-	base_root=$(owned_dir pre-push-gate-base) || { printf 'pre-push-gate: cannot stage base archive\n' >&2; exit 1; }
 	base_archive="$base_root/tree"
 	git -C "$ROOT" archive "$base_ref" | tar -xf - -C "$base_archive" || { printf 'pre-push-gate: cannot extract base archive\n' >&2; exit 1; }
 	gate_scripts="$base_archive"
@@ -195,11 +202,14 @@ else
 	printf 'SKIP doc-drift: no base to range against\n' >&2
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
-# its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child; its output
-# streams to the terminal and to archive_root/gate.log, and its status (from a file, because a
-# pipeline reports tee's) decides whether cleanup keeps that log. `|| st=$?` because set -e would
-# end the group at the failing gate before its status is written.
-{ st=0; sh "$gate_scripts/scripts/fresh-gate.sh" "$@" || st=$?; printf '%s\n' "$st" >"$archive_root/gate.rc"; } 2>&1 | tee "$archive_root/gate.log"
+# its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child.
+sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+}
+# The body runs as a plain subshell, not inside `||`: POSIX ignores set -e anywhere in an AND-OR
+# list, so `( gate_body ) || st=$?` would let a failing early checker fall through. set +e is
+# scoped to this group only; the subshell re-enables set -e for every step of the body. The status
+# goes through a file because a pipeline reports tee's.
+{ set +e; ( set -e; gate_body ); printf '%s\n' "$?" >"$archive_root/gate.rc"; } 2>&1 | tee "$archive_root/gate.log"
 gate_rc=$(cat "$archive_root/gate.rc" 2>/dev/null) || gate_rc=1
 case "$gate_rc" in ''|*[!0-9]*) gate_rc=1 ;; esac
 [ "$gate_rc" = 0 ] || gate_red=1

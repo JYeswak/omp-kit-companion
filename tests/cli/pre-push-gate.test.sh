@@ -312,6 +312,33 @@ if [ "$rc" = "5" ] && [ "$(leftover "$repo")" = "1" ] && [ "$files" = "./.owner 
 else
 	fail=$((fail + 1)); printf 'FAIL red-keeps-only-log-and-rc: rc=%s leftover=%s files=<%s>\n' "$rc" "$(leftover "$repo")" "$files"
 fi
+# ompkit-fp72.40: a red before fresh-gate (an early checker) also keeps exactly its log and its
+# exit code, and fresh-gate never runs after it.
+repo=$(mkrepo earlyred 'echo FRESH-GATE-RAN' 'echo HEAD-GATE' publishability.test.sh)
+rc=$(run_adapter "$repo")
+kept=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate.*' ! -name 'pre-push-gate-base.*')
+files=$( [ -n "$kept" ] && (cd "$kept" && find . ! -type d | sort | tr '\n' ' ') )
+if [ "$rc" = "7" ] && [ "$(leftover "$repo")" = "1" ] && [ "$files" = "./.owner ./gate.log " ] \
+	&& grep -q 'RED checker-contract publishability.test.sh' "$kept/gate.log" && ! grep -q 'FRESH-GATE-RAN' "$kept/gate.log"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL early-red-keeps-log-and-rc: rc=%s leftover=%s files=<%s>\n' "$rc" "$(leftover "$repo")" "$files"
+fi
+# ompkit-fp72.40: a step that fails without an explicit exit (the regexploit gate) still stops the
+# push: set -e must hold inside the logged body (POSIX drops it inside an AND-OR list).
+printf '#!/usr/bin/env python3\nimport sys\nprint("REGEXPLOIT-RED")\nsys.exit(3)\n' > "$TMP/regexploit-red.py"
+repo=$(mkrepo setered 'echo FRESH-GATE-RAN' 'echo HEAD-GATE')
+git -C "$repo" checkout -q HEAD~1
+cp "$TMP/regexploit-red.py" "$repo/scripts/regexploit-gate.py"
+git -C "$repo" commit -qam "[test] base regexploit red"
+git -C "$repo" commit -q --allow-empty -m "[test] head"
+rc=$(run_adapter "$repo")
+out=$(cat "$TMP/out")
+if [ "$rc" = "3" ] && printf '%s' "$out" | grep -q 'REGEXPLOIT-RED' && ! printf '%s' "$out" | grep -q 'FRESH-GATE-RAN'; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL set-e-holds-in-logged-body: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
 
 # ompkit-fp72.40: a symlink inside the extract (a kit-update test fixture's prefix/bin/omp-kit link)
 # kept its parent dirs non-empty, so cleanup that deleted only regular files left the whole tree.
