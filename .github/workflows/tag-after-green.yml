@@ -1,0 +1,46 @@
+name: Tag after green
+
+# fp72.49 stage 2: tag exactly the certified bump SHA.
+#
+# The stage-1 train pushes the bump commit to main UNTAGGED with a
+# refs/train/pending-vX.Y.Z ref recording the bump SHA. When that SHA's own
+# push run completes, this workflow matches the run head SHA to the recorded
+# bump SHA (scripts/tag-after-green.sh) and tags it only when
+# native-certification is green for every shipped platform/track, then
+# dispatches the candidate. A green run for any other SHA, a red cert, or a
+# still-running cert creates no tag, with the reason in the log.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-after-green
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: >-
+      github.event.repository.private == false &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Tag the certified bump SHA or skip with reason
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sh scripts/tag-after-green.sh \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --head-sha "${{ github.event.workflow_run.head_sha }}"
