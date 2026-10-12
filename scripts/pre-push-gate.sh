@@ -188,7 +188,7 @@ else
 	printf 'SKIP doc-drift: no base to range against\n' >&2
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
-# its archive extracts into var/agent-tmp (ompkit-fp72.40). Run the gate as a child, keep its status.
-rc=0
-sh "$gate_scripts/scripts/fresh-gate.sh" "$@" || rc=$?
-exit "$rc"
+# its archive extracts into var/agent-tmp (ompkit-fp72.40). Run the gate as a child as the last
+# command: its status is the hook's status and the EXIT trap still runs. No trailing `exit "$rc"`:
+# with it, shellcheck stops counting the trap as a call to cleanup (SC2317/SC2329, red main 296771de).
+sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
