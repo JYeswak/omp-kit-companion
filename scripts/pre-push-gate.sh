@@ -52,11 +52,18 @@ archive_root=""
 base_root=""
 # Every non-directory goes (files, symlinks, sockets): a symlink left by a test fixture kept
 # its parents non-empty, so the whole extract survived (pre-push-gate.vx9qma, 2026-10-12).
+# A red gate keeps its log: archive_root/gate.log and .owner survive, everything else goes, so the
+# failure can be read after the push is refused and the reaper still owns the dir (ompkit-fp72.40).
+gate_red=0
 cleanup() {
 	for dir in ${archive_root:+"$archive_root"} ${base_root:+"$base_root"}; do
 		[ -d "$dir" ] || continue
 		chmod -R u+w "$dir" 2>/dev/null || true
-		find "$dir" ! -type d -delete 2>/dev/null || true
+		if [ "$gate_red" = 1 ] && [ "$dir" = "$archive_root" ]; then
+			find "$dir" ! -type d ! -path "$dir/gate.log" ! -path "$dir/.owner" -delete 2>/dev/null || true
+		else
+			find "$dir" ! -type d -delete 2>/dev/null || true
+		fi
 		find "$dir" -depth -type d -empty -delete 2>/dev/null || true
 	done
 }
@@ -188,7 +195,14 @@ else
 	printf 'SKIP doc-drift: no base to range against\n' >&2
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
-# its archive extracts into var/agent-tmp (ompkit-fp72.40). Run the gate as a child as the last
-# command: its status is the hook's status and the EXIT trap still runs. No trailing `exit "$rc"`:
-# with it, shellcheck stops counting the trap as a call to cleanup (SC2317/SC2329, red main 296771de).
-sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+# its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child; its output
+# streams to the terminal and to archive_root/gate.log, and its status (from a file, because a
+# pipeline reports tee's) decides whether cleanup keeps that log. `|| st=$?` because set -e would
+# end the group at the failing gate before its status is written.
+{ st=0; sh "$gate_scripts/scripts/fresh-gate.sh" "$@" || st=$?; printf '%s\n' "$st" >"$archive_root/gate.rc"; } 2>&1 | tee "$archive_root/gate.log"
+gate_rc=$(cat "$archive_root/gate.rc" 2>/dev/null) || gate_rc=1
+case "$gate_rc" in ''|*[!0-9]*) gate_rc=1 ;; esac
+[ "$gate_rc" = 0 ] || gate_red=1
+trap - EXIT
+cleanup
+exit "$gate_rc"

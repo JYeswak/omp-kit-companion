@@ -292,8 +292,9 @@ else
 	fail=$((fail + 1)); printf 'FAIL main-no-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
-# ompkit-fp72.40: the gate removes its archive extracts on green AND red, and a red keeps its exit code.
-# An `exec` into the last step replaced the shell owning the EXIT trap, so every push leaked its extract.
+# ompkit-fp72.40: the gate removes its archive extracts on green; on red it keeps exactly one dir
+# holding .owner and gate.log (the failing output), and keeps its exit code. An `exec` into the
+# last step replaced the shell owning the EXIT trap, so every push leaked its extract.
 leftover() { find "$1/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate*' | wc -l | tr -d ' '; }
 repo=$(mkrepo cleangreen 'echo BASE-GATE' 'echo HEAD-GATE')
 rc=$(run_adapter "$repo")
@@ -304,10 +305,12 @@ else
 fi
 repo=$(mkrepo cleanred 'echo BASE-GATE-FAIL; exit 5' 'echo HEAD-GATE')
 rc=$(run_adapter "$repo")
-if [ "$rc" = "5" ] && [ "$(leftover "$repo")" = "0" ]; then
+kept=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate.*' ! -name 'pre-push-gate-base.*')
+files=$( [ -n "$kept" ] && (cd "$kept" && find . ! -type d | sort | tr '\n' ' ') )
+if [ "$rc" = "5" ] && [ "$(leftover "$repo")" = "1" ] && [ "$files" = "./.owner ./gate.log " ] && grep -q 'BASE-GATE-FAIL' "$kept/gate.log"; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL red-leaves-no-extract-keeps-rc: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
+	fail=$((fail + 1)); printf 'FAIL red-keeps-only-log-and-rc: rc=%s leftover=%s files=<%s>\n' "$rc" "$(leftover "$repo")" "$files"
 fi
 
 # ompkit-fp72.40: a symlink inside the extract (a kit-update test fixture's prefix/bin/omp-kit link)
