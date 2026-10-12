@@ -1603,9 +1603,10 @@ function policyCommand(request: ParsedCommand): CliResult {
 			"PROFILE_INVENTORY_UNVERIFIED", "UNVERIFIED_PROFILE", "NATIVE_CONFIG_UNAVAILABLE", "NATIVE_CONFIG_RESULT_INVALID", "OMP_CONFIG_UNAVAILABLE", "OMP_IDENTITY_MISMATCH",
 			"INVALID_POLICY", "INVALID_PROFILE_SELECTION", "DISABLED_RULE_REFUSED", "FRESH_PLAN", "INVALID_PLAN",
 			"INSUFFICIENT_SPACE", "LOCK_BUSY"];
-		return refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
+		const fallback = refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
 			"Policy plan or apply refused without claiming a completed change",
 			"Inspect the declared TTSR policy, selected profile configs and disabled rules, then replan.");
+		return safe.includes(code) ? fallback : { ...fallback, data: { ...fallback.data, cause_code: code, cause_message: message.slice(0, 200) } };
 	}
 }
 

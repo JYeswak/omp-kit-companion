@@ -116,8 +116,9 @@ nativeTest("compiled apply policy exposes native plan commands and a backup on c
 	expect(build.exitCode, build.stdout.toString() + build.stderr.toString()).toBe(0);
 	mkdirSync(dirname(stable), { recursive: true });
 	symlinkSync(binary, stable);
-	const run = (args: string[]) => {
-		const child = Bun.spawnSync([stable, ...args, "--json"], { cwd: f.project, env: nativeTestEnv(f.home), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	const run = (args: string[], envOverrides: Record<string, string> = {}) => {
+		const child = Bun.spawnSync([stable, ...args, "--json"], { cwd: f.project,
+			env: { ...nativeTestEnv(f.home), ...envOverrides }, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
 		const stdout = child.stdout.toString();
 		return { exitCode: child.exitCode, output: stdout + child.stderr.toString(), envelope: JSON.parse(stdout) };
 	};
@@ -152,6 +153,13 @@ nativeTest("compiled apply policy exposes native plan commands and a backup on c
 	expect(manifest.profiles[0].mode).toBe(statSync(configPath).mode & 0o7777);
 	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.enabled")).toBe(true);
 	expect((YAML.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>).model).toBe("owned-by-user");
+	const noOmpPath = join(f.workspace, "no-omp-bin");
+	mkdirSync(noOmpPath);
+	const failedProbe = run(["apply", "policy", "--plan"], { PATH: noOmpPath });
+	expect(failedProbe.exitCode).toBe(2);
+	expect(failedProbe.envelope.errors[0].code).toBe("POLICY_PLAN_FAILED");
+	expect(failedProbe.envelope.data.cause_code).toBe("omp executable not found on PATH");
+	expect(failedProbe.envelope.data.cause_message).toBe("omp executable not found on PATH");
 });
 
 nativeTest("pre-write native profile drift preserves FRESH_PLAN instead of partial apply", () => {

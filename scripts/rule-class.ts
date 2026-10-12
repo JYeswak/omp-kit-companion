@@ -50,7 +50,9 @@ const defaultLookup: OmpSourceLookup = {
 	env: process.env,
 	launcherVersion(launcher) {
 		// From the launcher's own directory: a trust-gated launcher refuses to run inside an untrusted project.
-		const run = spawnSync(launcher, ["--version"], { cwd: path.dirname(launcher), encoding: "utf8", timeout: 15_000 });
+		const env = { ...process.env };
+		delete env.BUN_BE_BUN;
+		const run = spawnSync(launcher, ["--version"], { cwd: path.dirname(launcher), env, encoding: "utf8", timeout: 15_000 });
 		return run.status === 0 ? /(\d+\.\d+\.\d+)/.exec(run.stdout)?.[1] ?? null : null;
 	},
 	sourceCache(version, env) {

@@ -847,6 +847,8 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 	for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
 	delete env.OMP_PROFILE;
 	delete env.PI_PROFILE;
+	// BUN_BE_BUN is for invoking embedded omp-kit, not the nested OMP CLI launcher.
+	delete env.BUN_BE_BUN;
 	delete env.PI_CODING_AGENT_DIR;
 	env.HOME = home;
 	let disagreements = 0;
