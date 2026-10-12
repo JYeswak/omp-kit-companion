@@ -291,5 +291,23 @@ if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "SKIPVAL=$" && ! printf '%s' 
 else
 	fail=$((fail + 1)); printf 'FAIL main-no-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
+
+# ompkit-fp72.40: the gate removes its archive extracts on green AND red, and a red keeps its exit code.
+# An `exec` into the last step replaced the shell owning the EXIT trap, so every push leaked its extract.
+leftover() { find "$1/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate*' | wc -l | tr -d ' '; }
+repo=$(mkrepo cleangreen 'echo BASE-GATE' 'echo HEAD-GATE')
+rc=$(run_adapter "$repo")
+if [ "$rc" = "0" ] && [ "$(leftover "$repo")" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL green-leaves-no-extract: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
+fi
+repo=$(mkrepo cleanred 'echo BASE-GATE-FAIL; exit 5' 'echo HEAD-GATE')
+rc=$(run_adapter "$repo")
+if [ "$rc" = "5" ] && [ "$(leftover "$repo")" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL red-leaves-no-extract-keeps-rc: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
+fi
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
