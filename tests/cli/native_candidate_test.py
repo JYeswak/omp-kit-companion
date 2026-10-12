@@ -5,8 +5,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 
@@ -228,6 +231,53 @@ class CertEnvTests(unittest.TestCase):
                 os.environ["GITHUB_ACTIONS"] = saved
         self.assertNotIn("GITHUB_ACTIONS", env)
         self.assertEqual(env["CI"], "true")
+
+
+class ScopedRunTests(unittest.TestCase):
+    """fp72.48: certification children die as a group, so teardown never races live writers."""
+
+    def test_timeout_reaps_detached_grandchild_and_tree_removes_cleanly(self) -> None:
+        work = Path(tempfile.mkdtemp(prefix="scoped-writer-", dir=ROOT / "var" / "agent-tmp"))
+        self.addCleanup(shutil.rmtree, work, True)
+        late = work / "late.txt"
+        pidfile = work / "writer.pid"
+        # Child detaches a grandchild that writes into the tree, then sleeps
+        # past the timeout: without a group kill the grandchild survives and a
+        # later rmtree races it (native Errno 66 masking a 900 s timeout).
+        inner_path = work / "writer.py"
+        inner_path.write_text(
+            "import os, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            f"open({str(late)!r}, 'a').write('late\\n')\n"
+            "time.sleep(300)\n",
+            encoding="utf-8")
+        script = (
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, {str(inner_path)!r}])\n"
+            "import time; time.sleep(60)\n"
+        )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            native_candidate.run_scoped(
+                [sys.executable, "-c", script],
+                cwd=str(work), env=os.environ.copy(), timeout=5)
+        writer = int(pidfile.read_text(encoding="utf-8").strip())
+        for _ in range(100):
+            try:
+                os.kill(writer, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("detached writer survived the group kill")
+        shutil.rmtree(work)
+        self.assertFalse(work.exists())
+
+    def test_clean_exit_returns_completed_process(self) -> None:
+        result = native_candidate.run_scoped(
+            [sys.executable, "-c", "print('ok')"],
+            cwd=str(ROOT), env=os.environ.copy(), timeout=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"ok", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()

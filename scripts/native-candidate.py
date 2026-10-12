@@ -8,10 +8,12 @@ import os
 import shutil
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
 # Intel macOS remains a CI-only probe; release candidates ship these three targets.
@@ -30,6 +32,51 @@ def load(path):
     with open(path, encoding="utf-8") as source:
         return json.load(source)
 
+
+def kill_group(pgid):
+    """TERM a process group, grace, then KILL; silent when the group is gone.
+    The sig-0 existence probe may raise PermissionError on a dying group
+    (observed on macOS); that escalates to the next signal instead of
+    failing, since only ESRCH proves the group is gone."""
+    for sig, grace in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                break
+            time.sleep(0.05)
+
+
+def run_scoped(argv, *, cwd, env, timeout):
+    """Run a certification child as a session leader and reap the whole tree.
+    subprocess.run kills only the direct child on timeout, so an e2e-live
+    group (shell, omp session, mock) survives and keeps writing into the
+    tree; the TemporaryDirectory teardown then fails with Errno 66 and masks
+    the real error. Here the child leads a fresh session: on timeout the
+    group gets TERM, a grace period, then KILL before TimeoutExpired is
+    re-raised. Survivors after a clean exit get the same treatment, since a
+    finished check owns no orphans. Returns CompletedProcess like run()."""
+    child = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(child.pid)
+        child.kill()
+        try:
+            stdout, stderr = child.communicate(timeout=30)
+        except subprocess.TimeoutExpired as expired:
+            stdout, stderr = expired.output or b"", expired.stderr or b""
+        raise subprocess.TimeoutExpired(child.args, timeout, output=stdout, stderr=stderr)
+    kill_group(child.pid)
+    return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
 
 def case_counts(release_root):
     manifest = load(release_root / "release-manifest.json")
@@ -261,7 +308,7 @@ def native(args):
             home = root / "home"
             home.mkdir()
             env = cert_env(home, root)
-            omp = subprocess.run(["omp", "--version"], cwd=root, env=env, capture_output=True, timeout=30)
+            omp = run_scoped(["omp", "--version"], cwd=root, env=env, timeout=30)
             observed = (omp.stdout + omp.stderr).decode(errors="replace").strip()
             if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(omp_version) + r"(?!\d)", observed):
                 raise ValueError(f"stock OMP version does not match requested {args.omp_track} version {omp_version}")
@@ -271,9 +318,9 @@ def native(args):
                          "assets": {args.platform: asset}})
             prefix = root / "installed"
             installer = Path(__file__).resolve().parent.parent / "installer" / "install.sh"
-            installed = subprocess.run(["sh", str(installer), "--version", args.version,
+            installed = run_scoped(["sh", str(installer), "--version", args.version,
                                         "--index", str(index), "--offline", str(Path(args.archive_dir) / asset["filename"]),
-                                        "--prefix", str(prefix)], cwd=root, env=env, capture_output=True, timeout=180)
+                                        "--prefix", str(prefix)], cwd=root, env=env, timeout=180)
             if installed.returncode != 0:
                 raise ValueError("verified archive installation refused; inspect native runner logs privately")
             binary = prefix / "bin" / "omp-kit"
@@ -319,7 +366,7 @@ def native(args):
                       "project_preflight": ["doctor", "--scope", "project-loading", "--project", str(project), "--json"]}
             for name, flags in checks.items():
                 before = isolated_snapshot(home, project)
-                child = subprocess.run([str(binary), *flags], cwd=root, env=env, capture_output=True,
+                child = run_scoped([str(binary), *flags], cwd=root, env=env,
                                        timeout=900 if name == "full" else 120)
                 if isolated_snapshot(home, project) != before:
                     raise ValueError(f"native {name} changed the isolated HOME or startup project")
@@ -480,10 +527,10 @@ def native(args):
 
             def lsp_call(selected, target, expected_status, path=None):
                 before = isolated_snapshot(home, project, selected)
-                child = subprocess.run(
+                child = run_scoped(
                     [str(binary), "doctor", "--scope", "lsp", "--deep", "--yes", "--project", str(selected),
                      "--file", str(target), "--json"],
-                    cwd=root, env={**env, "PATH": path or env["PATH"]}, capture_output=True, timeout=240)
+                    cwd=root, env={**env, "PATH": path or env["PATH"]}, timeout=240)
                 if isolated_snapshot(home, project, selected) != before:
                     raise ValueError("compiled LSP probe changed protected HOME or project inputs")
                 try:
@@ -739,8 +786,8 @@ process.stdin.on("data", chunk => {
             # The configured profile is synthetic; never test a real private memory store.
             (agent / "config.yml").write_text("memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n", encoding="utf-8")
             before = isolated_snapshot(home, project)
-            check = subprocess.run([str(binary), "doctor", "--scope", "memory", "--json"],
-                                   cwd=root, env=env, capture_output=True, timeout=120)
+            check = run_scoped([str(binary), "doctor", "--scope", "memory", "--json"],
+                                   cwd=root, env=env, timeout=120)
             if isolated_snapshot(home, project) != before:
                 raise ValueError("synthetic memory inspection changed the isolated HOME or project")
             if check.returncode != 0:
@@ -800,9 +847,9 @@ for (const [name, working, episodic] of banks) {
   } finally { db.close(); }
 }
 '''
-            seeded = subprocess.run([bun, "-e", seed], cwd=root,
+            seeded = run_scoped([bun, "-e", seed], cwd=root,
                                     env={**env, "P29_SCHEMA": str(schema), "P29_STORE": str(store_root)},
-                                    capture_output=True, timeout=120)
+                                    timeout=120)
             if seeded.returncode != 0:
                 raise ValueError("native initBeam synthetic Mnemopi stores could not be created")
             audit_env = {**env, "TMPDIR": str(root)}
@@ -813,8 +860,8 @@ for (const [name, working, episodic] of banks) {
 
             def audit_call(flags):
                 before = isolated_snapshot(home, project)
-                child = subprocess.run([*audit_args[:-1], *flags, "--json"], cwd=project, env=audit_env,
-                                       capture_output=True, timeout=120)
+                child = run_scoped([*audit_args[:-1], *flags, "--json"], cwd=project, env=audit_env,
+                                       timeout=120)
                 if isolated_snapshot(home, project) != before:
                     raise ValueError("compiled memory audit changed synthetic HOME, project, or store inputs")
                 output = child.stdout + child.stderr

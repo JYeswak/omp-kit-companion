@@ -259,6 +259,21 @@ reap_mock() {
   fi
   MP=""
 }
+# Normal-path group reap: the limit wrapper's waitpid returns when the omp
+# session leader exits, but group orphans (helpers, daemons) survive it and
+# keep writing under $T. A later tree removal (cleanup rm -rf, or a caller's
+# rmtree) then races live writers: native certification saw Errno 66 mask a
+# 900 s full-ladder timeout. Reap the published group the same way the
+# signal path does before reporting the scenario.
+reap_group() {
+  [ -n "${LIMIT_PGID_FILE:-}" ] && [ -s "$LIMIT_PGID_FILE" ] || return 0
+  pgid=$(cat "$LIMIT_PGID_FILE" 2>/dev/null) || pgid=""
+  case "$pgid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -TERM "-$pgid" 2>/dev/null
+  w=0
+  while kill -0 "-$pgid" 2>/dev/null && [ "$w" -lt 20 ]; do sleep 0.1; w=$((w+1)); done
+  kill -KILL "-$pgid" 2>/dev/null
+}
 for i in $scenario_ids; do
   name=$("$OMP_KIT_BUN" "$LIB" name "$i")
   name_rc=$?
@@ -286,6 +301,7 @@ for i in $scenario_ids; do
   echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&2
   wait "$OP"; rc=$?; OP=""
   reap_mock
+  reap_group
   rm -f "$LIMIT_PGID_FILE"; unset LIMIT_PGID_FILE
   echo "mock server cleanup_rc=$mock_cleanup_rc log=$T/mock-$name.txt"
   cat "$T/mock-$name.txt"

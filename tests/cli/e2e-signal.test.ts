@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import process from "node:process";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import process from "node:process";
 
 // Integration test: exercises real SIGTERM delivery and child reaping against
 // the platform clock. Fake timers cannot work: the waits synchronize with a
@@ -97,4 +99,70 @@ test("SIGTERM stops e2e-live within 10 s with no surviving children", async () =
 		await new Promise(resolve => setTimeout(resolve, 100));
 	}
 	expect(observed).toEqual([]);
+}, 300_000);
+
+test("lingering scenario child is reaped and the tree removes cleanly", async () => {
+	// fp72.48 planted negative: a stub OMP detaches a writer into the
+	// scenario dir and exits at once. Only a session-group reap kills it;
+	// without one the writer survives the suite and a later tree removal
+	// races live writes (native Errno 66 masking a 900 s timeout).
+	// Integration test: exercises real child reaping against the platform
+	// clock. Fake timers cannot work: process death is observed through
+	// kill(2), not in-process timers.
+	const stubDir = mkdtempSync(join(tmpdir(), "e2e-stub-"));
+	const stub = join(stubDir, "stub-omp.sh");
+	writeFileSync(stub, [
+		"#!/bin/sh",
+		"# Daemon-shaped: the writer detaches with closed stdio (like the CI",
+		"# orphan), so only its file writes -- not held pipes -- can wedge the run.",
+		"# The --version probe answers quietly: it runs with the repo cwd, and a",
+		"# writer there would pollute the checkout instead of the work tree.",
+		'if [ "$1" = "--version" ]; then echo "stub-omp 0.0.0"; exit 0; fi',
+		'echo started >> "$PWD/lingering.txt"',
+		'(while true; do echo tick >> "$PWD/lingering.txt"; sleep 1; done) </dev/null >/dev/null 2>&1 &',
+		'echo $! > "$STUB_OUT/writer.pid"',
+		"exit 0",
+		""].join("\n"));
+	chmodSync(stub, 0o755);
+	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
+		cwd: REPO_ROOT,
+		env: { ...process.env, OMP: stub, STUB_OUT: stubDir, ONLY: "canary-near",
+			TIMEOUT: "60", KEEP: "1", OMP_KIT_TEST_NO_COVERAGE: "1" },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const decoder = new TextDecoder();
+	let out = "";
+	let err = "";
+	const pumpOut = (async () => {
+		for await (const chunk of child.stdout) out += decoder.decode(chunk, { stream: true });
+	})();
+	const pumpErr = (async () => {
+		for await (const chunk of child.stderr) err += decoder.decode(chunk, { stream: true });
+	})();
+	await child.exited;
+	await pumpOut;
+	await pumpErr;
+	const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(`${out}\n${err}`);
+	const pidText = readFileSync(join(stubDir, "writer.pid"), "utf8").trim();
+	const writer = Number(pidText);
+	if (!Number.isInteger(writer) || writer <= 0) throw new Error(`stub wrote no writer pid: ${pidText}`);
+	const sleep = (ms: number) => {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, ms);
+		return promise;
+	};
+	let dead = false;
+	for (let i = 0; i < 100; i++) {
+		if (!await alive(writer)) { dead = true; break; }
+		await sleep(100);
+	}
+	expect(dead).toBe(true);
+	const tree = kept[1];
+	const projs = readdirSync(tree).filter(name => name.startsWith("proj-"));
+	expect(projs.length).toBeGreaterThan(0);
+	expect(existsSync(join(tree, projs[0], "lingering.txt"))).toBe(true);
+	rmSync(kept[2], { recursive: true, force: true });
+	expect(existsSync(kept[2])).toBe(false);
+	rmSync(stubDir, { recursive: true, force: true });
 }, 300_000);
