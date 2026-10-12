@@ -3059,6 +3059,8 @@ async function reconcileUpdateCommand(stateRoot: string, release: string, id: st
 				return refusal("INVALID_PREFIX", "The reconcile prefix must be a canonical absolute install prefix",
 					"Pass the absolute kit prefix holding releases/, or omit --prefix to derive it from the receipt postimage; nothing was changed.");
 			prefix = prefixFlag;
+		} else {
+			prefix = dirname(dirname(release));
 		}
 		const result = reconcilePendingUpdate({ stateRoot, prefix, id });
 		return { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,

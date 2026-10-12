@@ -123,7 +123,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" });
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
 		const result = await apply(preview);
-		if (result.status === "PARTIAL") { await dependencies.notify?.("omp-kit update postcheck failed; automatic undo completed"); return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "NOT_RUN" }); }
+		if (result.status === "PARTIAL") { await dependencies.notify?.(`omp-kit update postcheck failed; the update stays pending, recover with \`omp-kit undo ${result.receiptId ?? "(unknown receipt)"} --yes\``); return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "NOT_RUN" }); }
 		if (result.status !== "UPDATED") return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false, relink: "NOT_RUN" });
 		// The kit symlink now points at the new release; relink its plugin package
 		// into the OMP profiles with the new binary itself, then report one line.

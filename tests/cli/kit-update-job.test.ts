@@ -38,7 +38,8 @@ test("postcheck failure reports UNDONE, notifies and never relinks", async () =>
 		relink: async () => { relinked = true; return { ok: true, detail: "" }; },
 	});
 	expect(result).toMatchObject({ status: "UNDONE", receiptId: "r2", notification: true, relink: "NOT_RUN" });
-	expect(relinked).toBe(false); expect(notes[0]).toContain("automatic undo");
+	expect(relinked).toBe(false); expect(notes[0]).toContain("stays pending");
+	expect(notes[0]).toContain("r2");
 	expect(existsSync(join(value.stateRoot, readdirSync(value.stateRoot)[0]!))).toBe(true);
 });
 
