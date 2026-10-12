@@ -2628,7 +2628,15 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Pass an absolute --drop-dir; nothing was sent.");
 	}
 	const reasonFlag = request.flags.get("--no-bead-reason");
+	const untilFlag = request.flags.get("--until-delivered");
+	let untilDeliveredMs: number | undefined;
+	if (typeof untilFlag === "string") {
+		if (!/^[0-9]+$/.test(untilFlag)) return refusal("INVALID_UNTIL_DELIVERED", "The deferred-delivery bound needs non-negative integer seconds",
+			"Pass --until-delivered <seconds>; nothing was sent.");
+		untilDeliveredMs = Number(untilFlag) * 1000;
+	}
 	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
+		untilDeliveredMs,
 		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
 		admission: {
 			launcherBinding: "none",
@@ -2654,6 +2662,9 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 				remediation: "Set TMUX or TMUX_TMPDIR to select the intended server; nothing was sent." }] };
 	}
 	if (result.status === "OK") {
+		return { code: 0, data: { overall: "OK", session, pane, status: result.status, tmux_socket: result.tmux_socket, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED" };
+	}
+	if (result.status === "DELIVERED") {
 		return { code: 0, data: { overall: "OK", session, pane, status: result.status, tmux_socket: result.tmux_socket, marker: result.marker, sends: result.sends, drop_path: null, detail: result.detail, ...beads }, verification: "UNVERIFIED" };
 	}
 	return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: result.status, tmux_socket: result.tmux_socket, marker: result.marker, sends: result.sends, drop_path: result.drop_path, detail: result.detail, ...beads }, verification: "UNVERIFIED",

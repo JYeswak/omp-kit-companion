@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
@@ -15,7 +15,7 @@ export interface SendExec {
 }
 
 export interface ProvenSend {
-	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "BEAD_REQUIRED" | "TMUX_AMBIGUOUS" | "ADMISSION_REFUSED";
+	status: "OK" | "PENDING_SUBMIT" | "NOT_DELIVERED" | "DELIVERED" | "UNDELIVERED" | "BEAD_REQUIRED" | "TMUX_AMBIGUOUS" | "ADMISSION_REFUSED";
 	marker: string;
 	sends: number;
 	drop_path: string | null;
@@ -151,6 +151,77 @@ export function markerInComposer(capture: string, marker: string): boolean {
 	return composerStart >= 0 && lines.slice(composerStart).some((line) => line.includes(marker));
 }
 
+/** Text after the ❯ prompt in the composer region (prompt chrome excluded). */
+export function composerTextAfterPrompt(capture: string): string {
+	const lines = capture.split("\n");
+	let composerStart = -1;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!.trimStart();
+		if (line.startsWith("╭──")) composerStart = i + 1;
+		if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
+	}
+	if (composerStart < 0) return "";
+	return lines.slice(composerStart).map((line) => line.replace(/^\s*❯\s?/, "")).join("\n").trim();
+}
+
+/** True when the composer holds text beyond the bare prompt (ours or foreign). */
+export function composerHasText(capture: string): boolean {
+	return composerTextAfterPrompt(capture).length > 0;
+}
+
+/**
+ * Deferred completion (ompkit-fp72.21): a message left sitting in a busy
+ * pane's composer is submitted once the pane goes idle, but only while the
+ * composer still holds exactly this message (marker match). Never presses
+ * Enter into foreign text, never while busy, never past the bound.
+ */
+export async function completeDeferredSend(args: {
+	runTmux: (args: string[]) => { code: number; out: string };
+	wait: (ms: number) => Promise<void>;
+	pollMs: number;
+	untilDeliveredMs: number;
+	session: string;
+	pane: string;
+	marker: string;
+	sends: number;
+	dropPath: string | null;
+	bead_ids: string[];
+	no_bead_reason: string | null;
+	tmux_socket: string | null;
+}): Promise<ProvenSend> {
+	const shared = { marker: args.marker, sends: args.sends, bead_ids: args.bead_ids, no_bead_reason: args.no_bead_reason, tmux_socket: args.tmux_socket };
+	const capture = () => args.runTmux(["capture-pane", "-p", "-S", "-200", "-t", args.pane]);
+	const deadline = Date.now() + args.untilDeliveredMs;
+	let entered = false;
+	for (;;) {
+		const got = capture();
+		if (got.code === 0 && !paneIsBusy(got.out)) {
+			if (markerInComposer(got.out, args.marker)) {
+				if (!entered) {
+					args.runTmux(["send-keys", "-t", args.pane, "Enter"]);
+					entered = true;
+				}
+				await args.wait(args.pollMs);
+				const again = capture();
+				if (again.code !== 0 || markerInComposer(again.out, args.marker)) {
+					if (Date.now() >= deadline) break;
+					continue;
+				}
+				if (args.dropPath) { try { rmSync(args.dropPath, { force: true }); } catch {} }
+				return { status: "DELIVERED", drop_path: null, detail: `marker left ${args.pane} composer after one deferred Enter`, ...shared };
+			}
+			if (composerHasText(got.out)) {
+				return { status: "UNDELIVERED", drop_path: args.dropPath, detail: `composer of ${args.pane} holds foreign text; Enter withheld`, ...shared };
+			}
+			if (args.dropPath) { try { rmSync(args.dropPath, { force: true }); } catch {} }
+			return { status: "DELIVERED", drop_path: null, detail: `marker gone from ${args.pane} composer without submit; receiver consumed it`, ...shared };
+		}
+		if (Date.now() >= deadline) break;
+		await args.wait(args.pollMs);
+	}
+	return { status: "UNDELIVERED", drop_path: args.dropPath, detail: entered ? `marker still in ${args.pane} composer after one deferred Enter` : `pane ${args.pane} never idled within the bound; no keys sent`, ...shared };
+}
+
 /**
  * Send via ntm and prove the marker landed in the target pane's capture.
  * A work dispatch citing no bead is refused before anything reaches tmux
@@ -169,6 +240,11 @@ export async function proveSend(input: {
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
+	/**
+	 * ompkit-fp72.21: bound in ms for deferred completion of a busy-pane
+	 * NOT_DELIVERED. Default 300 s for dispatches, off otherwise; explicit 0 disables.
+	 */
+	untilDeliveredMs?: number;
 	/**
 	 * ompkit-bj08.5: pause/custody admission snapshot from the caller. When
 	 * present it is consulted before anything reaches tmux; a refusal sends
@@ -216,6 +292,7 @@ export async function proveSend(input: {
 	const pollMs = input.pollMs ?? SEND_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? SEND_DEADLINE_MS;
 	const wait = input.wait ?? waitFor;
+	const untilDeliveredMs = input.untilDeliveredMs ?? (dispatch ? 300_000 : 0);
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	// SENDRESUME1 (ompkit-q3mw): a slash command must reach the pane verbatim.
 	// Send it with no appended marker (the marker stays out of band in the
@@ -274,6 +351,10 @@ export async function proveSend(input: {
 		// submit) with a recovery copy instead of a duplicate delivery.
 		if (markerSeen && receiverActive) {
 			const busyDropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+			if (untilDeliveredMs > 0) {
+				return completeDeferredSend({ runTmux, wait, pollMs, untilDeliveredMs, session: input.session, pane: input.pane,
+					marker, sends, dropPath: busyDropPath, bead_ids, no_bead_reason, tmux_socket });
+			}
 			return { status: "NOT_DELIVERED", marker, sends, drop_path: busyDropPath, detail: `marker stayed in ${input.pane} composer while the pane was busy; Enter withheld to avoid a double submit; recovery copy written to ${busyDropPath}`, bead_ids, no_bead_reason, tmux_socket };
 		}
 	}

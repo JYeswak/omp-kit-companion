@@ -527,6 +527,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback)", usage: "send SESSION PANE MESSAGE", flags: [
 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
+		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for deferred completion of a busy-pane send (default 300 for dispatches, off otherwise; 0 disables)" },
 	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
 	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes)", usage: "infra pin|check|promote|undo", flags: [], subcommands: [
 		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
