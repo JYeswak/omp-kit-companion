@@ -95,9 +95,10 @@ interface SessionFileContents {
 	known: boolean;
 }
 
+/** One `candidate <sha> for <paths>` clause; the sha vouches only for the paths named in its own clause. */
 interface CandidateReceipt {
 	sha: string;
-	text: string;
+	paths: string[];
 }
 
 interface OwnedRepository {
@@ -116,7 +117,7 @@ interface SessionState {
 	rootByDirectory: Map<string, string>;
 	pendingToolPathWork: Promise<void>;
 	pendingToolPathSnapshots: Map<string, Map<string, FileSnapshot>>;
-	pendingCandidateCalls: Map<string, CandidateReceipt>;
+	pendingCandidateCalls: Map<string, CandidateReceipt[]>;
 	candidateReceipts: CandidateReceipt[];
 	rePrompts: number;
 	warningEmitted: boolean;
@@ -361,38 +362,64 @@ function isHexSha(value: string): boolean {
 	return true;
 }
 
-function candidateSha(text: string): string | null {
-	const words: string[] = [];
-	let word = "";
+const RECEIPT_DELIMITERS = " \t\r\n\"'`,;()[]{}<>|&";
+
+function receiptTokens(text: string): string[] {
+	const tokens: string[] = [];
+	let token = "";
 	for (const character of text) {
-		const lower = character.toLowerCase();
-		if ((lower >= "a" && lower <= "z") || (character >= "0" && character <= "9")) {
-			word += character;
-		} else if (word.length > 0) {
-			words.push(word);
-			word = "";
+		if (RECEIPT_DELIMITERS.includes(character)) {
+			if (token.length > 0) tokens.push(token);
+			token = "";
+		} else {
+			token += character;
 		}
 	}
-	if (word.length > 0) words.push(word);
-	for (let index = 0; index < words.length; index += 1) {
-		if (words[index]?.toLowerCase() !== "candidate") continue;
-		for (let next = index + 1; next < Math.min(words.length, index + 5); next += 1) {
-			if (isHexSha(words[next] ?? "")) return words[next]!.toLowerCase();
-		}
-	}
-	return null;
+	if (token.length > 0) tokens.push(token);
+	return tokens.map(value => {
+		let start = 0;
+		let end = value.length;
+		while (start < end && value[start] === ":") start += 1;
+		while (end > start && ".:!?".includes(value[end - 1]!)) end -= 1;
+		const trimmed = value.slice(start, end);
+		return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed;
+	}).filter(value => value.length > 0);
 }
 
-function receiptFromToolCall(event: SaveGuardToolCallEvent): CandidateReceipt | null {
+/**
+ * Parse every `candidate <sha> for <paths>` clause. Each clause owns the sha that follows its own
+ * `candidate` word and the path tokens up to the next clause, so a combined command naming several
+ * repositories never lends one repository's sha to another's paths.
+ */
+function candidateReceipts(text: string): CandidateReceipt[] {
+	const tokens = receiptTokens(text);
+	const receipts: CandidateReceipt[] = [];
+	let current: CandidateReceipt | null = null;
+	for (let index = 0; index < tokens.length; index += 1) {
+		if (tokens[index]!.toLowerCase() === "candidate") {
+			current = null;
+			for (let next = index + 1; next < Math.min(tokens.length, index + 5); next += 1) {
+				if (!isHexSha(tokens[next]!)) continue;
+				current = { sha: tokens[next]!.toLowerCase(), paths: [] };
+				receipts.push(current);
+				index = next;
+				break;
+			}
+			continue;
+		}
+		if (current && tokens[index]!.toLowerCase() !== "for") current.paths.push(tokens[index]!);
+	}
+	return receipts.filter(receipt => receipt.paths.length > 0);
+}
+
+function receiptsFromToolCall(event: SaveGuardToolCallEvent): CandidateReceipt[] {
 	const toolName = event.toolName.toLowerCase();
 	const mailRecord = toolName.includes("agent_mail") &&
 		(toolName.includes("send_message") || toolName.includes("reply_message"));
 	const beadComment = (toolName === "bash" || toolName === "exec") &&
 		inputStrings(event.input).some(value => value.includes("br comments add"));
-	if (!mailRecord && !beadComment) return null;
-	const text = inputStrings(event.input).join("\n").slice(0, 20_000);
-	const sha = candidateSha(text);
-	return sha ? { sha, text } : null;
+	if (!mailRecord && !beadComment) return [];
+	return candidateReceipts(inputStrings(event.input).join("\n").slice(0, 20_000));
 }
 
 function newOwnedRepository(
@@ -579,19 +606,56 @@ async function diffFromBaseline(
 	return diff.code === 0 ? parsePatch(diff.stdout) : null;
 }
 
+/** Blob id of the path's current working-tree content; null when the path is absent, undefined when unreadable. */
+async function workingBlob(
+	exec: SaveGuardApi["exec"],
+	root: string,
+	repoPath: string,
+): Promise<string | null | undefined> {
+	try {
+		lstatSync(path.join(root, repoPath));
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return null;
+		return undefined;
+	}
+	const local = await runGit(exec, root, ["--literal-pathspecs", "hash-object", "--", repoPath]);
+	return local.code === 0 ? gitLine(local.stdout) : undefined;
+}
+
+/** True when `revision` holds exactly the current content of `repoPath` (both absent counts as equal). */
+async function revisionHoldsContent(
+	exec: SaveGuardApi["exec"],
+	root: string,
+	revision: string,
+	repoPath: string,
+	current: string | null | undefined,
+): Promise<boolean> {
+	if (revision.length === 0 || current === undefined) return false;
+	const blob = await runGit(exec, root, ["rev-parse", "--verify", "--quiet", `${revision}:${repoPath}`]);
+	if (blob.code !== 0) return current === null;
+	return current !== null && gitLine(blob.stdout) === current;
+}
+
+function receiptNamesPath(receipt: CandidateReceipt, root: string, repoPath: string): boolean {
+	const absolutePath = path.resolve(root, repoPath);
+	return receipt.paths.some(token => token === repoPath || (path.isAbsolute(token) && path.resolve(token) === absolutePath));
+}
+
 async function hasSavedCandidate(
 	exec: SaveGuardApi["exec"],
 	repository: OwnedRepository,
 	repoPath: string,
+	current: string | null | undefined,
 ): Promise<boolean> {
 	const expected = repository.sessionDeltas.get(repoPath);
-	if (!expected?.known || !repository.baselineHead) return false;
 	for (const receipt of repository.candidateReceipts) {
-		if (!receipt.text.includes(repoPath) &&
-			!receipt.text.includes(path.resolve(repository.root, repoPath))) continue;
+		if (!receiptNamesPath(receipt, repository.root, repoPath)) continue;
+		// The sha must be an object of this repository; another repository's receipt never applies here.
 		const type = await runGit(exec, repository.root, ["cat-file", "-t", receipt.sha]);
 		const objectType = type.code === 0 ? gitLine(type.stdout) : "";
 		if (objectType !== "commit" && objectType !== "tree") continue;
+		if (await revisionHoldsContent(exec, repository.root, receipt.sha, repoPath, current)) return true;
+		if (!expected?.known || !repository.baselineHead) continue;
 		const diff = await runGit(exec, repository.root, [
 			"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
 			repository.baselineHead, receipt.sha, "--", repoPath,
@@ -602,21 +666,20 @@ async function hasSavedCandidate(
 }
 
 /**
- * True when the working-tree file is byte-identical to the upstream branch's copy. The work is then
- * already published (for example landed through a private index while this shared checkout's local
- * branch lags behind), and committing it again would put the same change on the branch twice.
+ * The published branch: the configured upstream, else origin/HEAD, else origin/<current branch>.
+ * A shared checkout often has no upstream configured while its work lands on origin directly.
  */
-async function publishedUpstream(
-	exec: SaveGuardApi["exec"],
-	root: string,
-	upstreamHead: string,
-	repoPath: string,
-): Promise<boolean> {
-	if (upstreamHead.length === 0) return false;
-	const published = await runGit(exec, root, ["rev-parse", "--verify", "--quiet", `${upstreamHead}:${repoPath}`]);
-	if (published.code !== 0) return false;
-	const local = await runGit(exec, root, ["--literal-pathspecs", "hash-object", "--", repoPath]);
-	return local.code === 0 && gitLine(local.stdout) === gitLine(published.stdout);
+async function upstreamRevision(exec: SaveGuardApi["exec"], root: string): Promise<string> {
+	const candidates = ["@{u}", "refs/remotes/origin/HEAD"];
+	const branch = await runGit(exec, root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+	if (branch.code === 0 && gitLine(branch.stdout).length > 0) {
+		candidates.push(`refs/remotes/origin/${gitLine(branch.stdout)}`);
+	}
+	for (const candidate of candidates) {
+		const resolved = await runGit(exec, root, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]);
+		if (resolved.code === 0 && gitLine(resolved.stdout).length > 0) return gitLine(resolved.stdout);
+	}
+	return "";
 }
 
 export async function checkSaveState(
@@ -635,8 +698,7 @@ export async function checkSaveState(
 	const statuses = statusEntries(status.stdout);
 	const ownedPathSet = new Set(ownedPaths);
 	const dirtyPaths = Array.from(statuses.keys()).filter(path => ownedPathSet.has(path)).sort();
-	const upstream = await runGit(exec, repository.root, ["rev-parse", "--verify", "@{u}"]);
-	const upstreamHead = upstream.code === 0 ? gitLine(upstream.stdout) : "";
+	const upstreamHead = await upstreamRevision(exec, repository.root);
 	const exclusions: string[] = [];
 	if (repository.baselineHead) exclusions.push(repository.baselineHead);
 	if (upstreamHead.length > 0) exclusions.push(upstreamHead);
@@ -655,7 +717,10 @@ export async function checkSaveState(
 	const privateIndexPaths = new Set<string>();
 	const savedPaths = new Set<string>();
 	for (const repoPath of dirtyPaths) {
-		if (await publishedUpstream(exec, repository.root, upstreamHead, repoPath)) {
+		// Published means the current content is byte-identical to the upstream copy: the work already
+		// landed (for example through a private index while this shared checkout's branch lags behind).
+		const current = await workingBlob(exec, repository.root, repoPath);
+		if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current)) {
 			savedPaths.add(repoPath);
 			continue;
 		}
@@ -665,7 +730,7 @@ export async function checkSaveState(
 		const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 			(!repository.baselineStatusKnown && !untracked) ||
 			(!untracked && (!actual || !expected?.known || !samePatch(actual, expected)));
-		if (mixed && await hasSavedCandidate(exec, repository, repoPath)) {
+		if (mixed && await hasSavedCandidate(exec, repository, repoPath, current)) {
 			savedPaths.add(repoPath);
 			continue;
 		}
@@ -675,12 +740,19 @@ export async function checkSaveState(
 	if (aheadCount !== null && aheadCount > 0) {
 		for (const repoPath of ownedPaths) {
 			if (savedPaths.has(repoPath)) continue;
+			// Current content already on the upstream (for example a local commit that landed there under
+			// a different sha) is published, not unsaved.
+			const current = await workingBlob(exec, repository.root, repoPath);
+			if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current)) {
+				savedPaths.add(repoPath);
+				continue;
+			}
 			const actual = await diffFromBaseline(exec, repository, repoPath);
 			const expected = repository.sessionDeltas.get(repoPath);
 			const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 				(!repository.baselineStatusKnown && actual !== null) ||
 				(actual !== null && (!expected?.known || !samePatch(actual, expected)));
-			if (mixed && await hasSavedCandidate(exec, repository, repoPath)) {
+			if (mixed && await hasSavedCandidate(exec, repository, repoPath, current)) {
 				savedPaths.add(repoPath);
 				continue;
 			}
@@ -757,11 +829,11 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		if (event.toolCallId.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
-		const receipt = receiptFromToolCall(event);
+		const receipts = receiptsFromToolCall(event);
 		const snapshots = pathsFromToolCall(event, ctx.cwd);
-		if (!receipt && snapshots.size === 0) return;
+		if (receipts.length === 0 && snapshots.size === 0) return;
 		const state = sessionStateFor(sessions, sessionId);
-		if (receipt) state.pendingCandidateCalls.set(event.toolCallId, receipt);
+		if (receipts.length > 0) state.pendingCandidateCalls.set(event.toolCallId, receipts);
 		if (snapshots.size > 0) state.pendingToolPathSnapshots.set(event.toolCallId, snapshots);
 	});
 
@@ -770,13 +842,13 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
 		const pathSnapshots = state?.pendingToolPathSnapshots.get(event.toolCallId);
 		if (state) state.pendingToolPathSnapshots.delete(event.toolCallId);
-		const receipt = state?.pendingCandidateCalls.get(event.toolCallId);
-		if (state && receipt) {
+		const receipts = state?.pendingCandidateCalls.get(event.toolCallId);
+		if (state && receipts) {
 			state.pendingCandidateCalls.delete(event.toolCallId);
 			if (!event.isError) {
-				state.candidateReceipts.push(receipt);
+				state.candidateReceipts.push(...receipts);
 				for (const repository of state.repositories.values()) {
-					repository.candidateReceipts.push(receipt);
+					repository.candidateReceipts.push(...receipts);
 				}
 			}
 		}

@@ -601,3 +601,138 @@ test("a further edit after publishing upstream still blocks", async () => {
 	expect(result).toMatchObject({ decision: "block" });
 	expect(reasonOf(result)).toContain("AGENTS.md");
 });
+
+test("a local commit whose content already landed upstream under a different sha stays silent", async () => {
+	const { root, fake, landed } = await sessionEditsTrackedFile();
+	landOnUpstream(root, "AGENTS.md", landed, "landed-elsewhere");
+	sh(root, "commit", "-am", "redundant local duplicate [test]");
+	expect(sh(root, "rev-list", "--count", "@{u}..HEAD").stdout.trim()).toBe("1");
+	expect(sh(root, "status", "--porcelain").stdout).toBe("");
+
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("a local commit with an extra unpushed hunk beyond the upstream copy still blocks", async () => {
+	const { root, file, fake, landed } = await sessionEditsTrackedFile();
+	landOnUpstream(root, "AGENTS.md", landed, "landed-then-extra");
+	writeFileSync(file, `${landed}unpushed hunk\n`);
+	sh(root, "commit", "-am", "extra hunk [test]");
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain("ahead=1");
+	expect(reasonOf(result)).toContain("AGENTS.md");
+});
+
+test("a branch without upstream stays silent once its commit is in origin/main", async () => {
+	const root = repo({ remote: true });
+	sh(root, "branch", "--unset-upstream");
+	const file = join(root, "no-upstream.txt");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	writeFileSync(file, "landed without upstream\n");
+	await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }));
+	sh(root, "add", "no-upstream.txt");
+	sh(root, "commit", "-m", "landed [test]");
+	sh(root, "push", "origin", "main");
+	expect(Bun.spawnSync(["git", "rev-parse", "--verify", "@{u}"], { cwd: root }).exitCode).not.toBe(0);
+
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("a branch without upstream still blocks on a commit missing from origin/main", async () => {
+	const root = repo({ remote: true });
+	sh(root, "branch", "--unset-upstream");
+	const file = join(root, "no-upstream-unpushed.txt");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	writeFileSync(file, "not on origin\n");
+	await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }));
+	sh(root, "add", "no-upstream-unpushed.txt");
+	sh(root, "commit", "-m", "unpushed [test]");
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain("no-upstream-unpushed.txt");
+});
+
+async function recordCommentReceipt(fake: FakeSaveGuard, command: string, toolCallId: string): Promise<void> {
+	await fake.emit("tool_call", { type: "tool_call", toolCallId, toolName: "bash", input: { command } });
+	await fake.emit("tool_execution_end", {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "bash",
+		result: { details: {} },
+		isError: false,
+	});
+}
+
+/** cfsios-style mixed AGENTS.md: the session adds one hunk on top of held foreign work. */
+async function sessionHunkOnHeldWork(fake: FakeSaveGuard, label: string): Promise<{ root: string; file: string; tree: string }> {
+	const { root, file, base, held } = cfsiosFixture();
+	const tree = candidateTree(root, "AGENTS.md", `${base}${label} hunk\n`, label);
+	const insertionPoint = held.indexOf("held 95\n");
+	await emitPathToolCall(fake, "edit", file, `${label}-edit`);
+	writeFileSync(file, `${held.slice(0, insertionPoint)}${label} hunk\n${held.slice(insertionPoint)}`);
+	await fake.emit("tool_execution_end", writeEvent("edit", { path: file, diff: `+${label} hunk` }, false, `${label}-edit`));
+	return { root, file, tree };
+}
+
+test("a combined two-repo receipt binds each clause's sha to its own repository", async () => {
+	const cwd = repo();
+	const fake = fakePi(cwd);
+	await kitSaveGuard(fake.pi);
+	const first = await sessionHunkOnHeldWork(fake, "first");
+	const second = await sessionHunkOnHeldWork(fake, "second");
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+
+	await recordCommentReceipt(fake,
+		`br comments add a "candidate ${first.tree} for ${first.file}" && br comments add b "candidate ${second.tree} for ${second.file}"`,
+		"combined-receipt");
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+});
+
+test("a receipt naming one repository's sha with another repository's path does not clear it", async () => {
+	const cwd = repo();
+	const fake = fakePi(cwd);
+	await kitSaveGuard(fake.pi);
+	const foreign = await sessionHunkOnHeldWork(fake, "foreign");
+	const owned = await sessionHunkOnHeldWork(fake, "owned");
+	// Clear the foreign repository with its own receipt so only the owned repository can remain.
+	await recordCommentReceipt(fake, `br comments add a "candidate ${foreign.tree} for ${foreign.file}"`, "foreign-receipt");
+	// The owned repository's own tree is named only for an unrelated path; its file is named only
+	// beside the foreign repository's sha.
+	await recordCommentReceipt(fake,
+		`br comments add b "candidate ${foreign.tree} for ${owned.file}" && br comments add c "candidate ${owned.tree} for unrelated.md"`,
+		"crossed-receipt");
+
+	const result = await stop(fake);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain(owned.root);
+	expect(reasonOf(result)).not.toContain(foreign.root);
+});
+
+test("a candidate holding the session's current content clears work whose hunk is unknown", async () => {
+	const { root, file, held } = cfsiosFixture();
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	const current = `${held}unsnapshotted session line\n`;
+	// No tool_call snapshot: the session's own hunk is unknown, so patch containment cannot vouch.
+	writeFileSync(file, current);
+	await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }));
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+
+	const tree = candidateTree(root, "AGENTS.md", current, "current-content");
+	await recordMailCandidate(fake, tree, "AGENTS.md");
+	expect(await stop(fake)).toBeUndefined();
+	expect(fake.notices).toEqual([]);
+
+	writeFileSync(file, `${current}later unsaved line\n`);
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+});
