@@ -1,1 +1,0 @@
-- `resolveOmpIdentity` now resolves Tern-managed omp installs: a `versions/<V>` launcher corroborated by the manager `state.json` naming the same version plus a version-matching `omp-src` package (manifest and matcher source, no npm receipt needed). State/package version mismatches, missing state, and missing matcher source still refuse.

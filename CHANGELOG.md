@@ -4,6 +4,25 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.25] - 2026-10-12
+
+### Added
+
+- `skills/fleet-round`: `fleet-round.ts barrier` reports, per project, whether its round report for the phase (INSIGHT, AGREE, SORT) arrived in Agent Mail thread `fleet-round-<N>` and was accepted by the validator (ACCEPTED, REJECTED with reasons, MISSING, LATE), and whether the barrier is OPEN, MET or MISSED against its deadline (exit 0 MET, 1 MISSED, 3 any source unavailable, never MET on unknown, 4 OPEN); it tracks consecutive misses in the private round dir and reports ESCALATE when a project hits the same blocker at two barriers, and ships a launchd template (not installed) that runs it every 10 minutes while a phase is open.
+- `skills/fleet-round`: the lock-step fleet round protocol (phases, barriers, timeboxes, roles, lending) and a read-only validator that recomputes each director's round report from br, git, tmux, ps and Agent Mail identity files; rejects reports whose labeled lines and single `fleet-round.report/v1` JSON block disagree or whose claims differ from br; checks the round-0 pass bar (mission, pile, dag, frontier, focus) with UNKNOWN, never PASS, for an unobservable holder; samples 10% of the round's closes reproducibly; and scores predictions per prediction and per author.
+
+### Changed
+
+- The kit-update service relink now covers all profiles including default (`apply plugin --apply --profiles all --include-default`).
+- Fleet Watch pull nudges (decisions Q20/Q22): an idle worker is sent one item. The order is the grading queue (a review-status bead or an unanswered `DONE` callback the worker did not author), then the rework queue (the original implementer goes first while its seat is live), then the first `bv --robot-triage` recommendation under the session's `focusEpics` that `br ready` confirms is a claimable leaf. `br ready` order is used only when bv or the DAG is unusable, and the nudge says so. Grading and rework now reach workers even when no execution leaf is ready. The nudge carries mission `file:line`, round/phase, focus epics, the close rule and both grading outcomes (`CLOSED` or `REWORK` with a gap comment). Reports go through `omp-kit send`, not `ntm send`, using the Q22 reply table that also parses bead comments. Empty queues park the seat (NO-WORK, one director notice) until any item becomes eligible. `phase: INSIGHT` or `pullEnabled: false` stops pull nudges. The new config fields `focusEpics`, `mission`, `round`, `phase` and `pullEnabled` are validated. `readyCommand` is now run to list ready rows. Director-notice episodes now persist across service runs.
+- Fleet Watch nudges follow decision Q23, one escalation chain from worker to director to chief to Josh. Every worker reply, UNHEALTHY and BLOCKED owner-decision or live-action included, is rendered as an `omp-kit send` to the session's director pane and nowhere else, and the nudge text names no other route. A pane that cannot be captured (DEAD) is reported to the director.
+- `resolveOmpIdentity` now resolves Tern-managed omp installs: a `versions/<V>` launcher corroborated by the manager `state.json` naming the same version plus a version-matching `omp-src` package (manifest and matcher source, no npm receipt needed). State/package version mismatches, missing state, and missing matcher source still refuse.
+- Recovery honesty: a `PARTIAL` tick no longer claims automatic undo (it notifies the pending receipt id with the `omp-kit undo` command), and `update --reconcile` derives the install prefix when `--prefix` is omitted instead of passing it through as undefined.
+
+### Fixed
+
+- `skills/fleet-round`: the report validator accepts `MISSION: PROPOSED` in round 0 with the drafted text in `mission_proposed`, as the round-0 plan allows, when the repo states no mission; it still rejects a draft after round 0, a draft without text, or a draft where the repo already states a mission.
+
 ## [0.2.24] - 2026-10-12
 
 ### Fixed
