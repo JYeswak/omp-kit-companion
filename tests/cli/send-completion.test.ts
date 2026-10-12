@@ -1,7 +1,7 @@
 import { expect, test, vi } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { composerHasText, markerInComposer, proveSend, type SendExec } from "../../src/send.ts";
+import { composerHasText, composerTextAfterPrompt, markerInComposer, proveSend, type SendExec } from "../../src/send.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -161,4 +161,41 @@ test("dispatches complete by default; plain messages still refuse fast when disa
 	} finally {
 		vi.useRealTimers();
 	}
+});
+
+/**
+ * Real-capture composer fixtures (ompkit-fp72.21 item 7 fix): captured
+ * 2026-10-12 via read-only tmux capture-pane of live omp-test panes, with
+ * model names, paths, percentages and timings normalized to stable tokens
+ * (box/border/prompt/separator/footer glyphs byte-exact). Draft bodies in
+ * the draft fixtures are inserted at the real prompt line; everything else
+ * (separator, footer, scrollback chrome) is verbatim capture.
+ */
+function realFixture(name: string): string {
+	return readFileSync(join(repoRoot, "tests", "fixtures", "send", name), "utf8");
+}
+
+test("planted: real idle pane with separator and footer reads no composer text", () => {
+	const idle = realFixture("omp-real-idle-footer.txt");
+	expect(composerHasText(idle)).toBe(false);
+	expect(composerTextAfterPrompt(idle)).toBe("");
+	expect(markerInComposer(idle, "kit-send-aaaaaaaaaaaaaaaa")).toBe(false);
+});
+
+test("planted: real draft in the composer reads text", () => {
+	const draft = realFixture("omp-real-draft.txt");
+	expect(composerHasText(draft)).toBe(true);
+	expect(composerTextAfterPrompt(draft)).toBe("human draft here");
+});
+
+test("planted: real multiline draft reads text", () => {
+	const draft = realFixture("omp-real-draft-multiline.txt");
+	expect(composerHasText(draft)).toBe(true);
+	expect(composerTextAfterPrompt(draft)).toBe("human draft here\ncontinuation line two");
+});
+
+test("planted: scrollback tool output above an idle prompt reads no text", () => {
+	const idle = realFixture("omp-real-scrollback-idle.txt");
+	expect(composerHasText(idle)).toBe(false);
+	expect(markerInComposer(idle, "kit-send-aaaaaaaaaaaaaaaa")).toBe(false);
 });

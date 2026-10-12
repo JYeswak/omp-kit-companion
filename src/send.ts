@@ -137,31 +137,44 @@ function dropMessage(dropDir: string, session: string, pane: string, marker: str
 }
 
 /**
+ * Bounded composer region as content lines: from the ❯ prompt line (prompt
+ * chrome stripped) to the next separator line (starting with ─) exclusive.
+ * Everything past the separator is footer chrome (model, context meters),
+ * never draft text: the old tail-to-end-of-capture read mistook an idle
+ * pane's footer for a draft and admission never passed. Without a ❯ prompt
+ * the region falls back to the legacy tail so odd captures keep working.
+ */
+export function composerRegionLines(capture: string): string[] {
+	const lines = capture.split("\n");
+	let composerStart = -1;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!.trimStart();
+		if (line.startsWith("╭──")) composerStart = i + 1;
+		if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
+	}
+	if (composerStart < 0) return [];
+	const tail = lines.slice(composerStart);
+	const promptAt = tail.findIndex((line) => /^\s*❯/.test(line));
+	if (promptAt < 0) return tail;
+	const region: string[] = [tail[promptAt]!.replace(/^\s*❯\s?/, "")];
+	for (let i = promptAt + 1; i < tail.length; i++) {
+		if (/^\s*─/.test(tail[i]!)) break;
+		region.push(tail[i]!);
+	}
+	return region;
+}
+
+/**
  * True when the marker appears in the lower-most composer region: after the
  * latest default `╭──` border or Claude `─` rule immediately above a `❯` prompt.
  */
 export function markerInComposer(capture: string, marker: string): boolean {
-	const lines = capture.split("\n");
-	let composerStart = -1;
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]!.trimStart();
-		if (line.startsWith("╭──")) composerStart = i + 1;
-		if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
-	}
-	return composerStart >= 0 && lines.slice(composerStart).some((line) => line.includes(marker));
+	return composerRegionLines(capture).some((line) => line.includes(marker));
 }
 
 /** Text after the ❯ prompt in the composer region (prompt chrome excluded). */
 export function composerTextAfterPrompt(capture: string): string {
-	const lines = capture.split("\n");
-	let composerStart = -1;
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]!.trimStart();
-		if (line.startsWith("╭──")) composerStart = i + 1;
-		if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
-	}
-	if (composerStart < 0) return "";
-	return lines.slice(composerStart).map((line) => line.replace(/^\s*❯\s?/, "")).join("\n").trim();
+	return composerRegionLines(capture).join("\n").trim();
 }
 
 /** True when the composer holds text beyond the bare prompt (ours or foreign). */
@@ -249,15 +262,9 @@ export async function sweepUnsentMarkers(args: {
 		const got = args.runTmux(["capture-pane", "-p", "-S", "-200", "-t", pane]);
 		if (got.code !== 0) continue;
 		panes++;
-		const lines = got.out.split("\n");
-		let composerStart = -1;
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i]!.trimStart();
-			if (line.startsWith("╭──")) composerStart = i + 1;
-			if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
-		}
-		if (composerStart < 0) continue;
-		const region = lines.slice(composerStart).join("\n");
+		const regionLines = composerRegionLines(got.out);
+		if (regionLines.length === 0) continue;
+		const region = regionLines.join("\n");
 		const markers: string[] = [];
 		for (const found of region.match(SWEPT_MARKER) ?? []) {
 			if (!markers.includes(found)) markers.push(found);
