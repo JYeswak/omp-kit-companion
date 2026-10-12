@@ -22,12 +22,18 @@ fail() {
 command -v git >/dev/null 2>&1 || fail "git is required (scans tracked files)"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 
-TMP_FINDINGS=$(mktemp "${TMPDIR:-/tmp}/publishability.XXXXXX") || fail "cannot create findings file"
-TMP_FILES=$(mktemp "${TMPDIR:-/tmp}/publishability-files.XXXXXX") || fail "cannot create file list"
-TMP_HITS=$(mktemp "${TMPDIR:-/tmp}/publishability-hits.XXXXXX") || fail "cannot create hit file"
-trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS"' EXIT INT TERM
-
 cd -- "$ROOT" || fail "cannot cd to $ROOT"
+# ROOT must be the top of a git work tree: a plain directory nested inside another repo (an
+# extracted archive, a scratch copy) would otherwise enumerate nothing and report OK (rz5.106.7).
+top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not inside a git work tree"
+[ "$(cd -P -- "$top" && pwd)" = "$(pwd -P)" ] || fail "UNRUN: $ROOT is not the top of its git work tree ($top is)"
+# Scratch goes in the scanned repo's own var/agent-tmp unless TMPDIR is set; never /tmp.
+scratch=${TMPDIR:-$(pwd -P)/var/agent-tmp}
+mkdir -p "$scratch" || fail "cannot create scratch dir $scratch"
+TMP_FINDINGS=$(mktemp "$scratch/publishability.XXXXXX") || fail "cannot create findings file"
+TMP_FILES=$(mktemp "$scratch/publishability-files.XXXXXX") || fail "cannot create file list"
+TMP_HITS=$(mktemp "$scratch/publishability-hits.XXXXXX") || fail "cannot create hit file"
+trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS"' EXIT INT TERM
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.
@@ -44,6 +50,7 @@ scan() {
 	if [ -n "${4:-}" ]; then grep -vE -- "$4" "$TMP_HITS" || true; else cat "$TMP_HITS"; fi \
 		| cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS"
 }
+scanned=0
 while IFS= read -r file; do
 	case "$file" in
 		var/agent-tmp/*|.git/*) continue ;;
@@ -52,6 +59,7 @@ while IFS= read -r file; do
 		\"*) printf 'unscannable-name: %s\n' "$file" >> "$TMP_FINDINGS"; continue ;;
 	esac
 	[ -f "$file" ] || continue
+	scanned=$((scanned + 1))
 	if [ ! -r "$file" ]; then
 		printf 'unreadable: %s\n' "$file" >> "$TMP_FINDINGS"
 		continue
@@ -68,7 +76,9 @@ done < "$TMP_FILES"
 
 if [ -s "$TMP_FINDINGS" ]; then
 	sort -u "$TMP_FINDINGS"
-	printf 'publishability: FAIL (%s finding(s))\n' "$(wc -l < "$TMP_FINDINGS" | tr -d ' ')" >&2
+	printf 'publishability: FAIL (%s finding(s), %s file(s) scanned)\n' "$(wc -l < "$TMP_FINDINGS" | tr -d ' ')" "$scanned" >&2
 	exit 1
 fi
-printf 'publishability: OK\n'
+# Zero scanned subjects is not a clean result: an empty repo or an all-excluded tree proves nothing.
+[ "$scanned" -gt 0 ] || fail "UNRUN: 0 tracked files scanned"
+printf 'publishability: OK (%s file(s) scanned)\n' "$scanned"

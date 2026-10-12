@@ -159,5 +159,34 @@ for producer in git grep; do
 	fi
 done
 
+# rz5.106.7: zero scanned subjects is UNRUN (exit 2), never OK: an empty repo, and a plain directory
+# nested inside a repo (an extracted archive) whose files git does not track.
+mkfixture
+rc=0; sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "2" ] && grep -q 'UNRUN' "$TMP/out" && ! grep -q 'publishability: OK' "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL empty-repo-unrun: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+mkfixture
+printf 'tracked\n' > "$TMP/fixture/kept.txt"
+git -C "$TMP/fixture" add kept.txt
+mkdir -p "$TMP/fixture/extract"
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/extract/config.txt"
+rc=0; sh "$CHECK" "$TMP/fixture/extract" > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "2" ] && grep -q 'UNRUN' "$TMP/out" && ! grep -q 'publishability: OK' "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL nested-dir-unrun: rc=%s out<<<%s>>>\n' "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+# rz5.106.7: an OK names how many files it scanned; with TMPDIR unset, scratch goes to the scanned
+# repo's var/agent-tmp, not /tmp.
+rc=0; (unset TMPDIR; sh "$CHECK" "$TMP/fixture") > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "0" ] && grep -q 'publishability: OK (1 file(s) scanned)' "$TMP/out" && [ -d "$TMP/fixture/var/agent-tmp" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL ok-counts-and-repo-scratch: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
 printf 'publishability: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
