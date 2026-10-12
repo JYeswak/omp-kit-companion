@@ -509,6 +509,10 @@ export function choosePull(input: PullInput): PullChoice {
 			const epic = focusOn ? focusEpicOf(id, parents!, input.focus) : null;
 			if (!focusOn || epic !== null) return { ready: true, pick: { kind: "TRIAGE", id, rank: index + 1, epic } };
 		}
+		// FWFOCUS1 (ompkit-fp72.28): bv's top-N can hold no focus leaf while br ready does; take the first such leaf.
+		const fallback = focusOn ? leafRows.find((row) => focusEpicOf(row.id, parents!, input.focus) !== null) : undefined;
+		if (fallback !== undefined)
+			return { ready: true, pick: { kind: "READY", id: fallback.id, reason: `bv top-${input.triage.ids.length} has no focus leaf`, epic: focusEpicOf(fallback.id, parents!, input.focus) } };
 		return { ready: false, kind: "NO_TRIAGE_PICK", text: `Fleet watch (NO_TRIAGE_PICK): ${input.sessionName} workers parked: nothing to grade or rework, and none of the ${input.triage.ids.length} bv --robot-triage recommendations is a claimable br ready leaf${focus}; set focus or unblock. Seats wake when an item becomes eligible.` };
 	}
 	const reason = input.triage.usable ? "DAG unreadable (.beads/issues.jsonl)" : `bv unusable: ${input.triage.reason}`;

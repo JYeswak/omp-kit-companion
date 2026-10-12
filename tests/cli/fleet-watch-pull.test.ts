@@ -198,6 +198,15 @@ test("[fallback] bv unavailable falls back to br ready order under focus and say
 	expect(text).toContain("bv unusable: bv --robot-triage exited 1, so this is the br ready fallback: take x-2 (under x-epic)");
 });
 
+test("[triage] bv top-N with no focus leaf falls through to the first focus ready leaf (FWFOCUS1)", () => {
+	const issues = [issue("y-1"), issue("y-2"), issue("x-5", { parents: ["x-epic"] })];
+	const run = nudgeOnce(configOf(), world({ readyRows: [leaf("y-1"), leaf("y-2"), leaf("x-5")], issues, triage: { usable: true, ids: ["y-1", "y-2"] } }));
+	expect(run.worker("%1")[0]).toContain("bv top-2 has no focus leaf, so this is the br ready fallback: take x-5 (under x-epic)");
+	const none = nudgeOnce(configOf(), world({ readyRows: [leaf("y-1"), leaf("y-2")], issues: [issue("y-1"), issue("y-2")], triage: { usable: true, ids: ["y-1", "y-2"] } }), ["%2"]);
+	expect(none.worker("%1")).toEqual([]);
+	expect(none.coordinator()[0]).toContain("NO_TRIAGE_PICK");
+});
+
 test("[pause] round phase INSIGHT and pullEnabled false send no pull nudge, no escalation", () => {
 	const busyWorld = world({ statusRows: [review("x-9", "BlueWorker")], readyRows: [leaf("x-1")] });
 	for (const paused of [{ phase: "INSIGHT" }, { pullEnabled: false }]) {
