@@ -4,6 +4,16 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.29] - 2026-10-12
+
+### Added
+
+- `omp-kit mission anchor [--project PATH]... [--json]`: per-repo mission-anchor status for a fleet. The live-doc Mission statement (heading plus approval marker in the toml-declared doc, else ROADMAP.md/MISSION.md) is the human source of truth for wording; `.omp/mission.toml` is the machine record. Reports AGREE only when the doc statement, its approval, a VALID record, and the recorded identity wording all line up; any disagreement (missing doc, missing heading/approval, non-VALID record, wording drift) is DRIFT with named reasons (exit 0 all AGREE, 1 otherwise).
+
+### Changed
+
+- `omp-kit send` serializes concurrent sends to one pane (per-destination lock file, stale-holder steal by pid liveness) and refuses to type into a non-empty composer (empty-composer admission with bounded wait, then UNDELIVERED): three concurrent sends plus a human draft arrive as three ordered submissions with independent marker acks, and `sweepUnsentMarkers` reports composer-region markers while ignoring scrollback.
+
 ## [0.2.28] - 2026-10-12
 
 ### Changed

@@ -1,2 +1,0 @@
-### Added
-- `omp-kit mission anchor [--project PATH]... [--json]`: per-repo mission-anchor status for a fleet. The live-doc Mission statement (heading plus approval marker in the toml-declared doc, else ROADMAP.md/MISSION.md) is the human source of truth for wording; `.omp/mission.toml` is the machine record. Reports AGREE only when the doc statement, its approval, a VALID record, and the recorded identity wording all line up; any disagreement (missing doc, missing heading/approval, non-VALID record, wording drift) is DRIFT with named reasons (exit 0 all AGREE, 1 otherwise).
