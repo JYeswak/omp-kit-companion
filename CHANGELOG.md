@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.27] - 2026-10-12
+
+### Changed
+
+- Fix kit updates to relink the OMP plugin across covered profiles with a reversible per-profile receipt, and make doctor fail on stale plugin targets.
+
 ## [0.2.26] - 2026-10-12
 
 ### Changed
