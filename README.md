@@ -449,7 +449,7 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 | `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Language-server readiness; never installs or starts servers | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
-| `omp-kit mission` | `mission validate [--project PATH]` | Check `.omp/mission.toml` fields and check hashes: `VALID`, `UNREGISTERED`, `INVALID` | `omp-kit mission validate --json` |
+| `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes (`VALID`, `UNREGISTERED`, `INVALID`); `anchor` reports the live-doc Mission statement against the record per repo (`AGREE` or `DRIFT` with reasons) | `omp-kit mission anchor --project ~/Developer/omp-kit --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load-admitted command at nice 10; exit 75 when deferred | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |

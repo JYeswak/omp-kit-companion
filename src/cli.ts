@@ -62,7 +62,7 @@ import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyF
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
-import { validateMissionRecord } from "./mission.ts";
+import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -3205,6 +3205,18 @@ function missionValidateCommand(request: ParsedCommand): CliResult {
 	return { code: report.overall === "VALID" ? 0 : 1, data: { ...report }, verification: "PERFORMED" };
 }
 registerCommandHandler("mission validate", missionValidateCommand);
+function missionAnchorCommand(request: ParsedCommand): CliResult {
+	const projectFlag = request.flags.get("--project");
+	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
+	const roots = typeof projectFlag === "string" ? projectFlag.split("\n").map(root => root.trim()).filter(root => root.length > 0) : [process.cwd()];
+	if (roots.length === 0)
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
+	const rows = roots.map(root => missionAnchorStatus(resolve(root)));
+	const drift = rows.filter(row => row.verdict !== "AGREE");
+	return { code: drift.length === 0 ? 0 : 1, data: { overall: drift.length === 0 ? "AGREE" : "DRIFT", repos: rows }, verification: "PERFORMED" };
+}
+registerCommandHandler("mission anchor", missionAnchorCommand);
 
 registerCommandHandler("update", updateCommand);
 

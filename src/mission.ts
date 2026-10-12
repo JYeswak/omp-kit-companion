@@ -197,3 +197,113 @@ export function validateMissionRecord(projectRoot: string, options: { readonly m
 	const unregistered = pillars.some(pillar => pillar.status === "UNREGISTERED");
 	return report(errors.length === 0 ? "VALID" : unregistered ? "UNREGISTERED" : "INVALID", relativeMissionFile, identity, stage, pillars, errors);
 }
+
+const ANCHOR_DOC_CANDIDATES = ["ROADMAP.md", "MISSION.md", "docs/ROADMAP.md", ".flywheel/MISSION.md", "README.md"];
+const ANCHOR_HEADING = /^#{1,3}[ \t]+Mission\b/i;
+const ANCHOR_APPROVAL = /approved?[ \t]+by|STATE[ \t]*:[ \t]*(PROPOSED|APPROVED)|APPROVED_BY/i;
+const ANCHOR_HUMAN_TEXT = /^#[^\n]*Human text:[ \t]*(\S+)/m;
+
+export type MissionAnchorVerdict = "AGREE" | "DRIFT";
+
+export interface MissionAnchorDoc {
+	readonly file: string | null;
+	readonly heading: string | null;
+	readonly approved: boolean;
+	readonly errors: readonly string[];
+}
+
+export interface MissionAnchorStatus {
+	readonly root: string;
+	readonly doc: MissionAnchorDoc;
+	readonly record: MissionValidationReport | null;
+	readonly wordingAgrees: boolean | null;
+	readonly verdict: MissionAnchorVerdict;
+	readonly details: readonly string[];
+}
+
+function anchorDocFile(root: string, tomlText: string | null, explicitDocFile: string | undefined): string | null {
+	if (explicitDocFile !== undefined) return missionFilePath(root, explicitDocFile);
+	if (tomlText !== null) {
+		const declared = ANCHOR_HUMAN_TEXT.exec(tomlText)?.[1]?.replace(/[",)]+$/, "");
+		if (declared) {
+			try {
+				const path = missionFilePath(root, declared);
+				if (lstatSync(path).isFile()) return path;
+				return null;
+			} catch { return null; }
+		}
+	}
+	for (const candidate of ANCHOR_DOC_CANDIDATES) {
+		try {
+			const path = missionFilePath(root, candidate);
+			if (lstatSync(path).isFile()) return path;
+		} catch { continue; }
+	}
+	return null;
+}
+
+function anchorDocSection(text: string): { heading: string | null; body: string } {
+	const lines = text.split("\n");
+	const start = lines.findIndex(line => ANCHOR_HEADING.test(line));
+	if (start < 0) return { heading: null, body: "" };
+	const level = /^#{1,3}/.exec(lines[start]!)![0].length;
+	let end = lines.length;
+	for (let index = start + 1; index < lines.length; index++) {
+		const edge = /^(#{1,3})[ \t]/.exec(lines[index]!);
+		if (edge && edge[1]!.length <= level) { end = index; break; }
+	}
+	return { heading: lines[start]!.trim(), body: lines.slice(start, end).join("\n") };
+}
+
+/** One anchor, two faces (ompkit-fp72.9 ANCHOR1): the live-doc Mission statement is the
+ * human source of truth for wording; .omp/mission.toml is the machine record. Reports
+ * per-repo status and flags any disagreement as DRIFT. Never launches checks. */
+export function missionAnchorStatus(projectRoot: string, options: { readonly missionFile?: string; readonly docFile?: string } = {}): MissionAnchorStatus {
+	let root: string;
+	try { root = canonicalProjectRoot(projectRoot); }
+	catch {
+		return { root: projectRoot, doc: { file: null, heading: null, approved: false, errors: ["ANCHOR_PROJECT_PATH_INVALID"] },
+			record: null, wordingAgrees: null, verdict: "DRIFT", details: ["ANCHOR_PROJECT_PATH_INVALID"] };
+	}
+	const relativeMissionFile = options.missionFile ?? ".omp/mission.toml";
+	let tomlText: string | null = null;
+	let recordValue: MissionValidationReport | null = null;
+	try {
+		tomlText = safeRead(missionFilePath(root, relativeMissionFile), MAX_MISSION_BYTES).toString("utf8");
+		recordValue = validateMissionRecord(root, { missionFile: relativeMissionFile });
+	} catch { recordValue = null; }
+	const details: string[] = [];
+	const docErrors: string[] = [];
+	let docFile: string | null = null;
+	try { docFile = anchorDocFile(root, tomlText, options.docFile); }
+	catch { docFile = null; }
+	let heading: string | null = null;
+	let approved = false;
+	let section = "";
+	if (docFile === null) {
+		docErrors.push("ANCHOR_DOC_MISSING");
+	} else {
+		let docText = "";
+		try { docText = safeRead(docFile, MAX_MISSION_BYTES).toString("utf8"); }
+		catch { docErrors.push("ANCHOR_DOC_UNREADABLE"); }
+		if (docText) {
+			const parsed = anchorDocSection(docText);
+			heading = parsed.heading;
+			section = parsed.body;
+			if (heading === null) docErrors.push("ANCHOR_DOC_NO_MISSION_HEADING");
+			approved = ANCHOR_APPROVAL.test(`${heading ?? ""}\n${section}`);
+			if (!approved) docErrors.push("ANCHOR_DOC_APPROVAL_MISSING");
+		}
+	}
+	for (const error of docErrors) details.push(error);
+	let wordingAgrees: boolean | null = null;
+	if (recordValue !== null && recordValue.overall !== "VALID") details.push(`ANCHOR_RECORD_${recordValue.overall}`);
+	if (recordValue === null) details.push("ANCHOR_RECORD_UNAVAILABLE");
+	if (docErrors.length === 0 && recordValue !== null && recordValue.overall === "VALID") {
+		wordingAgrees = recordValue.identity !== null && section.replace(/\s+/g, " ").trim().includes(recordValue.identity.replace(/\s+/g, " ").trim());
+		if (!wordingAgrees) details.push("ANCHOR_WORDING_DRIFT");
+	}
+	const verdict: MissionAnchorVerdict = details.length === 0 ? "AGREE" : "DRIFT";
+	return { root, doc: { file: docFile, heading, approved, errors: Object.freeze([...docErrors]) },
+		record: recordValue, wordingAgrees, verdict, details: Object.freeze([...details]) };
+}

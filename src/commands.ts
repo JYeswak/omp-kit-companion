@@ -332,10 +332,13 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
 		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, mutation: true, dataSchema: planningConvertData },
 	], runnable: false },
-	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate [--project PATH] [--json]", flags: [], subcommands: [
+	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate|anchor [--project PATH] [--json]", flags: [], subcommands: [
 		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [
 			{ name: "--project", value: "PATH", description: "Project root to validate; defaults to the current directory" },
 		], example: "omp-kit mission validate --json", runnable: false, dataSchema: missionData },
+		{ name: "anchor", description: "Report per-repo mission-anchor status: live-doc Mission statement against the .omp/mission.toml record, flagging disagreement", usage: "mission anchor [--project PATH]... [--json]", flags: [
+			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
+		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--staged] [--deep --yes]", flags: [
