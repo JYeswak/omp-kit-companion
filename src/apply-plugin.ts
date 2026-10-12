@@ -25,6 +25,10 @@ export interface PluginUndoBackup {
 	lock_state: "ABSENT" | "FILE";
 	lock_file?: string;
 	lock_mode?: number;
+	runtime_config_state: "ABSENT" | "FILE";
+	runtime_config_file?: string;
+	runtime_config_mode?: number;
+	runtime_config_hash?: string;
 	package_state: "ABSENT" | "SYMLINK" | "DIRECTORY";
 	package_backup?: string;
 	package_tree_hash?: string;
@@ -81,13 +85,34 @@ function pluginPathHash(path: string): string {
 	entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
 	return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 }
-
-export function pluginProfileHashes(pluginDir: string): Pick<PluginSnapshot, "plugins_dir_hash" | "lock_hash"> {
+function pluginMutationHashes(pluginDir: string): Pick<PluginSnapshot, "plugins_dir_hash" | "lock_hash"> {
+	if (!isAbsolute(pluginDir) || resolve(pluginDir) !== pluginDir) throw new Error("PLUGIN_SNAPSHOT_PATH_INVALID");
+	const runtimeConfigPath = join(pluginDir, "installed_plugins.json");
+	const runtimeConfigKind = filesystemKind(runtimeConfigPath);
+	const lockPath = join(pluginDir, "omp-plugins.lock.json");
+	const lockKind = filesystemKind(lockPath);
+	if (runtimeConfigKind !== "ABSENT" && runtimeConfigKind !== "FILE")
+		throw new Error("PLUGIN_RUNTIME_CONFIG_UNSAFE_TO_SNAPSHOT");
+	if (lockKind !== "ABSENT" && lockKind !== "FILE")
+		throw new Error("PLUGIN_LOCK_UNSAFE_TO_SNAPSHOT");
+	const paths = [join(pluginDir, "node_modules", "omp-kit-companion"), runtimeConfigPath, lockPath];
+	const snapshot = snapshotWatched(paths);
+	if (snapshot.incomplete.length) throw new Error(`PLUGIN_SNAPSHOT_INCOMPLETE:${snapshot.incomplete.join(",")}`);
+	const lockEntry = snapshot.entries.get(lockPath);
+	if (lockEntry === undefined) throw new Error(`PLUGIN_SNAPSHOT_INCOMPLETE:${lockPath}`);
+	const entries = [...snapshot.entries].map(([entry, value]) => [relative(pluginDir, entry) || ".", value] as const);
+	entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
 	return {
-		plugins_dir_hash: pluginPathHash(pluginDir),
-		lock_hash: pluginPathHash(join(pluginDir, "omp-plugins.lock.json")),
+		plugins_dir_hash: createHash("sha256").update(JSON.stringify(entries)).digest("hex"),
+		lock_hash: createHash("sha256").update(JSON.stringify([[".", lockEntry]])).digest("hex"),
 	};
 }
+
+/** Hash only the OMP link and registry files, excluding unrelated plugin caches. */
+export function pluginProfileHashes(pluginDir: string): Pick<PluginSnapshot, "plugins_dir_hash" | "lock_hash"> {
+	return pluginMutationHashes(pluginDir);
+}
+
 export function pluginPackageHash(packageDir: string): string {
 	if (!isAbsolute(packageDir) || resolve(packageDir) !== packageDir)
 		throw new Error("PLUGIN_PACKAGE_PATH_INVALID");
@@ -270,12 +295,20 @@ function captureUndoBackup(
 		throw new Error("PLUGIN_LINK_CHANGED_BEFORE_BACKUP");
 
 	const lockPath = join(pluginDir, "omp-plugins.lock.json");
-	if (pluginPathHash(lockPath) !== before.lock_hash || filesystemKind(lockPath) !== before.lock_kind)
+	const runtimeConfigPath = join(pluginDir, "installed_plugins.json");
+	const runtimeConfigKind = filesystemKind(runtimeConfigPath);
+	if (runtimeConfigKind !== "ABSENT" && runtimeConfigKind !== "FILE")
+		throw new Error("PLUGIN_RUNTIME_CONFIG_UNSAFE_TO_BACKUP");
+	const mutationHashes = pluginMutationHashes(pluginDir);
+	if (mutationHashes.plugins_dir_hash !== before.plugins_dir_hash)
+		throw new Error("PLUGIN_MUTATION_SURFACE_CHANGED_BEFORE_BACKUP");
+	if (mutationHashes.lock_hash !== before.lock_hash || filesystemKind(lockPath) !== before.lock_kind)
 		throw new Error("PLUGIN_LOCK_CHANGED_BEFORE_BACKUP");
 
 	const backupName = `plugin-${receiptId}-${createHash("sha256").update(profile).digest("hex").slice(0, 12)}`;
 	const backup: PluginUndoBackup = {
 		lock_state: before.lock_kind,
+		runtime_config_state: runtimeConfigKind,
 		package_state: before.link_kind,
 		plugin_dir_present: before.plugin_dir_present,
 		node_modules_present: before.node_modules_present,
@@ -309,6 +342,23 @@ function captureUndoBackup(
 		backup.lock_mode = lockStat.mode & 0o7777;
 		writeFileSync(join(stateRoot, backup.lock_file), lockBytes, { flag: "wx", mode: 0o600 });
 	}
+	if (runtimeConfigKind === "FILE") {
+		const runtimeStat = lstatSync(runtimeConfigPath);
+		const runtimeBytes = readFileSync(runtimeConfigPath);
+		const runtimeHash = createHash("sha256").update(runtimeBytes).digest("hex");
+		if (pluginMutationHashes(pluginDir).plugins_dir_hash !== before.plugins_dir_hash)
+			throw new Error("PLUGIN_RUNTIME_CONFIG_CHANGED_DURING_BACKUP");
+		const runtimeFile = `${backupName}.runtime`;
+		const runtimeBackupPath = join(stateRoot, runtimeFile);
+		writeFileSync(runtimeBackupPath, runtimeBytes, { flag: "wx", mode: 0o600 });
+		if (createHash("sha256").update(readFileSync(runtimeBackupPath)).digest("hex") !== runtimeHash)
+			throw new Error("PLUGIN_RUNTIME_CONFIG_BACKUP_INVALID");
+		backup.runtime_config_file = runtimeFile;
+		backup.runtime_config_mode = runtimeStat.mode & 0o7777;
+		backup.runtime_config_hash = runtimeHash;
+	}
+	if (pluginMutationHashes(pluginDir).plugins_dir_hash !== before.plugins_dir_hash)
+		throw new Error("PLUGIN_MUTATION_SURFACE_CHANGED_DURING_BACKUP");
 	return backup;
 }
 
@@ -333,6 +383,8 @@ function restorePluginFilesystem(
 	if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot || filesystemKind(stateRoot) !== "DIRECTORY")
 		throw new Error("PLUGIN_BACKUP_ROOT_INVALID");
 	if (backup.package_state !== before.link_kind) throw new Error("PLUGIN_UNDO_BACKUP_STATE_MISMATCH");
+	if (backup.runtime_config_state !== "ABSENT" && backup.runtime_config_state !== "FILE")
+		throw new Error("PLUGIN_UNDO_RUNTIME_CONFIG_BACKUP_MISSING");
 
 	const pluginDir = dirname(dirname(linkPath));
 	const nodeModulesDir = dirname(linkPath);
@@ -347,6 +399,27 @@ function restorePluginFilesystem(
 	const currentLockKind = filesystemKind(lockPath);
 	if ((after.lock_kind !== "ABSENT" && after.lock_kind !== "FILE") || currentLockKind !== after.lock_kind)
 		throw new Error("PLUGIN_UNDO_LOCK_POSTIMAGE_UNSAFE");
+	const runtimeConfigPath = join(pluginDir, "installed_plugins.json");
+	const currentRuntimeKind = filesystemKind(runtimeConfigPath);
+	if (currentRuntimeKind !== "ABSENT" && currentRuntimeKind !== "FILE")
+		throw new Error("PLUGIN_UNDO_RUNTIME_CONFIG_POSTIMAGE_UNSAFE");
+	let runtimeConfigBytes: Buffer | undefined;
+	if (backup.runtime_config_state === "FILE") {
+		const runtimeFile = backup.runtime_config_file;
+		const runtimeMode = backup.runtime_config_mode;
+		const runtimeHash = backup.runtime_config_hash;
+		if (!runtimeFile || runtimeFile.includes("/") || runtimeFile.includes("\\") || runtimeFile === "." || runtimeFile === ".." ||
+			runtimeMode === undefined || !Number.isInteger(runtimeMode) || runtimeMode < 0 || runtimeMode > 0o7777 || !runtimeHash)
+			throw new Error("PLUGIN_UNDO_BACKUP_INVALID");
+		const runtimeBackupPath = join(stateRoot, runtimeFile);
+		if (filesystemKind(runtimeBackupPath) !== "FILE") throw new Error("PLUGIN_UNDO_BACKUP_MISSING");
+		runtimeConfigBytes = readFileSync(runtimeBackupPath);
+		if (createHash("sha256").update(runtimeConfigBytes).digest("hex") !== runtimeHash)
+			throw new Error("PLUGIN_UNDO_RUNTIME_CONFIG_BACKUP_INVALID");
+	} else if (backup.runtime_config_file !== undefined || backup.runtime_config_mode !== undefined || backup.runtime_config_hash !== undefined)
+		throw new Error("PLUGIN_UNDO_BACKUP_INVALID");
+	if (!after.plugins_dir_hash || pluginMutationHashes(pluginDir).plugins_dir_hash !== after.plugins_dir_hash)
+		throw new Error("PLUGIN_UNDO_MUTATION_POSTIMAGE_MISMATCH");
 	if (backup.lock_state === "FILE") {
 		if (!backup.lock_file || !/^[A-Za-z0-9._-]+$/.test(backup.lock_file) || backup.lock_mode === undefined)
 			throw new Error("PLUGIN_UNDO_BACKUP_INVALID");
@@ -356,6 +429,13 @@ function restorePluginFilesystem(
 		writeFileSync(lockPath, bytes, { mode: backup.lock_mode });
 		chmodSync(lockPath, backup.lock_mode);
 	} else if (currentLockKind === "FILE") unlinkSync(lockPath);
+	if (backup.runtime_config_state === "FILE") {
+		const runtimeMode = backup.runtime_config_mode;
+		const runtimeBytes = runtimeConfigBytes;
+		if (runtimeMode === undefined || runtimeBytes === undefined) throw new Error("PLUGIN_UNDO_BACKUP_INVALID");
+		writeFileSync(runtimeConfigPath, runtimeBytes, { mode: runtimeMode });
+		chmodSync(runtimeConfigPath, runtimeMode);
+	} else if (currentRuntimeKind === "FILE") unlinkSync(runtimeConfigPath);
 
 	if (currentKind === "SYMLINK") unlinkSync(linkPath);
 	if (backup.package_state === "SYMLINK") {

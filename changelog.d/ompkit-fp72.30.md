@@ -1,0 +1,1 @@
+- Bound plugin apply receipts and operator snapshots to the OMP package link, installed-plugin registry, and lock; undo restores registry bytes and ignores unrelated cache trees.

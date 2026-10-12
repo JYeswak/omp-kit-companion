@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, undoPlugin, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
 
 const store = "/fixture/releases/0.2.5";
@@ -101,14 +101,19 @@ test("names a profile when postcheck loses its plugin rules", () => {
 		rmSync(stateRoot, { recursive: true, force: true });
 	}
 });
-test("plugin profile hashes cover the plugin tree and lock and record absence", () => {
+test("plugin profile hashes cover the OMP link and registry files, not unrelated cache entries", () => {
 	const scratchRoot = join(process.cwd(), "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
 	const dir = mkdtempSync(join(scratchRoot, "plugin-hash-test-"));
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=plugin-hash-test\nrepo=${process.cwd()}\ncreated=${new Date().toISOString()}\n`);
 	const plugins = join(dir, "plugins");
 	mkdirSync(plugins);
+	const linkPath = join(plugins, "node_modules", "omp-kit-companion");
+	const runtimeConfig = join(plugins, "installed_plugins.json");
 	const lock = join(plugins, "omp-plugins.lock.json");
+	mkdirSync(join(plugins, "node_modules"), { recursive: true });
+	symlinkSync("/fixture/releases/old", linkPath, "dir");
+	writeFileSync(runtimeConfig, "{}\n");
 	writeFileSync(lock, "{}\n");
 	try {
 		const before = pluginProfileHashes(plugins);
@@ -116,15 +121,25 @@ test("plugin profile hashes cover the plugin tree and lock and record absence", 
 		expect(before.lock_hash).toMatch(/^[0-9a-f]{64}$/);
 		expect(pluginProfileHashes(plugins)).toEqual(before);
 
-		writeFileSync(join(plugins, "installed_plugins.json"), "{}\n");
-		const changedTree = pluginProfileHashes(plugins);
-		expect(changedTree.plugins_dir_hash).not.toBe(before.plugins_dir_hash);
-		expect(changedTree.lock_hash).toBe(before.lock_hash);
+		mkdirSync(join(plugins, "cache"));
+		writeFileSync(join(plugins, "cache", "entry"), "unrelated");
+		expect(pluginProfileHashes(plugins)).toEqual(before);
+
+		rmSync(linkPath);
+		symlinkSync("/fixture/releases/new", linkPath, "dir");
+		const changedLink = pluginProfileHashes(plugins);
+		expect(changedLink.plugins_dir_hash).not.toBe(before.plugins_dir_hash);
+		expect(changedLink.lock_hash).toBe(before.lock_hash);
+
+		writeFileSync(runtimeConfig, "{\"plugins\":[]}\n");
+		const changedRuntime = pluginProfileHashes(plugins);
+		expect(changedRuntime.plugins_dir_hash).not.toBe(changedLink.plugins_dir_hash);
+		expect(changedRuntime.lock_hash).toBe(before.lock_hash);
 
 		writeFileSync(lock, "{\"plugins\":[]}\n");
 		const changedLock = pluginProfileHashes(plugins);
-		expect(changedLock.plugins_dir_hash).not.toBe(changedTree.plugins_dir_hash);
-		expect(changedLock.lock_hash).not.toBe(changedTree.lock_hash);
+		expect(changedLock.plugins_dir_hash).not.toBe(changedRuntime.plugins_dir_hash);
+		expect(changedLock.lock_hash).not.toBe(before.lock_hash);
 
 		const absent = pluginProfileHashes(join(dir, "absent"));
 		expect(absent.plugins_dir_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -339,7 +354,7 @@ test("budgeted apply requires the exact captured report before mutation", () => 
 		rmSync(stateRoot, { recursive: true, force: true });
 	}
 });
-test("filesystem undo restores absent directories and exact plugin-lock bytes", () => {
+test("filesystem undo restores plugin config and lock while ignoring a >512 MiB cache", () => {
 	const stateRoot = makeStateRoot("filesystem-undo");
 	try {
 		const storePath = join(stateRoot, "store");
@@ -350,14 +365,22 @@ test("filesystem undo restores absent directories and exact plugin-lock bytes", 
 		const packageHash = pluginPackageHash(storePath);
 
 		for (const initialLock of [null, "{\"plugins\":[\"other\"]}\n"] as const) {
-			const profile = initialLock ? "codex-lock" : "codex-empty";
+			const profile = initialLock ? "codex-lock" : "default";
 			const pluginDir = join(stateRoot, profile, "plugins");
 			const nodeModulesDir = join(pluginDir, "node_modules");
 			const linkPath = join(nodeModulesDir, "omp-kit-companion");
+			const runtimeConfig = join(pluginDir, "installed_plugins.json");
 			const lockPath = join(pluginDir, "omp-plugins.lock.json");
+			let cachePath: string | undefined;
 			if (initialLock) {
 				mkdirSync(nodeModulesDir, { recursive: true });
+				writeFileSync(runtimeConfig, "{\"plugins\":[\"other\"]}\n");
 				writeFileSync(lockPath, initialLock);
+			} else {
+				cachePath = join(pluginDir, "cache", "large.bin");
+				mkdirSync(join(pluginDir, "cache"), { recursive: true });
+				writeFileSync(cachePath, "");
+				truncateSync(cachePath, 512 * 1024 * 1024 + 1);
 			}
 
 			const snapshot = (): PluginSnapshot => {
@@ -383,8 +406,11 @@ test("filesystem undo restores absent directories and exact plugin-lock bytes", 
 			const testRunner: PluginRunner = {
 				snapshot,
 				invoke: (_name, args) => {
+					const target = args.at(-1);
+					if (target === undefined) throw new Error("plugin link target missing");
 					mkdirSync(nodeModulesDir, { recursive: true });
-					symlinkSync(args.at(-1)!, linkPath, "dir");
+					symlinkSync(target, linkPath, "dir");
+					writeFileSync(runtimeConfig, "{\"plugins\":[\"omp-kit-companion\"]}\n");
 					writeFileSync(lockPath, "{\"plugins\":[\"omp-kit-companion\"]}\n");
 					return { code: 0, stdout: "", stderr: "" };
 				},
@@ -395,7 +421,7 @@ test("filesystem undo restores absent directories and exact plugin-lock bytes", 
 				new Map([[profile, before]]), { package_hash: packageHash }), testRunner, stateRoot);
 			expect(receipt.rows[0]).toMatchObject({
 				status: "APPLIED",
-				backup: { lock_state: initialLock ? "FILE" : "ABSENT" },
+				backup: { lock_state: initialLock ? "FILE" : "ABSENT", runtime_config_state: initialLock ? "FILE" : "ABSENT" },
 			});
 			expect(undoPlugin(receipt, testRunner, stateRoot)).toEqual([{ profile, status: "RESTORED" }]);
 			const restored = snapshot();
@@ -404,10 +430,98 @@ test("filesystem undo restores absent directories and exact plugin-lock bytes", 
 			expect(restored.lock_kind).toBe(before.lock_kind);
 			expect(restored.plugin_dir_present).toBe(before.plugin_dir_present);
 			expect(restored.node_modules_present).toBe(before.node_modules_present);
-			if (initialLock) expect(readFileSync(lockPath, "utf8")).toBe(initialLock);
+			if (initialLock) {
+				expect(readFileSync(lockPath, "utf8")).toBe(initialLock);
+				expect(readFileSync(runtimeConfig, "utf8")).toBe("{\"plugins\":[\"other\"]}\n");
+			} else {
+				if (cachePath === undefined) throw new Error("cache fixture missing");
+				expect(statSync(cachePath).size).toBe(512 * 1024 * 1024 + 1);
+			}
 		}
 	} finally {
 		rmSync(stateRoot, { recursive: true, force: true });
+	}
+});
+
+test("undo refuses tampering of the plugin link, runtime config, or lock", () => {
+	for (const tamper of ["symlink", "runtime-config", "lock"] as const) {
+		const stateRoot = makeStateRoot(`mutation-tamper-${tamper}`);
+		try {
+			const makePackage = (path: string) => {
+				mkdirSync(join(path, "rules"), { recursive: true });
+				mkdirSync(join(path, "extensions"));
+				writeFileSync(join(path, "package.json"), "{\"name\":\"omp-kit-companion\",\"version\":\"0.2.5\"}\n");
+				writeFileSync(join(path, "rules", "rule.md"), "rule\n");
+				writeFileSync(join(path, "extensions", "guard.ts"), "export default {};\n");
+			};
+			const storePath = join(stateRoot, "store");
+			const tamperedStore = join(stateRoot, "tampered-store");
+			makePackage(storePath);
+			makePackage(tamperedStore);
+			const pluginDir = join(stateRoot, "home", "plugins");
+			const nodeModulesDir = join(pluginDir, "node_modules");
+			const linkPath = join(nodeModulesDir, "omp-kit-companion");
+			const runtimeConfig = join(pluginDir, "installed_plugins.json");
+			const lockPath = join(pluginDir, "omp-plugins.lock.json");
+			mkdirSync(nodeModulesDir, { recursive: true });
+			writeFileSync(runtimeConfig, "{\"plugins\":[]}\n");
+			writeFileSync(lockPath, "{\"plugins\":[]}\n");
+
+			const snapshot = (): PluginSnapshot => {
+				const linkKind = filesystemKind(linkPath);
+				const target = linkKind === "SYMLINK" ? resolve(readlinkSync(linkPath)) : null;
+				const lockKind = filesystemKind(lockPath);
+				return {
+					installed: linkKind === "SYMLINK" || linkKind === "DIRECTORY",
+					target,
+					link_path: linkPath,
+					...pluginProfileHashes(pluginDir),
+					package_hash: target ? pluginPackageHash(target) : null,
+					link_target_text: linkKind === "SYMLINK" ? readlinkSync(linkPath) : null,
+					version: target ? "0.2.5" : null,
+					link_kind: linkKind,
+					lock_kind: lockKind === "ABSENT" || lockKind === "FILE" || lockKind === "SYMLINK" ? lockKind : "OTHER",
+					plugin_dir_present: filesystemKind(pluginDir) === "DIRECTORY",
+					node_modules_present: filesystemKind(nodeModulesDir) === "DIRECTORY",
+					disabled_rules: [],
+				};
+			};
+			const runner: PluginRunner = {
+				snapshot,
+				invoke: (_profile, args) => {
+					const target = args.at(-1);
+					if (target === undefined) throw new Error("plugin link target missing");
+					symlinkSync(target, linkPath, "dir");
+					writeFileSync(runtimeConfig, "{\"plugins\":[\"omp-kit-companion\"]}\n");
+					writeFileSync(lockPath, "{\"plugins\":[\"omp-kit-companion\"]}\n");
+					return { code: 0, stdout: "", stderr: "" };
+				},
+				postcheck: () => ({ ok: true }),
+			};
+			const before = snapshot();
+			const receipt = applyPlugin(
+				planPlugin(storePath, [{ name: "default", configFiles: ["config.yml"], pluginDir }],
+					new Map([["default", before]]), { package_hash: pluginPackageHash(storePath) }),
+				runner,
+				stateRoot,
+			);
+			expect(receipt.rows[0]?.status).toBe("APPLIED");
+
+			if (tamper === "symlink") {
+				rmSync(linkPath);
+				symlinkSync(tamperedStore, linkPath, "dir");
+			} else if (tamper === "runtime-config") writeFileSync(runtimeConfig, "{\"plugins\":[\"tampered\"]}\n");
+			else writeFileSync(lockPath, "{\"plugins\":[\"tampered\"]}\n");
+
+			expect(undoPlugin(receipt, runner, stateRoot)).toEqual([
+				{ profile: "default", status: "REFUSED", reason: "POSTIMAGE_CHANGED" },
+			]);
+			if (tamper === "symlink") expect(readlinkSync(linkPath)).toBe(tamperedStore);
+			else if (tamper === "runtime-config") expect(readFileSync(runtimeConfig, "utf8")).toBe("{\"plugins\":[\"tampered\"]}\n");
+			else expect(readFileSync(lockPath, "utf8")).toBe("{\"plugins\":[\"tampered\"]}\n");
+		} finally {
+			rmSync(stateRoot, { recursive: true, force: true });
+		}
 	}
 });
 test("directory-backed default plugin is replaced with an exact reversible backup", () => {

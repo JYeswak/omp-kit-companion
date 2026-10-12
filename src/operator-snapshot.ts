@@ -41,13 +41,20 @@ export type WatchedComparison = { unchanged: boolean; complete: boolean; watched
  */
 export function operatorWatchedPaths(home: string, stateRoot: string | null): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
+	const pluginDirs = [join(home, ".omp", "plugins")];
 	try {
-		for (const name of readdirSync(join(home, ".omp", "profiles")).sort())
-			profileDirs.push(join(home, ".omp", "profiles", name, "agent"));
+		for (const name of readdirSync(join(home, ".omp", "profiles")).sort()) {
+			const root = join(home, ".omp", "profiles", name);
+			profileDirs.push(join(root, "agent"));
+			pluginDirs.push(join(root, "plugins"));
+		}
 	} catch { /* no named profiles */ }
 	const paths: WatchedPaths = [join(home, ".omp", "settings.json"), join(home, ".agents", "rules"), join(home, ".agents", "omp-kit-ownership.json"),
-		join(home, ".omp", "omp-extensions"), join(home, ".omp", "plugins")];
+		join(home, ".omp", "omp-extensions")];
 	for (const dir of profileDirs) paths.push(...PROFILE_FILES.map(name => join(dir, name)), join(dir, "rules"));
+	// OMP links one package and updates these two registry files; plugin caches are unrelated state.
+	for (const dir of pluginDirs) paths.push(join(dir, "node_modules", "omp-kit-companion"),
+		join(dir, "installed_plugins.json"), join(dir, "omp-plugins.lock.json"));
 	if (stateRoot) { paths.push(stateRoot); paths.stateRoot = stateRoot; }
 	return paths;
 }

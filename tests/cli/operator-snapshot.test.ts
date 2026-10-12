@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 
@@ -54,6 +54,46 @@ test("a write to a watched profile config, rule, rule ownership record, or new p
 		"~/.omp/profiles/work/agent/config.yml",
 	]);
 });
+
+test("large plugin caches stay excluded while OMP link and registry mutations remain watched", () => {
+	const { home, paths } = operatorHome();
+	const pluginDir = join(home, ".omp", "plugins");
+	const cacheFile = join(pluginDir, "cache", "large.bin");
+	mkdirSync(join(pluginDir, "cache"), { recursive: true });
+	writeFileSync(cacheFile, "");
+	truncateSync(cacheFile, 512 * 1024 * 1024 + 1);
+	expect(statSync(cacheFile).size).toBe(512 * 1024 * 1024 + 1);
+
+	const linkPath = join(pluginDir, "node_modules", "omp-kit-companion");
+	const runtimeConfig = join(pluginDir, "installed_plugins.json");
+	const lockPath = join(pluginDir, "omp-plugins.lock.json");
+	mkdirSync(join(pluginDir, "node_modules"), { recursive: true });
+	symlinkSync("/fixture/releases/old", linkPath, "dir");
+	writeFileSync(runtimeConfig, "{\"plugins\":[]}\n");
+	writeFileSync(lockPath, "{\"plugins\":[]}\n");
+
+	const beforeCacheWrite = snapshotWatched(paths);
+	writeFileSync(join(pluginDir, "cache", "small-entry"), "unrelated cache state");
+	expect(compareWatched(beforeCacheWrite, snapshotWatched(paths), home)).toMatchObject({
+		unchanged: true, complete: true, changed_paths: [], incomplete_paths: [],
+	});
+
+	const symlinkBefore = snapshotWatched(paths);
+	rmSync(linkPath);
+	symlinkSync("/fixture/releases/new", linkPath, "dir");
+	expect(compareWatched(symlinkBefore, snapshotWatched(paths), home).changed_paths)
+		.toEqual(["~/.omp/plugins/node_modules/omp-kit-companion"]);
+
+	const runtimeBefore = snapshotWatched(paths);
+	writeFileSync(runtimeConfig, "{\"plugins\":[\"omp-kit-companion\"]}\n");
+	expect(compareWatched(runtimeBefore, snapshotWatched(paths), home).changed_paths)
+		.toEqual(["~/.omp/plugins/installed_plugins.json"]);
+
+	const lockBefore = snapshotWatched(paths);
+	writeFileSync(lockPath, "{\"plugins\":[\"omp-kit-companion\"]}\n");
+	expect(compareWatched(lockBefore, snapshotWatched(paths), home).changed_paths)
+		.toEqual(["~/.omp/plugins/omp-plugins.lock.json"]);
+}, 120_000);
 
 test("an mtime-only touch is not a change; a mode change is", () => {
 	const { home, paths } = operatorHome();
