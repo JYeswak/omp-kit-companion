@@ -383,9 +383,12 @@ export function parsePolicy(value: unknown): TrackerPolicy | null {
 	return { statuses, transitions, ready };
 }
 
-/** Statuses that hold work awaiting verification: reachable from in_progress, able to close, not ready work. */
+/** Parked workflow states are never review work, even when the policy lets them close (FWDEFER1 rz5.102.1). */
+const PARKED_STATUSES: Record<string, true> = { deferred: true, blocked: true };
+
+/** Statuses that hold work awaiting verification: reachable from in_progress, able to close, not ready work, never parked. */
 export function reviewStatuses(policy: TrackerPolicy): string[] {
-	return (policy.transitions.in_progress ?? []).filter((status) => status !== "closed" && !policy.ready.includes(status) && (policy.transitions[status] ?? []).includes("closed"));
+	return (policy.transitions.in_progress ?? []).filter((status) => status !== "closed" && !PARKED_STATUSES[status] && !policy.ready.includes(status) && (policy.transitions[status] ?? []).includes("closed"));
 }
 
 export function parseIssuesJsonl(text: string): TrackerIssue[] | null {

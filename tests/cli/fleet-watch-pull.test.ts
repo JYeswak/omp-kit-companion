@@ -470,3 +470,10 @@ test("[fallback] null ready rows carry the probe failure into the UNKNOWN notice
 	expect(text).toContain("UNKNOWN");
 	expect(text).toContain("timeout after 15000 ms");
 });
+
+test("[defer] parked states never count as review work (FWDEFER1 rz5.102.1)", () => {
+	const jevShaped = parsePolicy({ workflow: { statuses: ["open", "in_progress", "in_review", "deferred", "blocked", "closed"], transitions: { in_progress: ["in_review", "deferred", "blocked"], in_review: ["closed", "in_progress"], deferred: ["closed"], blocked: ["closed"] }, status_groups: { ready: ["open"] } } })!;
+	expect(reviewStatuses(jevShaped)).toEqual(["in_review"]);
+	expect(reviewStatuses(jevShaped)).not.toContain("deferred");
+	expect(reviewStatuses(jevShaped)).not.toContain("blocked");
+});
