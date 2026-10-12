@@ -179,13 +179,30 @@ if [ "$rc" = "2" ] && grep -q 'UNRUN' "$TMP/out" && ! grep -q 'publishability: O
 else
 	fail=$((fail + 1)); printf 'FAIL nested-dir-unrun: rc=%s out<<<%s>>>\n' "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
 fi
-# rz5.106.7: an OK names how many files it scanned; with TMPDIR unset, scratch goes to the scanned
-# repo's var/agent-tmp, not /tmp.
-rc=0; (unset TMPDIR; sh "$CHECK" "$TMP/fixture") > "$TMP/out" 2>&1 || rc=$?
-if [ "$rc" = "0" ] && grep -q 'publishability: OK (1 file(s) scanned)' "$TMP/out" && [ -d "$TMP/fixture/var/agent-tmp" ]; then
+# rz5.106.7: an OK names how many files it scanned. Scratch is an owned dir in the scanned repo's
+# var/agent-tmp, never TMPDIR: a planted forbidden TMPDIR (stand-in for macOS /var/folders) stays
+# unused, the run leaves no scratch behind, and while it runs the dir carries .owner.
+forbidden="$TMP/forbidden-tmpdir"
+rc=0; TMPDIR="$forbidden" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+left=$(find "$TMP/fixture/var/agent-tmp" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')
+if [ "$rc" = "0" ] && grep -q 'publishability: OK (1 file(s) scanned)' "$TMP/out" && [ ! -e "$forbidden" ] && [ "$left" = "0" ]; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL ok-counts-and-repo-scratch: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+	fail=$((fail + 1)); printf 'FAIL owned-scratch-not-tmpdir: rc=%s forbidden_exists=%s leftover=%s out<<<%s>>>\n' "$rc" "$([ -e "$forbidden" ] && echo yes || echo no)" "$left" "$(cat "$TMP/out")"
+fi
+# While a scan runs, its scratch dir carries an .owner naming the scanner pid (stub grep pauses it).
+mkdir -p "$TMP/stub-slow"
+# The stub calls the real grep by absolute path: an unqualified grep inside it resolves to the stub
+# itself and recurses without bound. shellcheck SC2016: the stub's $d and $@ stay literal.
+# shellcheck disable=SC2016
+printf '#!/bin/sh\nfor d in "%s"/var/agent-tmp/publishability.*; do [ -f "$d/.owner" ] && "%s" -q "^pid=" "$d/.owner" && touch "%s/owner-seen"; done\nexec "%s" "$@"\n' "$TMP/fixture" "$real_grep" "$TMP" "$real_grep" > "$TMP/stub-slow/grep"
+chmod +x "$TMP/stub-slow/grep"
+rm -f "$TMP/owner-seen"
+PATH="$TMP/stub-slow:$PATH" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || true
+if [ -f "$TMP/owner-seen" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scratch-has-owner: out<<<%s>>>\n' "$(cat "$TMP/out")"
 fi
 
 printf 'publishability: %s pass %s fail\n' "$pass" "$fail"

@@ -27,13 +27,15 @@ cd -- "$ROOT" || fail "cannot cd to $ROOT"
 # extracted archive, a scratch copy) would otherwise enumerate nothing and report OK (rz5.106.7).
 top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not inside a git work tree"
 [ "$(cd -P -- "$top" && pwd)" = "$(pwd -P)" ] || fail "UNRUN: $ROOT is not the top of its git work tree ($top is)"
-# Scratch goes in the scanned repo's own var/agent-tmp unless TMPDIR is set; never /tmp.
-scratch=${TMPDIR:-$(pwd -P)/var/agent-tmp}
-mkdir -p "$scratch" || fail "cannot create scratch dir $scratch"
-TMP_FINDINGS=$(mktemp "$scratch/publishability.XXXXXX") || fail "cannot create findings file"
-TMP_FILES=$(mktemp "$scratch/publishability-files.XXXXXX") || fail "cannot create file list"
-TMP_HITS=$(mktemp "$scratch/publishability-hits.XXXXXX") || fail "cannot create hit file"
-trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS"' EXIT INT TERM
+# Scratch is an owned dir in the scanned repo: var/agent-tmp/publishability.<pid>.XXXXXX with an .owner
+# file (AGENTS.md Storing). TMPDIR is ignored on purpose: its macOS default is /var/folders, which the
+# fleet rules forbid. The dir and its files are removed on exit.
+mkdir -p "$(pwd -P)/var/agent-tmp" || fail "cannot create var/agent-tmp"
+scratch=$(mktemp -d "$(pwd -P)/var/agent-tmp/publishability.$$.XXXXXX") || fail "cannot create scratch dir"
+printf 'pid=%s\nlabel=publishability\nrepo=%s\ncreated=%s\n' "$$" "$(pwd -P)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$scratch/.owner"
+TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"; TMP_HITS="$scratch/hits"
+: > "$TMP_FINDINGS"
+trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.
