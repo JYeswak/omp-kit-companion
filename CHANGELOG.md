@@ -4,6 +4,26 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.32] - 2026-10-12
+
+### Added
+
+- RX1 gate absolute single-check ceiling: a single 16k near-miss check may not exceed 50ms (a tenth of the 500ms stream budget), so flat-catastrophic patterns fail naming the rule even when their growth ratio looks innocent.
+- Release train stage 2 (tag-after-green): the bump commit lands untagged with a pending ref, and only its own green push run creates the tag on that exact SHA before the candidate dispatches.
+
+### Changed
+
+- `BUN_BE_BUN` is removed from both the OMP launcher-version probe and nested OMP CLI children, preventing Bun's embedded-kit mode from misrouting `omp ttsr` on macOS. Unexpected policy-plan failures also retain their cause code and a bounded message excerpt.
+- Native certification reaps each check's process group (session-scoped spawn with TERM/KILL on timeout and stray cleanup on exit), and `scripts/e2e-live.sh` reaps the omp session group after every scenario: a `test --full` timeout no longer strands writers under the work tree, so teardown reports the true timeout instead of `[Errno 66] Directory not empty`. (ompkit-fp72.48)
+- `omp-kit fleet respawn` reports panes running a stale plugin (omp started before the latest applied relink) and, with explicit `--panes` plus `--apply --yes`, respawns named idle panes with `--resume`, strictly serially with same-session verification; busy, frozen, dirty, reservation-holding and sessionless panes are reported, never touched.
+
+### Fixed
+
+- The pre-push gate no longer leaks its archive extracts into `var/agent-tmp` (ompkit-fp72.40). Its last step ran under `exec`, which replaced the shell holding the cleanup trap, so every push left one or two full source extracts behind (196 dirs, 6.1 GiB measured on 2026-10-12); it now runs as a child and exits with its status. Cleanup also removes symlinks and other non-directories, so a fixture link inside an extract no longer keeps its parent tree alive. Each extract sits in a dir named with the gate's pid and an `.owner` file, so a gate killed outright leaves a dir that `omp-kit scratch` reaps as soon as that pid is dead.
+- RX1 literal probe no longer demands a content literal for exact vacuous `(?s).+` conditions scoped to tool write/edit: such a pattern matches everything in O(n), so a prefilter literal can never reject anything.
+- Fleet-watch `UNKNOWN` (ready rows unreadable) now names the probe cause: `runJson` returns a typed failure (`timeout` after N ms, `maxBuffer` N bytes exceeded, `exit` N with the first stderr line, `signal`, `non-JSON output`, spawn error, each with status/signal/elapsed ms) instead of swallowing it into `undefined`, and the `bv --robot-triage` probe reports elapsed ms, status, signal and stderr head. The UNKNOWN notice and its `fleet-watch.jsonl` record carry the cause. Timeouts, IO priority and fail-closed behavior are unchanged; `br ready` probes use an explicit 16 MiB buffer.
+- Fleet-watch never offers parked workflow states for grading: `deferred` and `blocked` are excluded from review statuses even when the policy lets them close, so a deferred bead is not pulled for verification while `in_review` work still is.
+
 ## [0.2.31] - 2026-10-12
 
 ### Added
