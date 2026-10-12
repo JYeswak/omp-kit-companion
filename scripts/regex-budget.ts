@@ -18,6 +18,8 @@ export const DEFAULT_ENCODINGS = ["raw", "json"] as const;
 const NEAR_MISS_RATIO = 2.6;
 const NEAR_MISS_FLOOR_MS = 5;
 const STREAM_BUDGET_MS = 500;
+/** A single 16k near-miss check may not exceed a tenth of the whole stream budget (also 10x the noise floor): flat catastrophics fail here even when their growth ratio looks innocent. */
+export const SINGLE_CHECK_CEILING_MS = STREAM_BUDGET_MS / 10;
 const GATE_DEADLINE_MS = 57_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 20_000;
 /** Same contention line as the TOOL1 quiet-machine check and the LOAD1 heavy gate: above 1.5x cores the box is too loud to judge timing. */
@@ -227,6 +229,13 @@ export function failsNearMissBudget(times: readonly number[]): boolean {
 	return at16k > NEAR_MISS_FLOOR_MS && at16k / Math.max(at8k, 0.01) > NEAR_MISS_RATIO;
 }
 
+export function failsSingleCheckCeiling(times: readonly number[]): boolean {
+	if (times.length === 0) return true;
+	const at16k = times[times.length - 1];
+	if (!Number.isFinite(at16k)) return true;
+	return at16k > SINGLE_CHECK_CEILING_MS;
+}
+
 export function failsStreamBudget(totalMs: number): boolean {
 	return !Number.isFinite(totalMs) || totalMs > STREAM_BUDGET_MS;
 }
@@ -407,6 +416,9 @@ export async function measureCondition(input: {
 			const ratio = sample.ms[sample.ms.length - 1] / Math.max(sample.ms[sample.ms.length - 2], 0.01);
 			failures.push({ code: "NEAR_MISS_SUPERQUADRATIC", shape: sample.shape, encoding: sample.encoding, message: "rule=" + input.rule + " condition=" + input.conditionIndex + " shape=" + sample.shape + " encoding=" + sample.encoding + " 8k-to-16k=" + ratio.toFixed(2) + "x, 16k=" + sample.ms[sample.ms.length - 1].toFixed(2) + "ms" });
 		}
+		if (failsSingleCheckCeiling(sample.ms)) {
+			failures.push({ code: "SINGLE_CHECK_CEILING", shape: sample.shape, encoding: sample.encoding, message: "rule=" + input.rule + " condition=" + input.conditionIndex + " shape=" + sample.shape + " encoding=" + sample.encoding + " 16k=" + sample.ms[sample.ms.length - 1].toFixed(2) + "ms exceeds " + SINGLE_CHECK_CEILING_MS + "ms single-check ceiling" });
+		}
 	}
 	if (timedOut) {
 		const timeoutCode = stderr.includes("RX_BUDGET_STREAM_START") ? "STREAM_TIMEOUT" : "NEAR_MISS_TIMEOUT";
@@ -540,6 +552,17 @@ function printReport(report: GateReport): void {
 	}
 	if (!rows.length) console.log("(none)");
 	for (const row of rows.sort((a, b) => b.ms[2] - a.ms[2])) console.log(row.rule + " | " + row.condition + " | " + row.shape + "/" + row.encoding + " | " + formatMs(row.ms[0]) + " | " + formatMs(row.ms[1]) + " | " + formatMs(row.ms[2]) + " | " + row.ratio.toFixed(2) + "x");
+
+	console.log("single-check ceiling failures (16K >" + SINGLE_CHECK_CEILING_MS + "ms):");
+	console.log("rule | condition | worst shape/encoding | 16K ms");
+	const ceilingRows: Array<{ rule: string; condition: number; shape: string; encoding: string; ms: number }> = [];
+	for (const measurement of report.measurements) {
+		for (const sample of measurement.samples) {
+			if (failsSingleCheckCeiling(sample.ms)) ceilingRows.push({ rule: measurement.rule, condition: measurement.condition_index, shape: sample.shape, encoding: sample.encoding, ms: sample.ms[sample.ms.length - 1] });
+		}
+	}
+	if (!ceilingRows.length) console.log("(none)");
+	for (const row of ceilingRows.sort((a, b) => b.ms - a.ms)) console.log(row.rule + " | " + row.condition + " | " + row.shape + "/" + row.encoding + " | " + formatMs(row.ms));
 	console.log("measurement timeouts:");
 	const timeouts = report.measurements.filter(measurement => measurement.status !== "MEASURED");
 	if (!timeouts.length) console.log("(none)");

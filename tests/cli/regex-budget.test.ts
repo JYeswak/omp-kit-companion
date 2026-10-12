@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
-import { failsNearMissBudget, failsStreamBudget, lintCondition, literalProbe, measureCondition, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
+import { failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, lintCondition, literalProbe, measureCondition, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -185,4 +185,23 @@ test("planted contention reports INCONCLUSIVE without measuring", async () => {
 		expect(report.conditions_measured).toBe(0);
 		expect(report.note ?? "").toContain("RX1");
 	} finally { delete process.env.RX1_FAKE_LOAD1; }
+});
+
+test("single-check ceiling catches flat catastrophics the ratio misses", () => {
+	expect(failsSingleCheckCeiling([0.1, 0.2, 0.3])).toBe(false);
+	expect(failsSingleCheckCeiling([60, 61, 62])).toBe(true);
+	expect(failsSingleCheckCeiling([0.1, 0.2, 50])).toBe(false);
+	expect(failsSingleCheckCeiling([0.1, 0.2, 50.1])).toBe(true);
+	expect(failsSingleCheckCeiling([0.1, 0.2, Number.POSITIVE_INFINITY])).toBe(true);
+});
+
+test("planted (a+)+b fixture fails the single-check ceiling naming its rule", async () => {
+	const fixture = fixtureRule("fixture-flat-catastrophic", "(a+)+b");
+	try {
+		const measurement = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], sizes: [16, 20, 26], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 10_000, streamWire: "x".repeat(33) } as const);
+		expect(measurement.status).toBe("MEASURED");
+		const ceiling = measurement.failures.filter(failure => failure.code === "SINGLE_CHECK_CEILING");
+		expect(ceiling.length).toBeGreaterThan(0);
+		expect(ceiling[0]!.message).toContain("rule=" + fixture.name);
+	} finally { cleanup(fixture.dir); }
 });
