@@ -69,11 +69,11 @@ test("a README without the command reference or with a changelog heading is RED"
 });
 
 test("a stale inventory count (the old \"18 stream-triggered rules\") is RED with the real count", () => {
-	const planted = readme.replace("\n## TL;DR\n", "\nShips 18 stream-triggered rules and four skills.\n\n## TL;DR\n");
+	const planted = readme.replace("\n## TL;DR\n", "\nShips 18 stream-triggered rules and nine skills.\n\n## TL;DR\n");
 	const result = check(["--readme", plantedReadme("README.counts.md", planted)]);
 	expect(result.code).toBe(1);
 	expect(result.out).toMatch(/claims "18 stream-triggered rules" but the tree ships \d+ rules/);
-	expect(result.out).toMatch(/claims "four skills" but the tree ships \d+ skills/);
+	expect(result.out).toMatch(/claims "nine skills" but the tree ships \d+ skills/);
 	const claims = (text: string) => [...text.matchAll(COUNT_CLAIM)].map(match => match[0]);
 	expect(claims("has 30 rules, five guard extensions and 30 diagnostic scopes")).toEqual(["30 rules", "five guard extensions", "30 diagnostic scopes"]);
 	expect(claims("rule 30 v1.30 rules-engine someone skills 3.5 rules")).toEqual([]);
