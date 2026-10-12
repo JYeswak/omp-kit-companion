@@ -31,8 +31,8 @@ import type { LoadedRule, Rule } from "./rule-class.ts";
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
 // logical checkout instead, or the disposable archive path makes normal repo files look like scratch.
-const caseCwdOverride = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE;
-const CASE_CWD = caseCwdOverride ? path.resolve(caseCwdOverride) : KIT;
+const caseCwdOverride = process.env.OMP_KIT_CASE_CWD;
+const CASE_CWD = caseCwdOverride ? path.resolve(caseCwdOverride) : "/__omp_case_root__";
 // The rule loader and this harness must read the same installed omp package.
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 // A separate process is required: a pathological synchronous matcher can block JS timers.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { OMP_SRC, loadRuleFile } from "./rule-class.ts";
 const ttsr = await import(join(OMP_SRC, "export/ttsr.ts"));
 const TtsrManager = ttsr.TtsrManager as new (settings?: Record<string, unknown>) => { addRule(rule: unknown): boolean; checkDelta(delta: string, context: Record<string, unknown>): unknown; checkSnapshot(snapshot: string, context: Record<string, unknown>): unknown; checkAstSnapshot?(snapshot: string, context: Record<string, unknown>): unknown };
@@ -16,7 +16,8 @@ for await (const line of input) {
 		const registered = manager.addRule(loaded.rule);
 		const source = request.source ?? "tool";
 		const toolName = request.tool ?? "bash";
-		const context = { source, toolName, streamKey: `toolcall:l9:${request.path ?? "-"}`, ...(request.path && request.path !== "-" ? { filePaths: [request.path, join(process.cwd(), request.path)] } : {}) };
+		const caseRoot = process.env.OMP_KIT_CASE_CWD ? resolve(process.env.OMP_KIT_CASE_CWD) : "/__omp_case_root__";
+		const context = { source, toolName, streamKey: `toolcall:l9:${request.path ?? "-"}`, ...(request.path && request.path !== "-" ? { filePaths: [request.path, resolve(caseRoot, request.path)] } : {}) };
 		const wire = source === "tool" && toolName === "bash" ? JSON.stringify({ command: request.snippet }) : request.snippet;
 		let matches: unknown[] = [];
 		if (registered && source === "tool" && toolName === "bash") {
