@@ -50,7 +50,7 @@ function idleDeps(logPath: string, admission: AdmissionInput | undefined, recove
 			},
 			preassignProbes: {
 				findRecoveryFlags: () => [],
-				listReadyRows: () => [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }],
+				listReadyRows: () => ({ rows: [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }], failure: null }),
 			},
 			...(admission === undefined ? {} : { admission }),
 		},

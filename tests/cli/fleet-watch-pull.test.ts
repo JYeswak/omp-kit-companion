@@ -16,6 +16,7 @@ import {
 	reportCommand,
 	reviewStatuses,
 	runFleetWatchOnce,
+	runJson,
 	type FleetWatchConfig,
 	type FleetWatchSession,
 	type PullPick,
@@ -53,6 +54,7 @@ const review = (id: string, assignee: string): ReadyRow => ({ id, status: "in_re
 
 type World = {
 	readyRows: ReadyRow[] | null;
+	readyFailure?: string | null;
 	statusRows: ReadyRow[] | null;
 	issues: TrackerIssue[] | null;
 	triage: TriageResult;
@@ -90,7 +92,7 @@ function harness(config: FleetWatchConfig, current: { world: World }, busy: stri
 		statePath: join(dir, "fleet-watch-state.json"),
 		now: () => 0,
 		recoverTracker: () => null,
-		preassignProbes: { findRecoveryFlags: () => [], listReadyRows: () => current.world.readyRows },
+		preassignProbes: { findRecoveryFlags: () => [], listReadyRows: () => ({ rows: current.world.readyRows, failure: current.world.readyFailure ?? null }) },
 		pullProbes,
 	};
 	return {
@@ -411,4 +413,60 @@ test("[route] DEAD: a pane that cannot be captured is reported to the director f
 	});
 	expect(sends.length).toBeGreaterThan(0);
 	for (const send of sends) expect(`${send.session} ${send.pane}`).toBe("work %54");
+});
+
+const BUN = process.execPath;
+
+test("[runJson] a probe sleeping past the timeout names timeout with elapsed ms", () => {
+	const outcome = runJson([BUN, "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000)"], undefined, { timeoutMs: 150 });
+	expect(outcome.ok).toBe(false);
+	if (!outcome.ok) {
+		expect(outcome.failure.kind).toBe("timeout");
+		expect(outcome.failure.detail).toContain("timeout after 150 ms");
+		expect(outcome.failure.elapsed_ms).toBeGreaterThanOrEqual(100);
+	}
+}, 10000);
+
+test("[runJson] output past maxBuffer names the buffer bound", () => {
+	const outcome = runJson([BUN, "-e", "console.log(\"x\".repeat(100000))"], undefined, { maxBuffer: 1000 });
+	expect(outcome.ok).toBe(false);
+	if (!outcome.ok) {
+		expect(outcome.failure.kind).toBe("buffer");
+		expect(outcome.failure.detail).toContain("maxBuffer 1000 bytes exceeded");
+	}
+}, 10000);
+
+test("[runJson] non-zero exit names the code and first stderr line", () => {
+	const outcome = runJson([BUN, "-e", "console.error(\"first problem\"); console.error(\"second\"); process.exit(3)"], undefined);
+	expect(outcome.ok).toBe(false);
+	if (!outcome.ok) {
+		expect(outcome.failure.kind).toBe("exit");
+		expect(outcome.failure.status).toBe(3);
+		expect(outcome.failure.detail).toBe("first problem");
+	}
+}, 10000);
+
+test("[runJson] a signal death names the signal, not an exit", () => {
+	const outcome = runJson([BUN, "-e", "process.kill(process.pid, \"SIGTERM\")"], undefined);
+	expect(outcome.ok).toBe(false);
+	if (!outcome.ok) {
+		expect(outcome.failure.kind).toBe("signal");
+		expect(outcome.failure.status).toBeNull();
+		expect(outcome.failure.detail).toBe("SIGTERM");
+	}
+}, 10000);
+
+test("[runJson] non-JSON output and valid JSON stay distinct", () => {
+	const bad = runJson([BUN, "-e", "console.log(\"not json\")"], undefined);
+	expect(bad.ok).toBe(false);
+	if (!bad.ok) expect(bad.failure.kind).toBe("bad-json");
+	const good = runJson([BUN, "-e", "console.log(JSON.stringify({ a: 1 }))"], undefined);
+	expect(good).toMatchObject({ ok: true, value: { a: 1 } });
+}, 10000);
+
+test("[fallback] null ready rows carry the probe failure into the UNKNOWN notice", () => {
+	const run = nudgeOnce(configOf(), world({ readyRows: null, readyFailure: "br ready --json: timeout after 15000 ms (status null, signal SIGTERM, 15012 ms)" }));
+	const [text] = run.coordinator();
+	expect(text).toContain("UNKNOWN");
+	expect(text).toContain("timeout after 15000 ms");
 });

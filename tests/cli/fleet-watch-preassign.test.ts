@@ -58,7 +58,7 @@ test("[1] planted latched repo: zero nudges, one WRITE_LATCHED naming the flag, 
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, {
 		findRecoveryFlags: () => ["/repo/.beads/.br_recovery/schema-migrations/flag-1"],
-		listReadyRows: () => [LEAF],
+		listReadyRows: () => ({ rows: [LEAF], failure: null }),
 	}, recoveries, { kind: "RECOVERY_BLOCKED", text: "Fleet Watch: tracker recovery blocked; live holder." });
 	const watcher = new FleetWatcher(config, () => 0);
 	runFleetWatchOnce(config, run.deps, watcher);
@@ -79,11 +79,11 @@ test("[2] planted no-free-leaf frontier: zero nudges, one NO_FREE_LEAF with coun
 	const skippedConfig: FleetWatchConfig = { ...config, sessions: [skipped] };
 	const run = idleDeps(logPath, {
 		findRecoveryFlags: () => [],
-		listReadyRows: () => [
+		listReadyRows: () => ({ rows: [
 			{ id: "h-1", status: "open", assignee: "BusyAgent", labels: [], issue_type: "task" },
 			{ id: "e-1", status: "open", assignee: null, labels: [], issue_type: "epic" },
 			{ id: "s-1", status: "open", assignee: null, labels: ["owner-decision"], issue_type: "task" },
-		],
+		], failure: null }),
 	}, recoveries, null);
 	const watcher = new FleetWatcher(skippedConfig, () => 0);
 	runFleetWatchOnce(skippedConfig, run.deps, watcher);
@@ -101,13 +101,14 @@ test("[3] positive: writable repo with one open leaf nudges as today", () => {
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, {
 		findRecoveryFlags: () => [],
-		listReadyRows: () => [LEAF],
+		listReadyRows: () => ({ rows: [LEAF], failure: null }),
 	}, recoveries, null);
 	const watcher = new FleetWatcher(config, () => 0);
 	runFleetWatchOnce(config, run.deps, watcher);
 	const actions = runFleetWatchOnce(config, run.deps, watcher);
 	expect(actions.map((action) => action.kind)).toEqual(["NUDGED"]);
 	expect(run.workerSends()).toHaveLength(1);
+	expect(countKind(logPath, "UNKNOWN")).toBe(0);
 });
 
 test("[4] UNKNOWN readiness refuses with the reason reported", () => {
@@ -115,7 +116,7 @@ test("[4] UNKNOWN readiness refuses with the reason reported", () => {
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, {
 		findRecoveryFlags: () => [],
-		listReadyRows: () => null,
+		listReadyRows: () => ({ rows: null, failure: "br ready --json: timeout after 15000 ms (status null, signal SIGTERM, 15012 ms)" }),
 	}, recoveries, null);
 	const watcher = new FleetWatcher(config, () => 0);
 	runFleetWatchOnce(config, run.deps, watcher);
@@ -124,7 +125,10 @@ test("[4] UNKNOWN readiness refuses with the reason reported", () => {
 	const coordinator = run.coordinatorSends();
 	expect(coordinator).toHaveLength(1);
 	expect(coordinator[0]?.text).toContain("UNKNOWN");
+	expect(coordinator[0]?.text).toContain("timeout after 15000 ms");
 	expect(countKind(logPath, "UNKNOWN")).toBe(1);
+	const unknownRecord = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("\"kind\":\"UNKNOWN\"")).map(line => JSON.parse(line) as { text?: string })[0];
+	expect(unknownRecord?.text).toContain("timeout after 15000 ms");
 });
 
 test("[5] reverting the check makes the latched case nudge", () => {
@@ -132,7 +136,7 @@ test("[5] reverting the check makes the latched case nudge", () => {
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, {
 		findRecoveryFlags: () => [],
-		listReadyRows: () => [LEAF],
+		listReadyRows: () => ({ rows: [LEAF], failure: null }),
 	}, recoveries, null);
 	const watcher = new FleetWatcher(config, () => 0);
 	runFleetWatchOnce(config, run.deps, watcher);

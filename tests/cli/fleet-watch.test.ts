@@ -116,7 +116,7 @@ test("healthy captures nudge the worker once at the idle threshold", () => {
 		now: () => 0,
 		preassignProbes: {
 			findRecoveryFlags: () => [],
-			listReadyRows: () => [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }],
+			listReadyRows: () => ({ rows: [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }], failure: null }),
 		},
 	};
 	expect(runFleetWatchOnce(watchConfig, deps, watcher)).toEqual([]);
@@ -144,7 +144,7 @@ test("runFleetWatchOnce restores idle and decision-throttle state across fresh i
 		recoverTracker: () => null,
 		preassignProbes: {
 			findRecoveryFlags: () => [],
-			listReadyRows: () => [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }],
+			listReadyRows: () => ({ rows: [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }], failure: null }),
 		},
 	};
 	try {

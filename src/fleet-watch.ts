@@ -54,30 +54,68 @@ export type PreassignVerdict =
 export interface PreassignProbes {
 	/** Unresolved recovery flag dirs, or null when unreadable (UNKNOWN). */
 	findRecoveryFlags: (repo: string) => string[] | null;
-	/** Ready rows from the session's readyCommand (default `br ready --json`), or null when unreadable (UNKNOWN). */
-	listReadyRows: (repo: string, readyCommand?: string) => ReadyRow[] | null;
+	/** Ready rows plus the probe failure (null when rows read) for the UNKNOWN notice. */
+	listReadyRows: (repo: string, readyCommand?: string) => { rows: ReadyRow[] | null; failure: string | null };
 }
 
 const NON_LEAF_LABEL = /epic|umbrella/i;
 const READY_TIMEOUT_MS = 15000;
+const READY_MAX_BUFFER = 16 * 1024 * 1024;
+const FAILURE_DETAIL_CHARS = 200;
 
-/** Parsed stdout of a zero-exit command, or undefined when it cannot run, fails or prints non-JSON. */
-function runJson(argv: readonly string[], cwd: string | undefined): unknown {
+export type RunJsonFailureKind = "timeout" | "buffer" | "exit" | "signal" | "bad-json" | "spawn";
+export type RunJsonFailure = { kind: RunJsonFailureKind; status: number | null; signal: string | null; elapsed_ms: number; detail: string };
+export type RunJsonResult = { ok: true; value: unknown } | { ok: false; failure: RunJsonFailure };
+
+const firstLine = (text: string): string => text.split("\n", 1)[0]!.slice(0, FAILURE_DETAIL_CHARS);
+
+/** spawnSync outcome with the failure named (ompkit-fp72.31 FWUNK1): timeouts,
+ * buffer overflows, exits, signals and bad JSON stay distinguishable. Timeouts
+ * and IO priority are untouched; fail-closed callers map failure to null. */
+export function runJson(argv: readonly string[], cwd: string | undefined, bounds: { readonly timeoutMs?: number; readonly maxBuffer?: number } = {}): RunJsonResult {
+	const started = performance.now();
+	const elapsed = (): number => Math.round(performance.now() - started);
+	const timeoutMs = bounds.timeoutMs ?? READY_TIMEOUT_MS;
+	const maxBuffer = bounds.maxBuffer ?? READY_MAX_BUFFER;
+	let child: { status: number | null; signal: string | null; stdout: string; stderr: string; error?: unknown };
 	try {
-		const child = spawnSync(argv[0]!, argv.slice(1), { cwd, encoding: "utf8", timeout: READY_TIMEOUT_MS });
-		if (child.status !== 0) return undefined;
-		return JSON.parse(child.stdout);
+		child = spawnSync(argv[0]!, argv.slice(1), { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer });
+	} catch (error) {
+		return { ok: false, failure: { kind: "spawn", status: null, signal: null, elapsed_ms: elapsed(), detail: firstLine(error instanceof Error ? error.message : String(error)) } };
+	}
+	const message = child.error instanceof Error ? child.error.message : "";
+	if (/ETIMEDOUT/.test(message)) return { ok: false, failure: { kind: "timeout", status: child.status, signal: child.signal, elapsed_ms: elapsed(), detail: `timeout after ${timeoutMs} ms` } };
+	if (/ENOBUFS|maxBuffer/.test(message)) return { ok: false, failure: { kind: "buffer", status: child.status, signal: child.signal, elapsed_ms: elapsed(), detail: `maxBuffer ${maxBuffer} bytes exceeded` } };
+	if (child.error !== undefined && child.error !== null) return { ok: false, failure: { kind: "spawn", status: child.status, signal: child.signal, elapsed_ms: elapsed(), detail: firstLine(message) } };
+	if (child.status !== 0) return { ok: false, failure: { kind: child.signal !== null && child.status === null ? "signal" : "exit", status: child.status, signal: child.signal, elapsed_ms: elapsed(), detail: child.signal !== null && child.status === null ? child.signal : firstLine(child.stderr) } };
+	try {
+		return { ok: true, value: JSON.parse(child.stdout) };
 	} catch {
-		return undefined;
+		return { ok: false, failure: { kind: "bad-json", status: child.status, signal: child.signal, elapsed_ms: elapsed(), detail: "non-JSON output" } };
 	}
 }
 
-function defaultListReadyRows(repo: string, readyCommand?: string): ReadyRow[] | null {
-	if (!existsSync(repo)) return null;
+function defaultListReadyRows(repo: string, readyCommand?: string): { rows: ReadyRow[] | null; failure: string | null } {
+	if (!existsSync(repo)) return { rows: null, failure: "repo missing" };
 	const argv = (readyCommand ?? "br ready --json").split(" ").filter((part) => part !== "");
-	if (argv[0] !== "br") return null;
-	const parsed = runJson(argv, repo);
-	return parsed === undefined ? null : parseReadyRows(parsed);
+	if (argv[0] !== "br") return { rows: null, failure: "not a br command" };
+	const outcome = runJson(argv, repo);
+	if (!outcome.ok) return { rows: null, failure: `br ready --json: ${describeRunFailure(outcome.failure)}` };
+	const rows = parseReadyRows(outcome.value);
+	if (rows === null) return { rows: null, failure: "br ready --json: unexpected ready-rows shape" };
+	return { rows, failure: null };
+}
+
+/** One line for the UNKNOWN notice and its jsonl record. */
+export function describeRunFailure(failure: RunJsonFailure): string {
+	switch (failure.kind) {
+		case "timeout": return `${failure.detail} (status ${String(failure.status)}, signal ${String(failure.signal)}, ${failure.elapsed_ms} ms)`;
+		case "buffer": return `${failure.detail} (status ${String(failure.status)}, signal ${String(failure.signal)}, ${failure.elapsed_ms} ms)`;
+		case "exit": return `exit ${String(failure.status)}${failure.detail ? `: ${failure.detail}` : ""} (${failure.elapsed_ms} ms)`;
+		case "signal": return `signal ${String(failure.signal)} (${failure.elapsed_ms} ms)`;
+		case "bad-json": return `${failure.detail} (status ${String(failure.status)}, ${failure.elapsed_ms} ms)`;
+		case "spawn": return `spawn: ${failure.detail} (${failure.elapsed_ms} ms)`;
+	}
 }
 
 export function parseReadyRows(value: unknown): ReadyRow[] | null {
@@ -145,9 +183,10 @@ export function writeGate(sessionName: string, flags: string[] | null, recoveryK
 	return { ready: true };
 }
 
-function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: readonly string[]): PreassignVerdict {
+function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: readonly string[], readyFailure: string | null = null): PreassignVerdict {
 	if (rows === null) {
-		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (ready rows unreadable); nudges resume when probes answer.` };
+		const cause = readyFailure === null ? "ready rows unreadable" : `ready rows unreadable: ${readyFailure}`;
+		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (${cause}); nudges resume when probes answer.` };
 	}
 	const open = rows.filter((row) => row.status === "open");
 	const leaves = open.filter((row) => isClaimableLeaf(row, skipLabels));
@@ -477,6 +516,8 @@ export interface PullInput {
 	triage: TriageResult;
 	issues: TrackerIssue[] | null;
 	readyRows: ReadyRow[] | null;
+	/** Probe failure behind null readyRows, named in the UNKNOWN notice; absent in older callers. */
+	readyFailure?: string | null;
 	policy: TrackerPolicy;
 	focus: readonly string[];
 	skipLabels: readonly string[];
@@ -496,7 +537,7 @@ export function choosePull(input: PullInput): PullChoice {
 	if (rework !== undefined) return { ready: true, pick: { kind: "REWORK", id: rework.id, implementer: rework.implementer } };
 	const queued = new Set([...input.grading.map((item) => item.id), ...input.rework.map((item) => item.id)]);
 	const rows = input.readyRows?.filter((row) => !input.taken.has(row.id) && !queued.has(row.id)) ?? null;
-	const leaves = leafVerdict(input.sessionName, rows, input.skipLabels);
+	const leaves = leafVerdict(input.sessionName, rows, input.skipLabels, input.readyFailure ?? null);
 	if (!leaves.ready) return leaves;
 	const leafRows = rows!.filter((row) => isClaimableLeaf(row, input.skipLabels));
 	const leafIds = new Set(leafRows.map((row) => row.id));
@@ -697,24 +738,28 @@ export const defaultPullProbes: PullProbes = {
 		if (statuses.length === 0) return [];
 		if (!existsSync(repo)) return null;
 		// br 0.7.4 `list --json` prints {issues, total, limit, offset, has_more}; the default limit is unlimited.
-		const parsed = runJson(["br", "list", ...statuses.flatMap((status) => ["--status", status]), "--json", "--no-auto-import", "--no-auto-flush"], repo);
-		return parseReadyRows(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).issues : undefined);
+		const outcome = runJson(["br", "list", ...statuses.flatMap((status) => ["--status", status]), "--json", "--no-auto-import", "--no-auto-flush"], repo);
+		if (!outcome.ok) return null;
+		return parseReadyRows(outcome.value && typeof outcome.value === "object" && !Array.isArray(outcome.value) ? (outcome.value as Record<string, unknown>).issues : undefined);
 	},
 	readIssues: (repo) => {
 		try { return parseIssuesJsonl(readFileSync(join(repo, ".beads", "issues.jsonl"), "utf8")); } catch { return null; }
 	},
 	triage: (repo) => {
 		if (!existsSync(repo)) return { usable: false, reason: "repo missing" };
-		const child = spawnSync("bv", ["--robot-triage"], { cwd: repo, encoding: "utf8", timeout: READY_TIMEOUT_MS });
-		if (child.error) return { usable: false, reason: `bv --robot-triage did not run (${child.error.message})` };
-		if (child.status !== 0) return { usable: false, reason: `bv --robot-triage exited ${child.status}` };
-		try { return parseTriage(JSON.parse(child.stdout)); } catch { return { usable: false, reason: "bv --robot-triage printed non-JSON" }; }
+		const started = performance.now();
+		const elapsed = (): number => Math.round(performance.now() - started);
+		const child = spawnSync("bv", ["--robot-triage"], { cwd: repo, encoding: "utf8", timeout: READY_TIMEOUT_MS, maxBuffer: READY_MAX_BUFFER });
+		if (child.error) return { usable: false, reason: `bv --robot-triage did not run (${child.error.message}; status ${String(child.status)}, signal ${String(child.signal)}, ${elapsed()} ms)` };
+		if (child.status !== 0) return { usable: false, reason: `bv --robot-triage exited ${child.status} (signal ${String(child.signal)}, ${elapsed()} ms)${child.stderr ? `: ${child.stderr.split("\n", 1)[0]!.slice(0, FAILURE_DETAIL_CHARS)}` : ""}` };
+		try { return parseTriage(JSON.parse(child.stdout)); } catch { return { usable: false, reason: `bv --robot-triage printed non-JSON (status ${String(child.status)}, ${elapsed()} ms)` }; }
 	},
 	resolveWorker: (repo, pane) => {
 		if (!/^%\d+$/.test(pane)) return null;
 		// am.agents.resolve-pane.v1 prints {schema_version, agent_name, pane_id, project_key, source, binding}.
-		const parsed = runJson(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], undefined);
-		const name: unknown = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).agent_name : undefined;
+		const outcome = runJson(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], undefined);
+		if (!outcome.ok) return null;
+		const name: unknown = outcome.value && typeof outcome.value === "object" ? (outcome.value as Record<string, unknown>).agent_name : undefined;
 		return typeof name === "string" && name !== "" ? name : null;
 	},
 };
@@ -791,7 +836,8 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const policy = cached(policyCache, session.repo, () => pull.readPolicy(session.repo)) ?? EMPTY_POLICY;
 		const review = reviewStatuses(policy);
 		const statusRows = cached(statusCache, session.repo, () => pull.listStatuses(session.repo, policy.statuses.includes(REWORK_LABEL) ? [...review, REWORK_LABEL] : review));
-		const readyRows = cached(rowsCache, `${session.repo}\0${session.readyCommand ?? ""}`, () => probes.listReadyRows(session.repo, session.readyCommand));
+		const ready = cached(rowsCache, `${session.repo}\0${session.readyCommand ?? ""}`, () => probes.listReadyRows(session.repo, session.readyCommand));
+		const readyRows = ready.rows;
 		const issues = cached(issuesCache, session.repo, () => pull.readIssues(session.repo));
 		const grading = gradingQueue(statusRows, issues, review);
 		const rework = reworkQueue(statusRows, readyRows, issues);
@@ -805,6 +851,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			triage: cached(triageCache, session.repo, () => pull.triage(session.repo)),
 			issues,
 			readyRows,
+			readyFailure: ready.failure,
 			policy,
 			focus: session.focusEpics ?? [],
 			skipLabels: session.skipLabels ?? [],
