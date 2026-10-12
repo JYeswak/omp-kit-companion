@@ -95,15 +95,23 @@ JSON
 out=$(sh "$TRAIN" verify-candidate --proof "$TMP/proof.json" --index "$TMP/index-short.json" --version 0.2.21 --sha "$SHA" 2>&1); rc=$?
 check "verify-candidate: short asset map refused" 4 "$rc" "$out" "asset map"
 
-# 14. newest version takes Latest
+# 14. planted: proof bound to another version never verifies
+cat > "$TMP/proof-version.json" <<'JSON'
+{"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.2.20",
+ "certified_platforms": ["linux-x64-gnu", "darwin-arm64-none", "linux-arm64-gnu"]}
+JSON
+out=$(sh "$TRAIN" verify-candidate --proof "$TMP/proof-version.json" --index "$TMP/index.json" --version 0.2.21 --sha "$SHA" 2>&1); rc=$?
+check "verify-candidate: wrong version refused" 4 "$rc" "$out" "different sha, version"
+
+# 15. newest version takes Latest
 out=$(sh "$TRAIN" latest-flag --version 0.2.21 --max-version 0.2.21 2>&1); rc=$?
 check "latest-flag: newest takes Latest" 0 "$rc" "$out" "--latest"
 
-# 15. planted: superseded version must not steal Latest
+# 16. planted: superseded version must not steal Latest
 out=$(sh "$TRAIN" latest-flag --version 0.2.21 --max-version 0.2.22 2>&1); rc=$?
 check "latest-flag: superseded keeps Latest" 0 "$rc" "$out" "--latest=false"
 
-# 16. idle release lane proceeds
+# 17. idle release lane proceeds
 mkdir -p "$TMP/bin"
 printf '#!/bin/sh\necho 0\n' > "$TMP/bin/gh"; chmod +x "$TMP/bin/gh"
 out=$(GH_BIN="$TMP/bin/gh" sh "$TRAIN" wait-release-idle --repo R --poll 1 --timeout 5 2>&1); rc=$?
