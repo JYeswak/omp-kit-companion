@@ -310,5 +310,33 @@ jobs:
           subject-path: candidate/*.tar
           sbom-path: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
 
+  open-p0-on-post-cert-failure:
+    # A candidate that fails after its own SHA certified green opens a P0 issue
+    # with the evidence (fp72.49). Never a rerun: diagnose forward from the issue.
+    needs: [validate-tag, native-candidate, attest-platforms, attest]
+    if: ${{ always() && github.event.repository.private == false && failure() && !inputs.rehearsal && inputs.sha != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+      - name: Open a P0 issue when the certified bump's candidate failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          sh scripts/candidate-failure.sh \
+            --repo "${{ github.repository }}" \
+            --version "$VERSION" \
+            --sha "$SHA" \
+            --run-id "${{ github.run_id }}"
+
 # Deliberately no release upload, GitHub visibility change, latest pointer, or tag creation.
 # P25 alone may promote the exact SHA-bound candidate after privacy and hero authorization.
