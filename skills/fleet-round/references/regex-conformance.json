@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "engine": "js",
+  "cases": [
+    {
+      "id": "LABEL_LINE:claim-with-id",
+      "pattern": "^([A-Z][A-Z_]{0,31})(?: ([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "match",
+      "input": "CLAIM C1: in_progress = 3",
+      "expected": {
+        "value": {
+          "text": "CLAIM C1: in_progress = 3",
+          "span": [
+            0,
+            25
+          ],
+          "captures": [
+            "CLAIM",
+            "C1",
+            "in_progress = 3"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "LABEL_LINE:plain-key",
+      "pattern": "^([A-Z][A-Z_]{0,31})(?: ([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "match",
+      "input": "ROUND: 0",
+      "expected": {
+        "value": {
+          "text": "ROUND: 0",
+          "span": [
+            0,
+            8
+          ],
+          "captures": [
+            "ROUND",
+            null,
+            "0"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "LABEL_LINE:lowercase-key",
+      "pattern": "^([A-Z][A-Z_]{0,31})(?: ([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "test",
+      "input": "round: 0",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "LABEL_LINE:no-space-after-colon",
+      "pattern": "^([A-Z][A-Z_]{0,31})(?: ([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "test",
+      "input": "ROUND:0",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "LABEL_LINE:near-miss-blank-value",
+      "pattern": "^([A-Z][A-Z_]{0,31})(?: ([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "CLAIM C1:",
+        "pump": " ",
+        "count": 4000,
+        "suffix": ""
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CLAIM_VALUE:with-note",
+      "pattern": "^([a-z][a-z0-9_]{0,63})[ \\t]*=[ \\t]*([^ \\t\\n=]{1,128})(?:[ \\t]+[^\\n]*)?$",
+      "flags": "",
+      "operation": "match",
+      "input": "in_progress = 3 (br list)",
+      "expected": {
+        "value": {
+          "text": "in_progress = 3 (br list)",
+          "span": [
+            0,
+            25
+          ],
+          "captures": [
+            "in_progress",
+            "3"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CLAIM_VALUE:tight",
+      "pattern": "^([a-z][a-z0-9_]{0,63})[ \\t]*=[ \\t]*([^ \\t\\n=]{1,128})(?:[ \\t]+[^\\n]*)?$",
+      "flags": "",
+      "operation": "match",
+      "input": "in_progress=0",
+      "expected": {
+        "value": {
+          "text": "in_progress=0",
+          "span": [
+            0,
+            13
+          ],
+          "captures": [
+            "in_progress",
+            "0"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CLAIM_VALUE:uppercase-metric",
+      "pattern": "^([a-z][a-z0-9_]{0,63})[ \\t]*=[ \\t]*([^ \\t\\n=]{1,128})(?:[ \\t]+[^\\n]*)?$",
+      "flags": "",
+      "operation": "test",
+      "input": "In_progress = 3",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CLAIM_VALUE:near-miss-no-value",
+      "pattern": "^([a-z][a-z0-9_]{0,63})[ \\t]*=[ \\t]*([^ \\t\\n=]{1,128})(?:[ \\t]+[^\\n]*)?$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "in_progress",
+        "pump": " ",
+        "count": 4000,
+        "suffix": "="
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "SEAT:double-dash-session",
+      "pattern": "^([A-Za-z0-9_][A-Za-z0-9_-]{0,63}):(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+      "flags": "",
+      "operation": "match",
+      "input": "uds--burn-down:0.6",
+      "expected": {
+        "value": {
+          "text": "uds--burn-down:0.6",
+          "span": [
+            0,
+            18
+          ],
+          "captures": [
+            "uds--burn-down",
+            "0",
+            "6"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "SEAT:leading-zero-pane",
+      "pattern": "^([A-Za-z0-9_][A-Za-z0-9_-]{0,63}):(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+      "flags": "",
+      "operation": "test",
+      "input": "omp-test:0.01",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "SEAT:near-miss-long-window",
+      "pattern": "^([A-Za-z0-9_][A-Za-z0-9_-]{0,63}):(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "s:",
+        "pump": "1",
+        "count": 4000,
+        "suffix": ".0"
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CITATION:root-doc",
+      "pattern": "^([^:\\s]{1,1024}):([1-9][0-9]{0,6})$",
+      "flags": "",
+      "operation": "match",
+      "input": "ROADMAP.md:9",
+      "expected": {
+        "value": {
+          "text": "ROADMAP.md:9",
+          "span": [
+            0,
+            12
+          ],
+          "captures": [
+            "ROADMAP.md",
+            "9"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CITATION:space-in-path",
+      "pattern": "^([^:\\s]{1,1024}):([1-9][0-9]{0,6})$",
+      "flags": "",
+      "operation": "test",
+      "input": "docs/a b.md:3",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "CITATION:near-miss-no-line",
+      "pattern": "^([^:\\s]{1,1024}):([1-9][0-9]{0,6})$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "",
+        "pump": "a",
+        "count": 1024,
+        "suffix": ":"
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "ROUND_NUMBER:zero",
+      "pattern": "^(0|[1-9][0-9]{0,5})$",
+      "flags": "",
+      "operation": "match",
+      "input": "0",
+      "expected": {
+        "value": {
+          "text": "0",
+          "span": [
+            0,
+            1
+          ],
+          "captures": [
+            "0"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "ROUND_NUMBER:leading-zero",
+      "pattern": "^(0|[1-9][0-9]{0,5})$",
+      "flags": "",
+      "operation": "test",
+      "input": "00",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "ROUND_NUMBER:near-miss-too-long",
+      "pattern": "^(0|[1-9][0-9]{0,5})$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "1",
+        "pump": "0",
+        "count": 4000,
+        "suffix": ""
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "DONE_CALLBACK:callback",
+      "pattern": "^DONE[ \\t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \\t]+([0-9a-f]{7,40})(?:[ \\t][^\\n]*)?$",
+      "flags": "",
+      "operation": "match",
+      "input": "DONE ompkit-1iku 3b617e6 tests green",
+      "expected": {
+        "value": {
+          "text": "DONE ompkit-1iku 3b617e6 tests green",
+          "span": [
+            0,
+            36
+          ],
+          "captures": [
+            "ompkit-1iku",
+            "3b617e6"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "DONE_CALLBACK:no-sha",
+      "pattern": "^DONE[ \\t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \\t]+([0-9a-f]{7,40})(?:[ \\t][^\\n]*)?$",
+      "flags": "",
+      "operation": "test",
+      "input": "DONE ompkit-1iku notasha",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "DONE_CALLBACK:near-miss-sha-then-junk",
+      "pattern": "^DONE[ \\t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \\t]+([0-9a-f]{7,40})(?:[ \\t][^\\n]*)?$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "DONE x 0000000",
+        "pump": "0",
+        "count": 33,
+        "suffix": "g"
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "NO_EPIC:reason",
+      "pattern": "^no-epic:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "match",
+      "input": "no-epic: release chore",
+      "expected": {
+        "value": {
+          "text": "no-epic: release chore",
+          "span": [
+            0,
+            22
+          ],
+          "captures": [
+            "release chore"
+          ],
+          "named": {}
+        },
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "NO_EPIC:empty-reason",
+      "pattern": "^no-epic:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "test",
+      "input": "no-epic:",
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    },
+    {
+      "id": "NO_EPIC:near-miss-blank-reason",
+      "pattern": "^no-epic:[ \\t]+([^ \\t\\n][^\\n]*)$",
+      "flags": "",
+      "operation": "test",
+      "generate": {
+        "prefix": "no-epic:",
+        "pump": " ",
+        "count": 4000,
+        "suffix": ""
+      },
+      "expected": {
+        "value": false,
+        "lastIndex": 0
+      }
+    }
+  ]
+}

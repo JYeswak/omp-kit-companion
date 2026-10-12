@@ -12,7 +12,7 @@
 
 </div>
 
-A tested rule pack, five guard extensions, three skills, and a guarded CLI for
+A tested rule pack, five guard extensions, four skills, and a guarded CLI for
 an existing OMP install. Every change
 the CLI makes is planned first, written with a receipt, and reversible with
 `omp-kit undo`.
@@ -166,7 +166,7 @@ omp-kit apply extensions --apply --yes --profiles all
 
 ### Skills
 
-`skills/` ships three OMP skills:
+`skills/` ships four OMP skills:
 
 - **omp-native:** use native OMP tooling first: `omp ttsr list/test/scan`,
   plugin links, and read-only settings.
@@ -179,9 +179,16 @@ omp-kit apply extensions --apply --yes --profiles all
   `approval-template`, `verify` and `handoff`; `scripts/sitrep.py` reports
   per-pane state, flags, MCP versions and last callback plus per-repo counts and
   CI.
+- **fleet-round:** the lock-step fleet round protocol and a read-only
+  validator for its reports. `scripts/fleet-round.ts` has `collect`,
+  `snapshot`, `check`, `validate`, `spot-check` and `score`: it recomputes
+  each director's claims from br, git, tmux and Agent Mail identity files,
+  checks the round-0 pass bar, and reports UNKNOWN, never PASS, for anything
+  it cannot observe.
 
 ```sh
 python3 skills/fleet-restart/scripts/sitrep.py --selftest
+bun skills/fleet-round/scripts/fleet-round.ts check --config fleet.json --project app --focus app-e1,app-e2,app-e3
 omp-kit planning score --json
 ```
 

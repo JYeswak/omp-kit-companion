@@ -1,0 +1,11 @@
+{
+  "schema": "fleet-round.measured/v1",
+  "round": 0,
+  "values": {
+    "sort_outcome_share": {"reclaimed": 0.60, "closed": 0.10, "review_queue": 0.10, "blocked": 0.15, "active": 0.05},
+    "in_progress_assignee_without_live_seat_share": 0.62,
+    "projects_missing_insight_deadline": 1,
+    "jev_ready_before_sort": 3,
+    "advisor_director_prediction_error_vs_median": "lower"
+  }
+}

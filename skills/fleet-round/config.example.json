@@ -1,0 +1,23 @@
+{
+  "schema": "fleet-round.config/v1",
+  "projects": {
+    "app": {
+      "root": "~/src/app",
+      "identity_keys": ["~/src/app"]
+    },
+    "kit": {
+      "root": "~/src/kit-tracker",
+      "repo": "~/src/kit",
+      "doc_ref": "origin/main",
+      "identity_keys": ["~/src/kit-tracker", "~/src/kit"]
+    }
+  },
+  "seats": {
+    "tmux_sockets": ["~/.tmux-sockets/tmux-501/default"],
+    "identity_root": "~/.config/agent-mail/identity",
+    "agent_markers": ["/.bun/bin/omp", "/pi-coding-agent/dist/cli.js"]
+  },
+  "stale_hours": 24,
+  "frontier_top": 3,
+  "approver": "Operator"
+}
