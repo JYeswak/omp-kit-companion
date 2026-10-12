@@ -112,5 +112,29 @@ else
 	fail=$((fail + 1)); printf 'FAIL neutral: rc!=0 out<<<%s>>>\n' "$(cat "$TMP/out")"
 fi
 
+# rz5.106.7: producer failures fail closed with exit 2, never "publishability: OK", never content.
+# A neutral fixture plus a planted token, so an OK or a printed token are both visible failures.
+mkfixture
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/config.txt"
+git -C "$TMP/fixture" add config.txt
+real_git=$(command -v git)
+real_grep=$(command -v grep)
+mkdir -p "$TMP/stub-git" "$TMP/stub-grep"
+# The stubs are script text: their $1 and $@ must stay literal, so single quotes are intended.
+# shellcheck disable=SC2016
+printf '#!/bin/sh\ncase "$1" in ls-files) echo "fatal: planted ls-files failure" >&2; exit 128 ;; esac\nexec "%s" "$@"\n' "$real_git" > "$TMP/stub-git/git"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-naoE" ] && { echo "grep: planted read error" >&2; exit 2; }; done\nexec "%s" "$@"\n' "$real_grep" > "$TMP/stub-grep/grep"
+chmod +x "$TMP/stub-git/git" "$TMP/stub-grep/grep"
+for producer in git grep; do
+	rc=0
+	PATH="$TMP/stub-$producer:$PATH" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+	if [ "$rc" = "2" ] && ! grep -q 'publishability: OK' "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL failing-%s-fails-closed: rc=%s out<<<%s>>>\n' "$producer" "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+	fi
+done
+
 printf 'publishability: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

@@ -23,12 +23,25 @@ command -v git >/dev/null 2>&1 || fail "git is required (scans tracked files)"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 
 TMP_FINDINGS=$(mktemp "${TMPDIR:-/tmp}/publishability.XXXXXX") || fail "cannot create findings file"
-trap 'rm -f "$TMP_FINDINGS"' EXIT INT TERM
+TMP_FILES=$(mktemp "${TMPDIR:-/tmp}/publishability-files.XXXXXX") || fail "cannot create file list"
+TMP_HITS=$(mktemp "${TMPDIR:-/tmp}/publishability-hits.XXXXXX") || fail "cannot create hit file"
+trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS"' EXIT INT TERM
 
 cd -- "$ROOT" || fail "cannot cd to $ROOT"
 
-# Tracked text files, one per line.
-git ls-files | while IFS= read -r file; do
+# Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
+# never an empty scan that ends in OK. grep rc 1 means no match.
+git ls-files > "$TMP_FILES" || fail "git ls-files failed (rc $?): nothing was scanned"
+# scan CLASS PATTERN FILE [EXEMPT]: report class: file:line for each match, never the match text.
+# EXEMPT is an ERE over line:match that drops a hit (documentation nets, the shared users dir).
+scan() {
+	rc=0
+	grep -naoE -- "$2" "$3" > "$TMP_HITS" || rc=$?
+	[ "$rc" -le 1 ] || fail "grep failed on $3 (rc $rc): scan incomplete"
+	if [ -n "${4:-}" ]; then grep -vE -- "$4" "$TMP_HITS" || true; else cat "$TMP_HITS"; fi \
+		| cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS"
+}
+while IFS= read -r file; do
 	case "$file" in
 		var/agent-tmp/*|.git/*) continue ;;
 	esac
@@ -37,19 +50,15 @@ git ls-files | while IFS= read -r file; do
 		printf 'unreadable: %s\n' "$file" >> "$TMP_FINDINGS"
 		continue
 	fi
-	{
-		# Each grep prints only line:match; the match is filtered, then dropped, so the report
-		# carries the class and location and never the text.
-		# Absolute per-user home roots are refused; $HOME, ~ and shared-system paths pass.
-		grep -naoE -- '/Users/[^ /:]+|/home/[^ /:]+' "$file" | grep -v ':/Users/Shared$' | cut -d: -f1 | sed 's/^/home-path:/'
-		# Secrets (fixed literal anchors, bounded token bodies).
-		grep -naoE -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,120}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,200}|sk-live-[A-Za-z0-9]{16,100}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file" | cut -d: -f1 | sed 's/^/secret:/'
-		# Private IPs except the documentation TEST-NETs.
-		grep -naoE -- '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$file" | grep -vE ':(192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)' | cut -d: -f1 | sed 's/^/private-ip:/'
-		# LAN hostnames; example.invalid and worker-1 pass.
-		grep -naoE -- '[A-Za-z0-9_.-]+\.(local|lan|internal|corp|home\.arpa)\b' "$file" | cut -d: -f1 | sed 's/^/hostname:/'
-	} | F="$file" awk -F: '{ print $1 ": " ENVIRON["F"] ":" $2 }' >> "$TMP_FINDINGS"
-done
+	# Absolute per-user home roots are refused; $HOME, ~ and shared-system paths pass.
+	scan home-path '/Users/[^ /:]+|/home/[^ /:]+' "$file" '^[0-9]+:/Users/Shared$'
+	# Secrets (fixed literal anchors, bounded token bodies).
+	scan secret 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,120}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,200}|sk-live-[A-Za-z0-9]{16,100}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file"
+	# Private IPs except the documentation TEST-NETs.
+	scan private-ip '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$file" '^[0-9]+:(192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)'
+	# LAN hostnames; example.invalid and worker-1 pass.
+	scan hostname '[A-Za-z0-9_.-]+\.(local|lan|internal|corp|home\.arpa)\b' "$file"
+done < "$TMP_FILES"
 
 if [ -s "$TMP_FINDINGS" ]; then
 	sort -u "$TMP_FINDINGS"
