@@ -31,7 +31,10 @@ cd -- "$ROOT" || fail "cannot cd to $ROOT"
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.
-git ls-files > "$TMP_FILES" || fail "git ls-files failed (rc $?): nothing was scanned"
+# core.quotePath=false keeps non-ASCII names literal; git still C-quotes a name holding a tab,
+# newline, quote or backslash, which this line-based loop cannot open, so such a name is a finding
+# (unscannable-name), never a silent skip.
+git -c core.quotePath=false ls-files > "$TMP_FILES" || fail "git ls-files failed (rc $?): nothing was scanned"
 # scan CLASS PATTERN FILE [EXEMPT]: report class: file:line for each match, never the match text.
 # EXEMPT is an ERE over line:match that drops a hit (documentation nets, the shared users dir).
 scan() {
@@ -44,6 +47,9 @@ scan() {
 while IFS= read -r file; do
 	case "$file" in
 		var/agent-tmp/*|.git/*) continue ;;
+	esac
+	case "$file" in
+		\"*) printf 'unscannable-name: %s\n' "$file" >> "$TMP_FINDINGS"; continue ;;
 	esac
 	[ -f "$file" ] || continue
 	if [ ! -r "$file" ]; then

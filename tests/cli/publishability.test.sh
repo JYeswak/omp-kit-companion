@@ -112,6 +112,29 @@ else
 	fail=$((fail + 1)); printf 'FAIL neutral: rc!=0 out<<<%s>>>\n' "$(cat "$TMP/out")"
 fi
 
+# rz5.106.7: a tracked file whose name git C-quotes (here a tab) holding a planted token must not
+# yield OK; a non-ASCII name stays scannable and its token is found.
+mkfixture
+tabname=$(printf 'odd\tname.txt')
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/$tabname"
+git -C "$TMP/fixture" add -- "$tabname"
+expect_fail "quoted-name-not-skipped"
+if grep -q 'unscannable-name: ' "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL quoted-name-reported: out<<<%s>>>\n' "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+mkfixture
+nonascii=$(printf 'caf\303\251.txt')
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/$nonascii"
+git -C "$TMP/fixture" add -A
+expect_fail "non-ascii-name-scanned"
+if grep -q 'secret: caf' "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL non-ascii-name-secret-found: out<<<%s>>>\n' "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+
 # rz5.106.7: producer failures fail closed with exit 2, never "publishability: OK", never content.
 # A neutral fixture plus a planted token, so an OK or a printed token are both visible failures.
 mkfixture
@@ -122,7 +145,7 @@ real_grep=$(command -v grep)
 mkdir -p "$TMP/stub-git" "$TMP/stub-grep"
 # The stubs are script text: their $1 and $@ must stay literal, so single quotes are intended.
 # shellcheck disable=SC2016
-printf '#!/bin/sh\ncase "$1" in ls-files) echo "fatal: planted ls-files failure" >&2; exit 128 ;; esac\nexec "%s" "$@"\n' "$real_git" > "$TMP/stub-git/git"
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "ls-files" ] && { echo "fatal: planted ls-files failure" >&2; exit 128; }; done\nexec "%s" "$@"\n' "$real_git" > "$TMP/stub-git/git"
 # shellcheck disable=SC2016
 printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-naoE" ] && { echo "grep: planted read error" >&2; exit 2; }; done\nexec "%s" "$@"\n' "$real_grep" > "$TMP/stub-grep/grep"
 chmod +x "$TMP/stub-git/git" "$TMP/stub-grep/grep"
