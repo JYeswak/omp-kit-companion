@@ -63,6 +63,7 @@ import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
 import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
+import { closeQueue, landingCommits, readDrainStore, staleClaims } from "./drain.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { proveSend } from "./send.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -3217,6 +3218,37 @@ function missionAnchorCommand(request: ParsedCommand): CliResult {
 	return { code: drift.length === 0 ? 0 : 1, data: { overall: drift.length === 0 ? "AGREE" : "DRIFT", repos: rows }, verification: "PERFORMED" };
 }
 registerCommandHandler("mission anchor", missionAnchorCommand);
+function drainFlag(flag: string | true | undefined): string | null {
+	if (typeof flag !== "string" || !flag.trim()) return null;
+	return flag;
+}
+function drainCloseQueueCommand(request: ParsedCommand): CliResult {
+	const db = drainFlag(request.flags.get("--db"));
+	const repo = drainFlag(request.flags.get("--repo"));
+	if (db === null) return refusal("INVALID_FLAG", "--db requires a tracker beads.db path", "Use omp-kit drain close-queue --db PATH --repo DIR.");
+	if (repo === null) return refusal("INVALID_FLAG", "--repo requires the git checkout holding landing commits", "Use omp-kit drain close-queue --db PATH --repo DIR.");
+	let store;
+	try { store = readDrainStore(resolve(db)); }
+	catch { return refusal("UNREADABLE_DB", `cannot read tracker database at ${db}`, "Point --db at a readable beads.db."); }
+	const openIds = new Set(store.issues.filter(issue => issue.status === "open").map(issue => issue.id));
+	let landings;
+	try { landings = landingCommits(resolve(repo), openIds); }
+	catch { return refusal("UNREADABLE_REPO", `cannot read git history in ${repo}`, "Point --repo at the git checkout holding landing commits."); }
+	const rows = closeQueue(store.issues, store.comments, landings);
+	return { code: 0, data: { overall: "OK", rows }, verification: "PERFORMED" };
+}
+registerCommandHandler("drain close-queue", drainCloseQueueCommand);
+function drainStaleClaimsCommand(request: ParsedCommand): CliResult {
+	const db = drainFlag(request.flags.get("--db"));
+	if (db === null) return refusal("INVALID_FLAG", "--db requires a tracker beads.db path", "Use omp-kit drain stale-claims --db PATH.");
+	let store;
+	try { store = readDrainStore(resolve(db)); }
+	catch { return refusal("UNREADABLE_DB", `cannot read tracker database at ${db}`, "Point --db at a readable beads.db."); }
+	const rows = staleClaims(store.issues, store.comments, Date.now());
+	return { code: 0, data: { overall: "OK", rows }, verification: "PERFORMED" };
+}
+registerCommandHandler("drain stale-claims", drainStaleClaimsCommand);
+
 
 registerCommandHandler("update", updateCommand);
 

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { resolveOmpIdentity } from "./paths.ts";
+import { readDrainStore, staleClaims } from "./drain.ts";
 import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
 import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
 import { inspectStateRoot } from "./state-root.ts";
@@ -1141,6 +1142,28 @@ function inspectBeadDuplicates(project: string): Finding {
 		? finding("beads", "FAIL", "Likely duplicate beads share most of their title, description and acceptance text", "Merge each pair into one canonical bead, keeping the richer testing specs and dependency chain.", { tracker_path: trackerPath, duplicate_pairs: pairs })
 		: finding("beads", "OK", "No live bead pair shares enough text to look duplicated", "No action required.", { tracker_path: trackerPath, checked_beads: tokenized.length, duplicate_pairs: pairs });
 }
+/** DRAIN1 (ompkit-kdbz.1): stale in-progress claims from the tracker's beads.db. Read-only. */
+function inspectDrainStaleClaims(project: string): Finding {
+	const dir = resolve(project);
+	const localDb = join(dir, ".beads", "beads.db");
+	const envDb = process.env.BEADS_DB;
+	const beadsDb = pathState(localDb) === "file" ? localDb : (typeof envDb === "string" && envDb && pathState(envDb) === "file" ? envDb : null);
+	if (!beadsDb) {
+		return finding("beads", "UNVERIFIED", "No tracker database at the project .beads and no usable BEADS_DB; stale claims were not checked",
+			"Pass the tracker checkout (the repo holding .beads/beads.db) as --project, or set BEADS_DB to its beads.db.", { project: dir });
+	}
+	let rows;
+	try {
+		const store = readDrainStore(beadsDb);
+		rows = staleClaims(store.issues, store.comments, Date.now());
+	} catch {
+		return finding("beads", "UNVERIFIED", "Tracker database cannot be read; stale claims were not checked",
+			"Repair read-only access to the tracker's beads.db, then rerun.", { project: dir });
+	}
+	return rows.length
+		? finding("beads", "FAIL", `${rows.length} in-progress claim(s) look stale (no worker or no recent evidence)`, "Reclaim each with its listed command, or record the owner and route on the bead.", { project: dir, stale_claims: rows })
+		: finding("beads", "OK", "No stale in-progress claims", "No action required.", { project: dir, stale_claims: rows });
+}
 
 function inspectTmuxSockets(home: string): Finding {
 	const uid = process.getuid?.();
@@ -1188,6 +1211,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	}
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
+	if (input.scope === "beads" && input.project) rows.push(inspectDrainStaleClaims(resolve(input.project)));
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));

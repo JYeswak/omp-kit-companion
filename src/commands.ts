@@ -57,7 +57,10 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	repeat: { type: "object" },
 	metamorphic: { type: "object" },
 } };
-
+const drainData: DataSchema = { type: "object", required: ["overall", "rows"], properties: {
+	overall: { enum: ["OK"] },
+	rows: { type: "array" },
+} };
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
 	overall: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL"] },
 	kit: { type: "object", required: ["version", "release", "data_paths", "platform"], properties: {
@@ -340,6 +343,15 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
+	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
+		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
+			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
+			{ name: "--repo", value: "DIR", description: "Git checkout holding the landing commits" },
+		], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false, dataSchema: drainData },
+		{ name: "stale-claims", description: "In-progress beads with no worker or no recent evidence, with reclaim commands", usage: "drain stale-claims --db PATH [--json]", flags: [
+			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
+		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
+	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--staged] [--deep --yes]", flags: [
 			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations|identity|flywheel|fleet|derived|layout|public-files|github|secrets", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit; identity checks pane identities for missing, shared and stale names; flywheel grades fleet practices from git and the tracker (set BEADS_DB to the tracker beads.db when --project is a code repo); fleet reads live tmux panes and Agent Mail for DIRECTOR_DOING_WORK and COMMUNICATION_PURGATORY; derived lists literal probe-readable facts in config files; layout reports standard repo layout deviations; public-files lists missing standard public files; github probes read-only GitHub capability rows; secrets compares file tokens against sha256 digests of every readable Infisical value (UNVERIFIED when Infisical is unreachable)" },
