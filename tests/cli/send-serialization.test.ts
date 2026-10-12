@@ -95,6 +95,7 @@ function paneFake(events: PaneEvent[], me: string, pane: SharedPane): PaneFake {
 					events.push({ t: Date.now(), ev: `ntm-${word}` });
 					return { code: 0, out: "sent" };
 				}
+				if (argv.includes("display-message")) return { code: 0, out: "%99" };
 				if (argv.includes("send-keys")) {
 					taken.enters++;
 					taken.enterContexts.push(renderPane(pane));

@@ -376,10 +376,22 @@ export async function proveSend(input: {
 	const firstToken = input.message.trimStart().split(/\s+/, 1)[0] ?? "";
 	const isSlash = firstToken.startsWith("/");
 	const runTmux = (args: string[]) => exec.run(["tmux", ...tmuxArgs, ...args], sendEnv);
-	const slashBaseline = isSlash ? runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]).out : "";
+	// SENDX1 (ompkit-fp72.39): verify against the pane that was typed into.
+	// ntm resolves `--panes=<pane>` inside SESSION, but an unqualified index
+	// resolves against the caller's window, so captures must use the target
+	// resolved once here: global %ids pass through, anything already
+	// qualified passes through, anything else resolves via display-message
+	// with a qualified fallback that still beats an unqualified index.
+	const paneTarget = (() => {
+		if (/^%\d+$/.test(input.pane) || input.pane.includes(":")) return input.pane;
+		const probed = runTmux(["display-message", "-p", "-t", `${input.session}:${input.pane}`, "#{pane_id}"]);
+		const id = probed.code === 0 ? /%\d+/.exec(probed.out)?.[0] : undefined;
+		return id ?? `${input.session}:${input.pane}`;
+	})();
+	const slashBaseline = isSlash ? runTmux(["capture-pane", "-p", "-S", "-200", "-t", paneTarget]).out : "";
 	const isDispatch = dispatchBeads(input.message).dispatch;
 	const paneDir = isDispatch && !input.knownPrefixes && selection.status === "RESOLVED"
-		? runTmux(["display-message", "-p", "-t", input.pane, "#{pane_current_path}"]).out.trim()
+		? runTmux(["display-message", "-p", "-t", paneTarget, "#{pane_current_path}"]).out.trim()
 		: "";
 	const knownPrefixes = !isDispatch ? new Set<string>()
 		: input.knownPrefixes ?? fleetBeadPrefixes(env, [process.cwd(), paneDir].filter(dir => dir.startsWith("/")));
@@ -425,7 +437,7 @@ export async function proveSend(input: {
 			const admitAttempts = Math.max(1, Math.ceil(untilDeliveredMs / pollMs));
 			let admitted = false;
 			for (let i = 0; i < admitAttempts; i++) {
-				const pre = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
+				const pre = runTmux(["capture-pane", "-p", "-S", "-200", "-t", paneTarget]);
 				if (pre.code !== 0 || !composerHasText(pre.out)) { admitted = true; break; }
 				if (i + 1 < admitAttempts) await wait(pollMs);
 			}
@@ -450,7 +462,7 @@ export async function proveSend(input: {
 				// Bare pane id: session:pane is parsed as a window and misses.
 				// -S -200 reads scrollback history: a rendered message scrolls off
 				// the visible screen but stays provable in history.
-				const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
+				const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", paneTarget]);
 				if (got.code === 0 && (isSlash ? got.out !== slashBaseline : got.out.includes(marker))) {
 					markerSeen = true;
 					if (isSlash) {
@@ -470,7 +482,7 @@ export async function proveSend(input: {
 					if (paneIsBusy(got.out)) {
 						receiverActive = true;
 					} else if (!entered && !isSlash) {
-						runTmux(["send-keys", "-t", input.pane, "Enter"]);
+						runTmux(["send-keys", "-t", paneTarget, "Enter"]);
 						entered = true;
 					}
 				}
@@ -487,7 +499,7 @@ export async function proveSend(input: {
 			if (markerSeen && receiverActive) {
 				const busyDropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
 				if (untilDeliveredMs > 0) {
-					return completeDeferredSend({ runTmux, wait, pollMs, untilDeliveredMs, session: input.session, pane: input.pane,
+					return completeDeferredSend({ runTmux, wait, pollMs, untilDeliveredMs, session: input.session, pane: paneTarget,
 						marker, sends, dropPath: busyDropPath, bead_ids, no_bead_reason, tmux_socket });
 				}
 				return { status: "NOT_DELIVERED", marker, sends, drop_path: busyDropPath, detail: `marker stayed in ${input.pane} composer while the pane was busy; Enter withheld to avoid a double submit; recovery copy written to ${busyDropPath}`, bead_ids, no_bead_reason, tmux_socket };
