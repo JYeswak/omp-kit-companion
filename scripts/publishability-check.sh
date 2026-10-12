@@ -3,9 +3,11 @@
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106).
 # Scans tracked files (git ls-files) for shapes that must never go public:
 # secret-shaped tokens, absolute home paths, private IPs and LAN hostnames.
-# Skips var/agent-tmp scratch, .git and binaries. Prints file:line findings;
-# exit 1 when any finding exists, 0 when clean. Neutral fixtures (worker-1,
-# example.invalid, 192.0.2.x) pass. Local check: no network, no GitHub.
+# Skips var/agent-tmp scratch and .git. Prints `class: file:line` and never the matched text
+# (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.7): this repo is public, so a printed token
+# lands in a public CI log and in the pre-push gate.log. Binary files are scanned too (-a), and an
+# unreadable tracked file is itself a finding (fail closed). Exit 1 when any finding exists, 0
+# when clean. Neutral fixtures (worker-1, example.invalid, 192.0.2.x) pass. Local check: no network, no GitHub.
 # Patterns follow the regex-engineering skill: literal-anchored, bounded
 # classes, no nested quantifiers (linear in grep -E / ripgrep default).
 # Usage: publishability-check.sh [ROOT]
@@ -31,17 +33,22 @@ git ls-files | while IFS= read -r file; do
 		var/agent-tmp/*|.git/*) continue ;;
 	esac
 	[ -f "$file" ] || continue
+	if [ ! -r "$file" ]; then
+		printf 'unreadable: %s\n' "$file" >> "$TMP_FINDINGS"
+		continue
+	fi
 	{
-		# Absolute per-user home roots are refused; $HOME, ~ and
-		# shared-system paths pass.
-		grep -HnE -- '/Users/[^ /:]+|/home/[^ /:]+' "$file" 2>/dev/null | grep -v '/Users/Shared/' | sed 's/^/home-path: /'
+		# Each grep prints only line:match; the match is filtered, then dropped, so the report
+		# carries the class and location and never the text.
+		# Absolute per-user home roots are refused; $HOME, ~ and shared-system paths pass.
+		grep -naoE -- '/Users/[^ /:]+|/home/[^ /:]+' "$file" | grep -v ':/Users/Shared$' | cut -d: -f1 | sed 's/^/home-path:/'
 		# Secrets (fixed literal anchors, bounded token bodies).
-		grep -HnEI -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,120}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,200}|sk-live-[A-Za-z0-9]{16,100}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file" 2>/dev/null | sed 's/^/secret: /'
+		grep -naoE -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,120}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,200}|sk-live-[A-Za-z0-9]{16,100}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file" | cut -d: -f1 | sed 's/^/secret:/'
 		# Private IPs except the documentation TEST-NETs.
-		grep -HnEo -- '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$file" 2>/dev/null | grep -vE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.' | sed 's/^/private-ip: /'
+		grep -naoE -- '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$file" | grep -vE ':(192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)' | cut -d: -f1 | sed 's/^/private-ip:/'
 		# LAN hostnames; example.invalid and worker-1 pass.
-		grep -HnEo -- '[A-Za-z0-9_.-]+\.(local|lan|internal|corp|home\.arpa)\b' "$file" 2>/dev/null | sed 's/^/hostname: /'
-	} >> "$TMP_FINDINGS"
+		grep -naoE -- '[A-Za-z0-9_.-]+\.(local|lan|internal|corp|home\.arpa)\b' "$file" | cut -d: -f1 | sed 's/^/hostname:/'
+	} | F="$file" awk -F: '{ print $1 ": " ENVIRON["F"] ":" $2 }' >> "$TMP_FINDINGS"
 done
 
 if [ -s "$TMP_FINDINGS" ]; then

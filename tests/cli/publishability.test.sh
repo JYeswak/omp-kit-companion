@@ -40,6 +40,35 @@ fake_token_body='abcdefghijklmnopqrstuvwxyz0123456789'
 printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/config.txt"
 git -C "$TMP/fixture" add config.txt
 expect_fail "secret-token"
+# rz5.106.7: the report names class and location and never the matched text (this repo is public:
+# the output goes to CI logs and to the pre-push gate.log).
+if grep -q "secret: config.txt:1" "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL secret-not-emitted: out<<<%s>>>\n' "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+# rz5.106.7: a secret in a binary tracked file is still found (no -I skip), still not printed.
+mkfixture
+printf 'x\000y token=%s%s\000z\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/blob.bin"
+git -C "$TMP/fixture" add blob.bin
+expect_fail "secret-in-binary"
+if grep -q "secret: blob.bin:" "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL secret-in-binary-reported: out<<<%s>>>\n' "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+# rz5.106.7: an unreadable tracked file fails closed instead of being skipped.
+mkfixture
+printf 'nothing secret\n' > "$TMP/fixture/locked.txt"
+git -C "$TMP/fixture" add locked.txt
+chmod 000 "$TMP/fixture/locked.txt"
+expect_fail "unreadable-fails-closed"
+if grep -q "unreadable: locked.txt" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL unreadable-reported: out<<<%s>>>\n' "$(cat "$TMP/out")"
+fi
+chmod 600 "$TMP/fixture/locked.txt"
 
 # 2. planted absolute home path is refused; the same path under scratch is ignored
 mkfixture
@@ -54,6 +83,11 @@ printf 'root = "%s"\n' "$home_path" > "$TMP/fixture/var/agent-tmp/scratch.1/path
 git -C "$TMP/fixture" add paths.txt
 git -C "$TMP/fixture" add -f var/agent-tmp/scratch.1/paths.txt
 expect_fail "home-path"
+if grep -q "home-path: paths.txt:1" "$TMP/out" && ! grep -q "$home_user" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL home-user-not-emitted: out<<<%s>>>\n' "$(cat "$TMP/out")"
+fi
 if sh "$CHECK" "$TMP/fixture" 2>&1 | grep -q "scratch.1"; then
 	fail=$((fail + 1)); printf 'FAIL scratch-exempt: scratch finding reported\n'
 else
