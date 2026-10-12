@@ -69,6 +69,7 @@ import { proveSend } from "./send.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
+import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
@@ -3053,6 +3054,107 @@ async function fleetCommand(request: ParsedCommand): Promise<CliResult> {
 	return { code: report.panes.some((pane) => pane.result === "STILL_STUCK") ? 1 : 0, data: report, verification: report.applied ? "PERFORMED" : "UNVERIFIED" };
 }
 registerCommandHandler("fleet flush-pending", fleetCommand);
+
+/** Live RespawnDeps for fleet respawn: ps start times, pane agent identity
+ * and exclusive holds come from local read-only probes. */
+function liveRespawnDeps(): RespawnDeps {
+	return {
+		psStartMs: (pids: readonly number[]) => {
+			const out = new Map<number, number | null>();
+			if (pids.length === 0) return out;
+			const run = Bun.spawnSync(["ps", "-o", "pid=,etime=", "-p", pids.join(",")], { stdout: "pipe", stderr: "pipe" });
+			if (run.exitCode !== 0) return out;
+			const now = Date.now();
+			for (const line of run.stdout.toString().split("\n")) {
+				const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+				if (!match) continue;
+				const elapsed = parsePsElapsed(match[2]!);
+				out.set(Number(match[1]), elapsed === null ? null : now - elapsed);
+			}
+			return out;
+		},
+		resolveAgent: (paneId: string) => {
+			try {
+				const run = Bun.spawnSync(["am", "agents", "resolve-pane", "--project", process.cwd(), "--pane", paneId, "--json"], { stdout: "pipe", stderr: "pipe" });
+				if (run.exitCode !== 0) return null;
+				const parsed: unknown = JSON.parse(run.stdout.toString());
+				if (typeof parsed !== "object" || parsed === null || !("agent_name" in parsed)) return null;
+				const name: unknown = parsed.agent_name;
+				return typeof name === "string" && name.length > 0 ? name : null;
+			} catch {
+				return null;
+			}
+		},
+		exclusiveHolds: (agent: string) => {
+			try {
+				const run = Bun.spawnSync(["am", "file_reservations", "active", process.cwd(), "--format", "json"], { stdout: "pipe", stderr: "pipe" });
+				if (run.exitCode !== 0) return [];
+				const rows: unknown = JSON.parse(run.stdout.toString());
+				if (!Array.isArray(rows)) return [];
+				const holds: string[] = [];
+				for (const row of rows) {
+					if (typeof row !== "object" || row === null || !("agent" in row) || !("paths" in row) || !("exclusive" in row)) continue;
+					if (row.agent !== agent || row.exclusive !== true) continue;
+					const paths: unknown = row.paths;
+					if (!Array.isArray(paths)) continue;
+					for (const path of paths) {
+						if (typeof path === "string") holds.push(path);
+					}
+				}
+				return holds;
+			} catch {
+				return [];
+			}
+		},
+	};
+}
+
+function latestAppliedRelinkAt(): { createdAt: string; ms: number } | null {
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) return null;
+	let best: { createdAt: string; ms: number } | null = null;
+	let entries: string[] = [];
+	try {
+		entries = readdirSync(join(stateRoot, "receipts"));
+	} catch {
+		return null;
+	}
+	for (const entry of entries) {
+		if (!entry.startsWith("plugin-") || !entry.endsWith(".json")) continue;
+		try {
+			const receipt = readPluginReceipt(join(stateRoot, "receipts", entry));
+			const applied = receipt.rows.some((row) => row.status === "APPLIED");
+			if (!applied) continue;
+			const ms = Date.parse(receipt.created_at);
+			if (Number.isNaN(ms)) continue;
+			if (!best || ms > best.ms) best = { createdAt: receipt.created_at, ms };
+		} catch {
+			continue;
+		}
+	}
+	return best;
+}
+
+async function respawnCommand(request: ParsedCommand): Promise<CliResult> {
+	const panesFlag = request.flags.get("--panes");
+	const selection = typeof panesFlag === "string" ? panesFlag.split(",").map((pane) => pane.trim()).filter((pane) => pane.length > 0) : [];
+	const apply = request.flags.has("--apply") && request.flags.has("--yes");
+	if (apply && selection.length === 0) {
+		return refusal("PANES_REQUIRED", "fleet respawn --apply needs explicit --panes SESSION:window.pane labels",
+			"Name the panes to respawn; nothing was changed.");
+	}
+	const io = liveFleetIo();
+	const processes = io.processes();
+	const relink = latestAppliedRelinkAt();
+	if (!apply) {
+		const report = reportStalePanes(io, liveRespawnDeps(), relink?.createdAt ?? null, "no applied plugin relink receipt found", processes);
+		return { code: 0, data: { overall: "OK", applied: false, panes: report.panes }, verification: "UNVERIFIED" };
+	}
+	const result = respawnPanes(io, liveRespawnDeps(), relink?.createdAt ?? null, "no applied plugin relink receipt found", relink?.ms ?? 0, processes, selection, true);
+ const failed = result.outcomes.some((outcome) => outcome.result === "FAILED");
+	return { code: failed ? 1 : 0, data: { overall: failed ? "FINDINGS" : "OK", applied: result.applied, panes: result.outcomes }, verification: result.applied ? "PERFORMED" : "UNVERIFIED" };
+}
+registerCommandHandler("fleet respawn", respawnCommand);
 /**
  * ompkit-3isy.1 UPDREC1: resolve a PARTIAL update receipt whose postimages
  * verify. Requires --yes: the operator attests they inspected the audit and
