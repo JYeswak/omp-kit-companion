@@ -1,0 +1,31 @@
+{
+ "_provenance": "br 0.7.4 `br list --status in_review --json --no-auto-import --no-auto-flush` in the omp-kit tracker, captured 2026-10-12; long text fields dropped",
+ "total": 2,
+ "limit": 0,
+ "offset": 0,
+ "has_more": false,
+ "issues": [
+  {
+   "id": "ompkit-114o",
+   "status": "in_review",
+   "assignee": "WhiteHarbor",
+   "labels": [
+    "fleet-round"
+   ],
+   "issue_type": "feature",
+   "priority": 1,
+   "created_by": "josh"
+  },
+  {
+   "id": "ompkit-1iku",
+   "status": "in_review",
+   "assignee": "LavenderFortress",
+   "labels": [
+    "fleet-round"
+   ],
+   "issue_type": "feature",
+   "priority": 1,
+   "created_by": "josh"
+  }
+ ]
+}

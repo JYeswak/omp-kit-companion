@@ -1,0 +1,28 @@
+# omp-kit tracker workflow policy (Mission Protocol v0.1 P3, approved by Josh 2026-10-04).
+# Closed is reachable only through gated edges. Measured on br 0.7.4: without strict + transitions,
+# open->closed and in_progress->closed bypass every gate. Delete this file to restore the old behavior.
+workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, blocked, deferred, closed]
+    in_progress: [in_review, open, blocked, deferred]
+    in_review: [closed, rework]
+    rework: [in_progress]
+    blocked: [open, in_progress]
+    deferred: [open]
+    closed: [open]
+  status_groups:
+    ready: [open, rework]
+  required_fields:
+    "open -> in_progress": [acceptance_criteria_present]
+    in_review: [acceptance_criteria, transition_comment]
+    closed: [transition_comment]
+  gates:
+    "in_review -> closed":
+      require_all:
+        - min_reviewers: 1
+    "open -> closed":
+      require_all:
+        - min_reviewers: 1

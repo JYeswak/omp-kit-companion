@@ -1,0 +1,103 @@
+{
+ "_provenance": "bv v0.25.2 `bv --robot-triage` in the omp-kit tracker, captured 2026-10-12; keys fleet-watch does not read are dropped, values unchanged",
+ "generated_at": "2026-10-12T02:19:34Z",
+ "version": "v0.25.2",
+ "source_authority": {
+  "state": "complete",
+  "claim_safe": true,
+  "readiness": "proven"
+ },
+ "triage": {
+  "recommendations": [
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.84",
+    "type": "task",
+    "status": "open",
+    "assignee": "YellowSalmon",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-bj08.1",
+     "ompkit-ex6l",
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.103",
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.83"
+    ]
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.113",
+    "type": "feature",
+    "status": "open",
+    "assignee": "PlumRaven",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.118"
+    ]
+   },
+   {
+    "id": "ompkit-ex6l",
+    "type": "task",
+    "status": "open",
+    "assignee": "ScarletWaterfall",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-kxdy"
+    ]
+   },
+   {
+    "id": "ompkit-t8do",
+    "type": "feature",
+    "status": "blocked",
+    "claimable": false
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.98",
+    "type": "task",
+    "status": "open",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.93"
+    ]
+   },
+   {
+    "id": "ompkit-kxdy",
+    "type": "task",
+    "status": "blocked",
+    "claimable": false
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.114",
+    "type": "feature",
+    "status": "open",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.115",
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.94",
+     "ompkit-rc-epic-land-fix-release-dogfood-rz5.97",
+     "ompkit-t8do"
+    ]
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.93",
+    "type": "task",
+    "status": "blocked",
+    "assignee": "PinkOwl",
+    "claimable": false
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.83",
+    "type": "task",
+    "status": "open",
+    "assignee": "SunnyIbis",
+    "claimable": false,
+    "blocked_by": [
+     "ompkit-bj08.1"
+    ]
+   },
+   {
+    "id": "ompkit-rc-epic-land-fix-release-dogfood-rz5.118",
+    "type": "bug",
+    "status": "open",
+    "claimable": false
+   }
+  ]
+ }
+}

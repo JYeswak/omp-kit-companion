@@ -1,0 +1,43 @@
+# uds tracker: shared strict policy (MP3 template + session deltas).
+# Closed is reachable only through gated edges.
+# Extra statuses per uds ACK 2026-10-05: grading entered only from
+# in_progress (route_pass gate DROPPED 2026-10-06: uds route posts a
+# comment, not a gate report; returns after rch-measured.sh wiring);
+# grading -> closed needs landed report AND reviewer (main close path);
+# draft open<->draft only; pinned approximated (returns open/in_progress,
+# br cannot express prior-status); tombstone from closed only, terminal.
+# Closure gates stay uds_l3_close_support; bypass stays disabled.
+workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, blocked, deferred, draft, closed, tombstone, pinned, grading]
+  transitions:
+    initial: [open]
+    open: [in_progress, blocked, deferred, draft, closed, pinned]
+    in_progress: [in_review, open, blocked, deferred, grading, pinned]
+    in_review: [closed, rework, pinned]
+    rework: [in_progress]
+    blocked: [open, in_progress, pinned]
+    deferred: [open, pinned]
+    closed: [open, tombstone]
+    draft: [open, pinned]
+    grading: [open, in_progress, closed, pinned]
+    pinned: [open, in_progress]
+  status_groups:
+    ready: [open, rework]
+  required_fields:
+    in_review: [acceptance_criteria, transition_comment]
+    closed: [transition_comment]
+  gates:
+    "open -> closed":
+      require_all:
+        - uds_l3_close_support
+        - min_reviewers: 1
+    "in_review -> closed":
+      require_all:
+        - uds_l3_close_support
+        - min_reviewers: 1
+    "grading -> closed":
+      require_all:
+        - uds_l3_close_support
+        - min_reviewers: 1
+allow_bypass: false
