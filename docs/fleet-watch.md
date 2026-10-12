@@ -121,9 +121,16 @@ before.
 `false` and the session's workers get no pull nudge, escalation or
 no-decision alert, and no grading nudge. A missing field keeps pulling on.
 
+**One escalation chain (Q23).** The chain runs worker, director (`:0.1`),
+chief, Josh. Every worker reply, `UNHEALTHY` and `BLOCKED` owner-decision or
+live-action included, goes only to the session's director pane
+(`reportCommand` renders each one as `omp-kit send <coordinatorSession>
+<coordinatorPane> "<reply>"`). The director escalates. Worker-facing text names
+no other route.
+
 Watcher states: BUSY (spinner), IDLE-SILENT (the nudge above), and DEAD (a
-failed capture reports `NO_DECISION` to the director). HUNG and UNPARSEABLE
-are tracked in `ompkit-qs0n`.
+failed capture reports `NO_DECISION` to the director first). HUNG and
+UNPARSEABLE are tracked in `ompkit-qs0n` and also notify the director first.
 
 Shapes read, observed 2026-10-12 (fixtures in `tests/fixtures/fleet-watch/`):
 `bv --robot-triage` v0.25.2 `triage.recommendations[].id` (10 entries) and

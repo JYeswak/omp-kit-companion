@@ -526,19 +526,24 @@ export function pullPausedReason(session: FleetWatchSession): string | null {
 	return null;
 }
 
+/**
+ * Q23: one escalation chain, worker -> director (:0.1) -> chief -> Josh. Every worker reply goes only
+ * to the session's director pane; the director escalates. Worker-facing text names no other route.
+ */
+export function reportCommand(config: FleetWatchSession, verb: WorkerVerb, bead: string): string {
+	const row = WORKER_REPLIES.find((entry) => entry.verb === verb)!;
+	return `omp-kit send ${config.coordinatorSession} ${config.coordinatorPane} "${verb} ${row.args.replace("<bead>", bead)}"`;
+}
+
 export function nudgeText(config: FleetWatchSession, pick: PullPick): string {
-	const reply = (verb: WorkerVerb, bead: string) => {
-		const row = WORKER_REPLIES.find((entry) => entry.verb === verb)!;
-		return `${verb} ${row.args.replace("<bead>", bead)}`;
-	};
-	const send = `omp-kit send ${config.coordinatorSession} ${config.coordinatorPane}`;
 	const round = config.round !== undefined ? `round ${config.round}${config.phase ? ` ${config.phase}` : ""}` : config.phase ? `phase ${config.phase}` : null;
 	const context = [config.mission ? `mission ${config.mission}` : null, round, config.focusEpics?.length ? `focus ${config.focusEpics.join(", ")}` : null].filter((part) => part !== null);
 	const head = `${IDLE_HEAD}${context.length ? ` ${context.join("; ")}.` : ""}`;
-	const work = (id: string) => `Report to ${config.coordinatorPane} with one line: ${send} "${reply("DONE", id)}" (or ${(["PROGRESS", "BLOCKED", "QUESTION", "SPLIT", "OBSOLETE"] as const).map((verb) => reply(verb, id)).join(" | ")}). Close only a bead you did not author, after verifying every acceptance item, with the evidence in the close reason.`;
+	const route = `Every reply, including UNHEALTHY and BLOCKED owner-decision or live-action, goes only to your director ${config.coordinatorPane}; the director escalates.`;
+	const work = (id: string) => `Report with one line: ${reportCommand(config, "DONE", id)}, or the same command with ${(["PROGRESS", "BLOCKED", "QUESTION", "SPLIT", "OBSOLETE"] as const).map((verb) => `${verb} ${WORKER_REPLIES.find((entry) => entry.verb === verb)!.args.replace("<bead>", id)}`).join(" | ")}. ${route} Close only a bead you did not author, after verifying every acceptance item, with the evidence in the close reason.`;
 	switch (pick.kind) {
 		case "GRADE":
-			return `${head} Grade ${pick.id} first (${pick.via}${pick.author ? `, author ${pick.author}` : ""}; never grade your own). Every acceptance item verified: br close it with the evidence in the close reason, then ${send} "${reply("CLOSED", pick.id)}". Any gap: one bead comment naming each failed item with its evidence command and output and what success looks like (concrete, checkable, citing the skill that applies, e.g. regex-engineering, verification-before-completion); ${pick.rework}; unassign; then ${send} "${reply("REWORK", pick.id)}".`;
+			return `${head} Grade ${pick.id} first (${pick.via}${pick.author ? `, author ${pick.author}` : ""}; never grade your own). Every acceptance item verified: br close it with the evidence in the close reason, then ${reportCommand(config, "CLOSED", pick.id)}. Any gap: one bead comment naming each failed item with its evidence command and output and what success looks like (concrete, checkable, citing the skill that applies, e.g. regex-engineering, verification-before-completion); ${pick.rework}; unassign; then ${reportCommand(config, "REWORK", pick.id)}. ${route}`;
 		case "REWORK":
 			return `${head} Nothing to grade; rework ${pick.id}${pick.implementer ? ` (implementer ${pick.implementer})` : ""}: its latest rework comment is the brief. Claim it, close every gap, set it in_review again. ${work(pick.id)}`;
 		case "TRIAGE":

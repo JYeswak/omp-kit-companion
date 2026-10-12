@@ -13,6 +13,7 @@ import {
 	parseReadyRows,
 	parseTriage,
 	parseWorkerReply,
+	reportCommand,
 	reviewStatuses,
 	runFleetWatchOnce,
 	type FleetWatchConfig,
@@ -344,4 +345,48 @@ test("[legacy] a session without Q20 fields still nudges toward the bv pick", ()
 	const run = nudgeOnce(configOf(plain), world({ readyRows: [leaf("y-1")], triage: { usable: true, ids: ["y-1"] } }));
 	expect(run.worker("%1")).toEqual([nudgeText(plain, { kind: "TRIAGE", id: "y-1", rank: 1, epic: null })]);
 	expect(run.worker("%1")[0]).toStartWith("Fleet watch: idle for 4+ minutes. Nothing to grade or rework; take y-1");
+});
+
+// Q23: one escalation chain, worker -> director -> chief -> Josh. Workers reply only to the director.
+const ALL_PICKS: PullPick[] = [
+	{ kind: "GRADE", id: "x-9", via: "in_review", author: "BlueWorker", rework: "set status rework" },
+	{ kind: "REWORK", id: "x-7", implementer: "BlueWorker" },
+	{ kind: "TRIAGE", id: "x-2", rank: 1, epic: "x-epic" },
+	{ kind: "READY", id: "x-2", reason: "bv unusable: missing", epic: null },
+];
+
+test("[route] every reply verb's command goes to the director pane and nowhere else", () => {
+	for (const reply of WORKER_REPLIES) {
+		const command = reportCommand(session, reply.verb, "x-1");
+		expect(command).toStartWith(`omp-kit send work %54 "${reply.verb} `);
+	}
+});
+
+test("[route] every worker-facing nudge sends only to the director and names no chief or Josh route", () => {
+	const owned = { ...session, skipLabels: ["owner-decision", "human-gate"] };
+	for (const pick of ALL_PICKS) {
+		const text = nudgeText(owned, pick);
+		const sends = text.split("omp-kit send ").slice(1);
+		expect(sends.length).toBeGreaterThan(0);
+		for (const send of sends) expect(send).toStartWith("work %54 \"");
+		expect(text).toContain("Every reply, including UNHEALTHY and BLOCKED owner-decision or live-action, goes only to your director %54; the director escalates.");
+		expect(text.toLowerCase()).not.toContain("chief");
+		expect(text.toLowerCase()).not.toContain("josh");
+	}
+});
+
+test("[route] DEAD: a pane that cannot be captured is reported to the director first, never to the worker", () => {
+	const sends: { session: string; pane: string; text: string }[] = [];
+	const config = configOf();
+	runFleetWatchOnce({ ...config, noDecisionChecks: 1 }, {
+		capture: () => ({ code: 1, stdout: "", stderr: "can't find pane: %1" }),
+		send: (target, pane, text) => { sends.push({ session: target, pane, text }); },
+		sendKeys: () => { throw new Error("no keys"); },
+		logPath: "/dev/null",
+		statePath: null,
+		now: () => 0,
+		recoverTracker: () => null,
+	});
+	expect(sends.length).toBeGreaterThan(0);
+	for (const send of sends) expect(`${send.session} ${send.pane}`).toBe("work %54");
 });
