@@ -263,7 +263,7 @@ export const WORKER_REPLIES = [
 	{ verb: "SPLIT", args: "<bead> <child ids>", role: "status", pattern: /^SPLIT[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+[A-Za-z0-9]/ },
 	{ verb: "FILED", args: "<bead> <parent|no-epic reason>", role: "status", pattern: /^FILED[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+\S/ },
 	{ verb: "OBSOLETE", args: "<bead> <evidence>", role: "implementer", pattern: /^OBSOLETE[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+\S/ },
-	{ verb: "BLOCKED", args: "<bead> <dependency|environment|credential|reservation|quota|external|live-action|owner-decision> <route>", role: "status", pattern: /^BLOCKED[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+(?:dependency|environment|credential|reservation|quota|external|live-action|owner-decision)[ \t]+\S/ },
+	{ verb: "BLOCKED", args: "<bead> <dependency|environment|credential|reservation|quota|external|live-action|owner-decision> cmd=<exact failing command and its output> tried=<two or more approaches, each with its result> fix=<researched unblock: command, patch, owner or route, with its source file:line, doc or skill> next=<item you pulled meanwhile>", role: "status", pattern: /^BLOCKED[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+(?:dependency|environment|credential|reservation|quota|external|live-action|owner-decision)[ \t]+cmd=\S(?=[^\n]*[ \t]tried=\S)(?=[^\n]*[ \t]fix=\S)(?=[^\n]*[ \t]next=\S)/ },
 	{ verb: "QUESTION", args: "<bead> <question>", role: "status", pattern: /^QUESTION[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+\S/ },
 	{ verb: "SKIP", args: "<bead> <reason>", role: "status", pattern: /^SKIP[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,127})[ \t]+\S/ },
 	{ verb: "NO-WORK", args: "<queue counts>", role: "status", pattern: /^NO-WORK[ \t]+()\S/ },
@@ -535,15 +535,21 @@ export function reportCommand(config: FleetWatchSession, verb: WorkerVerb, bead:
 	return `omp-kit send ${config.coordinatorSession} ${config.coordinatorPane} "${verb} ${row.args.replace("<bead>", bead)}"`;
 }
 
+/**
+ * Josh, 2026-10-12: BLOCKED is a last resort. Every nudge states the bar the BLOCKED row's pattern
+ * enforces (cmd=, tried=, fix=, next=); the director rejects any BLOCKED that misses a field.
+ */
+const BLOCKED_BAR = "BLOCKED is a last resort, not a status: send it only after you have researched the fix. It counts only with all four fields: cmd= the exact failing command and its output, tried= two or more approaches you ran and their results, fix= the researched unblock (exact command, patch, owner or route) with its source (file:line, doc or skill), next= the item you pulled meanwhile. Long output goes in a bead comment that the line cites. Your director rejects any BLOCKED missing a field (REJECTED-BLOCKED) and sends you back to research it.";
+
 export function nudgeText(config: FleetWatchSession, pick: PullPick): string {
 	const round = config.round !== undefined ? `round ${config.round}${config.phase ? ` ${config.phase}` : ""}` : config.phase ? `phase ${config.phase}` : null;
 	const context = [config.mission ? `mission ${config.mission}` : null, round, config.focusEpics?.length ? `focus ${config.focusEpics.join(", ")}` : null].filter((part) => part !== null);
 	const head = `${IDLE_HEAD}${context.length ? ` ${context.join("; ")}.` : ""}`;
 	const route = `Every reply, including UNHEALTHY and BLOCKED owner-decision or live-action, goes only to your director ${config.coordinatorPane}; the director escalates.`;
-	const work = (id: string) => `Report with one line: ${reportCommand(config, "DONE", id)}, or the same command with ${(["PROGRESS", "BLOCKED", "QUESTION", "SPLIT", "OBSOLETE"] as const).map((verb) => `${verb} ${WORKER_REPLIES.find((entry) => entry.verb === verb)!.args.replace("<bead>", id)}`).join(" | ")}. ${route} Close only a bead you did not author, after verifying every acceptance item, with the evidence in the close reason.`;
+	const work = (id: string) => `Report with one line: ${reportCommand(config, "DONE", id)}, or the same command with ${(["PROGRESS", "BLOCKED", "QUESTION", "SPLIT", "OBSOLETE"] as const).map((verb) => `${verb} ${WORKER_REPLIES.find((entry) => entry.verb === verb)!.args.replace("<bead>", id)}`).join(" | ")}. ${BLOCKED_BAR} ${route} Close only a bead you did not author, after verifying every acceptance item, with the evidence in the close reason.`;
 	switch (pick.kind) {
 		case "GRADE":
-			return `${head} Grade ${pick.id} first (${pick.via}${pick.author ? `, author ${pick.author}` : ""}; never grade your own). Every acceptance item verified: br close it with the evidence in the close reason, then ${reportCommand(config, "CLOSED", pick.id)}. Any gap: one bead comment naming each failed item with its evidence command and output and what success looks like (concrete, checkable, citing the skill that applies, e.g. regex-engineering, verification-before-completion); ${pick.rework}; unassign; then ${reportCommand(config, "REWORK", pick.id)}. ${route}`;
+			return `${head} Grade ${pick.id} first (${pick.via}${pick.author ? `, author ${pick.author}` : ""}; never grade your own). Every acceptance item verified: br close it with the evidence in the close reason, then ${reportCommand(config, "CLOSED", pick.id)}. Any gap: one bead comment naming each failed item with its evidence command and output and what success looks like (concrete, checkable, citing the skill that applies, e.g. regex-engineering, verification-before-completion); ${pick.rework}; unassign; then ${reportCommand(config, "REWORK", pick.id)}. ${BLOCKED_BAR} ${route}`;
 		case "REWORK":
 			return `${head} Nothing to grade; rework ${pick.id}${pick.implementer ? ` (implementer ${pick.implementer})` : ""}: its latest rework comment is the brief. Claim it, close every gap, set it in_review again. ${work(pick.id)}`;
 		case "TRIAGE":

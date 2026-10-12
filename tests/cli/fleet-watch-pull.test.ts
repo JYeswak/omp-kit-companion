@@ -267,7 +267,7 @@ const REPLY_CASES: Record<string, { match: string; miss: string }> = {
 	SPLIT: { match: "SPLIT x-1 x-1.1 x-1.2", miss: "SPLIT x-1 ," },
 	FILED: { match: "FILED x-2 x-epic", miss: "FILED  " },
 	OBSOLETE: { match: "OBSOLETE x-1 superseded by abc1234", miss: "OBSOLETE: x-1 gone" },
-	BLOCKED: { match: "BLOCKED x-1 credential ask the director", miss: "BLOCKED x-1 tired ask the director" },
+	BLOCKED: { match: "BLOCKED x-1 credential cmd=op-read-exit-1 tried=signin->2FA;env->unset fix=infisical-secrets:40 next=x-2", miss: "BLOCKED x-1 tired cmd=a tried=b fix=c next=d" },
 	QUESTION: { match: "QUESTION x-1 which epic owns this?", miss: "QUESTION x-1" },
 	SKIP: { match: "SKIP x-1 owner-decision label", miss: "SKIPPED x-1 owner-decision label" },
 	"NO-WORK": { match: "NO-WORK grading 0 rework 0 ready 0", miss: "NO WORK grading 0" },
@@ -292,6 +292,19 @@ test("[replies] the nudge renders its report lines from the same table", () => {
 		const row = WORKER_REPLIES.find((reply) => reply.verb === verb)!;
 		expect(text).toContain(`${verb} ${row.args.replace("<bead>", "x-2")}`);
 	}
+});
+
+test("[replies] a BLOCKED without researched evidence is not a reply (Josh 2026-10-12)", () => {
+	expect(parseWorkerReply("BLOCKED x-1 reservation cmd=edit-refused tried=reserve->held;ask->no-reply fix=am-force-release:2h next=x-3")).toEqual({ verb: "BLOCKED", role: "status", bead: "x-1" });
+	for (const thin of [
+		"BLOCKED x-1 credential ask the director",
+		"BLOCKED x-1 credential tried=a->b;c->d fix=skill:x next=x-2",
+		"BLOCKED x-1 credential cmd=x-exit-1 fix=skill:x next=x-2",
+		"BLOCKED x-1 credential cmd=x-exit-1 tried=a->b;c->d next=x-2",
+		"BLOCKED x-1 credential cmd=x-exit-1 tried=a->b;c->d fix=skill:x",
+		"BLOCKED x-1 credential cmd= tried=a->b fix=skill:x next=x-2",
+		"BLOCKED x-1 credential cmd=a retried=b prefix=c context=d",
+	]) expect(parseWorkerReply(thin)).toBeNull();
 });
 
 test("[replies] each pattern stays linear on a long near-miss", () => {

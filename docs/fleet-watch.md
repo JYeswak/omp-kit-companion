@@ -97,10 +97,20 @@ same table parses replies in bead comments:
 `DONE <bead> <sha> <evidence>`, `PROGRESS <bead> <sha> <remaining>`,
 `SPLIT <bead> <child ids>`, `FILED <bead> <parent|no-epic reason>`,
 `OBSOLETE <bead> <evidence>`,
-`BLOCKED <bead> <dependency|environment|credential|reservation|quota|external|live-action|owner-decision> <route>`,
+`BLOCKED <bead> <dependency|environment|credential|reservation|quota|external|live-action|owner-decision> cmd=<command and output> tried=<approaches and results> fix=<researched unblock and source> next=<item pulled>`,
 `QUESTION <bead> <question>`, `SKIP <bead> <reason>`, `NO-WORK <queue counts>`,
 `UNHEALTHY <tracker|git|disk|auth|quota|model|tool> <detail>`,
 `HANDOFF <bead> <comment ref>`.
+
+**BLOCKED bar (Josh, 2026-10-12).** BLOCKED is a last resort. A BLOCKED line
+parses as a reply only with all four fields: `cmd=` the exact failing command
+and its output, `tried=` two or more approaches and their results, `fix=` the
+researched unblock (command, patch, owner or route) with its source
+(`file:line`, doc or skill), and `next=` the item pulled meanwhile. Long output
+goes in a bead comment that the line cites. Every nudge states this bar. The
+director answers a BLOCKED that misses a field with `REJECTED-BLOCKED <bead>
+<missing items>` and sends the worker back to research it; it does not accept,
+forward or soften it.
 
 A grading nudge states both outcomes. If every acceptance item is verified,
 `br close` the bead with the evidence and send `CLOSED`. If anything is
