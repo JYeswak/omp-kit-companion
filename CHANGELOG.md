@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.26] - 2026-10-12
+
+### Changed
+
+- `omp-kit send` completes busy-pane delivery: with `--until-delivered <seconds>` (default 300 s for dispatches), a message left sitting in a busy composer is submitted once the pane idles while it still holds exactly this message, verified gone afterward; foreign text, never-idling panes, and timeouts report UNDELIVERED with no stray Enter.
+- Fleet Watch: a worker `BLOCKED` reply counts only with researched evidence: `cmd=` (exact failing command and output), `tried=` (two or more approaches and their results), `fix=` (the researched unblock with its source) and `next=` (the item pulled meanwhile). The old `BLOCKED <bead> <class> <route>` line no longer parses as a reply, and every pull and grading nudge states the bar and that the director rejects a BLOCKED missing a field (Josh, 2026-10-12; ompkit-fp72.27).
+
 ## [0.2.25] - 2026-10-12
 
 ### Added
