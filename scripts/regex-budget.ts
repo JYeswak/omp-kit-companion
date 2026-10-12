@@ -347,6 +347,17 @@ function isScratchScopedMatchAny(pattern: string, scope: readonly string[] | und
 	});
 }
 
+/** A vacuous content condition needs no content literal: exact `(?s).+` matches
+ * everything in O(n) (greedy scan succeeds at the first position; empty input
+ * fails in O(1)), so a literal prefilter can never reject anything and only adds
+ * work. Admission must still come from tool calls: every scope token is a
+ * tool:edit/write route, otherwise the exemption does not apply. */
+function isVacuousContentWithToolScope(pattern: string, scope: readonly string[] | undefined): boolean {
+	if (pattern !== "(?s).+" || !scope?.length) return false;
+	return scope.every(token =>
+		(token.startsWith("tool:write(") || token.startsWith("tool:edit(")) && token.endsWith(")"));
+}
+
 /** The live stream fixture represents tool:bash; path-scoped file rules do not run on it. */
 function appliesToBashStream(scope: readonly string[] | undefined): boolean {
 	return !scope?.length || scope.includes("tool:bash");
@@ -388,8 +399,9 @@ export async function measureCondition(input: {
 	const result = parseWorkerOutput(stdout);
 	const samples = result.samples;
 	const failures: MeasurementFailure[] = [];
-	// Only the proven atomic scoped case skips the literal precondition; timing checks still run.
-	if (!literal && !isScratchScopedMatchAny(input.pattern, input.scope)) failures.push({ code: "NO_REQUIRED_LITERAL_PROBE", message: "no consuming literal found for rule=" + input.rule + " condition=" + input.conditionIndex });
+	// Only the proven atomic scoped case and the proven vacuous-content case skip the
+	// literal precondition; timing checks still run.
+	if (!literal && !isScratchScopedMatchAny(input.pattern, input.scope) && !isVacuousContentWithToolScope(input.pattern, input.scope)) failures.push({ code: "NO_REQUIRED_LITERAL_PROBE", message: "no consuming literal found for rule=" + input.rule + " condition=" + input.conditionIndex });
 	for (const sample of samples) {
 		if (failsNearMissBudget(sample.ms)) {
 			const ratio = sample.ms[sample.ms.length - 1] / Math.max(sample.ms[sample.ms.length - 2], 0.01);

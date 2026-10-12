@@ -71,6 +71,41 @@ test("match-any condition is accepted only with discriminating temp write/edit s
 	expect(nonAtomicWildcard.failures.map(failure => failure.code)).toContain("NO_REQUIRED_LITERAL_PROBE");
 });
 
+test("vacuous (?s).+ is accepted only with tool write/edit scopes, never unscoped", async () => {
+	const skillScopes = [
+		"tool:edit(~/.claude/skills/**)",
+		"tool:write(~/.claude/skills/**)",
+		"tool:edit(~/.agents/skills/**)",
+		"tool:write(~/.agents/skills/**)",
+		"tool:edit(/Users/*/.claude/skills/**)",
+		"tool:write(/Users/*/.claude/skills/**)",
+		"tool:edit(/Users/*/.agents/skills/**)",
+		"tool:write(/Users/*/.agents/skills/**)",
+	] as const;
+	const measure = (pattern: string, scope: readonly string[]) => {
+		const input = {
+			rule: "kit-teach-shared-skills", conditionIndex: 0, pattern, scope,
+			sizes: [32, 64, 128], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 2_000,
+			streamWire: "x".repeat(33),
+		} as const;
+		return measureCondition(input);
+	};
+
+	const scoped = await measure("(?s).+", skillScopes);
+	expect(scoped.status).toBe("MEASURED");
+	expect(scoped.failures.map(failure => failure.code)).not.toContain("NO_REQUIRED_LITERAL_PROBE");
+	expect(scoped.stream_ms).toBeUndefined();
+
+	const unscoped = await measure("(?s).+", []);
+	expect(unscoped.failures.map(failure => failure.code)).toContain("NO_REQUIRED_LITERAL_PROBE");
+
+	const bareTool = await measure("(?s).+", ["tool:bash"]);
+	expect(bareTool.failures.map(failure => failure.code)).toContain("NO_REQUIRED_LITERAL_PROBE");
+
+	const nonAtomic = await measure("(?:x|(?s).+)", skillScopes);
+	expect(nonAtomic.failures.map(failure => failure.code)).toContain("NO_REQUIRED_LITERAL_PROBE");
+});
+
 test("scope-aware CLI excludes file-only rules from the Bash stream budget", () => {
 	const fixture = fixtureRule("fixture-scoped-match-any", "[\\s\\S]");
 	const streamFile = join(fixture.dir, "stream.sh");
