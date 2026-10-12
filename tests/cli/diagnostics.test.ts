@@ -74,6 +74,49 @@ test("fresh release verifies shipped bytes but does not claim unapplied rules or
 	expect(finding(rows, "unknown_rules").status).toBe("UNVERIFIED");
 	expect(health(rows)).toBe("UNVERIFIED");
 });
+test("stale plugin symlink fails by profile and the installed release target passes", async () => {
+	const f = fixture();
+	mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	const oldRoot = join(f.base, "old-release");
+	mkdirSync(join(oldRoot, "rules"), { recursive: true });
+	mkdirSync(join(oldRoot, "extensions"));
+	writeFileSync(join(oldRoot, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.20" }));
+	mkdirSync(join(f.home, ".omp", "profiles", "claude", "agent"), { recursive: true });
+	const defaultLink = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	const claudeLink = join(f.home, ".omp", "profiles", "claude", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(defaultLink), { recursive: true });
+	mkdirSync(dirname(claudeLink), { recursive: true });
+	symlinkSync(oldRoot, defaultLink);
+	symlinkSync(f.root, claudeLink);
+
+	const staleRows = await diagnose({ root: f.root, home: f.home });
+	const stale = finding(staleRows, "plugin_links");
+	expect(stale.status).toBe("FAIL");
+	expect(stale.reason).toContain("default");
+	expect(stale.evidence?.stale_profiles).toEqual(["default"]);
+	expect((stale.evidence?.links as Array<{ profile: string; status: string }>).find(row => row.profile === "claude")?.status).toBe("CURRENT");
+
+	rmSync(defaultLink);
+	symlinkSync(f.root, defaultLink);
+	const current = finding(await diagnose({ root: f.root, home: f.home }), "plugin_links");
+	expect(current.status).toBe("OK");
+	expect(current.evidence?.stale_profiles).toEqual([]);
+});
+test("plugin-link inventory treats a named profile without an agent directory as unverified", async () => {
+	const f = fixture();
+	mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	const defaultLink = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(defaultLink), { recursive: true });
+	symlinkSync(f.root, defaultLink);
+	mkdirSync(join(f.home, ".omp", "profiles", "claude"), { recursive: true });
+
+	const pluginLinks = finding(await diagnose({ root: f.root, home: f.home }), "plugin_links");
+	expect(pluginLinks.status).toBe("UNVERIFIED");
+	expect(pluginLinks.evidence?.missing_profiles).toEqual([]);
+	expect(pluginLinks.evidence?.inventory_issue).toContain("claude");
+});
 
 test("effective profile probes do not replace installed-byte diagnostics", async () => {
 	const f = fixture(); installOmp(f);

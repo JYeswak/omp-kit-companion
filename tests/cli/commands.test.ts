@@ -113,7 +113,7 @@ function compiledDiagnosticFixture() {
 	const languageServer = join(ompBin, "typescript-language-server");
 	writeFileSync(languageServer, `#!/bin/sh\nprintf 'invoked\\n' > ${JSON.stringify(serverInvocation)}\nexit 98\n`);
 	chmodSync(languageServer, 0o755);
-	for (const dir of [release, join(release, "bin"), join(release, "rules"), join(release, "retired"), home, project, otherProject, join(home, ".omp")]) mkdirSync(dir, { recursive: true });
+	for (const dir of [release, join(release, "bin"), join(release, "rules"), join(release, "retired"), join(release, "extensions"), home, project, otherProject, join(home, ".omp")]) mkdirSync(dir, { recursive: true });
 	mkdirSync(join(release, "examples", "profiles", "v1"), { recursive: true });
 	for (const name of ["memory-off.yml", "mnemopi-manual.yml", "model-roles.yml"]) {
 		writeFileSync(join(release, "examples", "profiles", "v1", name),
@@ -122,6 +122,7 @@ function compiledDiagnosticFixture() {
 	const rule = "# Rule A\n";
 	writeFileSync(join(release, "rules", "rule-a.md"), rule);
 	writeFileSync(join(release, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nrule-a\t${createHash("sha256").update(rule).digest("hex")}\ttripwire\tabc1234\n`);
+	writeFileSync(join(release, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
 	writeFileSync(join(home, ".omp", "settings.json"), "{\"opaque_user_profile\":true}\n");
 	writeFileSync(join(project, "project.txt"), "project contents must not run\n");
 	const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", entry, "--outfile", binary], {
@@ -129,7 +130,7 @@ function compiledDiagnosticFixture() {
 	});
 	if (build.exitCode !== 0) throw new Error(`compiled diagnostic CLI failed: ${build.stderr.toString()}`);
 	const realOmp = resolveOmpIdentity({ PATH: ompBin }).launcher;
-	const invoke = (args: string[], envOverride: Record<string, string> = {}) => {
+	const invoke = (args: string[], envOverride: Record<string, string> = {}, assertReadOnly = true) => {
 		const beforeHome = snapshot(home);
 		const beforeProject = snapshot(project);
 		const beforeOtherProject = snapshot(otherProject);
@@ -137,17 +138,19 @@ function compiledDiagnosticFixture() {
 			cwd: project, stdin: "ignore", stdout: "pipe", stderr: "pipe",
 			env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_STATE_HOME: join(home, "xdg-state"), XDG_DATA_HOME: join(home, "xdg-data"), XDG_CACHE_HOME: join(home, "xdg-cache"), PATH: `${ompBin}:/usr/bin:/bin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", ...envOverride },
 		});
-		expect(snapshot(home)).toEqual(beforeHome);
-		expect(snapshot(project)).toEqual(beforeProject);
-		expect(snapshot(otherProject)).toEqual(beforeOtherProject);
-		expect(existsSync(launcherInvocation)).toBe(false);
-		expect(existsSync(serverInvocation)).toBe(false);
+		if (assertReadOnly) {
+			expect(snapshot(home)).toEqual(beforeHome);
+			expect(snapshot(project)).toEqual(beforeProject);
+			expect(snapshot(otherProject)).toEqual(beforeOtherProject);
+			expect(existsSync(launcherInvocation)).toBe(false);
+			expect(existsSync(serverInvocation)).toBe(false);
+		}
 		expect(result.stderr.toString()).toBe("");
 		const stdout = result.stdout.toString();
 		expect(stdout.trim().split("\n")).toHaveLength(1);
 		return { code: result.exitCode, envelope: JSON.parse(stdout), realOmp };
 	};
-	return { release, home, project, otherProject, ompPackage, invoke: (...args: string[]) => invoke(args), invokeWithEnv: invoke };
+	return { release, home, project, otherProject, ompPackage, invoke: (...args: string[]) => invoke(args), invokeWithEnv: invoke, invokeUnchecked: (args: string[]) => invoke(args, {}, false) };
 }
 
 function compiledTest(name: string, run: () => void): void {
@@ -365,6 +368,27 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(conforms(doctor.envelope.data, schemas.doctor)).toBe(true);
 		const capabilities = invoke("capabilities");
 		expect(capabilities.envelope.data.commands.map((command: { name: string }) => command.name)).toEqual(expect.arrayContaining(["status", "health", "doctor"]));
+	});
+	compiledTest("compiled doctor fails on an older profile plugin target and passes after relinking", () => {
+		const { release, home, invokeUnchecked } = compiledDiagnosticFixture();
+		const oldRelease = join(dirname(release), "old-release");
+		const pluginLink = join(home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+		mkdirSync(oldRelease);
+		mkdirSync(dirname(pluginLink), { recursive: true });
+		symlinkSync(oldRelease, pluginLink);
+
+		const stale = invokeUnchecked(["doctor"]);
+		expect(stale.code).toBe(1);
+		expect(stale.envelope.errors[0].code).toBe("REQUIRED_FINDING_FAILED");
+		const staleFinding = stale.envelope.data.findings.find((row: { component: string }) => row.component === "plugin_links");
+		expect(staleFinding.status).toBe("FAIL");
+		expect(staleFinding.reason).toContain("default");
+
+		rmSync(pluginLink);
+		symlinkSync(release, pluginLink);
+		const current = invokeUnchecked(["doctor"]);
+		expect(current.code).toBe(0);
+		expect(current.envelope.data.findings.find((row: { component: string }) => row.component === "plugin_links").status).toBe("OK");
 	});
 
 	compiledTest("compiled inventory exposes manifest failure, installed drift, retired/unknown rules and project shadow without modifying either tree", () => {

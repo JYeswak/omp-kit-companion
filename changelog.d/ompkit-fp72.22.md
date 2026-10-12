@@ -1,0 +1,1 @@
+- Fix kit updates to relink the OMP plugin across covered profiles with a reversible per-profile receipt, and make doctor fail on stale plugin targets.

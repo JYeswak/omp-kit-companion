@@ -36,7 +36,7 @@ import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./s
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
-import { KIT_UPDATE_REPO_PATTERN, runKitUpdateJob } from "./kit-update-job.ts";
+import { KIT_UPDATE_REPO_PATTERN, relinkKitPlugin, runKitUpdateJob } from "./kit-update-job.ts";
 import { claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
@@ -563,7 +563,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (availability === "UNAVAILABLE") return { code: 3, data: healthData, errors: [{
 		code: "OMP_UNAVAILABLE", message: omp.reason, remediation: ompFinding?.recommended_action ?? "Install OMP and put it on PATH.",
 	}], verification: "UNVERIFIED" };
-	const failedRequired = findings.find((item) => (item.component === "kit" || item.component === "manifest") && item.status === "FAIL");
+	const failedRequired = findings.find((item) => (item.component === "kit" || item.component === "manifest" || item.component === "plugin_links") && item.status === "FAIL");
 	if (failedRequired) return { code: 1, data: healthData, errors: [{
 		code: "REQUIRED_FINDING_FAILED", message: failedRequired.reason, remediation: failedRequired.recommended_action,
 	}], verification: "UNVERIFIED" };
@@ -3119,7 +3119,34 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 				source: plan.provenance, asset_sha256: plan.release.asset.sha256 },
 		}, verification: "UNVERIFIED" };
 	try {
-		return kitUpdateEnvelope(plan, await applyKitUpdate(plan));
+		const outcome = await applyKitUpdate(plan);
+		const envelope = kitUpdateEnvelope(plan, outcome);
+		if (outcome.status !== "UPDATED") return envelope;
+		const prefix = dirname(dirname(release));
+		const binary = join(prefix, "bin", "omp-kit");
+		const store = outcome.activeVersion ? join(prefix, "releases", outcome.activeVersion) : null;
+		const link = store
+			? await relinkKitPlugin(binary, store)
+			: { ok: false as const, detail: "updated release version is missing or invalid" };
+		const plugin = {
+			plugin_relink: link.ok ? "APPLIED" : "FAILED",
+			plugin_receipt_id: link.receiptId ?? null,
+			plugin_undo_command: link.undoCommand ?? null,
+			plugin_relink_detail: link.detail,
+		};
+		return {
+			...envelope,
+			...(link.ok ? {} : { code: 1 as const }),
+			data: { ...envelope.data, ...(link.ok ? {} : { overall: "FAIL" }), ...plugin },
+			...(!link.ok ? { errors: [...(envelope.errors ?? []), {
+				code: "PLUGIN_RELINK_FAILED",
+				message: `Kit update to ${outcome.activeVersion ?? "unknown version"} succeeded, but plugin relinking did not complete: ${link.detail}`,
+				remediation: link.undoCommand
+					? `Undo partial profile changes with \`${link.undoCommand}\`, inspect the plugin receipt, then retry relinking.`
+					: `Inspect omp-kit apply plugin --plan --store ${store ?? "<release-root>"} --profiles all --include-default before retrying.`,
+			}] } : {}),
+			verification: "UNVERIFIED",
+		};
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },

@@ -220,9 +220,13 @@ archive paths; it never fetches an inferred latest:
   --index "$KIT_INDEX_LOCAL" --archive "$KIT_ARCHIVE" --json
 ```
 
-Applying activates only the selected kit release, then reruns the matcher
-and live post-checks against the current OMP. OMP updates belong to your
-existing OMP install method. A v0.1.x kit cannot self-update on a real
+Manual `update --apply` and the service `kit-update` job activate the selected
+kit release, then rerun the matcher and live post-checks against current OMP
+before relinking every covered profile, including default. The plugin apply
+writes a separate receipt listing each profile's before/after link; undo it
+with `omp-kit undo <plugin-receipt> --yes`. `doctor` fails and names profiles
+whose plugin link differs from the installed release. OMP updates belong to
+your existing OMP install method. A v0.1.x kit cannot self-update on a real
 HOME; reinstall with the installer instead.
 
 ## For rule authors

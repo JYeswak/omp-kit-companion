@@ -14,6 +14,7 @@ import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
 import { record } from "./mcp-sources.ts";
+import { pluginPackageHash } from "./apply-plugin.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
 export interface Finding {
@@ -259,6 +260,100 @@ function inspectProfiles(home: string): { profiles: ConfigInspection[]; issue?: 
 		}
 		return { profiles, ...(issue ? { issue } : {}) };
 	} catch (error) { return { profiles, issue: `named profiles could not be listed: ${errorText(error)}` }; }
+}
+function inspectPluginLinks(root: string, home: string): Finding {
+	let installedRoot: string;
+	let installedHash: string;
+	try {
+		installedRoot = realpathSync(root);
+		installedHash = pluginPackageHash(installedRoot);
+	} catch (error) {
+		return finding("plugin_links", "UNVERIFIED", `Installed kit plugin package could not be verified: ${errorText(error)}`,
+			"Use an intact, verified omp-kit release.", { release_root: root });
+	}
+	const profiles = new Set(["default"]);
+	let inventoryIssue: string | undefined;
+	const namedDirectory = join(home, ".omp", "profiles");
+	const namedState = directoryPath(home, [".omp", "profiles"]);
+	if (namedState === "directory") {
+		try {
+			for (const name of readdirSync(namedDirectory).sort()) {
+				if (!matchesBounded(name, 128, /^[a-z0-9][a-z0-9._-]{0,63}$/) || name === "default" || name.endsWith(".")) continue;
+				const profilePath = join(namedDirectory, name);
+				const agentState = directoryPath(home, [".omp", "profiles", name, "agent"]);
+				if (agentState === "directory") profiles.add(name);
+				else if (pathState(profilePath) !== "missing")
+					inventoryIssue = `named profile ${name} has no safe agent directory (removed or unsafe); it was not recreated`;
+			}
+		} catch (error) { inventoryIssue = `named profiles could not be listed: ${errorText(error)}`; }
+	} else if (namedState === "unsafe") inventoryIssue = "named profile directory is unsafe";
+
+	const observations: Array<Record<string, unknown>> = [];
+	const staleProfiles: string[] = [], missingProfiles: string[] = [], unverifiedProfiles: string[] = [];
+	for (const profile of [...profiles].sort()) {
+		const parent = profile === "default"
+			? [".omp", "plugins", "node_modules"]
+			: [".omp", "profiles", profile, "plugins", "node_modules"];
+		const linkPath = join(home, ...parent, "omp-kit-companion");
+		const parentState = directoryPath(home, parent);
+		if (parentState === "missing") {
+			missingProfiles.push(profile);
+			observations.push({ profile, path: linkPath, status: "MISSING" });
+			continue;
+		}
+		if (parentState === "unsafe") {
+			unverifiedProfiles.push(profile);
+			observations.push({ profile, path: linkPath, status: "UNVERIFIED", reason: "plugin parent path is unsafe" });
+			continue;
+		}
+		try {
+			const stat = lstatSync(linkPath);
+			if (stat.isSymbolicLink()) {
+				let target: string;
+				try { target = realpathSync(linkPath); }
+				catch {
+					staleProfiles.push(profile);
+					observations.push({ profile, path: linkPath, status: "STALE", target: null, reason: "plugin symlink is broken" });
+					continue;
+				}
+				const current = target === installedRoot;
+				observations.push({ profile, path: linkPath, status: current ? "CURRENT" : "STALE", target,
+					...(current ? {} : { reason: "plugin symlink points to a different release" }) });
+				if (!current) staleProfiles.push(profile);
+			} else if (stat.isDirectory()) {
+				const actualHash = pluginPackageHash(resolve(linkPath));
+				const current = actualHash === installedHash;
+				observations.push({ profile, path: linkPath, status: current ? "CURRENT" : "STALE", package_sha256: actualHash,
+					...(current ? {} : { reason: "copied plugin package differs from installed release" }) });
+				if (!current) staleProfiles.push(profile);
+			} else {
+				unverifiedProfiles.push(profile);
+				observations.push({ profile, path: linkPath, status: "UNVERIFIED", reason: "plugin path is neither a directory nor a symlink" });
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				missingProfiles.push(profile);
+				observations.push({ profile, path: linkPath, status: "MISSING" });
+			} else {
+				unverifiedProfiles.push(profile);
+				observations.push({ profile, path: linkPath, status: "UNVERIFIED", reason: errorText(error) });
+			}
+		}
+	}
+	const status = staleProfiles.length ? "FAIL" : unverifiedProfiles.length || inventoryIssue ? "UNVERIFIED" : missingProfiles.length ? "DEGRADED" : "OK";
+	const reason = staleProfiles.length
+		? `Plugin links for profile(s) ${staleProfiles.join(", ")} differ from installed release ${installedRoot}`
+		: missingProfiles.length ? `Kit plugin is not installed for profile(s) ${missingProfiles.join(", ")}`
+			: unverifiedProfiles.length || inventoryIssue ? `Plugin link inspection is incomplete${inventoryIssue ? `: ${inventoryIssue}` : ` for profile(s) ${unverifiedProfiles.join(", ")}`}`
+				: "All covered profile plugin links match the installed release";
+	const recommendedAction = staleProfiles.length || missingProfiles.length
+		? "Run omp-kit apply plugin --apply --yes --profiles all --include-default; retain the plugin receipt so the relink can be undone."
+		: unverifiedProfiles.length || inventoryIssue ? "Resolve the unsafe or incomplete profile-path inspection, then rerun omp-kit doctor." : "No action required.";
+	return finding("plugin_links", status, reason, recommendedAction, {
+		release_root: installedRoot, expected_package_sha256: installedHash, links: observations,
+		stale_profiles: staleProfiles, missing_profiles: missingProfiles, unverified_profiles: unverifiedProfiles,
+		...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}),
+	});
 }
 type ProjectConfig = { override?: "EMPTY_ARRAY"; disabledRules?: string[]; issue?: string };
 function inspectProjectConfig(project?: string): ProjectConfig {
@@ -1192,6 +1287,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		}
 	}
 	const profiles = inspectProfiles(home);
+	rows.push(inspectPluginLinks(root, home));
 	const effectiveOmpEvidence = rows.find(row => row.component === "omp")?.evidence;
 	let kitVersion: string | null = null;
 	try {
