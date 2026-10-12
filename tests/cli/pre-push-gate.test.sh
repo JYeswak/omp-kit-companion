@@ -309,5 +309,40 @@ if [ "$rc" = "5" ] && [ "$(leftover "$repo")" = "0" ]; then
 else
 	fail=$((fail + 1)); printf 'FAIL red-leaves-no-extract-keeps-rc: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
 fi
+
+# ompkit-fp72.40: a symlink inside the extract (a kit-update test fixture's prefix/bin/omp-kit link)
+# kept its parent dirs non-empty, so cleanup that deleted only regular files left the whole tree.
+repo=$(mkrepo cleansymlink 'a=$2; mkdir -p "$a/var/agent-tmp/kit-update-x/prefix/bin"; ln -s ../releases/0.2.3/bin/omp-kit "$a/var/agent-tmp/kit-update-x/prefix/bin/omp-kit"; echo BASE-GATE' 'echo HEAD-GATE')
+rc=$(run_adapter "$repo")
+if [ "$rc" = "0" ] && [ "$(leftover "$repo")" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL symlink-tree-leaves-no-extract: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
+fi
+
+# ompkit-fp72.40 planted negative: SIGKILL skips the trap, so the extract survives; it must carry an
+# .owner naming the dead gate pid in a pid-named dir, and the real scratch reaper must judge it REAP.
+repo=$(mkrepo killed 'echo $$ > "$GATE_PIDFILE"; exec sleep 30' 'echo HEAD-GATE')
+printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/killed.in"
+rm -f "$TMP/gate.pid"
+( cd -- "$repo" && GATE_PIDFILE="$TMP/gate.pid" exec sh "$ADAPTER" ) < "$TMP/killed.in" > "$TMP/killed.out" 2>&1 &
+apid=$!
+i=0
+while [ ! -s "$TMP/gate.pid" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+kill -9 "$apid" 2>/dev/null
+[ -s "$TMP/gate.pid" ] && kill -9 "$(cat "$TMP/gate.pid")" 2>/dev/null
+wait "$apid" 2>/dev/null
+verdicts=""
+for owned in "$repo"/var/agent-tmp/pre-push-gate.$apid.* "$repo"/var/agent-tmp/pre-push-gate-base.$apid.*; do
+	[ -d "$owned" ] || { verdicts="$verdicts missing"; continue; }
+	grep -qx "pid=$apid" "$owned/.owner" || { verdicts="$verdicts no-owner-pid"; continue; }
+	v=$(OMP_KIT_SCRATCH_ROOTS="$repo/var/agent-tmp" bun "$KITREPO/src/cli.ts" scratch plan --json 2>>"$TMP/plan.err" | jq -r --arg d "$owned" '[.. | objects | select(.dir? == $d) | .action] | first // "absent"')
+	verdicts="$verdicts $v"
+done
+if [ -s "$TMP/gate.pid" ] && [ "$verdicts" = " REAP REAP" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL killed-gate-extract-reapable: verdicts=%s plan-stderr<<<%s>>> out<<<%s>>>\n' "$verdicts" "$(cat "$TMP/plan.err" 2>/dev/null)" "$(cat "$TMP/killed.out" 2>/dev/null)"
+fi
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

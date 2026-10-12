@@ -33,15 +33,36 @@ case "${remote_sha:-}" in
 		;;
 	*) base_ref=$remote_sha ;;
 esac
-archive=$(mktemp -d "$ROOT/var/agent-tmp/pre-push-gate.XXXXXX")
-base_archive=""
+# Each extract lives inside a reaper-owned dir (ompkit-fp72.40): the name carries this shell's pid
+# and .owner records it, so a gate killed by SIGKILL (which skips the trap) leaves a dir the scratch
+# reaper takes once this pid is dead, instead of an ownerless tree held for 72 h.
+owned_dir() {
+	dir=$(mktemp -d "$ROOT/var/agent-tmp/$1.$$.XXXXXX") || return 1
+	start=$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+	created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	if [ -n "$start" ]; then
+		printf 'pid=%s\nprocess_start=%s\nlabel=%s\nrepo=%s\ncreated_at=%s\nargv0=%s\n' "$$" "$start" "$1" "$ROOT" "$created" "$0" > "$dir/.owner"
+	else
+		printf 'pid=%s\nlabel=%s\nrepo=%s\ncreated=%s\n' "$$" "$1" "$ROOT" "$created" > "$dir/.owner"
+	fi
+	mkdir "$dir/tree"
+	printf '%s' "$dir"
+}
+archive_root=""
+base_root=""
+# Every non-directory goes (files, symlinks, sockets): a symlink left by a test fixture kept
+# its parents non-empty, so the whole extract survived (pre-push-gate.vx9qma, 2026-10-12).
 cleanup() {
-	for dir in "$archive" ${base_archive:+"$base_archive"}; do
-		find "$dir" -type f -delete 2>/dev/null || true
+	for dir in ${archive_root:+"$archive_root"} ${base_root:+"$base_root"}; do
+		[ -d "$dir" ] || continue
+		chmod -R u+w "$dir" 2>/dev/null || true
+		find "$dir" ! -type d -delete 2>/dev/null || true
 		find "$dir" -depth -type d -empty -delete 2>/dev/null || true
 	done
 }
 trap cleanup EXIT HUP INT TERM
+archive_root=$(owned_dir pre-push-gate) || { printf 'pre-push-gate: cannot stage archive\n' >&2; exit 1; }
+archive="$archive_root/tree"
 git -C "$ROOT" archive "$local_sha" | tar -xf - -C "$archive"
 set -- --archive-dir "$archive"
 if [ -n "${base_ref:-}" ]; then
@@ -59,7 +80,8 @@ if [ -n "${base_ref:-}" ]; then
 fi
 gate_scripts="$archive"
 if [ -n "${base_ref:-}" ]; then
-	base_archive=$(mktemp -d "$ROOT/var/agent-tmp/pre-push-gate-base.XXXXXX") || { printf 'pre-push-gate: cannot stage base archive\n' >&2; exit 1; }
+	base_root=$(owned_dir pre-push-gate-base) || { printf 'pre-push-gate: cannot stage base archive\n' >&2; exit 1; }
+	base_archive="$base_root/tree"
 	git -C "$ROOT" archive "$base_ref" | tar -xf - -C "$base_archive" || { printf 'pre-push-gate: cannot extract base archive\n' >&2; exit 1; }
 	gate_scripts="$base_archive"
 fi
