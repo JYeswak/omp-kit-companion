@@ -16,8 +16,8 @@ name: Release train
 #   CHANGELOG.md [Unreleased], promotes it to `## [X.Y.Z] - DATE`, sets both
 #   package.json versions, and commits `chore: bump version to X.Y.Z` on the
 #   SHA. Nothing to release (no entries, no fragments) skips: no tag, never an
-#   empty release body. The bump and tag vX.Y.Z are pushed atomically, and
-#   release.yml is dispatched at the tag; it reuses the green CI of the bump's
+#   release.yml is dispatched from main head with the bump SHA (a tag-head run
+#   completion would never fire the publish job); it reuses the green CI of the
 #   parent (`release-train.sh evidence-sha`) and refuses a tag whose
 #   package.json or CHANGELOG section does not match.
 # - The candidate release completing green -> publish job reads the version
@@ -211,7 +211,10 @@ jobs:
           if [[ "$remote_main" != "$SHA" ]]; then echo "train skips this SHA: main moved to $remote_main; the newer train releases it"; exit 0; fi
           # The bump is a fast-forward of the green SHA; branch and tag land together or not at all.
           git push --atomic origin "$BUMP_SHA:refs/heads/main" "$BUMP_SHA:refs/tags/v$VERSION"
-          gh workflow run release.yml --ref "v$VERSION" -f version="$VERSION"
+          # Dispatch from main head (ompkit-dj7d): a tag-head run completion is never delivered,
+          # so the publish job would never fire. The sha input pins the exact bump commit; the
+          # candidate identity refuses unless the tag names it and the run started on it.
+          gh workflow run release.yml --ref main -f version="$VERSION" -f sha="$BUMP_SHA"
 
   publish:
     if: >-

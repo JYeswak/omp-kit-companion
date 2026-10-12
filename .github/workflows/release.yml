@@ -138,7 +138,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$SOURCE_SHA" = "$GITHUB_SHA"
           printf 'source_sha=%s\n' "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          if [[ "$REHEARSAL" == "true" || -n "$SOURCE_SHA_INPUT" ]]; then
+          if [[ -n "$SOURCE_SHA_INPUT" ]] && git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            # Train dispatch (ompkit-dj7d): the run is on main head but the tag names exactly the
+            # dispatched SHA, so this is a real release, not a rehearsal. Anything else refuses.
+            test "$GITHUB_REF" = "refs/heads/main"
+            test "$(git rev-parse "refs/tags/v$VERSION^{commit}")" = "$SOURCE_SHA" || { echo "v$VERSION does not name $SOURCE_SHA" >&2; exit 1; }
+            printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          elif [[ "$REHEARSAL" == "true" || -n "$SOURCE_SHA_INPUT" ]]; then
             test "$GITHUB_REF" = "refs/heads/main"
             if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
               echo "v$VERSION is already tagged; a candidate needs an unspent version" >&2
