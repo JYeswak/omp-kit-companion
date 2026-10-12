@@ -633,3 +633,37 @@ test("barrier usage: missing barrier config, bad phase or round, missing state d
 		expect(run(["barrier", "--config", configured, ...args]).code).toBe(2);
 	}
 });
+
+// ---- MISSION: PROPOSED (decisions Q9) -----------------------------------------------------------
+
+const PROPOSED_LINES = GOOD_LINES.replace("MISSION: README.md:3", "MISSION: PROPOSED");
+const PROPOSED_JSON = { ...GOOD_JSON, mission: "PROPOSED", mission_proposed: "Ship the demo to every user." };
+const NO_MISSION_DOCS = { "README.md": "# Demo\n\nNo mission stated yet.\n" };
+
+function validateCli(name: string, raw: RawBundle, body: string): { code: number | null; report: { status: string; errors: string[] } } {
+	const config = join(workspace, "proposed-config.json");
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } }, approver: "Op" }));
+	const path = join(workspace, `${name}.md`);
+	writeFileSync(path, body);
+	const result = run(["validate", "--config", config, "--project", "demo", "--raw", rawFile(name, raw), "--report", path, "--now", iso(NOW)]);
+	return { code: result.code, report: JSON.parse(result.out).report };
+}
+
+test("round 0: MISSION: PROPOSED with its drafted text is ACCEPTED where the repo states no mission", () => {
+	const raw = bundle(CLEAN, READY, { docs: NO_MISSION_DOCS });
+	const verdict = validateReport(report(PROPOSED_LINES, PROPOSED_JSON), measuredFor(raw), "demo");
+	expect(verdict.errors).toEqual([]);
+	expect(verdict.fields).toMatchObject({ mission: "PROPOSED", mission_proposed: "Ship the demo to every user." });
+	expect(validateCli("proposed", raw, report(PROPOSED_LINES, PROPOSED_JSON)).report).toMatchObject({ status: "ACCEPTED", errors: [] });
+});
+
+test("planted: PROPOSED without text, after round 0, beside a stated mission, or text without PROPOSED -> REJECTED", () => {
+	const raw = bundle(CLEAN, READY, { docs: NO_MISSION_DOCS });
+	expect(validateReport(report(PROPOSED_LINES, { ...PROPOSED_JSON, mission_proposed: " " }), measuredFor(raw), "demo").errors).toEqual(["MISSION: PROPOSED needs the drafted mission text in json.mission_proposed"]);
+	expect(validateReport(report(PROPOSED_LINES.replace("ROUND: 0", "ROUND: 1"), { ...PROPOSED_JSON, round: 1 }), measuredFor(raw), "demo").errors).toEqual(["MISSION: PROPOSED is accepted in round 0 only; cite the approved mission as path:line"]);
+	expect(validateReport(report(GOOD_LINES, { ...GOOD_JSON, mission_proposed: "x" }), measuredFor(bundle(CLEAN, READY)), "demo").errors).toEqual(["json.mission_proposed is set but MISSION is not PROPOSED"]);
+	expect(validateReport(report(GOOD_LINES.replace("MISSION: README.md:3", "MISSION: TBD"), { ...GOOD_JSON, mission: "TBD" }), measuredFor(raw), "demo").errors).toEqual(['mission "TBD" is neither a path:line citation nor PROPOSED']);
+	const stated = validateCli("proposed-stated", bundle(CLEAN, READY), report(PROPOSED_LINES, PROPOSED_JSON));
+	expect(stated.code).toBe(1);
+	expect(stated.report.errors).toEqual(["field mission: report says PROPOSED, but the repo states a mission at README.md:3; cite it"]);
+});

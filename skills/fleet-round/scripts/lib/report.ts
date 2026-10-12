@@ -11,6 +11,8 @@ export const PHASES = ["insight", "agree", "execute", "measure", "validate"];
 export const STATUSES = ["done", "warn", "blocked"];
 const SINGLE = ["ROUND", "PROJECT", "SEAT", "PHASE", "STATUS", "MISSION", "FOCUS"];
 const REQUIRED = ["ROUND", "PROJECT", "SEAT", "PHASE", "STATUS"];
+/** MISSION value of a director-drafted mission awaiting approval (decisions Q9: round 0 only); the text is json.mission_proposed. */
+export const PROPOSED = "PROPOSED";
 
 export type Labeled = { key: string; id: string | null; value: string; line: number };
 export type ClaimCheck = { id: string; metric: string; reported: string; measured: number | null; status: "VERIFIED" | "MISMATCH" | "UNVERIFIABLE"; evidence: string };
@@ -18,7 +20,7 @@ export type ReportVerdict = {
 	status: "ACCEPTED" | "REJECTED" | "UNVERIFIED";
 	errors: string[];
 	unverified: string[];
-	fields: { round: number | null; project: string | null; seat: string | null; phase: string | null; status: string | null; mission: string | null; focus: string[] | null };
+	fields: { round: number | null; project: string | null; seat: string | null; phase: string | null; status: string | null; mission: string | null; mission_proposed: string | null; focus: string[] | null };
 	claims: ClaimCheck[];
 	predictions: { id: string; text: string; metric: string | null }[];
 };
@@ -45,7 +47,7 @@ export function labeledLines(markdown: string): { lines: Labeled[]; errors: stri
 export function validateReport(markdown: string, measured: Record<string, number>, expectedProject: string | null): ReportVerdict {
 	const errors: string[] = [];
 	const unverified: string[] = [];
-	const fields: ReportVerdict["fields"] = { round: null, project: null, seat: null, phase: null, status: null, mission: null, focus: null };
+	const fields: ReportVerdict["fields"] = { round: null, project: null, seat: null, phase: null, status: null, mission: null, mission_proposed: null, focus: null };
 	const claims: ClaimCheck[] = [];
 	const predictions: ReportVerdict["predictions"] = [];
 	const done = (): ReportVerdict => ({ status: errors.length > 0 ? "REJECTED" : unverified.length > 0 ? "UNVERIFIED" : "ACCEPTED", errors, unverified, fields, claims, predictions });
@@ -101,15 +103,23 @@ export function validateReport(markdown: string, measured: Record<string, number
 	if (fields.status !== null && !STATUSES.includes(fields.status)) errors.push(`status ${JSON.stringify(fields.status)} is not one of ${STATUSES.join("|")}`);
 	if (expectedProject !== null && fields.project !== null && fields.project !== expectedProject) errors.push(`project ${JSON.stringify(fields.project)} is not the project under validation (${expectedProject})`);
 
-	// mission citation (optional, both sides or neither)
+	// mission citation, or PROPOSED with its drafted text in round 0 (optional, both sides or neither)
 	const missionLine = single.MISSION?.value;
 	if ((missionLine === undefined) !== (json.mission === undefined)) errors.push(`field mission present on only one side (line MISSION ${missionLine === undefined ? "absent" : "present"}, json.mission ${json.mission === undefined ? "absent" : "present"})`);
 	else if (missionLine !== undefined) {
 		if (typeof json.mission !== "string") errors.push("json.mission is not a path:line string");
 		else if (json.mission !== missionLine) errors.push(`field mission disagrees: line MISSION says ${JSON.stringify(missionLine)}, json.mission says ${JSON.stringify(json.mission)}`);
-		else if (!matchLine(CITATION, missionLine)) errors.push(`mission ${JSON.stringify(missionLine)} is not a path:line citation`);
+		else if (missionLine === PROPOSED) {
+			if (fields.round !== 0) errors.push(`MISSION: ${PROPOSED} is accepted in round 0 only; cite the approved mission as path:line`);
+			else if (typeof json.mission_proposed !== "string" || json.mission_proposed.trim() === "") errors.push(`MISSION: ${PROPOSED} needs the drafted mission text in json.mission_proposed`);
+			else {
+				fields.mission = PROPOSED;
+				fields.mission_proposed = json.mission_proposed.trim();
+			}
+		} else if (!matchLine(CITATION, missionLine)) errors.push(`mission ${JSON.stringify(missionLine)} is neither a path:line citation nor ${PROPOSED}`);
 		else fields.mission = missionLine;
 	}
+	if (json.mission_proposed !== undefined && missionLine !== PROPOSED) errors.push(`json.mission_proposed is set but MISSION is not ${PROPOSED}`);
 
 	// focus (optional, both sides or neither)
 	const focusLine = single.FOCUS?.value;

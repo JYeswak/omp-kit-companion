@@ -62,7 +62,7 @@ CLAIM C1: in_progress = 7
 }
 ```
 
-`ROUND`, `PROJECT`, `SEAT`, `PHASE` (`insight|agree|execute|measure|validate`) and `STATUS` (`done|warn|blocked`) are required on both sides. `MISSION` and `FOCUS` are optional but, when present, must be on both sides. Every `CLAIM` line needs a `claims[]` entry with metric, scalar value and an evidence command, and vice versa; the same holds for `PREDICTION` and `predictions[]`.
+`ROUND`, `PROJECT`, `SEAT`, `PHASE` (`insight|agree|execute|measure|validate`) and `STATUS` (`done|warn|blocked`) are required on both sides. `MISSION` and `FOCUS` are optional but, when present, must be on both sides. In round 0 only, a repo that states no mission may report `MISSION: PROPOSED` with the drafted text in `"mission_proposed"` (the director drafts, the approver approves at the round-0 summary); a repo that already states one must cite it. Every `CLAIM` line needs a `claims[]` entry with metric, scalar value and an evidence command, and vice versa; the same holds for `PREDICTION` and `predictions[]`.
 
 The report is **REJECTED** when: the json block is missing, malformed or duplicated (a second block anywhere, including inside a list); a required field is missing or duplicated; a line and the JSON disagree (the error names the field and both values); a labeled line is not verbatim in the source (inline markdown or escapes); `MISSION` cites anything but the validator's own mission location; or a claim differs from the validator's recomputation (the error names the claim and both values). A claim on a metric the validator cannot recompute makes the report **UNVERIFIED**, never ACCEPTED.
 

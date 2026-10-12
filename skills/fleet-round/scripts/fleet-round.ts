@@ -19,7 +19,7 @@ import { BARRIER_PHASES, type BarrierPhase, collect, type Config, loadConfig } f
 import { HELD_STATUSES, isRecord, parseSeats, parseTracker, type RawBundle } from "./lib/model.ts";
 import { matchLine, ROUND_NUMBER } from "./lib/patterns.ts";
 import { loadMeasured, loadPredictionDoc, scoreAll } from "./lib/predictions.ts";
-import { type ReportVerdict, validateReport } from "./lib/report.ts";
+import { PROPOSED, type ReportVerdict, validateReport } from "./lib/report.ts";
 
 const USAGE = "usage: fleet-round.ts collect|check|validate|snapshot|spot-check|score|barrier [flags]; see the header of this file";
 
@@ -177,7 +177,10 @@ function validateWith(report: string, bundle: RawBundle, config: Config, options
 	if (checked.fields.mission !== null) {
 		const mission = verdict.checks.find(c => c.name === "mission")!;
 		const cited = (mission.data?.missions as { citation: string }[] | undefined)?.map(m => m.citation) ?? [];
-		if (!cited.includes(checked.fields.mission)) checked.errors.push(`field mission: report cites ${checked.fields.mission}, validator found ${cited.join(", ") || "no mission"}`);
+		if (checked.fields.mission === PROPOSED) {
+			// A draft is for a repo with no stated mission; one that states a mission must cite it.
+			if (cited.length > 0) checked.errors.push(`field mission: report says ${PROPOSED}, but the repo states a mission at ${cited.join(", ")}; cite it`);
+		} else if (!cited.includes(checked.fields.mission)) checked.errors.push(`field mission: report cites ${checked.fields.mission}, validator found ${cited.join(", ") || "no mission"}`);
 		if (checked.errors.length > 0) checked.status = "REJECTED";
 	}
 	return { ...verdict, report: checked };
