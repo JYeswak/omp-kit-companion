@@ -17,13 +17,13 @@ name: Release train
 #   package.json versions, and commits `chore: bump version to X.Y.Z` on the
 #   SHA. Nothing to release (no entries, no fragments) skips: no tag, never an
 #   empty release.
-# - Two stages, no circularity (ompkit-fp72.49): stage 1 pushes the bump commit
-#   to main UNTAGGED with a `refs/train/pending-vX.Y.Z` ref recording the bump
-#   SHA; that SHA's own push run certifies it (native-cert for every shipped
-#   platform/track). Stage 2 (tag-after-green) creates the tag ON that exact SHA
-#   only after its run is green, then dispatches the candidate, which recertifies
-#   the final release-version artifacts. Red/cancelled/running => no tag, reason logged.
-# - Stage 2 dispatches release.yml from main head with the bump SHA (a tag-head run
+# - No circularity (ompkit-fp72.49, fp72.65): the train pushes the bump commit
+#   to main UNTAGGED. GITHUB_TOKEN pushes start no push workflow, so the bump
+#   is certified by calling CI on it inside this run (full native set), and a
+#   tag job verifies every native receipt records the bump SHA before creating
+#   the tag ON that exact SHA and dispatching the candidate, which recertifies
+#   the final release-version artifacts.
+# - release.yml is dispatched from main head with the bump SHA (a tag-head run
 #   completion would never fire the publish job); it reuses the green CI of the
 #   parent (`release-train.sh evidence-sha`) and refuses a tag whose
 #   package.json or CHANGELOG section does not match.
@@ -203,7 +203,7 @@ jobs:
           cat "$RUNNER_TEMP/release-notes.md"
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Push the bump commit untagged with its pending ref (stage 1 of 2)
+      - name: Push the bump commit untagged (certified inline below)
         if: steps.bump.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -221,16 +221,10 @@ jobs:
           fi
           remote_main="$(git ls-remote origin refs/heads/main | cut -f1)"
           if [[ "$remote_main" != "$SHA" ]]; then echo "train skips this SHA: main moved to $remote_main; the newer train releases it"; exit 0; fi
-          # Stage 1 of the 2-stage train (ompkit-fp72.49): the bump lands on main WITHOUT a tag.
-          # Its own push run certifies that exact SHA; stage 2 (tag-after-green) tags it only on
-          # green, matching the CI head_sha to the recorded bump SHA, then dispatches the candidate.
-          # The pending ref records which SHA the train bumped. Stale pending refs from superseded
-          # trains are deleted in the same atomic push so stage 2 never matches an older bump.
-          pending="refs/train/pending-v$VERSION"
-          stale="$(git ls-remote origin 'refs/train/pending-v*' | awk -v keep="$pending" '$2 != keep { print ":"$2 }')"
-          # The bump is a fast-forward of the green SHA; branch and pending ref land together or not at all.
-          # shellcheck disable=SC2086
-          git push --atomic origin "$BUMP_SHA:refs/heads/main" "$BUMP_SHA:$pending" $stale
+          # The bump lands on main WITHOUT a tag (fp72.65: a token push starts
+          # no push workflow). The certify-bump job below calls CI on this exact
+          # SHA; the tag job tags it only on green receipts, then dispatches.
+          git push origin "$BUMP_SHA:refs/heads/main"
 
   certify-bump:
     # fp72.65: GITHUB_TOKEN pushes start no push workflow, so the bump is
