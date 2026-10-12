@@ -76,6 +76,11 @@ jobs:
     permissions:
       contents: write
       actions: write
+    outputs:
+      go: ${{ steps.redecide.outputs.go }}
+      version: ${{ steps.version.outputs.version }}
+      bump_sha: ${{ steps.bump.outputs.bump_sha }}
+      release: ${{ steps.bump.outputs.release }}
     steps:
       - name: Resolve the candidate SHA and its CI verdict
         id: event
@@ -226,6 +231,56 @@ jobs:
           # The bump is a fast-forward of the green SHA; branch and pending ref land together or not at all.
           # shellcheck disable=SC2086
           git push --atomic origin "$BUMP_SHA:refs/heads/main" "$BUMP_SHA:$pending" $stale
+
+  certify-bump:
+    # fp72.65: GITHUB_TOKEN pushes start no push workflow, so the bump is
+    # certified by calling CI on it inside this run (full native set; a fresh
+    # bump sha has nothing reusable, so reuse_fast_ci is false). Cost per
+    # bump is one candidate-class run (~16 min macOS critical path).
+    needs: [train]
+    if: ${{ github.event.repository.private == false && inputs.rehearsal != 'true' && needs.train.outputs.release == 'true' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.train.outputs.version }}
+      source_sha: ${{ needs.train.outputs.bump_sha }}
+      reuse_fast_ci: false
+    permissions:
+      contents: read
+
+  tag-certified-bump:
+    needs: [train, certify-bump]
+    if: ${{ github.event.repository.private == false && inputs.rehearsal != 'true' && needs.train.outputs.release == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Download the native receipts this run recorded
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: native-receipt-*
+          path: receipts/
+          merge-multiple: true
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Prove the receipts certify this bump, then tag it and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.train.outputs.version }}
+          BUMP_SHA: ${{ needs.train.outputs.bump_sha }}
+        run: |
+          set -euo pipefail
+          sh scripts/verify-bump-cert.sh --version "$VERSION" --sha "$BUMP_SHA" --receipts receipts/
+          # Tag the exact certified SHA and retire its pending ref together or not at all.
+          git push --atomic origin "$BUMP_SHA:refs/tags/v$VERSION" ":refs/train/pending-v$VERSION"
+          # Dispatch from main head (ompkit-dj7d): a tag-head run completion is never delivered,
+          # so the publish job would never fire. The sha input pins the exact bump commit; the
+          # candidate identity refuses unless the tag names it and the run started on it.
+          gh workflow run release.yml --ref main -f version="$VERSION" -f sha="$BUMP_SHA"
 
   publish:
     if: >-
