@@ -394,9 +394,34 @@ test("update derives the N+2 fast denominator from the manifest-bound case corpu
 		observed_cases: candidate.targetCases, observed_quiet_cases: candidate.targetQuiet });
 
 	const updated = await applyKitUpdate(plan);
+	const report = updated.postcheck.report;
+	const liveLines = [report?.producer.stdout, report?.producer.stderr]
+		.flatMap(output => output?.split("\n") ?? []);
+	const scenarioStart = liveLines.findIndex(line => line.includes("started scenario=settings-no-checkout-remedy"));
+	const scenarioOutput = scenarioStart < 0 ? liveLines.filter(line => line.includes("settings-no-checkout-remedy"))
+		: liveLines.slice(scenarioStart, Math.min(scenarioStart + 80, liveLines.findIndex((line, index) =>
+			index > scenarioStart && line.includes("FAIL  settings-no-checkout-remedy")) + 1 || scenarioStart + 80));
+	const scenarioText = scenarioOutput.join("\n");
+	const readinessStageEnd = liveLines.findIndex(line => line.startsWith("GREEN readiness-selftest producer_rc="));
+	const liveStageEnd = liveLines.findIndex((line, index) => index > readinessStageEnd &&
+		line.startsWith("RED   e2e-live producer_rc="));
+	const stageStdout = readinessStageEnd < 0 ? scenarioText : liveLines
+		.slice(readinessStageEnd + 1, liveStageEnd < 0 ? liveLines.length : liveStageEnd).join("\n");
+	const policyFailure = liveLines.filter(line => line.includes("POLICY_PLAN_FAILED") ||
+		line.includes("cause_code") || line.includes("cause_message")).join("\n").slice(0, 400);
+	let diagnosticArtifact: string | null = null;
+	if (report && updated.postcheck.status !== "PASS") {
+		diagnosticArtifact = mkdtempSync(join(scratch, `fp72-41-nplus2.${process.pid}.`));
+		writeFileSync(join(diagnosticArtifact, ".owner"), `pid=${process.pid}\nlabel=fp72-41-nplus2\n` +
+			`repo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`);
+		writeFileSync(join(diagnosticArtifact, "producer.stdout"), report.producer.stdout);
+		writeFileSync(join(diagnosticArtifact, "producer.stderr"), report.producer.stderr);
+	}
 	expect(updated.status, JSON.stringify({ reason: updated.postcheck.reason, matcher: updated.postcheck.matcher,
-		live: updated.postcheck.live, failures: updated.postcheck.report?.failures,
-		fastFailures: updated.postcheck.report?.fast.failures, stages: updated.postcheck.report?.stages })).toBe("UPDATED");
+		live: updated.postcheck.live, failures: report?.failures,
+		fastFailures: report?.fast.failures, stages: report?.stages,
+		e2eLiveOutput: { stdout: stageStdout.slice(0, 400), producerStderr: report?.producer.stderr.slice(0, 400) ?? "" },
+		policyFailure, diagnosticArtifact })).toBe("UPDATED");
 	expect(updated.postcheck.status).toBe("PASS");
 	expect(updated.postcheck.report?.fast.proofs.G2_payload).toMatchObject({ status: "PASS",
 		expected_cases: candidate.targetCases, observed_cases: candidate.targetCases });
