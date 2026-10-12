@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedOmpPackage, ensureOmpSource } from "../../src/omp-source-cache.ts";
@@ -120,4 +120,57 @@ test("gate resolver: a compiled launcher alone takes the cache's src; without a 
 		.toBe(join(pkg, "src"));
 	expect(() => resolveOmpSource({ env: { PATH, BUN_INSTALL: join(base, "no-bun") }, launcherVersion: () => "9.9.9", sourceCache: () => null }))
 		.toThrow("cannot locate the omp 9.9.9 package source");
+});
+
+/** A Tern-managed omp: versions/9.9.9 binary beside state.json, plus an unverified omp-src package. */
+function ternManaged(stated: string | null, pkgVersion: string | null, matcher = true): { path: string; cache: string } {
+	const app = join(base, `tern-${++n}`);
+	mkdirSync(join(app, "bin"), { recursive: true });
+	mkdirSync(join(app, "versions"), { recursive: true });
+	writeFileSync(join(app, "versions", "9.9.9"), `#!/bin/sh\necho "omp/9.9.9"\n`);
+	chmodSync(join(app, "versions", "9.9.9"), 0o755);
+	symlinkSync("../versions/9.9.9", join(app, "bin", "omp"));
+	if (stated !== null) writeFileSync(join(app, "state.json"), JSON.stringify({ installed: { version: stated } }));
+	const cache = join(base, `tern-cache-${n}`);
+	if (pkgVersion !== null) {
+		const pkg = join(cache, "9.9.9", ...PKG);
+		for (const dir of ["export", "capability", "discovery"]) mkdirSync(join(pkg, "src", dir), { recursive: true });
+		mkdirSync(join(cache, "9.9.9", "node_modules", "@oh-my-pi", "pi-natives"), { recursive: true });
+		writeFileSync(join(cache, "9.9.9", "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives", version: pkgVersion }));
+		writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: pkgVersion }));
+		for (const file of matcher ? ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"] : ["export/ttsr.ts", "capability/rule.ts"]) {
+			writeFileSync(join(pkg, "src", file), "export {};\n");
+		}
+	}
+	return { path: join(app, "bin"), cache };
+}
+
+test("product resolver: a Tern-managed launcher resolves its corroborated package without the npm receipt", () => {
+	const { path, cache } = ternManaged("9.9.9", "9.9.9");
+	const identity = resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" });
+	expect(identity.source).toBe(realpathSync(join(cache, "9.9.9", ...PKG, "src")));
+});
+
+test("planted: a Tern state.json naming another version still refuses", () => {
+	const { path, cache } = ternManaged("9.9.8", "9.9.9");
+	expect(() => resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }))
+		.toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.9 for OMP launcher");
+});
+
+test("planted: a Tern package manifest naming another version still refuses", () => {
+	const { path, cache } = ternManaged("9.9.9", "9.9.8");
+	expect(() => resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }))
+		.toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.9 for OMP launcher");
+});
+
+test("planted: a Tern layout without state.json still refuses instead of trusting the binary name", () => {
+	const { path, cache } = ternManaged(null, "9.9.9");
+	expect(() => resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }))
+		.toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.9 for OMP launcher");
+});
+
+test("planted: a Tern package missing matcher source still refuses", () => {
+	const { path, cache } = ternManaged("9.9.9", "9.9.9", false);
+	expect(() => resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }))
+		.toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.9 for OMP launcher");
 });

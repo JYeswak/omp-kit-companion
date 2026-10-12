@@ -117,6 +117,39 @@ function launcherVersion(launcher: string, env: Record<string, string | undefine
  * own exact-version source cache (installed from npm on first use). Any other version is refused:
  * matching rules with a different OMP's source is the drift the identity check exists to stop.
  */
+/** A manager-laid-out omp: `<app>/versions/<V>` binary beside a state.json naming it. */
+function ternManagedPackage(launcher: string, version: string | null, env: Record<string, string | undefined>): string | null {
+	if (version === null) return null;
+	let real: string;
+	try {
+		real = realpathSync(launcher);
+	} catch {
+		return null;
+	}
+	if (basename(real) !== version || basename(dirname(real)) !== "versions") return null;
+	let stated: unknown;
+	try {
+		stated = JSON.parse(readFileSync(join(dirname(dirname(real)), "state.json"), "utf8"));
+	} catch {
+		return null;
+	}
+	if (!stated || typeof stated !== "object" || !("installed" in stated) || !stated.installed ||
+		typeof stated.installed !== "object" || !("version" in stated.installed) || stated.installed.version !== version) return null;
+	const root = ompSourceCacheRoot(env);
+	if (!root) return null;
+	const pkg = join(root, version, "node_modules", ...PACKAGE_NAME.split("/"));
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(join(pkg, "package.json"), "utf8"));
+		if (typeof parsed !== "object" || parsed === null || !("name" in parsed) || parsed.name !== PACKAGE_NAME ||
+			!("version" in parsed) || parsed.version !== version) return null;
+	} catch {
+		return null;
+	}
+	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
+		if (!existsSync(join(pkg, "src", file))) return null;
+	}
+	return realpath(pkg, "OMP Tern-managed package");
+}
 function packageRootFor(launcher: string, env: Record<string, string | undefined>): string {
 	const own = enclosingPackage(launcher);
 	if (own) return own.root;
@@ -128,6 +161,8 @@ function packageRootFor(launcher: string, env: Record<string, string | undefined
 		const found = enclosingPackage(candidate);
 		if (found && version !== null && found.version === version) return found.root;
 	}
+	const managed = ternManagedPackage(launcher, version, env);
+	if (managed) return managed;
 	const refusal = `cannot locate ${PACKAGE_NAME} ${version ?? "(unknown version)"} for OMP launcher ${launcher}`;
 	if (version === null || !ompSourceCacheRoot(env)) throw new Error(refusal);
 	try {
