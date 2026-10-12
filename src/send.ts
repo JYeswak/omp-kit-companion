@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -170,6 +170,104 @@ export function composerHasText(capture: string): boolean {
 }
 
 /**
+ * Per-destination serialization (ompkit-fp72.21 items 6-7): one lock file per
+ * target pane so concurrent sends queue behind each other instead of typing
+ * into the same composer. Atomic O_EXCL create; a holder whose pid is gone
+ * (crashed sender) is stolen. Staleness is pid liveness only, never a clock,
+ * so the wait loop stays exact under fake timers.
+ */
+export function paneLockPath(dropDir: string, session: string, pane: string): string {
+	const safe = `${session}-${pane}`.replace(/[^A-Za-z0-9]+/g, "_");
+	return resolve(join(dropDir, "..", "send-locks", `${safe}.lock`));
+}
+
+function lockHolderDead(lockPath: string): boolean {
+	let pid = NaN;
+	try {
+		pid = Number(readFileSync(lockPath, "utf8").split(/\s/, 1)[0]);
+	} catch {
+		return true;
+	}
+	if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+	try {
+		process.kill(pid, 0);
+		return false;
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return true;
+		return false;
+	}
+}
+
+async function acquirePaneLock(lockPath: string, attempts: number, pollMs: number, wait: (ms: number) => Promise<void>): Promise<(() => void) | null> {
+	mkdirSync(dirname(lockPath), { recursive: true });
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		try {
+			writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				try { rmSync(lockPath, { force: true }); } catch {}
+			};
+		} catch (error) {
+			if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EEXIST") throw error;
+			if (lockHolderDead(lockPath)) {
+				try { rmSync(lockPath, { force: true }); } catch {}
+				continue;
+			}
+		}
+		if (attempt + 1 < attempts) await wait(pollMs);
+	}
+	return null;
+}
+
+/**
+ * Sweep pattern (regex-engineering §7: required `kit-send-<12hex>` matches;
+ * `kit-send-xyz`/short/upper reject; a 13-hex run matches its first 12, kept
+ * because only our markers carry the literal prefix and a sweep only
+ * reports; 88 KB near-miss scans in 0.1 ms; regexploit silent).
+ */
+const SWEPT_MARKER = /kit-send-[0-9a-f]{12}/g;
+
+export interface SweptPane {
+	pane: string;
+	markers: string[];
+}
+
+/**
+ * Fleet sweep (ompkit-fp72.21 item 7): capture each pane and report markers
+ * still sitting in a composer region. Scrollback history never counts;
+ * failed captures are skipped, never reported.
+ */
+export async function sweepUnsentMarkers(args: {
+	runTmux: (argv: string[]) => { code: number; out: string };
+	panes: string[];
+}): Promise<{ panes: number; unsent: SweptPane[] }> {
+	const unsent: SweptPane[] = [];
+	let panes = 0;
+	for (const pane of args.panes) {
+		const got = args.runTmux(["capture-pane", "-p", "-S", "-200", "-t", pane]);
+		if (got.code !== 0) continue;
+		panes++;
+		const lines = got.out.split("\n");
+		let composerStart = -1;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i]!.trimStart();
+			if (line.startsWith("╭──")) composerStart = i + 1;
+			if (line.startsWith("─") && lines[i + 1]?.trimStart().startsWith("❯")) composerStart = i + 1;
+		}
+		if (composerStart < 0) continue;
+		const region = lines.slice(composerStart).join("\n");
+		const markers: string[] = [];
+		for (const found of region.match(SWEPT_MARKER) ?? []) {
+			if (!markers.includes(found)) markers.push(found);
+		}
+		if (markers.length > 0) unsent.push({ pane, markers });
+	}
+	return { panes, unsent };
+}
+
+/**
  * Deferred completion (ompkit-fp72.21): a message left sitting in a busy
  * pane's composer is submitted once the pane goes idle, but only while the
  * composer still holds exactly this message (marker match). Never presses
@@ -300,65 +398,98 @@ export async function proveSend(input: {
 	// marker text echoed in the composer. Never press Enter into a slash
 	// command: that would execute it twice.
 	const text = isSlash ? input.message : `${input.message}\n[${marker}]`;
-	if (selection.status === "UNAVAILABLE") {
+	// Per-destination serialization (ompkit-fp72.21 items 6-7): concurrent
+	// sends to this pane queue behind one lock for the whole attempt,
+	// including deferred completion. A lock that outlives the bound is never
+	// acquired: UNDELIVERED with a recovery copy, no keys typed.
+	const lockAttempts = Math.max(1, Math.ceil((untilDeliveredMs > 0 ? untilDeliveredMs : deadlineMs) / pollMs));
+	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.session, input.pane), lockAttempts, pollMs, wait);
+	if (!releaseLock) {
+		const lockDrop = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+		return { status: "UNDELIVERED", marker, sends: 0, drop_path: lockDrop, bead_ids, no_bead_reason, tmux_socket,
+			detail: `pane ${input.pane} stayed locked by another send within the bound; nothing typed, no keys sent` };
+	}
+	try {
+		// Empty-composer admission (ompkit-fp72.21 item 7): on the armed
+		// (fleet) path, never type into a composer that already holds text
+		// (another send or a human draft). Wait within the bound, else
+		// UNDELIVERED with no keys. Plain sends keep the legacy path.
+		if (untilDeliveredMs > 0) {
+			const admitAttempts = Math.max(1, Math.ceil(untilDeliveredMs / pollMs));
+			let admitted = false;
+			for (let i = 0; i < admitAttempts; i++) {
+				const pre = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
+				if (pre.code !== 0 || !composerHasText(pre.out)) { admitted = true; break; }
+				if (i + 1 < admitAttempts) await wait(pollMs);
+			}
+			if (!admitted) {
+				const admitDrop = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+				return { status: "UNDELIVERED", marker, sends: 0, drop_path: admitDrop, bead_ids, no_bead_reason, tmux_socket,
+					detail: `composer of ${input.pane} never emptied within the bound; nothing typed, no keys sent` };
+			}
+		}
+		if (selection.status === "UNAVAILABLE") {
+			const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+			return { status: "NOT_DELIVERED", marker, sends: 0, drop_path: dropPath, bead_ids, no_bead_reason, tmux_socket: null,
+				detail: `no live tmux server found; candidates checked: ${selection.candidates.join(", ")}; message written to ${dropPath}` };
+		}
+		for (let sends = 1; sends <= SEND_MAX_SENDS; sends++) {
+			if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text], sendEnv).code !== 0) continue;
+			const started = Date.now();
+			let entered = false;
+			let markerSeen = false;
+			let receiverActive = false;
+			while (Date.now() - started < deadlineMs) {
+				// Bare pane id: session:pane is parsed as a window and misses.
+				// -S -200 reads scrollback history: a rendered message scrolls off
+				// the visible screen but stays provable in history.
+				const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
+				if (got.code === 0 && (isSlash ? got.out !== slashBaseline : got.out.includes(marker))) {
+					markerSeen = true;
+					if (isSlash) {
+						return { status: "OK", marker, sends, drop_path: null, detail: `command effect observed in ${input.pane} history after ${sends} send(s)`, bead_ids, no_bead_reason, tmux_socket };
+					}
+					// Text typed into the input box but never submitted is not a delivery.
+					if (!markerInComposer(got.out, marker)) {
+						const how = entered ? " after one Enter" : "";
+						const active = receiverActive || paneIsBusy(got.out) ? ", receiver active" : "";
+						return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}${active}`, bead_ids, no_bead_reason, tmux_socket };
+					}
+					// ompkit-rq59: a fast pickup clears the composer on its own.
+					// Never force Enter into a working pane: that submits into
+					// the agent's live turn and the static scrollback then reads
+					// as forever-pending. Only a truly idle pane gets the single
+					// bounded Enter; a busy pane is watched for a self-clear.
+					if (paneIsBusy(got.out)) {
+						receiverActive = true;
+					} else if (!entered && !isSlash) {
+						runTmux(["send-keys", "-t", input.pane, "Enter"]);
+						entered = true;
+					}
+				}
+				await wait(pollMs);
+			}
+			// The text is on the pane: resending or dropping would duplicate it.
+			if (entered) {
+				return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason, tmux_socket };
+			}
+			// Marker visible but the pane stayed busy: the receiver owns the
+			// composer now and Enter was withheld, so this send is unproven.
+			// Report NOT_DELIVERED under the same marker key (no second blind
+			// submit) with a recovery copy instead of a duplicate delivery.
+			if (markerSeen && receiverActive) {
+				const busyDropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
+				if (untilDeliveredMs > 0) {
+					return completeDeferredSend({ runTmux, wait, pollMs, untilDeliveredMs, session: input.session, pane: input.pane,
+						marker, sends, dropPath: busyDropPath, bead_ids, no_bead_reason, tmux_socket });
+				}
+				return { status: "NOT_DELIVERED", marker, sends, drop_path: busyDropPath, detail: `marker stayed in ${input.pane} composer while the pane was busy; Enter withheld to avoid a double submit; recovery copy written to ${busyDropPath}`, bead_ids, no_bead_reason, tmux_socket };
+			}
+		}
 		const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-		return { status: "NOT_DELIVERED", marker, sends: 0, drop_path: dropPath, bead_ids, no_bead_reason, tmux_socket: null,
-			detail: `no live tmux server found; candidates checked: ${selection.candidates.join(", ")}; message written to ${dropPath}` };
+		const tailDetail = isSlash ? `no command effect observed in ${input.pane} history; message written to ${dropPath}` : `marker never appeared in ${input.pane} history; message written to ${dropPath}`;
+		return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: tailDetail, bead_ids, no_bead_reason, tmux_socket };
+	} finally {
+		releaseLock();
 	}
-	for (let sends = 1; sends <= SEND_MAX_SENDS; sends++) {
-		if (exec.run(["ntm", "send", input.session, "--panes=" + input.pane, text], sendEnv).code !== 0) continue;
-		const started = Date.now();
-		let entered = false;
-		let markerSeen = false;
-		let receiverActive = false;
-		while (Date.now() - started < deadlineMs) {
-			// Bare pane id: session:pane is parsed as a window and misses.
-			// -S -200 reads scrollback history: a rendered message scrolls off
-			// the visible screen but stays provable in history.
-			const got = runTmux(["capture-pane", "-p", "-S", "-200", "-t", input.pane]);
-			if (got.code === 0 && (isSlash ? got.out !== slashBaseline : got.out.includes(marker))) {
-				markerSeen = true;
-				if (isSlash) {
-					return { status: "OK", marker, sends, drop_path: null, detail: `command effect observed in ${input.pane} history after ${sends} send(s)`, bead_ids, no_bead_reason, tmux_socket };
-				}
-				// Text typed into the input box but never submitted is not a delivery.
-				if (!markerInComposer(got.out, marker)) {
-					const how = entered ? " after one Enter" : "";
-					const active = receiverActive || paneIsBusy(got.out) ? ", receiver active" : "";
-					return { status: "OK", marker, sends, drop_path: null, detail: `marker seen in ${input.pane} history after ${sends} send(s)${how}${active}`, bead_ids, no_bead_reason, tmux_socket };
-				}
-				// ompkit-rq59: a fast pickup clears the composer on its own.
-				// Never force Enter into a working pane: that submits into
-				// the agent's live turn and the static scrollback then reads
-				// as forever-pending. Only a truly idle pane gets the single
-				// bounded Enter; a busy pane is watched for a self-clear.
-				if (paneIsBusy(got.out)) {
-					receiverActive = true;
-				} else if (!entered && !isSlash) {
-					runTmux(["send-keys", "-t", input.pane, "Enter"]);
-					entered = true;
-				}
-			}
-			await wait(pollMs);
-		}
-		// The text is on the pane: resending or dropping would duplicate it.
-		if (entered) {
-			return { status: "PENDING_SUBMIT", marker, sends, drop_path: null, detail: `marker still unsubmitted in ${input.pane} input box after one Enter`, bead_ids, no_bead_reason, tmux_socket };
-		}
-		// Marker visible but the pane stayed busy: the receiver owns the
-		// composer now and Enter was withheld, so this send is unproven.
-		// Report NOT_DELIVERED under the same marker key (no second blind
-		// submit) with a recovery copy instead of a duplicate delivery.
-		if (markerSeen && receiverActive) {
-			const busyDropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-			if (untilDeliveredMs > 0) {
-				return completeDeferredSend({ runTmux, wait, pollMs, untilDeliveredMs, session: input.session, pane: input.pane,
-					marker, sends, dropPath: busyDropPath, bead_ids, no_bead_reason, tmux_socket });
-			}
-			return { status: "NOT_DELIVERED", marker, sends, drop_path: busyDropPath, detail: `marker stayed in ${input.pane} composer while the pane was busy; Enter withheld to avoid a double submit; recovery copy written to ${busyDropPath}`, bead_ids, no_bead_reason, tmux_socket };
-		}
-	}
-	const dropPath = dropMessage(input.dropDir, input.session, input.pane, marker, input.message);
-	const tailDetail = isSlash ? `no command effect observed in ${input.pane} history; message written to ${dropPath}` : `marker never appeared in ${input.pane} history; message written to ${dropPath}`;
-	return { status: "NOT_DELIVERED", marker, sends: SEND_MAX_SENDS, drop_path: dropPath, detail: tailDetail, bead_ids, no_bead_reason, tmux_socket };
 }

@@ -64,6 +64,7 @@ test("planted: busy then idle completes with one Enter and marker gone", async (
 	try {
 		const dir = dropDir();
 		const pane = scripted([
+			composer(false, null),
 			...Array.from({ length: 20 }, () => composer(true, "hello [MARKER]")),
 			composer(false, "hello [MARKER]"),
 			composer(false, null),
@@ -84,6 +85,7 @@ test("planted: foreign text in an idle composer never gets Enter", async () => {
 	try {
 		const dir = dropDir();
 		const pane = scripted([
+			composer(false, null),
 			...Array.from({ length: 20 }, () => composer(true, "hello [MARKER]")),
 			["h", "╭──", "❯ foreign hands typing"].join("\n"),
 		]);
@@ -102,7 +104,7 @@ test("planted: a pane that never idles reports UNDELIVERED with no keys sent", a
 	vi.useFakeTimers();
 	try {
 		const dir = dropDir();
-		const pane = scripted([composer(true, "hello [MARKER]")]);
+		const pane = scripted([composer(false, null), composer(true, "hello [MARKER]")]);
 		const result = await proveSend({ session: "s", pane: "%1", message: "hello", dropDir: dir,
 			exec: pane.exec, env: testEnv, pollMs: 10, deadlineMs: 60, wait: tick, untilDeliveredMs: 60,
 			knownPrefixes: new Set() });
@@ -119,6 +121,7 @@ test("two queued deferred sends complete in order", async () => {
 		for (const n of [1, 2]) {
 			const dir = dropDir();
 			const pane = scripted([
+				composer(false, null),
 				...Array.from({ length: 20 }, () => composer(true, `message ${n} [MARKER]`)),
 				composer(false, `message ${n} [MARKER]`),
 				composer(false, null),
@@ -145,6 +148,9 @@ test("dispatches complete by default; plain messages still refuse fast when disa
 		expect(busy.taken.enters).toBe(0);
 		const idle = scripted([
 			...Array.from({ length: 20 }, () => composer(true, "D AM1 t-x9 go [MARKER]")),
+			composer(false, "D AM1 t-x9 go [MARKER]"),
+			composer(false, null),
+			...Array.from({ length: 6 }, () => composer(true, "D AM1 t-x9 go [MARKER]")),
 			composer(false, "D AM1 t-x9 go [MARKER]"),
 			composer(false, null),
 		]);
