@@ -91,3 +91,48 @@ Refuted hypotheses and no-ship experiments for omp-kit. Read before changing TTS
   entry keeps the measurement.
 - Ratchet history (2026-10-02): the first MT3 adoption used a checked-in baseline of known breaks (170 ids with per-class reasons) so the existing pack could adopt strict checking without masking new breaks. After Q1/Q2/Q3/W/E fixes drove the measured break set to zero, L1 deleted that baseline and its loader/plumbing. `scripts/ladder.sh` now runs `--metamorphic-json` without an exemption file: every break is a RED, and fixed breaks disappear by fixing the rule/case rather than editing a golden. The current strict run is 304 tool cases / 1866 variants / 0 breaks / 0 stale, with 19 text/thinking prose cases excluded from shell relations by design.
 - Retry condition: re-run the strict metamorphic report after any rule-condition or case edit; any nonzero break blocks the ladder until the behavior is fixed and the relevant fire/quiet case remains explicit.
+
+## NE-11 (2026-10-12) — bounding kit-no-gh-poll separator-scan runs {0,24} is a ~0-gain lever
+- Hypothesis: gh-poll stream cost (48.4 + 39.5 ms of a 171 ms stream) comes from
+  unbounded separator-scan runs `(?:\s|\\[nrt]|\\\\\\[nrt])*` evaluated per
+  separator position; bounding all 8 sites at {0,24} cuts it (micro isolation
+  showed 1.5x on separator-stripped input).
+- Minimal repro / experiment: origin 00ee942a rules plus the 8-site bound
+  (fidelity-proven: diff is exactly eight `*` to `{0,24}`); repo RX1 gate
+  stream section, 5 baseline runs vs 5 candidate runs, same fingerprint
+  (M3 Ultra 32c, Bun 1.4.0, load ~8.6, wire scripts/e2e-live.sh 20819B,
+  1302 deltas/condition).
+- Expected signal (if hypothesis true): gh-poll#0/#1 stream means drop materially.
+- Result (measured, inline): gh-poll#1 48.26 vs 48.42 ms, gh-poll#0 39.12 vs
+  39.48 ms — noise (variance under 1 pct within each arm). Isomorphism held
+  throughout: G2/G3 475/0, metamorphic 448/2359/0, oracle 475/0, gh-poll
+  fire/quiet rows identical 4/4.
+- Verdict: NO-SHIP
+- Retry-condition: a gate by_rule profile shows a condition whose measured cost
+  drops when ONLY its separator runs are bounded (i.e., long separator runs
+  demonstrably dominate that condition on the measured wire), or the matcher
+  gains per-position prefiltering that changes scan economics.
+- Evidence: artifacts var/agent-tmp/ghprof/run1-5.log (baseline) and re1-5.log
+  (candidate); verify log var/agent-tmp/ghprof/verify-harness.log; bead
+  ompkit-fp72.64 comments; file restored to origin, nothing landed.
+
+## NE-12 (2026-10-12) — literal-first lookbehind anchors are refused by native TtsrManager.addRule
+- Hypothesis: moving gh-poll's context prefix into a lookbehind behind a leading
+  `gh` (resp. loopword) literal cuts scan positions ~200x while preserving
+  verdicts (same sublanguages, existential detection).
+- Minimal repro / experiment: anchored rewrites of both gh-poll conditions;
+  repo ttsr-harness --gate G1 registration + G2 rows.
+- Expected signal (if hypothesis true): G1 registers; fire/quiet rows identical.
+- Result (measured, inline): G1 RED — `TtsrManager.addRule refused it: loads
+  and never fires`; both fire rows went quiet (380, 381). Native refuses the
+  shape (variable-length lookbehind anchor) while plain bounded repeats pass.
+  Sibling evidence that anchors CAN pass: settings-gap bound (no lookbehind)
+  and secret noun-anchor both register and hold all rows (landed 00ee942a).
+- Verdict: REFUTED (as a shippable lever on this OMP version)
+- Retry-condition: native TtsrManager.addRule registers a leading
+  variable-length-lookbehind condition (OMP version change), or an anchor
+  restructured into an addRule-accepted shape with a fresh profile showing the
+  win on the gate stream metric.
+- Evidence: harness log var/agent-tmp/streamcost/harness2.log (G1 RED lines
+  541-543); rejected file kept in director scratch rule-restore3.*; bead
+  ompkit-fp72.64 comments.
