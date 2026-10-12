@@ -181,10 +181,11 @@ omp-kit apply extensions --apply --yes --profiles all
   CI.
 - **fleet-round:** the lock-step fleet round protocol and a read-only
   validator for its reports. `scripts/fleet-round.ts` has `collect`,
-  `snapshot`, `check`, `validate`, `spot-check` and `score`: it recomputes
-  each director's claims from br, git, tmux and Agent Mail identity files,
-  checks the round-0 pass bar, and reports UNKNOWN, never PASS, for anything
-  it cannot observe.
+  `snapshot`, `check`, `validate`, `spot-check`, `score` and `barrier`: it
+  recomputes each director's claims from br, git, tmux and Agent Mail identity
+  files, checks the round-0 pass bar, reports UNKNOWN, never PASS, for anything
+  it cannot observe, and at each barrier reports per project whether its report
+  arrived on time and was accepted, escalating a repeated blocker.
 
 ```sh
 python3 skills/fleet-restart/scripts/sitrep.py --selftest

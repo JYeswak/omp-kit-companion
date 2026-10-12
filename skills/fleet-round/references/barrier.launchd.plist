@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- fleet-round barrier timer, one round phase. Template: render the @...@ placeholders and load it
+     as SKILL.md "Barrier timer" says; never installed by the kit. Reads Agent Mail's store and the
+     project trackers read-only; writes only into @ROUND_DIR@. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.omp-kit.fleet-round-barrier</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BUN@</string>
+		<string>run</string>
+		<string>--no-env-file</string>
+		<string>--config=/dev/null</string>
+		<string>@SKILL_DIR@/scripts/fleet-round.ts</string>
+		<string>barrier</string>
+		<string>--config</string>
+		<string>@CONFIG@</string>
+		<string>--round</string>
+		<string>@ROUND@</string>
+		<string>--phase</string>
+		<string>@PHASE@</string>
+		<string>--opened-at</string>
+		<string>@OPENED_AT@</string>
+		<string>--state</string>
+		<string>@ROUND_DIR@</string>
+		<string>--out-json</string>
+		<string>@ROUND_DIR@/barrier-@ROUND@-@PHASE@.json</string>
+		<string>--out-md</string>
+		<string>@ROUND_DIR@/barrier-@ROUND@-@PHASE@.md</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>600</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>WorkingDirectory</key>
+	<string>@ROUND_DIR@</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@PATH@</string>
+		<key>NO_COLOR</key>
+		<string>1</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>@ROUND_DIR@/barrier.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>@ROUND_DIR@/barrier.launchd.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>Umask</key>
+	<integer>63</integer>
+</dict>
+</plist>

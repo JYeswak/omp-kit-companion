@@ -2,7 +2,9 @@
 // on its word: lines and JSON disagree, a claim differs from br, a dead holder's bead counts as
 // active, an orphan or cycle passes, a frontier outside focus passes, or an unobservable holder
 // reads as PASS. Each planted negative below must go RED; the clean bundle must go GREEN so a
-// reject-everything validator also fails.
+// reject-everything validator also fails. Barrier timer: a missing, rejected or late report, or an
+// unreadable source, must keep the barrier from MET, and a repeated blocker must escalate.
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -428,5 +430,206 @@ test("regexes: doubled near-misses stay bounded (linear, capped)", () => {
 		const long = time(2000);
 		expect(matchLine(pattern, make(2000))).toBeNull();
 		expect(long / Math.max(short, 0.5)).toBeLessThan(4);
+	}
+});
+
+// ---- barrier timer -------------------------------------------------------------------------------
+
+// Agent Mail's three tables exactly as `.schema` printed them on the reference host (REA
+// ev_245b51e8..., references/evidence.md), minus triggers and indexes the timer never touches.
+const MAIL_DDL = `
+CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, human_key TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE agents (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL, program TEXT NOT NULL, model TEXT NOT NULL, task_description TEXT NOT NULL DEFAULT '', inception_ts INTEGER NOT NULL, last_active_ts INTEGER NOT NULL, attachments_policy TEXT NOT NULL DEFAULT 'auto', contact_policy TEXT NOT NULL DEFAULT 'auto', reaper_exempt INTEGER NOT NULL DEFAULT 0, registration_token TEXT, retired_at INTEGER, UNIQUE(project_id, name));
+CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), sender_id INTEGER NOT NULL REFERENCES agents(id), thread_id TEXT, topic TEXT COLLATE NOCASE, subject TEXT NOT NULL, body_md TEXT NOT NULL, importance TEXT NOT NULL DEFAULT 'normal', ack_required INTEGER NOT NULL DEFAULT 0, created_ts INTEGER NOT NULL, recipients_json TEXT NOT NULL DEFAULT '{}', attachments TEXT NOT NULL DEFAULT '[]');
+`;
+const FLEET_KEY = "/home/user/fleet";
+const MINUTE = 60_000;
+const T0 = NOW - 3 * HOUR; // INSIGHT opens; 2 h timebox, so its deadline is NOW - 1 h
+const DEADLINE = T0 + 2 * HOUR;
+type Mail = { from: string; body: string; at: number; thread?: string; key?: string };
+
+/** A store with the observed schema; created_ts in integer microseconds as observed. */
+function mailDb(name: string, mails: Mail[], ddl = MAIL_DDL): string {
+	const path = join(workspace, `${name}.sqlite3`);
+	rmSync(path, { force: true });
+	const db = new Database(path);
+	db.exec(ddl);
+	const projects = new Map<string, number>();
+	const agents = new Map<string, number>();
+	const projectId = (key: string): number => {
+		if (!projects.has(key)) projects.set(key, Number(db.query("INSERT INTO projects (slug, human_key, created_at) VALUES (?, ?, ?)").run(key.slice(1).split("/").join("-"), key, T0 * 1000).lastInsertRowid));
+		return projects.get(key)!;
+	};
+	projectId(FLEET_KEY);
+	for (const mail of mails) {
+		const project = projectId(mail.key ?? FLEET_KEY);
+		const who = `${project}:${mail.from}`;
+		if (!agents.has(who)) agents.set(who, Number(db.query("INSERT INTO agents (project_id, name, program, model, inception_ts, last_active_ts) VALUES (?, ?, 'omp', 'm', ?, ?)").run(project, mail.from, T0 * 1000, T0 * 1000).lastInsertRowid));
+		db.query("INSERT INTO messages (project_id, sender_id, thread_id, subject, body_md, created_ts) VALUES (?, ?, ?, 'round report', ?, ?)").run(project, agents.get(who)!, mail.thread ?? "fleet-round-0", mail.body, mail.at * 1000 + 123);
+	}
+	db.close();
+	return path;
+}
+
+function reportFor(project: string, { phase = "insight", round = 0, inProgress = 1 } = {}): string {
+	const lines = GOOD_LINES.replace("ROUND: 0", `ROUND: ${round}`).replace("PROJECT: demo", `PROJECT: ${project}`).replace("SEAT: demo:0.1", `SEAT: ${project}:0.1`).replace("PHASE: insight", `PHASE: ${phase}`).replace("in_progress = 1", `in_progress = ${inProgress}`);
+	return report(lines, { ...GOOD_JSON, round, project, seat: `${project}:0.1`, phase, claims: [{ ...GOOD_JSON.claims[0], value: inProgress }] });
+}
+
+const READY = ["demo-e1.1", "demo-e2.2"];
+function rawFile(name: string, raw: RawBundle): string {
+	const path = join(workspace, `${name}.raw.json`);
+	writeFileSync(path, JSON.stringify(raw));
+	return path;
+}
+const raws = (): string[] => [`demo=${rawFile("demo", bundle(CLEAN, READY))}`, `kit=${rawFile("kit", { ...bundle(CLEAN, READY), project: "kit" })}`];
+
+function roundDir(name: string): string {
+	const dir = join(workspace, `round-${name}`);
+	rmSync(dir, { recursive: true, force: true });
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+type BarrierJson = { state: string; projects: { project: string; verdict: string; reasons: string[]; cached: boolean; consecutive_misses: number; escalate: boolean }[]; escalate: string[]; unavailable: string[]; mail: { available: boolean; reason: string | null; other_messages: number } };
+function barrier(db: string, opts: { state: string; phase?: string; opened?: number; now?: number; raw?: string[]; outMd?: string }): { code: number | null; json: BarrierJson; out: string } {
+	const config = join(workspace, "barrier-config.json");
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { agent_mail_db: db, mail_project: FLEET_KEY, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } }));
+	const args = ["barrier", "--config", config, "--round", "0", "--phase", opts.phase ?? "INSIGHT", "--opened-at", iso(opts.opened ?? T0), "--state", opts.state, "--now", iso(opts.now ?? NOW), ...(opts.raw ?? raws()).flatMap(spec => ["--raw", spec])];
+	const result = run(opts.outMd ? [...args, "--out-json", join(opts.state, "barrier.json"), "--out-md", opts.outMd] : args);
+	const json = JSON.parse(opts.outMd ? readFileSync(join(opts.state, "barrier.json"), "utf8") : result.out) as BarrierJson;
+	return { code: result.code, json, out: result.out };
+}
+const verdicts = (json: BarrierJson): Record<string, string> => Object.fromEntries(json.projects.map(p => [p.project, p.verdict]));
+const projectOf = (json: BarrierJson, name: string) => json.projects.find(p => p.project === name)!;
+
+test("barrier: every report accepted before the deadline -> MET, exit 0 (positive control)", () => {
+	const db = mailDb("met", [
+		{ from: "Chief", body: "Round 0 is open.\n\nPHASE: insight\n", at: T0 + MINUTE },
+		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
+		{ from: "KitDirector", body: reportFor("kit"), at: T0 + 40 * MINUTE },
+		{ from: "KitDirector", body: reportFor("kit", { round: 1, inProgress: 9 }), at: T0 + 50 * MINUTE },
+		{ from: "KitDirector", body: reportFor("kit", { inProgress: 9 }), at: T0 + 55 * MINUTE, thread: "fleet-round-1" },
+	]);
+	const early = barrier(db, { state: roundDir("met"), now: T0 + HOUR });
+	expect(early.code).toBe(0);
+	expect(early.json.state).toBe("MET");
+	expect(verdicts(early.json)).toEqual({ demo: "ACCEPTED", kit: "ACCEPTED" });
+	expect(early.json.mail.other_messages).toBe(2);
+	const after = barrier(db, { state: roundDir("met-after") });
+	expect([after.code, after.json.state]).toEqual([0, "MET"]);
+	const sort = barrier(mailDb("sort", [{ from: "D", body: reportFor("demo", { phase: "execute" }), at: T0 + HOUR }, { from: "K", body: reportFor("kit", { phase: "execute" }), at: T0 + HOUR }]), { state: roundDir("sort"), phase: "SORT" });
+	expect([sort.code, sort.json.state]).toEqual([0, "MET"]);
+});
+
+test("planted: a project with no report -> MISSING; OPEN before the deadline (exit 4), MISSED after (exit 1)", () => {
+	const db = mailDb("missing", [
+		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
+		{ from: "KitDirector", body: reportFor("kit", { phase: "agree" }), at: T0 + 30 * MINUTE },
+	]);
+	const open = barrier(db, { state: roundDir("missing-open"), now: T0 + HOUR });
+	expect([open.code, open.json.state]).toEqual([4, "OPEN"]);
+	expect(verdicts(open.json)).toEqual({ demo: "ACCEPTED", kit: "MISSING" });
+	const missed = barrier(db, { state: roundDir("missing") });
+	expect([missed.code, missed.json.state]).toEqual([1, "MISSED"]);
+	expect(projectOf(missed.json, "kit")).toMatchObject({ verdict: "MISSING", reasons: ["no insight report for round 0 in fleet-round-0"] });
+});
+
+test("planted: a report whose claim differs from br -> REJECTED naming the claim; barrier MISSED", () => {
+	const db = mailDb("rejected", [
+		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
+		{ from: "KitDirector", body: reportFor("kit", { inProgress: 5 }), at: T0 + 30 * MINUTE },
+	]);
+	const result = barrier(db, { state: roundDir("rejected") });
+	expect([result.code, result.json.state]).toEqual([1, "MISSED"]);
+	expect(projectOf(result.json, "kit")).toMatchObject({ verdict: "REJECTED", reasons: ["CLAIM C1 in_progress: reported 5, validator measured 1"] });
+	expect(projectOf(result.json, "demo").verdict).toBe("ACCEPTED");
+});
+
+test("planted: a report after the deadline -> LATE; one exactly at the deadline is on time", () => {
+	const late = barrier(mailDb("late", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE + MINUTE }]), { state: roundDir("late") });
+	expect([late.code, late.json.state]).toEqual([1, "MISSED"]);
+	expect(projectOf(late.json, "kit").verdict).toBe("LATE");
+	expect(projectOf(late.json, "kit").reasons[0]).toContain("after the deadline 2026-10-12T11:00:00.000Z");
+	const edge = barrier(mailDb("edge", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE }]), { state: roundDir("edge") });
+	expect([edge.code, edge.json.state]).toEqual([0, "MET"]);
+});
+
+test("planted: an unreadable source -> exit 3, never MET", () => {
+	const both = [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }];
+	const noDb = barrier(join(workspace, "absent.sqlite3"), { state: roundDir("no-db") });
+	expect(noDb.code).toBe(3);
+	expect(noDb.json.state).toBe("UNKNOWN");
+	expect(verdicts(noDb.json)).toEqual({ demo: "UNKNOWN", kit: "UNKNOWN" });
+	// Every report is on time and would be ACCEPTED, but kit's tracker cannot be read: not MET.
+	const noTracker = barrier(mailDb("no-tracker", both), { state: roundDir("no-tracker"), now: T0 + HOUR, raw: [raws()[0]!] });
+	expect(noTracker.code).toBe(3);
+	expect(noTracker.json.state).toBe("OPEN");
+	expect(verdicts(noTracker.json)).toEqual({ demo: "ACCEPTED", kit: "UNKNOWN" });
+	expect(noTracker.json.unavailable).toEqual(["kit"]);
+	const drift = barrier(mailDb("drift", [], MAIL_DDL.replace("created_ts INTEGER", "created_at INTEGER")), { state: roundDir("drift") });
+	expect(drift.code).toBe(3);
+	expect(drift.json.mail.reason).toContain("lacks created_ts");
+	const otherKey = barrier(mailDb("other-key", both.map(m => ({ ...m, key: "/home/user/elsewhere" }))), { state: roundDir("other-key") });
+	expect(otherKey.code).toBe(1); // the configured key exists with no reports: a definite miss, not unknown
+	const unregistered = join(workspace, "unregistered.sqlite3");
+	rmSync(unregistered, { force: true });
+	const bare = new Database(unregistered);
+	bare.exec(MAIL_DDL);
+	bare.close();
+	const noProject = barrier(unregistered, { state: roundDir("no-project") });
+	expect([noProject.code, noProject.json.state]).toEqual([3, "UNKNOWN"]);
+	expect(noProject.json.mail.reason).toContain("0 projects with key /home/user/fleet");
+});
+
+test("planted: the same blocker at two consecutive barriers -> ESCALATE; a different blocker does not", () => {
+	const agreeOpen = DEADLINE + 5 * MINUTE;
+	const agreeNow = agreeOpen + HOUR + 5 * MINUTE;
+	const db = mailDb("escalate", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }]);
+	const dir = roundDir("escalate");
+	const first = barrier(db, { state: dir, now: DEADLINE + MINUTE });
+	expect([first.code, first.json.state]).toEqual([1, "MISSED"]);
+	expect(projectOf(first.json, "kit")).toMatchObject({ verdict: "MISSING", consecutive_misses: 1, escalate: false });
+	const md = join(dir, "barrier.md");
+	const second = barrier(db, { state: dir, phase: "AGREE", opened: agreeOpen, now: agreeNow, outMd: md });
+	expect(second.code).toBe(1);
+	expect(projectOf(second.json, "kit")).toMatchObject({ verdict: "MISSING", consecutive_misses: 2, escalate: true });
+	expect(projectOf(second.json, "demo")).toMatchObject({ verdict: "ACCEPTED", consecutive_misses: 0, escalate: false });
+	expect(second.json.escalate).toEqual(["kit"]);
+	expect(readFileSync(md, "utf8")).toContain("| kit | ESCALATE (MISSING) | - | - | 2 |");
+	const rerun = barrier(db, { state: dir, phase: "AGREE", opened: agreeOpen, now: agreeNow + 10 * MINUTE });
+	expect(projectOf(rerun.json, "kit")).toMatchObject({ consecutive_misses: 2, escalate: true }); // re-running a barrier records it once
+
+	const mixed = mailDb("mixed", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }, { from: "K", body: reportFor("kit", { phase: "agree", inProgress: 5 }), at: agreeOpen + 10 * MINUTE }]);
+	const other = roundDir("mixed");
+	barrier(mixed, { state: other, now: DEADLINE + MINUTE });
+	const changed = barrier(mixed, { state: other, phase: "AGREE", opened: agreeOpen, now: agreeNow });
+	expect(projectOf(changed.json, "kit")).toMatchObject({ verdict: "REJECTED", consecutive_misses: 2, escalate: false });
+});
+
+test("a report is judged once, when first seen: later tracker work cannot flip it", () => {
+	const db = mailDb("cache", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
+	const moved = [raws()[0]!, `kit=${rawFile("kit-moved", { ...bundle([...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent" }], READY), project: "kit" })}`];
+	const dir = roundDir("cache");
+	expect(barrier(db, { state: dir, now: T0 + 40 * MINUTE }).json.state).toBe("MET");
+	const later = barrier(db, { state: dir, raw: moved });
+	expect(projectOf(later.json, "kit")).toMatchObject({ verdict: "ACCEPTED", cached: true });
+	const fresh = barrier(db, { state: roundDir("cache-fresh"), raw: moved });
+	expect(projectOf(fresh.json, "kit")).toMatchObject({ verdict: "REJECTED", cached: false });
+});
+
+test("barrier usage: missing barrier config, bad phase or round, missing state dir exit 2", () => {
+	const config = join(workspace, "plain-config.json");
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } } }));
+	const dir = roundDir("usage");
+	const base = ["--round", "0", "--phase", "INSIGHT", "--opened-at", iso(T0), "--state", dir];
+	expect(run(["barrier", "--config", config, ...base]).out).toContain('needs a "barrier" section');
+	const db = mailDb("usage", []);
+	barrier(db, { state: dir });
+	const configured = join(workspace, "barrier-config.json");
+	for (const bad of [["--phase", "MEASURE"], ["--round", "01"], ["--state", join(workspace, "absent-dir")]]) {
+		const args = [...base];
+		args[args.indexOf(bad[0]!) + 1] = bad[1]!;
+		expect(run(["barrier", "--config", configured, ...args]).code).toBe(2);
 	}
 });

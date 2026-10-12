@@ -24,7 +24,22 @@ to `-` and anything else to `_` (lines 476-493). `lib/model.ts` mirrors both.
 
 Probe SHA-256 at capture: `br_shapes.py` 8007ecde...e6e4f31e, `edge_shapes.py`
 0086258d...e98571c1, `seat_shapes.py` e7b1ae7a...d5c73e00 (the version captured by
-`ev_4a8974...`).
+`ev_4a8974...`), `mail_shapes.py` 2a62b058...01106aa0.
+
+## Agent Mail round thread (barrier timer)
+
+Observed 2026-10-12 with `am` 0.3.36 on the same host, REA 6.4.0 process captures. To see a real
+round report in the store, one report (the format in SKILL.md, project `app`, phase `insight`) was
+posted with `am mail send --thread-id fleet-round-0` into a scratch project key under
+`omp-test/var/agent-tmp/`, not into any fleet project.
+
+| Evidence id | Command | Observed |
+|---|---|---|
+| `ev_245b51e80d4d68d03d5e222ae9b81af7ced4d9a66a609a66332096120dea9327` | `python3 probes/mail_shapes.py <AGENT_MAIL_STORAGE_ROOT>/storage.sqlite3 <scratch key> fleet-round-0 <sent body>` | The store opens with `mode=ro`. `projects(id, slug, human_key, created_at)`, `agents(id, project_id, name, ...)`, `messages(id, project_id, sender_id, thread_id, topic, subject, body_md, importance, ack_required, created_ts, recipients_json, attachments)`; a thread is `messages.thread_id` within one `project_id`; exactly one project carries the key. `created_ts` is an **integer in microseconds** (`1791768295454448` = `2026-10-12T01:24:55.454448Z`, the time `am mail send` returned). `body_md` equals the sent body byte for byte (454 bytes, sha256 `d4b76cf2...`), so labeled lines and the json fence reach the validator unchanged. |
+| `ev_add0714a2163181c6219e8cf87b0dbf96b036cf7d2394c4c9212dc66c3790f90` | `am robot thread fleet-round-0 --project <key> --json`, then an absent thread and an absent project key | Thread messages carry `ack, age, body, from, importance, position, subject, to`: no message id and only a relative `age` (`25s ago`), so a deadline cannot be judged from it. An absent thread and an absent project both exit 1 with an `error: invalid argument: ... not found` line. The timer therefore reads the store, not `am`. |
+
+`am robot search` was not used: on this host it tried to take the search index writer lock
+(`LockBusy`) and reported the index unavailable, so it is neither read-only nor reliable.
 
 ## What the validator does with each fact
 
@@ -43,3 +58,8 @@ Probe SHA-256 at capture: `br_shapes.py` 8007ecde...e6e4f31e, `edge_shapes.py`
   directory, unreachable tmux or missing `ps` makes every holder UNKNOWN.
 - **Never Agent Mail's resolver.** `resolve_pane_identity` may adopt a dead binding and rewrite the
   file, so the validator only reads the files.
+- **Round thread.** `barrier` opens the store readonly, checks that every column it reads exists
+  (a missing one is schema drift: UNKNOWN, exit 3), requires exactly one project with the
+  configured key (none or several: UNKNOWN), and reads `id`, sender `name`, `created_ts` (must be
+  an SQLite integer; divided by 1000 for milliseconds) and `body_md` of the thread's messages. The
+  configured key existing with no thread is a fact (MISSING), not an unknown.

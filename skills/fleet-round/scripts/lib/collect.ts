@@ -16,6 +16,11 @@ const MAX_DOC_BYTES = 2 * 1024 * 1024;
 const MAX_IDENTITY_BYTES = 4096;
 /** root: the br tracker; repo: the git repo whose docs hold the mission (default root); doc_ref: the committed ref those docs are read at. */
 export type ProjectConfig = { root: string; repo: string; doc_ref: string; identity_keys: string[] };
+/** Barrier phases and the report PHASE each one closes (round 0's execute phase is the sort). */
+export const BARRIER_PHASES = { INSIGHT: "insight", AGREE: "agree", SORT: "execute" } as const;
+export type BarrierPhase = keyof typeof BARRIER_PHASES;
+/** database: Agent Mail's SQLite store, read with readonly; mail_project: the Agent Mail project key holding thread fleet-round-<N>; hours: timebox per barrier phase. */
+export type BarrierConfig = { database: string; mail_project: string; hours: Record<BarrierPhase, number> };
 export type Config = {
 	projects: Record<string, ProjectConfig>;
 	tmux_sockets: string[];
@@ -24,6 +29,7 @@ export type Config = {
 	stale_hours: number;
 	frontier_top: number;
 	approver: string | null;
+	barrier: BarrierConfig | null;
 };
 
 function expand(path: string): string {
@@ -62,7 +68,20 @@ export function loadConfig(text: string, where: string): Config {
 		stale_hours: number("stale_hours", 24),
 		frontier_top: number("frontier_top", 3),
 		approver: typeof json.approver === "string" ? json.approver : null,
+		barrier: json.barrier === undefined ? null : barrierConfig(json.barrier, where),
 	};
+}
+
+function barrierConfig(value: unknown, where: string): BarrierConfig {
+	if (!isRecord(value) || typeof value.agent_mail_db !== "string" || value.agent_mail_db === "" || typeof value.mail_project !== "string" || value.mail_project === "") throw new Error(`${where}: barrier needs agent_mail_db and mail_project paths`);
+	const hours = isRecord(value.hours) ? value.hours : {};
+	const timeboxes = {} as Record<BarrierPhase, number>;
+	for (const phase of Object.keys(BARRIER_PHASES) as BarrierPhase[]) {
+		const h = hours[phase];
+		if (typeof h !== "number" || !(h > 0)) throw new Error(`${where}: barrier.hours.${phase} must be a positive number of hours`);
+		timeboxes[phase] = h;
+	}
+	return { database: expand(value.agent_mail_db), mail_project: expand(value.mail_project), hours: timeboxes };
 }
 
 function run(argv: string[], cwd: string): { ok: boolean; stdout: string; error: string } {
