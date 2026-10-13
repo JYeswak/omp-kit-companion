@@ -4,6 +4,8 @@
 # Asserts dispatcher creation, bespoke preservation + chaining, pre-push
 # member install, and nonzero exit whenever a member would be inactive.
 set -u
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)

@@ -4,6 +4,8 @@
 # drop-back line, fast-forward moves HEAD cleanly, dirty and diverged report
 # without touching anything. No network; file:// remote only.
 set -u
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 CHECK=$(CDPATH='' cd -- "$(dirname "$0")/../../scripts" && pwd -P)/sync-check.sh
 TMP=var/agent-tmp/sync-check-test-$$
 mkdir -p "$TMP"

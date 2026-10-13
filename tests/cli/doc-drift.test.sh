@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # doc-drift.test.sh — PUB1a gate contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.1).
 # Builds fixture git repos with a minimal command registry at two revisions;

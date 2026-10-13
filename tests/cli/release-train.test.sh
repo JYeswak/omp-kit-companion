@@ -5,6 +5,8 @@
 # candidate bound to another SHA/version/ship set must never verify; a
 # superseded version must never take Latest.
 set -u
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 
 TRAIN=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/release-train.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)

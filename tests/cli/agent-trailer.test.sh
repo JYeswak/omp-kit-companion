@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # agent-trailer.test.sh — ID1 commit trailer contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.108).
 # Drives the hook body directly plus a real git commit through it;

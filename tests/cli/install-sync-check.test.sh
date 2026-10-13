@@ -3,6 +3,8 @@
 # Fixture repo without scripts/: install creates it, the copy proves itself;
 # re-install is idempotent; non-repos and the kit root itself are refused.
 set -u
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 INSTALLER=$(CDPATH='' cd -- "$(dirname "$0")/../../scripts" && pwd -P)/install-sync-check.sh
 TMP=var/agent-tmp/install-sync-check-test-$$
 mkdir -p "$TMP"

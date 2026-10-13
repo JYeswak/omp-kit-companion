@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # commit-imports.test.sh — FLY2-3 dangling-import gate contract
 # (ompkit-uzgf). Fixture repos where HEAD imports a missing file must be
 # refused naming sha+path; clean trees pass. Every verdict comes from the

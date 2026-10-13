@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # close-guard.test.sh — ID1 close guard contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.108).
 # A stub br serves canned bead JSON; a fixture git repo carries commit

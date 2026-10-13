@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # pre-push-gate.test.sh — GATE1 base-authoritative gate contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.88).
 # Fixture git repos where HEAD rewrites the gate: the adapter must run the

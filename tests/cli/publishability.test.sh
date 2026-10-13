@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # publishability.test.sh — PUB1 checker contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106).
 # Builds a fixture git repo with planted bad shapes and neutral controls;
@@ -32,6 +34,31 @@ mkfixture() {
 	git -C "$TMP/fixture" config user.email "test@example.invalid"
 	git -C "$TMP/fixture" config user.name "worker-1"
 }
+# 0. a shell test running with hook selectors cannot write the hook index or config.
+sentinel="$TMP/git-env-sentinel"
+mkdir -p "$sentinel"
+git -C "$sentinel" init -q
+git -C "$sentinel" config --local user.name "Sentinel"
+git -C "$sentinel" config --local user.email "sentinel@example.invalid"
+printf 'sentinel\n' > "$sentinel/sentinel.txt"
+git -C "$sentinel" add sentinel.txt
+cp "$sentinel/.git/index" "$TMP/sentinel-index.before"
+shell_test_rc=0
+if GIT_DIR="$sentinel/.git" GIT_INDEX_FILE="$sentinel/.git/index" sh "$REPO_ROOT/tests/cli/agent-trailer.test.sh" > "$TMP/shell-test.out" 2>&1; then
+	:
+else
+	shell_test_rc=$?
+fi
+sentinel_name=$(git -C "$sentinel" config --local user.name)
+sentinel_email=$(git -C "$sentinel" config --local user.email)
+index_unchanged=0
+if cmp -s "$TMP/sentinel-index.before" "$sentinel/.git/index"; then index_unchanged=1; fi
+if [ "$shell_test_rc" = "0" ] && [ "$sentinel_name" = "Sentinel" ] && [ "$sentinel_email" = "sentinel@example.invalid" ] && [ "$index_unchanged" = "1" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL shell-test-git-env: rc=%s name=%s email=%s index_unchanged=%s out<<<%s>>>\n' "$shell_test_rc" "$sentinel_name" "$sentinel_email" "$index_unchanged" "$(cat "$TMP/shell-test.out")"
+fi
+
 
 # 1. planted secret token is refused
 mkfixture
