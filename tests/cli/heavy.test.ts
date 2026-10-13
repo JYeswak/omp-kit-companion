@@ -234,3 +234,37 @@ test("a waiting job reports position, running jobs and the contention reason", a
 	expect(result.stderr).toContain("LOAD1");
 	expect(result.stderr).toContain("deferred:");
 });
+
+test("GITHUB_ACTIONS=true bypasses LOAD1 and starts the command", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 1 });
+	const marker = join(root, "gha-ran");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "gha-load", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ GITHUB_ACTIONS: "true", OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+});
+
+test("CI=1 alone does not bypass LOAD1 admission", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 1 });
+	const marker = join(root, "ci-ran");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "ci-load", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ CI: "1", GITHUB_ACTIONS: "", OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("LOAD1");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("GITHUB_ACTIONS load exemption preserves slot admission", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 1 });
+	const jobs = await seedJob(root, { id: "gha-slot-owner" });
+	const marker = join(root, "slot-ran");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "gha-slot", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ GITHUB_ACTIONS: "true", OMP_KIT_HEAVY_FAKE_LOAD1: "9999" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("all 1 heavy-work slot is occupied");
+	expect(existsSync(marker)).toBe(false);
+	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual(["gha-slot-owner.json"]);
+});

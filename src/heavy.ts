@@ -173,7 +173,7 @@ function removeJob(directory: string, id: string): void {
 
 
 function admissionReason(jobs: readonly HeavyJob[], id: string, slots: number, load: MachineLoad): string | null {
-	const loadReason = machineLoadBlockReason(load.load1, load.ncpu);
+	const loadReason = process.env.GITHUB_ACTIONS === "true" ? null : machineLoadBlockReason(load.load1, load.ncpu);
 	if (loadReason) return loadReason;
 	const running = jobs.filter((job) => job.state === "running");
 	if (running.length >= slots) return `all ${slots} heavy-work slot${slots === 1 ? " is" : "s are"} occupied`;
