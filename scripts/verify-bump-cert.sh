@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
 done
 if ! printf '%s' "$VERSION" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then echo "version must be X.Y.Z" >&2; exit 2; fi
 if ! printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$'; then echo "sha must be a 40-hex commit" >&2; exit 2; fi
-[ -n "$DIR" ] && [ -d "$DIR" ] || { echo "receipts dir is missing: $DIR" >&2; exit 2; }
+if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then echo "receipts dir is missing: $DIR" >&2; exit 2; fi
 command -v jq >/dev/null 2>&1 || { echo "verify-bump-cert: jq is required" >&2; exit 3; }
 
 count=0
