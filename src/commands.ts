@@ -377,9 +377,11 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
 			{ name: "--repo", value: "DIR", description: "Git checkout holding the landing commits" },
+			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db, landing repo is DIR; refused with --db" },
 		], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false, dataSchema: drainData },
 		{ name: "stale-claims", description: "In-progress beads with no worker or no recent evidence, with reclaim commands", usage: "drain stale-claims --db PATH [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
+			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
 	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },

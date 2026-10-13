@@ -65,7 +65,7 @@ import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
 import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
-import { closeQueue, landingCommits, readDrainStore, staleClaims } from "./drain.ts";
+import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClaims } from "./drain.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
 import { proveSend } from "./send.ts";
@@ -3344,8 +3344,15 @@ function drainFlag(flag: string | true | undefined): string | null {
 	return flag;
 }
 function drainCloseQueueCommand(request: ParsedCommand): CliResult {
-	const db = drainFlag(request.flags.get("--db"));
-	const repo = drainFlag(request.flags.get("--repo"));
+	const project = drainFlag(request.flags.get("--project"));
+	let db = drainFlag(request.flags.get("--db"));
+	let repo = drainFlag(request.flags.get("--repo"));
+	if (db !== null && project !== null) return refusal("INVALID_FLAG", "--db and --project cannot be used together", "Use --db PATH with --repo DIR, or --project DIR alone.");
+	if (project !== null) {
+		try { db = resolveProjectDb(resolve(project)); }
+		catch { return refusal("INVALID_FLAG", `no tracker database under ${project} (expected ${project}/.beads/beads.db)`, "Point --project at a dir holding .beads/beads.db."); }
+		if (repo === null) repo = project;
+	}
 	if (db === null) return refusal("INVALID_FLAG", "--db requires a tracker beads.db path", "Use omp-kit drain close-queue --db PATH --repo DIR.");
 	if (repo === null) return refusal("INVALID_FLAG", "--repo requires the git checkout holding landing commits", "Use omp-kit drain close-queue --db PATH --repo DIR.");
 	let store;
@@ -3360,7 +3367,13 @@ function drainCloseQueueCommand(request: ParsedCommand): CliResult {
 }
 registerCommandHandler("drain close-queue", drainCloseQueueCommand);
 function drainStaleClaimsCommand(request: ParsedCommand): CliResult {
-	const db = drainFlag(request.flags.get("--db"));
+	const project = drainFlag(request.flags.get("--project"));
+	let db = drainFlag(request.flags.get("--db"));
+	if (db !== null && project !== null) return refusal("INVALID_FLAG", "--db and --project cannot be used together", "Use --db PATH or --project DIR, not both.");
+	if (project !== null) {
+		try { db = resolveProjectDb(resolve(project)); }
+		catch { return refusal("INVALID_FLAG", `no tracker database under ${project} (expected ${project}/.beads/beads.db)`, "Point --project at a dir holding .beads/beads.db."); }
+	}
 	if (db === null) return refusal("INVALID_FLAG", "--db requires a tracker beads.db path", "Use omp-kit drain stale-claims --db PATH.");
 	let store;
 	try { store = readDrainStore(resolve(db)); }

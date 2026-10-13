@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 export const STALE_UNASSIGNED_MS = 24 * 3600 * 1000;
 export const STALE_EVIDENCE_MS = 48 * 3600 * 1000;
@@ -85,6 +87,12 @@ export function staleClaims(
 }
 
 export type DrainStore = { readonly issues: DrainIssue[]; readonly comments: DrainComment[] };
+/** Resolve a project dir to its tracker DB. Throws naming the missing path. */
+export function resolveProjectDb(projectDir: string): string {
+	const db = join(projectDir, ".beads", "beads.db");
+	if (!existsSync(db)) throw new Error(`no tracker database at ${db}`);
+	return db;
+}
 
 /** Read-only tracker snapshot for the drain views. Throws on unreadable input. */
 export function readDrainStore(dbPath: string): DrainStore {
