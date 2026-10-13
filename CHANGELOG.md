@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.37] - 2026-10-13
+
+### Changed
+
+- Fixed heavy CLI test fixtures to pin OMP_KIT_HEAVY_FAKE_LOAD1 so slot-admission assertions remain deterministic under high runner load.
+
 ## [0.2.36] - 2026-10-13
 
 ### Changed
