@@ -1,1 +1,0 @@
-- The flywheel guard now parses shell redirections as redirections, so a close command followed by `2>` no longer mistakes the operator token for a bead id and skips the self-close lookup. (ompkit-xa5s.8)

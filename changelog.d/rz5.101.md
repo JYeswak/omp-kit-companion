@@ -1,1 +1,0 @@
-- `omp-kit scratch index-lock --repo DIR` reports a stale holder-less empty `.git/index.lock`, or moves it aside with `--apply --yes`; it never touches non-empty, young, held, or unknown locks. (ompkit-rz5.101)

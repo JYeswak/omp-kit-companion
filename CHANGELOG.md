@@ -4,6 +4,25 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.33] - 2026-10-13
+
+### Changed
+
+- `omp-kit update --reconcile` derives the install prefix from the receipt when no explicit prefix is supplied, so a stuck older binary cannot point reconciliation at the wrong install. (ompkit-3isy.1)
+- Native certification reports preserve timeout output and identify the in-flight full-test stage and elapsed time when progress markers are available.
+- `omp-kit scratch index-lock --repo DIR` reports a stale holder-less empty `.git/index.lock`, or moves it aside with `--apply --yes`; it never touches non-empty, young, held, or unknown locks. (ompkit-rz5.101)
+- The flywheel guard now parses shell redirections as redirections, so a close command followed by `2>` no longer mistakes the operator token for a bead id and skips the self-close lookup. (ompkit-xa5s.8)
+
+### Fixed
+
+- A refused push now keeps the reason for every red step, not only the final gate (ompkit-fp72.40). The hook's whole body, from the archive extract through each checker contract, the pushed-bead and import checks, doc-drift and fresh-gate, streams to the terminal and to `gate.log` in its `var/agent-tmp/pre-push-gate.<pid>.*` dir; on any red the hook keeps that log and `.owner` with its exit code, and a green gate leaves nothing.
+- Oracle hermetic case root: native worker and harness resolve corpus-relative paths against a synthetic root unless OMP_KIT_CASE_CWD overrides, so archive extracts stop disagreeing with the canonical checkout.
+- Cut rule streaming cost for the CI judge: bounded the `omp`-to-`config` word gap in kit-settings-mutation and anchored kit-no-plaintext-secret on its credential noun, cutting the live-stream total by a quarter with no verdict change.
+- The release train advances past existing CHANGELOG sections and rejects invalid fragment categories before promotion.
+- Release train certifies the bump inline: the train calls CI on the bump SHA in its own run and tags only when every native receipt records that SHA, so a token-pushed bump no longer waits for a push run that never starts.
+- Fleet guard drops cached reservation lookups when a release call passes through (MCP tool or `am file_reservations release` parsed source-aware, so quoted mentions never clear), so an edit right after releasing re-queries instead of seeing a stale allow.
+- The publishability scan no longer prints what it finds (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.7). It reported each finding with the whole matching line, so a planted or real token, or a user's home path, went into CI logs (public for this repo) and into the pre-push `gate.log`. It now prints only `class: file:line`. Binary tracked files are scanned instead of skipped, and an unreadable tracked file is a finding instead of a silent skip.
+
 ## [0.2.32] - 2026-10-12
 
 ### Added

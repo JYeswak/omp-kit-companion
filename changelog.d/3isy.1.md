@@ -1,1 +1,0 @@
-- `omp-kit update --reconcile` derives the install prefix from the receipt when no explicit prefix is supplied, so a stuck older binary cannot point reconciliation at the wrong install. (ompkit-3isy.1)
