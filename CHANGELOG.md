@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.34] - 2026-10-13
+
+### Changed
+
+- Native full-test receipts retain per-stage durations when markers are available; missing or malformed timing telemetry is recorded separately without refusing a passing full proof. Existing receipts remain accepted.
+
 ## [0.2.33] - 2026-10-13
 
 ### Changed
