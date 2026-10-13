@@ -217,6 +217,36 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
         if expected_live_ids is not None and omp_version is not None:
             detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail
+def timeout_detail(name, error, timeout):
+    """Record the last live full-test stage when the native command is externally timed out."""
+    stdout = (error.stdout or b"").decode(errors="replace")
+    stderr = (error.stderr or b"").decode(errors="replace")
+    detail = {
+        "command": name,
+        "timed_out": True,
+        "timeout_seconds": timeout,
+        "stdout_tail": stdout[-2000:],
+        "stderr_tail": stderr[-2000:],
+    }
+    prefix = "OMP_KIT_STAGE_START name="
+    for line in stderr.splitlines():
+        if not line.startswith(prefix):
+            continue
+        fields = line[len(prefix):].split(" ")
+        if len(fields) != 2 or not fields[1].startswith("started_at_ms="):
+            continue
+        stage = fields[0]
+        if not stage:
+            continue
+        try:
+            started_at_ms = int(fields[1][len("started_at_ms="):])
+        except ValueError:
+            continue
+        detail["current_stage"] = {
+            "name": stage,
+            "elapsed_ms": max(0, round(time.time() * 1000 - started_at_ms)),
+        }
+    return detail
 
 
 def isolated_snapshot(*roots):
@@ -366,8 +396,23 @@ def native(args):
                       "project_preflight": ["doctor", "--scope", "project-loading", "--project", str(project), "--json"]}
             for name, flags in checks.items():
                 before = isolated_snapshot(home, project)
-                child = run_scoped([str(binary), *flags], cwd=root, env=env,
+                stage_env = {**env, "OMP_KIT_NATIVE_STAGE_PROGRESS": "1"} if name == "full" else env
+                try:
+                    child = run_scoped([str(binary), *flags], cwd=root, env=stage_env,
                                        timeout=900 if name == "full" else 120)
+                except subprocess.TimeoutExpired as error:
+                    if name != "full":
+                        raise
+                    timeout = 900
+                    detail = timeout_detail(name, error, timeout)
+                    receipt["refusal_detail"] = detail
+                    current = detail.get("current_stage")
+                    if current:
+                        raise ValueError(
+                            f"native full timed out after {timeout} seconds during {current['name']} "
+                            f"(stage elapsed {current['elapsed_ms']} ms)"
+                        ) from error
+                    raise ValueError(f"native full timed out after {timeout} seconds; active stage unavailable") from error
                 if isolated_snapshot(home, project) != before:
                     raise ValueError(f"native {name} changed the isolated HOME or startup project")
                 (root / (name + ".stdout")).write_bytes(child.stdout)

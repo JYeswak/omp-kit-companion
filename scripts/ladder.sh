@@ -3,6 +3,29 @@
 # G1-G3 harness gate, harness selftest (plants must go RED), checker selftests under /bin/sh,
 # manifest check, G4 live suite, G4 plant (must go RED). Prints each complete producer log and rc.
 set -u
+stage_start() {
+  stage_name=$1
+  stage_started_at_ms=$(date +%s%3N 2>/dev/null) || stage_started_at_ms=
+  case "$stage_started_at_ms" in ''|*[!0-9]*) stage_started_at_ms= ;; esac
+  case "$stage_started_at_ms" in
+    ?????????????) ;;
+    *)
+      if command -v python3 >/dev/null 2>&1; then
+        stage_started_at_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)' 2>/dev/null) || return 1
+      else
+        echo "ladder: cannot obtain millisecond stage timestamp" >&2
+        return 1
+      fi
+      ;;
+  esac
+  case "$stage_started_at_ms" in ?????????????) ;; *) echo "ladder: invalid stage timestamp" >&2; return 1 ;; esac
+  printf 'OMP_KIT_STAGE_START name=%s started_at_ms=%s\n' "$stage_name" "$stage_started_at_ms" >&2
+}
+if [ "$#" -eq 2 ] && [ "$1" = "--selftest-interruption" ]; then
+  case "$2" in ''|*[!A-Za-z0-9_-]*) echo "ladder: invalid selftest stage" >&2; exit 2 ;; esac
+  stage_start "$2" || exit 125
+  exec /bin/sleep 30
+fi
 HERE=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 cd "$HERE" || exit 1
 OMP_KIT_BUN="$HERE/scripts/runtime-adapter.sh"
@@ -36,6 +59,7 @@ run_heavy() {
 }
 step() { # step <label> <cmd...>
   label=$1; shift
+  stage_start "$label" || { echo "ladder: cannot mark stage $label" >&2; KEEP_WORK=1; exit 125; }
   log="$WORK/ladder-$label.txt"
   if [ "$label" = "manifest" ]; then
     "$@" > "$log" 2>&1

@@ -279,5 +279,16 @@ class ScopedRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn(b"ok", result.stdout)
 
+    def test_timeout_receipt_names_interrupted_ladder_stage_and_elapsed_ms(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired) as timeout:
+            native_candidate.run_scoped(
+                ["/bin/sh", str(ROOT / "scripts" / "ladder.sh"), "--selftest-interruption", "e2e-live"],
+                cwd=str(ROOT), env=os.environ.copy(), timeout=0.15)
+
+        detail = native_candidate.timeout_detail("full", timeout.exception, 0.15)
+        self.assertTrue(detail["timed_out"])
+        self.assertEqual(detail["current_stage"]["name"], "e2e-live")
+        self.assertGreaterEqual(detail["current_stage"]["elapsed_ms"], 100)
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,40 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 
+
+async function readStderr(stream: ReadableStream<Uint8Array>, forwardStageMarkers: boolean): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let pending = "";
+	const forwardLine = (line: string) => {
+		if (forwardStageMarkers && line.startsWith("OMP_KIT_STAGE_START name=")) {
+			process.stderr.write(`${line}\n`);
+		}
+	};
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		const chunk = decoder.decode(value, { stream: true });
+		chunks.push(chunk);
+		pending += chunk;
+		for (;;) {
+			const newline = pending.indexOf("\n");
+			if (newline < 0) break;
+			const line = pending.slice(0, newline);
+			forwardLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+			pending = pending.slice(newline + 1);
+		}
+	}
+	const finalChunk = decoder.decode();
+	if (finalChunk) {
+		chunks.push(finalChunk);
+		pending += finalChunk;
+	}
+	if (pending) forwardLine(pending.endsWith("\r") ? pending.slice(0, -1) : pending);
+	return chunks.join("");
+}
+
 export interface BundledRunResult {
 	code: number;
 	stdout: string;
@@ -79,6 +113,7 @@ export function sanitizedEnv(
 	env.XDG_DATA_HOME = join(privateRoot, "xdg-data");
 	env.XDG_STATE_HOME = join(privateRoot, "xdg-state");
 	env.BUN_INSTALL = join(privateRoot, "bun-install");
+	if (inherited.OMP_KIT_NATIVE_STAGE_PROGRESS === "1") env.OMP_KIT_NATIVE_STAGE_PROGRESS = "1";
 	env.OMP = identity.launcher;
 	env.OMP_BIN = identity.launcher;
 	env.OMP_PATH = identity.launcher;
@@ -117,7 +152,7 @@ async function runIsolated(
 		const [code, stdout, stderr] = await Promise.all([
 			child.exited,
 			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
+			readStderr(child.stderr, process.env.OMP_KIT_NATIVE_STAGE_PROGRESS === "1"),
 		]);
 		return { code, stdout, stderr };
 	} finally {

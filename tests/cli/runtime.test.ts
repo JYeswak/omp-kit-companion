@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
-import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
+import { runtimeTempRoot, sanitizedEnv, runIsolatedShell } from "../../src/runtime.ts";
 import { once } from "node:events";
 
 const fixtures: string[] = [];
@@ -488,4 +488,40 @@ test("isolated children inherit the CI judge signal through runIsolatedShell", (
 	const withoutSignal = sanitizedEnv(identity, { CI: "true", PATH: "/usr/bin:/bin" }, "/private");
 	expect("GITHUB_ACTIONS" in withoutSignal).toBe(false);
 	expect(withoutSignal.CI).toBe("true");
+});
+
+test("native stage markers reach the outer certification process", async () => {
+	const root = fixtureRoot();
+	const omp = createOmp(join(root, "omp"), "18.10.3");
+	const binary = join(root, "bin", "omp-kit");
+	mkdirSync(dirname(binary), { recursive: true });
+	writeFileSync(binary, "#!/bin/sh\nexit 0\n");
+	chmodSync(binary, 0o755);
+	mkdirSync(join(root, "scripts"), { recursive: true });
+	const marker = "OMP_KIT_STAGE_START name=e2e-live started_at_ms=123";
+	const script = join(root, "scripts", "ladder.sh");
+	writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' '${marker}' >&2\nprintf 'runner stderr stays\\n' >&2\n`);
+	chmodSync(script, 0o755);
+	const keys = ["PATH", "OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC", "OMP_KIT_NATIVE_STAGE_PROGRESS"];
+	const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+	const originalWrite = process.stderr.write;
+	let forwarded = "";
+	process.stderr.write = ((chunk: string | Uint8Array) => {
+		forwarded += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		return true;
+	}) as typeof process.stderr.write;
+	process.env.PATH = dirname(omp.launcher);
+	for (const key of keys.slice(1)) delete process.env[key];
+	process.env.OMP_KIT_NATIVE_STAGE_PROGRESS = "1";
+	try {
+		const result = await runIsolatedShell("scripts/ladder.sh", [], root, binary);
+		expect(result.stderr).toBe(`${marker}\nrunner stderr stays\n`);
+	} finally {
+		process.stderr.write = originalWrite;
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+	expect(forwarded).toContain(`${marker}\n`);
 });
