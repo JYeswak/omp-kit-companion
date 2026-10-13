@@ -53,7 +53,7 @@ run_adapter() {
 	repo=$1
 	base=$(git -C "$repo" rev-parse HEAD~1)
 	head=$(git -C "$repo" rev-parse HEAD)
-	printf 'refs/heads/main %s refs/heads/main %s\n' "$head" "$base" | (cd -- "$repo" && sh "$ADAPTER" > "$TMP/out" 2>&1)
+	printf 'refs/heads/main %s refs/heads/main %s\n' "$head" "$base" | (cd -- "$repo" && GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" sh "$ADAPTER" > "$TMP/out" 2>&1)
 	printf '%s' "$?"
 }
 
@@ -75,6 +75,21 @@ if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "BASE-GATE-FAIL"; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL base-failure-refuses: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# 2a. fixture identity writes from the gate must not reach the hook repository.
+fixture="$TMP/git-env-fixture"
+mkdir -p "$fixture"
+git -C "$fixture" init -q
+git -C "$fixture" config user.name "Sentinel"
+repo=$(mkrepo scrub-git-env "git -C $fixture config user.name 'Fixture Identity'" "echo HEAD-GATE")
+rc=$(run_adapter "$repo")
+hook_name=$(git -C "$repo" config --local user.name)
+fixture_name=$(git -C "$fixture" config --local user.name)
+if [ "$rc" = "0" ] && [ "$hook_name" = "worker-1" ] && [ "$fixture_name" = "Fixture Identity" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scrub-git-env: rc=%s hook=%s fixture=%s out<<<%s>>>\n' "$rc" "$hook_name" "$fixture_name" "$(cat "$TMP/out")"
 fi
 
 # 3. planted: a commit built on base B that deletes lines added at B+1 is
@@ -271,7 +286,7 @@ mkdir -p "$s4/scripts" "$s4/var/agent-tmp"
 git -C "$s4" init -q
 git -C "$s4" config user.email "test@example.invalid"
 git -C "$s4" config user.name "worker-1"
-printf '#!/bin/sh\nprintf "SKIPVAL=%%s\\n" "$FRESH_GATE_SKIP_REGEX"\n' > "$s4/scripts/fresh-gate.sh"
+printf "#!/bin/sh\nprintf \"SKIPVAL=%%s\\\\n\" \"\$FRESH_GATE_SKIP_REGEX\"\n" > "$s4/scripts/fresh-gate.sh"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$s4/scripts/regexploit-gate.py"
 create_checker_test_stubs "$s4"
 git -C "$s4" add -A
@@ -342,7 +357,7 @@ fi
 
 # ompkit-fp72.40: a symlink inside the extract (a kit-update test fixture's prefix/bin/omp-kit link)
 # kept its parent dirs non-empty, so cleanup that deleted only regular files left the whole tree.
-repo=$(mkrepo cleansymlink 'a=$2; mkdir -p "$a/var/agent-tmp/kit-update-x/prefix/bin"; ln -s ../releases/0.2.3/bin/omp-kit "$a/var/agent-tmp/kit-update-x/prefix/bin/omp-kit"; echo BASE-GATE' 'echo HEAD-GATE')
+repo=$(mkrepo cleansymlink "a=\$2; mkdir -p \"\$a/var/agent-tmp/kit-update-x/prefix/bin\"; ln -s ../releases/0.2.3/bin/omp-kit \"\$a/var/agent-tmp/kit-update-x/prefix/bin/omp-kit\"; echo BASE-GATE" 'echo HEAD-GATE')
 rc=$(run_adapter "$repo")
 if [ "$rc" = "0" ] && [ "$(leftover "$repo")" = "0" ]; then
 	pass=$((pass + 1))
@@ -352,7 +367,7 @@ fi
 
 # ompkit-fp72.40 planted negative: SIGKILL skips the trap, so the extract survives; it must carry an
 # .owner naming the dead gate pid in a pid-named dir, and the real scratch reaper must judge it REAP.
-repo=$(mkrepo killed 'echo $$ > "$GATE_PIDFILE"; exec sleep 30' 'echo HEAD-GATE')
+repo=$(mkrepo killed "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30" 'echo HEAD-GATE')
 printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/killed.in"
 rm -f "$TMP/gate.pid"
 ( cd -- "$repo" && GATE_PIDFILE="$TMP/gate.pid" exec sh "$ADAPTER" ) < "$TMP/killed.in" > "$TMP/killed.out" 2>&1 &
@@ -363,7 +378,7 @@ kill -9 "$apid" 2>/dev/null
 [ -s "$TMP/gate.pid" ] && kill -9 "$(cat "$TMP/gate.pid")" 2>/dev/null
 wait "$apid" 2>/dev/null
 verdicts=""
-for owned in "$repo"/var/agent-tmp/pre-push-gate.$apid.* "$repo"/var/agent-tmp/pre-push-gate-base.$apid.*; do
+for owned in "$repo"/var/agent-tmp/pre-push-gate."$apid".* "$repo"/var/agent-tmp/pre-push-gate-base."$apid".*; do
 	[ -d "$owned" ] || { verdicts="$verdicts missing"; continue; }
 	grep -qx "pid=$apid" "$owned/.owner" || { verdicts="$verdicts no-owner-pid"; continue; }
 	v=$(OMP_KIT_SCRATCH_ROOTS="$repo/var/agent-tmp" bun "$KITREPO/src/cli.ts" scratch plan --json 2>>"$TMP/plan.err" | jq -r --arg d "$owned" '[.. | objects | select(.dir? == $d) | .action] | first // "absent"')

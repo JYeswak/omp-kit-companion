@@ -3,6 +3,13 @@
 # The gate is always executed from the exact commit archive, never the working tree.
 set -eu
 ROOT=$(git rev-parse --show-toplevel)
+# Git supplies repository selectors to hooks. ROOT is resolved first; fixture
+# processes below must not inherit those selectors or config overrides.
+for name in $(env | cut -d= -f1); do
+	case "$name" in
+		GIT_*) [ "$name" = GIT_TERMINAL_PROMPT ] || unset "$name" ;;
+	esac
+done
 IFS=' '
 read -r local_ref local_sha remote_ref remote_sha || exit 0
 : "${remote_ref:-}"
