@@ -59,8 +59,8 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { matchesBounded } from "./regex-guards.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, scratchPressureChiefRoute, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, applyScratchForPressure, classifyScratchPressure, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, measureDiskFreePercent, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
+import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
@@ -2540,97 +2540,6 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
 			} catch (error) { lock.release(); return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
 		}
-		if (job.name === "scratch-pressure") {
-			const started = new Date().toISOString();
-			let freePct = measureDiskFreePercent(home);
-			let pressure = classifyScratchPressure(freePct);
-			const previous = (() => {
-				try {
-					const value = JSON.parse(readFileSync(jobReceiptPath(home, job.name), "utf8")) as unknown;
-					return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
-				} catch { return {}; }
-			})();
-			let action = pressure === "NORMAL" ? "NOOP" : pressure;
-			let warningStatus = "NOT_NEEDED";
-			let warningSent = false;
-			let reclaimApplied = false;
-			let result: ScratchApplyResult | null = null;
-			let detail: string | undefined;
-			let busyHolder: number | null = null;
-			if (pressure === "WARN") {
-				if (previous.pressure === "WARN" && previous.warning_sent === true) {
-					warningStatus = "ALREADY_SENT";
-					warningSent = true;
-				} else {
-					const route = scratchPressureChiefRoute(home);
-					if (route === null) {
-						action = "WARN_ROUTE_UNAVAILABLE";
-						warningStatus = "ROUTE_UNAVAILABLE";
-						detail = "fleet-watch config has no valid chief session and pane";
-					} else {
-						const message = "omp-kit scratch pressure WARN: " + (freePct?.toFixed(1) ?? "unknown") + "% free (warn 25%; reclaim 20%; sbh 14%).";
-						const sent = defaultRunner(["ntm", "send", route.session, "--panes=" + route.pane, "--no-cass-check", message]);
-						warningSent = sent.code === 0;
-						warningStatus = warningSent ? "SENT" : "SEND_FAILED";
-						if (!warningSent) { action = "WARN_SEND_FAILED"; detail = sent.stderr || sent.stdout || "ntm send failed"; }
-						else action = "WARNED";
-					}
-				}
-			}
-			if (pressure === "RECLAIM") {
-				if (previous.pressure === "RECLAIM" && previous.reclaim_applied === true && previous.exit === 0) {
-					action = "ALREADY_RECLAIMED";
-					reclaimApplied = true;
-				} else {
-					const reaperClaim = acquireRunLock(jobsDir, "scratch-reaper");
-					if (reaperClaim.status !== "ACQUIRED") {
-						action = "BUSY";
-						busyHolder = reaperClaim.holderPid;
-						detail = "scratch-reaper already holds the per-repository apply lock";
-					} else {
-						try {
-							const measured = applyScratchForPressure(home, { liveness: defaultLiveness(), run: scratchRunner, home,
-								onProgress: (verdict, progress) => {
-								if (progress.done === 1 || progress.done === progress.total || progress.done % 100 === 0)
-									process.stderr.write("scratch-pressure " + progress.done + "/" + progress.total + " " + verdict.action + " " + verdict.dir + "\n");
-							},
-						});
-						freePct = measured.free_pct;
-						pressure = measured.pressure;
-						result = measured.result;
-					} finally { reaperClaim.lock.release(); }
-					if (result !== null) {
-						reclaimApplied = result.receipt.failed_count === 0;
-						action = reclaimApplied ? "APPLIED" : "APPLY_FINDINGS";
-					} else action = pressure === "NORMAL" ? "NOOP" : pressure;
-					}
-				}
-			}
-			const unavailable = pressure === "UNKNOWN" || action === "WARN_ROUTE_UNAVAILABLE";
-			const failed = action === "WARN_SEND_FAILED" || action === "APPLY_FINDINGS";
-			const exit = action === "BUSY" ? OVERLAP_EXIT : unavailable ? 3 : failed ? 1 : 0;
-			const finished = new Date().toISOString();
-			const metrics = result?.receipt;
-			const receipt = { started_at: started, finished_at: finished, exit, omp_version: null, pressure,
-				free_pct_before: freePct, free_pct_after: metrics?.free_pct_after ?? freePct,
-				reaped_gb: metrics?.reaped_gb ?? 0, quarantined_gb: metrics?.quarantined_gb ?? 0, deleted_gb: metrics?.deleted_gb ?? 0,
-				failed_count: metrics?.failed_count ?? 0, refused_count: metrics?.refused_count ?? 0,
-				failed_gb: metrics?.failed_gb ?? 0, refused_gb: metrics?.refused_gb ?? 0,
-				action, warning_status: warningStatus, warning_sent: warningSent, reclaim_applied: reclaimApplied };
-			if (!recordJobReceipt(home, job.name, receipt)) {
-				lock.release();
-				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
-						remediation: "Repair the state root; the pressure action may already have run." }], verification: "UNVERIFIED" };
-			}
-			lock.release();
-			const overall = unavailable ? "UNAVAILABLE" : failed ? "FINDINGS" : action === "BUSY" ? "FINDINGS" : "OK";
-			return { code: exit, data: { overall, job: job.name, pressure, free_pct: freePct, action, busy_holder_pid: busyHolder,
-				rootMetrics: result?.rootMetrics ?? [], quarantineBuckets: result?.quarantineBuckets ?? null, receipt },
-			errors: unavailable || failed || action === "BUSY" ? [{ code: action, message: detail ?? "Scratch pressure action did not complete",
-				remediation: "Inspect the pressure receipt and scratch-reap JSONL; safe refusals leave entries in place." }] : [],
-			verification: "UNVERIFIED" };
-		}
 		if (job.name === "scratch-reaper") {
 			const started = new Date().toISOString();
 			const result = applyScratch(home, { liveness: defaultLiveness(), run: scratchRunner, home });
@@ -2640,7 +2549,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				kill: pid => defaultRunner(["kill", "-TERM", String(pid)]).code === 0,
 				quarantine: path => { try { const root = join(home, ".local", "state", "omp-kit", "browser-quarantine"); mkdirSync(root, { recursive: true, mode: 0o700 }); renameSync(path, join(root, `${Date.now()}-${path.split("/").pop() ?? "clone"}`)); return true; } catch { return false; } },
 			});
-			const failed = result.applied.filter(isApplyFailure).length + result.expired.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+			const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
 			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: failed > 0 ? 1 : 0, omp_version: null };
 			try {
 				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
@@ -2658,9 +2567,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					quarantined: result.applied.filter(v => v.action === "QUARANTINE").length,
 					deleted: result.expired.length, failures: failed,
 					reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
-				rootMetrics: result.rootMetrics, pressure: result.pressure, quarantineBuckets: result.quarantineBuckets,
-				sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired,
-				metrics: result.receipt },
+				sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired },
 			errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)${firstFailure(result)}`,
 				remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 			verification: "UNVERIFIED" };
@@ -3113,32 +3020,20 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);
 		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
-			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes,
-			rootMetrics: plan.rootMetrics, pressure: plan.pressure, quarantineBuckets: plan.quarantineBuckets }, verification: "UNVERIFIED" };
+			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes }, verification: "UNVERIFIED" };
 	}
 	if (sub === "apply") {
 		if (!request.flags.has("--apply")) {
 			return refusal("SCRATCH_REQUIRES_APPLY", "scratch apply deletes scratch and kills orphaned harness servers",
 				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
 		}
-		const stateRoot = receiptStateRoot();
-		const jobsDir = stateRoot ? join(stateRoot, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
-		try { mkdirSync(jobsDir, { recursive: true, mode: 0o700 }); } catch {
-			return { code: 3, data: { overall: "UNAVAILABLE" }, errors: [{ code: "SCRATCH_LOCK_UNAVAILABLE",
-				message: "The scratch apply lock directory is unavailable", remediation: "Repair the private state root; scratch was not changed." }], verification: "UNVERIFIED" };
-		}
-		const claim = acquireRunLock(jobsDir, "scratch-reaper");
-		if (claim.status !== "ACQUIRED") return { code: OVERLAP_EXIT,
-			data: { overall: "BUSY", holder_pid: claim.holderPid, holder_age_ms: claim.holderAgeMs }, verification: "UNVERIFIED" };
-		try {
-			const result = applyScratch(home, { ...deps, home });
-			const failed = result.applied.filter(isApplyFailure).length + result.expired.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
-			return { code: failed > 0 ? 1 : 0,
-				data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
-					orphans: result.orphans, killed: result.killed, expired: result.expired,
-					reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
-				verification: "UNVERIFIED" };
-		} finally { claim.lock.release(); }
+		const result = applyScratch(home, { ...deps, home });
+		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+		return { code: failed > 0 ? 1 : 0,
+			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
+				orphans: result.orphans, killed: result.killed, expired: result.expired,
+				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
+			verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }

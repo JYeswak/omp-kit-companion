@@ -5,7 +5,6 @@ import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
 import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
-import { classifyScratchPressure, type ScratchPressure } from "./scratch.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -22,7 +21,6 @@ export interface ServiceJobDef { name: string; label: string; kind: "watch" | "i
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
-	"scratch-pressure": { name: "scratch-pressure", label: "com.omp-kit.scratch-pressure", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
@@ -68,63 +66,6 @@ export function serviceLabel(name: string): string {
 	if (namespace === undefined || namespace === "") return `com.omp-kit.${name}`;
 	if (!TEST_NAMESPACE_PATTERN.test(namespace)) throw new Error(`refusing to build a service label from OMP_KIT_TEST_LABEL_NAMESPACE=${namespace}`);
 	return `${namespace}.${name}`;
-}
-
-export interface ScratchPressureTriggerResult {
-	pressure: ScratchPressure;
-	action: "NOOP" | "WARN" | "UNKNOWN" | "UNSUPPORTED" | "RECLAIM_TRIGGERED" | "RECLAIM_TRIGGER_FAILED";
-	command: readonly string[] | null;
-	result: ServiceRunResult | null;
-}
-
-/** A lightweight tick kicks the existing reaper; its own per-job lock serializes every apply. */
-export function runScratchPressureTrigger(freePct: number | null, platform: string,
-	run: ServiceRunner): ScratchPressureTriggerResult {
-	const pressure = classifyScratchPressure(freePct);
-	if (pressure !== "RECLAIM") return {
-		pressure,
-		action: pressure === "WARN" ? "WARN" : pressure === "UNKNOWN" ? "UNKNOWN" : "NOOP",
-		command: null,
-		result: null,
-	};
-	const job = KNOWN_JOBS["scratch-reaper"]!;
-	const command = platform === "darwin"
-		? ["launchctl", "kickstart", `${domain()}/${job.label}`]
-		: platform === "linux"
-			? ["systemctl", "--user", "start", `omp-kit-${job.name}.service`]
-			: null;
-	if (command === null) return { pressure, action: "UNSUPPORTED", command: null, result: null };
-	const result = run(command);
-	return {
-		pressure,
-		action: result.code === 0 ? "RECLAIM_TRIGGERED" : "RECLAIM_TRIGGER_FAILED",
-		command,
-		result,
-	};
-}
-
-export interface ScratchPressureChiefRoute { session: string; pane: string; agent: string | null }
-
-export function scratchPressureChiefRoute(home: string,
-	configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json")):
-	ScratchPressureChiefRoute | null {
-	let config: unknown;
-	try {
-		config = JSON.parse(readFileSync(configPath, "utf8"));
-	} catch {
-		return null;
-	}
-	if (typeof config !== "object" || config === null || Array.isArray(config)) return null;
-	const chief = (config as Record<string, unknown>).chief;
-	if (typeof chief !== "object" || chief === null || Array.isArray(chief)) return null;
-	const route = chief as Record<string, unknown>;
-	const session = route.session;
-	const pane = route.pane;
-	const agent = route.agent;
-	if (typeof session !== "string" || session.trim() === "" || session !== session.trim() || session.includes("\r") || session.includes("\n") ||
-		typeof pane !== "string" || pane.trim() === "" || pane !== pane.trim() || pane.includes("\r") || pane.includes("\n") ||
-		(agent !== undefined && typeof agent !== "string")) return null;
-	return { session, pane, agent: typeof agent === "string" && agent.trim() !== "" ? agent : null };
 }
 
 export function serviceHome(home?: string): string {
