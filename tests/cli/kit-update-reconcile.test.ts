@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reconcilePendingUpdate } from "../../src/kit-update.ts";
 
@@ -10,19 +10,25 @@ const repoRoot = resolve(import.meta.dir, "../..");
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const ID = "abcdef0123456789abcdef0123456789ab";
 
+function makePrefix(root: string, name: string, version: string, bytes: Buffer): string {
+	const prefix = join(root, name);
+	mkdirSync(join(prefix, "bin"), { recursive: true });
+	mkdirSync(join(prefix, "releases", version, "bin"), { recursive: true });
+	writeFileSync(join(prefix, "releases", version, "bin", "omp-kit"), bytes, { mode: 0o755 });
+	symlinkSync(`../releases/${version}/bin/omp-kit`, join(prefix, "bin", "omp-kit"));
+	return prefix;
+}
+
 function fixture(options: { liveBytes: Buffer; recordedBytes: Buffer; withActivation?: boolean } = {
 	liveBytes: Buffer.from("binary-0.2.17"),
 	recordedBytes: Buffer.from("binary-0.2.17"),
 }) {
 	const root = mkdtempSync(join(repoRoot, "var", "agent-tmp", "kit-update-reconcile-"));
-	const prefix = join(root, "prefix"), stateRoot = join(root, "state");
-	mkdirSync(join(prefix, "bin"), { recursive: true });
-	mkdirSync(join(prefix, "releases", "0.2.17", "bin"), { recursive: true });
+	const prefix = makePrefix(root, "prefix", "0.2.17", options.liveBytes);
+	const stateRoot = join(root, "state");
 	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
 	chmodSync(stateRoot, 0o700);
-	const { liveBytes, recordedBytes } = options;
-	writeFileSync(join(prefix, "releases", "0.2.17", "bin", "omp-kit"), liveBytes, { mode: 0o755 });
-	symlinkSync("../releases/0.2.17/bin/omp-kit", join(prefix, "bin", "omp-kit"));
+	const { recordedBytes } = options;
 	writeFileSync(join(stateRoot, "kit-update.pending.json"), JSON.stringify({
 		scope: "kit", identitySha256: sha(Buffer.from("old")), kitVersion: "0.2.16",
 		ompVersion: null, channel: null, id: ID, state: "PENDING",
@@ -40,10 +46,10 @@ function fixture(options: { liveBytes: Buffer; recordedBytes: Buffer; withActiva
 	return { root, prefix, stateRoot };
 }
 
-test("[1] positive: matching postimages reconcile and record the verification", () => {
+test("[1] positive: derived prefix reconciles matching postimages", () => {
 	const ctx = fixture();
 	try {
-		const result = reconcilePendingUpdate({ stateRoot: ctx.stateRoot, prefix: ctx.prefix, id: ID });
+		const result = reconcilePendingUpdate({ stateRoot: ctx.stateRoot, id: ID });
 		expect(result.status).toBe("RECONCILED");
 		expect(result.activeVersion).toBe("0.2.17");
 		expect(result.verified.sha256).toBe(sha(Buffer.from("binary-0.2.17")));
@@ -78,5 +84,57 @@ test("unknown receipt id and missing activation record refuse", () => {
 		expect(() => reconcilePendingUpdate({ stateRoot: bare.stateRoot, prefix: bare.prefix, id: ID })).toThrow("KIT_RECEIPT_INVALID");
 	} finally {
 		rmSync(bare.root, { recursive: true, force: true });
+	}
+});
+
+test("[1b] explicit matching prefix reconciles through the override path", () => {
+	const ctx = fixture();
+	try {
+		const result = reconcilePendingUpdate({ stateRoot: ctx.stateRoot, prefix: ctx.prefix, id: ID });
+		expect(result.status).toBe("RECONCILED");
+		expect(result.activeVersion).toBe("0.2.17");
+	} finally {
+		rmSync(ctx.root, { recursive: true, force: true });
+	}
+});
+
+test("[2b] planted: wrong explicit prefix refuses and stays pending", () => {
+	const ctx = fixture();
+	const other = makePrefix(ctx.root, "other", "0.2.16", Buffer.from("binary-0.2.16"));
+	try {
+		expect(() => reconcilePendingUpdate({ stateRoot: ctx.stateRoot, prefix: other, id: ID })).toThrow("PENDING_RECOVERY");
+		expect(existsSync(join(ctx.stateRoot, "kit-update.pending.json"))).toBe(true);
+	} finally {
+		rmSync(ctx.root, { recursive: true, force: true });
+	}
+});
+
+test("malformed postimage binary path refuses without touching state", () => {
+	const ctx = fixture();
+	writeFileSync(join(ctx.stateRoot, `kit-activation-${ID}.json`), JSON.stringify({
+		schema_version: 1, id: ID,
+		before: { version: "0.2.16", sha256: sha(Buffer.from("old")), target: "../releases/0.2.16/bin/omp-kit", binary: join(ctx.prefix, "releases", "0.2.16", "bin", "omp-kit") },
+		after: { version: "0.2.17", sha256: sha(Buffer.from("binary-0.2.17")), target: "../releases/0.2.17/bin/omp-kit", binary: "/weird/place" },
+		state: "READY",
+	}), { mode: 0o600 });
+	try {
+		expect(() => reconcilePendingUpdate({ stateRoot: ctx.stateRoot, id: ID })).toThrow("KIT_RECEIPT_INVALID");
+		expect(existsSync(join(ctx.stateRoot, "kit-update.pending.json"))).toBe(true);
+	} finally {
+		rmSync(ctx.root, { recursive: true, force: true });
+	}
+});
+
+test("[1c] explicit relocated prefix records the observed binary path", () => {
+	const ctx = fixture();
+	const movedPrefix = makePrefix(ctx.root, "moved-prefix", "0.2.17", Buffer.from("binary-0.2.17"));
+	try {
+		const result = reconcilePendingUpdate({ stateRoot: ctx.stateRoot, prefix: movedPrefix, id: ID });
+		const movedBinary = join(movedPrefix, "releases", "0.2.17", "bin", "omp-kit");
+		expect(result.verified.binary).toBe(movedBinary);
+		const recorded = JSON.parse(readFileSync(join(ctx.stateRoot, `kit-reconcile-${ID}.json`), "utf8")) as { verified: { binary: string } };
+		expect(recorded.verified.binary).toBe(movedBinary);
+	} finally {
+		rmSync(ctx.root, { recursive: true, force: true });
 	}
 });

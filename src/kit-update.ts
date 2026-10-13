@@ -382,7 +382,7 @@ export interface KitReconcileResult {
  * pending receipt intact, so a later update stays blocked until a real fix.
  * Writes a reconcile record naming exactly what was verified.
  */
-export function reconcilePendingUpdate(input: { stateRoot: string; prefix: string; id: string }): KitReconcileResult {
+export function reconcilePendingUpdate(input: { stateRoot: string; prefix?: string | null; id: string }): KitReconcileResult {
  const heldLock = acquireKitUpdateLock(input.stateRoot);
  try {
   const pending = inspectPendingKitUpdate(input.stateRoot);
@@ -395,9 +395,33 @@ export function reconcilePendingUpdate(input: { stateRoot: string; prefix: strin
    throw error;
   }
   if (receipt.state !== "READY") throw new Error("KIT_RECEIPT_INVALID");
-  const verified: KitReconcileVerified = { target: receipt.after.target, binary: receipt.after.binary,
+  // The running binary's release root names the WRONG install on a stuck
+  // machine (it predates the reconcile command). The recorded postimage
+  // names the right one: strip the release suffix the same shape undo
+  // already validates. An explicit --prefix wins outright and is validated
+  // the same way, by matching rather than by derivation.
+  let effectivePrefix: string;
+  if (input.prefix !== undefined && input.prefix !== null) {
+   effectivePrefix = input.prefix;
+  } else {
+   if (receipt.after.target !== relativeTarget(receipt.after.version)) throw new Error("KIT_RECEIPT_INVALID");
+   const suffix = `/releases/${receipt.after.version}/bin/omp-kit`;
+   if (!receipt.after.binary.endsWith(suffix)) throw new Error("KIT_RECEIPT_INVALID");
+   effectivePrefix = receipt.after.binary.slice(0, receipt.after.binary.length - suffix.length);
+   if (!isAbsolute(effectivePrefix) || resolve(effectivePrefix) !== effectivePrefix) throw new Error("KIT_RECEIPT_INVALID");
+   if (receipt.after.binary !== installedBinary(effectivePrefix, receipt.after.version)) throw new Error("KIT_RECEIPT_INVALID");
+  }
+  let verified: KitReconcileVerified = { target: receipt.after.target, binary: receipt.after.binary,
    sha256: receipt.after.sha256, version: receipt.after.version };
-  reconcileKitUpdateReceipt(input.stateRoot, heldLock, input.id, () => matches(input.prefix, receipt.after));
+  const rescan = (): boolean => {
+   try {
+    const live = readInstallation(effectivePrefix);
+    if (live.target !== receipt.after.target || live.sha256 !== receipt.after.sha256) return false;
+    verified = { target: live.target, binary: live.binary, sha256: live.sha256, version: receipt.after.version };
+    return true;
+   } catch { return false; }
+  };
+  reconcileKitUpdateReceipt(input.stateRoot, heldLock, input.id, rescan);
   writePrivate(join(input.stateRoot, `kit-reconcile-${input.id}.json`),
    JSON.stringify({ schema_version: 1, id: input.id, state: "RECONCILED", scope: pending.scope, verified }));
   return { status: "RECONCILED", receiptId: input.id, activeVersion: receipt.after.version, verified };
