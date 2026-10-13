@@ -23,7 +23,7 @@ function configure(root: string, values: { slots?: number; max_wait_s?: number }
 async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}) {
 	const child = Bun.spawn([process.execPath, entry, ...args], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", ...extraEnv },
+		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...extraEnv },
 		stdin: "ignore", stdout: "pipe", stderr: "pipe",
 	});
 	const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
