@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.36] - 2026-10-13
+
+### Changed
+
+- `omp-kit heavy` bypasses only machine LOAD1 admission for GitHub Actions jobs; local CI=1 remains load-limited and slot admission is unchanged.
+- Regex-budget judges each case by the median of five round-robin samples. Reports pair per-sample timings with runner load1; machine load no longer blocks timing stages.
+
+### Fixed
+
+- The pre-push gate and kit tests no longer inherit GIT_DIR/GIT_WORK_TREE or write fixture identity into the real repo config.
+
 ## [0.2.35] - 2026-10-13
 
 ### Added
