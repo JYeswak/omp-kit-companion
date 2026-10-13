@@ -282,6 +282,23 @@ const infraData: DataSchema = { type: "object", required: ["overall", "command"]
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
+	rootMetrics: { type: "array", items: { type: "object", required: ["root", "free_pct", "scratch_gb"], properties: {
+		root: { type: "string" }, free_pct: { type: ["number", "null"] }, scratch_gb: { type: "number" },
+	} } },
+	pressure: { enum: ["NORMAL", "WARN", "RECLAIM", "UNKNOWN"] },
+	quarantineBuckets: { type: "object", required: ["young", "expiredHeld", "failed", "oldestAgeMs", "readable", "ttlValid"], properties: {
+		young: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		expiredHeld: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		failed: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		oldestAgeMs: { type: ["number", "null"] }, readable: { type: "boolean" }, ttlValid: { type: "boolean" },
+	} },
+	receipt: { type: "object", properties: {
+		started_at: { type: "string" }, finished_at: { type: "string" },
+		free_pct_before: { type: ["number", "null"] }, free_pct_after: { type: ["number", "null"] },
+		reaped_gb: { type: "number" }, quarantined_gb: { type: "number" }, deleted_gb: { type: "number" },
+		failed_count: { type: "number" }, failed_gb: { type: "number" },
+		refused_count: { type: "number" }, refused_gb: { type: "number" },
+	} },
 	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
 		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
 		reason: { type: "string" }, sizeBytes: { type: "number" },
