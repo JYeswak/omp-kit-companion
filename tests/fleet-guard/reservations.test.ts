@@ -118,5 +118,108 @@ describe("fleet guard reservation checks", () => {
 			if (saved.root === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT; else process.env.AGENT_MAIL_STORAGE_ROOT = saved.root;
 		}
 	});
+	test("a release drops the cached allow so the next edit re-queries", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		expect(calls).toBe(1);
+		covered = false;
+		expect(await check({ toolName: "release_file_reservations", arguments: { paths: ["src/rel.ts"] } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+	test("an am CLI release drops the cached allow so the next edit re-queries", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, projectKey: "/workspace/repo", agentName: "Alice", isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		expect(calls).toBe(1);
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release /workspace/repo Alice --paths src/rel.ts" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
+	test("the same release words inside an echo string never clear the cache", async () => {
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered: true, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "bash", arguments: { command: 'echo "am file_reservations release /workspace/repo Alice"' } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		expect(calls).toBe(1);
+	});
+	test("am release with --paths before positionals clears the right scope", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release --paths src/rel.ts /workspace/repo Alice" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
+	test("am release with --ids before positionals clears the right scope", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release --ids 12 /workspace/repo Alice" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
+	test("am release with --paths=a,b form clears the right scope", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release --paths=a,b /workspace/repo Alice" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
+	test("am release with options after positionals clears the right scope", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toBeUndefined();
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release /workspace/repo Alice --paths src/rel.ts" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/rel.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(2);
+	});
+
+	test("an unscannable release clears everything instead of keeping stale allows", async () => {
+		let covered = true;
+		let calls = 0;
+		const lookupReservations = async () => { calls += 1; return { covered, conflicts: [] }; };
+		let now = 1_000_000;
+		const context = { ...base, isTrackedPath: async () => true, lookupReservations, now: () => now };
+		expect(await check({ toolName: "edit", arguments: { path: "src/a.ts" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/b.ts" } }, context)).toBeUndefined();
+		covered = false;
+		expect(await check({ toolName: "bash", arguments: { command: "am file_reservations release /workspace/repo" } }, context)).toBeUndefined();
+		expect(await check({ toolName: "edit", arguments: { path: "src/a.ts" } }, context)).toMatchObject({ block: true });
+		expect(await check({ toolName: "edit", arguments: { path: "src/b.ts" } }, context)).toMatchObject({ block: true });
+		expect(calls).toBe(4);
+	});
 });
 

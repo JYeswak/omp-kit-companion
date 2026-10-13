@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { type ActiveHold, readActiveHolds } from "../reservation-age.ts";
 import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, readHotPaths, renewScope, reservationArgs } from "./hot-cap.ts";
+import { shellTokens } from "./scratch.ts";
 
 export interface ReservationEvent {
 	toolName?: unknown;
@@ -74,6 +75,66 @@ function eventPath(event: ReservationEvent): string | undefined {
 
 function isEditOrWriteTool(name: string): boolean {
 	return /(?:^|[._/-])(edit|write)(?:[-_]?file)?$/.test(name) || name === "edit" || name === "write";
+}
+
+/** True for Agent Mail reservation-release tool calls (any prefix/suffix shape). */
+function isReleaseTool(name: string): boolean {
+	const lowered = name.toLowerCase();
+	return lowered.includes("file_reservation") && lowered.includes("release");
+}
+
+/** Drop cached lookups so the next edit re-queries instead of seeing a stale allow. */
+function dropCachedLookups(projectKey: string, agentName: string | undefined): void {
+	const scope = agentName === undefined ? projectKey + "\\0" : projectKey + "\\0" + agentName + "\\0";
+	for (const key of cache.keys()) if (key.startsWith(scope)) cache.delete(key);
+}
+
+function isBashTool(name: string): boolean {
+	return /(?:^|[._/-])bash$/.test(name.toLowerCase());
+}
+
+function bashCommand(event: ReservationEvent): string | undefined {
+	const candidates: unknown[] = [
+		event.arguments && typeof event.arguments === "object" ? (event.arguments as Record<string, unknown>).command : undefined,
+		event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).command : undefined,
+		event.params && typeof event.params === "object" ? (event.params as Record<string, unknown>).command : undefined,
+	];
+	for (const candidate of candidates) if (typeof candidate === "string" && candidate.trim()) return candidate;
+	return undefined;
+}
+
+/**
+ * Project/agent of an `am file_reservations release` CLI call, parsed
+ * source-aware: only UNQUOTED words count, so the same words inside an echo
+ * string never clear the cache. Positional PROJECT then AGENT per
+ * `am file_reservations release --help`; --paths/--ids consume the next word
+ * and --opt=value is one word. Returns "ambiguous" when a release is present
+ * but unscannable: the caller must clear everything, because under-clearing
+ * is the bug and over-clearing costs one re-query.
+ */
+function bashReleaseScope(command: string): { project: string; agent: string } | "ambiguous" | undefined {
+	const words = shellTokens(command).filter(token => !token.quoted).map(token => token.text);
+	for (let i = 0; i + 2 < words.length; i++) {
+		const head = words[i]!;
+		if (head !== "am" && !head.endsWith("/am")) continue;
+		if (words[i + 1] !== "file_reservations" || words[i + 2] !== "release") continue;
+		const positionals: string[] = [];
+		for (let j = i + 3; j < words.length; j++) {
+			const word = words[j]!;
+			if (/^[;&|()]$/.test(word)) continue;
+			if (word === "--paths" || word === "--ids") { j++; continue; }
+			if (word.startsWith("--")) {
+				if (word.includes("=") || word === "--help") continue;
+				return "ambiguous";
+			}
+			if (word === "-h") continue;
+			if (word.startsWith("-")) return "ambiguous";
+			positionals.push(word);
+		}
+		if (positionals.length < 2 || positionals[0] === undefined || positionals[1] === undefined) return "ambiguous";
+		return { project: positionals[0], agent: positionals[1] };
+	}
+	return undefined;
 }
 
 function findRepoRoot(start: string): string | undefined {
@@ -319,7 +380,25 @@ async function checkHotRenewal(
 }
 
 export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> {
+	// A release retires holds: drop cached allows so the next edit re-queries
+	// instead of seeing a stale lock. Releases are never blocked.
+	if (isReleaseTool(eventToolName(event))) {
+		const cwd = context.cwd ?? process.cwd();
+		const root = context.repoRoot ?? context.projectRoot ?? findRepoRoot(cwd);
+		dropCachedLookups(context.projectKey ?? root ?? cwd, context.agentName ?? process.env.AGENT_NAME);
+		return undefined;
+	}
 	const reservationKind = isReservationTool(eventToolName(event));
+	// The am CLI reaches the hook as a bash tool call: parse it source-aware.
+	if (isBashTool(eventToolName(event))) {
+		const command = bashCommand(event);
+		if (command !== undefined) {
+			const scope = bashReleaseScope(command);
+			if (scope === "ambiguous") clearReservationCache();
+			else if (scope !== undefined) dropCachedLookups(scope.project, scope.agent);
+		}
+		return undefined;
+	}
 	if (reservationKind !== null) return checkHotReservation(event, context, reservationKind);
 	if (!isEditOrWriteTool(eventToolName(event))) return undefined;
 	const inputPath = eventPath(event);
