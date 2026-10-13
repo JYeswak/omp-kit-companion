@@ -185,6 +185,42 @@ test("fold refuses a fragment with an unknown category or a stray heading, namin
 	expect(heading.exitCode).toBe(1);
 	expect(heading.output).toContain("changelog.d/y.md: only one optional leading");
 });
+test("pre-push notes coverage rejects unknown fragment categories before release promotion", () => {
+	const checkFragment = (slug: string, category: string) => {
+		const beadId = "ompkit-fp72.65.1";
+		const tip = commitTree(treeWithFiles(releaseHead, {
+			"scripts/release-notes-gate-fixture.ts": "export const checked = true;\n",
+			[`changelog.d/${beadId}.md`]: `### ${category}\n- A release note fixture.\n`,
+		}), [releaseHead], `fixture ${slug} fragment [test]`, [
+			`Bead: ${beadId}`,
+			"Verified: release-note gate fixture",
+		]);
+		const archive = join(workspace, `pushed-notes-${slug}`);
+		const archiveFile = join(workspace, `pushed-notes-${slug}.tar`);
+		mkdirSync(archive);
+		const archived = Bun.spawnSync(["git", "-C", fixture, "archive", `--output=${archiveFile}`, tip], {
+			stdout: "pipe", stderr: "pipe",
+		});
+		expect(archived.exitCode, archived.stderr.toString()).toBe(0);
+		const extracted = Bun.spawnSync(["tar", "-xf", archiveFile, "-C", archive], {
+			stdout: "pipe", stderr: "pipe",
+		});
+		expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+		const checked = Bun.spawnSync(["sh", join(repo, "scripts", "check-pushed-notes.sh"),
+			"--repo", fixture, "--base", releaseHead, "--tip", tip, "--archive-dir", archive], {
+			stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch },
+		});
+		return { exitCode: checked.exitCode, output: `${checked.stdout.toString()}${checked.stderr.toString()}` };
+	};
+
+	const invalid = checkFragment("unknown-category", "Security");
+	expect(invalid.exitCode).not.toBe(0);
+	expect(invalid.output).toContain('unknown category "Security"');
+	const valid = checkFragment("valid-category", "Fixed");
+	expect(valid.exitCode, valid.output).toBe(0);
+	expect(valid.output).toContain("covered by Bead");
+});
+
 
 test("promote refuses (exit 4) when there is nothing to release: no Unreleased entries and no fragments", () => {
 	const empty = releasedChangelog.replace("### Added\n\n- Existing unreleased addition.\n\n", "");

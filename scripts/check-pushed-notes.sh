@@ -28,15 +28,25 @@ if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$TIP" ] || [ -z "$ARCHIVE_DIR" ]; t
 	echo "usage: check-pushed-notes.sh --repo DIR --base SHA --tip SHA --archive-dir DIR" >&2
 	exit 2
 fi
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 
-fragments=$(mktemp -d "$ARCHIVE_DIR/../pushed-notes.XXXXXX") || exit 1
-trap 'rm -rf "$fragments"' EXIT HUP INT TERM
-# changelog.d/ is an inbox the release train drains into CHANGELOG.md, so it may be
-# empty; a commit that needs a fragment still fails below, naming the missing file.
+
+scratch=$(mktemp -d "$ARCHIVE_DIR/../pushed-notes.XXXXXX") || exit 1
+fragments="$scratch/fragments"
+validation="$scratch/validation"
+mkdir -p "$fragments" "$validation/changelog.d"
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+cp "$ARCHIVE_DIR/CHANGELOG.md" "$validation/CHANGELOG.md"
+git -C "$validation" init -q
 for frag in "$ARCHIVE_DIR"/changelog.d/*.md; do
 	[ -f "$frag" ] || continue
 	cp "$frag" "$fragments/"
+	cp "$frag" "$validation/changelog.d/"
 done
+if ! (cd "$validation" && sh "$SCRIPT_DIR/release-notes.sh" fold >/dev/null); then
+	echo "notes validation: candidate changelog fragments are not promotable" >&2
+	exit 1
+fi
 
 fail=0
 for commit in $(git -C "$REPO" rev-list --first-parent "$BASE..$TIP"); do

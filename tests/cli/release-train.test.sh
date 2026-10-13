@@ -49,20 +49,95 @@ out=$(sh "$TRAIN" decide --conclusion success --run-status completed --sha "$SHA
 check "decide: superseded SHA skipped" 4 "$rc" "$out" "DECIDE=skip" "superseded-by-newer-green"
 
 # 6. next patch after the max tag
-out=$(printf 'v0.2.18\nv0.2.20\nv0.2.19\n' | sh "$TRAIN" next-version 2>&1); rc=$?
+out=$(printf 'v0.2.18\nv0.2.20\nv0.2.19\n' | sh "$TRAIN" next-version --tags-only 2>&1); rc=$?
 check "next-version: max plus one" 0 "$rc" "$out" "0.2.21"
 
 # 7. legacy non-semver tags are ignored, not parsed
-out=$(printf 'omp-kit v0.2.3\nv0.2.5\nv0.2.15\n' | sh "$TRAIN" next-version 2>&1); rc=$?
+out=$(printf 'omp-kit v0.2.3\nv0.2.5\nv0.2.15\n' | sh "$TRAIN" next-version --tags-only 2>&1); rc=$?
 check "next-version: legacy tags ignored" 0 "$rc" "$out" "0.2.16"
 
 # 8. planted: ls-remote full ref lines are accepted
-out=$(printf 'abc123\trefs/tags/v0.2.20\ndef456\trefs/tags/v0.2.20^{}\n' | sh "$TRAIN" next-version 2>&1); rc=$?
+out=$(printf 'abc123\trefs/tags/v0.2.20\ndef456\trefs/tags/v0.2.20^{}\n' | sh "$TRAIN" next-version --tags-only 2>&1); rc=$?
 check "next-version: ls-remote ref lines" 0 "$rc" "$out" "0.2.21"
 
 # 9. planted: no parseable tag refuses instead of guessing
-out=$(printf 'omp-kit v0.2.3\n' | sh "$TRAIN" next-version 2>&1); rc=$?
+out=$(printf 'omp-kit v0.2.3\n' | sh "$TRAIN" next-version --tags-only 2>&1); rc=$?
 check "next-version: no tag refuses" 4 "$rc" "$out" "no parseable"
+# orphaned-version planted case: the changelog section is newer than the latest tag
+BUMP_FIXTURE="$TMP/orphan-version"
+mkdir -p "$BUMP_FIXTURE/changelog.d"
+cat > "$BUMP_FIXTURE/CHANGELOG.md" <<'CHANGELOG'
+# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- A new release entry.
+
+## [0.2.32] - 2026-10-12
+
+### Fixed
+
+- Existing untagged bump.
+
+## [0.2.31] - 2026-10-11
+
+### Fixed
+
+- Previous tagged release.
+CHANGELOG
+cat > "$BUMP_FIXTURE/package.json" <<'JSON'
+{
+	"name": "omp-kit-companion",
+	"version": "0.2.32",
+	"omp": {
+		"name": "omp-kit-companion",
+		"version": "0.2.32"
+	}
+}
+JSON
+printf '### Fixed\n- New train entry.\n' > "$BUMP_FIXTURE/changelog.d/ompkit-fp72.65.2.md"
+git -C "$BUMP_FIXTURE" init -q
+mkdir -p "$BUMP_FIXTURE/hooks"
+git -C "$BUMP_FIXTURE" config core.hooksPath "$BUMP_FIXTURE/hooks"
+git -C "$BUMP_FIXTURE" config user.name "Release Train Fixture"
+git -C "$BUMP_FIXTURE" config user.email "release-train@example.invalid"
+git -C "$BUMP_FIXTURE" add CHANGELOG.md package.json changelog.d/ompkit-fp72.65.2.md
+git -C "$BUMP_FIXTURE" commit -qm "fixture baseline [test]"
+git -C "$BUMP_FIXTURE" tag v0.2.31
+printf 'v0.2.31\n' > "$TMP/orphan-tags.txt"
+(cd "$BUMP_FIXTURE" && sh "$TRAIN" next-version < "$TMP/orphan-tags.txt" > "$TMP/orphan-version.out" 2> "$TMP/orphan-version.err")
+rc=$?
+version=$(cat "$TMP/orphan-version.out")
+out=$(cat "$TMP/orphan-version.err")
+check "next-version: untagged changelog section advances" 0 "$rc" "$out" "VERSION-DECISION" "basis=changelog" "version=0.2.33"
+if [ "$version" = "0.2.33" ]; then
+	pass=$((pass + 1)); printf 'ok next-version: exact release version\n'
+else
+	fail=$((fail + 1)); printf 'FAIL next-version: exact release version (got=%s)\n' "$version"
+fi
+out=$(sh "$TRAIN" bump --version "$version" --date 2026-10-13 --repo "$BUMP_FIXTURE" 2>&1); rc=$?
+check "bump: untagged changelog section promotes next version" 0 "$rc" "$out" "BUMP=committed" "version=0.2.33"
+if grep -F -x -q '## [0.2.33] - 2026-10-13' "$BUMP_FIXTURE/CHANGELOG.md" \
+	&& jq -e '.version == "0.2.33" and .omp.version == "0.2.33"' "$BUMP_FIXTURE/package.json" >/dev/null; then
+	pass=$((pass + 1)); printf 'ok bump: release section and package versions\n'
+else
+	fail=$((fail + 1)); printf 'FAIL bump: release section or package versions differ\n'
+fi
+printf 'v0.2.34\n' > "$TMP/newer-tags.txt"
+(cd "$BUMP_FIXTURE" && sh "$TRAIN" next-version < "$TMP/newer-tags.txt" > "$TMP/newer-version.out" 2> "$TMP/newer-version.err")
+rc=$?
+version=$(cat "$TMP/newer-version.out")
+out=$(cat "$TMP/newer-version.err")
+check "next-version: higher tag beats changelog section" 0 "$rc" "$out" "basis=tags" "max_tag=0.2.34" "max_changelog=0.2.33"
+if [ "$version" = "0.2.35" ]; then
+	pass=$((pass + 1)); printf 'ok next-version: exact higher-tag version\n'
+else
+	fail=$((fail + 1)); printf 'FAIL next-version: exact higher-tag version (got=%s)\n' "$version"
+fi
+
+
 
 # 10. candidate proof plus index verify for the exact version and SHA
 cat > "$TMP/proof.json" <<'JSON'

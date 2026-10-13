@@ -1,19 +1,18 @@
 #!/bin/sh
 # release-train.sh — RELTRAIN1 (ompkit-v66l) train decision logic.
 #
-# Pure, testable helpers around the release train. Every verdict comes from
-# the exit code plus one machine-readable line on stdout; refusals exit 4
-# (fail closed, same convention as check-commit-imports.sh).
+# Pure, testable helpers around the release train. Commands report through
+# exit codes and stdout; next-version logs its selection basis on stderr.
+# Refusals exit 4 (fail closed, same convention as check-commit-imports.sh).
 #
 #   decide --conclusion C --run-status S --sha SHA --head HEAD
 #     Green CI on main's head may tag. Anything else skips with a reason:
 #     red CI is never tagged, a still-running CI is never tagged, and a
 #     superseded SHA (HEAD moved on) is left to the newer train (latest wins).
 #   next-version
-#     Reads `vX.Y.Z` tags on stdin (one per line, e.g. from
-#     `git ls-remote --tags origin`), prints the next patch `X.Y.(Z+1)`.
-#     Non-`vX.Y.Z` tags (e.g. legacy `omp-kit v0.2.3`) are ignored; no
-#     parseable tag is a refusal, never a guess.
+#     Reads `vX.Y.Z` tags on stdin and advances past both the newest tag and
+#     any newer CHANGELOG.md release section; --tags-only disables that
+#     section floor for isolated tag-parser checks. The decision is logged.
 #   verify-candidate --proof PROOF --index INDEX --version V --sha SHA
 #     Publish gate: the unpublished candidate index for exactly this version
 #     and source SHA must carry the full certified ship set, and the asset
@@ -71,6 +70,13 @@ decide)
 	printf 'DECIDE=tag REASON=green-head sha=%s\n' "$sha"; exit 0
 	;;
 next-version)
+	use_changelog=1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--tags-only) use_changelog=0; shift ;;
+			*) echo "next-version: unknown argument: $1" >&2; exit 2 ;;
+		esac
+	done
 	max_major=""; max_minor=""; max_patch=""
 	while IFS= read -r line; do
 		tag=$line
@@ -99,8 +105,55 @@ next-version)
 			max_major=$major; max_minor=$minor; max_patch=$patch
 		fi
 	done
-	[ -n "$max_major" ] || { echo "next-version: no parseable vX.Y.Z tag on stdin" >&2; exit 4; }
-	printf '%s.%s.%s\n' "$max_major" "$max_minor" "$((max_patch + 1))"; exit 0
+	changelog_major=""; changelog_minor=""; changelog_patch=""
+	if [ "$use_changelog" -eq 1 ] && [ -f CHANGELOG.md ]; then
+		while IFS= read -r line; do
+			case "$line" in
+				'## ['*']'*) section=${line#'## ['}; section=${section%%]*} ;;
+				*) continue ;;
+			esac
+			case "$section" in
+				*[!0-9.]*|""|.*|*.|*..*) continue ;;
+			esac
+			case "$section" in *.*.*) ;; *) continue ;; esac
+			major=${section%%.*}; rem=${section#*.}
+			minor=${rem%%.*}; patch=${rem#*.}
+			case "$patch" in *.*) continue ;; esac
+			case "$major$minor$patch" in *[!0-9]*|"") continue ;; esac
+			case "$major" in 0) ;; *) case "$major" in 0* ) continue ;; esac ;; esac
+			case "$minor" in 0) ;; *) case "$minor" in 0* ) continue ;; esac ;; esac
+			case "$patch" in 0) ;; *) case "$patch" in 0* ) continue ;; esac ;; esac
+			if [ -z "$changelog_major" ] \
+				|| [ "$major" -gt "$changelog_major" ] \
+				|| { [ "$major" -eq "$changelog_major" ] && [ "$minor" -gt "$changelog_minor" ]; } \
+				|| { [ "$major" -eq "$changelog_major" ] && [ "$minor" -eq "$changelog_minor" ] && [ "$patch" -gt "$changelog_patch" ]; }; then
+				changelog_major=$major; changelog_minor=$minor; changelog_patch=$patch
+			fi
+		done < CHANGELOG.md
+	fi
+	if [ -z "$max_major" ] && [ -z "$changelog_major" ]; then
+		echo "next-version: no parseable vX.Y.Z tag or CHANGELOG.md release section" >&2
+		exit 4
+	fi
+	selected_major=$max_major; selected_minor=$max_minor; selected_patch=$max_patch
+	basis=tags
+	if [ -z "$max_major" ] \
+		|| { [ -n "$changelog_major" ] && [ "$changelog_major" -gt "$max_major" ]; } \
+		|| { [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] && [ "$changelog_minor" -gt "$max_minor" ]; } \
+		|| { [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] && [ "$changelog_minor" -eq "$max_minor" ] && [ "$changelog_patch" -gt "$max_patch" ]; }; then
+		selected_major=$changelog_major; selected_minor=$changelog_minor; selected_patch=$changelog_patch
+		basis=changelog-section
+	elif [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] \
+		&& [ "$changelog_minor" -eq "$max_minor" ] && [ "$changelog_patch" -eq "$max_patch" ]; then
+		basis='tag-and-changelog'
+	fi
+	tag_version=none; changelog_version=none
+	[ -z "$max_major" ] || tag_version="$max_major.$max_minor.$max_patch"
+	[ -z "$changelog_major" ] || changelog_version="$changelog_major.$changelog_minor.$changelog_patch"
+	printf 'VERSION-DECISION version=%s.%s.%s basis=%s max_tag=%s max_changelog=%s\n' \
+		"$selected_major" "$selected_minor" "$((selected_patch + 1))" "$basis" "$tag_version" "$changelog_version" >&2
+	printf '%s.%s.%s\n' "$selected_major" "$selected_minor" "$((selected_patch + 1))"
+	exit 0
 	;;
 verify-candidate)
 	proof=""; index=""; version=""; sha=""
