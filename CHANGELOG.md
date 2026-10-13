@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.35] - 2026-10-13
+
+### Added
+
+- Added `omp-kit land --paths PATH --message MSG --apply --yes`: owner-bound publication of exactly actively reserved files from fresh `origin/main` through a private Git index and ordinary non-force push, leaving the shared index, local HEAD, and worktree unchanged.
+
 ## [0.2.34] - 2026-10-13
 
 ### Changed
