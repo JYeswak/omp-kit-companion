@@ -217,6 +217,23 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
         if expected_live_ids is not None and omp_version is not None:
             detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail
+def stage_start_markers(stderr):
+    text = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
+    prefix = "OMP_KIT_STAGE_START name="
+    markers = []
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        fields = line[len(prefix):].split()
+        if len(fields) != 2 or not fields[1].startswith("started_at_ms=") or not fields[0]:
+            continue
+        try:
+            started_at_ms = int(fields[1][len("started_at_ms="):])
+        except ValueError:
+            continue
+        markers.append((fields[0], started_at_ms))
+    return markers
+
 def timeout_detail(name, error, timeout):
     """Record the last live full-test stage when the native command is externally timed out."""
     stdout = (error.stdout or b"").decode(errors="replace")
@@ -228,25 +245,53 @@ def timeout_detail(name, error, timeout):
         "stdout_tail": stdout[-2000:],
         "stderr_tail": stderr[-2000:],
     }
-    prefix = "OMP_KIT_STAGE_START name="
-    for line in stderr.splitlines():
-        if not line.startswith(prefix):
-            continue
-        fields = line[len(prefix):].split(" ")
-        if len(fields) != 2 or not fields[1].startswith("started_at_ms="):
-            continue
-        stage = fields[0]
-        if not stage:
-            continue
-        try:
-            started_at_ms = int(fields[1][len("started_at_ms="):])
-        except ValueError:
-            continue
+    for stage, started_at_ms in stage_start_markers(stderr):
         detail["current_stage"] = {
             "name": stage,
             "elapsed_ms": max(0, round(time.time() * 1000 - started_at_ms)),
         }
     return detail
+
+def completed_stage_durations(stderr, finished_at_ms, stages):
+    if not isinstance(finished_at_ms, int) or isinstance(finished_at_ms, bool):
+        raise ValueError("native full report has no finish timestamp")
+    if not isinstance(stages, dict):
+        raise ValueError("native full report has no stage status map")
+    expected = {
+        name for name, result in stages.items()
+        if isinstance(result, dict) and result.get("status") == "PASS"
+    }
+    if not expected:
+        raise ValueError("native full report has no passing stages")
+    starts = {}
+    for name, started_at_ms in stage_start_markers(stderr):
+        if name in starts:
+            raise ValueError(f"native full report repeats stage-start marker: {name}")
+        starts[name] = started_at_ms
+    missing = sorted(expected - starts.keys())
+    if missing:
+        raise ValueError("native full report omitted stage-start marker(s): " + ", ".join(missing))
+    ordered = sorted((started_at_ms, name) for name, started_at_ms in starts.items())
+    durations = {}
+    for index, (started_at_ms, name) in enumerate(ordered):
+        ended_at_ms = ordered[index + 1][0] if index + 1 < len(ordered) else finished_at_ms
+        if ended_at_ms < started_at_ms:
+            raise ValueError(f"native full report has non-monotonic stage markers: {name}")
+        if name in expected:
+            durations[name] = ended_at_ms - started_at_ms
+    return durations
+
+def proof_record(name, child, test, finished_at_ms, receipt):
+    proof = {"status": "PASS", "stdout_sha256": hashlib.sha256(child.stdout).hexdigest()}
+    if name == "full":
+        stages = test.get("stages") if isinstance(test, dict) else None
+        try:
+            proof["stage_durations_ms"] = completed_stage_durations(
+                child.stderr, finished_at_ms, stages)
+        except ValueError as error:
+            receipt["telemetry_error"] = str(error)[:300]
+    receipt["proofs"][name] = proof
+    return proof
 
 
 def isolated_snapshot(*roots):
@@ -400,6 +445,7 @@ def native(args):
                 try:
                     child = run_scoped([str(binary), *flags], cwd=root, env=stage_env,
                                        timeout=900 if name == "full" else 120)
+                    finished_at_ms = round(time.time() * 1000) if name == "full" else None
                 except subprocess.TimeoutExpired as error:
                     if name != "full":
                         raise
@@ -528,7 +574,7 @@ def native(args):
                                        for server in evidence["servers"])
                             or mcp_marker.exists()):
                         raise ValueError("named-profile MCP inventory failed or executed the fixture server")
-                receipt["proofs"][name] = {"status": "PASS", "stdout_sha256": hashlib.sha256(child.stdout).hexdigest()}
+                proof_record(name, child, data.get("test"), finished_at_ms, receipt)
             lsp_root = root / "lsp-fixtures"
             lsp_root.mkdir()
 
@@ -977,15 +1023,30 @@ def certified_omp_versions(args, platform, asset, required_omp_versions, require
         if (not identity_matches or proof.get("certified") is not True
                 or proof.get("omp_version") != expected_omp_version or "failure" in proof
                 or set(proof.get("proofs", {})) != required_proofs
-                or any(set(item) != {"status", "stdout_sha256"} or item["status"] != "PASS"
-                       or not isinstance(item["stdout_sha256"], str)
-                       or re.fullmatch("[0-9a-f]{64}", item["stdout_sha256"]) is None
-                       for item in proof["proofs"].values())):
+                or any(not valid_proof_record(name, item)
+                       for name, item in proof["proofs"].items())):
             raise ValueError(
                 "detached native proof disagrees with archive, source, or OMP track: " + platform + "/" + track
             )
         versions[track] = expected_omp_version
     return versions
+
+
+def valid_proof_record(name, item):
+    if not isinstance(item, dict):
+        return False
+    expected_fields = {"status", "stdout_sha256"}
+    if name == "full" and "stage_durations_ms" in item:
+        expected_fields.add("stage_durations_ms")
+        durations = item["stage_durations_ms"]
+        if (not isinstance(durations, dict)
+                or any(not isinstance(stage, str) or not stage
+                       or not isinstance(duration, int) or isinstance(duration, bool) or duration < 0
+                       for stage, duration in durations.items())):
+            return False
+    return (set(item) == expected_fields and item.get("status") == "PASS"
+            and isinstance(item.get("stdout_sha256"), str)
+            and re.fullmatch("[0-9a-f]{64}", item["stdout_sha256"]) is not None)
 
 
 def candidate(args):

@@ -97,7 +97,10 @@ class CandidateReceiptTests(unittest.TestCase):
                     "requested_omp_version": MINIMUM if track == "minimum" else CERTIFIED,
                     "omp_version": MINIMUM if track == "minimum" else CERTIFIED,
                     "proofs": {
-                        name: {"status": "PASS", "stdout_sha256": "c" * 64}
+                        name: {
+                            "status": "PASS", "stdout_sha256": "c" * 64,
+                            **({"stage_durations_ms": {"manifest": 1}} if name == "full" else {}),
+                        }
                         for name in PROOF_NAMES
                     },
                     "certified": True,
@@ -142,6 +145,34 @@ class CandidateReceiptTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, f"certified={CERTIFIED}"):
             native_candidate.candidate(self._args())
+
+    def test_full_receipt_with_telemetry_error_and_no_durations_is_accepted(self) -> None:
+        self._write_receipts()
+        platform = PLATFORMS[0]
+        path = self.receipts / f"native-receipt-{platform}-minimum" / "receipt.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        del receipt["proofs"]["full"]["stage_durations_ms"]
+        receipt["telemetry_error"] = "native full report omitted stage-start marker(s)"
+        write_json(path, receipt)
+
+        self.assertEqual(
+            native_candidate.certified_omp_versions(
+                self._args(), platform, self.asset_by_platform[platform],
+                {"minimum": MINIMUM}, PROOF_NAMES),
+            {"minimum": MINIMUM})
+
+    def test_full_receipt_with_invalid_stage_durations_is_rejected(self) -> None:
+        self._write_receipts()
+        platform = PLATFORMS[0]
+        path = self.receipts / f"native-receipt-{platform}-minimum" / "receipt.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["proofs"]["full"]["stage_durations_ms"] = {"manifest": -1}
+        write_json(path, receipt)
+
+        with self.assertRaisesRegex(ValueError, "detached native proof"):
+            native_candidate.certified_omp_versions(
+                self._args(), platform, self.asset_by_platform[platform],
+                {"minimum": MINIMUM}, PROOF_NAMES)
 
     def test_incomplete_platform_is_not_advertised_when_other_platforms_have_both_versions(self) -> None:
         incomplete = PLATFORMS[0]
@@ -289,6 +320,49 @@ class ScopedRunTests(unittest.TestCase):
         self.assertTrue(detail["timed_out"])
         self.assertEqual(detail["current_stage"]["name"], "e2e-live")
         self.assertGreaterEqual(detail["current_stage"]["elapsed_ms"], 100)
+
+class FullProofTests(unittest.TestCase):
+    def test_passing_full_proof_retains_stage_durations_without_telemetry_error(self) -> None:
+        child = types.SimpleNamespace(
+            stdout=b"full report",
+            stderr=(b"OMP_KIT_STAGE_START name=harness-gate started_at_ms=100\n"
+                    b"OMP_KIT_STAGE_START name=e2e-live started_at_ms=220\n"),
+        )
+        test = {"stages": {
+            "harness-gate": {"status": "PASS"},
+            "e2e-live": {"status": "PASS"},
+            "optional-stage": {"status": "NOT_RUN"},
+        }}
+        receipt = {"proofs": {}}
+
+        proof = native_candidate.proof_record(
+            "full", child, test, finished_at_ms=300, receipt=receipt)
+
+        self.assertEqual(proof["status"], "PASS")
+        self.assertEqual(proof["stdout_sha256"], hashlib.sha256(child.stdout).hexdigest())
+        self.assertEqual(proof["stage_durations_ms"], {"harness-gate": 120, "e2e-live": 80})
+        self.assertEqual(receipt["proofs"]["full"], proof)
+        self.assertNotIn("telemetry_error", receipt)
+
+    def test_missing_stage_marker_records_bounded_telemetry_without_refusing_full_proof(self) -> None:
+        child = types.SimpleNamespace(
+            stdout=b"full report",
+            stderr=b"OMP_KIT_STAGE_START name=harness-gate started_at_ms=100\n",
+        )
+        stages = {"harness-gate": {"status": "PASS"}}
+        stages.update({f"missing-{index:03}": {"status": "PASS"} for index in range(40)})
+        receipt = {"proofs": {}}
+
+        proof = native_candidate.proof_record(
+            "full", child, {"stages": stages}, finished_at_ms=300, receipt=receipt)
+
+        self.assertEqual(proof["status"], "PASS")
+        self.assertNotIn("stage_durations_ms", proof)
+        self.assertEqual(receipt["proofs"]["full"], proof)
+        self.assertIn("telemetry_error", receipt)
+        self.assertIn("missing-", receipt["telemetry_error"])
+        self.assertLessEqual(len(receipt["telemetry_error"]), 300)
+
 
 if __name__ == "__main__":
     unittest.main()
