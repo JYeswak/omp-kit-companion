@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
-import { failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, lintCondition, literalProbe, measureCondition, regexLoadBlockReason, runGate } from "../../scripts/regex-budget.ts";
+import { failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, lintCondition, literalProbe, medianMs, measureCondition, runGate } from "../../scripts/regex-budget.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -24,6 +24,21 @@ test("near-miss threshold requires both super-quadratic growth and absolute cost
 	expect(failsNearMissBudget([1, 10, 26])).toBe(false);
 	expect(failsNearMissBudget([1, 1.9, 5])).toBe(false);
 	expect(failsNearMissBudget([1, 1.9, 5.1])).toBe(true);
+});
+
+test("five-sample medians ignore one timing spike and reject max/single-sample mutants", () => {
+	const bySize = [
+		[1, 1, 1, 1, 1],
+		[2, 2, 2, 2, 2],
+		[100, 4, 4, 4, 4],
+	];
+	const medians = bySize.map(medianMs);
+	expect(medians).toEqual([1, 2, 4]);
+	expect(failsNearMissBudget(medians)).toBe(false);
+	expect(failsSingleCheckCeiling(medians)).toBe(false);
+	expect(failsNearMissBudget(bySize.map(samples => Math.max(...samples)))).toBe(true);
+	expect(failsNearMissBudget(bySize.map(samples => samples[0]!))).toBe(true);
+	expect(medianMs([1, 2, 3, 4])).toBe(Number.POSITIVE_INFINITY);
 });
 
 test("live stream threshold accepts 500ms and rejects a larger cost", () => {
@@ -127,7 +142,7 @@ test("scope-aware CLI excludes file-only rules from the Bash stream budget", () 
 	try {
 		const result = Bun.spawnSync([
 			process.execPath, "run", "--no-env-file", "--config=/dev/null",
-			resolve(root, "scripts/regex-budget.ts"), "--rules", fixture.dir, "--stream", streamFile, "--judge-regardless-of-load",
+			resolve(root, "scripts/regex-budget.ts"), "--rules", fixture.dir, "--stream", streamFile,
 		], { cwd: root, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
 		const reportLine = result.stdout.toString().split("\n").find(line => line.startsWith("JSON_REPORT="));
 		if (!reportLine) throw new Error("REGEX_BUDGET_JSON_REPORT_MISSING: " + result.stderr.toString());
@@ -171,20 +186,29 @@ test("literal-first fixture control compiles and stays below the budget", async 
 	} finally { cleanup(fixture.dir); }
 });
 
-test("load gate blocks only above 1.5 times the core count", () => {
-	expect(regexLoadBlockReason(48.01, 32)).toContain("RX1");
-	expect(regexLoadBlockReason(48.0, 32)).toBeNull();
-	expect(regexLoadBlockReason(Number.NaN, 32)).toContain("unavailable");
-});
-
-test("planted contention reports INCONCLUSIVE without measuring", async () => {
+test("runner load is recorded and never gates regex measurements", async () => {
+	const fixture = fixtureRule("fixture-under-load", "^a+b$");
+	const streamFile = join(fixture.dir, "stream.sh");
+	writeFileSync(streamFile, "echo a\n");
+	const savedLoad = process.env.RX1_FAKE_LOAD1;
 	process.env.RX1_FAKE_LOAD1 = "9999";
 	try {
-		const report = await runGate(join(root, "rules"), join(root, "scripts/e2e-live.sh"));
-		expect(report.status).toBe("INCONCLUSIVE");
-		expect(report.conditions_measured).toBe(0);
-		expect(report.note ?? "").toContain("RX1");
-	} finally { delete process.env.RX1_FAKE_LOAD1; }
+		const report = await runGate(fixture.dir, streamFile);
+		expect(report.status).toBe("PASS");
+		expect(report.conditions_measured).toBe(1);
+		const sample = report.measurements[0]?.samples[0];
+		if (!sample) throw new Error("runner-load timing sample missing");
+		expect(sample.sample_ms).toHaveLength(5);
+		expect(sample.sample_load1).toHaveLength(5);
+		expect(sample.sample_ms.every(run => run.length === 3)).toBe(true);
+		expect(sample.sample_load1.every(run => run.length === 3 && run.every(Number.isFinite))).toBe(true);
+		expect(report.stream.sample_total_ms).toHaveLength(5);
+		expect(report.stream.sample_load1).toHaveLength(5);
+	} finally {
+		if (savedLoad === undefined) delete process.env.RX1_FAKE_LOAD1;
+		else process.env.RX1_FAKE_LOAD1 = savedLoad;
+		cleanup(fixture.dir);
+	}
 });
 
 test("single-check ceiling catches flat catastrophics the ratio misses", () => {
@@ -195,13 +219,19 @@ test("single-check ceiling catches flat catastrophics the ratio misses", () => {
 	expect(failsSingleCheckCeiling([0.1, 0.2, Number.POSITIVE_INFINITY])).toBe(true);
 });
 
-test("planted (a+)+b fixture fails the single-check ceiling naming its rule", async () => {
+test("median of five (a+)+b timings still fails the single-check ceiling widely", async () => {
 	const fixture = fixtureRule("fixture-flat-catastrophic", "(a+)+b");
 	try {
-		const measurement = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], sizes: [16, 20, 26], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 10_000, streamWire: "x".repeat(33) } as const);
-		expect(measurement.status).toBe("MEASURED");
-		const ceiling = measurement.failures.filter(failure => failure.code === "SINGLE_CHECK_CEILING");
-		expect(ceiling.length).toBeGreaterThan(0);
-		expect(ceiling[0]!.message).toContain("rule=" + fixture.name);
+		const repeatedMs: number[][] = [];
+		for (let run = 0; run < 5; run++) {
+			const measurement = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], sizes: [16, 20, 26], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 10_000, streamWire: "x".repeat(33) } as const);
+			expect(measurement.status).toBe("MEASURED");
+			const sample = measurement.samples[0];
+			if (!sample) throw new Error("catastrophic timing sample missing");
+			repeatedMs.push(sample.ms);
+		}
+		const medians = [0, 1, 2].map(size => medianMs(repeatedMs.map(sample => sample[size] ?? Number.POSITIVE_INFINITY)));
+		expect(failsSingleCheckCeiling(medians)).toBe(true);
+		expect(medians[2]).toBeGreaterThan(100);
 	} finally { cleanup(fixture.dir); }
 });

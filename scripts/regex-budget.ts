@@ -6,7 +6,7 @@
  * omp's compileRuleCondition. A child process contains synchronous regex stalls.
  */
 import { readFileSync } from "node:fs";
-import { cpus, loadavg } from "node:os";
+import { loadavg } from "node:os";
 import path from "node:path";
 import { OMP_SRC, loadRules } from "./rule-class.ts";
 import type { LoadedRule } from "./rule-class.ts";
@@ -22,24 +22,18 @@ const STREAM_BUDGET_MS = 500;
 export const SINGLE_CHECK_CEILING_MS = STREAM_BUDGET_MS / 10;
 const GATE_DEADLINE_MS = 57_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 20_000;
-/** Same contention line as the TOOL1 quiet-machine check and the LOAD1 heavy gate: above 1.5x cores the box is too loud to judge timing. */
-const MAX_LOAD_PER_CORE = Number(process.env.RX1_MAX_LOAD_PER_CORE ?? "") > 0 ? Number(process.env.RX1_MAX_LOAD_PER_CORE) : 1.5;
-/** Test-only load injection for planted contention cases (mirrors OMP_KIT_HEAVY_FAKE_LOAD1). Production always reads the real one-minute average. */
-function testFakeLoad(): number | undefined {
-	const raw = process.env.RX1_FAKE_LOAD1;
-	if (raw === undefined || raw === "") return undefined;
-	const value = Number(raw);
-	return Number.isFinite(value) ? value : undefined;
-}
-/** Null when the machine is quiet enough to judge regex timing; otherwise the INCONCLUSIVE reason. */
-export function regexLoadBlockReason(load1: number, ncpu: number): string | null {
-	if (!Number.isFinite(load1) || !Number.isFinite(ncpu) || ncpu < 1) return "machine load unavailable";
-	const threshold = ncpu * MAX_LOAD_PER_CORE;
-	return load1 > threshold ? `RX1 load ${load1.toFixed(2)} exceeds ${threshold.toFixed(2)} (${ncpu} cores x ${MAX_LOAD_PER_CORE})` : null;
-}
+const TIMING_SAMPLE_COUNT = 5;
 
 type Shape = typeof DEFAULT_SHAPES[number];
 type Encoding = typeof DEFAULT_ENCODINGS[number];
+type WorkerSample = {
+	shape: Shape;
+	encoding: Encoding;
+	ms: number[];
+	load1: number[];
+	matched: boolean[];
+	bytes: number[];
+};
 type WorkerRequest = {
 	rule: string;
 	conditionIndex: number;
@@ -55,6 +49,8 @@ export type ProbeSample = {
 	shape: Shape;
 	encoding: Encoding;
 	ms: number[];
+	sample_ms: number[][];
+	sample_load1: number[][];
 	matched: boolean[];
 	bytes: number[];
 };
@@ -66,6 +62,8 @@ export type ConditionMeasurement = {
 	literal: string | null;
 	samples: ProbeSample[];
 	stream_ms?: number;
+	sample_stream_ms?: number[];
+	sample_stream_load1?: number[];
 	stream_deltas?: number;
 	failures: MeasurementFailure[];
 };
@@ -240,6 +238,14 @@ export function failsStreamBudget(totalMs: number): boolean {
 	return !Number.isFinite(totalMs) || totalMs > STREAM_BUDGET_MS;
 }
 
+/** Return the median only when at least five finite timings were observed. */
+export function medianMs(samples: readonly number[]): number {
+	if (samples.length < TIMING_SAMPLE_COUNT || samples.some(sample => !Number.isFinite(sample))) return Number.POSITIVE_INFINITY;
+	const ordered = [...samples].sort((left, right) => left - right);
+	const middle = Math.floor(ordered.length / 2);
+	return ordered.length % 2 === 1 ? ordered[middle]! : (ordered[middle - 1]! + ordered[middle]!) / 2;
+}
+
 function repeatToSize(literal: string, size: number): string {
 	if (!literal) literal = "x";
 	return literal.repeat(Math.ceil(size / literal.length)).slice(0, size);
@@ -276,24 +282,28 @@ async function workerMain(): Promise<void> {
 		for (const shape of request.shapes) {
 			for (const encoding of request.encodings) {
 				const ms: number[] = [];
+				const load1: number[] = [];
 				const matched: boolean[] = [];
 				const bytes: number[] = [];
 				for (const size of request.sizes) {
 					const raw = rawInput(shape, size, literal);
 					const input = encoding === "json" ? JSON.stringify({ command: raw }) : raw;
+					load1.push(loadavg()[0] ?? Number.NaN);
 					const timing = measureRegex(re, input);
 					ms.push(timing.ms);
 					matched.push(timing.matched);
 					bytes.push(Buffer.byteLength(input, "utf8"));
 				}
-				const sample = { shape, encoding, ms, matched, bytes };
+				const sample = { shape, encoding, ms, load1, matched, bytes };
 				process.stdout.write(JSON.stringify({ type: "sample", sample }) + "\n");
 			}
 		}
 		let streamMs: number | undefined;
+		let streamLoad1: number | undefined;
 		let streamDeltas: number | undefined;
 		if (request.streamWire !== undefined) {
 			process.stderr.write("RX_BUDGET_STREAM_START\n");
+			streamLoad1 = loadavg()[0] ?? Number.NaN;
 			const start = performance.now();
 			streamDeltas = 0;
 			for (let end = 16; end <= request.streamWire.length; end += 16) {
@@ -306,23 +316,24 @@ async function workerMain(): Promise<void> {
 			}
 			streamMs = performance.now() - start;
 		}
-		process.stdout.write(JSON.stringify({ type: "complete", streamMs, streamDeltas }) + "\n");
+		process.stdout.write(JSON.stringify({ type: "complete", streamMs, streamLoad1, streamDeltas }) + "\n");
 	} catch (error) {
 		process.stdout.write(JSON.stringify({ type: "error", error: String(error) }) + "\n");
 	}
 }
 
-type WorkerSummary = { samples: ProbeSample[]; complete: boolean; streamMs?: number; streamDeltas?: number; error?: string };
+type WorkerSummary = { samples: WorkerSample[]; complete: boolean; streamMs?: number; streamLoad1?: number; streamDeltas?: number; error?: string };
 
 function parseWorkerOutput(stdout: string): WorkerSummary {
 	const summary: WorkerSummary = { samples: [], complete: false };
 	for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
 		try {
 			const event = JSON.parse(line) as Record<string, unknown>;
-			if (event.type === "sample" && event.sample && typeof event.sample === "object") summary.samples.push(event.sample as ProbeSample);
+			if (event.type === "sample" && event.sample && typeof event.sample === "object") summary.samples.push(event.sample as WorkerSample);
 			else if (event.type === "complete") {
 				summary.complete = true;
 				if (typeof event.streamMs === "number") summary.streamMs = event.streamMs;
+				if (typeof event.streamLoad1 === "number") summary.streamLoad1 = event.streamLoad1;
 				if (typeof event.streamDeltas === "number") summary.streamDeltas = event.streamDeltas;
 			} else if (event.type === "error") summary.error = String(event.error ?? "worker error");
 		} catch { /* Ignore non-JSON diagnostics; retain completed sample events. */ }
@@ -406,7 +417,15 @@ export async function measureCondition(input: {
 	clearTimeout(timer);
 	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
 	const result = parseWorkerOutput(stdout);
-	const samples = result.samples;
+	const samples: ProbeSample[] = result.samples.map(sample => ({
+		shape: sample.shape,
+		encoding: sample.encoding,
+		ms: sample.ms,
+		sample_ms: [sample.ms],
+		sample_load1: [sample.load1],
+		matched: sample.matched,
+		bytes: sample.bytes,
+	}));
 	const failures: MeasurementFailure[] = [];
 	// Only the proven atomic scoped case and the proven vacuous-content case skip the
 	// literal precondition; timing checks still run.
@@ -435,51 +454,42 @@ export async function measureCondition(input: {
 		status: "MEASURED",
 		literal,
 		samples,
-		...(typeof result.streamMs === "number" ? { stream_ms: result.streamMs } : {}),
+		...(typeof result.streamMs === "number" ? { stream_ms: result.streamMs, sample_stream_ms: [result.streamMs] } : {}),
+		...(typeof result.streamLoad1 === "number" ? { sample_stream_load1: [result.streamLoad1] } : {}),
 		...(typeof result.streamDeltas === "number" ? { stream_deltas: result.streamDeltas } : {}),
 		failures,
 	};
 }
 
 type GateReport = {
-	status: "PASS" | "FAIL" | "INCONCLUSIVE";
-	/** Set on INCONCLUSIVE: why the run cannot judge (e.g. machine too loud). */
-	note?: string;
+	status: "PASS" | "FAIL";
+	timing_samples: number;
 	engine: { bun: string; omp_source: string };
 	load_average_before: number[];
 	load_average_after: number[];
 	rules_loaded: number;
 	conditions_measured: number;
-	stream: { complete: boolean; file: string; wire_bytes: number; chunk_bytes: number; deltas: number; total_ms: number; budget_ms: number; by_rule: Array<{ rule: string; condition_index: number; ms: number }> };
+	stream: {
+		complete: boolean;
+		file: string;
+		wire_bytes: number;
+		chunk_bytes: number;
+		deltas: number;
+		total_ms: number;
+		budget_ms: number;
+		sample_total_ms: number[];
+		sample_load1: number[];
+		by_rule: Array<{ rule: string; condition_index: number; ms: number; sample_ms: number[]; sample_load1: number[] }>;
+	};
 	measurements: ConditionMeasurement[];
 	lint_violations: Array<{ rule: string; condition_index: number; code: string; pattern: string }>;
 	gate_elapsed_ms: number;
 };
 
-export async function runGate(rulesDir: string, streamFile: string, opts: { judgeRegardlessOfLoad?: boolean } = {}): Promise<GateReport> {
+async function runGateSample(rulesDir: string, streamFile: string): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
-	// A loud box cannot judge regex timing: refuse to measure rather than fail a correct push.
-	// --judge-regardless-of-load overrides this ONLY where CI is the judge of record (ladder passes
-	// it iff GITHUB_ACTIONS is set); the verdict is then recorded as judged-under-load in note.
-	const loudAtStart = regexLoadBlockReason(testFakeLoad() ?? before[0] ?? Number.NaN, cpus().length);
-	if (loudAtStart && !opts.judgeRegardlessOfLoad) {
-		console.log("REGEX-BUDGET: INCONCLUSIVE (" + loudAtStart + "; retry on a quieter machine)");
-		return {
-			status: "INCONCLUSIVE",
-			note: loudAtStart + "; retry on a quieter machine",
-			engine: { bun: Bun.version, omp_source: OMP_SRC },
-			load_average_before: before,
-			load_average_after: before,
-			rules_loaded: 0,
-			conditions_measured: 0,
-			stream: { complete: false, file: streamFile, wire_bytes: 0, chunk_bytes: 16, deltas: 0, total_ms: 0, budget_ms: STREAM_BUDGET_MS, by_rule: [] },
-			measurements: [],
-			lint_violations: [],
-			gate_elapsed_ms: performance.now() - started,
-		};
-	}
 	const loaded: LoadedRule[] = loadRules(rulesDir);
 	const rules = loaded.flatMap(item => (item.rule.condition ?? []).filter((condition): condition is string => typeof condition === "string" && condition.length > 0).map((pattern, conditionIndex) => ({ rule: item.name, conditionIndex, pattern, scope: item.rule.scope ?? [] })));
 	const lintViolations: GateReport["lint_violations"] = [];
@@ -506,30 +516,139 @@ export async function runGate(rulesDir: string, streamFile: string, opts: { judg
 			workerTimeoutMs: Math.min(DEFAULT_WORKER_TIMEOUT_MS, remaining - 500),
 		}));
 	}
-	const byRule = measurements.filter(m => typeof m.stream_ms === "number").map(m => ({ rule: m.rule, condition_index: m.condition_index, ms: m.stream_ms! }));
+	const byRule = measurements.filter(measurement => typeof measurement.stream_ms === "number").map(measurement => ({
+		rule: measurement.rule,
+		condition_index: measurement.condition_index,
+		ms: measurement.stream_ms!,
+		sample_ms: measurement.sample_stream_ms ?? [],
+		sample_load1: measurement.sample_stream_load1 ?? [],
+	}));
 	const streamTotal = byRule.reduce((sum, item) => sum + item.ms, 0);
 	const streamConditions = rules.filter(condition => appliesToBashStream(condition.scope)).length;
 	const streamComplete = byRule.length === streamConditions;
-	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(m => m.status !== "MEASURED" || m.failures.length > 0) || failsStreamBudget(streamTotal);
-	// Load spiked mid-run: a FAIL measured under contention is suspect, so report it as INCONCLUSIVE. A PASS stays a PASS.
-	// Under --judge-regardless-of-load the verdict stands as measured and the load is recorded in note.
+	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(streamTotal);
 	const after = loadavg();
-	const loudAtEnd = regexLoadBlockReason(testFakeLoad() ?? after[0] ?? Number.NaN, cpus().length);
-	const status = loudAtEnd && failed && !opts.judgeRegardlessOfLoad ? "INCONCLUSIVE" : failed ? "FAIL" : "PASS";
 	return {
-		status,
-		...(loudAtEnd && failed && !opts.judgeRegardlessOfLoad ? { note: loudAtEnd + "; FAIL measured under contention is suspect; retry on a quieter machine" } : {}),
-		...(opts.judgeRegardlessOfLoad && (loudAtStart || loudAtEnd) ? { note: "judged under load per --judge-regardless-of-load (CI judge of record); load before/after in report" } : {}),
+		status: failed ? "FAIL" : "PASS",
+		timing_samples: 1,
 		engine: { bun: Bun.version, omp_source: OMP_SRC },
 		load_average_before: before,
 		load_average_after: after,
 		rules_loaded: loaded.length,
 		conditions_measured: rules.length,
-		stream: { complete: streamComplete, file: streamFile, wire_bytes: Buffer.byteLength(streamWire, "utf8"), chunk_bytes: 16, deltas: byRule.length ? (measurements.find(m => m.stream_deltas !== undefined)?.stream_deltas ?? 0) : 0, total_ms: streamTotal, budget_ms: STREAM_BUDGET_MS, by_rule: byRule.sort((a, b) => b.ms - a.ms) },
+		stream: {
+			complete: streamComplete,
+			file: streamFile,
+			wire_bytes: Buffer.byteLength(streamWire, "utf8"),
+			chunk_bytes: 16,
+			deltas: byRule.length ? (measurements.find(measurement => measurement.stream_deltas !== undefined)?.stream_deltas ?? 0) : 0,
+			total_ms: streamTotal,
+			budget_ms: STREAM_BUDGET_MS,
+			sample_total_ms: [streamTotal],
+			sample_load1: [before[0] ?? Number.NaN],
+			by_rule: byRule.sort((left, right) => right.ms - left.ms),
+		},
 		measurements,
 		lint_violations: lintViolations,
 		gate_elapsed_ms: performance.now() - started,
 	};
+}
+
+function summarizeRepeatedReports(reports: readonly GateReport[]): GateReport {
+	if (reports.length < TIMING_SAMPLE_COUNT) throw new Error("regex budget requires at least " + TIMING_SAMPLE_COUNT + " interleaved timing samples");
+	const first = reports[0]!;
+	const measurements = first.measurements.map((firstMeasurement, measurementIndex): ConditionMeasurement => {
+		const repeated = reports.map(report => report.measurements[measurementIndex]);
+		const status: ConditionMeasurement["status"] = repeated.some(measurement => !measurement)
+			? "GATE_TIMEOUT"
+			: repeated.find(measurement => measurement!.status !== "MEASURED")?.status ?? "MEASURED";
+		const samples = firstMeasurement.samples.map((firstSample, sampleIndex): ProbeSample => {
+			const repeatedSamples = repeated.map(measurement => measurement?.samples[sampleIndex]);
+			const sample_ms = repeatedSamples.map(sample => sample?.sample_ms[0] ?? sample?.ms ?? []);
+			const sample_load1 = repeatedSamples.map(sample => sample?.sample_load1[0] ?? []);
+			const ms = firstSample.ms.map((_value, sizeIndex) => medianMs(sample_ms.map(sample => sample[sizeIndex] ?? Number.POSITIVE_INFINITY)));
+			return { ...firstSample, ms, sample_ms, sample_load1 };
+		});
+		const failureMap = new Map<string, MeasurementFailure>();
+		for (const measurement of repeated) {
+			for (const failure of measurement?.failures ?? []) {
+				if (failure.code === "NEAR_MISS_SUPERQUADRATIC" || failure.code === "SINGLE_CHECK_CEILING") continue;
+				const key = failure.code + "|" + (failure.shape ?? "") + "|" + (failure.encoding ?? "");
+				if (!failureMap.has(key)) failureMap.set(key, failure);
+			}
+		}
+		for (const sample of samples) {
+			if (failsNearMissBudget(sample.ms)) {
+				const ratio = sample.ms[sample.ms.length - 1]! / Math.max(sample.ms[sample.ms.length - 2]!, 0.01);
+				failureMap.set("NEAR_MISS_SUPERQUADRATIC|" + sample.shape + "|" + sample.encoding, {
+					code: "NEAR_MISS_SUPERQUADRATIC",
+					shape: sample.shape,
+					encoding: sample.encoding,
+					message: "rule=" + firstMeasurement.rule + " condition=" + firstMeasurement.condition_index + " shape=" + sample.shape + " encoding=" + sample.encoding + " 8k-to-16k=" + ratio.toFixed(2) + "x, 16k=" + sample.ms[sample.ms.length - 1]!.toFixed(2) + "ms",
+				});
+			}
+			if (failsSingleCheckCeiling(sample.ms)) {
+				failureMap.set("SINGLE_CHECK_CEILING|" + sample.shape + "|" + sample.encoding, {
+					code: "SINGLE_CHECK_CEILING",
+					shape: sample.shape,
+					encoding: sample.encoding,
+					message: "rule=" + firstMeasurement.rule + " condition=" + firstMeasurement.condition_index + " shape=" + sample.shape + " encoding=" + sample.encoding + " 16k=" + sample.ms[sample.ms.length - 1]!.toFixed(2) + "ms exceeds " + SINGLE_CHECK_CEILING_MS + "ms single-check ceiling",
+				});
+			}
+		}
+		const streamRuns = repeated.map(measurement => measurement?.sample_stream_ms?.[0] ?? measurement?.stream_ms);
+		const hasStream = streamRuns.some(value => typeof value === "number");
+		const merged: ConditionMeasurement = {
+			rule: firstMeasurement.rule,
+			condition_index: firstMeasurement.condition_index,
+			status,
+			literal: firstMeasurement.literal,
+			samples,
+			failures: [...failureMap.values()],
+		};
+		if (hasStream) {
+			const sample_stream_ms = streamRuns.map(value => value ?? Number.POSITIVE_INFINITY);
+			merged.sample_stream_ms = sample_stream_ms;
+			merged.sample_stream_load1 = repeated.map(measurement => measurement?.sample_stream_load1?.[0] ?? Number.NaN);
+			merged.stream_ms = medianMs(sample_stream_ms);
+			merged.stream_deltas = firstMeasurement.stream_deltas;
+		}
+		return merged;
+	});
+	const sample_total_ms = reports.map(report => report.stream.total_ms);
+	const sample_load1 = reports.map(report => report.stream.sample_load1[0] ?? report.load_average_before[0] ?? Number.NaN);
+	const total_ms = medianMs(sample_total_ms);
+	const streamComplete = reports.every(report => report.stream.complete);
+	const streamByRule = measurements.filter(measurement => typeof measurement.stream_ms === "number").map(measurement => ({
+		rule: measurement.rule,
+		condition_index: measurement.condition_index,
+		ms: measurement.stream_ms!,
+		sample_ms: measurement.sample_stream_ms ?? [],
+		sample_load1: measurement.sample_stream_load1 ?? [],
+	})).sort((left, right) => right.ms - left.ms);
+	const failed = first.rules_loaded === 0 || !streamComplete || first.lint_violations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(total_ms);
+	return {
+		...first,
+		status: failed ? "FAIL" : "PASS",
+		timing_samples: reports.length,
+		gate_elapsed_ms: reports.reduce((sum, report) => sum + report.gate_elapsed_ms, 0),
+		stream: {
+			...first.stream,
+			complete: streamComplete,
+			total_ms,
+			sample_total_ms,
+			sample_load1,
+			by_rule: streamByRule,
+		},
+		measurements,
+	};
+}
+
+/** Run every case once per round so samples for each case are separated by a full pass over the others. */
+export async function runGate(rulesDir: string, streamFile: string): Promise<GateReport> {
+	const reports: GateReport[] = [];
+	for (let sample = 0; sample < TIMING_SAMPLE_COUNT; sample++) reports.push(await runGateSample(rulesDir, streamFile));
+	return summarizeRepeatedReports(reports);
 }
 
 function formatMs(value: number | undefined): string {
@@ -538,12 +657,12 @@ function formatMs(value: number | undefined): string {
 
 function printReport(report: GateReport): void {
 	console.log("REGEX-BUDGET: " + report.status);
-	if (report.note) console.log("note: " + report.note);
 	console.log("Bun=" + report.engine.bun + " OMP_SRC=" + report.engine.omp_source);
 	console.log("loadavg before=" + report.load_average_before.map(n => n.toFixed(2)).join(",") + " after=" + report.load_average_after.map(n => n.toFixed(2)).join(","));
 	console.log("rules=" + report.rules_loaded + " regex-conditions=" + report.conditions_measured + " elapsed=" + report.gate_elapsed_ms.toFixed(1) + "ms");
-	console.log("near-miss failures (8K→16K ratio >2.6 and 16K >5ms):");
-	console.log("rule | condition | worst shape/encoding | 4K ms | 8K ms | 16K ms | ratio");
+	console.log("timing samples=" + report.timing_samples + " round-robin passes; JSON sample_ms and sample_load1 rows align by run and size");
+	console.log("near-miss failures (median 8K→16K ratio >2.6 and median 16K >5ms):");
+	console.log("rule | condition | worst shape/encoding | median 4K ms | median 8K ms | median 16K ms | ratio");
 	const rows: Array<{ rule: string; condition: number; shape: string; encoding: string; ms: number[]; ratio: number }> = [];
 	for (const measurement of report.measurements) {
 		for (const sample of measurement.samples) {
@@ -553,8 +672,8 @@ function printReport(report: GateReport): void {
 	if (!rows.length) console.log("(none)");
 	for (const row of rows.sort((a, b) => b.ms[2] - a.ms[2])) console.log(row.rule + " | " + row.condition + " | " + row.shape + "/" + row.encoding + " | " + formatMs(row.ms[0]) + " | " + formatMs(row.ms[1]) + " | " + formatMs(row.ms[2]) + " | " + row.ratio.toFixed(2) + "x");
 
-	console.log("single-check ceiling failures (16K >" + SINGLE_CHECK_CEILING_MS + "ms):");
-	console.log("rule | condition | worst shape/encoding | 16K ms");
+	console.log("single-check ceiling failures (median 16K >" + SINGLE_CHECK_CEILING_MS + "ms):");
+	console.log("rule | condition | worst shape/encoding | median 16K ms");
 	const ceilingRows: Array<{ rule: string; condition: number; shape: string; encoding: string; ms: number }> = [];
 	for (const measurement of report.measurements) {
 		for (const sample of measurement.samples) {
@@ -571,8 +690,12 @@ function printReport(report: GateReport): void {
 	if (!report.lint_violations.length) console.log("(none)");
 	for (const violation of report.lint_violations) console.log(violation.rule + "#" + violation.condition_index + " | " + violation.code + " | " + violation.pattern);
 	const streamStatus = !report.stream.complete ? "INCOMPLETE" : failsStreamBudget(report.stream.total_ms) ? "FAIL" : "PASS";
-	console.log("live stream: " + streamStatus + " file=" + report.stream.file + " wire=" + report.stream.wire_bytes + "B chunk=" + report.stream.chunk_bytes + "B deltas/condition=" + report.stream.deltas + " total=" + report.stream.total_ms.toFixed(1) + "ms / " + report.stream.budget_ms + "ms");
-	for (const item of report.stream.by_rule.slice(0, 8)) console.log("stream " + item.rule + "#" + item.condition_index + " | " + item.ms.toFixed(1) + "ms");
+	const streamSamples = report.stream.sample_total_ms.map((ms, index) => ms.toFixed(1) + "ms@load1=" + (report.stream.sample_load1[index]?.toFixed(2) ?? "unknown"));
+	console.log("live stream: " + streamStatus + " file=" + report.stream.file + " wire=" + report.stream.wire_bytes + "B chunk=" + report.stream.chunk_bytes + "B deltas/condition=" + report.stream.deltas + " median=" + report.stream.total_ms.toFixed(1) + "ms / " + report.stream.budget_ms + "ms samples=[" + streamSamples.join(", ") + "]");
+	for (const item of report.stream.by_rule.slice(0, 8)) {
+		const samples = item.sample_ms.map((ms, index) => ms.toFixed(1) + "ms@load1=" + (item.sample_load1[index]?.toFixed(2) ?? "unknown"));
+		console.log("stream " + item.rule + "#" + item.condition_index + " | median=" + item.ms.toFixed(1) + "ms samples=[" + samples.join(", ") + "]");
+	}
 	console.log("JSON_REPORT=" + JSON.stringify(report));
 	console.log("Scope: measured shapes and this Bun/JSC runtime only; no universal regex-safety claim.");
 }
@@ -589,10 +712,9 @@ if (process.argv.includes("--regex-budget-worker")) {
 	const rulesDir = path.resolve(rulesPath);
 	const streamFile = path.resolve(streamPath);
 	try {
-		const report = await runGate(rulesDir, streamFile, { judgeRegardlessOfLoad: args.includes("--judge-regardless-of-load") });
+		const report = await runGate(rulesDir, streamFile);
 		printReport(report);
-		// 75 = retry later: a busy machine must not refuse a correct push.
-		process.exitCode = report.status === "PASS" ? 0 : report.status === "INCONCLUSIVE" ? 75 : 1;
+		process.exitCode = report.status === "PASS" ? 0 : 1;
 	} catch (error) {
 		console.error("REGEX-BUDGET: FAIL");
 		console.error(String(error));

@@ -60,7 +60,7 @@ jobs:
             for target in $order; do
               output="$results_dir/run-$i-$target.log"
               rc=0
-              (cd "$target" && bun scripts/regex-budget.ts --judge-regardless-of-load >"$output" 2>&1) || rc=$?
+              (cd "$target" && bun scripts/regex-budget.ts >"$output" 2>&1) || rc=$?
               echo "--- run $i target=$target os=${{ matrix.os }} rc=$rc"
               grep -E '^(REGEX-BUDGET:|live stream:|stream |JSON_REPORT=)' "$output" || true
             done

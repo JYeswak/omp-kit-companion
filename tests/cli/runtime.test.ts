@@ -476,10 +476,9 @@ test("runtime temp root avoids caller HOME when TMPDIR is nested there", () => {
 	}
 });
 
-test("isolated children inherit the CI judge signal through runIsolatedShell", () => {
-	// RELEASE BLOCKER A3: the nested ladder keys --judge-regardless-of-load on
-	// GITHUB_ACTIONS; sanitizedEnv must carry it or macOS certification refuses
-	// with producer_rc=75. Non-allowlisted keys stay scrubbed either way.
+test("isolated children preserve GitHub Actions for CI-only behavior", () => {
+	// Heavy-work admission uses GITHUB_ACTIONS to distinguish hosted CI from
+	// local runners; non-allowlisted environment keys stay scrubbed either way.
 	const identity = { launcher: "/bin/omp", packageRoot: "/pkg", source: "/src", nativeRoot: "/native" };
 	const withSignal = sanitizedEnv(identity, { CI: "true", GITHUB_ACTIONS: "true", PATH: "/usr/bin:/bin", SECRET: "x" }, "/private");
 	expect(withSignal.GITHUB_ACTIONS).toBe("true");

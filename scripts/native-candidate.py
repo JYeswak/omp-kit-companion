@@ -341,9 +341,9 @@ def asset_for(path, platform, version, directory):
 
 def cert_env(home, root):
     """Scrubbed environment for certification children. CI=true always: these
-    runs judge. GITHUB_ACTIONS passes through when the parent run sets it so
-    nested CI judges (ladder regex-budget --judge-regardless-of-load) see the
-    signal; local runs stay fail-closed. Nothing else leaks."""
+    runs judge. GITHUB_ACTIONS passes through when the parent sets it so nested
+    CI-only behavior, including heavy-work admission, sees the signal; local
+    runs retain normal load admission. Nothing else leaks."""
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": str(root), "CI": "true",
            "NO_COLOR": "1", "XDG_STATE_HOME": str(home / "state"),
            "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data")}
