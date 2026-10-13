@@ -262,7 +262,7 @@ jobs:
 
   build-candidates:
     needs: resolve-omp-versions
-    if: github.event.repository.private == false && github.event_name != 'pull_request'
+    if: github.event.repository.private == false && github.event_name != 'pull_request' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -296,7 +296,7 @@ jobs:
           retention-days: ${{ inputs.version && 7 || 2 }}
 
   real-home-journey:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && github.event_name != 'push'
     needs: [build-candidates, resolve-omp-versions]
     strategy:
       fail-fast: false
@@ -356,7 +356,7 @@ jobs:
           retention-days: 2
 
   native-certification:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && github.event_name != 'push'
     needs: [build-candidates, resolve-omp-versions]
     # Intel macOS is a non-shipping probe; release aggregation ignores it and requires all three ship targets.
     # For release runs, certify only shipping targets: macOS has five concurrent slots, and queued Intel
