@@ -312,6 +312,12 @@ const landData: DataSchema = { type: "object", required: ["overall", "commit", "
 	overall: { enum: ["PUSHED"] }, commit: { type: "string" }, owner: { type: "string" },
 	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
 } };
+const alignData: DataSchema = { type: "object", required: ["overall", "verdict", "mode"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "NOT_RUN"] },
+	verdict: { enum: ["ALIGNED", "PRESERVED", "NO_CHANGE", "PLAN", "REFUSED", "UNKNOWN"] },
+	mode: { enum: ["apply", "dry-run", "preserve-only"] },
+	receipt: { type: ["object", "null"] },
+} };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] }, verdict: { type: "string" }, receipt: { type: "object" },
 } };
@@ -360,6 +366,13 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "Request owner-bound publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
+	{ name: "align", description: "Align a shared checkout's main ref and index to origin/main under git's own index.lock: pins local-only commits under refs/preserve/, adopts or updates only provably unchanged paths, and refuses with a typed code on staged changes, peer edits or concurrent writers", usage: "align --repo DIR (--dry-run | --apply --yes) [--preserve-only]", flags: [
+		{ name: "--repo", value: "DIR", description: "Absolute root of the checkout (holds a .git directory)" },
+		{ name: "--dry-run", description: "Print the full preserve/adopt/update/stop plan; touches nothing" },
+		{ name: "--preserve-only", description: "Only pin local-only main commits under refs/preserve/; valid when local main is not an ancestor of origin/main" },
+		{ name: "--apply", description: "Request guarded alignment" },
+		{ name: "--yes", description: "Confirm the alignment in noninteractive mode" },
+	], example: "omp-kit align --repo ~/Developer/omp-kit-companion --dry-run --json", runnable: false, mutation: true, dataSchema: alignData },
 	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },

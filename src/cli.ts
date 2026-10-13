@@ -9,6 +9,7 @@ import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand,
 import { RELEASE_DATA } from "./release-assets.ts";
 import { audit, undo, why } from "./audit.ts";
 import { landCommand } from "./land.ts";
+import { alignCommand } from "./align.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
@@ -986,6 +987,7 @@ function receiptCommand(request: ParsedCommand): CliResult {
 registerCommandHandler("audit", receiptCommand);
 registerCommandHandler("why", receiptCommand);
 registerCommandHandler("land", landCommand);
+registerCommandHandler("align", alignCommand);
 registerCommandHandler("undo", receiptCommand);
 
 function rulesCommand(request: ParsedCommand): CliResult {
