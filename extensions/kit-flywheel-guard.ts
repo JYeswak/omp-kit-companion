@@ -148,7 +148,53 @@ export function shellCommands(command: string): string[][] {
 			}
 		} else if (ch === "#" && !inWord) {
 			while (index + 1 < command.length && command[index + 1] !== "\n") index += 1;
-		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
+		} else if ((ch === ">" || ch === "<" || (ch === "&" && command[index + 1] === ">")) && quote === null) {
+			// ompkit-xa5s.8: source-aware redirections. Quoted operators never
+			// reach here (quote branches above own them). A leading all-digit
+			// word is the fd prefix; anything else ends first. N>&M / N>&-
+			// dups are self-contained; other forms consume one target word
+			// (quote-aware). >( and <( are process substitution, not
+			// redirections; a lone & still separates commands.
+			let fd = "";
+			if (/^\d+$/.test(word)) { fd = word; word = ""; inWord = false; }
+			else endWord();
+			let op = ch;
+			let cursor = index + 1;
+			const peek = () => (cursor < command.length ? command[cursor]! : "");
+			if ((ch === ">" || ch === "<") && peek() === ch && command[cursor + 1] !== "(") { op += peek(); cursor += 1; }
+			if ((op === ">" || op === ">>" || op === "<" || op === "<<" || op === "&>") && peek() === "(") {
+				word = fd + op; inWord = true; index = cursor - 1;
+			} else {
+				if ((op === ">" || op === ">>" || op === "<" || op === "<<") && peek() === "&") {
+					op += "&";
+					cursor += 1;
+					if (/[0-9-]/.test(peek())) { while (/[0-9-]/.test(peek())) { op += peek(); cursor += 1; } }
+				}
+				const selfContained = /&[0-9-]+$/.test(op);
+				index = cursor - 1;
+				if (!selfContained) {
+					let scan = cursor;
+					while (scan < command.length && (command[scan] === " " || command[scan] === "\t" || command[scan] === "\r")) scan += 1;
+					if (scan < command.length) {
+						const t = command[scan]!;
+						if (t === "'" || t === '"') {
+							const q = t; scan += 1;
+							while (scan < command.length && command[scan] !== q) {
+								if (q === '"' && command[scan] === "\\" && scan + 1 < command.length) scan += 1;
+								scan += 1;
+							}
+							if (scan < command.length) scan += 1;
+						} else if (t === "\\" && scan + 1 < command.length) scan += 2;
+						else if (!";|&()\n`#".includes(t) && t !== " " && t !== "\t" && t !== "\r") {
+							while (scan < command.length && !";|&()\n `#\t\r".includes(command[scan]!)) {
+								if (command[scan] === "\\" && scan + 1 < command.length) scan += 1;
+								scan += 1;
+							}
+						}
+						index = scan - 1;
+					}
+				}
+			}		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
 			endCommand();
 		} else if (ch === " " || ch === "\t" || ch === "\r") {
 			endWord();
@@ -358,8 +404,14 @@ export async function checkSelfClose(event: FlywheelToolCallEvent, deps: SelfClo
 		for (const id of request.ids) {
 			const found = await beadAssignee(deps.exec, request, id);
 			if (!found.ok) {
-				warnings.push(`self-close check skipped: ${found.why}`);
-				continue;
+				if (found.why === `${id} has no assignee`) {
+					warnings.push(`self-close check skipped: ${found.why}`);
+					continue;
+				}
+				return {
+					block: true,
+					reason: `kit-flywheel-guard LOOKUP_REFUSED: cannot verify authorship of ${id}: ${found.why}. ` + `Resolve the lookup (or have someone else close it); the close was blocked, nothing was executed.`
+				};
 			}
 			if (identities.length === 0) {
 				warnings.push(`self-close check skipped for ${id}: caller identity unknown (no --actor/--agent-name, BR_ACTOR, BR_AGENT_NAME, AGENT_NAME, or Agent Mail pane identity for TMUX_PANE)`);

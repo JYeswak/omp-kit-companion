@@ -10,6 +10,7 @@ import kitFlywheelGuard, {
 	type FlywheelMessage,
 	type FlywheelToolCallResult,
 } from "./kit-flywheel-guard";
+import { closeRequests } from "./kit-flywheel-guard";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
 
@@ -192,17 +193,18 @@ test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning"
 	expect(h.notices.length).toBe(1);
 });
 
-test("SELF_CLOSE_REFUSED negative: br show failure is allowed with a warning", async () => {
+test("LOOKUP_REFUSED: br show failure blocks instead of warning", async () => {
 	const project = mkdtempSync(join(base, "proj-"));
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await host({ env: { TMUX_PANE: "%77" }, home, respond: brTable({}) });
 	const result = await toolCall(h, project, "br close kit-404");
-	expect(result?.block).toBeUndefined();
-	expect(result?.additionalContext).toContain("`br show kit-404` exited 3: Issue not found: kit-404");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("LOOKUP_REFUSED");
+	expect(result?.reason).toContain("kit-404");
 	const thrown = await host({ env: { BR_ACTOR: "BlueFox" }, respond: () => { throw new Error("spawn br ENOENT"); } });
 	const crashed = await toolCall(thrown, project, "br close kit-1");
-	expect(crashed?.block).toBeUndefined();
-	expect(crashed?.additionalContext).toContain("could not run (spawn br ENOENT)");
+	expect(crashed?.block).toBe(true);
+	expect(crashed?.reason).toContain("LOOKUP_REFUSED");
 });
 
 test("SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a warning", async () => {
@@ -226,4 +228,31 @@ test("SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never co
 	expect(h.execs).toEqual([]);
 	const write = await h.emit("tool_call", { toolName: "write", input: { path: "x", content: "br close kit-1" } }, h.ctx(project));
 	expect(write).toEqual([undefined]);
+});
+
+test("REDIRECTION_IDS: shell redirections never become bead ids (ompkit-xa5s.8)", () => {
+	const ids = (command: string) => closeRequests(command, "/tmp", "/tmp").flatMap(r => r.ids);
+	expect(ids("br close real-id --reason ok")).toEqual(["real-id"]);
+	expect(ids("br close real-id --reason ok 2>&1 | tail -3")).toEqual(["real-id"]);
+	expect(ids("br close real-id --reason ok 2>/dev/null")).toEqual(["real-id"]);
+	expect(ids("br close real-id --reason ok > out.txt")).toEqual(["real-id"]);
+	expect(ids("br close real-id --reason ok 2> err.txt")).toEqual(["real-id"]);
+	// Attached operators consume no following argument; only a bare operator
+	// consumes the next word. A fix swallowing the second subject would skip
+	// its self-close check.
+	expect(ids("br close id1 2>&1 id2")).toEqual(["id1", "id2"]);
+	expect(ids("br close id1 >out.txt id2")).toEqual(["id1", "id2"]);
+	expect(ids("br close id1 > out.txt id2")).toEqual(["id1", "id2"]);
+	expect(ids("br close id1 2>&- id2")).toEqual(["id1", "id2"]);
+});
+
+test("SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup uses the clean id", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	const h = await host({ env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-9": bead("kit-9", "BlueFox") }) });
+	const result = await toolCall(h, project, "br close kit-9 --reason ok 2>&1 | tail -3");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+	const show = h.execs.find(call => call.command === "br");
+	expect(show?.args).toEqual(["show", "kit-9", "--json"]);
 });
