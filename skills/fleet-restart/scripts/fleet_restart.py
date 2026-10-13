@@ -143,6 +143,16 @@ def find_agent(procs, pane_pid):
             return {"pid": p["pid"], "args": p["args"], "flags": normalize_flags(rest), "mcp": mcp, "mcp_pids": sorted(mcp_pids)}
     return None
 
+def git_child(procs, pane_pid):
+    """First live git descendant of the pane, if any. Respawning (SIGHUP) a
+    pane mid-git leaves a holder-less .git/index.lock behind (rz5.101), so a
+    pane with a running git child is deferred, never restarted."""
+    for _, p in descendants(procs, pane_pid):
+        first = (p["args"] or "").split(None, 1)[0] if p["args"] else ""
+        if os.path.basename(first) == "git":
+            return p
+    return None
+
 
 def parse_screen(lines):
     """IDLE when the bottom status bar starts with the prompt glyph π; BUSY on a
@@ -227,6 +237,9 @@ def classify(pane, procs, chief, protect):
         row["action"] = "SKIP_PROTECTED"
     elif pane["pane"] == chief or pane["pane_id"] == chief:
         row["action"] = "SKIP_CHIEF"
+    elif (git := git_child(procs, pane["pane_pid"])) is not None:
+        row["action"] = "SKIP_GIT"
+        row["reason"] = "git child pid %s (%s); deferred to the next pass" % (git["pid"], git["args"][:80])
     elif not agent:
         row["action"] = "SKIP_SHELL"
     elif any(pane["cwd"] == c or pane["cwd"].startswith(c + "/") for c in FORBIDDEN_CWDS):

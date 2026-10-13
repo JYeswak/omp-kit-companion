@@ -65,6 +65,8 @@ def inventory():
         {"pane": "jev:0.0", "pane_id": "%19", "pane_pid": 600, "cwd": "/Users/josh/Developer/jev", "screen": ["%"]},
         # agent whose cwd is forbidden.
         {"pane": "modeltest:0.2", "pane_id": "%4", "pane_pid": 700, "cwd": "/private/tmp", "screen": IDLE},
+        # idle agent with a long-running git child (rz5.101.1).
+        {"pane": "cfs:0.2", "pane_id": "%8", "pane_pid": 800, "cwd": "/Users/josh/Developer/cfs", "screen": IDLE},
     ]
     procs = [
         {"pid": 100, "ppid": 1, "args": "-zsh"},
@@ -84,6 +86,9 @@ def inventory():
         {"pid": 601, "ppid": 600, "args": WORKER},
         {"pid": 700, "ppid": 1, "args": "-zsh"},
         {"pid": 701, "ppid": 700, "args": OMP + " --profile codex"},
+        {"pid": 800, "ppid": 1, "args": "-zsh"},
+        {"pid": 801, "ppid": 800, "args": OMP + " --profile claude"},
+        {"pid": 802, "ppid": 801, "args": "git status"},
     ]
     return {"captured_at": "2026-10-11T15:32:42Z", "panes": panes, "procs": procs}
 
@@ -154,6 +159,8 @@ def main():
          and rows["uds--burn-down:0.1"]["flags"] == ["--profile", "muse", "--model", "muse-code/muse-spark-1.3-contributor", "--thinking", "high", "--auto-approve"],
          json.dumps(rows["uds--burn-down:0.1"].get("flags")))
     case("NEG worker-daemon-only shell pane -> SKIP_SHELL", rows["jev:0.0"]["action"] == "SKIP_SHELL", rows["jev:0.0"]["action"])
+    case("NEG pane with running git child -> SKIP_GIT with reason", rows["cfs:0.2"]["action"] == "SKIP_GIT" and "802" in rows["cfs:0.2"].get("reason", ""), rows["cfs:0.2"].get("action") + " " + rows["cfs:0.2"].get("reason", ""))
+    case("CTL same pane shape without git child still restarts", rows["modeltest:0.1"]["action"] == "RESTART", rows["modeltest:0.1"]["action"])
     # --- busy pane never restarted
     case("NEG busy pane -> QUEUE_BUSY", rows["control-plane:0.1"]["action"] == "QUEUE_BUSY", rows["control-plane:0.1"]["action"])
     case("NEG protected pane -> SKIP_PROTECTED", rows["uds--burn-down:0.0"]["action"] == "SKIP_PROTECTED", rows["uds--burn-down:0.0"]["action"])
