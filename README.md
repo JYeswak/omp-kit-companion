@@ -200,6 +200,7 @@ omp-kit send SESSION PANE "message" --json   # proves delivery; needs a bead id 
 omp-kit fleet flush-pending --json           # plan: queued bands, frozen turns
 omp-kit fleet respawn --json                 # plan: stale-plugin panes
 omp-kit scratch plan --json                  # reap report over scratch roots
+omp-kit scratch index-lock --repo DIR --json  # plan: stale index.lock verdict
 omp-kit ci status --json                     # cached CI, never calls GitHub
 omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 ```
@@ -459,6 +460,7 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |
 | `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|apply [--apply --yes]` | Release, quarantine and delete scratch; idle 72 h goes to quarantine, quarantine expires after 7 days | `omp-kit scratch plan --json` |
+| `omp-kit scratch` | `scratch index-lock --repo DIR [--apply --yes]` | Report a stale holder-less empty .git/index.lock, or move it aside; never touches non-empty, young, held, or unknown locks | `omp-kit scratch index-lock --repo /repo --json` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo` | Pin the gate toolchain, test a candidate binary, and let a human promote it | `omp-kit infra pin --json` |
 | `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |

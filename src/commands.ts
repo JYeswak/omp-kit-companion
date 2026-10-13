@@ -308,6 +308,9 @@ const loadData: DataSchema = { type: "object", required: ["scope", "overall", "v
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 } };
+const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS"] }, verdict: { type: "string" }, receipt: { type: "object" },
+} };
 const missionData: DataSchema = { type: "object", required: ["overall", "mission_file", "identity", "stage", "pillars", "errors", "no_claim"], properties: {
 	overall: { enum: ["VALID", "UNREGISTERED", "INVALID"] }, mission_file: { type: "string" },
 	identity: { type: ["string", "null"] }, stage: { type: ["string", "null"] },
@@ -578,6 +581,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: an unowned dir with fresh activity (newest mtime within 72h) stays LIVE; idle past 72h with no open fds goes to quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
+		{ name: "index-lock", description: "Report a stale holder-less empty .git/index.lock for one repo, or move it aside with --apply --yes; never touches non-empty, young, held, or unknown locks", usage: "scratch index-lock --repo DIR [--apply --yes]", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
 		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },

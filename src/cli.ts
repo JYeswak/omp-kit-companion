@@ -65,6 +65,7 @@ import { runPlanningConvert } from "./planning-convert.ts";
 import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { closeQueue, landingCommits, readDrainStore, staleClaims } from "./drain.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
+import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
 import { proveSend } from "./send.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
@@ -3032,8 +3033,21 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
+for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
- for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
+	const repoFlag = request.flags.get("--repo");
+	if (typeof repoFlag !== "string" || !isAbsolute(repoFlag) || resolve(repoFlag) !== repoFlag)
+		return refusal("SCRATCH_REPO_REQUIRED", "scratch index-lock needs --repo ABSOLUTE_DIR",
+			"Pass the repository root holding .git; nothing was changed.");
+	const apply = request.flags.has("--apply") && request.flags.has("--yes");
+	const gitDir = join(repoFlag, ".git");
+	const outcome = maybeMoveStaleIndexLock(gitDir, { run: scratchRunner, staleAfterMs: indexLockStaleAfterMs(), dryRun: !apply });
+	if (!apply) return { code: 0, data: { overall: "OK", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
+	return { code: outcome.verdict === "MOVED" ? 0 : 1,
+		data: { overall: outcome.verdict === "MOVED" ? "CHANGED" : "FINDINGS", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
+}
+registerCommandHandler("scratch index-lock", scratchIndexLockCommand);
  
  async function ciStatusCommand(request: ParsedCommand): Promise<CliResult> {
  	const sub = request.command.name;
