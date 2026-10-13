@@ -23,7 +23,7 @@ function configure(root: string, values: { slots?: number; max_wait_s?: number }
 async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}) {
 	const child = Bun.spawn([process.execPath, entry, ...args], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...extraEnv },
+		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv },
 		stdin: "ignore", stdout: "pipe", stderr: "pipe",
 	});
 	const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -55,10 +55,10 @@ test("machine admission blocks only above 2.5 times the core count", () => {
 	expect(machineLoadBlockReason(1, 4)).toBeNull();
 });
 
- // Slot-logic tests pin a quiet load reading (OMP_KIT_LOAD_OVERRIDE) so the
+ // Slot-logic tests pin the heavy-specific load seam so the
  // slot behavior under test, not ambient runner load, decides the outcome.
  // The LOAD1 gate itself stays covered by the machineLoadBlockReason tests.
- const QUIET_LOAD = { OMP_KIT_LOAD_OVERRIDE: "0.5/8" };
+ const QUIET_LOAD = { OMP_KIT_HEAVY_FAKE_LOAD1: "0.5" };
  test("heavy streams the child and preserves its exit code", async () => {
  	const root = fixture();
  	configure(root, { slots: 1, max_wait_s: 1 });
@@ -171,7 +171,7 @@ test("SIGINT releases the slot with exit 130", async () => {
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "interruptible", "--", "sleep", "30"], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test" },
+		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", ...QUIET_LOAD },
 		stdin: "ignore", stdout: "ignore", stderr: "pipe",
 	});
 	await waitForLedgerState(root, "running", 15000);
@@ -188,7 +188,7 @@ test("SIGTERM releases the slot with exit 143", async () => {
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "terminable", "--", "sleep", "30"], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test" },
+		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", ...QUIET_LOAD },
 		stdin: "ignore", stdout: "ignore", stderr: "pipe",
 	});
 	await waitForLedgerState(root, "running", 15000);
