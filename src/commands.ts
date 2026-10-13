@@ -308,6 +308,10 @@ const loadData: DataSchema = { type: "object", required: ["scope", "overall", "v
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 } };
+const landData: DataSchema = { type: "object", required: ["overall", "commit", "owner", "paths", "base"], properties: {
+	overall: { enum: ["PUSHED"] }, commit: { type: "string" }, owner: { type: "string" },
+	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
+} };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] }, verdict: { type: "string" }, receipt: { type: "object" },
 } };
@@ -350,6 +354,12 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
+	{ name: "land", description: "Publish exactly reserved worktree paths onto fresh origin/main using an owner-bound private Git index and ordinary push", usage: "land --paths PATH... --message MSG --apply --yes", flags: [
+		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file" },
+		{ name: "--message", value: "MSG", description: "Commit message for the candidate" },
+		{ name: "--apply", description: "Request owner-bound publication" },
+		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
+	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
