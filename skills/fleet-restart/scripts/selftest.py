@@ -108,7 +108,11 @@ def fake_home(root, link_version, release_version):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="fleet-restart-selftest.")
+    # Never inherit TMPDIR. A restart run sets it inside a repo, and a temp dir
+    # there makes repo_root climb into that repo and the preserve gate fails.
+    base = os.path.join(os.path.expanduser("~"), ".local", "state", "omp-kit", "fleet-restart-selftest")
+    os.makedirs(base, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="fleet-restart-selftest.", dir=base)
     uid = os.getuid()
 
     # --- missing TMUX env (ntm send then fails "no tmux sessions running")
