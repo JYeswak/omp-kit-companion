@@ -108,7 +108,7 @@ Order, each step appended to `$RUN/ledger.jsonl`:
    - work scratch dirs whose `.owner` pid is the omp pid (newest file and mtime), `runtime_scratch` (`omp.<pid>`), the repo's last push (from `update by push` reflog entries), the dirs that hold (`held_scratch`), repo dirt count.
 3. **Watchers pause**: dead-man first, then `launchctl bootout` of each loaded `pause: true` job → `$RUN/watchers-paused.json`.
 4. **Canary** (rule 14): `--canary` idle panes, a RESPAWN pane first, each sent and verified alone; any failure trips the breaker before the waves.
-5. **Idle panes in waves of `--wave`**: `/restart`, or a respawn re-validated live (rule 13), by mode → verify (rule 12) → advisor re-apply (`ADVISOR_OFF`, `ADVISOR_KEPT`, `ADVISOR_RESTORED` or `ADVISOR_FAILED`). The breaker stops new sends.
+5. **Idle panes, one process each, after the canary.** The canary is still one pane, verified alone. If it passes, each remaining idle pane gets its own process (`PANE_FANOUT` on stderr and in the ledger). A cancel file or `SIGTERM` stops a child before it sends. A child that already sent finishes verify. Tests stay on the serial wave path.
 6. **Busy panes** at their turn boundary, same steps including the live re-validation; still busy at the timeout → `QUEUED_BUSY`, zero sends.
 7. **Scratch reap**: `omp-kit scratch apply --apply --yes`, only after preserve succeeded. Dead-owner scratch is deleted, including dirs whose owner pid a respawn in this run just killed. The copy under `$RUN/preserve` and the `refs/preserve/fleet-restart/` pin are the save. Live-owner scratch is left. A reap failure is recorded as `SCRATCH_REAP` and does not fail a verified restart.
 8. **Watchers resume** in `finally` → `$RUN/watchers-resumed.json`; dead-man removed.

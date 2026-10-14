@@ -20,9 +20,12 @@ The chief pane is never touched: the report prints its respawn command. Every
 action appends to ledger.jsonl; --resume-run continues from it. The only
 keystrokes sent are `/restart` and `/advisor on`. All side effects go through a
 Ctx of injected functions."""
+import fcntl
 import json
+import multiprocessing
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -44,12 +47,16 @@ EXIT_REFUSED, EXIT_FAILED = 7, 6
 class Ctx:
     def __init__(self, env, uid, home, agents_dir, registry, run_fn, capture_fn, inventory_fn, snapshot_fn, lsof_fn, align_fn,
                  preflight_fn, target_fn, sleep_fn=time.sleep, clock_fn=time.time, verify_timeout=120, verify_poll=5, verify_settle=10,
-                 advisor_grace=6, advisor_timeout=20, advisor_poll=2, busy_poll=30):
+                 advisor_grace=6, advisor_timeout=20, advisor_poll=2, busy_poll=30, parallel=False, spawn_fn=None,
+                 releases=None, version=None, run_dir=None):
         self.env, self.uid, self.home, self.agents_dir, self.registry = env, uid, home, agents_dir, registry
         self.run_fn, self.capture_fn, self.inventory_fn, self.snapshot_fn, self.lsof_fn = run_fn, capture_fn, inventory_fn, snapshot_fn, lsof_fn
         self.align_fn, self.preflight_fn, self.target_fn, self.sleep_fn, self.clock_fn = align_fn, preflight_fn, target_fn, sleep_fn, clock_fn
         self.verify_timeout, self.verify_poll, self.verify_settle = verify_timeout, verify_poll, verify_settle
         self.advisor_grace, self.advisor_timeout, self.advisor_poll, self.busy_poll = advisor_grace, advisor_timeout, advisor_poll, busy_poll
+        self.parallel, self.spawn_fn = parallel, spawn_fn
+        self.releases, self.version, self.run_dir = releases, version, run_dir
+        self.cancel_path = None
 
     def clock(self):
         return self.clock_fn()
@@ -75,7 +82,8 @@ def live_ctx(env, home, releases, version=None, agents_dir=None, registry_path=f
                registry=fw.load_registry(registry_path), run_fn=core.run, capture_fn=core.capture_live(env),
                inventory_fn=lambda only=None: core.live_inventory(env, only=only), snapshot_fn=snapshot_fn,
                lsof_fn=fr_save.lsof_live(core.run), align_fn=lambda: core.align_check(home, releases, version or core.kit_version()),
-               preflight_fn=preflight_fn, target_fn=lambda: fr_save.target_live(core.run))
+               preflight_fn=preflight_fn, target_fn=lambda: fr_save.target_live(core.run),
+               parallel=True, releases=releases, version=version)
 
 
 class Ledger:
@@ -84,7 +92,12 @@ class Ledger:
 
     def add(self, event, **kw):
         with open(self.path, "a") as fh:
-            fh.write(json.dumps(dict({"at": fw.iso(self.clock()), "event": event}, **kw), ensure_ascii=False) + "\n")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                fh.write(json.dumps(dict({"at": fw.iso(self.clock()), "event": event}, **kw), ensure_ascii=False) + "\n")
+                fh.flush()
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     def events(self):
         try:
@@ -406,8 +419,8 @@ def process_wave(ctx, rows, saved, target, approval, ledger, results, brk, canar
             rr = core.respawn_row(r, s) if r.get("mode") == "RESPAWN" else None
             sent.append(dict(r, added=rr["added"] if rr else []))
             continue
-        if brk["trip"] or not brk["sends"]:
-            conclude(ledger, results, held(r, "HOLD_BREAKER", "breaker: %s %s" % ((brk["trip"] or {}).get("pane"), (brk["trip"] or {}).get("verdict"))))
+        if brk["trip"] or not brk["sends"] or cancelled(ctx):
+            conclude(ledger, results, held(r, "HOLD_BREAKER", "cancel" if cancelled(ctx) else "breaker: %s %s" % ((brk["trip"] or {}).get("pane"), (brk["trip"] or {}).get("verdict"))))
             continue
         row, hold = action_row(r, s)
         if hold:
@@ -455,6 +468,107 @@ def canary_pass(ctx, queue, saved, target, approval, ledger, results, brk):
         b, n = process_wave(ctx, [r], saved, target, approval, ledger, results, brk, canary=True)
         busy += b
         brk["canary_left"] -= n
+    return busy
+
+
+def cancelled(ctx):
+    return bool(ctx.cancel_path and os.path.exists(ctx.cancel_path))
+
+
+def should_fanout(ctx, rows, brk):
+    """After the canary, live runs use one process per remaining pane. Tests stay serial."""
+    return bool(ctx.parallel and rows and not brk["trip"] and brk["sends"] and ctx.run_dir)
+
+
+def progress(event, **kw):
+    sys.stderr.write(json.dumps(dict({"event": event, "at": fw.iso(time.time())}, **kw), ensure_ascii=False) + "\n")
+    sys.stderr.flush()
+
+
+def pane_payloads(rows, saved, target, approval, env, home, releases, version, run_dir, cancel, strict):
+    out = []
+    for row in rows:
+        out.append({"row": row, "saved": saved.get(row["pane_id"]) or {}, "target": target, "approval": approval,
+                    "env": env, "home": home, "releases": releases, "version": version, "run_dir": run_dir,
+                    "cancel": cancel, "strict": strict, "ledger": os.path.join(run_dir, LEDGER)})
+    return out
+
+
+def pane_main(payload):
+    """One pane, one process. Rebuilds a live context. Does not re-run selftest."""
+    started = time.time()
+    progress("PANE_START", pane=payload["row"]["pane"], pid=os.getpid())
+    ctx = live_ctx(payload["env"], payload["home"], payload["releases"], payload.get("version"))
+    ctx.parallel = False
+    ctx.cancel_path = payload["cancel"]
+    ctx.preflight_fn = lambda: (True, "already passed")
+    ledger = Ledger(payload["ledger"], time.time)
+    results, brk = {}, {"trip": None, "sends": True, "strict": payload["strict"], "canary_left": 0}
+    busy, _n = process_wave(ctx, [payload["row"]], {payload["row"]["pane_id"]: payload["saved"]}, payload["target"], payload["approval"], ledger, results, brk)
+    res = results.get(payload["row"]["pane"]) or held(payload["row"], "FAILED", "pane process produced no result")
+    res["busy"] = bool(busy)
+    res["elapsed_ms"] = int((time.time() - started) * 1000)
+    out = os.path.join(payload["run_dir"], "pane-results")
+    os.makedirs(out, exist_ok=True)
+    safe = payload["row"]["pane"].replace("/", "_").replace(":", "_")
+    with open(os.path.join(out, safe + ".json"), "w") as fh:
+        json.dump(res, fh)
+        fh.write("\n")
+    progress("PANE_DONE", pane=payload["row"]["pane"], result=res.get("result"), elapsed_ms=res["elapsed_ms"], pid=os.getpid())
+    return res
+
+
+def spawn_pane_processes(payloads):
+    mp = multiprocessing.get_context("spawn")
+    procs = []
+    for payload in payloads:
+        proc = mp.Process(target=pane_main, args=(payload,), name="pane-%s" % payload["row"]["pane"])
+        proc.start()
+        procs.append(proc)
+    return procs
+
+
+def parallel_panes(ctx, rows, saved, target, approval, ledger, results, brk):
+    """One process per pane. A canary failure never reaches here. Parent cancel stops a child before it sends."""
+    cancel = os.path.join(ctx.run_dir, "cancel")
+    ctx.cancel_path = cancel
+    payloads = pane_payloads(rows, saved, target, approval, ctx.env, ctx.home, ctx.releases, ctx.version, ctx.run_dir, cancel, brk["strict"])
+    progress("PANE_FANOUT", count=len(payloads), panes=[p["row"]["pane"] for p in payloads])
+    ledger.add("PANE_FANOUT", count=len(payloads), panes=[p["row"]["pane"] for p in payloads])
+    if ctx.spawn_fn:
+        return ctx.spawn_fn(ctx, payloads, saved, target, approval, ledger, results, brk)
+    procs = spawn_pane_processes(payloads)
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def stop(signum, frame):
+        with open(cancel, "w") as fh:
+            fh.write("parent-sigterm\n")
+        if callable(previous):
+            previous(signum, frame)
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        for proc in procs:
+            proc.join()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    busy = []
+    for payload in payloads:
+        safe = payload["row"]["pane"].replace("/", "_").replace(":", "_")
+        path = os.path.join(ctx.run_dir, "pane-results", safe + ".json")
+        try:
+            with open(path) as fh:
+                res = json.load(fh)
+        except OSError:
+            res = held(payload["row"], "FAILED", "pane process exited without a result")
+            ledger.add("PANE_LOST", pane=payload["row"]["pane"])
+        results[res["pane"]] = res
+        if res.pop("busy", False):
+            busy.append(payload["row"])
+        check_trip(ledger, brk, res)
+        if brk["trip"] and not os.path.exists(cancel):
+            with open(cancel, "w") as fh:
+                fh.write("breaker\n")
     return busy
 
 
@@ -517,9 +631,12 @@ def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk
     if reverify:
         busy += process_wave(ctx, reverify, saved, target, approval, ledger, results, brk)[0]
     busy += canary_pass(ctx, idle, saved, target, approval, ledger, results, brk)
-    wave = max(1, int(man.get("wave") or 1))
-    for i in range(0, len(idle), wave):
-        busy += process_wave(ctx, idle[i:i + wave], saved, target, approval, ledger, results, brk)[0]
+    if should_fanout(ctx, idle, brk):
+        busy += parallel_panes(ctx, idle, saved, target, approval, ledger, results, brk)
+    else:
+        wave = max(1, int(man.get("wave") or 1))
+        for i in range(0, len(idle), wave):
+            busy += process_wave(ctx, idle[i:i + wave], saved, target, approval, ledger, results, brk)[0]
     deadline = ctx.clock() + 60 * float(man.get("busy_timeout_min") or 0)
     while busy and ctx.clock() < deadline and not brk["trip"] and brk["sends"]:
         ctx.sleep(ctx.busy_poll)
@@ -527,7 +644,10 @@ def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk
         busy = [r for r in busy if r not in ready]
         busy += canary_pass(ctx, ready, saved, target, approval, ledger, results, brk)
         if ready:
-            busy += process_wave(ctx, ready, saved, target, approval, ledger, results, brk)[0]
+            if should_fanout(ctx, ready, brk):
+                busy += parallel_panes(ctx, ready, saved, target, approval, ledger, results, brk)
+            else:
+                busy += process_wave(ctx, ready, saved, target, approval, ledger, results, brk)[0]
     for r in busy:
         if brk["trip"] or not brk["sends"]:
             conclude(ledger, results, held(r, "HOLD_BREAKER", "breaker stop before its turn boundary"))
@@ -613,6 +733,7 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
         ledger.add("WATCHERS_PAUSE", rows=[{k: r.get(k) for k in ("label", "action")} for r in paused["rows"]], refused=paused.get("refused"))
         if paused.get("refused"):
             raise RuntimeError("watchers pause refused: %s" % paused["refused"])
+        ctx.run_dir = run_dir
         restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk)
         rc_scratch, out_scratch = ctx.run_fn(["omp-kit", "scratch", "apply", "--apply", "--yes", "--json"], None)
         ledger.add("SCRATCH_REAP", rc=rc_scratch, tail=(out_scratch or "")[-300:])

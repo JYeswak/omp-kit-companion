@@ -228,6 +228,7 @@ def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
     gate_watchers(case, tmp, uid)
     gate_save(case, tmp)
     gate_preserve(case, tmp)
+    gate_parallel(case, tmp)
     gate_mode(case, tmp)
     gate_respawn(case, tmp, uid, good_env, plan)
     gate_run(case, tmp, uid, good_env, aligned)
@@ -424,6 +425,15 @@ def gate_save(case, tmp):
 
 
 
+def gate_parallel(case, tmp):
+    rows = [{"pane": "a:0.1", "pane_id": "%1", "mode": "RESTART"}, {"pane": "a:0.2", "pane_id": "%2", "mode": "RESTART"}]
+    payloads = fr_run.pane_payloads(rows, {}, {"path": "/t"}, {"quote": "go"}, {"TMUX_TMPDIR": "/s"}, "/h", "/rel", None, tmp, os.path.join(tmp, "cancel"), False)
+    case("CTL one payload per remaining pane", len(payloads) == 2 and [p["row"]["pane"] for p in payloads] == ["a:0.1", "a:0.2"]
+         and payloads[0]["ledger"].endswith("ledger.jsonl"), json.dumps([p["row"]["pane"] for p in payloads]))
+    case("NEG fanout refused when the canary breaker has tripped or no run dir is set",
+         not fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": tmp})(), rows, {"trip": {"pane": "c"}, "sends": False})
+         and not fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": None})(), rows, {"trip": None, "sends": True})
+         and fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": tmp})(), rows, {"trip": None, "sends": True}))
 def gate_preserve(case, tmp):
     repo = os.path.join(tmp, "preserve-repo")
     os.makedirs(repo)
