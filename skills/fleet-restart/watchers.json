@@ -1,0 +1,18 @@
+{
+ "schema": "fleet-restart/watchers/v1",
+ "note": "launchd jobs (label -> class). pane-actor: sends keys or messages into agent panes. state-mutator: changes installs, scratch or OMP state a restart depends on. reader: read-only or project-local; keeps running. Only pause:true jobs are booted out during a fleet restart. An unregistered loaded job whose ProgramArguments (or a script they name) contain a pane-actor signature is HOLD_UNCLASSIFIED and blocks run --apply until it is added here.",
+ "jobs": {
+  "com.omp-kit.fleet-watch": {"class": "pane-actor", "pause": true, "why": "StartInterval 120; nudges and dispatches into agent panes"},
+  "com.omp-kit.fleet-flush": {"class": "pane-actor", "pause": true, "why": "StartInterval 60; sends Alt+Up/Enter into agent panes"},
+  "com.omp-kit.kit-update": {"class": "state-mutator", "pause": true, "why": "StartInterval 300; installs kit releases mid-restart"},
+  "com.omp-kit.scratch-reaper": {"class": "state-mutator", "pause": true, "why": "StartInterval 21600; deletes owned scratch whose .owner pid is dead, which a respawn creates"},
+  "com.omp-kit.omp-watch": {"class": "state-mutator", "pause": true, "why": "WatchPaths on the OMP package.json; reacts to OMP installs"},
+  "com.omp-kit.ci-poller": {"class": "reader", "pause": false, "why": "polls CI; never touches panes"},
+  "com.omp-kit.load-watch": {"class": "reader", "pause": false, "why": "samples load; never touches panes"},
+  "com.omp-kit.claude-save": {"class": "reader", "pause": false, "why": "saves Claude transcripts; never touches panes"},
+  "com.jyeswak.fleet-scheduler": {"class": "reader", "pause": false, "why": "no tmux/ntm/omp-kit send signature in its source (measured 2026-10-13)"},
+  "ai.zeststream.skill-scheduler-watchdog": {"class": "reader", "pause": false, "why": "no tmux/ntm/omp-kit send signature in its source (measured 2026-10-13)"},
+  "ai.zeststream.herdr-loop-watch": {"class": "reader", "pause": false, "why": "no tmux/ntm/omp-kit send signature in its source (measured 2026-10-13); it does not restart herdr panes. Herdr omp panes are restarted by the fleet-restart herdr procedure, not by this job"},
+  "ai.zeststream.skill-discovery-watcher": {"class": "reader", "pause": false, "why": "no tmux/ntm/omp-kit send signature in its source (measured 2026-10-13)"}
+ }
+}

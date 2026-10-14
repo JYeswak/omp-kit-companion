@@ -194,7 +194,9 @@ def main():
     screen_cmd = "cd /Users/josh/Developer/uds && omp --model muse-code/muse-spark-1.3-contributor"
     ok, code = fr.check_cmd_flags(screen_cmd, row["flags"])
     case("NEG screen-rebuilt respawn cmd -> FLAGS_NOT_FROM_LIVE_ARGS", not ok and code == "FLAGS_NOT_FROM_LIVE_ARGS", code)
-    tampered = fr.restart_manifest(plan, mode="respawn")
+    save_fixture = {"rows": [{"pane_id": r["pane_id"], "session_file": "/s/sessions/-x/%s.jsonl" % r["pane_id"][1:], "holds": [],
+                              "advisor": {"on": False, "source": "runtime"}} for r in plan["rows"] if r["action"] == "RESTART"]}
+    tampered = fr.restart_manifest(plan, mode="respawn", save=save_fixture)
     for r in tampered["rows"]:
         if r["pane"] == "uds--burn-down:0.1":
             r["cmd"] = screen_cmd
@@ -278,8 +280,14 @@ def main():
          roles == ["director", "worker"] and all(os.path.isfile(r["file"]) for r in msgs["rows"]),
          json.dumps(roles))
     director_text = next(open(r["file"]).read() for r in msgs["rows"] if r["role"] == "director")
-    case("CTL director message orders HEALTH > INTEGRATE > DISPATCH with one callback grammar",
-         director_text.index("HEALTH") < director_text.index("INTEGRATE") < director_text.index("DISPATCH") and "DONE|BLOCKED <bead> <sha> <evidence>; NEXT <item>" in director_text)
+    case("CTL staged director text follows tick order, VALIDATE before INTEGRATE",
+         [director_text.index(p) for p in ("INIT", "RESEARCH", "PLAN", "BEADS", "DISPATCH", "VALIDATE", "INTEGRATE", "LEARN")]
+         == sorted(director_text.index(p) for p in ("INIT", "RESEARCH", "PLAN", "BEADS", "DISPATCH", "VALIDATE", "INTEGRATE", "LEARN"))
+         and "DONE|BLOCKED <bead> <sha> <evidence>; NEXT <item>" in director_text)
+    case("NEG staged director text leads with INTEGRATE before VALIDATE",
+         "VALIDATE" in director_text and director_text.index("VALIDATE") < director_text.index("INTEGRATE")
+         and director_text.index("DISPATCH") < director_text.index("VALIDATE"),
+         director_text.replace("\n", " | "))
     try:
         fr.messages_manifest(plan, handoff="/h.md", snapshot_dir="/snap", kit_version="0.2.20", out_dir=os.path.join(tmp, "nodirs"), directors=None)
         code = "NO_ERROR"
@@ -295,6 +303,9 @@ def main():
     case("NEG staged message edited after approval -> refused, not sent",
          by.get("modeltest:0.1") == "REFUSED_FILE_CHANGED_AFTER_APPROVAL" and all("--panes=%55" not in a for a, _ in calls), json.dumps(by))
     case("CTL unchanged staged worker message sent via --file", by.get("uds--burn-down:0.1") == "SENT" and calls and "--file" in calls[-1][0], json.dumps(by))
+
+    import selftest_run  # noqa: E402  (watchers, save, advisor, respawn, autonomous run gates)
+    selftest_run.gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE)
 
     print("selftest: %s (%d failing)" % ("PASS" if not FAILS else "FAIL", len(FAILS)))
     return 1 if FAILS else 0

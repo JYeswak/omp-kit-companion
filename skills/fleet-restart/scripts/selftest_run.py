@@ -1,0 +1,1050 @@
+"""Selftest gates for the autonomous run (ompkit-fp72.19.1): check-env, watchers
+registry/pause/resume/dead-man, save (session file, executable, advisor state,
+scratch, WATCHDOG drift), per-pane mode (RESTART only on the target build, else
+RESPAWN), composer hold, version verify, advisor re-apply, respawn argv, run
+plan/apply/resume-run. Called by selftest.py; every gate pairs a planted negative
+with its control. launchctl, ntm, tmux, lsof, the clock and sleep are fakes:
+nothing here touches the live fleet or launchd."""
+import argparse
+import json
+import os
+import plistlib
+import shlex
+import subprocess
+import sys
+
+import fleet_restart as fr
+import fr_run
+import fr_save
+import fr_watchers as fw
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BUN_OMP = "bun /Users/josh/.bun/bin/omp"
+BUN = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun"
+TERN = "/Users/josh/Library/Application Support/Tern/omp/versions/"
+TARGET = TERN + "18.10.3"
+TARGET_INFO = {"ok": True, "command": "omp", "which": "/opt/homebrew/bin/omp", "path": TARGET, "version": "18.10.3", "via": "fake"}
+# The "+ 👁 0.42" spend segment is always present: OMP restores advisor spend from the transcript on resume.
+STATUS = " {glyph} · ◉ {model}{badge} · 📁 ~/w · ◫ 1.0%/1M ⟲ · S1.00 + 👁 0.42"
+APPROVE = {"approved_by": "selftest", "quote": "go"}
+
+
+def screen_of(glyph="π", badge=False, composer="", model="Opus 5.5"):
+    return ["older output", "──── 📥 task ─", "❯ " + composer, "────────", STATUS.format(glyph=glyph, badge=" 👁" if badge else "", model=model)]
+
+
+class FakeLaunchd:
+    def __init__(self, loaded=(), refuse_bootstrap=()):
+        self.loaded, self.refuse, self.calls = set(loaded), set(refuse_bootstrap), []
+
+    def handle(self, argv):
+        self.calls.append(list(argv))
+        verb = argv[1]
+        if verb == "print":
+            label = argv[2].split("/", 2)[2]
+            return (0, "%s = {" % argv[2]) if label in self.loaded else (113, 'Could not find service "%s"' % label)
+        if verb == "bootout":
+            label = argv[2].split("/", 2)[2]
+            if label in self.loaded:
+                self.loaded.discard(label)
+                return 0, ""
+            return 3, "Boot-out failed: 3: No such process"
+        if verb == "bootstrap":
+            with open(argv[3], "rb") as fh:
+                label = plistlib.load(fh)["Label"]
+            if label in self.refuse:
+                return 5, "Bootstrap failed: 5: Input/output error"
+            self.loaded.add(label)
+            return 0, ""
+        return 1, "unknown verb"
+
+    def run(self, argv, env):
+        return self.handle(argv) if argv[0] == "launchctl" else (1, "unexpected")
+
+    def mutations(self):
+        return [c for c in self.calls if c[1] in ("bootout", "bootstrap")]
+
+
+class Pane:
+    """kind: target (compiled omp already on TARGET) | tern (older versioned build) | bun."""
+    def __init__(self, name, pid, n, cwd, advisor="off", flags="--profile claude", kind="target", session=True, badge_ok=True,
+                 busy_until=None, lose_session=False, drop_restart=False, composer="", stale=False, model="Opus 5.5", launch_model=None, on_idle=None):
+        self.name, self.id, self.shell, self.omp, self.cwd, self.advisor, self.kind = name, pid, n * 10, n * 10 + 1, cwd, advisor, kind
+        self.flags = flags + (" --advisor" if advisor == "flag" else "")
+        self.session = os.path.join(cwd, "sessions", "-w", "S%d.jsonl" % n) if session else None
+        self.badge_ok, self.busy_until, self.lose_session, self.drop_restart = badge_ok, busy_until, lose_session, drop_restart
+        self.composer, self.stale, self.model, self.launch_model, self.on_idle = composer, stale, model, launch_model, on_idle
+        self.badge, self.restarts, self.mcp_pid, self.suffix, self.next_pid = advisor != "off", 0, n * 10 + 2, "", n * 1000
+        self.exe = TARGET if kind == "target" else BUN if kind == "bun" else TERN + "18.9.2"
+
+    def args(self):
+        head = {"target": "/opt/homebrew/bin/omp", "bun": BUN_OMP, "tern": TERN + "18.9.2"}[self.kind]
+        return head + " " + self.flags + self.suffix
+
+
+class FakeFleet:
+    def __init__(self, panes, launchd):
+        self.t, self.panes, self.ld, self.sends, self.boom, self.crash_sleep = 1_000_000.0, {p.id: p for p in panes}, launchd, [], set(), False
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, sec):
+        if self.crash_sleep:
+            self.crash_sleep = False
+            raise RuntimeError("simulated crash mid-verify")
+        self.t += sec
+        for p in self.panes.values():  # things that happen while a pane is busy, seen once it is idle
+            if p.on_idle and p.busy_until is not None and self.t >= p.busy_until:
+                hook, p.on_idle = p.on_idle, None
+                hook(p)
+
+    def screen(self, p):
+        busy = p.busy_until is not None and self.t < p.busy_until
+        return screen_of("⠹ 2m" if busy else "π", p.badge, p.composer, p.model)
+
+    def capture(self, pane_id):
+        return self.screen(self.panes[pane_id])
+
+    def inventory(self, only=None):
+        panes, procs = [], []
+        for p in self.panes.values():
+            panes.append({"pane": p.name, "pane_id": p.id, "pane_pid": p.shell, "cwd": p.cwd, "screen": self.screen(p) if only is None or p.id in only else []})
+            procs += [{"pid": p.shell, "ppid": 1, "args": "-zsh"}, {"pid": p.omp, "ppid": p.shell, "args": p.args()},
+                      {"pid": p.mcp_pid, "ppid": p.omp, "args": "npm exec rea-agents@6.3.0 mcp"}]
+        return {"captured_at": "2026-10-13T00:00:00Z", "panes": panes, "procs": procs}
+
+    def lsof(self, pid):
+        p = next(x for x in self.panes.values() if x.omp == pid)
+        out = "p%d\nftxt\nn%s\nftxt\nn/usr/lib/dyld\n" % (pid, p.exe)
+        if p.session:
+            f = p.session.replace(".jsonl", "-new.jsonl") if p.lose_session and p.restarts else p.session
+            out += "f38\nn%s\nf39\nn%s\n" % (f, f[:-len(".jsonl")] + "/__advisor.jsonl")
+        return out
+
+    def run(self, argv, env):
+        if argv[0] == "launchctl":
+            return self.ld.handle(argv)
+        if argv[0] == "ntm":
+            p = self.panes[next(a for a in argv if a.startswith("--panes=")).split("=", 1)[1]]
+            text = argv[-1]
+            self.sends.append((p.name, text, self.t))
+            if p.name in self.boom:
+                raise RuntimeError("simulated ntm crash")
+            if text == "/restart" and not p.drop_restart:  # re-exec of process.execPath: same pid, same exe
+                p.restarts += 1
+                p.mcp_pid += 1000
+                p.suffix = " --resume S%d" % p.restarts
+                if p.advisor == "runtime":
+                    p.badge = False
+                if p.launch_model:  # /restart keeps the launch --model; a runtime switch reverts
+                    p.model = p.launch_model
+            if text == "/advisor on" and p.badge_ok:
+                p.badge = True
+            return 0, '{"success":true}'
+        if argv[:3] == ["omp-kit", "scratch", "apply"]:
+            return 0, '{"ok":true}'
+        if argv[:2] == ["tmux", "respawn-pane"]:
+            p = self.panes[argv[argv.index("-t") + 1]]
+            self.sends.append((p.name, "RESPAWN", self.t))
+            if p.drop_restart:  # respawn lost (tmux error, pane gone mid-send): the old omp keeps running
+                return 0, ""
+            inner = shlex.split(argv[-1])[2]  # zsh -lc '<cd … && omp …; exec zsh -l>'
+            toks = shlex.split(inner.split("&&", 1)[1].rsplit(";", 1)[0])
+            assert toks[0] == "omp" and argv[argv.index("-c") + 1] == p.cwd, argv
+            p.restarts += 1
+            p.omp, p.mcp_pid = p.next_pid + p.restarts * 10, p.next_pid + p.restarts * 10 + 1
+            p.kind, p.exe = ("tern", TERN + "18.9.2") if p.stale else ("target", TARGET)
+            rest = fr.normalize_flags(toks[1:])
+            p.flags, p.suffix = " ".join(rest), ""
+            if "--resume" in toks:
+                p.suffix = " --resume " + toks[toks.index("--resume") + 1]
+            p.badge = "--advisor" in rest or p.advisor == "config"
+            p.composer = ""
+            if p.launch_model:
+                p.model = p.launch_model
+            return 0, ""
+        return 1, "unexpected %s" % argv
+
+    def count(self, name=None, text=None):
+        return sum(1 for n, t, _ in self.sends if (name is None or n == name) and (text is None or t == text))
+
+
+def write_plist(d, label, args, raw=None):
+    path = os.path.join(d, label + ".plist")
+    with open(path, "wb") as fh:
+        if raw is not None:
+            fh.write(raw)
+        else:
+            plistlib.dump({"Label": label, "ProgramArguments": args}, fh)
+    return path
+
+
+def agents_fixture(root, extra=False):
+    d = os.path.join(root, "LaunchAgents")
+    os.makedirs(d, exist_ok=True)
+    for label in ("com.omp-kit.fleet-watch", "com.omp-kit.fleet-flush", "com.omp-kit.ci-poller"):
+        write_plist(d, label, ["/x/omp-kit", "service", "run", label.rsplit(".", 1)[1]])
+    if extra:
+        write_plist(d, "com.example.sender", ["/bin/sh", "-c", "tmux send-keys -t %3 Enter"])
+        script = os.path.join(root, "actor.py")
+        with open(script, "w") as fh:
+            fh.write('import subprocess\nsubprocess.run(["ntm", "send", "uds", "--panes=1", "go"])\n')
+        write_plist(d, "com.example.script-actor", ["/usr/bin/python3", script])
+        write_plist(d, "com.example.reader", ["/bin/echo", "hi"])
+        write_plist(d, "com.example.idle-actor", ["/bin/sh", "-c", "tmux respawn-pane -k -t %9"])
+        write_plist(d, "com.example.broken", None, raw=b"not a plist")
+    return d
+
+
+def fake_home(root):
+    home = os.path.join(root, "home")
+    for prof, text in [("cfgp", "advisor:\n  enabled: true\n"), ("dotp", "advisor.enabled: true\n"),
+                       ("claude", "modelRoles:\n  advisor: openai-codex/gpt-6.1-sol\n")]:
+        d = os.path.join(home, ".omp", "profiles", prof, "agent")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.yml"), "w") as fh:
+            fh.write(text)
+    return home
+
+
+def ctx_for(fleet, home, agents_dir, env, uid, aligned, preflight=(True, "selftest: PASS (fake)")):
+    return fr_run.Ctx(env=env, uid=uid, home=home, agents_dir=agents_dir, registry=fw.load_registry(), run_fn=fleet.run,
+                      capture_fn=fleet.capture, inventory_fn=fleet.inventory,
+                      snapshot_fn=lambda d: (os.makedirs(d, exist_ok=True), fleet.inventory())[1], lsof_fn=fleet.lsof,
+                      align_fn=lambda: aligned, preflight_fn=lambda: preflight, target_fn=lambda: dict(TARGET_INFO),
+                      sleep_fn=fleet.sleep, clock_fn=fleet.clock,
+                      verify_timeout=30, verify_poll=5, verify_settle=1, advisor_grace=4, advisor_timeout=20, advisor_poll=2, busy_poll=30)
+
+
+def approve(run_dir, **extra):
+    with open(os.path.join(run_dir, fr_run.RUN_MANIFEST)) as fh:
+        man = json.load(fh)
+    return dict(APPROVE, manifest_sha256=fr.manifest_sha(man), **extra)
+
+
+def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
+    gate_check_env(case, tmp, good_env)
+    gate_watchers(case, tmp, uid)
+    gate_save(case, tmp)
+    gate_preserve(case, tmp)
+    gate_mode(case, tmp)
+    gate_respawn(case, tmp, uid, good_env, plan)
+    gate_run(case, tmp, uid, good_env, aligned)
+    gate_uxr3(case, tmp, plan, inventory, aligned)
+
+
+# ---------- 1. check-env ----------
+
+def gate_check_env(case, tmp, good_env):
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    env.update(good_env)
+    script = os.path.join(HERE, "fleet_restart.py")
+    p = subprocess.run([sys.executable, script, "check-env"], capture_output=True, text=True, env=env)
+    case("CTL check-env with the fleet socket -> exit 0, ok", p.returncode == 0 and json.loads(p.stdout)["ok"] is True, p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, script, "env"], capture_output=True, text=True, env=env)
+    case("NEG removed subcommand `env` rejected by argparse (uxr3: ran /usr/bin/env)",
+         p.returncode == 2 and "invalid choice" in p.stderr and not p.stdout, "rc=%d %s" % (p.returncode, p.stderr[-200:]))
+
+
+# ---------- 2. watchers ----------
+
+def gate_watchers(case, tmp, uid):
+    root = os.path.join(tmp, "watchers")
+    d = agents_fixture(root, extra=True)
+    reg = fw.load_registry()
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller", "com.example.sender", "com.example.script-actor", "com.example.reader"})
+    disc = fw.discover(d, reg, ld.run, uid)
+    status = {j["label"]: j["status"] for j in disc["jobs"]}
+    case("CTL pause plan = exactly the loaded pause:true jobs (unloaded fleet-flush and reader ci-poller excluded)",
+         disc["pause_plan"] == ["com.omp-kit.fleet-watch"], json.dumps(disc["pause_plan"]))
+    case("NEG unregistered plist with `tmux send-keys` in ProgramArguments -> HOLD_UNCLASSIFIED",
+         status.get("com.example.sender") == "HOLD_UNCLASSIFIED", json.dumps(status))
+    case("NEG unregistered job whose named script calls [\"ntm\", \"send\"] -> HOLD_UNCLASSIFIED",
+         status.get("com.example.script-actor") == "HOLD_UNCLASSIFIED", json.dumps(status))
+    case("CTL unregistered job without a pane-actor signature is not held",
+         status.get("com.example.reader") == "UNREGISTERED" and status.get("com.example.idle-actor") == "UNCLASSIFIED_NOT_LOADED", json.dumps(status))
+    case("CTL unreadable plist reported, not fatal", [os.path.basename(u["plist"]) for u in disc["unreadable"]] == ["com.example.broken.plist"],
+         json.dumps(disc["unreadable"]))
+    case("CTL registry seed: 5 pause:true, 7 readers",
+         sorted(k for k, v in reg.items() if v["pause"]) == ["com.omp-kit.fleet-flush", "com.omp-kit.fleet-watch", "com.omp-kit.kit-update",
+                                                              "com.omp-kit.omp-watch", "com.omp-kit.scratch-reaper"]
+         and sum(1 for v in reg.values() if not v["pause"] and v["class"] == "reader") == 7)
+
+    run_dir = os.path.join(root, "run1")
+    os.makedirs(run_dir)
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"})
+    d = agents_fixture(os.path.join(root, "clean"))
+    disc = fw.discover(d, reg, ld.run, uid)
+    dry = fw.pause(run_dir, disc, ld.run, uid, 1000, apply=False)
+    case("CTL watchers pause default is a dry run (no bootout/bootstrap)", not ld.mutations() and dry["mode"] == "DRY_RUN")
+    rec = fw.pause(run_dir, disc, ld.run, uid, 1000, ttl_min=90, apply=True)
+    dm = rec["deadman"]
+    with open(dm["plist"], "rb") as fh:
+        dmp = plistlib.load(fh)
+    case("CTL pause apply: dead-man installed (StartInterval 300, resume --if-expired --apply) before any bootout",
+         dmp["StartInterval"] == 300 and dmp["ProgramArguments"][1:] == [fw.SCRIPT_PATH, "watchers", "resume", "--run", run_dir, "--if-expired", "--apply"]
+         and ld.mutations()[0][1] == "bootstrap" and ld.mutations()[0][3] == dm["plist"], json.dumps(ld.mutations()))
+    rows = {r["label"]: r["action"] for r in rec["rows"]}
+    case("CTL pause apply: loaded fleet-watch booted out, unloaded fleet-flush recorded SKIP_NOT_LOADED",
+         rows == {"com.omp-kit.fleet-watch": "BOOTED_OUT", "com.omp-kit.fleet-flush": "SKIP_NOT_LOADED"}
+         and "com.omp-kit.fleet-watch" not in ld.loaded and "com.omp-kit.ci-poller" in ld.loaded, json.dumps(rows))
+    n = len(ld.mutations())
+    res = fw.resume(run_dir, ld.run, uid, 1000 + 89 * 60, if_expired=True, apply=True)
+    case("NEG resume --if-expired before expires_at -> no-op", res["result"] == "NOT_EXPIRED" and len(ld.mutations()) == n
+         and "com.omp-kit.fleet-watch" not in ld.loaded, res["result"])
+    res = fw.resume(run_dir, ld.run, uid, 1000 + 91 * 60, if_expired=True, apply=True)
+    boots = [c[3] for c in ld.mutations()[n:] if c[1] == "bootstrap"]
+    case("CTL resume after expiry bootstraps only the paused-and-loaded row; unloaded-before job stays unloaded",
+         res["result"] == "RESUMED" and boots == [os.path.join(d, "com.omp-kit.fleet-watch.plist")]
+         and "com.omp-kit.fleet-watch" in ld.loaded and "com.omp-kit.fleet-flush" not in ld.loaded, json.dumps(boots))
+    case("CTL resume removes the dead-man job and plist, writes watchers-resumed.json",
+         dm["label"] not in ld.loaded and not os.path.exists(dm["plist"]) and os.path.isfile(os.path.join(run_dir, fw.RESUMED)))
+    n = len(ld.mutations())
+    res = fw.resume(run_dir, ld.run, uid, 1000 + 92 * 60, apply=True)
+    case("CTL resume twice is idempotent (ALREADY_LOADED, zero launchctl mutations)",
+         res["result"] == "RESUMED" and [r["action"] for r in res["rows"]] == ["ALREADY_LOADED"] and len(ld.mutations()) == n, json.dumps(res["rows"]))
+
+    run_dir = os.path.join(root, "run2")
+    os.makedirs(run_dir)
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"}, refuse_bootstrap={fw.deadman_label(run_dir)})
+    disc = fw.discover(d, reg, ld.run, uid)
+    rec = fw.pause(run_dir, disc, ld.run, uid, 1000, apply=True)
+    case("NEG dead-man fails to load -> pause refused, zero bootouts",
+         rec.get("refused") == "DEADMAN_NOT_LOADED" and not [c for c in ld.mutations() if c[1] == "bootout"] and "com.omp-kit.fleet-watch" in ld.loaded,
+         json.dumps(rec.get("refused")))
+
+
+# ---------- 3. save ----------
+
+def gate_save(case, tmp):
+    root = os.path.join(tmp, "save")
+    home = fake_home(root)
+    sess = "/h/.omp/agent/sessions/-Developer-x/2026-10-13T00-00-00-000Z_abc.jsonl"
+    lsof = "p501\nfcwd\nn/Users/x\nftxt\nn%s\nftxt\nn/usr/lib/dyld\nf38\nn%s\nf39\nn%s\nf40\nn%s\n" % (
+        TERN + "18.9.2", sess[:-6] + "/__advisor.jsonl", sess, sess[:-6] + "/FleetWorker.jsonl")
+    case("CTL lsof fixture -> main session file (subagent and __advisor transcripts excluded)",
+         fr_save.pick_session(fr_save.session_candidates(lsof), None) == (sess, None), json.dumps(fr_save.session_candidates(lsof)))
+    case("CTL lsof fixture -> running executable is the first txt name, not a dylib or cwd", fr_save.executable(lsof) == TERN + "18.9.2",
+         str(fr_save.executable(lsof)))
+    case("NEG no open session jsonl -> HOLD_NO_SESSION", fr_save.pick_session(fr_save.session_candidates("p1\nn/dev/null\n"), None) == (None, "HOLD_NO_SESSION"))
+    two = lsof + "n/h/.omp/agent/sessions/-Developer-x/2026-10-12T00-00-00-000Z_old.jsonl\n"
+    case("NEG two main session files, no --resume id -> HOLD_SESSION_AMBIGUOUS",
+         fr_save.pick_session(fr_save.session_candidates(two), None)[1] == "HOLD_SESSION_AMBIGUOUS")
+    case("CTL --resume id in argv picks its session file", fr_save.pick_session(fr_save.session_candidates(two), "abc") == (sess, None))
+    case("CTL -r / --restore= session ids read from live argv", fr_save.resume_id("omp --profile x -r abc") == "abc"
+         and fr_save.resume_id("omp --restore=abc --model m") == "abc")
+    on = [" ⠹ 20m · ◉ Opus 5.5 👁 · 📁 ~/Developer/omp-test · ◫ 38.1%/1M ⟲ · S746.27 (+264.69) + 👁 43.76 "]
+    off = [" π · ◉ Opus 5.5 · 📁 ~/Developer/omp-test · ◫ 38.1%/1M"]
+    scroll = [" π · ◉ Opus 5.5 👁 · 📁 ~/x · ◫ 1%"] + ["line %d" % i for i in range(10)] + off
+    case("CTL 👁 in the live status line -> advisor on", fr.advisor_badge(on) is True)
+    case("NEG status line without 👁 -> off", fr.advisor_badge(off) is False)
+    case("NEG 👁 only in scrollback -> off", fr.advisor_badge(scroll) is False)
+    cost_only = [" π > ◒ Sonnet 5.5 > 📁 ~/Developer/jev > ⑂ main *68 > S170.24 (+1.23) + 👁 19.69 ▶────55%───┃──1M─", "╰─"]
+    case("NEG `+ 👁 <cost>` spend segment after 📁 (restored on resume, advisor off) -> off", fr.advisor_badge(cost_only) is False)
+    closed = [" π > ◒ Sonnet 5.5 🙈 > 📁 ~/Developer/jev > ⑂ main *68 > S170.24 (+1.23) + 👁 19.69 ▶────55%───┃──1M─", "╰─"]
+    case("CTL closed-eye 🙈 (advisors yielded the turn) after the model -> on, model name clean",
+         fr.advisor_badge(closed) is True and fr.parse_screen(closed) == {"state": "IDLE", "model": "Sonnet 5.5"}, json.dumps(fr.parse_screen(closed)))
+    case("CTL badge does not leak into the parsed model name", fr.parse_screen(on) == {"state": "BUSY", "model": "Opus 5.5"}, json.dumps(fr.parse_screen(on)))
+    adir = lambda p: fr_save.agent_dir(home, p)  # noqa: E731
+    case("CTL --advisor in live argv -> source flag", fr_save.advisor_state(on, ["--profile", "claude", "--advisor"], adir("claude"))["source"] == "flag")
+    case("CTL profile config.yml advisor.enabled (nested) -> source config", fr_save.advisor_state(on, ["--profile", "cfgp"], adir("cfgp"))["source"] == "config")
+    case("CTL profile config.yml advisor.enabled (dotted) -> source config", fr_save.advisor_state(on, ["--profile", "dotp"], adir("dotp"))["source"] == "config")
+    st = fr_save.advisor_state(on, ["--profile", "claude"], adir("claude"))
+    case("NEG modelRoles.advisor model line is not advisor.enabled -> source runtime", st["source"] == "runtime" and st["config"] == "absent", json.dumps(st))
+
+    repo = os.path.join(root, "repo")
+    for sub in (".git/logs/refs/remotes/origin", "var/agent-tmp/mine", "var/agent-tmp/theirs", "var/agent-tmp/jsonowner", "var/agent-tmp/pushed",
+                "var/agent-tmp/omp.71"):
+        os.makedirs(os.path.join(repo, sub))
+    for sub, text in [("mine", "pid=71\nlabel=x\n"), ("theirs", "pid: 9999\n"), ("jsonowner", '{"pid": 71}'), ("pushed", "pid=71\n"), ("omp.71", "pid=71\n")]:
+        with open(os.path.join(repo, "var/agent-tmp", sub, ".owner"), "w") as fh:
+            fh.write(text)
+    for sub, mtime in [("mine", 2_000_000_100), ("pushed", 2_000_000_000 - 50), ("omp.71", 2_000_000_900)]:
+        path = os.path.join(repo, "var/agent-tmp", sub, "work.txt")
+        with open(path, "w") as fh:
+            fh.write("x")
+        os.utime(path, (mtime, mtime))
+    with open(os.path.join(repo, ".git/logs/refs/remotes/origin/main"), "w") as fh:
+        fh.write("%s %s Josh <j@x> 1999999000 -0600\tfetch: fast-forward\n" % ("0" * 40, "1" * 40))
+        fh.write("%s %s Josh <j@x> 2000000000 -0600\tupdate by push\n" % ("1" * 40, "2" * 40))
+    with open(os.path.join(repo, "WATCHDOG.yml"), "w") as fh:
+        fh.write("advisors: []\n")
+    pane = {"pane": "w:0.9", "pane_id": "%9", "pane_pid": 70, "cwd": os.path.join(repo, "sub"), "screen": on}
+    os.makedirs(pane["cwd"])
+    procs = [{"pid": 70, "ppid": 1, "args": "-zsh"}, {"pid": 71, "ppid": 70, "args": BUN_OMP + " --profile claude --model m1"}]
+    git_calls = []
+
+    def run(argv, env):
+        git_calls.append(argv)
+        return 0, " M a\n?? b\n"
+    row = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
+    owned = {os.path.basename(s["path"]): s["newest_mtime"] for s in row["owned_scratch"]}
+    case("CTL last push read from the remote-tracking reflog (`update by push`, not fetch)", row["last_push"] == 2_000_000_000, str(row["last_push"]))
+    case("NEG owned work scratch newer than the last push is recorded as lost, not a hold; other pid's scratch not owned",
+         sorted(owned) == ["jsonowner", "mine", "pushed"] and owned["mine"] == 2_000_000_100 and row["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row["holds"], json.dumps(owned))
+    case("NEG omp.<pid> (the process's own TMPDIR) plus newer work scratch -> hold names only the work dir, newest file recorded",
+         [os.path.basename(s["path"]) for s in row["held_scratch"]] == ["mine"] and row["held_scratch"][0]["newest_file"].endswith("mine/work.txt")
+         and [os.path.basename(s["path"]) for s in row["runtime_scratch"]] == ["omp.71"], json.dumps(row["held_scratch"]))
+    for name, files, want_hold, label in [
+            ("only-runtime", [("omp.71", None)], False, "CTL pane owning only omp.<pid> (newer than any push) -> no hold, listed as runtime_scratch"),
+            ("other-runtime", [("omp.999", "pid=71\n")], True, "NEG omp.<otherpid> owned by this pid is work, not runtime -> HOLD_SCRATCH_OWNER")]:
+        r2 = os.path.join(root, name)
+        os.makedirs(os.path.join(r2, "sub"))
+        os.makedirs(os.path.join(r2, ".git"))  # a repo with no push recorded: any newer work scratch holds
+        for sub, owner in files:
+            os.makedirs(os.path.join(r2, "var/agent-tmp", sub))
+            if owner:
+                with open(os.path.join(r2, "var/agent-tmp", sub, ".owner"), "w") as fh:
+                    fh.write(owner)
+            with open(os.path.join(r2, "var/agent-tmp", sub, "cache.bin"), "w") as fh:
+                fh.write("x")
+        rr = fr_save.save_pane(dict(pane, cwd=os.path.join(r2, "sub")), procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
+        ok = (bool(rr["held_scratch"]) == want_hold) and ("HOLD_SCRATCH_OWNER" not in rr["holds"])
+        ok = ok and (bool(rr["runtime_scratch"]) != want_hold)
+        case(label, ok, json.dumps({k: rr[k] for k in ("holds", "runtime_scratch", "held_scratch")}))
+    row2 = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
+    os.unlink(os.path.join(repo, "var/agent-tmp/mine/work.txt"))
+    row3 = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
+    case("CTL owned work scratch whose files all predate the last push (or only .owner), runtime omp.<pid> newer -> no lost scratch",
+         row2["held_scratch"] and not row3["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row2["holds"], json.dumps(row3["holds"]))
+    case("CTL save row: repo, dirt via git --no-optional-locks, profile, model, session, bun executable",
+         row["repo"] == repo and row["repo_dirt_count"] == 2 and git_calls and git_calls[0][:2] == ["git", "--no-optional-locks"]
+         and row["profile"] == "claude" and row["model"] == "m1" and row["session_file"] == sess and row["bun"] and row["version"] == "bun",
+         json.dumps({k: row[k] for k in ("repo", "repo_dirt_count", "model", "version")}))
+    wd = row["advisor"]["watchdog_files"]
+    case("CTL project-scope WATCHDOG.yml recorded with sha256", [w["scope"] for w in wd] == ["project"] and wd[0]["sha256"], json.dumps(wd))
+    doc = {"rows": [row]}
+    same = fr_save.watchdog_drift(doc)
+    with open(os.path.join(repo, "WATCHDOG.yml"), "a") as fh:
+        fh.write("# edited\n")
+    changed = fr_save.watchdog_drift(doc)
+    case("NEG WATCHDOG roster edited during the run -> drift CHANGED (reported, not rewritten)",
+         same[0]["status"] == "SAME" and changed[0]["status"] == "CHANGED" and open(os.path.join(repo, "WATCHDOG.yml")).read().endswith("# edited\n"))
+
+
+
+def gate_preserve(case, tmp):
+    repo = os.path.join(tmp, "preserve-repo")
+    os.makedirs(repo)
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.email", "preserve@example.invalid"], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.name", "preserve"], check=True)
+    kept = os.path.join(repo, "kept.txt")
+    with open(kept, "w") as fh:
+        fh.write("base\n")
+    subprocess.run(["git", "-C", repo, "add", "kept.txt"], check=True)
+    subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "base [test]"], check=True)
+    head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    with open(kept, "w") as fh:
+        fh.write("dirty\n")
+    scratch = os.path.join(repo, "var", "agent-tmp", "job.9")
+    os.makedirs(scratch)
+    with open(os.path.join(scratch, "notes.txt"), "w") as fh:
+        fh.write("keep-me\n")
+    dest = os.path.join(tmp, "preserve-out")
+    doc = {"rows": [{"pane": "w:0.9", "repo": repo, "repo_dirt_count": 1,
+                     "held_scratch": [{"path": scratch, "newest_mtime": 1, "newest_file": os.path.join(scratch, "notes.txt")}]}]}
+    result = fr_save.preserve_work(doc, dest)
+    pinned = subprocess.run(["git", "-C", repo, "rev-parse", result["repos"][0]["ref"]], capture_output=True, text=True)
+    still = open(kept).read()
+    main = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    case("CTL dirty repo pinned on refs/preserve; worktree and HEAD untouched; scratch copied",
+         result["ok"] and pinned.returncode == 0 and still == "dirty\n" and main == head
+         and open(os.path.join(dest, "scratch", "w:0.9", "job.9", "notes.txt")).read() == "keep-me\n",
+         json.dumps(result)[:300])
+    missing = fr_save.preserve_work({"rows": [{"pane": "w:0.8", "repo": None, "repo_dirt_count": 0,
+                                               "held_scratch": [{"path": os.path.join(tmp, "no-such-scratch")}]}]},
+                                    os.path.join(tmp, "preserve-miss"))
+    case("NEG missing held scratch refuses preserve", not missing["ok"] and missing["error"], json.dumps(missing)[:200])
+
+
+def gate_mode(case, tmp):
+    def row(exe, args):
+        return {"exe_real": exe, "bun": fr_save.is_bun(exe, args)}
+    case("NEG versioned older execPath (Tern 18.9.2) -> RESPAWN (/restart re-execs the same build)",
+         fr_save.pane_mode(row(TERN + "18.9.2", TERN + "18.9.2 --profile x"), TARGET_INFO) == "RESPAWN")
+    case("CTL running executable == target realpath -> RESTART",
+         fr_save.pane_mode(row(TARGET, "omp --profile x"), TARGET_INFO) == "RESTART")
+    case("NEG bun launch -> RESPAWN (bun re-execs the bun-global package)",
+         fr_save.pane_mode(row(BUN, BUN_OMP + " --profile x"), TARGET_INFO) == "RESPAWN")
+    case("NEG bun-shaped argv even with the target exe -> RESPAWN", fr_save.pane_mode({"exe_real": TARGET, "bun": True}, TARGET_INFO) == "RESPAWN")
+    case("NEG executable unknown -> RESPAWN (never assume RESTART)", fr_save.pane_mode({"exe_real": None, "bun": False}, TARGET_INFO) == "RESPAWN")
+    case("CTL version parsed from the Tern versions path", fr_save.version_of(TARGET) == "18.10.3" and fr_save.version_of(BUN) is None)
+
+    def fake_zsh(out, rc=0):
+        return lambda argv, env: (rc, out) if argv[:2] == ["zsh", "-lc"] else (1, "")
+    link_dir = os.path.join(tmp, "mode", "bin")
+    os.makedirs(link_dir)
+    real = os.path.join(tmp, "mode", "versions", "18.10.3")
+    os.makedirs(os.path.dirname(real))
+    open(real, "w").close()
+    os.symlink(real, os.path.join(link_dir, "omp"))
+    t = fr_save.target_live(fake_zsh(os.path.join(link_dir, "omp") + "\n"))
+    case("CTL target = realpath of the login shell's `omp`, version recorded",
+         t["ok"] and t["path"] == os.path.realpath(real) and t["version"] == "18.10.3", json.dumps(t))
+    case("NEG login shell without omp -> target not ok (plan refuses TARGET_UNKNOWN)", not fr_save.target_live(fake_zsh("", 1))["ok"])
+
+    for args, want in [(TERN + "18.9.2 --profile codex -r abc --model m", ["--profile", "codex", "--model", "m"]),
+                       ("omp --restore=abc --thinking high", ["--thinking", "high"]),
+                       (BUN_OMP + " --profile muse --resume S1 --auto-approve", ["--profile", "muse", "--auto-approve"])]:
+        got = fr.normalize_flags(fr.omp_match(args))
+        case("CTL argv0 and --resume/-r/--restore stripped: %s" % args[-40:], got == want, json.dumps(got))
+    r = {"pane": "w:0.1", "pane_id": "%1", "session": "w", "cwd": "/w d", "flags": ["--profile", "codex", "--model", "m"]}
+    rr = fr.respawn_row(r, {"session_file": "/s/sessions/-w/S.jsonl", "holds": [], "advisor": {"on": True, "source": "runtime"}})
+    argv = fr.tmux_respawn_argv(rr)
+    inner = shlex.split(argv[-1])
+    toks = shlex.split(inner[2].split("&&", 1)[1].rsplit(";", 1)[0])
+    case("CTL respawn argv: tmux respawn-pane -k -t <id> -c <cwd> zsh -lc 'cd … && omp <live flags> --resume <file> --advisor; exec zsh -l'",
+         argv[:7] == ["tmux", "respawn-pane", "-k", "-t", "%1", "-c", "/w d"] and inner[:2] == ["zsh", "-lc"] and inner[2].endswith("; exec zsh -l")
+         and inner[2].startswith("cd '/w d' && ") and toks == ["omp", "--profile", "codex", "--model", "m", "--resume", "/s/sessions/-w/S.jsonl", "--advisor"],
+         json.dumps(argv))
+    case("NEG respawn command never carries a versioned path or bun", TERN not in argv[-1] and "bun" not in argv[-1])
+
+    case("CTL empty composer (plain '❯' row) -> ''", fr.composer_text(screen_of()) == "")
+    case("NEG typed text in the composer -> returned (HOLD_COMPOSER)", fr.composer_text(screen_of(composer="please also fix the README")) == "please also fix the README")
+    boxed_empty = ["╭── π > ⟳ Sonnet 5.5 > 📁 ~/m > (sub) ▶──9%──╮", "│                         │", "╰─                      ─╯"]
+    boxed_text = ["╭── π > ⟳ Sonnet 5.5 > 📁 ~/m > (sub) ▶──9%──╮", "│ queued: rebase first    │", "╰─                      ─╯"]
+    case("CTL boxed composer empty -> ''", fr.composer_text(boxed_empty) == "")
+    case("NEG boxed composer with text -> held", fr.composer_text(boxed_text) == "queued: rebase first")
+    case("NEG unknown layout under the status bar -> None (fail closed)", fr.composer_text([STATUS.format(glyph="π", badge="", model="M"), "autocomplete: /restart"]) is None)
+
+
+# ---------- 5. respawn ----------
+
+def gate_respawn(case, tmp, uid, good_env, plan):
+    rows = [r for r in plan["rows"] if r["action"] == "RESTART"]
+    a, b = rows[0], rows[1]
+
+    def saved(r, source="runtime", on=True, holds=()):
+        return {"pane_id": r["pane_id"], "session_file": "/s/sessions/-w/%s.jsonl" % r["pane_id"][1:], "holds": list(holds), "advisor": {"on": on, "source": source}}
+    row = fr.respawn_row(a, saved(a))
+    toks = row["cmd"].split()
+    case("CTL respawn argv = live flags + --resume <session file> + --advisor (runtime advisor)",
+         toks[toks.index("--resume") + 1] == "/s/sessions/-w/%s.jsonl" % a["pane_id"][1:] and toks.count("--advisor") == 1 and row["added"] == ["--advisor"]
+         and fr.check_cmd_flags(row["cmd"], a["flags"], row["added"], row["session_file"])[0], row["cmd"])
+    case("CTL config-sourced advisor -> respawn adds no --advisor", "--advisor" not in fr.respawn_row(a, saved(a, "config"))["cmd"].split())
+    flagged = dict(a, flags=a["flags"] + ["--advisor"])
+    case("CTL flag-sourced advisor -> exactly one --advisor", fr.respawn_row(flagged, saved(flagged, "flag"))["cmd"].split().count("--advisor") == 1)
+    case("CTL advisor off -> no --advisor", "--advisor" not in fr.respawn_row(a, saved(a, on=False))["cmd"].split())
+    sv = {"rows": [saved(a, holds=["HOLD_SCRATCH_OWNER"]), dict(saved(b), session_file=None, holds=["HOLD_NO_SESSION"])]}
+    man = fr.restart_manifest(plan, mode="respawn", save=sv)
+    case("NEG HOLD_NO_SESSION gets no respawn row; a scratch hold in save.json does not block",
+         [r["pane"] for r in man["rows"]] == [a["pane"]] and [h["pane"] for h in man["held"]] == [b["pane"]], json.dumps(man["held"]))
+    try:
+        fr.restart_manifest(plan, mode="respawn")
+        code = "NO_ERROR"
+    except ValueError as exc:
+        code = str(exc).split(":", 1)[0]
+    case("NEG respawn manifest without save.json -> SAVE_REQUIRED (a fresh session would drop the conversation)", code == "SAVE_REQUIRED", code)
+    man = fr.restart_manifest(plan, mode="respawn", save={"rows": [saved(a), saved(b, on=False)]})
+    for r in man["rows"]:
+        if r["pane_id"] == b["pane_id"]:
+            r["cmd"] = r["cmd"].replace(r["session_file"], "/s/sessions/-w/other.jsonl")
+    calls = []
+    passing = lambda r: (None, None)  # noqa: E731  (live revalidation has its own gates below)
+    res = fr.send(man, apply=True, approval=dict(APPROVE, manifest_sha256=fr.manifest_sha(man)), env=good_env, uid=uid,
+                  capture_fn=lambda pid: screen_of(), run_fn=lambda argv, env: (calls.append(argv), (0, "{}"))[1], revalidate_fn=passing)
+    by = {r["pane"]: r["result"] for r in res["rows"]}
+    case("NEG respawn row resuming a different session file -> REFUSED_RESUME_NOT_SAVED_SESSION; intact row SENT",
+         by.get(b["pane"]) == "REFUSED_RESUME_NOT_SAVED_SESSION" and by.get(a["pane"]) == "SENT" and len(calls) == 1, json.dumps(by))
+    calls.clear()
+    res = fr.send(man, apply=True, approval=dict(APPROVE, manifest_sha256=fr.manifest_sha(man)), env=good_env, uid=uid,
+                  capture_fn=lambda pid: screen_of(composer="half-typed reply"), run_fn=lambda argv, env: (calls.append(argv), (0, "{}"))[1],
+                  revalidate_fn=passing)
+    case("NEG non-empty composer at send time -> HELD_COMPOSER, nothing sent",
+         res["rows"][0]["result"] == "HELD_COMPOSER" and not calls, json.dumps(res["rows"]))
+    calls.clear()
+    res = fr.send(man, apply=True, approval=dict(APPROVE, manifest_sha256=fr.manifest_sha(man)), env=good_env, uid=uid,
+                  capture_fn=lambda pid: screen_of(), run_fn=lambda argv, env: (calls.append(argv), (0, "{}"))[1])
+    case("NEG manual respawn send without live revalidation -> REFUSED_NO_REVALIDATION, nothing sent",
+         {r["result"] for r in res["rows"]} <= {"REFUSED_NO_REVALIDATION", "REFUSED_RESUME_NOT_SAVED_SESSION"}
+         and any(r["result"] == "REFUSED_NO_REVALIDATION" for r in res["rows"]) and not calls, json.dumps(res["rows"]))
+
+
+# ---------- 4 + 6. advisor re-apply and the autonomous run ----------
+
+def fleet_fixture(root, ld):
+    cwd = os.path.join(root, "w")
+    os.makedirs(cwd, exist_ok=True)
+    panes = [Pane("w:0.1", "%101", 101, cwd, advisor="runtime"),
+             Pane("w:0.2", "%102", 102, cwd),
+             Pane("w:0.3", "%103", 103, cwd, advisor="config", flags="--profile cfgp"),
+             Pane("w:0.4", "%104", 104, cwd, advisor="flag"),
+             Pane("w:0.5", "%105", 105, cwd, advisor="runtime", badge_ok=False),
+             Pane("w:0.6", "%106", 106, cwd, busy_until=1e12),
+             Pane("w:0.7", "%107", 107, cwd, busy_until=1_000_000.0 + 90),
+             Pane("r:0.1", "%201", 201, cwd, kind="tern", advisor="runtime", flags="--profile codex --model gpt-6-luna"),
+             Pane("r:0.2", "%202", 202, cwd, kind="bun", flags="--profile muse --thinking high"),
+             Pane("r:0.4", "%204", 204, cwd, kind="tern", composer="unsent operator note"),
+             Pane("r:0.5", "%205", 205, cwd, kind="bun", session=False),
+             Pane("r:0.6", "%206", 206, cwd, kind="tern"),
+             Pane("uds--burn-down:0.0", "%31", 31, cwd),
+             Pane("omp-test:0.1", "%3", 3, cwd, kind="bun", advisor="runtime")]
+    for name, owner, fname in [("job.2061", "pid=2061\n", "notes.txt"), ("omp.2011", "pid=2011\n", "compile-cache.bin")]:
+        d = os.path.join(cwd, "var", "agent-tmp", name)  # r:0.6 (omp 2061) owns unpushed work; r:0.1 (omp 2011) only its runtime dir
+        os.makedirs(d, exist_ok=True)
+        for f, text in [(".owner", owner), (fname, "x")]:
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(text)
+    return FakeFleet(panes, ld)
+
+
+def gate_run(case, tmp, uid, good_env, aligned):
+    root = os.path.join(tmp, "run")
+    home = fake_home(root)
+    agents = agents_fixture(root)
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"})
+    fleet = fleet_fixture(root, ld)
+    ctx = ctx_for(fleet, home, agents, good_env, uid, aligned)
+    run_dir = os.path.join(root, "r1")
+    man = fr_run.plan_run(run_dir, ctx, "%3", fr.DEFAULT_PROTECT, wave=3, busy_timeout_min=5)
+    rows = {r["pane"]: r for r in man["rows"]}
+    acts = {p: r["action"] for p, r in rows.items()}
+    case("CTL run --plan: manifest has target, stages, rows, watchers to pause, holds, stage-1 snapshot; nothing sent or booted out",
+         man["target"]["path"] == TARGET and man["stages"][0] == "preflight" and man["watchers"]["pause"] == ["com.omp-kit.fleet-watch"]
+         and man["snapshot_dir"].endswith("/snapshot") and acts["w:0.6"] == "QUEUE_BUSY" and acts["uds--burn-down:0.0"] == "SKIP_PROTECTED"
+         and not fleet.sends and not ld.mutations() and man["counts"]["advisor_on"] == 6, json.dumps(man["counts"]))
+    case("CTL plan modes: target exe -> RESTART; Tern 18.9.2 and bun -> RESPAWN",
+         rows["w:0.1"]["mode"] == "RESTART" and rows["r:0.1"]["mode"] == "RESPAWN" and rows["r:0.2"]["mode"] == "RESPAWN"
+         and man["counts"]["versions"].get("bun") == 3 and man["counts"]["versions"].get("18.9.2") == 3, json.dumps(man["counts"]))
+    case("NEG plan: typed text in a composer -> HOLD_COMPOSER; RESPAWN pane without a session file -> HOLD_NO_SESSION",
+         acts["r:0.4"] == "HOLD_COMPOSER" and acts["r:0.5"] == "HOLD_NO_SESSION", json.dumps({k: acts[k] for k in ("r:0.4", "r:0.5")}))
+    ch = man["chief_respawn"]
+    case("CTL chief never in the run: SKIP_CHIEF, and its exact respawn command printed for the operator",
+         acts["omp-test:0.1"] == "SKIP_CHIEF" and ch and ch["argv"][:5] == ["tmux", "respawn-pane", "-k", "-t", "%3"] and "--resume" in ch["argv"][-1]
+         and "--advisor" in ch["argv"][-1], json.dumps(ch))
+    tpl = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "fleet_restart.py"), "approval-template", "--manifest",
+                                     os.path.join(run_dir, fr_run.RUN_MANIFEST)], capture_output=True, text=True).stdout)
+    case("CTL approval-template binds the run manifest sha, lists watchers to pause and the target",
+         tpl["manifest_sha256"] == man["manifest_sha256"] and tpl["watchers_pause"] == ["com.omp-kit.fleet-watch"] and tpl["unprotect"] == []
+         and tpl["target"]["path"] == TARGET, json.dumps(tpl)[:200])
+
+    for label, approval in [("no approval -> APPROVAL_MISSING", None),
+                            ("unfilled template -> APPROVAL_MISSING", dict(tpl)),
+                            ("approval for another sha -> APPROVAL_MISMATCH", dict(APPROVE, manifest_sha256="0" * 64))]:
+        rep, rc = fr_run.apply_run(run_dir, ctx, approval)
+        case("NEG run --apply %s, zero sends, zero launchctl mutations, no ledger" % label,
+             rc == fr_run.EXIT_REFUSED and rep["refused"] == label.rsplit("-> ", 1)[1] and not fleet.sends and not ld.mutations()
+             and not os.path.exists(os.path.join(run_dir, fr_run.LEDGER)), json.dumps(rep))
+    good = approve(run_dir)
+    path = os.path.join(run_dir, fr_run.RUN_MANIFEST)
+    with open(path) as fh:
+        stale = json.load(fh)
+    stale["wave"] = 30
+    fw.write_json(path, stale)
+    rep, rc = fr_run.apply_run(run_dir, ctx, good)
+    case("NEG manifest changed after approval (stale sha) -> APPROVAL_MISMATCH, no side effect",
+         rep.get("refused") == "APPROVAL_MISMATCH" and not fleet.sends and not ld.mutations(), json.dumps(rep))
+    fr_run.plan_run(run_dir, ctx, "%3", fr.DEFAULT_PROTECT, wave=3, busy_timeout_min=5)
+    rep, rc = fr_run.apply_run(run_dir, ctx_for(fleet, home, agents, good_env, uid, aligned, preflight=(False, "selftest: FAIL (1 failing)")), approve(run_dir))
+    case("NEG preflight selftest red -> PREFLIGHT_FAILED before save, zero sends, zero launchctl mutations",
+         rep.get("refused") == "PREFLIGHT_FAILED" and not fleet.sends and not ld.mutations(), json.dumps(rep)[:200])
+
+    rep, rc = fr_run.apply_run(run_dir, ctx, approve(run_dir))
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("CTL runtime advisor lost by /restart -> exactly one `/advisor on`, badge back -> ADVISOR_RESTORED",
+         res["w:0.1"].get("advisor") == "ADVISOR_RESTORED" and fleet.count("w:0.1", "/advisor on") == 1, json.dumps(res["w:0.1"]))
+    case("NEG badge never returns -> ADVISOR_FAILED (one send) and run exit non-zero",
+         res["w:0.5"].get("advisor") == "ADVISOR_FAILED" and fleet.count("w:0.5", "/advisor on") == 1 and rc == fr_run.EXIT_FAILED and "w:0.5" in rep["failed"],
+         json.dumps(res["w:0.5"]))
+    case("CTL advisor off before -> zero advisor sends (ADVISOR_OFF)",
+         res["w:0.2"].get("advisor") == "ADVISOR_OFF" and fleet.count("w:0.2", "/advisor on") == 0, json.dumps(res["w:0.2"]))
+    case("CTL config-sourced advisor showing the badge after restart -> zero sends (ADVISOR_KEPT)",
+         res["w:0.3"].get("advisor") == "ADVISOR_KEPT" and fleet.count("w:0.3", "/advisor on") == 0, json.dumps(res["w:0.3"]))
+    case("CTL flag-sourced advisor kept by /restart argv -> zero sends", res["w:0.4"].get("advisor") == "ADVISOR_KEPT" and fleet.count("w:0.4", "/advisor on") == 0)
+    case("NEG bare `/advisor` (toggle) never sent; only /restart, /advisor on and respawn reach panes",
+         fleet.count(text="/advisor") == 0 and {t for _, t, _ in fleet.sends} == {"/restart", "/advisor on", "RESPAWN"}, json.dumps(sorted({t for _, t, _ in fleet.sends})))
+    case("CTL SESSION_KEPT + VERSION_OK: same session file and target exe after /restart (same pid)",
+         res["w:0.1"].get("session") == "SESSION_KEPT" and res["w:0.1"]["version"] == "VERSION_OK" and res["w:0.1"]["result"] == "VERIFIED"
+         and res["w:0.1"]["new_pid"] == 1011, json.dumps(res["w:0.1"]))
+    case("CTL RESPAWN (Tern 18.9.2 pane): new pid, target exe, session kept, --advisor brought the runtime advisor back with zero /advisor sends",
+         res["r:0.1"]["result"] == "VERIFIED" and res["r:0.1"]["mode"] == "RESPAWN" and res["r:0.1"]["new_pid"] != 2011 and res["r:0.1"]["version"] == "VERSION_OK"
+         and res["r:0.1"]["session"] == "SESSION_KEPT" and res["r:0.1"]["advisor"] == "ADVISOR_KEPT" and fleet.count("r:0.1", "/restart") == 0
+         and fleet.count("r:0.1", "/advisor on") == 0, json.dumps(res["r:0.1"]))
+    case("CTL RESPAWN (bun pane) -> VERIFIED on the target build, no /restart sent", res["r:0.2"]["result"] == "VERIFIED" and fleet.count("r:0.2", "/restart") == 0
+         and fleet.count("r:0.2", "RESPAWN") == 1, json.dumps(res["r:0.2"]))
+    case("NEG HOLD_COMPOSER and HOLD_NO_SESSION panes: zero sends", fleet.count("r:0.4") == 0 and fleet.count("r:0.5") == 0
+         and res["r:0.4"]["result"] == "HOLD_COMPOSER")
+    md = open(os.path.join(run_dir, "report.md")).read()
+    held_dir = os.path.join(root, "w", "var", "agent-tmp", "job.2061")
+    case("CTL RESPAWN pane with held scratch is sent only after preserve; report names the dir",
+         res["r:0.6"]["result"] == "VERIFIED" and fleet.count("r:0.6") == 1 and ("`%s`" % held_dir) in md
+         and os.path.join(held_dir, "notes.txt") in md and fr_run.SCRATCH_ADVICE in md
+         and "refuses the run" in fr_run.SCRATCH_ADVICE
+         and os.path.isfile(os.path.join(run_dir, "preserve", "scratch", "r:0.6", "job.2061", "notes.txt")), md[-600:])
+    case("CTL RESPAWN pane owning only its runtime omp.<pid> is not held (r:0.1 respawned)",
+         res["r:0.1"]["result"] == "VERIFIED" and "omp.2011" not in md, json.dumps(res["r:0.1"]))
+    case("NEG pane busy past --busy-timeout-min -> QUEUED_BUSY with zero sends",
+         res["w:0.6"]["result"] == "QUEUED_BUSY" and fleet.count("w:0.6") == 0, json.dumps(res["w:0.6"]))
+    g = [t for n, t2, t in fleet.sends if n == "w:0.7" and t2 == "/restart"]
+    case("CTL busy pane restarted at its turn boundary (sent only after it went idle)",
+         res["w:0.7"]["result"] == "VERIFIED" and len(g) == 1 and g[0] >= 1_000_000.0 + 90, json.dumps(g))
+    case("NEG protected pane and chief untouched (zero sends); report carries the chief's respawn command",
+         res["uds--burn-down:0.0"]["result"] == "SKIP_PROTECTED" and res["omp-test:0.1"]["result"] == "SKIP_CHIEF"
+         and fleet.count("uds--burn-down:0.0") == 0 and fleet.count("omp-test:0.1") == 0 and rep["chief_respawn"]["argv"]
+         and "omp-test:0.1" in open(os.path.join(run_dir, "report.md")).read())
+    case("CTL watchers paused during the run and resumed after it; dead-man gone",
+         [c[2] for c in ld.mutations() if c[1] == "bootout"][:1] == ["gui/%d/com.omp-kit.fleet-watch" % uid] and "com.omp-kit.fleet-watch" in ld.loaded
+         and rep["watchers"]["resume"]["result"] == "RESUMED" and not [x for x in ld.loaded if x.startswith(fw.DEADMAN_PREFIX)], json.dumps(ld.mutations()))
+    events = [json.loads(ln)["event"] for ln in open(os.path.join(run_dir, fr_run.LEDGER))]
+    events = events[len(events) - events[::-1].index("RUN_START") - 1:]  # the applied attempt; an earlier one was preflight-refused
+    case("CTL ledger order: SAVE < WATCHERS_PAUSE < SENT < SCRATCH_REAP < WATCHERS_RESUME < RUN_END; report.json + report.md written",
+         events.index("SAVE") < events.index("WATCHERS_PAUSE") < events.index("SENT") < events.index("SCRATCH_REAP") < events.index("WATCHERS_RESUME") < events.index("RUN_END")
+         and os.path.isfile(os.path.join(run_dir, "report.md")) and os.path.isfile(os.path.join(run_dir, "report.json")), json.dumps(events[:12]))
+    case("CTL canary first: the first send is the RESPAWN pane r:0.1, verified (CANARY event) before any other send; non-strict ADVISOR_FAILED (w:0.5) trips no breaker",
+         fleet.sends[0][:2] == ("r:0.1", "RESPAWN") and events.index("CANARY") < [i for i, e in enumerate(events) if e == "SENT"][1]
+         and rep["breaker"] is None and res["w:0.5"].get("advisor") == "ADVISOR_FAILED", json.dumps([fleet.sends[:2], rep["breaker"]]))
+
+    restarts = fleet.count(text="/restart") + fleet.count(text="RESPAWN")
+    rep2, rc2 = fr_run.apply_run(run_dir, ctx, approve(run_dir))
+    case("NEG second --apply on an applied run refused (RUN_ALREADY_APPLIED), no sends",
+         rep2.get("refused", "").startswith("RUN_ALREADY_APPLIED") and fleet.count(text="/restart") + fleet.count(text="RESPAWN") == restarts, json.dumps(rep2))
+    rep2, rc2 = fr_run.apply_run(run_dir, ctx, approve(run_dir), resume_run=True)
+    res2 = {p["pane"]: p for p in rep2["panes"]}
+    case("NEG --resume-run sends no second /restart or respawn to a VERIFIED pane",
+         fleet.count("w:0.1", "/restart") == 1 and fleet.count("w:0.7", "/restart") == 1 and fleet.count("r:0.1", "RESPAWN") == 1 and res2["w:0.1"].get("from_ledger")
+         and fleet.count(text="/restart") + fleet.count(text="RESPAWN") == restarts and fleet.count("w:0.1", "/advisor on") == 1, json.dumps(res2.get("w:0.1")))
+    rep3, rc3 = fr_run.apply_run(run_dir, ctx, approve(run_dir, continue_after_breaker=True), resume_run=True, continue_after_breaker=True)
+    case("NEG --continue-after-breaker on a run with no breaker -> NO_BREAKER_TO_CONTINUE, no sends",
+         rep3.get("refused") == "NO_BREAKER_TO_CONTINUE" and fleet.count(text="/restart") + fleet.count(text="RESPAWN") == restarts, json.dumps(rep3))
+    for label, only, want in [("two named panes", ["w:0.2", "%104"], ["w:0.2", "w:0.4"]), ("unknown pane", ["nope:9.9"], None)]:
+        mo = fr_run.plan_run(os.path.join(root, "only-" + label.replace(" ", "-")), ctx, "%3", fr.DEFAULT_PROTECT, only=only)
+        got = sorted(r["pane"] for r in mo["rows"])
+        ok = got == want and not mo["refused"] if want else any(x.startswith("ONLY_NOT_IN_PLAN:nope:9.9") for x in mo["refused"])
+        case("%s --only %s -> %s" % ("CTL" if want else "NEG", label, "manifest rows limited to them" if want else "plan refused ONLY_NOT_IN_PLAN"),
+             ok, json.dumps([got, mo["refused"]]))
+
+    gate_breaker(case, root, home, agents, good_env, uid, aligned)
+    gate_revalidate(case, root, home, agents, good_env, uid, aligned)
+    gate_model(case, root, home, agents, good_env, uid, aligned)
+
+    cwd = os.path.join(root, "w")
+    ld3 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    fl3 = FakeFleet([Pane("uds--burn-down:0.0", "%31", 31, cwd)], ld3)
+    ctx3 = ctx_for(fl3, home, agents, good_env, uid, aligned)
+    rd = os.path.join(root, "r3")
+    m3 = fr_run.plan_run(rd, ctx3, "%3", fr.DEFAULT_PROTECT, unprotect=["uds--burn-down:0.0"])
+    rep, rc = fr_run.apply_run(rd, ctx3, approve(rd), unprotect=["uds--burn-down:0.0"])
+    case("NEG --unprotect without the approval naming it -> UNPROTECT_NOT_APPROVED, zero sends",
+         m3["rows"][0]["action"] == "RESTART" and rep.get("refused") == "UNPROTECT_NOT_APPROVED" and not fl3.sends, json.dumps(rep))
+    rep, rc = fr_run.apply_run(rd, ctx3, approve(rd, unprotect=["uds--burn-down:0.0"]), unprotect=[])
+    case("NEG approval names the pane but --unprotect missing at apply -> UNPROTECT_NOT_IN_MANIFEST", rep.get("refused") == "UNPROTECT_NOT_IN_MANIFEST", json.dumps(rep))
+    rep, rc = fr_run.apply_run(rd, ctx3, approve(rd, unprotect=["uds--burn-down:0.0"]), unprotect=["uds--burn-down:0.0"])
+    case("CTL DEFAULT_PROTECT pane restarted only with --unprotect + approval", rc == 0 and rep["panes"][0]["result"] == "VERIFIED" and fl3.count(text="/restart") == 1,
+         json.dumps(rep["panes"]))
+    m0 = fr_run.plan_run(os.path.join(root, "r3b"), ctx3, "", fr.DEFAULT_PROTECT)
+    case("NEG run --plan without a chief pane -> refused CHIEF_UNKNOWN", "CHIEF_UNKNOWN" in m0["refused"], json.dumps(m0["refused"]))
+
+    ld4 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    fl4 = FakeFleet([Pane("w:0.1", "%101", 101, cwd)], ld4)
+    fl4.boom = {"w:0.1"}
+    ctx4 = ctx_for(fl4, home, agents, good_env, uid, aligned)
+    rd = os.path.join(root, "r4")
+    fr_run.plan_run(rd, ctx4, "%3", fr.DEFAULT_PROTECT)
+    rep, rc = fr_run.apply_run(rd, ctx4, approve(rd))
+    ev = [json.loads(ln)["event"] for ln in open(os.path.join(rd, fr_run.LEDGER))]
+    case("NEG restart step raises -> watchers still resumed in finally, dead-man removed, exit non-zero",
+         rc == fr_run.EXIT_FAILED and "simulated ntm crash" in (rep["error"] or "") and "com.omp-kit.fleet-watch" in ld4.loaded
+         and not [x for x in ld4.loaded if x.startswith(fw.DEADMAN_PREFIX)] and ev.index("ERROR") < ev.index("WATCHERS_RESUME"), json.dumps(ev))
+
+    for kind, drop, label, want in [("target", True, "/restart SEND_LOST (no re-exec) -> exactly one retry, then VERIFIED", 2),
+                                    ("target", False, "/restart re-exec visible -> no resend, verified from the live process", 1),
+                                    ("tern", True, "respawn SEND_LOST (pane still on the old omp pid) -> exactly one re-respawn, then VERIFIED", 2),
+                                    ("tern", False, "respawn took effect (new pid) -> no second respawn, straight to VERIFY", 1)]:
+        ld5 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+        p5 = Pane("w:0.1", "%101", 101, cwd, drop_restart=drop, kind=kind)
+        fl5 = FakeFleet([p5], ld5)
+        ctx5 = ctx_for(fl5, home, agents, good_env, uid, aligned)
+        rd = os.path.join(root, "r5-%s-%s" % (kind, drop))
+        fr_run.plan_run(rd, ctx5, "%3", fr.DEFAULT_PROTECT, wave=1)
+        fl5.crash_sleep = True
+        fr_run.apply_run(rd, ctx5, approve(rd))
+        p5.drop_restart = False
+        rep, rc = fr_run.apply_run(rd, ctx5, approve(rd), resume_run=True)
+        ev = [json.loads(ln)["event"] for ln in open(os.path.join(rd, fr_run.LEDGER))]
+        sends = fl5.count(text="/restart") + fl5.count(text="RESPAWN")
+        case("CTL --resume-run after a crash: %s" % label,
+             sends == want and rep["panes"][0]["result"] == "VERIFIED" and (("SEND_LOST" in ev) == drop) and rc == 0,
+             "sends=%d %s" % (sends, json.dumps(rep["panes"])))
+
+    gate_verdict_resume(case, root, home, agents, good_env, uid, aligned)
+
+    ld6 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.example.sender"})
+    fl6 = FakeFleet([Pane("w:0.1", "%101", 101, cwd)], ld6)
+    agents6 = agents_fixture(os.path.join(root, "a6"), extra=True)
+    ctx6 = ctx_for(fl6, home, agents6, good_env, uid, aligned)
+    rd = os.path.join(root, "r6")
+    m6 = fr_run.plan_run(rd, ctx6, "%3", fr.DEFAULT_PROTECT)
+    rep, rc = fr_run.apply_run(rd, ctx6, approve(rd))
+    case("NEG unclassified pane-actor watcher -> plan refused HOLD_UNCLASSIFIED and run --apply refuses, no side effect",
+         "HOLD_UNCLASSIFIED" in m6["refused"] and str(rep.get("refused", "")).startswith("MANIFEST_REFUSED") and not fl6.sends and not ld6.mutations(),
+         json.dumps(rep))
+
+    mini = {"kind": "keys", "rows": [{"pane": "w:0.1", "pane_id": "%101", "session": "w", "flags": [], "kind": "keys", "text": "/advisor"}]}
+    calls = []
+    res = fr.send(mini, True, dict(APPROVE, manifest_sha256=fr.manifest_sha(mini)), good_env, uid, lambda pid: screen_of(),
+                  lambda argv, env: (calls.append(argv), (0, ""))[1])
+    try:
+        fr_run.gated(ctx, fr_run.keys_row({"pane": "w:0.1", "pane_id": "%101", "session": "w", "flags": []}, "/advisor"), APPROVE)
+        raised = False
+    except ValueError:
+        raised = True
+    case("NEG manifest row carrying bare `/advisor` refused at send (REFUSED_KEYS_NOT_ALLOWED); run send path raises",
+         res["rows"][0]["result"] == "REFUSED_KEYS_NOT_ALLOWED" and not calls and raised, json.dumps(res["rows"]))
+
+
+# ---------- canary + circuit breaker ----------
+
+def small_run(root, name, panes, home, agents, good_env, uid, aligned, **plan_kw):
+    fl = FakeFleet(panes, FakeLaunchd(loaded={"com.omp-kit.fleet-watch"}))
+    ctx = ctx_for(fl, home, agents, good_env, uid, aligned)
+    rd = os.path.join(root, name)
+    man = fr_run.plan_run(rd, ctx, "%3", fr.DEFAULT_PROTECT, **plan_kw)
+    return fl, ctx, rd, man
+
+
+def watchers_back(fl):
+    return "com.omp-kit.fleet-watch" in fl.ld.loaded and not [x for x in fl.ld.loaded if x.startswith(fw.DEADMAN_PREFIX)]
+
+
+def gate_breaker(case, root, home, agents, good_env, uid, aligned):
+    def cwd(name):
+        d = os.path.join(root, name)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    # canary fails (RESPAWN preferred even though listed second) -> nothing else is sent
+    c = cwd("cf")
+    fl, ctx, rd, _ = small_run(root, "b-canary", [Pane("w:0.1", "%101", 101, c), Pane("r:0.3", "%203", 203, c, kind="tern", stale=True),
+                                                   Pane("w:0.2", "%102", 102, c)], home, agents, good_env, uid, aligned)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    md = open(os.path.join(rd, "report.md")).read()
+    case("NEG canary fails (r:0.3 VERSION_STALE) -> zero further sends, others HOLD_BREAKER, watchers resumed, report BREAKER line, exit 6",
+         [s[:2] for s in fl.sends] == [("r:0.3", "RESPAWN")] and res["w:0.1"]["result"] == res["w:0.2"]["result"] == "HOLD_BREAKER"
+         and watchers_back(fl) and "BREAKER: r:0.3 VERSION_STALE (canary)" in md and rc == fr_run.EXIT_FAILED, json.dumps([fl.sends, rep["breaker"]]))
+    c = cwd("ca")
+    fl, ctx, rd, _ = small_run(root, "b-canary-adv", [Pane("w:0.5", "%105", 105, c, advisor="runtime", badge_ok=False), Pane("w:0.2", "%102", 102, c)],
+                               home, agents, good_env, uid, aligned)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    case("NEG canary whose advisor does not come back -> breaker even without --strict-advisor; the next pane gets zero sends",
+         rep["breaker"] == {"pane": "w:0.5", "verdict": "ADVISOR_FAILED", "canary": True} and fl.count("w:0.2") == 0 and rc == fr_run.EXIT_FAILED,
+         json.dumps(rep["breaker"]))
+
+    # canary passes; a mid-run failure trips the breaker; in-flight panes of that wave still verify
+    c = cwd("mid")
+    panes = [Pane("r:0.7", "%207", 207, c, kind="tern"), Pane("w:0.8", "%108", 108, c, lose_session=True),
+             Pane("r:0.3", "%203", 203, c, kind="tern", stale=True), Pane("w:0.9", "%109", 109, c), Pane("w:0.10", "%110", 110, c)]
+    fl, ctx, rd, _ = small_run(root, "b-mid", panes, home, agents, good_env, uid, aligned, wave=3)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    md = open(os.path.join(rd, "report.md")).read()
+    case("NEG different session file after /restart -> SESSION_LOST (failure)", res["w:0.8"]["result"] == "SESSION_LOST" and "w:0.8" in rep["failed"], json.dumps(res["w:0.8"]))
+    case("NEG respawned pane still on the old build -> VERSION_STALE (failure, exit non-zero)",
+         res["r:0.3"]["result"] == "VERSION_STALE" and "r:0.3" in rep["failed"] and rc == fr_run.EXIT_FAILED, json.dumps(res["r:0.3"]))
+    case("CTL failed /restart panes get a respawn fallback command from save.json",
+         any(f["pane"] == "w:0.8" and f["argv"] and "--resume" in f["argv"][-1] for f in rep["respawn_fallback"]), json.dumps(rep["respawn_fallback"]))
+    case("NEG mid-run SESSION_LOST trips the breaker: canary r:0.7 VERIFIED first, in-flight r:0.3/w:0.9 still verified, next wave HOLD_BREAKER, zero sends, watchers back",
+         res["r:0.7"]["result"] == "VERIFIED" and fl.sends[0][:2] == ("r:0.7", "RESPAWN") and res["w:0.9"]["result"] == "VERIFIED"
+         and res["w:0.10"]["result"] == "HOLD_BREAKER" and fl.count("w:0.10") == 0 and "BREAKER: w:0.8 SESSION_LOST" in md and watchers_back(fl),
+         json.dumps([rep["breaker"], {k: v["result"] for k, v in res.items()}]))
+    n = len(fl.sends)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("NEG --resume-run after a breaker stop, no --continue-after-breaker -> zero sends, HOLD_BREAKER kept, exit 6",
+         len(fl.sends) == n and res["w:0.10"]["result"] == "HOLD_BREAKER" and rep["breaker"]["pane"] == "w:0.8" and rc == fr_run.EXIT_FAILED,
+         json.dumps([rep["breaker"], res["w:0.10"]]))
+    with open(os.path.join(rd, fr_run.LEDGER), "a") as fh:  # a crash right after a send: SENT, no VERIFY, no effect on the pane
+        fh.write(json.dumps({"at": "x", "event": "SENT", "pane": "w:0.10", "mode": "RESTART"}) + "\n")
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
+    case("NEG after a breaker stop a SENT-without-VERIFY pane is not retried (no SEND_LOST resend) -> HOLD_BREAKER, zero sends",
+         len(fl.sends) == n and {p["pane"]: p for p in rep["panes"]}["w:0.10"]["result"] == "HOLD_BREAKER" and rc == fr_run.EXIT_FAILED,
+         json.dumps([p for p in rep["panes"] if p["pane"] == "w:0.10"]))
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True, continue_after_breaker=True)
+    case("NEG --continue-after-breaker without continue_after_breaker: true in the approval -> CONTINUE_NOT_APPROVED, no sends",
+         str(rep.get("refused", "")).startswith("CONTINUE_NOT_APPROVED") and len(fl.sends) == n, json.dumps(rep))
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd, continue_after_breaker=True), continue_after_breaker=True)
+    case("NEG --continue-after-breaker without --resume-run -> refused", rep.get("refused") in ("CONTINUE_NEEDS_RESUME_RUN", "RUN_ALREADY_APPLIED: continue with --resume-run")
+         and len(fl.sends) == n, json.dumps(rep))
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd, continue_after_breaker=True), resume_run=True, continue_after_breaker=True)
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("CTL approved --continue-after-breaker: the HOLD_BREAKER pane is sent and VERIFIED; failures stay failures and are not re-sent; exit 6",
+         res["w:0.10"]["result"] == "VERIFIED" and fl.count("w:0.10") == 1 and fl.count("w:0.8") == 1 and fl.count("r:0.3") == 1
+         and res["w:0.8"]["result"] == "SESSION_LOST" and rep["breaker"] is None and rc == fr_run.EXIT_FAILED, json.dumps([res["w:0.10"], rep["breaker"]]))
+
+    # --strict-advisor: a mid-run ADVISOR_FAILED trips too; plan-bound, apply may not change it
+    c = cwd("strict")
+    panes = [Pane("r:0.7", "%207", 207, c, kind="tern"), Pane("w:0.5", "%105", 105, c, advisor="runtime", badge_ok=False),
+             Pane("w:0.2", "%102", 102, c), Pane("w:0.9", "%109", 109, c)]
+    fl, ctx, rd, man = small_run(root, "b-strict", panes, home, agents, good_env, uid, aligned, wave=2, strict_advisor=True)
+    for label, kw, want in [("--strict-advisor dropped at apply", {"strict_advisor": False}, "STRICT_ADVISOR_NOT_IN_MANIFEST"),
+                            ("--canary 2 at apply, 1 planned", {"canary": 2}, "CANARY_NOT_IN_MANIFEST")]:
+        rep, rc = fr_run.apply_run(rd, ctx, approve(rd), **kw)
+        case("NEG %s -> %s, no side effect" % (label, want), rep.get("refused") == want and not fl.sends and not fl.ld.mutations(), json.dumps(rep))
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), strict_advisor=True)
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("NEG --strict-advisor: mid-run ADVISOR_FAILED trips the breaker; in-flight w:0.2 verified, next wave HOLD_BREAKER",
+         rep["breaker"] == {"pane": "w:0.5", "verdict": "ADVISOR_FAILED", "canary": False} and res["w:0.2"]["result"] == "VERIFIED"
+         and res["w:0.9"]["result"] == "HOLD_BREAKER" and fl.count("w:0.9") == 0 and rc == fr_run.EXIT_FAILED, json.dumps(rep["breaker"]))
+
+
+def gate_revalidate(case, root, home, agents, good_env, uid, aligned):
+    c = os.path.join(root, "rv")
+    os.makedirs(c, exist_ok=True)
+    t_idle = 1_000_000.0 + 90
+
+    def make_scratch(p):
+        d = os.path.join(p.cwd, "var", "agent-tmp", "job.%d" % p.omp)
+        os.makedirs(d, exist_ok=True)
+        for f, text in [(".owner", "pid=%d\n" % p.omp), ("draft.md", "unpushed")]:
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(text)
+
+    def new_pid(p):
+        p.omp = 99991
+
+    def new_session(p):
+        p.session = p.session.replace(".jsonl", "-forked.jsonl")
+    panes = [Pane("v:0.1", "%301", 301, c, kind="tern", busy_until=t_idle, on_idle=make_scratch),
+             Pane("v:0.2", "%302", 302, c, kind="tern", busy_until=t_idle, on_idle=new_pid),
+             Pane("v:0.3", "%303", 303, c, kind="tern", busy_until=t_idle, on_idle=new_session),
+             Pane("v:0.4", "%304", 304, c, kind="tern", busy_until=t_idle)]
+    fl, ctx, rd, man = small_run(root, "rv-run", panes, home, agents, good_env, uid, aligned, wave=4, busy_timeout_min=5)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    md = open(os.path.join(rd, "report.md")).read()
+    case("CTL busy pane that created work scratch during the wait is still sent",
+         res["v:0.1"]["result"] == "VERIFIED" and fl.count("v:0.1") == 1,
+         json.dumps(res["v:0.1"]))
+    case("NEG omp pid changed between save and send (run path) -> HELD_DRIFT, zero sends",
+         res["v:0.2"]["result"] == "HELD_DRIFT" and fl.count("v:0.2") == 0, json.dumps(res["v:0.2"]))
+    case("NEG session file changed between save and send (run path) -> HOLD_SESSION_CHANGED, zero sends",
+         res["v:0.3"]["result"] == "HOLD_SESSION_CHANGED" and fl.count("v:0.3") == 0, json.dumps(res["v:0.3"]))
+    case("CTL busy pane unchanged at its turn boundary passes revalidation -> respawned and VERIFIED",
+         res["v:0.4"]["result"] == "VERIFIED" and fl.count("v:0.4", "RESPAWN") == 1 and rep["breaker"] is None, json.dumps(res["v:0.4"]))
+
+    # manual `send` path: the same live checks; never respawn from a stale save.json row
+    for label, mutate, want, sends in [("omp pid changed", new_pid, "HELD_DRIFT", 0), ("session file changed", new_session, "HOLD_SESSION_CHANGED", 0),
+                                       ("work scratch created", make_scratch, "SENT", 1), ("nothing changed", None, "SENT", 1)]:
+        d = os.path.join(root, "rvm-" + label.replace(" ", "-"))
+        os.makedirs(d, exist_ok=True)
+        p = Pane("m:0.1", "%401", 401, d, kind="tern")
+        fl2, ctx2, rd2, _ = small_run(root, "rvm-run-" + label.replace(" ", "-"), [p], home, agents, good_env, uid, aligned)
+        man2 = fr.restart_manifest(json.load(open(os.path.join(rd2, "plan.json"))), mode="respawn", save=json.load(open(os.path.join(rd2, "save.json"))))
+        if mutate:
+            mutate(p)
+        res2 = fr.send(man2, True, dict(APPROVE, manifest_sha256=fr.manifest_sha(man2)), good_env, uid, fl2.capture, fl2.run,
+                       revalidate_fn=fr_save.respawn_revalidator(fl2.inventory, fl2.lsof))
+        got = res2["rows"][0]["result"] if res2["rows"] else "NO_ROW"
+        case("%s manual respawn send, %s since save.json -> %s%s" % ("NEG" if sends == 0 else "CTL", label, want, ", zero sends" if sends == 0 else ""),
+             got == want and fl2.count("m:0.1") == sends, json.dumps(res2["rows"]))
+
+
+def gate_model(case, root, home, agents, good_env, uid, aligned):
+    c = os.path.join(root, "model")
+    os.makedirs(c, exist_ok=True)
+    panes = [Pane("m:0.1", "%501", 501, c, model="GPT-6-Luna", launch_model="Muse Spark 1.3"), Pane("m:0.2", "%502", 502, c)]
+    fl, ctx, rd, _ = small_run(root, "model-run", panes, home, agents, good_env, uid, aligned)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    md = open(os.path.join(rd, "report.md")).read()
+    case("CTL runtime model switch reverted by restart -> MODEL_CHANGED warning in report.md and run output, never a failure (VERIFIED, exit 0)",
+         rep["warnings"] == ["MODEL_CHANGED m:0.1: GPT-6-Luna -> Muse Spark 1.3"] and "MODEL_CHANGED m:0.1: GPT-6-Luna -> Muse Spark 1.3" in md
+         and res["m:0.1"]["result"] == "VERIFIED" and not rep["failed"] and rep["breaker"] is None and rc == 0 and "model_changed" not in res["m:0.2"],
+         json.dumps([rep["warnings"], res["m:0.1"].get("result"), rc]))
+
+
+# ---------- VERDICT: the only terminal ledger event on --resume-run ----------
+
+def crash_on(event):
+    """Make the first Ledger.add(event) raise (a crash at that ledger line); returns the restore function."""
+    real, fired = fr_run.Ledger.add, []
+
+    def add(self, ev, **kw):
+        if ev == event and not fired:
+            fired.append(ev)
+            raise RuntimeError("simulated crash before %s" % event)
+        return real(self, ev, **kw)
+    fr_run.Ledger.add = add
+    return lambda: setattr(fr_run.Ledger, "add", real)
+
+
+def gate_verdict_resume(case, root, home, agents, good_env, uid, aligned):
+    cwd = os.path.join(root, "w")
+
+    def setup(name, pane):
+        fl = FakeFleet([pane], FakeLaunchd(loaded={"com.omp-kit.fleet-watch"}))
+        ctx = ctx_for(fl, home, agents, good_env, uid, aligned)
+        rd = os.path.join(root, "v-" + name)
+        fr_run.plan_run(rd, ctx, "%3", fr.DEFAULT_PROTECT, wave=1)
+        return fl, ctx, rd
+
+    def events(rd):
+        return [json.loads(ln) for ln in open(os.path.join(rd, fr_run.LEDGER))]
+
+    # (a) first run ends VERSION_STALE; the resume keeps it
+    fl, ctx, rd = setup("stale", Pane("w:0.1", "%101", 101, cwd, kind="tern", stale=True))
+    rep1, rc1 = fr_run.apply_run(rd, ctx, approve(rd))
+    n = len(fl.sends)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
+    case("NEG --resume-run after a VERSION_STALE verdict -> still VERSION_STALE, zero sends, exit 6",
+         rep1["panes"][0]["result"] == "VERSION_STALE" and rc1 == fr_run.EXIT_FAILED and rep["panes"][0]["result"] == "VERSION_STALE"
+         and rep["panes"][0].get("from_ledger") and len(fl.sends) == n and rc == fr_run.EXIT_FAILED, json.dumps([rep1["panes"], rep["panes"], rc]))
+
+    # (b) crash after VERIFY, before SESSION/VERDICT; the session file is different by the resume
+    p = Pane("w:0.1", "%101", 101, cwd)
+    fl, ctx, rd = setup("lost", p)
+    restore = crash_on("SESSION")
+    try:
+        fr_run.apply_run(rd, ctx, approve(rd))
+    finally:
+        restore()
+    ev = [e["event"] for e in events(rd) if e.get("pane") == "w:0.1"]
+    p.lose_session = True
+    n = len(fl.sends)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
+    verdicts = [e["result"] for e in events(rd) if e["event"] == "VERDICT"]
+    case("NEG crash after VERIFY before SESSION/VERDICT, session file changed -> resume re-verifies: SESSION_LOST, zero sends, exit 6",
+         "VERIFY" in ev and "VERDICT" not in ev and rep["panes"][0]["result"] == "SESSION_LOST" and len(fl.sends) == n
+         and verdicts == ["SESSION_LOST"] and rc == fr_run.EXIT_FAILED, json.dumps([ev, rep["panes"], verdicts]))
+
+    # (c) crash after VERIFY/SESSION/VERSION, before VERDICT; everything still good
+    fl, ctx, rd = setup("good", Pane("w:0.1", "%101", 101, cwd, kind="tern"))
+    restore = crash_on("VERDICT")
+    try:
+        fr_run.apply_run(rd, ctx, approve(rd))
+    finally:
+        restore()
+    n = len(fl.sends)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
+    ev = [e["event"] for e in events(rd) if e.get("pane") == "w:0.1"]
+    case("CTL crash after VERIFY before VERDICT, all checks good -> resume re-verifies without re-sending: VERIFIED, exit 0",
+         rep["panes"][0]["result"] == "VERIFIED" and rep["panes"][0]["version"] == "VERSION_OK" and rep["panes"][0]["session"] == "SESSION_KEPT"
+         and len(fl.sends) == n == 1 and ev.count("VERDICT") == 1 and "REVERIFY" in ev and rc == 0, json.dumps([ev, rep["panes"], rc]))
+
+
+# ---------- uxr3 ----------
+
+def gate_uxr3(case, tmp, plan, inventory, aligned):
+    with open(os.path.join(os.path.dirname(HERE), "SKILL.md")) as fh:
+        skill = fh.read()
+    cmds = [ln.strip() for ln in skill.splitlines()]
+    case("NEG SKILL.md has no bare-variable launcher line and no `env` subcommand (uxr3: printed secrets)",
+         not [c for c in cmds if c.startswith(("FR=", "$FR"))] and 'fleet_restart.py" env' not in skill
+         and 'python3 "$SKILL/scripts/fleet_restart.py" check-env' in skill)
+    rd = os.path.join(tmp, "uxr3")
+    os.makedirs(rd)
+    fw.write_json(os.path.join(rd, fr_run.RUN_MANIFEST), {"kind": "run", "snapshot_dir": os.path.join(rd, "snapshot")})
+    ns = argparse.Namespace(run=rd, plan=None, snapshot=None)
+    case("CTL handoff/messages default to the run manifest's stage-1 snapshot", fr.stage1(ns) == (os.path.join(rd, "plan.json"), os.path.join(rd, "snapshot")))
+    ns.snapshot = os.path.join(rd, "snapshot-after")
+    try:
+        fr.stage1(ns)
+        msg = "NO_ERROR"
+    except SystemExit as exc:
+        msg = str(exc)
+    case("NEG post-restart snapshot passed to handoff/messages -> SNAPSHOT_NOT_STAGE1", msg.startswith("SNAPSHOT_NOT_STAGE1"), msg)
+    p2 = fr.build_plan(inventory(), "omp-test:0.1", fr.DEFAULT_PROTECT, aligned, unprotect=["uds--burn-down:0.0"])
+    row = {r["pane"]: r for r in p2["rows"]}["uds--burn-down:0.0"]
+    case("CTL DEFAULT_PROTECT overridable via unprotect (row marked unprotected)", row["action"] == "RESTART" and row.get("unprotected"), json.dumps(row.get("action")))

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """fleet-restart helper: snapshot, align check, restart plan, gated send, verify,
-handoff and staged re-dispatch messages for an OMP agent fleet in tmux.
+handoff and staged re-dispatch messages for an OMP agent fleet in tmux, plus the
+autonomous run (watchers pause, session/advisor save, restart, advisor re-apply,
+watchers resume) in fr_watchers.py, fr_save.py and fr_run.py.
 
-Every command is read-only or plan/dry-run by default. The only writers are
-`send --apply` (needs an operator approval bound to the manifest sha256) and
-`align --relink --apply` (atomic symlink replace with an undo record).
-Stdlib only. Run through the interpreter: python3 scripts/fleet_restart.py <cmd>.
+Every command is read-only or plan/dry-run by default. The writers are `send
+--apply` and `run --apply` (operator approval bound to the manifest sha256),
+`watchers pause|resume --apply` and `align --relink --apply` (atomic symlink
+replace with an undo record). Stdlib only (PyYAML, when importable, reads profile
+config.yml). Always call it by full path: python3 "$SKILL/scripts/fleet_restart.py" <cmd>.
 """
 import argparse
 import datetime
@@ -31,6 +34,11 @@ STATUS_MARK = "📁"  # omp status line: "<π|spinner> · <glyph> <model> · �
 STATUS_DEPTH = 6  # the status bar is within the last few non-blank lines; older ones are scrollback
 BOX = "╭╮╰╯─│├┤┌┐└┘ "
 CALLBACK = "DONE|BLOCKED <bead> <sha> <evidence>; NEXT <item>"
+# Advisor badge right after the model name (pi-tui status-line modelAdvisorBadge): 👁 while
+# advisors review, 🙈 once all have yielded the turn; shown only while an advisor roster is
+# live. The "+ 👁 <cost>" spend segment after 📁 is restored from the transcript on resume
+# even with the advisor off, so it never counts.
+ADVISOR_MARKS = ("👁", "🙈")
 CAPTURE_LINES = 2000
 TAIL_LINES = 40
 
@@ -59,8 +67,11 @@ def tmux_env(env):
 
 # ---------- process + screen parsing ----------
 
+RESUME_FLAGS = ("--resume", "-r", "--restore")  # session selectors: a restart/respawn picks the session itself
+
+
 def normalize_flags(tokens):
-    """Split --k=v, drop --resume and its value (a restart may resume a session)."""
+    """Split --k=v, drop each --resume/-r/--restore and its value."""
     flat = []
     for t in tokens:
         if t.startswith("--") and "=" in t:
@@ -73,7 +84,7 @@ def normalize_flags(tokens):
         if skip:
             skip = False
             continue
-        if t == "--resume":
+        if t in RESUME_FLAGS:
             skip = True
             continue
         out.append(t)
@@ -154,28 +165,87 @@ def git_child(procs, pane_pid):
     return None
 
 
+def status_index(nonblank):
+    """Index (in the non-blank lines) of the omp status bar: the lowest of the last
+    STATUS_DEPTH lines carrying 📁 after at least one '·' (or ' > ') field; None when
+    absent. Older status lines higher up are scrollback and never count."""
+    start = max(0, len(nonblank) - STATUS_DEPTH)
+    for i in range(len(nonblank) - 1, start - 1, -1):
+        line = nonblank[i]
+        if STATUS_MARK not in line:
+            continue
+        head = line[:line.index(STATUS_MARK)].lstrip(BOX).replace(" > ", " · ")
+        if len(head.split("·")) >= 2:
+            return i
+    return None
+
+
+def status_line(lines):
+    nonblank = [ln for ln in lines if ln.strip()]
+    i = status_index(nonblank)
+    return None if i is None else nonblank[i]
+
+
+def advisor_badge(lines):
+    """True when the live status bar's model segments (before 📁) carry 👁 or 🙈."""
+    line = status_line(lines)
+    if not line:
+        return False
+    fields = line[:line.index(STATUS_MARK)].lstrip(BOX).replace(" > ", " · ").split("·")[1:]
+    return any(m in f for f in fields for m in ADVISOR_MARKS)
+
+
+def composer_text(lines):
+    """Text typed (or queued) in the composer; '' when empty; None when the layout is
+    not one of the two measured shapes (fail closed: callers hold the pane).
+    Plain: rows between the separator line just above the status bar and the
+    separator above them ('❯' prompt row). Boxed: rows between the status bar (the
+    box's top border) and the '╰' bottom border. Sending /restart into a non-empty
+    composer would submit the operator's text with it; respawn would discard it."""
+    nonblank = [ln for ln in lines if ln.strip()]
+    i = status_index(nonblank)
+    if i is None:
+        return None
+    after = nonblank[i + 1:]
+    if after:
+        if not after[-1].lstrip().startswith("╰"):
+            return None
+        rows = after[:-1]
+    else:
+        def sep(ln):
+            return ln.lstrip().startswith("──")
+        if i < 2 or not sep(nonblank[i - 1]):
+            return None
+        j, rows = i - 2, []
+        while j >= 0 and not sep(nonblank[j]):
+            rows.append(nonblank[j])
+            j -= 1
+        if j < 0:
+            return None
+    text = " ".join(r.strip().strip(BOX).replace("❯", "", 1).strip() for r in rows)
+    return text.strip()
+
+
 def parse_screen(lines):
     """IDLE when the bottom status bar starts with the prompt glyph π; BUSY on a
     braille spinner; UNKNOWN otherwise (fail closed). Plain splits, no regex:
     screen lines are untrusted text."""
-    bottom = [ln for ln in lines if ln.strip()][-STATUS_DEPTH:]
-    for line in reversed(bottom):
-        if STATUS_MARK not in line:
-            continue
-        head = line[:line.index(STATUS_MARK)].lstrip(BOX).replace(" > ", " · ")
-        parts = head.split("·")
-        if len(parts) < 2:
-            continue
-        first = parts[0].split()
-        tok = first[0] if first else ""
-        words = parts[1].split(None, 1)
-        model = words[1].strip() if len(parts) >= 3 and len(words) == 2 else ""
-        if tok == "π":
-            return {"state": "IDLE", "model": model}
-        if tok and "\u2800" <= tok[0] <= "\u28ff":
-            return {"state": "BUSY", "model": model}
-        return {"state": "UNKNOWN", "model": model}
-    return {"state": "UNKNOWN", "model": ""}
+    line = status_line(lines)
+    if line is None:
+        return {"state": "UNKNOWN", "model": ""}
+    parts = line[:line.index(STATUS_MARK)].lstrip(BOX).replace(" > ", " · ").split("·")
+    first = parts[0].split()
+    tok = first[0] if first else ""
+    words = parts[1].split(None, 1)
+    model = words[1] if len(parts) >= 3 and len(words) == 2 else ""
+    for mark in ADVISOR_MARKS:
+        model = model.replace(mark, "")
+    model = model.strip()
+    if tok == "π":
+        return {"state": "IDLE", "model": model}
+    if tok and "\u2800" <= tok[0] <= "\u28ff":
+        return {"state": "BUSY", "model": model}
+    return {"state": "UNKNOWN", "model": model}
 
 
 # ---------- align (kit + plugin links) ----------
@@ -226,14 +296,19 @@ def kit_version():
 
 # ---------- plan ----------
 
-def classify(pane, procs, chief, protect):
+def classify(pane, procs, chief, protect, unprotect=()):
+    """`unprotect`: panes the operator released from DEFAULT_PROTECT/--protect for
+    this run; `run --apply` honours it only when the approval names them too."""
     row = {"pane": pane["pane"], "pane_id": pane["pane_id"], "session": pane["pane"].split(":", 1)[0], "cwd": pane["cwd"]}
     agent = find_agent(procs, pane["pane_pid"])
     screen = parse_screen(pane.get("screen", []))
     row["state"], row["screen_model"] = screen["state"], screen["model"]
     if agent:
         row.update({"omp_pid": agent["pid"], "args": agent["args"], "flags": agent["flags"], "mcp": agent["mcp"], "mcp_pids": agent["mcp_pids"]})
-    if pane["pane"] in protect or pane["pane_id"] in protect:
+    protected = pane["pane"] in protect or pane["pane_id"] in protect
+    if protected and (pane["pane"] in unprotect or pane["pane_id"] in unprotect):
+        protected, row["unprotected"] = False, True
+    if protected:
         row["action"] = "SKIP_PROTECTED"
     elif pane["pane"] == chief or pane["pane_id"] == chief:
         row["action"] = "SKIP_CHIEF"
@@ -248,48 +323,88 @@ def classify(pane, procs, chief, protect):
         row["action"] = "QUEUE_BUSY"
     elif screen["state"] != "IDLE":
         row["action"] = "HOLD_UNKNOWN_STATE"
+    elif composer_text(pane.get("screen", [])) != "":
+        row["action"] = "HOLD_COMPOSER"  # never discard or append to typed/queued text
     else:
         row["action"] = "RESTART"
     return row
 
 
-def build_plan(inv, chief, protect, align_report):
-    plan = {"created": now(), "snapshot_at": inv.get("captured_at"), "chief": chief, "protect": list(protect),
+def build_plan(inv, chief, protect, align_report, unprotect=()):
+    plan = {"created": now(), "snapshot_at": inv.get("captured_at"), "chief": chief, "protect": list(protect), "unprotect": list(unprotect),
             "align": {k: align_report[k] for k in ("ok", "version", "expected", "stale")}, "rows": []}
     if not align_report["ok"]:
         plan["refused"] = "ALIGN_STALE"
         return plan
-    plan["rows"] = [classify(p, inv["procs"], chief, protect) for p in inv["panes"]]
+    plan["rows"] = [classify(p, inv["procs"], chief, protect, unprotect) for p in inv["panes"]]
     return plan
 
 
-def respawn_cmd(row):
-    return "cd %s && omp %s" % (shlex.quote(row["cwd"]), " ".join(shlex.quote(f) for f in row["flags"]))
+def respawn_cmd(row, argv=None):
+    flags = row["flags"] if argv is None else argv
+    return "cd %s && omp %s" % (shlex.quote(row["cwd"]), " ".join(shlex.quote(f) for f in flags))
 
 
-def check_cmd_flags(cmd, live_flags):
-    """A launch command must carry exactly the live process flags (minus --resume)."""
+def check_cmd_flags(cmd, live_flags, added=(), resume=None):
+    """A launch command must carry exactly the live process flags (minus --resume),
+    plus only the `added` flags its row declares (the respawn fallback's --advisor),
+    and, when `resume` is given, `--resume <that saved session file>`."""
     tail = cmd.split("&&", 1)[-1]
     toks = shlex.split(tail)
     if not toks or os.path.basename(toks[0]) != "omp":
         return False, "NOT_AN_OMP_COMMAND"
-    if not same_flags(toks[1:], live_flags):
+    rest = list(toks[1:])
+    for flag in added:
+        if flag not in rest:
+            return False, "DECLARED_FLAG_MISSING"
+        rest.remove(flag)
+    if not same_flags(rest, live_flags):
         return False, "FLAGS_NOT_FROM_LIVE_ARGS"
+    if resume is not None and not any(rest[i] == "--resume" and rest[i + 1] == resume for i in range(len(rest) - 1)):
+        return False, "RESUME_NOT_SAVED_SESSION"
     return True, "OK"
 
 
-def restart_manifest(plan, mode="restart"):
-    rows = []
+RESPAWN_HOLDS = ("HOLD_NO_SESSION", "HOLD_SESSION_AMBIGUOUS")
+
+
+def respawn_row(r, saved):
+    """Respawn fallback for one plan row from its save.json row: live flags +
+    --resume <session file> + --advisor when the advisor was on and the profile
+    config does not already enable it. None when a hold refuses respawn (no or
+    ambiguous session file). Unsaved scratch does not refuse the row."""
+    if not saved or any(h in RESPAWN_HOLDS for h in saved.get("holds", [])):
+        return None
+    argv, added = list(r["flags"]) + ["--resume", saved["session_file"]], []
+    adv = saved.get("advisor") or {}
+    if adv.get("on") and adv.get("source") != "config" and "--advisor" not in r["flags"]:
+        argv.append("--advisor")
+        added.append("--advisor")
+    return {"pane": r["pane"], "pane_id": r["pane_id"], "session": r["session"], "flags": r["flags"], "kind": "respawn", "cwd": r["cwd"],
+            "cmd": respawn_cmd(r, argv), "added": added, "session_file": saved["session_file"], "omp_pid": r.get("omp_pid")}
+
+
+def restart_manifest(plan, mode="restart", save=None):
+    """`save`: save.json; required for respawn (the fallback must resume the saved session)."""
+    if mode == "respawn" and save is None:
+        raise ValueError("SAVE_REQUIRED: respawn needs save.json (session file + advisor state per pane)")
+    saved = {r["pane_id"]: r for r in (save or {}).get("rows", [])}
+    rows, held = [], []
     for r in plan["rows"]:
         if r["action"] != "RESTART":
             continue
-        row = {"pane": r["pane"], "pane_id": r["pane_id"], "session": r["session"], "flags": r["flags"]}
         if mode == "restart":
-            row.update({"kind": "keys", "text": "/restart"})
+            rows.append({"pane": r["pane"], "pane_id": r["pane_id"], "session": r["session"], "flags": r["flags"], "kind": "keys", "text": "/restart"})
+            continue
+        row = respawn_row(r, saved.get(r["pane_id"]))
+        if row is None:
+            held.append({"pane": r["pane"], "holds": (saved.get(r["pane_id"]) or {}).get("holds", ["NOT_SAVED"])})
         else:
-            row.update({"kind": "respawn", "cmd": respawn_cmd(r)})
-        rows.append(row)
-    return {"kind": "restart-" + mode, "created": now(), "rows": rows}
+            rows.append(row)
+    man = {"kind": "restart-" + mode, "created": now(), "rows": rows}
+    if mode == "respawn":
+        man["held"] = held
+    return man
 
 
 def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directors):
@@ -311,10 +426,10 @@ def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directo
         if role == "director":
             text = (
                 "Fresh session on omp-kit %s. Read %s, your row and your workers' rows, then your pane snapshot %s.\n"
-                "1. HEALTH: /Users/josh/Developer/foundry/bin/flywheel doctor --repo %s --json and ntm health %s --json. "
+                "Follow the kit tick order: INIT → RESEARCH → PLAN → BEADS → DISPATCH → VALIDATE → INTEGRATE → LEARN. "
+                "VALIDATE is before INTEGRATE. A callback with no validation receipt is not INTEGRATE-ready.\n"
+                "INIT includes HEALTH: /Users/josh/Developer/foundry/bin/flywheel doctor --repo %s --json and ntm health %s --json. "
                 "A stale user/shell pane is a warning, not a block; exit 30 repo_not_initialized means phase INIT.\n"
-                "2. INTEGRATE: verify and close or reopen every bead your workers reported pushed (check the sha is on origin/main).\n"
-                "3. DISPATCH from br ready, one bead per idle worker.\n"
                 "Callback, one line: %s\n" % (kit_version, handoff, snap, r["cwd"], r["session"], CALLBACK))
         else:
             text = (
@@ -332,7 +447,17 @@ def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directo
 
 # ---------- gated send ----------
 
+# The only keystrokes any manifest may carry into an agent pane. Bare `/advisor`
+# TOGGLES the advisor (OMP slash-commands/builtin-collaboration.ts), so it is never allowed.
+KEYS_ALLOWED = ("/restart", "/advisor on")
+
+
 def manifest_sha(manifest):
+    """Run manifests bind every field (stages, watchers, holds, snapshot); the
+    others bind kind + rows, as before."""
+    if manifest.get("kind") == "run":
+        body = {k: v for k, v in manifest.items() if k != "manifest_sha256"}
+        return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     body = [{k: r[k] for k in sorted(r) if k not in ("result",)} for r in manifest["rows"]]
     return hashlib.sha256(json.dumps({"kind": manifest["kind"], "rows": body}, sort_keys=True).encode()).hexdigest()
 
@@ -347,10 +472,15 @@ def ntm_argv(row):
 
 
 def tmux_respawn_argv(row):
-    return ["tmux", "respawn-pane", "-k", "-t", row["pane_id"], "%s; exec zsh -l" % row["cmd"]]
+    """`omp` is the login shell's plain command (the target install), never a versioned
+    path or bun; `exec zsh -l` keeps the pane alive after omp exits."""
+    return ["tmux", "respawn-pane", "-k", "-t", row["pane_id"], "-c", row["cwd"], "zsh -lc %s" % shlex.quote(row["cmd"] + "; exec zsh -l")]
 
 
-def send(manifest, apply, approval, env, uid, capture_fn, run_fn, role=None):
+def send(manifest, apply, approval, env, uid, capture_fn, run_fn, role=None, revalidate_fn=None):
+    """`revalidate_fn(row) -> (hold, detail)`: live re-check of a respawn row's saved
+    facts (omp pid, session file, git child, owned scratch) right before its send. A
+    respawn row is refused without one: never respawn from a stale save.json row."""
     sha = manifest_sha(manifest)
     res = {"mode": "APPLY" if apply else "DRY_RUN", "manifest_sha256": sha, "rows": []}
     rows = [r for r in manifest["rows"] if role in (None, "all") or r.get("role") == role]
@@ -372,10 +502,18 @@ def send(manifest, apply, approval, env, uid, capture_fn, run_fn, role=None):
     res["approval"] = approval
     for r in rows:
         out = {"pane": r["pane"], "pane_id": r["pane_id"], "at": now()}
+        if r["kind"] == "keys" and r["text"] not in KEYS_ALLOWED:
+            out["result"] = "REFUSED_KEYS_NOT_ALLOWED"
+            res["rows"].append(out)
+            continue
         if r["kind"] == "respawn":
-            good, code = check_cmd_flags(r["cmd"], r["flags"])
+            good, code = check_cmd_flags(r["cmd"], r["flags"], r.get("added", ()), r.get("session_file"))
             if not good:
                 out["result"] = "REFUSED_" + code
+                res["rows"].append(out)
+                continue
+            if revalidate_fn is None:
+                out["result"] = "REFUSED_NO_REVALIDATION"
                 res["rows"].append(out)
                 continue
         if r["kind"] == "file":
@@ -384,11 +522,22 @@ def send(manifest, apply, approval, env, uid, capture_fn, run_fn, role=None):
                     out["result"] = "REFUSED_FILE_CHANGED_AFTER_APPROVAL"
                     res["rows"].append(out)
                     continue
-        state = parse_screen(capture_fn(r["pane_id"]))["state"]
+        screen = capture_fn(r["pane_id"])
+        state = parse_screen(screen)["state"]
         if state != "IDLE":
             out["result"] = "QUEUED_BUSY" if state == "BUSY" else "HELD_UNKNOWN_STATE"
             res["rows"].append(out)
             continue
+        if composer_text(screen) != "":
+            out["result"] = "HELD_COMPOSER"
+            res["rows"].append(out)
+            continue
+        if r["kind"] == "respawn":
+            hold, why = revalidate_fn(r)
+            if hold:
+                out.update({"result": hold, "why": why})
+                res["rows"].append(out)
+                continue
         argv = tmux_respawn_argv(r) if r["kind"] == "respawn" else ntm_argv(r)
         rc, text = run_fn(argv, tmux_env(env))
         out.update({"argv": argv, "rc": rc, "out": text[-500:], "result": "SENT" if rc == 0 else "SEND_FAILED"})
@@ -416,6 +565,8 @@ def verify(plan, inv_after, expect_mcp, mode="restart", sent=None):
         else:
             if mode == "restart" and agent["pid"] != r["omp_pid"]:
                 why.append("pid %s != %s (/restart re-execs in place)" % (agent["pid"], r["omp_pid"]))
+            if mode == "respawn" and agent["pid"] == r["omp_pid"]:
+                why.append("pid %s unchanged: no respawn observed" % agent["pid"])
             if set(agent["mcp_pids"]) & set(r.get("mcp_pids", [])):
                 why.append("mcp child pids %s unchanged: no restart observed" % sorted(set(agent["mcp_pids"]) & set(r["mcp_pids"])))
             if not same_flags(agent["flags"], r["flags"]):
@@ -438,7 +589,8 @@ def run(argv, env=None):
     return p.returncode, (p.stdout + p.stderr)
 
 
-def live_inventory(env, lines=TAIL_LINES, out_dir=None):
+def live_inventory(env, lines=TAIL_LINES, out_dir=None, only=None):
+    """`only`: pane ids to capture (polling one pane); the other panes keep an empty screen."""
     fmt = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}"
     rc, text = run(["tmux", "list-panes", "-a", "-F", fmt], tmux_env(env))
     if rc != 0:
@@ -452,6 +604,9 @@ def live_inventory(env, lines=TAIL_LINES, out_dir=None):
     panes = []
     for line in text.splitlines():
         pane, pid, ppid, cwd = line.split("\t")
+        if only is not None and pid not in only:
+            panes.append({"pane": pane, "pane_id": pid, "pane_pid": int(ppid), "cwd": cwd, "screen": []})
+            continue
         rc, cap = run(["tmux", "capture-pane", "-p", "-J", "-t", pid, "-S", "-%d" % lines], tmux_env(env))
         screen = [ln for ln in cap.splitlines()]
         while screen and not screen[-1].strip():
@@ -514,10 +669,31 @@ def dump(obj, path=None):
     print(text)
 
 
+def stage1(args):
+    """Plan and snapshot for handoff/messages. With --run they default to the run
+    manifest's plan.json and stage-1 snapshot; a different --snapshot is refused
+    (ompkit-uxr3: stage 7 once read the post-restart snapshot)."""
+    if not args.run:
+        if not (args.plan and args.snapshot):
+            raise SystemExit("give --run DIR, or both --plan and --snapshot")
+        return args.plan, args.snapshot
+    man = load(os.path.join(args.run, "run-manifest.json"))
+    if args.snapshot and os.path.abspath(args.snapshot) != man["snapshot_dir"]:
+        raise SystemExit("SNAPSHOT_NOT_STAGE1: %s is not the run's stage-1 snapshot %s" % (args.snapshot, man["snapshot_dir"]))
+    return args.plan or os.path.join(args.run, "plan.json"), man["snapshot_dir"]
+
+
+def read_approval(path):
+    approval = load(path) if path else None
+    if approval and ("<" in str(approval.get("approved_by", "<")) or "<" in str(approval.get("quote", "<"))):
+        return None  # unfilled template
+    return approval
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="fleet_restart.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("env")
+    sub.add_parser("check-env", help="tmux fleet socket reachable (exit 2 if not)")
     s = sub.add_parser("snapshot")
     s.add_argument("--out", required=True)
     s.add_argument("--lines", type=int, default=CAPTURE_LINES)
@@ -539,7 +715,9 @@ def main(argv):
     p.add_argument("--out")
     m = sub.add_parser("manifest")
     m.add_argument("kind", choices=["restart", "respawn", "messages"])
-    m.add_argument("--plan", required=True)
+    m.add_argument("--run", help="run dir: defaults --plan and the stage-1 --snapshot from its run manifest")
+    m.add_argument("--plan")
+    m.add_argument("--save", help="save.json; required for respawn (--resume <session file>, --advisor)")
     m.add_argument("--handoff")
     m.add_argument("--snapshot")
     m.add_argument("--directors", action="append")
@@ -561,13 +739,47 @@ def main(argv):
     v.add_argument("--mode", choices=["restart", "respawn"], default="restart")
     v.add_argument("--sent-log", help="send --log output; verify only panes it marks SENT")
     h = sub.add_parser("handoff")
-    h.add_argument("--plan", required=True)
-    h.add_argument("--snapshot", required=True)
+    h.add_argument("--run", help="run dir: plan.json and the stage-1 snapshot from its run manifest")
+    h.add_argument("--plan")
+    h.add_argument("--snapshot")
     h.add_argument("--out", required=True)
+    w = sub.add_parser("watchers")
+    w.add_argument("action", choices=["snapshot", "pause", "resume"])
+    w.add_argument("--run", help="run dir (pause/resume)")
+    w.add_argument("--ttl-min", type=int, default=90, help="pause: the dead-man resumes after this many minutes")
+    w.add_argument("--if-expired", action="store_true", help="resume: no-op before the pause record's expires_at")
+    w.add_argument("--apply", action="store_true")
+    w.add_argument("--approval", help="pause --apply: approval bound to DIR/watchers-pause-plan.json")
+    w.add_argument("--agents-dir", default=os.path.expanduser("~/Library/LaunchAgents"))
+    w.add_argument("--registry")
+    sv = sub.add_parser("save")
+    sv.add_argument("--run", required=True)
+    sv.add_argument("--inventory", help="inventory.json; default: live")
+    sv.add_argument("--home", default=os.path.expanduser("~"))
+    r = sub.add_parser("run")
+    r.add_argument("--run", required=True)
+    rmode = r.add_mutually_exclusive_group(required=True)
+    rmode.add_argument("--plan", action="store_true")
+    rmode.add_argument("--apply", action="store_true")
+    r.add_argument("--approval", help="--apply: approval bound to DIR/run-manifest.json")
+    r.add_argument("--busy-timeout-min", type=float, default=30)
+    r.add_argument("--wave", type=int, default=3)
+    r.add_argument("--resume-run", action="store_true")
+    r.add_argument("--canary", type=int, help="plan: panes restarted and verified first, RESPAWN preferred (default 1); apply may only repeat it")
+    r.add_argument("--strict-advisor", action="store_const", const=True, help="ADVISOR_FAILED also trips the breaker (canary panes always)")
+    r.add_argument("--continue-after-breaker", action="store_true", help="with --resume-run, after a breaker stop; the approval must carry continue_after_breaker: true")
+    r.add_argument("--only", action="append", default=[], help="plan: limit the manifest to these panes (name or %%id)")
+    r.add_argument("--unprotect", action="append", default=[], help="release a protected pane; the approval's unprotect list must name it too")
+    r.add_argument("--chief", default=os.environ.get("TMUX_PANE", ""), help="chief pane (default $TMUX_PANE); never touched by the run")
+    r.add_argument("--protect", action="append", default=[])
+    r.add_argument("--home", default=os.path.expanduser("~"))
+    r.add_argument("--releases", default=os.path.expanduser("~/.local/opt/omp-kit/releases"))
+    r.add_argument("--version")
+    r.add_argument("--agents-dir", default=os.path.expanduser("~/Library/LaunchAgents"))
     args = ap.parse_args(argv)
     env, uid = dict(os.environ), os.getuid()
 
-    if args.cmd == "env":
+    if args.cmd == "check-env":
         ok, code, detail = env_check(env, uid)
         dump({"ok": ok, "code": code, "detail": detail})
         return 0 if ok else 2
@@ -604,20 +816,32 @@ def main(argv):
         dump(plan, args.out)
         return 3 if plan.get("refused") else 0
     if args.cmd == "manifest":
-        plan = load(args.plan)
+        plan_path = args.plan
+        if args.kind == "messages":
+            plan_path, snapshot = stage1(args)
+        elif args.run and not plan_path:
+            plan_path = os.path.join(args.run, "plan.json")
+        if not plan_path:
+            ap.error("manifest needs --plan or --run")
+        plan = load(plan_path)
         if plan.get("refused"):
             print("plan refused: %s" % plan["refused"], file=sys.stderr)
             return 3
         if args.kind == "messages":
-            if not (args.handoff and args.snapshot and args.staged_dir and args.directors):
-                ap.error("messages needs --handoff --snapshot --staged-dir and one --directors per operator-confirmed director pane")
+            if not (args.handoff and args.staged_dir and args.directors):
+                ap.error("messages needs --handoff --staged-dir, --run (or --plan + --snapshot) and one --directors per operator-confirmed director pane")
             try:
-                man = messages_manifest(plan, args.handoff, args.snapshot, plan["align"]["version"], args.staged_dir, args.directors)
+                man = messages_manifest(plan, args.handoff, snapshot, plan["align"]["version"], args.staged_dir, args.directors)
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 3
         else:
-            man = restart_manifest(plan, mode=args.kind)
+            save_path = args.save or (os.path.join(args.run, "save.json") if args.run else None)
+            try:
+                man = restart_manifest(plan, mode=args.kind, save=load(save_path) if args.kind == "respawn" and save_path else None)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 3
         if args.only:
             man["rows"] = [r for r in man["rows"] if r["pane"] in args.only or r["pane_id"] in args.only]
         man["manifest_sha256"] = manifest_sha(man)
@@ -625,15 +849,22 @@ def main(argv):
         return 0
     if args.cmd == "approval-template":
         man = load(args.manifest)
-        dump({"manifest_sha256": manifest_sha(man), "approved_by": "<operator name>", "quote": "<operator's approval message, verbatim>",
-              "rows": [r["pane"] for r in man["rows"]]})
+        tpl = {"manifest_sha256": manifest_sha(man), "approved_by": "<operator name>", "quote": "<operator's approval message, verbatim>",
+               "rows": [r["pane"] for r in man["rows"]]}
+        if man.get("kind") == "run":
+            tpl["rows"] = [r["pane"] for r in man["rows"] if r["action"] in ("RESTART", "QUEUE_BUSY")]
+            tpl["watchers_pause"] = man["watchers"]["pause"]
+            tpl["unprotect"] = man.get("unprotect", [])
+            tpl["target"] = man.get("target")
+            tpl["canary"], tpl["strict_advisor"] = man.get("canary", 1), man.get("strict_advisor", False)
+            tpl["continue_after_breaker"] = False
+        dump(tpl)
         return 0
     if args.cmd == "send":
         man = load(args.manifest)
-        approval = load(args.approval) if args.approval else None
-        if approval and ("<" in approval.get("approved_by", "<") or "<" in approval.get("quote", "<")):
-            approval = None
-        res = send(man, args.apply, approval, env, uid, capture_live(env), run, role=args.role)
+        import fr_save
+        revalidate = fr_save.respawn_revalidator(lambda only: live_inventory(env, only=only), fr_save.lsof_live(run))
+        res = send(man, args.apply, read_approval(args.approval), env, uid, capture_live(env), run, role=args.role, revalidate_fn=revalidate)
         dump(res, args.log)
         return 0 if not res.get("refused") and all(r["result"] in ("SENT", "WOULD_SEND") for r in res["rows"]) else 4
     if args.cmd == "verify":
@@ -645,13 +876,83 @@ def main(argv):
         dump(res)
         return 0 if res["verified"] == res["total"] else 5
     if args.cmd == "handoff":
-        plan = load(args.plan)
-        text = render_handoff(plan, args.snapshot, plan["align"]["version"], plan["chief"])
+        plan_path, snapshot = stage1(args)
+        plan = load(plan_path)
+        text = render_handoff(plan, snapshot, plan["align"]["version"], plan["chief"])
         with open(args.out, "w") as fh:
             fh.write(text)
         print(args.out)
         return 0
+    if args.cmd == "watchers":
+        return watchers_cmd(args, env, uid)
+    if args.cmd == "save":
+        import fr_save
+        os.makedirs(args.run, exist_ok=True)
+        inv = load(args.inventory) if args.inventory else live_inventory(env)
+        doc = fr_save.save(inv, args.home, fr_save.lsof_live(run), run)
+        doc["stage"] = "manual"
+        with open(os.path.join(args.run, "save.json"), "w") as fh:
+            json.dump(doc, fh, indent=1, ensure_ascii=False)
+        dump({"out": os.path.join(args.run, "save.json"), "counts": doc["counts"], "holds": doc["holds"]})
+        return 0
+    if args.cmd == "run":
+        return run_cmd(args, env, uid)
     return 2
+
+
+def watchers_cmd(args, env, uid):
+    import fr_watchers as fw
+    reg = fw.load_registry(args.registry or fw.REGISTRY_PATH)
+    if args.action == "snapshot":
+        disc = fw.discover(args.agents_dir, reg, run, uid)
+        dump(dict(disc, counts={"jobs": len(disc["jobs"]), "loaded": sum(1 for j in disc["jobs"] if j["loaded"]),
+                                "pause_plan": len(disc["pause_plan"]), "unclassified": len(disc["unclassified"]), "unreadable": len(disc["unreadable"])}))
+        return 0
+    if not args.run:
+        raise SystemExit("watchers %s needs --run DIR" % args.action)
+    os.makedirs(args.run, exist_ok=True)
+    if args.action == "resume":
+        res = fw.resume(os.path.abspath(args.run), run, uid, int(datetime.datetime.now().timestamp()), if_expired=args.if_expired, apply=args.apply)
+        dump(res)
+        return 0 if res.get("result") != "RESUME_FAILED" else 8
+    disc = fw.discover(args.agents_dir, reg, run, uid)
+    plan_man = fw.pause_plan_manifest(disc)
+    plan_man["manifest_sha256"] = manifest_sha(plan_man)
+    if not args.apply:
+        with open(os.path.join(args.run, "watchers-pause-plan.json"), "w") as fh:
+            json.dump(plan_man, fh, indent=1)
+        dump(fw.pause(os.path.abspath(args.run), disc, run, uid, int(datetime.datetime.now().timestamp()), args.ttl_min, apply=False))
+        return 0
+    approval = read_approval(args.approval)
+    if not approval or approval.get("manifest_sha256") != plan_man["manifest_sha256"]:
+        dump({"refused": "APPROVAL_MISSING" if not approval else "APPROVAL_MISMATCH", "manifest_sha256": plan_man["manifest_sha256"]})
+        return 4
+    res = fw.pause(os.path.abspath(args.run), disc, run, uid, int(datetime.datetime.now().timestamp()), args.ttl_min, apply=True)
+    dump(res)
+    return 0 if not res.get("refused") and all(r["action"] != "BOOTOUT_FAILED" for r in res["rows"]) else 8
+
+
+def run_cmd(args, env, uid):
+    import fr_run
+    ctx = fr_run.live_ctx(env, args.home, args.releases, args.version, agents_dir=args.agents_dir)
+    run_dir = os.path.abspath(args.run)
+    if args.plan:
+        man = fr_run.plan_run(run_dir, ctx, args.chief, DEFAULT_PROTECT + args.protect, args.unprotect, args.wave, args.busy_timeout_min,
+                              canary=1 if args.canary is None else args.canary, strict_advisor=bool(args.strict_advisor), only=args.only)
+        dump({"run_manifest": os.path.join(run_dir, fr_run.RUN_MANIFEST), "manifest_sha256": man["manifest_sha256"], "refused": man["refused"],
+              "target": man["target"], "counts": man["counts"], "holds": man["holds"], "watchers_pause": man["watchers"]["pause"],
+              "watchers_unclassified": [j["label"] for j in man["watchers"]["unclassified"]], "snapshot_dir": man["snapshot_dir"],
+              "chief_respawn": man["chief_respawn"],
+              "scratch_held": {r["pane"]: [d["path"] for d in r.get("held_scratch") or []] for r in man["rows"] if r.get("held_scratch")},
+              "scratch_advice": fr_run.SCRATCH_ADVICE})
+        return 3 if man["refused"] else 0
+    rep, rc = fr_run.apply_run(run_dir, ctx, read_approval(args.approval), args.unprotect, args.resume_run, canary=args.canary,
+                               strict_advisor=args.strict_advisor, continue_after_breaker=args.continue_after_breaker)
+    dump(rep if rep.get("refused") else {"report": os.path.join(run_dir, "report.json"), "counts": rep["counts"], "advisor": rep["advisor"],
+                                         "failed": rep["failed"], "error": rep["error"], "watchers_resume": rep["watchers"]["resume"]["result"],
+                                         "breaker": fr_run.breaker_line(rep["breaker"]) if rep["breaker"] else None, "warnings": rep["warnings"],
+                                         "chief_respawn": rep["chief_respawn"]})
+    return rc
 
 
 if __name__ == "__main__":
