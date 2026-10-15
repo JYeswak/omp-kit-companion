@@ -294,6 +294,17 @@ function containedOmpCommand(input: IntegrationsInput, ompPath: string, args: st
 	return [ompPath, ...args];
 }
 
+/**
+ * MOCKSPAWN1 (ompkit-ssfx): the JS runtime that launches mock-model.mjs.
+ * process.execPath runs scripts under `bun src/...` but is the compiled
+ * binary in a release, which answers UNKNOWN_COMMAND instead of serving.
+ * Prefer a real bun when one resolves; otherwise keep execPath so dev keeps
+ * working and a release without bun still fails loudly at the port wait.
+ */
+export function resolveMockRuntime(execPath: string, bunPath: string | null): string {
+	return bunPath ?? execPath;
+}
+
 /** Run one scripted mock-model turn set against a profile in an isolated HOME. */
 export async function runLiveScenario(input: IntegrationsInput & { profile: string; repo: string },
 	scenario: ScenarioDef, vars: Record<string, string>): Promise<LiveAttempt> {
@@ -329,10 +340,11 @@ export async function runLiveScenario(input: IntegrationsInput & { profile: stri
 	const ompPath = input.ompPath ?? "omp";
 	const ompCommand = containedOmpCommand(input, ompPath, ["--profile", input.profile, "-p", "--no-session",
 		"--model", "mock/mock", "--approval-mode", "yolo", "go"], integration);
-	const mock = Bun.spawn([process.execPath, join(input.root, RELEASE_DATA.liveMockModel)], {
+	const mockRuntime = resolveMockRuntime(process.execPath, Bun.which("bun"));
+	const mock = Bun.spawn([mockRuntime, join(input.root, RELEASE_DATA.liveMockModel)], {
 		cwd: input.root,
 		env: { HOME: home, TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir,
-			SCEN: scenarioFile, LOG: mockLog, PORTFILE: portFile },
+			SCEN: scenarioFile, LOG: mockLog, PORTFILE: portFile, BUN_BE_BUN: "1" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
