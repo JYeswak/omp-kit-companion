@@ -176,6 +176,45 @@ async function recordMailCandidate(fake: FakeSaveGuard, sha: string, relativePat
 	});
 }
 
+for (const committed of [false, true]) {
+	test(`a declared candidate clears cleanly attributed ${committed ? "unpushed" : "dirty"} work until the content changes`, async () => {
+		const root = repo({ remote: true });
+		const file = join(root, "owned.txt");
+		writeFileSync(file, "baseline\n");
+		sh(root, "add", "--", "owned.txt");
+		sh(root, "commit", "-m", "baseline [test]");
+		sh(root, "push", "origin", "main");
+		const fake = fakePi(root);
+		await kitSaveGuard(fake.pi);
+		await startSession(fake);
+
+		await emitPathToolCall(fake, "write", file, "owned-write");
+		writeFileSync(file, "baseline\nsession change\n");
+		await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }, false, "owned-write"));
+		if (committed) {
+			sh(root, "add", "--", "owned.txt");
+			sh(root, "commit", "-m", "session change [test]");
+		}
+
+		const undeclared = await stop(fake);
+		expect(undeclared).toMatchObject({ decision: "block" });
+		expect(reasonOf(undeclared)).toContain("owned.txt");
+		expect(reasonOf(undeclared)).not.toContain("private GIT_INDEX_FILE");
+
+		const tree = candidateTree(root, "owned.txt", "baseline\nsession change\n", "cleanly-attributed");
+		await recordMailCandidate(fake, tree, "owned.txt");
+		expect(await stop(fake)).toBeUndefined();
+		expect(fake.notices).toEqual([]);
+
+		await emitPathToolCall(fake, "write", file, "later-write");
+		writeFileSync(file, "baseline\nsession change\nlater change\n");
+		await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }, false, "later-write"));
+		const changed = await stop(fake);
+		expect(changed).toMatchObject({ decision: "block" });
+		expect(reasonOf(changed)).toContain("owned.txt");
+	});
+}
+
 
 test("session_stop drains in-flight path attribution before checking owned work", async () => {
 	const root = repo({ remote: true });

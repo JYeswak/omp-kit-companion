@@ -730,7 +730,7 @@ export async function checkSaveState(
 		const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 			(!repository.baselineStatusKnown && !untracked) ||
 			(!untracked && (!actual || !expected?.known || !samePatch(actual, expected)));
-		if (mixed && await hasSavedCandidate(exec, repository, repoPath, current)) {
+		if (await hasSavedCandidate(exec, repository, repoPath, current)) {
 			savedPaths.add(repoPath);
 			continue;
 		}
@@ -752,7 +752,7 @@ export async function checkSaveState(
 			const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 				(!repository.baselineStatusKnown && actual !== null) ||
 				(actual !== null && (!expected?.known || !samePatch(actual, expected)));
-			if (mixed && await hasSavedCandidate(exec, repository, repoPath, current)) {
+			if (await hasSavedCandidate(exec, repository, repoPath, current)) {
 				savedPaths.add(repoPath);
 				continue;
 			}
