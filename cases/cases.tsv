@@ -474,3 +474,13 @@ kit-no-plaintext-secret	quiet	tool	write	config/mcp.json	{"path": "config/mcp.js
 kit-no-plaintext-secret	quiet	tool	write	.env.example	{"path": ".env.example", "content": "OPENAI_API_KEY=<your-key>\nANTHROPIC_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxx\nDB_PASSWORD=changeme\n"}	placeholders, not secrets
 kit-no-plaintext-secret	quiet	tool	bash	-	grep -rn OPENAI_API_KEY ~/.config 2>&1 | wc -l	a name with no value
 kit-no-plaintext-secret	quiet	tool	write	config.toml	{"path": "config.toml", "content": "APPLE_ASC_API_KEY_ID=ABC123DEF456GHI789JKL0\nSSH_KEY=/Users/me/.ssh/id_ed25519_2024\n"}	key id and key path are pointers, not secrets
+kit-no-owner-homework	fire	text	-	-	Deciding who owns the mount source is the CFS owner's call; I didn't make it.	gm0v fire: LilacLeopard mount-source handoff
+kit-no-owner-homework	fire	text	-	-	Request approved private auth route + exact mount-source custody handoff went to Josh.	gm0v fire: custody handoff to Josh
+kit-no-owner-homework	fire	text	-	-	Evidence-backed opportunity binding is assigned to the owner.	gm0v fire: binding to owner
+kit-no-owner-homework	fire	text	-	-	Josh must approve the private auth route before we proceed.	fire shape: approve engineering object
+kit-no-owner-homework	fire	text	-	-	Sending the mount source decision to Josh to decide.	fire shape: to-Josh-to-decide
+kit-no-owner-homework	quiet	text	-	-	Josh must approve the $2k ad budget increase.	planted quiet: spending authority is genuinely Josh's
+kit-no-owner-homework	quiet	text	-	-	CLOSED bead=ompkit-f2e4 (non-author verify+close; implementers untouched).	quiet: routine close report, no handoff
+kit-no-owner-homework	quiet	text	-	-	fp72.9 blocked+needs-director: fix=director picks A/B/C; ruling requested.	quiet: genuine authority gap with tried options
+kit-no-owner-homework	quiet	text	-	-	Sent the weekly status report to Josh.	quiet boundary: to-Josh without decision verb
+kit-no-owner-homework	quiet	text	-	-	The $2k budget increase is the owner's call, not mine.	quiet: money owner's-call vetoed by amount guard
