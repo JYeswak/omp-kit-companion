@@ -4,6 +4,22 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.38] - 2026-10-15
+
+### Added
+
+- Added `omp-kit align --repo DIR (--dry-run | --apply --yes) [--preserve-only]`: aligns a shared checkout's local `main` and index to `origin/main` while holding git's own `.git/index.lock` for the whole operation. Local-only commits are pinned under `refs/preserve/<date>-<sha>` before main moves; every path that differs between HEAD and origin/main is classified ADOPT, UPDATE or STOP, and any STOP, staged change, held lock, or ref/index change since the snapshot refuses with a typed code. The new index is renamed over `.git/index` only after a final re-check, main moves by compare-and-swap (the snapshot index is restored if it fails), child git processes never inherit `GIT_*` selectors, and a receipt is appended to `.git/omp-kit-align.jsonl`. The shared-checkout rule now points at it instead of a hand-run reset.
+
+### Changed
+
+- Reverted the scratch pressure reaping change (RECLAIM1, 2638ee8d) after it failed two Linux CI tests; it returns as a Linux-proven change.
+- Drain close-queue and stale-claims accept --project DIR to read the tracker from DIR/.beads/beads.db (refused with --db).
+
+### Fixed
+
+- Fleet restart copies held scratch out of reaper roots and pins each dirty repo on `refs/preserve/fleet-restart/` before any send. A preserve failure refuses the run. The shared index and worktree are not moved. [test]
+- Fleet restart never respawns a pane while a git process runs under it: panes with a running git child are deferred with reason to the next pass instead of risking a holder-less index.lock.
+
 ## [0.2.37] - 2026-10-13
 
 ### Changed
