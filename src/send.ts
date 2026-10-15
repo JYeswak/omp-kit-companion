@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
+import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 
 export const SEND_POLL_MS = 1500;
@@ -421,6 +422,20 @@ export async function proveSend(input: {
 	// sends to this pane queue behind one lock for the whole attempt,
 	// including deferred completion. A lock that outlives the bound is never
 	// acquired: UNDELIVERED with a recovery copy, no keys typed.
+	// SENDGATE1 (ompkit-send-payload-gate-6hk3): a destructive payload typed
+	// into a shell pane executes there, bypassing every command gate (the
+	// gate only sees the send). The cheap local match runs first so benign
+	// sends cost zero extra tmux calls; only a suspicious payload pays for
+	// the pane-type query, and only a shell pane is refused. The same text
+	// to an agent pane is prose and still passes.
+	const payloadHit = refuseShellPayload(input.message);
+	if (payloadHit) {
+		const paneCmd = runTmux(["display-message", "-p", "-t", paneTarget, "#{pane_current_command}"]);
+		if (paneCmd.code === 0 && paneRunsShell(paneCmd.out)) {
+			return { status: "ADMISSION_REFUSED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason, tmux_socket,
+				detail: `send payload refused by ${payloadHit.rule}: target pane runs a shell; nothing was sent` };
+		}
+	}
 	const lockAttempts = Math.max(1, Math.ceil((untilDeliveredMs > 0 ? untilDeliveredMs : deadlineMs) / pollMs));
 	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.session, input.pane), lockAttempts, pollMs, wait);
 	if (!releaseLock) {
