@@ -8,6 +8,8 @@ import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { type BarrierResult, type BarrierStateFile, planDelivery, type ProjectResult } from "../../skills/fleet-round/scripts/lib/barrier.ts";
+import { loadConfig } from "../../skills/fleet-round/scripts/lib/collect.ts";
 import { type CheckOptions, checkDag, checkFocus, checkFrontier, checkMission, checkPile, findMissions, metrics, spotCheck } from "../../skills/fleet-round/scripts/lib/checks.ts";
 import { identityDirName, parseSeats, parseTracker, type RawBundle, sanitizePaneKey, ShapeError } from "../../skills/fleet-round/scripts/lib/model.ts";
 import { CITATION, CLAIM_VALUE, DONE_CALLBACK, LABEL_LINE, MAX_LINE, matchLine, NO_EPIC, PATTERNS, ROUND_NUMBER, SEAT } from "../../skills/fleet-round/scripts/lib/patterns.ts";
@@ -262,6 +264,16 @@ test("planted: ready frontier outside the focus epics -> frontier FAIL", () => {
 	expect(frontier.findings.map(f => f.id)).toEqual(["demo-e2.2"]);
 	expect(checkFrontier(parseTracker(bundle(CLEAN, [])), options()).findings[0]!.kind).toBe("frontier-empty");
 	expect(checkFrontier(parseTracker(bundle(CLEAN, ["demo-e1.1"])), options({ focus: null })).status).toBe("UNKNOWN");
+});
+test("frontier-empty only fails when an open unblocked task exists", () => {
+	const readyButEmpty = checkFrontier(parseTracker(bundle(CLEAN, [])), options());
+	expect(readyButEmpty.status).toBe("FAIL");
+	expect(readyButEmpty.findings.map(f => f.kind)).toEqual(["frontier-empty"]);
+
+	const blockedOnly = CLEAN.map(spec => spec.id === "demo-e1.1" ? { ...spec, status: "blocked" } : spec);
+	const noClaimableWork = checkFrontier(parseTracker(bundle(blockedOnly, [])), options());
+	expect(noClaimableWork.status).toBe("PASS");
+	expect(noClaimableWork.findings).toEqual([]);
 });
 
 test("planted: focus naming a closed, missing or childless non-epic bead -> focus FAIL", () => {
@@ -632,6 +644,114 @@ test("barrier usage: missing barrier config, bad phase or round, missing state d
 		args[args.indexOf(bad[0]!) + 1] = bad[1]!;
 		expect(run(["barrier", "--config", configured, ...args]).code).toBe(2);
 	}
+});
+
+// ---- barrier delivery (ompkit-axpa): the timer wakes seats via omp-kit send -----------------------
+
+const CHIEF_SEAT = { session: "chief-sess", pane: "%1" };
+const DEMO_SEAT = { session: "demo-sess", pane: "%2" };
+const DIRECTORS = { demo: DEMO_SEAT };
+
+function deliveryProject(over: Partial<ProjectResult> & { project: string }): ProjectResult {
+	return { verdict: "ACCEPTED", reasons: [], message: null, reports: 0, cached: false, blocker: null, consecutive_misses: 0, escalate: false, ...over };
+}
+function deliveryResult(over: Partial<BarrierResult> & { projects: ProjectResult[] }): BarrierResult {
+	return { schema: "fleet-round.barrier/v1", round: 0, phase: "INSIGHT", report_phase: "insight", thread: "fleet-round-0", mail_project: FLEET_KEY, database: "db", opened_at: iso(T0), timebox_hours: 2, deadline: iso(DEADLINE), now: iso(NOW), state: "OPEN", mail: { available: true, reason: null, messages: 0, other_messages: 0 }, escalate: [], unavailable: [], ...over };
+}
+function deliveryState(notified: Record<string, string> = {}): BarrierStateFile {
+	return { schema: "fleet-round.barrier-state/v1", barriers: {}, validated: {}, notified };
+}
+const rejectedDemo = (cached: boolean): ProjectResult => deliveryProject({ project: "demo", verdict: "REJECTED", reasons: ["claim in_progress differs: line 1, json 3"], message: { id: 7, sender: "D", created_at: iso(T0 + 20 * MINUTE) }, reports: 1, cached, blocker: "rejected" });
+
+test("delivery: a fresh REJECTED wakes that project's director only, never the chief", () => {
+	const result = deliveryResult({ projects: [rejectedDemo(false), deliveryProject({ project: "kit" })] });
+	const got = planDelivery(result, deliveryState(), true, CHIEF_SEAT, DIRECTORS, null);
+	expect(got).toHaveLength(1);
+	expect(got[0]).toMatchObject({ key: "rejected:0:INSIGHT:demo:7", session: "demo-sess", pane: "%2" });
+	expect(got[0]!.text).toContain("report 7 REJECTED");
+	expect(got[0]!.text).toContain("Fix and resend to thread fleet-round-0");
+	expect(got.every(d => d.session !== "chief-sess")).toBe(true);
+});
+
+test("delivery: a rerun on unchanged state plans nothing (dedup via notified keys)", () => {
+	const result = deliveryResult({ state: "MET", projects: [deliveryProject({ project: "demo" }), deliveryProject({ project: "kit" })] });
+	const first = planDelivery(result, deliveryState(), true, CHIEF_SEAT, DIRECTORS, "md");
+	expect(first).toHaveLength(1);
+	const sent: Record<string, string> = {};
+	for (const d of first) sent[d.key] = iso(NOW);
+	expect(planDelivery(result, deliveryState(sent), true, CHIEF_SEAT, DIRECTORS, "md")).toEqual([]);
+});
+
+test("delivery: first-seen MET wakes the chief exactly once, with the barrier md path", () => {
+	const result = deliveryResult({ state: "MET", projects: [deliveryProject({ project: "demo" }), deliveryProject({ project: "kit" })] });
+	const md = join(workspace, "round-deliver", "barrier.md");
+	const got = planDelivery(result, deliveryState(), true, CHIEF_SEAT, DIRECTORS, md);
+	expect(got).toHaveLength(1);
+	expect(got[0]).toMatchObject({ key: "barrier:0:INSIGHT:MET", session: "chief-sess", pane: "%1" });
+	expect(got[0]!.text).toContain("MET");
+	expect(got[0]!.text).toContain(md);
+});
+
+test("delivery: deliver false plans nothing; OPEN plans nothing; cached REJECTED plans nothing", () => {
+	const fresh = deliveryResult({ projects: [rejectedDemo(false), deliveryProject({ project: "kit" })] });
+	expect(planDelivery(fresh, deliveryState(), false, CHIEF_SEAT, DIRECTORS, null)).toEqual([]);
+	const open = deliveryResult({ projects: [deliveryProject({ project: "demo" }), deliveryProject({ project: "kit" })] });
+	expect(planDelivery(open, deliveryState(), true, CHIEF_SEAT, DIRECTORS, null)).toEqual([]);
+	const seen = deliveryResult({ projects: [rejectedDemo(true), deliveryProject({ project: "kit" })] });
+	expect(planDelivery(seen, deliveryState(), true, CHIEF_SEAT, DIRECTORS, null)).toEqual([]);
+});
+
+test("delivery: a newly escalated project wakes the chief; seats without an address are skipped", () => {
+	const result = deliveryResult({ state: "MISSED", escalate: ["kit"], projects: [rejectedDemo(false), deliveryProject({ project: "kit", verdict: "MISSING", reasons: ["no insight report for round 0 in fleet-round-0"], blocker: "missing", consecutive_misses: 2, escalate: true })] });
+	const got = planDelivery(result, deliveryState(), true, CHIEF_SEAT, {}, null);
+	expect(got.map(d => d.key).sort()).toEqual(["barrier:0:INSIGHT:MISSED", "escalated:0:INSIGHT:kit"]);
+	expect(got.every(d => d.session === "chief-sess")).toBe(true);
+	expect(got.find(d => d.key.startsWith("escalated:"))!.text).toContain("ESCALATE");
+	const noChief = planDelivery(result, deliveryState(), true, null, {}, null);
+	expect(noChief).toEqual([]);
+});
+
+test("config: barrier deliver and project director parse, chief lives at top level; bad seats rejected", () => {
+	const base = { schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } }, barrier: { agent_mail_db: "db", mail_project: "k", hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } };
+	const good = loadConfig(JSON.stringify({ ...base, chief: { session: "c", pane: "%2" }, projects: { demo: { root: "/home/user/demo", director: { session: "s", pane: "%1" } } }, barrier: { ...base.barrier, deliver: true } }), "good");
+	expect(good.barrier).toMatchObject({ deliver: true });
+	expect(good.chief).toEqual({ session: "c", pane: "%2" });
+	expect(good.projects.demo?.director).toEqual({ session: "s", pane: "%1" });
+	const dflt = loadConfig(JSON.stringify(base), "dflt");
+	expect(dflt.barrier).toMatchObject({ deliver: false });
+	expect(dflt.chief).toBeNull();
+	expect(dflt.projects.demo?.director).toBeNull();
+	const badDeliver = JSON.stringify({ ...base, barrier: { ...base.barrier, deliver: "yes" } });
+	expect(() => loadConfig(badDeliver, "bad")).toThrow("barrier.deliver must be a boolean");
+	const nestedChief = JSON.stringify({ ...base, barrier: { ...base.barrier, chief: { session: "c", pane: "%2" } } });
+	expect(() => loadConfig(nestedChief, "bad")).toThrow("barrier.chief moved to top-level chief");
+	const badChief = JSON.stringify({ ...base, chief: { session: "", pane: "%2" } });
+	expect(() => loadConfig(badChief, "bad")).toThrow("chief must be {session, pane}");
+	const badDirector = JSON.stringify({ ...base, projects: { demo: { root: "/home/user/demo", director: { pane: "%1" } } } });
+	expect(() => loadConfig(badDirector, "bad")).toThrow("projects.demo.director must be {session, pane}");
+});
+
+function deliverCli(name: string, deliver: boolean): { code: number | null; out: string; dir: string } {
+	const db = mailDb(name, [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
+	const dir = roundDir(name);
+	const config = join(workspace, `${name}-config.json`);
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", chief: { session: "no-such-axpa", pane: "%999" }, projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { agent_mail_db: db, mail_project: FLEET_KEY, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 }, deliver } }));
+	const result = run(["barrier", "--config", config, "--round", "0", "--phase", "INSIGHT", "--opened-at", iso(T0), "--state", dir, "--now", iso(T0 + HOUR), ...raws().flatMap(spec => ["--raw", spec])]);
+	return { code: result.code, out: result.out, dir };
+}
+
+test("CLI barrier with deliver:false and a MET barrier sends nothing and exits 0", () => {
+	const result = deliverCli("deliver-off", false);
+	expect(result.code).toBe(0);
+	expect(result.out).toContain("MET");
+});
+
+test("CLI barrier with deliver:true and undeliverable seats fails loudly and records no notified keys", () => {
+	const result = deliverCli("deliver-loud", true);
+	expect(result.code).toBe(2);
+	expect(result.out).toContain("not proved");
+	const state = JSON.parse(readFileSync(join(result.dir, "barrier-state.json"), "utf8")) as BarrierStateFile;
+	expect(state.notified ?? {}).toEqual({});
 });
 
 // ---- MISSION: PROPOSED (decisions Q9) -----------------------------------------------------------

@@ -13,9 +13,10 @@
 // Exit: 0 PASS/ACCEPTED, 1 FAIL/REJECTED, 3 UNKNOWN/UNVERIFIED, 2 usage or unreadable input.
 // barrier: 0 MET, 1 MISSED, 3 any source unavailable (never MET on unknown), 4 OPEN, 2 usage.
 import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { barrierExit, barrierMarkdown, loadState, readThread, runBarrier, saveState, type Validation, writeAtomic } from "./lib/barrier.ts";
+import { barrierExit, barrierMarkdown, loadState, planDelivery, readThread, runBarrier, saveState, type Validation, writeAtomic } from "./lib/barrier.ts";
 import { type CheckOptions, type CheckResult, checkDag, checkFocus, checkFrontier, checkMission, checkPile, findMissions, metrics, overall, type Snapshot, spotCheck } from "./lib/checks.ts";
 import { BARRIER_PHASES, type BarrierPhase, collect, type Config, loadConfig } from "./lib/collect.ts";
+import { proveSend } from "../../../src/send.ts";
 import { HELD_STATUSES, isRecord, parseSeats, parseTracker, type RawBundle } from "./lib/model.ts";
 import { matchLine, ROUND_NUMBER } from "./lib/patterns.ts";
 import { loadMeasured, loadPredictionDoc, scoreAll } from "./lib/predictions.ts";
@@ -186,7 +187,7 @@ function validateWith(report: string, bundle: RawBundle, config: Config, options
 	return { ...verdict, report: checked };
 }
 
-function barrier(args: Map<string, string[]>, config: Config, configPath: string): number {
+async function barrier(args: Map<string, string[]>, config: Config, configPath: string): Promise<number> {
 	const settings = config.barrier;
 	if (settings === null) throw new Usage(`${configPath}: barrier needs a "barrier" section (agent_mail_db, mail_project, hours)`);
 	const roundText = need(args, "round");
@@ -229,11 +230,23 @@ function barrier(args: Map<string, string[]>, config: Config, configPath: string
 	const mdOut = one(args, "out-md");
 	if (jsonOut) writeAtomic(jsonOut, json);
 	if (mdOut) writeAtomic(mdOut, barrierMarkdown(result));
+	// ompkit-axpa: wake seats. Planned pure, sent here; each sent key lands in
+	// state.notified before the final save, so a rerun plans nothing new.
+	const directors: Record<string, { session: string; pane: string }> = {};
+	for (const [name, project] of Object.entries(config.projects)) if (project.director !== null) directors[name] = project.director;
+	const deliveries = planDelivery(result, state, settings.deliver, config.chief, directors, mdOut);
+	for (const delivery of deliveries) {
+		const sent = await proveSend({ session: delivery.session, pane: delivery.pane, message: delivery.text, dropDir: dir, noBeadReason: "fleet-round barrier wake-up, not a work dispatch" });
+		if (sent.status !== "OK" && sent.status !== "DELIVERED") throw new Error(`barrier delivery to ${delivery.session}:${delivery.pane} not proved (${sent.status}): ${sent.detail}; key ${delivery.key} stays unsent`);
+		(state.notified ??= {})[delivery.key] = result.now;
+		saveState(dir, state);
+	}
+	saveState(dir, state);
 	process.stdout.write(jsonOut || mdOut ? barrierMarkdown(result) : json);
 	return barrierExit(result);
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
 	const [command, ...rest] = argv;
 	const args = flags(rest);
 	const allowed = FLAGS[command ?? ""];
@@ -299,7 +312,7 @@ function main(argv: string[]): number {
 
 if (import.meta.main) {
 	try {
-		process.exitCode = main(process.argv.slice(2));
+		process.exitCode = await main(process.argv.slice(2));
 	} catch (error) {
 		console.error(`fleet-round: ${error instanceof Usage ? "" : "error: "}${(error as Error).message}`);
 		process.exitCode = 2;

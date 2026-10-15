@@ -93,12 +93,18 @@ export type BarrierResult = {
 	unavailable: string[];
 };
 
+/** A pane address a notification may be sent to. */
+export type DeliveryTarget = { session: string; pane: string };
+/** One planned notification: stable dedup key plus the send. */
+export type Delivery = { key: string; session: string; pane: string; text: string };
+
 export const STATE_SCHEMA = "fleet-round.barrier-state/v1";
 export const STATE_FILE = "barrier-state.json";
 type Outcome = { verdict: Verdict; blocker: string | null; message_id: number | null };
 type StoredBarrier = { round: number; phase: BarrierPhase; opened_at: string; deadline: string; updated_at: string; outcomes: Record<string, Outcome> };
 type StoredValidation = { project: string; status: "ACCEPTED" | "REJECTED"; reasons: string[]; validated_at: string };
-export type BarrierStateFile = { schema: typeof STATE_SCHEMA; barriers: Record<string, StoredBarrier>; validated: Record<string, StoredValidation> };
+/** notified: delivery dedup keys already sent (ompkit-axpa). Optional so pre-delivery state files still load; absent means nothing sent. */
+export type BarrierStateFile = { schema: typeof STATE_SCHEMA; barriers: Record<string, StoredBarrier>; validated: Record<string, StoredValidation>; notified?: Record<string, string> };
 
 export function loadState(dir: string): BarrierStateFile {
 	const path = join(dir, STATE_FILE);
@@ -237,6 +243,44 @@ export function runBarrier(input: BarrierInput, mail: MailRead, validate: (proje
 		escalate: results.filter(r => r.escalate).map(r => r.project),
 		unavailable,
 	};
+}
+
+/**
+ * Plan barrier wake-ups without sending them (ompkit-axpa). Pure: reads the
+ * result plus `state.notified`, returns one Delivery per message still owed.
+ * The runner sends each delivery (via omp-kit send) and records its key in
+ * `state.notified` before saving, so a repeated run on unchanged state plans
+ * nothing. `deliver` false plans nothing; OPEN plans nothing (no transition).
+ * A REJECTED verdict seen for the first time (`cached` false) wakes that
+ * project's director only, never the chief. A first-seen MET or MISSED state,
+ * or a project in `escalate` not yet notified for this round and phase, wakes
+ * the chief exactly once. Unknown-director or unknown-chief targets are
+ * skipped (no address to send to), never fanned out elsewhere.
+ */
+export function planDelivery(result: BarrierResult, state: BarrierStateFile, deliver: boolean, chief: DeliveryTarget | null, directors: Record<string, DeliveryTarget>, mdPath: string | null): Delivery[] {
+	if (!deliver) return [];
+	const sent = state.notified ?? {};
+	const out: Delivery[] = [];
+	const queue = (key: string, target: DeliveryTarget | null | undefined, text: string): void => {
+		if (!target || sent[key] !== undefined) return;
+		out.push({ key, session: target.session, pane: target.pane, text });
+	};
+	for (const r of result.projects) {
+		if (r.verdict === "REJECTED" && !r.cached && r.message !== null) {
+			queue(`rejected:${result.round}:${result.phase}:${r.project}:${r.message.id}`, directors[r.project], `fleet-round-${result.round} ${result.phase}: ${r.project} report ${r.message.id} REJECTED: ${r.reasons.join("; ")}. Fix and resend to thread fleet-round-${result.round}.`);
+		}
+	}
+	if (result.state === "MET" || result.state === "MISSED") {
+		queue(`barrier:${result.round}:${result.phase}:${result.state}`, chief, `fleet-round-${result.round} ${result.phase}: ${result.state} (${whereText(mdPath)}).`);
+	}
+	for (const project of result.escalate) {
+		queue(`escalated:${result.round}:${result.phase}:${project}`, chief, `fleet-round-${result.round} ${result.phase}: ${project} ESCALATE, blocked the same way twice running (${whereText(mdPath)}).`);
+	}
+	return out;
+}
+
+function whereText(mdPath: string | null): string {
+	return mdPath === null ? "no barrier md written" : `barrier md ${mdPath}`;
 }
 
 /** 0 MET, 1 MISSED, 3 any source unavailable (checked first: never MET on unknown), 4 OPEN. */

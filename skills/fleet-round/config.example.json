@@ -1,9 +1,11 @@
 {
   "schema": "fleet-round.config/v1",
+  "chief": { "session": "fleet-chief", "pane": "%1" },
   "projects": {
     "app": {
       "root": "~/src/app",
-      "identity_keys": ["~/src/app"]
+      "identity_keys": ["~/src/app"],
+      "director": { "session": "app-round", "pane": "%11" }
     },
     "kit": {
       "root": "~/src/kit-tracker",
@@ -23,6 +25,7 @@
   "barrier": {
     "agent_mail_db": "~/.local/share/mcp-agent-mail-rust-live/storage.sqlite3",
     "mail_project": "~/src/fleet",
-    "hours": { "INSIGHT": 2, "AGREE": 1, "SORT": 8 }
+    "hours": { "INSIGHT": 2, "AGREE": 1, "SORT": 8 },
+    "deliver": false
   }
 }

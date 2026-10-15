@@ -14,15 +14,18 @@ const BR_READ = ["--json", "--no-auto-import", "--no-auto-flush"];
 const SHOW_CHUNK = 200;
 const MAX_DOC_BYTES = 2 * 1024 * 1024;
 const MAX_IDENTITY_BYTES = 4096;
-/** root: the br tracker; repo: the git repo whose docs hold the mission (default root); doc_ref: the committed ref those docs are read at. */
-export type ProjectConfig = { root: string; repo: string; doc_ref: string; identity_keys: string[] };
+/** A pane address a notification may be sent to: tmux session plus pane id. */
+export type SeatConfig = { session: string; pane: string };
+/** root: the br tracker; repo: the git repo whose docs hold the mission (default root); doc_ref: the committed ref those docs are read at; director: the seat woken when this project's report is rejected (optional). */
+export type ProjectConfig = { root: string; repo: string; doc_ref: string; identity_keys: string[]; director: SeatConfig | null };
 /** Barrier phases and the report PHASE each one closes (round 0's execute phase is the sort). */
 export const BARRIER_PHASES = { INSIGHT: "insight", AGREE: "agree", SORT: "execute" } as const;
 export type BarrierPhase = keyof typeof BARRIER_PHASES;
-/** database: Agent Mail's SQLite store, read with readonly; mail_project: the Agent Mail project key holding thread fleet-round-<N>; hours: timebox per barrier phase. */
-export type BarrierConfig = { database: string; mail_project: string; hours: Record<BarrierPhase, number> };
+/** database: Agent Mail's SQLite store, read with readonly; mail_project: the Agent Mail project key holding thread fleet-round-<N>; hours: timebox per barrier phase; deliver: wake seats via omp-kit send (default false). */
+export type BarrierConfig = { database: string; mail_project: string; hours: Record<BarrierPhase, number>; deliver: boolean };
 export type Config = {
 	projects: Record<string, ProjectConfig>;
+	chief: SeatConfig | null;
 	tmux_sockets: string[];
 	identity_root: string;
 	agent_markers: string[];
@@ -48,7 +51,7 @@ export function loadConfig(text: string, where: string): Config {
 		const repo = value.repo === undefined ? root : typeof value.repo === "string" ? expand(value.repo) : null;
 		const ref = value.doc_ref === undefined ? "HEAD" : value.doc_ref;
 		if (repo === null || typeof ref !== "string" || ref === "") throw new Error(`${where}: projects.${name}.repo and doc_ref must be strings`);
-		projects[name] = { root, repo, doc_ref: ref, identity_keys: keys.map(expand) };
+		projects[name] = { root, repo, doc_ref: ref, identity_keys: keys.map(expand), director: seat(value.director, `${where}: projects.${name}.director`) };
 	}
 	const seats = isRecord(json.seats) ? json.seats : {};
 	const sockets = seats.tmux_sockets ?? [];
@@ -62,6 +65,7 @@ export function loadConfig(text: string, where: string): Config {
 	};
 	return {
 		projects,
+		chief: seat(json.chief, `${where}: chief`),
 		tmux_sockets: sockets.map(expand),
 		identity_root: expand(typeof seats.identity_root === "string" ? seats.identity_root : "~/.config/agent-mail/identity"),
 		agent_markers: markers,
@@ -81,7 +85,16 @@ function barrierConfig(value: unknown, where: string): BarrierConfig {
 		if (typeof h !== "number" || !(h > 0)) throw new Error(`${where}: barrier.hours.${phase} must be a positive number of hours`);
 		timeboxes[phase] = h;
 	}
-	return { database: expand(value.agent_mail_db), mail_project: expand(value.mail_project), hours: timeboxes };
+	const deliver = value.deliver === undefined ? false : value.deliver;
+	if (typeof deliver !== "boolean") throw new Error(`${where}: barrier.deliver must be a boolean`);
+	if (value.chief !== undefined) throw new Error(`${where}: barrier.chief moved to top-level chief`);
+	return { database: expand(value.agent_mail_db), mail_project: expand(value.mail_project), hours: timeboxes, deliver };
+}
+
+function seat(value: unknown, where: string): SeatConfig | null {
+	if (value === undefined) return null;
+	if (!isRecord(value) || typeof value.session !== "string" || value.session === "" || typeof value.pane !== "string" || value.pane === "") throw new Error(`${where} must be {session, pane} with non-empty strings`);
+	return { session: value.session, pane: value.pane };
 }
 
 function run(argv: string[], cwd: string): { ok: boolean; stdout: string; error: string } {
