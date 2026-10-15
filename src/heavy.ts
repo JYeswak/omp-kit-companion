@@ -73,6 +73,25 @@ function testFakeLoad(): number | undefined {
 	return Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * HEAVYDISK1 (ompkit-fp72.52): disk admission uses the fleet sbh floor.
+ * sbh contract: exit 0 healthy, 1 pressure, 2 error. sbhBin is a test seam
+ * (fixture PATH shadows the real binary); production always uses "sbh".
+ */
+export const HEAVY_DISK_NEED = "10G";
+export async function diskBlockReason(sbhBin = "sbh"): Promise<string | null> {
+	let code: number;
+	try {
+		const proc = Bun.spawn([sbhBin, "check", "--need", HEAVY_DISK_NEED], { stdout: "ignore", stderr: "ignore" });
+		code = await proc.exited;
+	} catch {
+		return "disk check unavailable: sbh binary not runnable";
+	}
+	if (code === 0) return null;
+	if (code === 1) return `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure`;
+	return `disk check unavailable: sbh check exited ${code}`;
+}
+
 
 
 function currentRepo(cwd: string): string {
@@ -267,6 +286,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					waitingJobs = [...waitingJobs, job];
 				}
 			reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
+				if (!reason) reason = await diskBlockReason();
 				if (!reason) {
 					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
 					writeJob(storage.jobs, running);

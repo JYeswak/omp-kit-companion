@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { machineLoadBlockReason } from "../../src/heavy.ts";
@@ -267,4 +267,58 @@ test("GITHUB_ACTIONS load exemption preserves slot admission", async () => {
 	expect(result.stderr).toContain("all 1 heavy-work slot is occupied");
 	expect(existsSync(marker)).toBe(false);
 	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual(["gha-slot-owner.json"]);
+});
+
+function fakeSbh(dir: string, code: number): string {
+	const bin = join(dir, "fakebin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nif [ "$1 $2 $3" = "check --need 10G" ]; then exit ${code}; fi\nexit 0\n`);
+	chmodSync(join(bin, "sbh"), 0o755);
+	return bin;
+}
+
+test("HEAVYDISK1 planted: no-wait defers on sbh pressure without starting", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const bin = fakeSbh(root, 1);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "disklow-nowait", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("disk low");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("HEAVYDISK1: healthy disk runs the command", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const bin = fakeSbh(root, 0);
+	const marker = join(root, "ran-marker");
+	const result = await invoke(root, ["heavy", "--label", "diskok", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+});
+
+test("HEAVYDISK1 planted: sbh error refuses explicitly without starting", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const bin = fakeSbh(root, 2);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "diskerr-nowait", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("disk check unavailable");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("HEAVYDISK1: waiting status names the disk reason", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 2 });
+	const bin = fakeSbh(root, 1);
+	const result = await invoke(root, ["heavy", "--label", "diskwait", "--", "sh", "-c", "exit 0"],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("heavy: queue position 1;");
+	expect(result.stderr).toContain("disk low");
 });
