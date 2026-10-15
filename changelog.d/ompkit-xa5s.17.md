@@ -1,1 +1,0 @@
-- Recognize declared local candidates for cleanly attributed dirty or unpushed work without requesting another save; undeclared work and edits made after the candidate still require saving.

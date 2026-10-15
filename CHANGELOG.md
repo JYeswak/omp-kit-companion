@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.39] - 2026-10-15
+
+### Changed
+
+- Recognize declared local candidates for cleanly attributed dirty or unpushed work without requesting another save; undeclared work and edits made after the candidate still require saving.
+
 ## [0.2.38] - 2026-10-15
 
 ### Added
