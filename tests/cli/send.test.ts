@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, isBareGoalDirective, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -537,4 +537,52 @@ test("TERN2.4 submitQueued disabled: IDLE provisioned seat still refused with ze
 	expect(r.marker).toBe("");
 	expect(calls).toBe(0);
 	void io;
+});
+
+// ---- GOALSEND form gate (ompkit-kdbz.2.4 AM55009/55134/c55136) ----
+test("GOALSEND classifier: bare /goal rejected, set/lifecycle/non-directive pass", () => {
+	for (const bare of ["/goal take the hill", "/goal", "  /goal oops", "/goal status now", "/goal\tTabbed"]) {
+		expect(isBareGoalDirective(bare)).toBe(true);
+	}
+	for (const ok of ["/goal set new objective", "/goal  set  spaced", "/goal pause", "/goal resume", "/goal drop",
+		"fix the /goal handling", "/goals are great", "plain text", ""]) {
+		expect(isBareGoalDirective(ok)).toBe(false);
+	}
+});
+
+test("TERN2.4 GOALSEND: bare /goal refused with zero sends and zero session reads", async () => {
+	for (const text of ["/goal take the hill", "/goal", "/goal status now"]) {
+		const f = ternFixture();
+		const r = await deliverToTernSeat({ seat: ternSeat, text, dropDir: dropDir(), io: f.io,
+			observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+		expect(r.status).toBe("REFUSED");
+		expect(r.code).toBe("GOAL_REQUIRES_SET_FORM");
+		expect(r.sends).toBe(0);
+		expect(f.taken.runs.length).toBe(0);
+		expect(f.taken.reads).toBe(0);
+	}
+});
+
+test("TERN2.4 GOALSEND: /goal set and lifecycle verbs pass the form gate", async () => {
+	const busy = ternFixture({ observe: { ...ternIdle, state: "BUSY", working: true, reason: "working" } });
+	for (const text of ["/goal set new objective", "/goal pause", "/goal resume", "/goal drop", "mention /goal mid-text"]) {
+		const r = await deliverToTernSeat({ seat: ternSeat, text, dropDir: dropDir(), io: busy.io,
+			observe: busy.observe, identify: busy.identify, pollMs: 1, deadlineMs: 10 });
+		expect(r.code).toBe("SEAT_BUSY");
+	}
+});
+
+test("GOALSEND proveSend: bare /goal refused before any exec call", async () => {
+	const { result, taken } = await send("/goal take the hill");
+	expect(result.status).toBe("ADMISSION_REFUSED");
+	expect(result.detail).toContain("GOAL_REQUIRES_SET_FORM");
+	expect(taken.sends).toBe(0);
+	expect(taken.captures).toBe(0);
+});
+
+test("GOALSEND proveSend: /goal set passes the form gate", async () => {
+	const { result, taken } = await send("/goal set new objective");
+	expect(result.detail ?? "").not.toContain("GOAL_REQUIRES_SET_FORM");
+	expect(taken.sends).toBe(1);
+	expect(result.status).toBe("OK");
 });

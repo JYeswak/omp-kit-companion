@@ -331,6 +331,24 @@ export async function completeDeferredSend(args: {
 }
 
 /**
+ * ompkit-kdbz.2.4 GOALSEND (AM55009/55134, corrected by 55136): classify a
+ * leading `/goal` slash control. A bare `/goal OBJECTIVE` is a provable
+ * no-op into an active goal (plain /goal refuses while a goal is active;
+ * only `/goal set` replaces it), so the send envelope must never emit one.
+ * Known lifecycle verbs (set/pause/resume/drop) pass this gate; adoption
+ * proof (a mode_change after the attempt cursor in the bound journal) is a
+ * separate live-leg criterion, not decided here.
+ */
+export function isBareGoalDirective(text: string): boolean {
+	const trimmed = text.trimStart();
+	if (!trimmed.startsWith("/goal")) return false;
+	const after = trimmed.slice("/goal".length);
+	if (after !== "" && !/^\s/.test(after)) return false;
+	const verb = after.trimStart().split(/\s+/, 1)[0] ?? "";
+	return verb !== "set" && verb !== "pause" && verb !== "resume" && verb !== "drop";
+}
+
+/**
  * Send via ntm and prove the marker landed in the target pane's capture.
  * A work dispatch citing no bead is refused before anything reaches tmux
  * unless `noBeadReason` records the exception.
@@ -368,6 +386,14 @@ export async function proveSend(input: {
 				detail: `admission refused the send: ${decision.reason}; nothing was sent` };
 		}
 	}
+	// ompkit-kdbz.2.4 GOALSEND: a bare /goal directive is a provable no-op
+	// into an active goal. Refuse before any exec call; goal delivery uses
+	// `/goal set BODY`.
+	if (isBareGoalDirective(input.message)) {
+		return { status: "ADMISSION_REFUSED", marker: "", sends: 0, drop_path: null, bead_ids: [], no_bead_reason: null, tmux_socket: null,
+			detail: `GOAL_REQUIRES_SET_FORM: bare /goal directive refused: goal delivery requires /goal set BODY; nothing was sent` };
+	}
+
 	const exec = input.exec ?? defaultExec();
 	const env = input.env ?? process.env;
 	const selection = resolveTmuxSocket(env, (socket, probeEnv) =>
@@ -665,6 +691,10 @@ export async function deliverToTernSeat(input: {
 	const fail = (code: string, detail: string): TernDeliverResult =>
 		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code });
 	const gate = input.gate ?? {};
+	// ompkit-kdbz.2.4 GOALSEND: bare /goal text is refused before any seat
+	// observation or send; goal delivery uses `/goal set BODY`.
+	if (isBareGoalDirective(input.text)) return fail("GOAL_REQUIRES_SET_FORM", "bare /goal directive refused: goal delivery requires /goal set BODY; zero sends");
+
 	if (gate.paused === true) return fail("GATE_PAUSED", "seat is paused; zero sends");
 	if (gate.custodyDisabled === true) return fail("GATE_CUSTODY_DISABLED", "seat custody disabled; zero sends");
 	if (gate.pullEnabled === false) return fail("GATE_PULL_DISABLED", "pullEnabled is false; zero sends");
