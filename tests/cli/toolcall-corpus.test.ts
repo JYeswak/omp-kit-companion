@@ -220,9 +220,16 @@ test("bash subset matches the producer baseline on identical roots", () => {
 	expect(run.status).toBe(0);
 	const mine = rowsOf(out).filter(row => field(row, "tool") === "bash").length;
 	expect(mine).toBe(2);
-	const baseline = spawnSync("omp-kit", ["corpus", "--sessions", root, "--json"], { encoding: "utf8", timeout: 120_000 });
-	expect(baseline.status).toBe(0);
-	const report: unknown = JSON.parse(baseline.stdout);
-	const events = field(field(field(report, "data"), "corpus"), "events");
+	// Use the exact producer delegated to by the packaged CLI, not an ambient installed kit.
+	const baseline = spawnSync(process.execPath, [
+		join(repoRoot, "scripts", "ttsr-harness.ts"), "--corpus", "--sessions-root", root,
+		"--out", join(scratch, `baseline-${id}.tsv`),
+	], { cwd: repoRoot, encoding: "utf8", timeout: 120_000 });
+	expect(baseline.status, baseline.stderr || baseline.error?.message).toBe(0);
+	const summary = baseline.stdout.split("\n").find(line => line.startsWith("corpus: files="));
+	if (!summary) throw new Error(`Corpus producer printed no summary: ${baseline.stdout}`);
+	const eventsJson = summary.split(" events=")[1]?.split(" secs=")[0];
+	if (!eventsJson) throw new Error(`Corpus producer summary has no event counts: ${summary}`);
+	const events: unknown = JSON.parse(eventsJson);
 	expect(field(events, "bash")).toBe(mine);
 });
