@@ -33,13 +33,17 @@ new_repo() {
 	printf '%s' "$dir"
 }
 
-# 1. absent hook: dispatcher created, member runs (id-less refused)
+# 1. absent hook: dispatcher created, member runs (id-less refused). An empty
+#    tracker file makes the refusal hermetic: without BEADS_DB the hook finds
+#    whatever tracker the caller's cwd resolves (none in an exported tree).
+EMPTY_DB="$TMP/empty.db"
+: > "$EMPTY_DB"
 A=$(new_repo absent)
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "absent-install-rc"
 MSG="$TMP/msg-a"
 printf 'fix widgets with no identity\n' > "$MSG"
-sh "$A/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
+BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
 ok "$?" "4" "absent-chain-refuses"
 
 # 2. plain bash hook: moved aside, both run (marker written, bead enforced)
@@ -50,7 +54,7 @@ chmod +x "$B/.git/hooks/commit-msg"
 sh "$INSTALLER" "$B" > /dev/null 2>&1
 ok "$?" "0" "plain-install-rc"
 printf 'fix widgets with no identity\n' > "$MSG"
-sh "$B/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
+BEADS_DB="$EMPTY_DB" sh "$B/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
 ok "$?" "4" "plain-chain-refuses"
 grep -q "MARKED" "$MSG"
 ok "$?" "0" "plain-bespoke-also-ran"
