@@ -256,12 +256,12 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		repo: currentRepo(cwd), cwd, agent: process.env.AGENT_NAME ?? process.env.OMP_AGENT_NAME ?? "unknown",
 		tmux_pane: process.env.TMUX_PANE ?? "", argv, state: "queued", queued_at: queuedAt,
 	};
-	// HEAVYCI1: observe the disk before queueing, whatever load and slots say,
-	// so a missing observer fails now instead of at the deadline. The first
-	// admission check reuses this same-moment verdict; later checks re-observe,
-	// so a long wait never admits on a stale reading.
-	let firstDisk: DiskVerdict | undefined = await diskVerdict();
-	if (firstDisk.kind === "unavailable") return prerequisiteMissing(firstDisk.text);
+	// HEAVYCI1: a missing observer fails now, before queueing or waiting on the
+	// state mutex, whatever load and slots say. This reading only decides that;
+	// admission below observes the disk again inside the mutex, because a
+	// reading taken before a lock wait can be stale (QuietBadger AM57798).
+	const precheck = await diskVerdict();
+	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.text);
 	const deadline = Date.now() + config.max_wait_s * 1000;
 	let nextStatus = 0;
 	let signal: HeavySignal | null = null;
@@ -305,10 +305,8 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					waitingJobs = [...waitingJobs, job];
 				}
 				reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
-				const observed = firstDisk;
-				firstDisk = undefined;
 				if (!reason) {
-					const disk = observed ?? await diskVerdict();
+					const disk = await diskVerdict();
 					if (disk.kind === "unavailable") {
 						removeJob(storage.jobs, id);
 						rowCreated = false;

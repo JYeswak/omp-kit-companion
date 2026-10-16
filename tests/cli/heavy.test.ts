@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
@@ -389,6 +389,34 @@ test("HEAVYCI1: a queued job re-observes the disk, so pressure that appears whil
 	// Re-observed: the pre-queue reading (call 1) was not reused after the wait.
 	expect(Number(readFileSync(join(root, "sbh-calls"), "utf8").trim())).toBeGreaterThanOrEqual(2);
 	expect(existsSync(marker)).toBe(false);
+}, 40_000);
+
+test("HEAVYCI1: admission observes the disk after acquiring the state mutex, not before the lock wait (QuietBadger AM57798)", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 4 });
+	const lock = join(root, "state", "omp-kit", "load", "mutex");
+	mkdirSync(lock, { recursive: true, mode: 0o700 });
+	const ps = Bun.spawn(["ps", "-p", String(process.pid), "-o", "lstart="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+	const processStart = (await new Response(ps.stdout).text()).trim();
+	writeFileSync(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, process_start: processStart }), { mode: 0o600 });
+	const bin = countingSbh(root, 1);
+	const calls = join(root, "sbh-calls");
+	const marker = join(root, "should-not-run");
+	const run = invoke(root, ["heavy", "--label", "lock-drift", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	// Release the live mutex once the pre-queue observation (healthy) has
+	// happened; every later observation reports pressure. The CLI is a separate
+	// process with no event to await, so this polls its observable side effect,
+	// as waitForLedgerState does above.
+	const waitStart = Date.now();
+	while (!existsSync(calls) && Date.now() - waitStart < 15_000) await Bun.sleep(50);
+	expect(existsSync(calls)).toBe(true);
+	unlinkSync(join(lock, "owner.json"));
+	rmdirSync(lock);
+	const result = await run;
+	expect(result.code).toBe(75);
+	expect(existsSync(marker)).toBe(false);
+	expect(Number(readFileSync(calls, "utf8").trim())).toBeGreaterThanOrEqual(2);
 }, 40_000);
 
 test("HEAVYDISK1: waiting status names the disk reason", async () => {
