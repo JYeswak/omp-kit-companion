@@ -484,3 +484,11 @@ kit-no-owner-homework	quiet	text	-	-	CLOSED bead=ompkit-f2e4 (non-author verify+
 kit-no-owner-homework	quiet	text	-	-	fp72.9 blocked+needs-director: fix=director picks A/B/C; ruling requested.	quiet: genuine authority gap with tried options
 kit-no-owner-homework	quiet	text	-	-	Sent the weekly status report to Josh.	quiet boundary: to-Josh without decision verb
 kit-no-owner-homework	quiet	text	-	-	The $2k budget increase is the owner's call, not mine.	quiet: money owner's-call vetoed by amount guard
+kit-rea-heavy-summary	fire	text	-	-	Setting analysis_timeout_ms: 60000 to speed up the app.asar analysis.	fp72.8 fire: shrinking timeout below the 300000 default
+kit-rea-heavy-summary	fire	text	-	-	Called with analysis_timeout_ms: 30000 like the MCP server default.	fp72.8 fire: 30 s confuses server default with analysis default
+kit-rea-heavy-summary	fire	text	-	-	Lowering max_heap_mb: 512 since the target looks small.	fp72.8 fire: shrinking heap below the 1024 default
+kit-rea-heavy-summary	fire	text	-	-	Hit resource_constraint, retrying the same full call again.	fp72.8 fire: retry without summary
+kit-rea-heavy-summary	quiet	text	-	-	Analyzing with detail: summary, then reading the evidence bundle.	fp72.8 quiet: summary-first call
+kit-rea-heavy-summary	quiet	text	-	-	Raised analysis_timeout_ms: 600000 for the 280 MB target.	fp72.8 quiet: timeout above default
+kit-rea-heavy-summary	quiet	text	-	-	Kept max_heap_mb: 2048 and waited the extra two minutes.	fp72.8 quiet: heap above default, waiting
+kit-rea-heavy-summary	quiet	text	-	-	Analyzing app.asar with defaults and reading the returned evidence.	fp72.8 quiet: defaults apply, no shrinking
