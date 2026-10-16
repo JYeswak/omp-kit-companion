@@ -129,4 +129,27 @@ describe("fleet guard main-only git checks", () => {
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("amend");
 	});
+
+	test("structured argv forms refuse amend and respect values without shell quoting", async () => {
+		const argv = (...words: string[]) => ({ toolName: "bash", arguments: words });
+		for (const words of [
+			["git", "commit", "--amend"],
+			["git", "commit", "--amend", "--", "some/path"],
+			["GIT_DIR=x", "git", "-C", "sub", "commit", "--amend"],
+		]) {
+			const result = check(argv(...words), context);
+			expect(result?.block, words.join(" ")).toBe(true);
+			expect(result?.reason, words.join(" ")).toContain("amend");
+		}
+		for (const words of [
+			["git", "commit", "-m", "--amend"],
+			["git", "commit", "-m", "msg", "--", "--amend"],
+			["git", "commit", "--author", "x", "-m", "msg"],
+		]) {
+			expect(check(argv(...words), context), words.join(" ")).toBeUndefined();
+		}
+		const entry = await handleToolCall(argv("git", "commit", "--amend"), context);
+		expect(entry?.block).toBe(true);
+		expect(entry?.reason).toContain("amend");
+	});
 });
