@@ -1,1 +1,0 @@
-- After compaction, the flywheel guard blocks edit, write, br update/close/comments and git commit/push until it observes a successful read of the named AGENTS.md and a br show of the session's in_progress bead (or an empty br list); gate errors block.
