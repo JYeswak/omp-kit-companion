@@ -143,26 +143,72 @@ test("planted: ci status is wired through the documented grammar", () => {
 	expect(ci?.example).toContain("ci status");
 });
 
-test("ci status reads only the cache file", () => {
+function runCiStatus(cache: CiCacheFile, json: boolean) {
 	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-status-"));
 	roots.push(home);
 	const state = join(home, "state", "omp-kit");
 	mkdirSync(state, { recursive: true });
+	const before = JSON.stringify(cache);
+	writeFileSync(join(state, CACHE_NAME), before);
+	const args = [process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "ci", "status"];
+	if (json) args.push("--json");
+	const child = Bun.spawnSync(args, {
+		cwd: home, env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "state"), OMP_KIT_GITHUB_API: "http://127.0.0.1:1" },
+		stdout: "pipe", stderr: "pipe",
+	});
+	return { home, state, before, child };
+}
+
+test("ci status reads only a fresh cache file", () => {
 	const stamped = new Date(Date.now()).toISOString();
 	const cache: CiCacheFile = { version: 1, repos: { "o/r": { etag: null, fetched_at: stamped,
 		source: "poll:200", backoff_until_ms: null,
 		runs: [{ id: 7, name: "push", branch: "main", sha: "abc", status: "completed", conclusion: "success",
 			created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T01:00:00Z",
 			fetched_at: stamped, source: "poll" }] } } };
-	const before = JSON.stringify(cache);
-	writeFileSync(join(state, CACHE_NAME), before);
-	const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "ci", "status", "--json"], {
-		cwd: home, env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, "state"), OMP_KIT_GITHUB_API: "http://127.0.0.1:1" },
-		stdout: "pipe", stderr: "pipe",
-	});
+	const { state, before, child } = runCiStatus(cache, true);
 	expect(child.exitCode).toBe(0);
 	const envelope = JSON.parse(child.stdout.toString());
 	expect(envelope.data.overall).toBe("OK");
 	expect(envelope.data.repos["o/r"]?.runs[0]).toMatchObject({ id: 7, stale: false });
 	expect(readFileSync(join(state, CACHE_NAME), "utf8")).toBe(before);
+});
+
+test("all-stale ci status is unavailable and exits nonzero", () => {
+	const nowMs = Date.now();
+	const staleAt = new Date(nowMs - STALE_AFTER_MS - 1).toISOString();
+	const cache: CiCacheFile = { version: 1, repos: { "o/stale": { etag: null,
+		fetched_at: staleAt, last_checked_at: staleAt, source: "backoff:403",
+		backoff_until_ms: nowMs + 60_000, backoff_reason: "RATE_LIMIT", runs: [] } } };
+	const { child } = runCiStatus(cache, true);
+	const envelope = JSON.parse(child.stdout.toString());
+	expect(child.exitCode).toBe(3);
+	expect(envelope.data.overall).toBe("UNAVAILABLE");
+	expect(envelope.data.repos["o/stale"]).toMatchObject({ status: "UNAVAILABLE", stale: true,
+		poller_state: "BACKOFF", backoff_reason: "RATE_LIMIT", backoff_until_ms: nowMs + 60_000 });
+	expect(envelope.data.repos["o/stale"]?.age_ms).toBeGreaterThan(STALE_AFTER_MS);
+});
+
+test("mixed fresh and stale ci status names the stale repo in JSON and human output", () => {
+	const nowMs = Date.now();
+	const freshAt = new Date(nowMs).toISOString();
+	const staleAt = new Date(nowMs - STALE_AFTER_MS - 1).toISOString();
+	const cache: CiCacheFile = { version: 1, repos: {
+		"o/fresh": { etag: null, fetched_at: freshAt, last_checked_at: freshAt, source: "poll:200",
+			backoff_until_ms: null, backoff_reason: null, runs: [] },
+		"o/stale": { etag: null, fetched_at: staleAt, last_checked_at: staleAt, source: "backoff:403",
+			backoff_until_ms: nowMs + 60_000, backoff_reason: "RATE_LIMIT", runs: [] },
+	} };
+	const json = runCiStatus(cache, true).child;
+	const human = runCiStatus(cache, false).child;
+	const data = JSON.parse(json.stdout.toString()).data;
+	const humanText = human.stdout.toString();
+	expect(json.exitCode).toBe(3);
+	expect(human.exitCode).toBe(3);
+	expect(data.overall).toBe("UNAVAILABLE");
+	expect(data.repos["o/fresh"]).toMatchObject({ status: "OK", stale: false });
+	expect(data.repos["o/stale"]).toMatchObject({ status: "UNAVAILABLE", stale: true });
+	expect(humanText).toContain("UNAVAILABLE");
+	expect(humanText).toContain("o/fresh");
+	expect(humanText).toContain("o/stale");
 });
