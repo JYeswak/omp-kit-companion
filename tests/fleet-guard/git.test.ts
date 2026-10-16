@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
@@ -8,6 +8,26 @@ const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-git-"));
 const repo = join(scratch, "repo");
 mkdirSync(join(repo, ".git"), { recursive: true });
+writeFileSync(join(repo, "ownA.txt"), "owned bytes");
+writeFileSync(join(repo, "foreignB.txt"), "peer bytes");
+writeFileSync(join(repo, "receipt.txt"), "receipt bytes");
+
+function snapshotTree(root: string): string[] {
+	const entries: string[] = [];
+	const walk = (directory: string, prefix: string): void => {
+		for (const name of readdirSync(directory)) {
+			const relative = prefix ? `${prefix}/${name}` : name;
+			if (statSync(join(directory, name)).isDirectory()) {
+				entries.push(`${relative}/`);
+				walk(join(directory, name), relative);
+			} else {
+				entries.push(`${relative}:${readFileSync(join(directory, name)).toString()}`);
+			}
+		}
+	};
+	walk(root, "");
+	return entries.sort();
+}
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const event = (command: string) => ({ toolName: "bash", arguments: { command } });
@@ -48,6 +68,7 @@ describe("fleet guard main-only git checks", () => {
 	});
 
 	test("refuses unscoped git commit --amend in every wrapper form", () => {
+		const before = snapshotTree(repo);
 		for (const command of [
 			"git commit --amend --no-edit",
 			"git commit --amend",
@@ -63,6 +84,7 @@ describe("fleet guard main-only git checks", () => {
 			expect(result?.block, command).toBe(true);
 			expect(result?.reason, command).toContain("amend");
 		}
+		expect(snapshotTree(repo)).toEqual(before);
 	});
 
 	test("allows ordinary scoped commits and quiet quoted prose", () => {
