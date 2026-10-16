@@ -82,9 +82,10 @@ while IFS= read -r file; do
 		fail "UNRUN: tracked file missing from worktree: $file (scan incomplete)"
 	fi
 	scanned=$((scanned + 1))
+	# A tracked file present but unreadable ends the run incomplete for the
+	# same reason: unscanned bytes are not clean bytes (rz5.106.7).
 	if [ ! -r "$file" ]; then
-		printf 'unreadable: %s\n' "$file" >> "$TMP_FINDINGS"
-		continue
+		fail "UNRUN: tracked file unreadable: $file (scan incomplete)"
 	fi
 	# Absolute per-user home roots are refused; $HOME, ~ and shared-system paths pass.
 	scan home-path '/Users/[^ /:]+|/home/[^ /:]+' "$file" '^[0-9]+:/Users/Shared$'

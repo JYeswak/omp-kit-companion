@@ -84,18 +84,19 @@ if grep -q "secret: blob.bin:" "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/
 else
 	fail=$((fail + 1)); printf 'FAIL secret-in-binary-reported: out<<<%s>>>\n' "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
 fi
-# rz5.106.7: an unreadable tracked file fails closed instead of being skipped.
+# rz5.106.7: an unreadable tracked file ends the run incomplete (UNRUN, exit
+# 2): unscanned bytes are not clean bytes.
 mkfixture
 printf 'nothing secret\n' > "$TMP/fixture/locked.txt"
 git -C "$TMP/fixture" add locked.txt
 chmod 000 "$TMP/fixture/locked.txt"
-expect_fail "unreadable-fails-closed"
-if grep -q "unreadable: locked.txt" "$TMP/out"; then
+rc=0; sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+chmod 600 "$TMP/fixture/locked.txt"
+if [ "$rc" = "2" ] && grep -q "UNRUN" "$TMP/out" && grep -q "locked.txt" "$TMP/out" && ! grep -q 'publishability: OK' "$TMP/out"; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL unreadable-reported: out<<<%s>>>\n' "$(cat "$TMP/out")"
+	fail=$((fail + 1)); printf 'FAIL unreadable-unrun: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
 fi
-chmod 600 "$TMP/fixture/locked.txt"
 
 # 2. planted absolute home path is refused; the same path under scratch is ignored
 mkfixture
