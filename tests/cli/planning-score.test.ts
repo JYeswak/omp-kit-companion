@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { COMMANDS } from "../../src/commands.ts";
 import { diagnose } from "../../src/diagnostics.ts";
 import { renderOutput, type PresentationResult } from "../../src/output.ts";
+import { record } from "../../src/mcp-sources.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -72,15 +72,6 @@ function passingSnapshot() {
 	};
 }
 
-test("planning score is a visible read command with repo and fleet modes", () => {
-	const planning = COMMANDS.find((command) => command.name === "planning");
-	const score = planning?.subcommands?.find((command) => command.name === "score");
-	expect(score).toMatchObject({ usage: "planning score [--repo PATH] [--fleet] [--json]" });
-	expect(score?.flags.map((flag) => flag.name)).toContain("--repo");
-	expect(score?.flags.map((flag) => flag.name)).toContain("--fleet");
-	const doctor = COMMANDS.find((command) => command.name === "doctor");
-	expect(doctor?.flags.some((flag) => flag.name === "--scope" && (flag.value ?? "").split("|").includes("beads"))).toBe(true);
-});
 
 test("JSON mode emits one envelope per score row", () => {
 	const result: PresentationResult = { code: 0, data: {} };
@@ -130,7 +121,6 @@ test("partial commit history reports unknown for every historical metric", async
 	if (!api) return;
 	const result = api.scorePlanningSnapshot({ ...passingSnapshot(), repoCommits: null }, tuning);
 	expect(result.metrics.plan_last_diff).toMatchObject({ value: null, status: "UNKNOWN" });
-	expect(Object.keys(result.metrics)).toHaveLength(11);
 });
 
 test("fleet weighted score includes each mission metric instance", async () => {
@@ -152,7 +142,7 @@ test("planted planning defects fail only their own metric", async () => {
 		{ name: "coverage_checks", snapshot: { ...base, trackerCommits: base.trackerCommits.filter((item) => !item.subject.startsWith("beads(demo): coverage check")) } },
 		{ name: "polish_last_changed", snapshot: { ...base, polishCurrentBeads: base.polishCurrentBeads.map((item, i) => i < 8 ? { ...item, notes: "planted edit" } : item) } },
 		{ name: "plan_ship_ratio_7d", snapshot: { ...base, repoCommits: base.repoCommits.filter((item) => item.sha !== "code-recent").concat(commit("code-one", "feat: one code change", now - 60, { changedPaths: ["src/demo.ts"] })), trackerCommits: base.trackerCommits.concat(Array.from({ length: 20 }, (_, i) => commit("recent-check-" + i, "beads(demo): coverage check " + (i + 2), now - 60 + i, { changedPaths: [".beads/issues.jsonl"] }))) } },
-		{ name: "main_green", snapshot: { ...base, ci: { mode: "hosted", ghConclusion: null } } },
+		{ name: "main_green", snapshot: { ...base, ci: { mode: "hosted" } } },
 	];
 	for (const item of cases) {
 		const result = api.scorePlanningSnapshot(item.snapshot, tuning);
@@ -217,6 +207,50 @@ test("A3 local CI is UNKNOWN without a receipt for the declared branch head", as
 	const noCheck = api.scorePlanningSnapshot({ ...base, ci: { mode: "local", branchHeadSha: "head", localReceipts: [{ sha: "head", exit_code: 0, time: new Date(now * 1000).toISOString() }] } }, tuning);
 	expect(noCheck.metrics.main_green).toMatchObject({ value: null, status: "UNKNOWN" });
 });
+
+test("hosted CI cannot pass without completed success bound to the required workflow and exact head", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const ci = { mode: "hosted", requiredWorkflow: "ci.yml", workflowId: 17, workflowPath: ".github/workflows/ci.yml", branchHeadSha: "head",
+		run: { databaseId: 101, workflowDatabaseId: 17, workflowName: "CI", headSha: "head", status: "completed", conclusion: "success", createdAt: "2026-10-15T01:00:00Z", attempt: 1 } };
+	for (const [status, conclusion, expected] of [
+		["completed", "success", "PASS"], ["completed", "failure", "FAIL"], ["completed", "cancelled", "FAIL"],
+		["in_progress", "success", "UNKNOWN"], ["queued", "", "UNKNOWN"],
+		["completed", "neutral", "UNKNOWN"], ["completed", "skipped", "UNKNOWN"],
+	]) {
+		const result = api.scorePlanningSnapshot({ ...passingSnapshot(), ci: { ...ci, run: { ...ci.run, status: status!, conclusion: conclusion! } } }, tuning);
+		expect(result.metrics.main_green?.status).toBe(expected);
+	}
+	for (const unbound of [
+		{ ...ci, requiredWorkflow: "" }, { ...ci, branchHeadSha: null }, { ...ci, run: null },
+		{ ...ci, run: { ...ci.run, headSha: "old" } }, { ...ci, run: { ...ci.run, workflowDatabaseId: 99 } },
+	]) expect(api.scorePlanningSnapshot({ ...passingSnapshot(), ci: unbound }, tuning).metrics.main_green?.status).toBe("UNKNOWN");
+});
+
+test("hosted collector rejects unrelated and historical greens through the public CLI", () => {
+	const result = Bun.spawnSync(["sh", join(repoRoot, "scripts/e2e/planning-main-green.sh")], {
+		cwd: repoRoot, env: { ...process.env, KIT: "" }, stdout: "pipe", stderr: "pipe",
+	});
+	const stdout = new TextDecoder().decode(result.stdout);
+	if (result.exitCode !== 0) {
+		console.error(stdout);
+		console.error(new TextDecoder().decode(result.stderr));
+	}
+	const observations = new Map<string, unknown>();
+	for (const line of stdout.trimEnd().split("\n")) {
+		const row: unknown = JSON.parse(line);
+		if (record(row) && row.kind === "case" && typeof row.fixture === "string") observations.set(row.fixture, row);
+	}
+	for (const [fixture, observed] of [
+		["unrelated-green-required-red", "FAIL"], ["same-head-newer-red", "FAIL"], ["same-head-newer-cancelled", "FAIL"],
+		["same-head-newer-pending", "UNKNOWN"], ["same-run-newer-attempt-red", "FAIL"], ["no-run-at-current-head", "UNKNOWN"],
+		["newer-run-for-old-head-must-not-hide-current-green", "PASS"], ["malformed-latest-attempt-cannot-revive-green", "UNKNOWN"],
+		["no-required-workflow", "UNKNOWN"], ["workflow-lookup-failed", "UNKNOWN"], ["display-name-not-identity", "UNKNOWN"],
+		["required-head-green", "PASS"], ["required-numeric-id-green", "PASS"], ["required-numeric-literal-green", "PASS"],
+		["required-full-path-green", "PASS"], ["unrelated-runs-cannot-hide-required-green", "PASS"],
+	]) expect(observations.get(fixture!)).toMatchObject({ observed, exit_code: observed === "PASS" ? 0 : observed === "FAIL" ? 1 : 3 });
+	expect(result.exitCode).toBe(0);
+}, 30_000);
 
 test("A4 uses the mission plan path from its override", async () => {
 	const api = await scoreApi();

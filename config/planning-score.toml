@@ -35,6 +35,9 @@ main_green = 1.0
 [ci]
 mode = "hosted"
 branch = "main"
+# Workflow id or YAML filename/path, never its display name. The configured
+# local Git branch is resolved exactly; an unpublished head without a run is UNKNOWN.
+required_workflow = "ci.yml"
 
 [fleet]
 repos = [

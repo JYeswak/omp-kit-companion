@@ -15,12 +15,25 @@ export type PlanningCommit = {
 	planDiffRatio?: number | null;
 };
 export type LocalCheckReceipt = { sha?: unknown; exit_code?: unknown; time?: unknown };
+type PlanningHostedRun = {
+	databaseId: number;
+	workflowDatabaseId: number;
+	workflowName: string;
+	headSha: string;
+	status: string;
+	conclusion: string;
+	createdAt: string;
+	attempt: number;
+};
 export type PlanningCiEvidence = {
 	mode?: string;
 	check?: string;
 	configurationError?: string;
 	branchHeadSha?: string | null;
-	ghConclusion?: string | null;
+	requiredWorkflow?: string;
+	workflowId?: number;
+	workflowPath?: string;
+	run?: PlanningHostedRun | null;
 	localReceipts?: readonly LocalCheckReceipt[] | null;
 };
 export type PlanningScoreSnapshot = {
@@ -81,6 +94,7 @@ const CODE_EXTENSIONS = new Set([".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp"
 
 function stringValue(value: unknown): string | null { return typeof value === "string" ? value : null; }
 function numberValue(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
+function positiveInteger(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
 function safePathStat(path: string): "missing" | "file" | "directory" | "unsafe" {
 	try {
 		const stat = lstatSync(path);
@@ -214,10 +228,18 @@ function localMainGreen(ci: PlanningCiEvidence): CiVerdict {
 	return { value: green, status: green ? "PASS" : "FAIL", evidence: { mode: "local", ...context, exit_code: latest.receipt.exit_code, receipt_time: latest.receipt.time } };
 }
 function hostedMainGreen(ci: PlanningCiEvidence): CiVerdict {
-	if (!ci.ghConclusion) return mainGreenUnknown("hosted", "no hosted CI conclusion available");
-	if (ci.ghConclusion === "success") return { value: true, status: "PASS", evidence: { mode: "hosted", conclusion: ci.ghConclusion } };
-	if (["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(ci.ghConclusion)) return { value: false, status: "FAIL", evidence: { mode: "hosted", conclusion: ci.ghConclusion } };
-	return mainGreenUnknown("hosted", "hosted CI conclusion is not final", { conclusion: ci.ghConclusion });
+	const context = { required_workflow: ci.requiredWorkflow, workflow_id: ci.workflowId, workflow_path: ci.workflowPath, branch_head_sha: ci.branchHeadSha };
+	if (ci.configurationError) return mainGreenUnknown("hosted", ci.configurationError, context);
+	if (!ci.requiredWorkflow || !positiveInteger(ci.workflowId) || !ci.workflowPath) return mainGreenUnknown("hosted", "required workflow identity unavailable", context);
+	if (!ci.branchHeadSha || !isHostedRun(ci.run) || ci.run.headSha !== ci.branchHeadSha || ci.run.workflowDatabaseId !== ci.workflowId)
+		return mainGreenUnknown("hosted", "no valid required-workflow run for branch head", context);
+	const evidence = { mode: "hosted", ...context, run_id: ci.run.databaseId, attempt: ci.run.attempt, created_at: ci.run.createdAt,
+		head_sha: ci.run.headSha, workflow_name: ci.run.workflowName, status: ci.run.status, conclusion: ci.run.conclusion };
+	if (ci.run.status !== "completed") return mainGreenUnknown("hosted", "required workflow has not completed", evidence);
+	if (ci.run.conclusion === "success") return { value: true, status: "PASS", evidence };
+	if (["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(ci.run.conclusion))
+		return { value: false, status: "FAIL", evidence };
+	return mainGreenUnknown("hosted", "hosted CI conclusion is not final", evidence);
 }
 function localMainGreenOrHosted(ci: PlanningCiEvidence): CiVerdict {
 	if (ci.mode === "local") return localMainGreen(ci);
@@ -588,15 +610,53 @@ function collectLocalCiEvidence(repo: string, home: string, raw: Record<string, 
 	return { mode: "local", check, branchHeadSha, localReceipts: readLocalReceipts(expandPath(receiptPath, home, repo)) };
 }
 function collectHostedCiEvidence(repo: string, mode: string, raw: Record<string, unknown>): PlanningCiEvidence {
-	const branch = stringValue(raw.branch) ?? "main";
-	if (mode !== "hosted" || branch.startsWith("-")) return { mode, ghConclusion: null };
+	const branch = stringValue(raw.branch)?.trim() ?? "main";
+	const configured = raw.required_workflow;
+	const requiredWorkflow = stringValue(configured)?.trim() ?? (positiveInteger(configured) ? String(configured) : "");
+	if (!requiredWorkflow) return { mode, configurationError: "hosted CI requires required_workflow (workflow id or file path)" };
+	const branchHeadSha = branch && !branch.startsWith("-") ? runGitCommand(repo, ["rev-parse", "--verify", "--end-of-options", branch + "^{commit}"])?.trim() ?? null : null;
+	const evidence: PlanningCiEvidence = { mode, requiredWorkflow, branchHeadSha, run: null };
+	if (mode !== "hosted" || !branchHeadSha) return evidence;
+	const workflow = ghJson(repo, ["api", "repos/{owner}/{repo}/actions/workflows/" + encodeURIComponent(basename(requiredWorkflow))]);
+	if (!record(workflow) || !positiveInteger(workflow.id) || typeof workflow.path !== "string" || !workflow.path) return evidence;
+	// API lookup accepts a filename or numeric id, not a display name. Verify the
+	// returned identity as well; a name match alone cannot establish requiredness.
+	const matches = positiveInteger(Number(requiredWorkflow)) ? String(workflow.id) === requiredWorkflow :
+		requiredWorkflow.includes("/") ? workflow.path === requiredWorkflow : basename(workflow.path) === requiredWorkflow;
+	if (!matches) return evidence;
+	evidence.workflowId = workflow.id;
+	evidence.workflowPath = workflow.path;
+	const runs = ghJson(repo, ["run", "list", "--branch", branch, "--workflow", String(workflow.id), "--limit", "20",
+		"--json", "databaseId,conclusion,status,headSha,workflowName,workflowDatabaseId,createdAt,attempt"]);
+	if (!Array.isArray(runs)) return evidence;
+	let latest: PlanningHostedRun | null = null;
+	let latestTime = -Infinity;
+	for (const run of runs) {
+		if (!record(run) || !positiveInteger(run.workflowDatabaseId)) return evidence;
+		if (run.workflowDatabaseId !== workflow.id) continue;
+		if (typeof run.headSha !== "string") return evidence;
+		if (run.headSha !== branchHeadSha) continue;
+		if (!isHostedRun(run)) return evidence;
+		const time = Date.parse(run.createdAt);
+		if (!latest || time > latestTime || (time === latestTime && (run.attempt > latest.attempt ||
+			(run.attempt === latest.attempt && run.databaseId > latest.databaseId)))) {
+			latest = run;
+			latestTime = time;
+		}
+	}
+	evidence.run = latest;
+	return evidence;
+}
+function isHostedRun(run: unknown): run is PlanningHostedRun {
+	return record(run) && positiveInteger(run.databaseId) && positiveInteger(run.workflowDatabaseId) && positiveInteger(run.attempt) &&
+		typeof run.workflowName === "string" && typeof run.headSha === "string" && typeof run.status === "string" &&
+		typeof run.conclusion === "string" && typeof run.createdAt === "string" && Number.isFinite(Date.parse(run.createdAt));
+}
+function ghJson(repo: string, args: readonly string[]): unknown {
 	try {
-		const result = spawnSync("gh", ["run", "list", "--branch", branch, "--limit", "1", "--json", "conclusion"], { cwd: repo, encoding: "utf8", timeout: 15_000, maxBuffer: 2 * 1_048_576 });
-		if (result.error || result.status !== 0) return { mode, ghConclusion: null };
-		const parsed: unknown = JSON.parse(result.stdout ?? "[]");
-		if (!Array.isArray(parsed) || !parsed.length || !record(parsed[0])) return { mode, ghConclusion: null };
-		return { mode, ghConclusion: stringValue(parsed[0].conclusion) };
-	} catch { return { mode, ghConclusion: null }; }
+		const result = spawnSync("gh", args, { cwd: repo, encoding: "utf8", timeout: 15_000, maxBuffer: 2 * 1_048_576 });
+		return result.error || result.status !== 0 ? null : JSON.parse(result.stdout ?? "");
+	} catch { return null; }
 }
 function appendReceiptLine(line: string, receipts: LocalCheckReceipt[]): void {
 	if (!line.trim()) return;
