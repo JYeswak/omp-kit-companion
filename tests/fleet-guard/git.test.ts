@@ -152,4 +152,39 @@ describe("fleet guard main-only git checks", () => {
 		expect(entry?.block).toBe(true);
 		expect(entry?.reason).toContain("amend");
 	});
+
+	test("nested shell substitution cannot smuggle amend past the guard", () => {
+		for (const command of [
+			"git commit -m \"$(git commit --amend --no-edit)\"",
+			"git commit -m \"`git commit --amend`\"",
+			"echo $(git commit --amend)",
+			"echo $(echo $(git commit --amend --no-edit))",
+			"sh -c 'git commit --amend'",
+			"bash -c \"git commit --amend --no-edit\"",
+			"bash <<EOF\ngit commit --amend --no-edit\nEOF",
+			"bash <<< \"git commit --amend\"",
+		]) {
+			const result = check(event(command), context);
+			expect(result?.block, command).toBe(true);
+		}
+	});
+
+	test("inert quoting stays quiet and bare branch listing passes", () => {
+		for (const command of [
+			"echo '$(git commit --amend)'",
+			"git commit -m 'fixed $(thing) stuff'",
+			"bash -c 'git status'",
+			"cat <<EOF\ngit commit --amend\nEOF",
+			"git branch",
+		]) {
+			expect(check(event(command), context), command).toBeUndefined();
+		}
+	});
+
+	test("runaway substitution nesting is refused instead of inspected forever", () => {
+		const deep = "echo " + "$(".repeat(40) + "echo hi" + ")".repeat(40);
+		const result = check(event(deep), context);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("budget");
+	});
 });

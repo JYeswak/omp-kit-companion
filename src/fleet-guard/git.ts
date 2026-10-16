@@ -144,6 +144,73 @@ function stripEnvWrappers(words: readonly string[]): readonly string[] | undefin
 	return words.slice(index);
 }
 
+const SUBSTITUTION_BUDGET = 32;
+
+function substitutionAt(text: string, index: number): { inner: string; next: number } | null {
+	const character = text[index]!;
+	if (character === "`") {
+		let end = index + 1;
+		while (end < text.length && !(text[end] === "`" && text[end - 1] !== "\\")) end++;
+		const close = end < text.length ? end : text.length;
+		return { inner: text.slice(index + 1, close), next: close + 1 };
+	}
+	if (character === "$" && text[index + 1] === "(") {
+		let depth = 0;
+		let end = index + 1;
+		let quote: "'" | "\"" | undefined;
+		while (end < text.length) {
+			const current = text[end]!;
+			if (quote) {
+				if (current === "\\" && quote === "\"") { end += 2; continue; }
+				if (current === quote) quote = undefined;
+				end++;
+				continue;
+			}
+			if (current === "'" || current === "\"") { quote = current; end++; continue; }
+			if (current === "(") depth++;
+			else if (current === ")") {
+				depth--;
+				if (depth === 0) break;
+			}
+			end++;
+		}
+		const close = end < text.length ? end : text.length;
+		return { inner: text.slice(index + 2, close), next: close + 1 };
+	}
+	return null;
+}
+
+function substitutionBodies(text: string): string[] {
+	const bodies: string[] = [];
+	const emit = (inner: string): void => {
+		bodies.push(inner);
+		for (const nested of substitutionBodies(inner)) bodies.push(nested);
+	};
+	let index = 0;
+	let quote: "'" | "\"" | undefined;
+	while (index < text.length) {
+		const character = text[index]!;
+		if (quote === "'") {
+			if (character === "'") quote = undefined;
+			index++;
+			continue;
+		}
+		if (quote === "\"") {
+			if (character === "\"") { quote = undefined; index++; continue; }
+			if (character === "\\") { index += 2; continue; }
+			const found = substitutionAt(text, index);
+			if (found) { emit(found.inner); index = found.next; continue; }
+			index++;
+			continue;
+		}
+		if (character === "'" || character === "\"") { quote = character; index++; continue; }
+		const found = substitutionAt(text, index);
+		if (found) { emit(found.inner); index = found.next; continue; }
+		index++;
+	}
+	return bodies;
+}
+
 function amendRewrite(words: readonly string[]): boolean {
 	let index = 1;
 	while (index < words.length) {
@@ -173,7 +240,6 @@ function isMessageBundle(word: string): boolean {
 		if (character < "A" || (character > "Z" && character < "a") || character > "z") return false;
 	}
 	return true;
-	return false;
 }
 
 function branchCreation(words: readonly string[]): boolean {
@@ -198,20 +264,106 @@ function branchesOptedOut(root: string): boolean {
 	}
 }
 
+const SUBSTITUTION_REASON =
+	"fleet-guard refusal: nested shell substitution exceeds the bounded inspection budget; no files were changed.";
+
+function heredocStart(line: string): { dash: boolean; delimiter: string; at: number } | { herestring: true; at: number } | null {
+	let quote: "'" | "\"" | undefined;
+	for (let i = 0; i < line.length; i++) {
+		const c = line[i]!;
+		if (quote) {
+			if (c === "\\" && quote === "\"") { i++; continue; }
+			if (c === quote) quote = undefined;
+			continue;
+		}
+		if (c === "'" || c === "\"") { quote = c; continue; }
+		if (c !== "<" || line[i + 1] !== "<") continue;
+		if (line[i + 2] === "<") return { herestring: true, at: i };
+		let j = i + 2;
+		let dash = false;
+		if (line[j] === "-") { dash = true; j++; }
+		while (line[j] === " " || line[j] === "\t") j++;
+		let delimiter: string;
+		if (line[j] === "'" || line[j] === "\"") {
+			const q = line[j]!;
+			const end = line.indexOf(q, j + 1);
+			if (end < 0) return null;
+			delimiter = line.slice(j + 1, end);
+		} else {
+			let end = j;
+			while (end < line.length && line[end] !== " " && line[end] !== "\t") end++;
+			delimiter = line.slice(j, end);
+		}
+		if (!delimiter) return null;
+		return { dash, delimiter, at: i };
+	}
+	return null;
+}
+
+function shellNestedTexts(words: readonly string[], segment: string): string[] {
+	const first = words[0] ?? "";
+	const base = first.slice(first.lastIndexOf("/") + 1);
+	if (base !== "sh" && base !== "bash" && base !== "zsh" && base !== "dash" && base !== "ksh") return [];
+	const texts: string[] = [];
+	for (let index = 1; index < words.length; index++) {
+		if (words[index] === "-c" && index + 1 < words.length) texts.push(words[index + 1]!);
+	}
+	const lines = segment.split("\n");
+	for (let n = 0; n < lines.length; n++) {
+		const found = heredocStart(lines[n]!);
+		if (!found) continue;
+		if ("herestring" in found) {
+			const rest = lines[n]!.slice(found.at + 3).trim();
+			const first = rest[0];
+			if ((first === "\"" || first === "'") && rest.length > 1 && rest.endsWith(first)) texts.push(rest.slice(1, -1));
+			else texts.push(rest);
+			continue;
+		}
+		const body: string[] = [];
+		n++;
+		while (n < lines.length) {
+			let line = lines[n]!;
+			if (found.dash) {
+				let k = 0;
+				while (line[k] === "\t") k++;
+				line = line.slice(k);
+			}
+			if (line === found.delimiter) break;
+			body.push(lines[n]!);
+			n++;
+		}
+		if (body.length) texts.push(body.join("\n"));
+	}
+	return texts;
+}
+
 export function check(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const command = commandFromEvent(event);
 	if (!command) return undefined;
-	for (const segment of commandSegments(command)) {
-		const words = shellWords(segment);
-		const effective = stripEnvWrappers(words);
-		if (!effective) continue;
-		const executable = effective[0]!;
-		if (executable.slice(executable.lastIndexOf("/") + 1) !== "git") continue;
-		const commandCwd = optionValue(effective, "-C");
-		const root = repositoryRoot(commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd());
-		if (!root) continue;
-		if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
-		if (amendRewrite(effective)) return { block: true, reason: AMEND_REASON };
+	const pending: string[] = [command];
+	let units = 0;
+	while (pending.length) {
+		if (++units > SUBSTITUTION_BUDGET) return { block: true, reason: SUBSTITUTION_REASON };
+		const text = pending.pop()!;
+		for (const segment of commandSegments(text)) {
+			const words = shellWords(segment);
+			for (const body of substitutionBodies(segment)) pending.push(body);
+			const effective = stripEnvWrappers(words);
+			if (!effective) continue;
+			const executable = effective[0]!;
+			const base = executable.slice(executable.lastIndexOf("/") + 1);
+			if (base !== "git") {
+				if (base === "sh" || base === "bash" || base === "zsh" || base === "dash" || base === "ksh") {
+					for (const nested of shellNestedTexts(effective, segment)) pending.push(nested);
+				}
+				continue;
+			}
+			const commandCwd = optionValue(effective, "-C");
+			const root = repositoryRoot(commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd());
+			if (!root) continue;
+			if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
+			if (amendRewrite(effective)) return { block: true, reason: AMEND_REASON };
+		}
 	}
 	return undefined;
 }
