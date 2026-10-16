@@ -60,9 +60,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: release-train
-  cancel-in-progress: false
 
 jobs:
   train:
