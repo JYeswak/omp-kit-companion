@@ -39,11 +39,15 @@ session-scoped `window.pane` selectors (`0.1`).
 }
 ```
 
-`readyCommand` defaults to `br ready --json` and is run (as `br` argv, no
-shell) to list the session's ready rows; `skipLabels` is optional. `focusEpics`,
-`mission` (`file:line`), `round`, `phase` and `pullEnabled` are optional; a
-malformed value refuses the config with `FLEET_WATCH_CONFIG_INVALID:
-sessions[N].<field>`.
+`readyCommand` defaults to `br ready --json`, must begin with `br ready`,
+and runs as argv without a shell. Readiness adds `--no-auto-import` and
+`--no-auto-flush`; JSONL-only `--no-db` output is not claim authority.
+`skipLabels` adds operator exclusions. Product workers always exclude
+`human-gate`, `owner-decision` and `kind:process`, even when `skipLabels`
+is absent, including grading and rework selection.
+`focusEpics`, `mission` (`file:line`), `round`, `phase` and `pullEnabled`
+are optional; a malformed value refuses the config with
+`FLEET_WATCH_CONFIG_INVALID: sessions[N].<field>`.
 `noDecisionChecks` controls the idle checks before an ordinary no-decision
 alert. Capture failures are different: Fleet Watch reports one `NO_DECISION`
 with the tmux error and does not infer that the pane is idle or send a nudge.
@@ -51,6 +55,23 @@ with the tmux error and does not infer that the pane is idle or send a nudge.
 If an otherwise idle pane shows `Steering · N` and `⌥↑ to edit`, Fleet Watch
 submits one queued message by sending `M-Up` then `Enter`, and logs the event.
 A busy pane is left untouched.
+
+### Explicit queue flushing
+
+`omp-kit fleet flush-pending --apply --yes` uses a separate doctor path. It only
+dequeues one complete, nonempty message over an idle empty composer.
+Zero-count, inconsistent, multiple-message and visibly truncated queues do
+not authorize a flush. After `M-Up`, the doctor captures the pane again:
+`Enter` requires an idle pane, no remaining queue, and a nonempty draft
+matching the complete queued message. An ineffective dequeue, capture
+failure, changed draft or newly busy pane prevents `Enter`; reports retain
+any keys already sent.
+
+These checks do not change Fleet Watch's separate steering branch. Screen
+recognition remains heuristic, and capture plus key delivery is not atomic.
+If dequeue succeeds but submission is refused, the doctor does not attempt
+to roll the draft back. This is not proof of native receiver ownership,
+live service safety or the cause of a particular paused goal.
 
 ## Pull nudges
 
@@ -70,17 +91,19 @@ pull (decision Q20). Fleet Watch chooses it in this order:
    `rework` when the policy has no `rework` status. While the original
    implementer (the last `DONE`/`PROGRESS`/`OBSOLETE` commenter) holds a
    configured seat, the item waits for that seat; otherwise any worker gets it.
-3. **Triage**: the first `bv --robot-triage` recommendation, in
-   recommendations order, that the ready rows confirm as a claimable leaf and
-   that sits under a `focusEpics` epic (parent-child edges in
+3. **Triage**: the first recommendation from
+   `bv --robot-triage --db <repo>/.beads/issues.jsonl`, in recommendation
+   order, whose native ready row confirms a claimable leaf under a
+   `focusEpics` epic (parent-child edges in
    `.beads/issues.jsonl`, or a dotted child id). With no `focusEpics`, any
    such recommendation qualifies. A higher-ranked pick outside focus is never
    chosen.
-4. **Fallback**: only when bv is unusable (it fails or times out, prints
-   non-JSON, has no `triage.recommendations`, or reports
-   `source_authority.claim_safe: false`) or the DAG cannot be read, the first
-   claimable leaf in the ready rows, still under focus when the DAG is
-   readable. The nudge names the reason.
+4. **Fallback**: the first eligible native ready leaf when ranked candidates
+   no longer qualify, not only when bv is unavailable. Focus still applies
+   when its DAG is readable. A stale export never authorizes its blocked
+   candidate and never globally parks unrelated eligible work. The nudge
+   names the fallback reason. Unavailable or malformed bv output and
+   `source_authority.claim_safe: false` also use the native fallback.
 
 Grading and rework come before the free-leaf check, so a project with no
 ready execution beads still gets grading and rework nudges. Seats idle in the
@@ -126,6 +149,52 @@ gets no repeated empty nudge, escalation or no-decision alert. It is
 re-checked on every idle tick and woken by any newly eligible grading,
 rework or ready item. `WRITE_LATCHED` and `UNKNOWN` still suppress nudges as
 before.
+
+### Native refusal evidence
+
+The existing JSONL log and one-shot action output retain `refusals`:
+`class`, `bead` (or null for a queue-level condition), `actor`, `next`, and
+an optional native comment `citation`. Missing actor evidence is explicitly
+`UNKNOWN`, with the coordinator seat named when available; it is not idle
+capacity or permission to act.
+
+`PULL_WARNINGS` accompanies a healthy pick when other candidates were
+withheld. `NO_FREE_LEAF`, `NO_TRIAGE_PICK`, `WRITE_LATCHED` and `UNKNOWN`
+retain their normal meanings and carry the same structured evidence.
+Native `br blocked` and batched `br show` reads name the actual blocker and
+current owner, rather than trusting exported ownership or merely asking for
+a re-export. Typed external endpoints remain dependencies; an unresolved
+external owner stays unknown.
+
+Director notice deduplication includes the current refusal fields, so a
+changed owner or predicate is not hidden behind an unchanged reason class.
+The director receives a bounded pointer to the existing log. A notice is
+an observation, **not a delivery receipt**. Refused notice admission sends
+nothing; a raised transport is recorded `NOTICE_UNPROVEN` without an
+automatic resend, and eligible work continues.
+
+A native `DECISION:` comment from the resolved coordinator can be cited
+through a later worker question or closed state. Its reference is not new
+authorization: the director still checks its current scope and the canonical
+decision record. Generic `DONE`/`PASS` comments are not owner decisions.
+Absence of a recognized reference does not prove that no decision exists.
+These readers never manufacture a hands-only result from `human-gate` or
+login/payment wording alone.
+
+The lifecycle extension prechecks recognized `br update --claim` and
+`--status in_progress` calls. Another holder is named in a structured
+`CLAIM_REFUSED`; a native lookup error is not treated as unassigned.
+An unassigned start requires atomic `--claim`; the same holder may resume
+or claim again. `--actor`/`BR_ACTOR` selects the native claim actor;
+`--agent-name` is recorded attribution only. Forced or manual
+assignment/start combinations are not a substitute for the normal claim.
+Closed/tombstoned work is not reopened to obtain supply.
+
+These checks are not a sandbox, a full shell interpreter, a native
+incarnation attestation or a permissions grant. `br` still makes the final
+atomic award and enforces its policy/dependencies. Source-test fixtures do
+not establish installed Tern delivery, service activation or live-fleet
+outcomes.
 
 **Parking a round.** Set `phase` to `INSIGHT` (any case) or `pullEnabled` to
 `false` and the session's workers get no pull nudge, escalation or
