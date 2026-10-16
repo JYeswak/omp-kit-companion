@@ -95,12 +95,6 @@ interface SessionFileContents {
 	known: boolean;
 }
 
-/** One `candidate <sha> for <paths>` clause; the sha vouches only for the paths named in its own clause. */
-interface CandidateReceipt {
-	sha: string;
-	paths: string[];
-}
-
 interface OwnedRepository {
 	root: string;
 	paths: Set<string>;
@@ -109,7 +103,6 @@ interface OwnedRepository {
 	baselineStatusKnown: boolean;
 	sessionDeltas: Map<string, PatchDelta>;
 	sessionFileContents: Map<string, SessionFileContents>;
-	candidateReceipts: CandidateReceipt[];
 }
 
 interface SessionState {
@@ -117,8 +110,6 @@ interface SessionState {
 	rootByDirectory: Map<string, string>;
 	pendingToolPathWork: Promise<void>;
 	pendingToolPathSnapshots: Map<string, Map<string, FileSnapshot>>;
-	pendingCandidateCalls: Map<string, CandidateReceipt[]>;
-	candidateReceipts: CandidateReceipt[];
 	rePrompts: number;
 	warningEmitted: boolean;
 }
@@ -132,7 +123,7 @@ export interface SaveGuardFinding {
 	root: string;
 	paths: string[];
 	aheadCount: number | null;
-	privateIndexPaths?: string[];
+	sharedPaths?: string[];
 
 }
 
@@ -340,94 +331,11 @@ function recordSessionDelta(
 	repository.sessionDeltas.set(repoPath, diffContents(contents.baseline, contents.current));
 }
 
-function inputStrings(value: unknown, output: string[] = [], depth = 0): string[] {
-	if (output.length >= 16 || depth > 4) return output;
-	if (typeof value === "string") {
-		output.push(value.slice(0, 10_000));
-		return output;
-	}
-	if (Array.isArray(value)) {
-		for (const item of value.slice(0, 16)) inputStrings(item, output, depth + 1);
-	} else if (typeof value === "object" && value !== null) {
-		for (const item of Object.values(value).slice(0, 16)) inputStrings(item, output, depth + 1);
-	}
-	return output;
-}
-
-function isHexSha(value: string): boolean {
-	if (value.length !== 40 && value.length !== 64) return false;
-	for (const character of value.toLowerCase()) {
-		if (!"0123456789abcdef".includes(character)) return false;
-	}
-	return true;
-}
-
-const RECEIPT_DELIMITERS = " \t\r\n\"'`,;()[]{}<>|&";
-
-function receiptTokens(text: string): string[] {
-	const tokens: string[] = [];
-	let token = "";
-	for (const character of text) {
-		if (RECEIPT_DELIMITERS.includes(character)) {
-			if (token.length > 0) tokens.push(token);
-			token = "";
-		} else {
-			token += character;
-		}
-	}
-	if (token.length > 0) tokens.push(token);
-	return tokens.map(value => {
-		let start = 0;
-		let end = value.length;
-		while (start < end && value[start] === ":") start += 1;
-		while (end > start && ".:!?".includes(value[end - 1]!)) end -= 1;
-		const trimmed = value.slice(start, end);
-		return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed;
-	}).filter(value => value.length > 0);
-}
-
-/**
- * Parse every `candidate <sha> for <paths>` clause. Each clause owns the sha that follows its own
- * `candidate` word and the path tokens up to the next clause, so a combined command naming several
- * repositories never lends one repository's sha to another's paths.
- */
-function candidateReceipts(text: string): CandidateReceipt[] {
-	const tokens = receiptTokens(text);
-	const receipts: CandidateReceipt[] = [];
-	let current: CandidateReceipt | null = null;
-	for (let index = 0; index < tokens.length; index += 1) {
-		if (tokens[index]!.toLowerCase() === "candidate") {
-			current = null;
-			for (let next = index + 1; next < Math.min(tokens.length, index + 5); next += 1) {
-				if (!isHexSha(tokens[next]!)) continue;
-				current = { sha: tokens[next]!.toLowerCase(), paths: [] };
-				receipts.push(current);
-				index = next;
-				break;
-			}
-			continue;
-		}
-		if (current && tokens[index]!.toLowerCase() !== "for") current.paths.push(tokens[index]!);
-	}
-	return receipts.filter(receipt => receipt.paths.length > 0);
-}
-
-function receiptsFromToolCall(event: SaveGuardToolCallEvent): CandidateReceipt[] {
-	const toolName = event.toolName.toLowerCase();
-	const mailRecord = toolName.includes("agent_mail") &&
-		(toolName.includes("send_message") || toolName.includes("reply_message"));
-	const beadComment = (toolName === "bash" || toolName === "exec") &&
-		inputStrings(event.input).some(value => value.includes("br comments add"));
-	if (!mailRecord && !beadComment) return [];
-	return candidateReceipts(inputStrings(event.input).join("\n").slice(0, 20_000));
-}
-
 function newOwnedRepository(
 	root: string,
 	baselineHead: string | null,
 	baselineDirtyPaths = new Set<string>(),
 	baselineStatusKnown = false,
-	candidateReceipts: CandidateReceipt[] = [],
 ): OwnedRepository {
 	return {
 		root,
@@ -437,7 +345,6 @@ function newOwnedRepository(
 		baselineStatusKnown,
 		sessionDeltas: new Map(),
 		sessionFileContents: new Map(),
-		candidateReceipts: candidateReceipts.slice(),
 	};
 }
 
@@ -448,8 +355,6 @@ function sessionStateFor(states: Map<string, SessionState>, sessionId: string): 
 			repositories: new Map(),
 			rootByDirectory: new Map(),
 			pendingToolPathWork: Promise.resolve(),
-			pendingCandidateCalls: new Map(),
-			candidateReceipts: [],
 			pendingToolPathSnapshots: new Map(),
 			rePrompts: 0,
 			warningEmitted: false,
@@ -496,7 +401,6 @@ async function recordSessionStart(
 		head.code === 0 ? gitLine(head.stdout) : null,
 		statusKnown ? new Set(statusEntries(status.stdout).keys()) : new Set(),
 		statusKnown,
-		state.candidateReceipts,
 	));
 }
 
@@ -536,7 +440,6 @@ async function recordToolPaths(
 				head.code === 0 ? gitLine(head.stdout) : null,
 				new Set(),
 				false,
-				state.candidateReceipts,
 			);
 			state.repositories.set(root, repository);
 		}
@@ -636,33 +539,26 @@ async function revisionHoldsContent(
 	return current !== null && gitLine(blob.stdout) === current;
 }
 
-function receiptNamesPath(receipt: CandidateReceipt, root: string, repoPath: string): boolean {
-	const absolutePath = path.resolve(root, repoPath);
-	return receipt.paths.some(token => token === repoPath || (path.isAbsolute(token) && path.resolve(token) === absolutePath));
-}
-
-async function hasSavedCandidate(
+/**
+ * True when the published diff `baselineHead..upstreamHead -- <path>` already carries this session's patch
+ * and the path still holds exactly what this session's last edit left; any later write is unattributed.
+ */
+async function upstreamHoldsSessionDelta(
 	exec: SaveGuardApi["exec"],
 	repository: OwnedRepository,
+	upstreamHead: string,
 	repoPath: string,
-	current: string | null | undefined,
 ): Promise<boolean> {
 	const expected = repository.sessionDeltas.get(repoPath);
-	for (const receipt of repository.candidateReceipts) {
-		if (!receiptNamesPath(receipt, repository.root, repoPath)) continue;
-		// The sha must be an object of this repository; another repository's receipt never applies here.
-		const type = await runGit(exec, repository.root, ["cat-file", "-t", receipt.sha]);
-		const objectType = type.code === 0 ? gitLine(type.stdout) : "";
-		if (objectType !== "commit" && objectType !== "tree") continue;
-		if (await revisionHoldsContent(exec, repository.root, receipt.sha, repoPath, current)) return true;
-		if (!expected?.known || !repository.baselineHead) continue;
-		const diff = await runGit(exec, repository.root, [
-			"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
-			repository.baselineHead, receipt.sha, "--", repoPath,
-		]);
-		if (diff.code === 0 && containsPatch(parsePatch(diff.stdout), expected)) return true;
-	}
-	return false;
+	if (!expected?.known || !repository.baselineHead || upstreamHead.length === 0) return false;
+	const contents = repository.sessionFileContents.get(repoPath);
+	const now = snapshotFile(path.join(repository.root, repoPath));
+	if (!contents?.known || !now.known || now.contents !== contents.current) return false;
+	const diff = await runGit(exec, repository.root, [
+		"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
+		repository.baselineHead, upstreamHead, "--", repoPath,
+	]);
+	return diff.code === 0 && containsPatch(parsePatch(diff.stdout), expected);
 }
 
 /**
@@ -714,11 +610,11 @@ export async function checkSaveState(
 	}
 
 	const pendingPaths = new Set<string>();
-	const privateIndexPaths = new Set<string>();
+	const sharedPaths = new Set<string>();
 	const savedPaths = new Set<string>();
 	for (const repoPath of dirtyPaths) {
-		// Published means the current content is byte-identical to the upstream copy: the work already
-		// landed (for example through a private index while this shared checkout's branch lags behind).
+		// Published means the current content is byte-identical to the upstream copy, or the upstream
+		// already carries this session's patch while the shared worktree still holds a peer's hunks.
 		const current = await workingBlob(exec, repository.root, repoPath);
 		if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current)) {
 			savedPaths.add(repoPath);
@@ -730,12 +626,12 @@ export async function checkSaveState(
 		const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 			(!repository.baselineStatusKnown && !untracked) ||
 			(!untracked && (!actual || !expected?.known || !samePatch(actual, expected)));
-		if (await hasSavedCandidate(exec, repository, repoPath, current)) {
+		if (await upstreamHoldsSessionDelta(exec, repository, upstreamHead, repoPath)) {
 			savedPaths.add(repoPath);
 			continue;
 		}
 		pendingPaths.add(repoPath);
-		if (mixed) privateIndexPaths.add(repoPath);
+		if (mixed) sharedPaths.add(repoPath);
 	}
 	if (aheadCount !== null && aheadCount > 0) {
 		for (const repoPath of ownedPaths) {
@@ -752,12 +648,12 @@ export async function checkSaveState(
 			const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 				(!repository.baselineStatusKnown && actual !== null) ||
 				(actual !== null && (!expected?.known || !samePatch(actual, expected)));
-			if (await hasSavedCandidate(exec, repository, repoPath, current)) {
+			if (await upstreamHoldsSessionDelta(exec, repository, upstreamHead, repoPath)) {
 				savedPaths.add(repoPath);
 				continue;
 			}
 			pendingPaths.add(repoPath);
-			if (mixed) privateIndexPaths.add(repoPath);
+			if (mixed) sharedPaths.add(repoPath);
 		}
 	}
 	if (pendingPaths.size === 0) return null;
@@ -765,7 +661,7 @@ export async function checkSaveState(
 		root: repository.root,
 		paths: Array.from(pendingPaths).sort(),
 		aheadCount,
-		privateIndexPaths: Array.from(privateIndexPaths).sort(),
+		sharedPaths: Array.from(sharedPaths).sort(),
 	};
 }
 
@@ -776,9 +672,9 @@ function shellQuote(value: string): string {
 function formatFinding(finding: SaveGuardFinding): string {
 	const paths = finding.paths.map(path => JSON.stringify(path)).join(", ");
 	const ahead = finding.aheadCount === null ? "unknown" : String(finding.aheadCount);
-	const privatePaths = finding.privateIndexPaths ?? [];
-	const saveMode = privatePaths.length > 0
-		? ` private-index-required=[${privatePaths.map(path => JSON.stringify(path)).join(", ")}]`
+	const sharedPaths = finding.sharedPaths ?? [];
+	const saveMode = sharedPaths.length > 0
+		? ` shared-with-peers=[${sharedPaths.map(path => JSON.stringify(path)).join(", ")}]`
 		: "";
 	return `repo ${JSON.stringify(finding.root)} paths [${paths}] ahead=${ahead}${saveMode}`;
 }
@@ -787,23 +683,16 @@ function formatSavePrompt(findings: SaveGuardFinding[]): string {
 	const details = findings.map(formatFinding).join("; ");
 	const steps: string[] = [];
 	for (const finding of findings) {
-		const privatePaths = new Set(finding.privateIndexPaths ?? []);
-		const plainPaths = finding.paths.filter(path => !privatePaths.has(path));
+		const sharedPaths = new Set(finding.sharedPaths ?? []);
+		const plainPaths = finding.paths.filter(path => !sharedPaths.has(path));
 		if (plainPaths.length > 0) {
 			const paths = plainPaths.map(path => JSON.stringify(path)).join(", ");
 			const commandPaths = plainPaths.map(shellQuote).join(" ");
-			steps.push(`repo ${JSON.stringify(finding.root)}: reserve ${paths}; run git commit --only -m "<msg> [level]" -- ${commandPaths}; git push (set upstream if needed); release the reservation`);
+			steps.push(`repo ${JSON.stringify(finding.root)}: reserve ${paths}; run git commit --only -m "<msg> [level]" -- ${commandPaths}; git push origin main (if origin moved: python3 ~/Developer/omp-kit/scripts/git_converge.py --repo ${shellQuote(finding.root)} --push); release the reservation`);
 		}
-		if (privatePaths.size > 0) {
-			const paths = Array.from(privatePaths).map(path => JSON.stringify(path)).join(", ");
-			const commandPaths = Array.from(privatePaths).map(shellQuote).join(" ");
-			steps.push([
-				`repo ${JSON.stringify(finding.root)}: reserve ${paths};`,
-				"fetch origin and initialize a private GIT_INDEX_FILE from fresh origin/main with GIT_INDEX_FILE=<private-index> git read-tree origin/main;",
-				`stage only this session's hunk with GIT_INDEX_FILE=<private-index> git add -p -- ${commandPaths};`,
-				"write the tree with GIT_INDEX_FILE=<private-index> git write-tree and create a candidate commit with git commit-tree <tree> -p origin/main;",
-				"record `candidate <sha> for <repo-relative path>` (use the 40- or 64-character object ID) in a bead comment via `br comments add` or an Agent Mail message; push the candidate through the guarded repo flow; release the reservation",
-			].join(" "));
+		if (sharedPaths.size > 0) {
+			const paths = Array.from(sharedPaths).map(path => JSON.stringify(path)).join(", ");
+			steps.push(`repo ${JSON.stringify(finding.root)}: ${paths} also hold another session's uncommitted hunks: message each path's holder (Agent Mail) to commit the whole file on main or hand it back; never build or push a private-index candidate (one history per repo)`);
 		}
 	}
 	return `Unsaved session-owned work remains (${details}). Save before ending: ${steps.join("; ")}.`;
@@ -829,12 +718,10 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		if (event.toolCallId.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
-		const receipts = receiptsFromToolCall(event);
 		const snapshots = pathsFromToolCall(event, ctx.cwd);
-		if (receipts.length === 0 && snapshots.size === 0) return;
+		if (snapshots.size === 0) return;
 		const state = sessionStateFor(sessions, sessionId);
-		if (receipts.length > 0) state.pendingCandidateCalls.set(event.toolCallId, receipts);
-		if (snapshots.size > 0) state.pendingToolPathSnapshots.set(event.toolCallId, snapshots);
+		state.pendingToolPathSnapshots.set(event.toolCallId, snapshots);
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
@@ -842,16 +729,6 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
 		const pathSnapshots = state?.pendingToolPathSnapshots.get(event.toolCallId);
 		if (state) state.pendingToolPathSnapshots.delete(event.toolCallId);
-		const receipts = state?.pendingCandidateCalls.get(event.toolCallId);
-		if (state && receipts) {
-			state.pendingCandidateCalls.delete(event.toolCallId);
-			if (!event.isError) {
-				state.candidateReceipts.push(...receipts);
-				for (const repository of state.repositories.values()) {
-					repository.candidateReceipts.push(...receipts);
-				}
-			}
-		}
 		if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") return;
 		const paths = pathsFromToolEvent(event, ctx.cwd);
 		if (paths.length === 0 || sessionId.length === 0) return;
