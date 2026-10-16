@@ -174,7 +174,7 @@ mkdir -p "$TMP/stub-git" "$TMP/stub-grep"
 # shellcheck disable=SC2016
 printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "ls-files" ] && { echo "fatal: planted ls-files failure" >&2; exit 128; }; done\nexec "%s" "$@"\n' "$real_git" > "$TMP/stub-git/git"
 # shellcheck disable=SC2016
-printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-naoE" ] && { echo "grep: planted read error" >&2; exit 2; }; done\nexec "%s" "$@"\n' "$real_grep" > "$TMP/stub-grep/grep"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in *config.txt*) echo "grep: planted read error" >&2; exit 2;; esac; done\nexec "%s" "$@"\n' "$real_grep" > "$TMP/stub-grep/grep"
 chmod +x "$TMP/stub-git/git" "$TMP/stub-grep/grep"
 for producer in git grep; do
 	rc=0
@@ -230,6 +230,39 @@ if [ -f "$TMP/owner-seen" ]; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL scratch-has-owner: out<<<%s>>>\n' "$(cat "$TMP/out")"
+fi
+
+# rz5.106.7 REWORK: a tracked file deleted from the worktree (the index still
+# lists it) ends the run incomplete (UNRUN, exit 2), never OK.
+mkfixture
+printf 'neutral readme\n' > "$TMP/fixture/README.md"
+printf 'will be gone\n' > "$TMP/fixture/gone.md"
+git -C "$TMP/fixture" add README.md gone.md
+rm "$TMP/fixture/gone.md"
+rc=0; sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "2" ] && grep -q "UNRUN" "$TMP/out" && grep -q "gone.md" "$TMP/out" && ! grep -q 'publishability: OK' "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL missing-tracked-unrun: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+# rz5.106.7 REWORK: matched values must never touch disk in the scan scratch
+# dir while the scan runs. The inventory stub records every scratch dir
+# listing on each grep call; any raw-hit artifact (the pre-fix hits file)
+# fails the case.
+mkfixture
+printf 'token = "%s%s"\n' "$fake_token_prefix" "$fake_token_body" > "$TMP/fixture/config.txt"
+git -C "$TMP/fixture" add config.txt
+mkdir -p "$TMP/stub-inv"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\nfor d in "%s"/var/agent-tmp/publishability.*; do [ -d "$d" ] && ls -A "$d" >> "%s/inv.log"; done\nexec "%s" "$@"\n' "$TMP/fixture" "$TMP" "$real_grep" > "$TMP/stub-inv/grep"
+chmod +x "$TMP/stub-inv/grep"
+rm -f "$TMP/inv.log"
+PATH="$TMP/stub-inv:$PATH" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || true
+inv_lines=$(wc -l < "$TMP/inv.log" 2>/dev/null | tr -d ' ') || inv_lines=0
+if [ "${inv_lines:-0}" -gt 0 ] && ! grep -qx 'hits' "$TMP/inv.log" 2>/dev/null && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL no-raw-temp: inv_lines=%s inv<<<%s>>> out<<<%s>>>\n' "${inv_lines:-0}" "$(cat "$TMP/inv.log" 2>/dev/null)" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
 fi
 
 printf 'publishability: %s pass %s fail\n' "$pass" "$fail"

@@ -33,9 +33,9 @@ top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not in
 mkdir -p "$(pwd -P)/var/agent-tmp" || fail "cannot create var/agent-tmp"
 scratch=$(mktemp -d "$(pwd -P)/var/agent-tmp/publishability.$$.XXXXXX") || fail "cannot create scratch dir"
 printf 'pid=%s\nlabel=publishability\nrepo=%s\ncreated=%s\n' "$$" "$(pwd -P)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$scratch/.owner"
-TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"; TMP_HITS="$scratch/hits"
+TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"
 : > "$TMP_FINDINGS"
-trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.
@@ -43,14 +43,17 @@ trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_HITS" "$scratch/.owner"; rmdir "$
 # newline, quote or backslash, which this line-based loop cannot open, so such a name is a finding
 # (unscannable-name), never a silent skip.
 git -c core.quotePath=false ls-files > "$TMP_FILES" || fail "git ls-files failed (rc $?): nothing was scanned"
-# scan CLASS PATTERN FILE [EXEMPT]: report class: file:line for each match, never the match text.
+# scan CLASS PATTERN FILE [EXEMPT]: report class: file:line for each match. Matched values never
+# touch disk: the count precheck prints only a number and the report stream carries line numbers.
 # EXEMPT is an ERE over line:match that drops a hit (documentation nets, the shared users dir).
 scan() {
-	rc=0
-	grep -naoE -- "$2" "$3" > "$TMP_HITS" || rc=$?
-	[ "$rc" -le 1 ] || fail "grep failed on $3 (rc $rc): scan incomplete"
-	if [ -n "${4:-}" ]; then grep -vE -- "$4" "$TMP_HITS" || true; else cat "$TMP_HITS"; fi \
-		| cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS"
+	grc=0
+	count=$(grep -caoE -- "$2" "$3" 2>/dev/null) || grc=$?
+	[ "$grc" -le 1 ] || fail "grep failed on $3 (rc $grc): scan incomplete"
+	[ "$count" -gt 0 ] || return 0
+	grep -naoE -- "$2" "$3" 2>/dev/null | {
+		if [ -n "${4:-}" ]; then grep -vE -- "$4" || true; else cat; fi
+	} | cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS"
 }
 scanned=0
 while IFS= read -r file; do
@@ -60,7 +63,12 @@ while IFS= read -r file; do
 	case "$file" in
 		\"*) printf 'unscannable-name: %s\n' "$file" >> "$TMP_FINDINGS"; continue ;;
 	esac
-	[ -f "$file" ] || continue
+	# A tracked file absent from the worktree ends the run incomplete: the
+	# scan cannot vouch for bytes it cannot read (rz5.106.7). Safe
+	# category/path only, never content.
+	if [ ! -e "$file" ]; then
+		fail "UNRUN: tracked file missing from worktree: $file (scan incomplete)"
+	fi
 	scanned=$((scanned + 1))
 	if [ ! -r "$file" ]; then
 		printf 'unreadable: %s\n' "$file" >> "$TMP_FINDINGS"
