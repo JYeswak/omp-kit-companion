@@ -1,0 +1,10 @@
+{"qid":"q01","query":"How do I register a plugin export that Carly can call?","intent":"plugin export registration","anchors":["tern.d.luau#tern","export"]}
+{"qid":"q02","query":"What does the run command do in a tern scenario?","intent":"scenario run semantics","anchors":["run","expect"]}
+{"qid":"q03","query":"How do I start a headless tern session for automated tests?","intent":"headless serve","anchors":["tern serve","--control"]}
+{"qid":"q04","query":"Which plugin API members are window only?","intent":"context scoping","anchors":["Window only","WindowCx"]}
+{"qid":"q05","query":"How do I restyle the UI without rebuilding tern?","intent":"css reload","anchors":["css","reload"]}
+{"qid":"q06","query":"What is the control endpoint protocol for sending commands?","intent":"control protocol","anchors":["one-line command","one-line JSON"]}
+{"qid":"q07","query":"How do I type into the focused pane and wait for expected output?","intent":"run then expect","anchors":["run","expect"]}
+{"qid":"q08","query":"Where does tern keep settings and state on disk?","intent":"config dir","anchors":["TERN_CONFIG_DIR"]}
+{"qid":"q09","query":"How do I render scenarios offscreen to PNG files?","intent":"shot rendering","anchors":["tern shot"]}
+{"qid":"q10","query":"How do async plugin results work with await?","intent":"awaitable results","anchors":["Awaitable","next"]}

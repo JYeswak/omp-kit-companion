@@ -1,0 +1,2 @@
+{"id":"serve-state-ok","run":["state"],"expect":["\"ok\":true"]}
+{"id":"planted-false-claim","run":["state"],"expect":["tern-ref-planted-never-matches-zzz"],"planted":true}
