@@ -503,6 +503,30 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
+	{ name: "tern-ref", description: "Build, query, validate, or drift-check the version-pinned local Tern Plugin SDK reference", usage: "tern-ref build|query|validate|drift", flags: [], example: "omp-kit tern-ref build --json", subcommands: [
+		{ name: "build", description: "Crawl docs, chunk tern.d.luau per member, index nomic+qwen, and write the version-keyed manifest", usage: "tern-ref build [--root DIR] [--site URL] [--force]", flags: [
+			{ name: "--root", value: "DIR", description: "State root holding version dirs; defaults to the platform state dir" },
+			{ name: "--site", value: "URL", description: "Docs start URL; defaults to https://docs.stencil.so/tern/index.html" },
+			{ name: "--force", description: "Rebuild even when this version's manifest exists" },
+		], example: "omp-kit tern-ref build --json", runnable: false, mutation: true },
+		{ name: "query", description: "Search the pinned reference index", usage: "tern-ref query (--query TEXT | --queries FILE) [--root DIR] [--backend nomic|qwen] [--k N]", flags: [
+			{ name: "--root", value: "DIR", description: "State root holding version dirs; defaults to the platform state dir" },
+			{ name: "--query", value: "TEXT", description: "Question or exact-token query" },
+			{ name: "--queries", value: "FILE", description: "Frozen queries JSONL; runs each and returns per-qid hits" },
+			{ name: "--backend", value: "MODEL", description: "nomic or qwen; defaults to the eval-chosen manifest model" },
+			{ name: "--k", value: "N", description: "Top-k hits; defaults to 10" },
+		], example: "omp-kit tern-ref query --query 'how do I restyle without rebuilding' --json", runnable: false },
+		{ name: "validate", description: "Gate retrieval quality on the frozen set and prove claims against an isolated tern serve", usage: "tern-ref validate [--root DIR] [--checks FILE] [--queries FILE --label-models A,B]", flags: [
+			{ name: "--root", value: "DIR", description: "State root holding version dirs; defaults to the platform state dir" },
+			{ name: "--checks", value: "FILE", description: "Runtime checks JSONL with one planted false claim" },
+			{ name: "--queries", value: "FILE", description: "Frozen retrieval queries for the blind-label eval" },
+			{ name: "--label-models", value: "A,B", description: "Two labeller models from different families; required with --queries" },
+		], example: "omp-kit tern-ref validate --checks tests/cli/fixtures/tern-ref-checks.jsonl --json", runnable: false, mutation: true },
+		{ name: "drift", description: "Re-crawl, re-index on ETag or version change, and list beads citing changed chunks", usage: "tern-ref drift [--root DIR] [--site URL]", flags: [
+			{ name: "--root", value: "DIR", description: "State root holding version dirs; defaults to the platform state dir" },
+			{ name: "--site", value: "URL", description: "Docs start URL; defaults to https://docs.stencil.so/tern/index.html" },
+		], example: "omp-kit tern-ref drift --json", runnable: false, mutation: true },
+	], runnable: false, mutation: true },
 	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, per-profile MCP callable proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
 		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON [--expect SERVER:REGEX]]... [--startup-timeout-ms N] [--call-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },

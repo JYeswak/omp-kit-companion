@@ -61,6 +61,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
+import { ternRefCommand } from "./tern-ref.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
@@ -3445,6 +3446,7 @@ function planningScoreCommand(request: ParsedCommand): CliResult {
 	const kitRoot = kitIdentity().release.root ?? resolve(import.meta.dir, "..");
 	return runPlanningScore({ kitRoot, ...(typeof repoFlag === "string" ? { repoPath: repoFlag } : {}), fleet: request.flags.has("--fleet"), cwd: process.cwd(), home: process.env.HOME });
 }
+for (const subcommand of ["build", "query", "validate", "drift"]) registerCommandHandler(`tern-ref ${subcommand}`, ternRefCommand);
 registerCommandHandler("planning score", planningScoreCommand);
 function planningConvertCommand(request: ParsedCommand): CliResult {
 	const planFlag = request.flags.get("--plan");
