@@ -55,7 +55,17 @@ function parseReservations(stdout: string): Reservation[] | null {
 type PaneKey = { key: string } | { refusal: CliResult };
 
 function paneKey(): PaneKey {
-	if (process.env.HERDR_PANE_ID && process.env.HERDR_PANE_ID.length > 0) return { refusal: refused("OWNER_UNAVAILABLE", "Land from a Herdr pane needs its own qualified ownership branch", "Herdr callers must not borrow an outer Tern or tmux key; no files were changed.") };
+	const herdr = process.env.HERDR_PANE_ID;
+	if (process.env.HERDR_ENV === "1" || herdr !== undefined) {
+		const id = herdr?.trim() ?? "";
+		if (process.env.HERDR_ENV !== "1" || !id || id !== herdr)
+			return { refusal: refused("OWNER_UNAVAILABLE", "A native Herdr pane identity is required", "Run land inside a Herdr-managed pane with HERDR_ENV=1 and its unchanged HERDR_PANE_ID; no files were changed.") };
+		const tmux = process.env.TMUX_PANE;
+		const tern = process.env.TERN_PANE;
+		if ((tmux && tmux.length > 0) || (tern && tern.trim().length > 0))
+			return { refusal: refused("OWNER_AMBIGUOUS", "Herdr and outer pane identity markers are both present", "Run land from the native Herdr pane after inherited tmux and Tern markers have been removed; no files were changed.") };
+		return { key: `herdr:${id}` };
+	}
 	const tmux = process.env.TMUX_PANE;
 	if (tmux && tmux.length > 0) return { key: tmux };
 	const tern = process.env.TERN_PANE;
