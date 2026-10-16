@@ -97,7 +97,7 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
  	report=$(cat "$root/.git/stale-worktree-report.$$" 2>/dev/null)
  	rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$"
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
- 	printf 'stale-worktree: declare each intended revert with a `Revert: <sha>` trailer line, or rework on a fresh worktree\n' >&2
+ 	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line, or rework on a fresh worktree\n' >&2
  	exit 1
  fi
  rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$"
