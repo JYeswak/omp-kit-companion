@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
@@ -41,6 +41,39 @@ function snapshotTree(root: string): string[] {
 	return entries.sort();
 }
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+const fixtureBin = join(scratch, "bin");
+mkdirSync(fixtureBin, { recursive: true });
+writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+chmodSync(join(fixtureBin, "am"), 0o755);
+function withOnlyFixture(response: unknown, mode: string, agent: string | undefined, run: () => void): void {
+	const savedPath = process.env.PATH;
+	const savedAgent = process.env.AGENT_NAME;
+	const savedResponse = process.env.AM_FIXTURE_RESPONSE;
+	const savedMode = process.env.AM_FIXTURE_MODE;
+	process.env.PATH = `${fixtureBin}:${savedPath ?? ""}`;
+	if (agent === undefined) delete process.env.AGENT_NAME;
+	else process.env.AGENT_NAME = agent;
+	process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
+	process.env.AM_FIXTURE_MODE = mode;
+	try {
+		run();
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
+		if (savedAgent === undefined) delete process.env.AGENT_NAME;
+		else process.env.AGENT_NAME = savedAgent;
+		if (savedResponse === undefined) delete process.env.AM_FIXTURE_RESPONSE;
+		else process.env.AM_FIXTURE_RESPONSE = savedResponse;
+		if (savedMode === undefined) delete process.env.AM_FIXTURE_MODE;
+		else process.env.AM_FIXTURE_MODE = savedMode;
+	}
+}
+const onlyAttestation = { state: "current", database_matches_server: true, storage_root_matches_server: true };
+const onlyHolds = (...paths: string[]) => ({
+	my_reservations: paths.map((path) => ({ agent: "FixtureAgent", path, exclusive: true, remaining_seconds: 3600 })),
+	reservation_read_attestation: onlyAttestation,
+});
 
 const event = (command: string) => ({ toolName: "bash", arguments: { command } });
 const context = { cwd: repo };
@@ -105,7 +138,6 @@ describe("fleet guard main-only git checks", () => {
 	test("allows ordinary scoped commits and quiet quoted prose", () => {
 		const before = snapshotTree(repo);
 		for (const command of [
-			"git commit --only -m msg -- some/path",
 			"git commit -m msg",
 			"git commit --no-amend",
 			"git commit -m \"fix --amend stuff\"",
@@ -122,6 +154,39 @@ describe("fleet guard main-only git checks", () => {
 		expect(snapshotTree(repo)).toEqual(before);
 		expect(readFileSync(join(repo, "ownA.txt"), "utf8")).toBe("owned bytes");
 		expect(readFileSync(join(repo, "foreignB.txt"), "utf8")).toBe("peer bytes");
+	});
+
+	test("scoped --only admits covered paths and refuses foreign or unknown callers", () => {
+		const before = snapshotTree(repo);
+		const gitBefore = gitState();
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			expect(check(event("git commit --only -m msg -- some/path"), context)).toBeUndefined();
+		});
+		withOnlyFixture(onlyHolds("sub/*"), "ok", "FixtureAgent", () => {
+			expect(check(event("git commit --only -m msg -- sub/file.txt"), context)).toBeUndefined();
+		});
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			const foreign = check(event("git commit --only -m foreign -- foreignB.txt"), context);
+			expect(foreign?.block, "foreign --only admitted").toBe(true);
+			expect(foreign?.reason, "foreign --only admitted").toContain("reservation");
+		});
+		withOnlyFixture(onlyHolds("some/path"), "ok", undefined, () => {
+			const anonymous = check(event("git commit --only -m msg -- some/path"), context);
+			expect(anonymous?.block, "anonymous --only admitted").toBe(true);
+			expect(anonymous?.reason, "anonymous --only admitted").toContain("AGENT_NAME");
+		});
+		withOnlyFixture(onlyHolds("some/path"), "fail", "FixtureAgent", () => {
+			const broken = check(event("git commit --only -m msg -- some/path"), context);
+			expect(broken?.block, "unreadable reservations admitted").toBe(true);
+			expect(broken?.reason, "unreadable reservations admitted").toContain("reservation");
+		});
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			const escape = check(event("git commit --only -m msg -- ../escape.txt"), context);
+			expect(escape?.block, "outside-repo --only admitted").toBe(true);
+			expect(escape?.reason, "outside-repo --only admitted").toContain("outside the repository");
+		});
+		expect(snapshotTree(repo)).toEqual(before);
+		expect(gitState()).toBe(gitBefore);
 	});
 
 	test("native entry path blocks unscoped amend through the chained checks", async () => {

@@ -1,5 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface FleetGuardEvent {
 	toolName?: unknown;
@@ -211,7 +212,15 @@ function substitutionBodies(text: string): string[] {
 	return bodies;
 }
 
-function amendRewrite(words: readonly string[]): boolean {
+interface CommitScope {
+	amend: boolean;
+	only: boolean;
+	paths: string[];
+}
+
+const COMMIT_VALUE_OPTIONS = ["-m", "--message", "-F", "--file", "--author", "--date", "--reuse-message", "--reedit-message"];
+
+function analyzeCommit(words: readonly string[]): CommitScope | null {
 	let index = 1;
 	while (index < words.length) {
 		const word = words[index]!;
@@ -221,17 +230,99 @@ function amendRewrite(words: readonly string[]): boolean {
 		if (word.startsWith("--git-dir=") || word.startsWith("--work-tree=")) { index++; continue; }
 		index++;
 	}
-	if (index >= words.length || words[index] !== "commit") return false;
+	if (index >= words.length || words[index] !== "commit") return null;
 	index++;
-	const COMMIT_VALUE_OPTIONS = ["-m", "--message", "-F", "--file", "--author", "--date", "--reuse-message", "--reedit-message"];
+	let amend = false;
+	let only = false;
+	const paths: string[] = [];
 	for (; index < words.length; index++) {
 		const word = words[index]!;
-		if (word === "--") break;
-		if (word === "--amend") return true;
+		if (word === "--") {
+			for (index++; index < words.length; index++) paths.push(words[index]!);
+			break;
+		}
+		if (word === "--amend") { amend = true; continue; }
+		if (word === "--only") { only = true; continue; }
 		if (COMMIT_VALUE_OPTIONS.includes(word)) { index++; continue; }
 		if (isMessageBundle(word)) { index++; continue; }
+		if (!word.startsWith("-") || word === "-") paths.push(word);
+	}
+	return { amend, only, paths };
+}
+
+const ONLY_IDENTITY_REASON =
+	"fleet-guard history: git commit --only needs an identified caller with exclusive reservations; set AGENT_NAME and reserve every named path first; no files were changed.";
+const ONLY_UNAVAILABLE_REASON =
+	"fleet-guard history: the reservation lookup for git commit --only failed; restore Agent Mail reservation reads before landing; no files were changed.";
+const ONLY_FOREIGN_REASON =
+	"fleet-guard history: git commit --only names a path outside the repository; no files were changed.";
+const ONLY_UNCOVERED_REASON =
+	"fleet-guard history: git commit --only names a path without an active exclusive reservation; reserve it first; no files were changed.";
+
+interface ReservationHold {
+	pattern: string;
+}
+
+function readReservationHolds(repoRoot: string, agent: string): ReservationHold[] | null {
+	let output: string;
+	try {
+		const run = spawnSync("am", ["robot", "reservations", "--project", repoRoot, "--agent", agent, "--json"], { encoding: "utf8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+		if (run.status !== 0) return null;
+		output = String(run.stdout);
+	} catch {
+		return null;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(output);
+	} catch {
+		return null;
+	}
+	if (!parsed || typeof parsed !== "object") return null;
+	const record = parsed as Record<string, unknown>;
+	const attestation = record.reservation_read_attestation;
+	if (!attestation || typeof attestation !== "object") return null;
+	const attested = attestation as Record<string, unknown>;
+	if (attested.state !== "current" || attested.database_matches_server !== true || attested.storage_root_matches_server !== true) return null;
+	const rows = record.my_reservations;
+	if (!Array.isArray(rows)) return null;
+	const holds: ReservationHold[] = [];
+	for (const row of rows) {
+		if (!row || typeof row !== "object") return null;
+		const entry = row as Record<string, unknown>;
+		if (entry.agent !== agent || entry.exclusive !== true || typeof entry.remaining_seconds !== "number" || entry.remaining_seconds <= 0 || typeof entry.path !== "string" || !entry.path) return null;
+		holds.push({ pattern: entry.path });
+	}
+	return holds;
+}
+
+function holdCovers(pattern: string, path: string): boolean {
+	if (pattern === path) return true;
+	if (pattern.endsWith("/*") && pattern.length > 2) {
+		const dir = pattern.slice(0, -2);
+		if (path === dir || path.startsWith(dir + "/")) return true;
 	}
 	return false;
+}
+
+function relativeRepoPath(root: string, base: string, value: string): string | null {
+	const pathFromRoot = relative(root, resolve(base, value));
+	if (pathFromRoot === "" || pathFromRoot === "." || pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot)) return null;
+	return pathFromRoot.split(sep).join("/");
+}
+
+function checkOnlyCoverage(paths: string[], root: string, base: string): FleetGuardBlock | undefined {
+	if (paths.length === 0) return undefined;
+	const agent = asString(process.env.AGENT_NAME);
+	if (!agent) return { block: true, reason: ONLY_IDENTITY_REASON };
+	const holds = readReservationHolds(root, agent);
+	if (!holds) return { block: true, reason: ONLY_UNAVAILABLE_REASON };
+	for (const value of paths) {
+		const path = relativeRepoPath(root, base, value);
+		if (!path) return { block: true, reason: ONLY_FOREIGN_REASON };
+		if (!holds.some((hold) => holdCovers(hold.pattern, path))) return { block: true, reason: ONLY_UNCOVERED_REASON };
+	}
+	return undefined;
 }
 
 function isMessageBundle(word: string): boolean {
@@ -359,10 +450,16 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 				continue;
 			}
 			const commandCwd = optionValue(effective, "-C");
-			const root = repositoryRoot(commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd());
+			const pathBase = commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd();
+			const root = repositoryRoot(pathBase);
 			if (!root) continue;
 			if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
-			if (amendRewrite(effective)) return { block: true, reason: AMEND_REASON };
+			const scope = analyzeCommit(effective);
+			if (scope && scope.amend) return { block: true, reason: AMEND_REASON };
+			if (scope && scope.only) {
+				const verdict = checkOnlyCoverage(scope.paths, root, pathBase);
+				if (verdict) return verdict;
+			}
 		}
 	}
 	return undefined;
