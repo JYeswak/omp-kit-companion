@@ -576,61 +576,121 @@ import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const TERN_PROOF_POLL_MS = 1000;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
-/** Absolute tern for GUI-process argv (AM58464); a bare `tern` resolves differently there. */
-export const TERN_CTL_BIN = "/Users/josh/.local/bin/tern";
+/**
+ * Resolve the tern binary without hardcoding a home directory (AM58562-5):
+ * explicit `TERN_CTL_BIN` env override, else `$HOME/.local/bin/tern`.
+ * The path is consumed locally when spawning; GUI-process argv still needs
+ * it absolute (AM58464).
+ */
+export function ternCtlBin(): string {
+	const override = process.env.TERN_CTL_BIN;
+	if (typeof override === "string" && override.trim() !== "") return override;
+	const home = process.env.HOME ?? "";
+	return home === "" ? "tern" : `${home}/.local/bin/tern`;
+}
 
 /**
- * ompkit-kdbz.2.4 native admission turn (AM58464): one carly-lua turn that
- * reads the live dock surface, admits only a sendable editor with an empty
- * draft and no modal layer, then emits a single evsend. Every check lives
- * inside the turn, so a BUSY/draft/modal transition between a separate read
- * and the effect cannot slip through; the program side revalidates (live
- * editor id match, sendable at handle time, blank-text drop). Returns null
- * when the payload cannot travel as a long-bracket literal. The lua uses no
- * backslash anywhere: carly lua rejects JSON.stringify-wrapped code with a
- * parse error (verified 2026-10-16), while long brackets need no escapes.
- * Verification happens outside the turn via capture --surfaces (composer
- * holds marker) and the session journal (USER entry), never via the shared
- * last_tool channel.
+ * Encode arbitrary text as lua `string.char(...)` byte codes (AM58562-1).
+ * The carly lua transport mangles several literal shapes inside source
+ * (verified live 2026-10-16 against carly lua on an owned pane, each with
+ * isolated passing/failing probes): `..` rejected at parse; unbalanced
+ * `{`/`}`/`?`/`,` inside string literals rejected (naive pre-scan);
+ * backslash escapes evaluate to nil; digit-strings containing `/` evaluate
+ * as division (so the block travels as bare pane digits, never `sess/pane`);
+ * `or` does not fall through on nil; `and`/`else` rejected or misbehave;
+ * `#` rejected; call results used directly in conditions mis-evaluate, so
+ * every call result is localized before comparison. The generated turn uses
+ * only live-verified constructs (locals, if/then/end nesting, while/break,
+ * ==, comparisons, string.format/char/find/sub, long-bracket literals,
+ * single-dot access) and carries no payload bytes as source text at all:
+ * every UTF-8 byte becomes a decimal code, so no payload (including `]]`,
+ * commas, quotes or newlines) can disturb parsing. Caveat: carly last_tool
+ * is a single shared channel, so verdict reads during concurrent fleet
+ * probing need nonce tagging; unhashed reads are attribution-unsafe.
+ */
+export function luaCharCodes(text: string): string {
+	const codes: number[] = [];
+	for (const b of Buffer.from(text, "utf8")) codes.push(b);
+	return codes.join(",");
+}
+
+/**
+ * ompkit-kdbz.2.4 native admission turn (AM58464, revised AM58562): one
+ * carly-lua turn that reads the live dock surface, admits only a single
+ * sendable editor with an empty draft and no modal layer content, then
+ * emits a single evsend. Every check lives inside the turn, so a
+ * BUSY/draft/modal transition between a separate read and the effect cannot
+ * slip through; the OMP backend revalidates at handle time (live editor id
+ * match, sendable, blank-text drop). The editor test is per-node scoped: the
+ * editor id must immediately precede its `"k":"editor"` tag, sendable and
+ * empty-draft markers must follow within a bounded window containing no
+ * other `"k":` tag, and exactly one eligible editor may exist. `block` is
+ * the bare decimal pane id (what `surface`/`event` address); anything else
+ * is refused. Returns null without running anything when the block is not
+ * a bare id. Residuals (unqualified, need the owned-target live leg):
+ * F1 BUSY fencing and F3 incarnation compare-and-send are asserted by
+ * construction here, not proven; a silent in-turn refusal leaves pending
+ * retained, never auto-resent.
  */
 export function buildNativeSendTurn(block: string, payload: string): string | null {
-	if (/["\\\n]/.test(block)) return null;
-	if (payload.includes("]]")) return null;
+	if (!/^[0-9]+$/.test(block)) return null;
 	return [
 		`local blk = "${block}"`,
 		`local jd = cx.session:surface(blk, {root="dock", nodes=100, max_chars=16})`,
 		`if jd == nil then return end`,
 		`local dj = tern.json.encode(jd)`,
-		`local epos = dj:find([["k":"editor"]], 1, true)`,
-		`if epos == nil then return end`,
-		`local idpos = 0`,
-		`local start = 1`,
-		`while true do`,
-		`local p = dj:find([["id":"]], start, true)`,
-		`if p == nil or p > epos then break end`,
-		`idpos = p`,
-		`start = p + 1`,
-		`end`,
-		`if idpos == 0 then return end`,
-		`local q = dj:find([["]], idpos + 6, true)`,
-		`if q == nil then return end`,
-		`local eid = dj:sub(idpos + 6, q - 1)`,
-		`local region = dj:sub(idpos, epos + 800)`,
-		`if region:find([["sendable":true]], 1, true) == nil then return end`,
-		`if region:find([["text":""]], 1, true) == nil then return end`,
-		`local ly = cx.session:surface(blk, {root="layer", nodes=100, max_chars=16})`,
-		`if ly ~= nil then`,
-		`local lj = tern.json.encode(ly)`,
-		`if lj:find([["k":"picker"]], 1, true) ~= nil then return end`,
-		`if lj:find([["k":"modal"]], 1, true) ~= nil then return end`,
-		`if lj:find([["k":"dialog"]], 1, true) ~= nil then return end`,
-		`if lj:find([["k":"sheet"]], 1, true) ~= nil then return end`,
-		`end`,
-		`local sf = jd.surface and jd.surface.id`,
+		`local Q = string.char(34)`,
+		`local C = string.char(44)`,
+		`local SURF = jd.surface`,
+		`if SURF == nil then return end`,
+		`local sf = SURF.id`,
 		`if sf == nil then return end`,
-		`cx.session:event(blk, {ev="send", sf=sf, id=eid, text=[[` + payload + `]]})`,
+		`local ly = cx.session:surface(blk, {root="layer", nodes=100, max_chars=16})`,
+		`local lj = tern.json.encode(ly)`,
+		`local lc = lj:find([["c":]], 1, true)`,
+		`if lc == nil then`,
+		`local EN = 0`,
+		`local EL = "none"`,
+		`local init = 1`,
+		`while true do`,
+		`local ks, ke = dj:find([["k":"editor"]], init, true)`,
+		`if ks == nil then break end`,
+		`init = ke + 1`,
+		`local eid = "none"`,
+		`local pre = dj:sub(ks-1, ks-1)`,
+		`if pre == C then`,
+		`local vs = ks - 2`,
+		`while vs > 1 do`,
+		`local ch = dj:sub(vs, vs)`,
+		`if ch == Q then break end`,
+		`vs = vs - 1`,
+		`end`,
+		`local tag = dj:sub(vs-4, vs-1)`,
+		`if tag == [["id":]] then`,
+		`eid = dj:sub(vs+1, ks-2)`,
+		`end`,
+		`end`,
+		`if eid == "none" then return end`,
+		`local klim = ke + 600`,
+		`local win = dj:sub(ke, klim)`,
+		`local s1 = win:find([["sendable":true]], 1, true)`,
+		`if s1 == nil then return end`,
+		`local t1 = win:find([["text":""]], 1, true)`,
+		`if t1 == nil then return end`,
+		`local k2 = win:find([["k":]], 1, true)`,
+		`if k2 == nil then`,
+		`EN = EN + 1`,
+		`if EN == 1 then EL = eid end`,
+		`if EN == 2 then return end`,
+		`end`,
+		`end`,
+		`if EN == 0 then return end`,
+		`local text = string.char(` + luaCharCodes(payload) + `)`,
+		`cx.session:event(blk, {ev="send", sf=sf, id=EL, text=text})`,
+		`end`,
 	].join("\n");
 }
+
 
 
 export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
@@ -657,6 +717,7 @@ export interface TernPendingRecord {
 	textSha256: string;
 	seatKey: string;
 	sessionSha: string;
+	sessionId: string;
 	leafId: string;
 	cursorBytes: number;
 	createdAt: string;
@@ -680,9 +741,10 @@ function readTernPending(path: string): TernPendingRecord | null {
 	const cursorBytes = typeof rec.cursorBytes === "number" && Number.isInteger(rec.cursorBytes) && rec.cursorBytes >= 0
 		? rec.cursorBytes
 		: null;
+	const sessionId = typeof rec.sessionId === "string" ? rec.sessionId : null;
 	if (marker === null || textSha256 === null || seatKey === null || sessionSha === null
-		|| leafId === null || createdAt === null || cursorBytes === null) return null;
-	return { marker, textSha256, seatKey, sessionSha, leafId, cursorBytes, createdAt };
+		|| sessionId === null || leafId === null || createdAt === null || cursorBytes === null) return null;
+	return { marker, textSha256, seatKey, sessionSha, sessionId, leafId, cursorBytes, createdAt };
 }
 /** Scan raw session text for the marker on a USER-role line past a cursor offset. */
 export function findTernUserMarker(text: string, marker: string, afterOffset: number): number | null {
@@ -710,35 +772,45 @@ export function findTernUserMarker(text: string, marker: string, afterOffset: nu
  * Deliver text to a bound Tern seat with session-file proof (2.4 [a]).
  *
  * Flow: gate flags (incl. GOALSEND form) -> seat binding -> observe IDLE
- * (must be IDENTIFIED) -> journal eligibility (settled turn) -> clear any
- * already-consumed pending marker (log status only, never resend) ->
- * suppress-while-pending check -> persist attempt record -> lock ->
+ * (must be IDENTIFIED) -> journal eligibility (settled turn) -> sweep
+ * consumed/dead-incarnation pendings (log status only, never resend) ->
+ * suppress-while-pending check keyed on the stable journal session identity
+ * (survives appends; AM58562-4) -> persist attempt record -> lock ->
  * re-read session file (cheap incarnation pre-filter, NOT atomicity) ->
- * ONE native carly-lua turn (surface read, sendable+empty+no-modal admission,
+ * ONE native carly-lua turn (surface read, typed per-editor admission,
  * single evsend) -> poll for the USER marker past the pre-send cursor
  * (default 20 s) -> capture --surfaces context note.
  *
- * Atomicity comes from the single lua turn plus the program-side gates
- * (OMP backend drops sends to non-live/stale editor ids; the composer drops
+ * Atomicity comes from the single lua turn plus the OMP backend gates
+ * (backend drops sends to non-live/stale editor ids; the composer drops
  * blank text and non-sendable submissions), never from the hash re-read
- * window. Refusal paths emit zero effects.
+ * window. Refusal paths emit zero effects. F1 BUSY fencing and F3
+ * incarnation compare-and-send remain UNQUALIFIED statically: this shape
+ * asserts them by construction, and only the owned-target live leg with
+ * post-cursor journal proof can qualify them (AM58562-2).
  *
  * Statuses: OK (USER marker proven), PENDING_CONSUME (sent but consumption
  * unproven within the bound; pending retained, never auto-resent — a missing
  * marker is uncertainty, never known-zero admission, per ACT58506),
- * NOT_DELIVERED (send turn failed; recovery copy written), REFUSED (zero
- * effects proven: gates, observation, identity, eligibility, incarnation,
- * unwireable payload).
+ * NOT_DELIVERED (send turn dispatch failed; effect unproven so pending is
+ * retained, recovery copy written), REFUSED (zero effects proven before any
+ * run: gates, observation, identity, eligibility, incarnation, unwireable
+ * block).
  *
  * Actuation note: one `tern ctl carly lua` turn reads the live dock surface
  * and emits a single evsend (Root real TSP USER admissions, AM58464).
- * Transport lesson, verified 2026-10-16 against carly lua: the code travels
- * as one plain argv string (a JSON.stringify-wrapped payload is rejected by
- * the lua parser); the lua itself avoids every backslash via long-bracket
- * literals. carly lua stdout carries only the dispatch ack; proof comes
- * from the session journal (primary) with capture --surfaces as context only
- * (never a refusal oracle), never from shared last_tool. Absolute tern path
- * per AM58464.
+ * Transport lessons, verified live 2026-10-16 against carly lua on an owned
+ * pane: the turn travels as one plain argv string (JSON.stringify-wrapped
+ * code is rejected); the turn body uses only live-verified constructs and
+ * carries the payload as `string.char(...)` byte codes, so arbitrary text
+ * (commas, braces, quotes, newlines, `]]`) cannot disturb parsing —
+ * literals with `..`, `#`, unbalanced `{}?`, commas, backslash escapes,
+ * `/` in digit-strings, `or`-defaults, `and`/`else` all misparse or
+ * mis-evaluate. The block is the bare decimal pane id (`surface`/`event`
+ * address it directly; `sess/pane` fails). Proof comes from the session
+ * journal (primary) with capture --surfaces as context only (never a
+ * refusal oracle), never from shared last_tool. Tern binary resolves from
+ * `TERN_CTL_BIN` or `$HOME/.local/bin/tern`, never a hardcoded home.
  */
 export async function deliverToTernSeat(input: {
 	seat: TernSeatBinding;
@@ -801,9 +873,14 @@ export async function deliverToTernSeat(input: {
 	const preCursor = Buffer.byteLength(journalText, "utf8");
 	const preSha = observation.sessionSha;
 	// A pending marker already consumed upgrades log status only: sweep every
-	// pending record for this seat (any incarnation) against the eligibility
-	// snapshot and clear consumed ones. Never resend old text. A remaining
-	// pending on THIS incarnation suppresses the new send.
+	// pending record for this seat against the eligibility snapshot. Records
+	// from a dead incarnation (session identity differs) are dropped without
+	// resend: their marker can never be consumed by this journal, and this
+	// function never auto-resends uncertain text. A remaining pending on THIS
+	// runtime incarnation suppresses the new send. The key is the stable
+	// journal session identity (header id, constant across appends), never
+	// the mutable whole-file content hash: an append must not release
+	// suppression for an unproven attempt (AM58562-4).
 	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
 	let pendingDirNames: string[] = [];
 	try {
@@ -814,22 +891,26 @@ export async function deliverToTernSeat(input: {
 	for (const name of pendingDirNames) {
 		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
 		const rec = readTernPending(join(pendingDir, name));
-		if (rec !== null && findTernUserMarker(journalText, rec.marker, rec.cursorBytes) !== null) {
+		if (rec === null) continue;
+		if (findTernUserMarker(journalText, rec.marker, rec.cursorBytes) !== null) {
+			try { rmSync(join(pendingDir, name), { force: true }); } catch {}
+		} else if (rec.sessionId !== journal.sessionId) {
 			try { rmSync(join(pendingDir, name), { force: true }); } catch {}
 		}
 	}
-	const pendingPath = resolve(join(pendingDir, `${seatKey}.${(preSha ?? "").slice(0, 16)}.json`));
+	const pendingTag = createHash("sha256").update(journal.sessionId, "utf8").digest("hex").slice(0, 16);
+	const pendingPath = resolve(join(pendingDir, `${seatKey}.${pendingTag}.json`));
 	const pending = readTernPending(pendingPath);
-	if (pending !== null) {
+	if (pending !== null && pending.sessionId === journal.sessionId) {
 		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile: observation.sessionFile,
-			offset: null, drop_path: null, detail: `earlier marker unconsumed on this incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
+			offset: null, drop_path: null, detail: `earlier marker unconsumed on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
 	}
 	// F5: persist the attempt BEFORE any irreversible effect; one lock per
 	// destination serializes concurrent senders.
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const textSha256 = createHash("sha256").update(input.text, "utf8").digest("hex");
 	const attempt: TernPendingRecord = { marker, textSha256, seatKey, sessionSha: preSha ?? "",
-		leafId: journal.leafId, cursorBytes: preCursor, createdAt: new Date().toISOString() };
+		sessionId: journal.sessionId, leafId: journal.leafId, cursorBytes: preCursor, createdAt: new Date().toISOString() };
 	try {
 		mkdirSync(dirname(pendingPath), { recursive: true });
 		writeFileSync(pendingPath, JSON.stringify(attempt) + "\n", { flag: "wx" });
@@ -856,20 +937,25 @@ export async function deliverToTernSeat(input: {
 			return { status: "REFUSED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null, drop_path: null,
 				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
 		}
-		const block = `${input.seat.session}/${observation.runtimeBinding.paneId}`;
+		// Block is the bare decimal pane id: `surface`/`event` address it
+		// directly (verified live 2026-10-16; a `sess/pane` string makes
+		// surface fail). Anything else never reaches a turn.
+		const block = String(observation.runtimeBinding.paneId);
 		const payload = `${input.text}\n[${marker}]`;
 		const lua = buildNativeSendTurn(block, payload);
 		if (lua === null) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null, drop_path: null,
-				detail: `payload not wireable as a native lua literal; zero sends`, code: "TEXT_UNWIREABLE" };
+				detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE" };
 		}
-		const ctl = [TERN_CTL_BIN, "--window", input.seat.windowKey, "ctl", "carly", "lua", lua];
+		const ctl = [ternCtlBin(), "--window", input.seat.windowKey, "ctl", "carly", "lua", lua];
 		if (input.io.run(ctl).code !== 0) {
-			try { rmSync(pendingPath, { force: true }); } catch {}
+			// AM58562-3: a nonzero turn dispatch does not prove zero native
+			// effects, so the attempt stays pending (never auto-resent) while
+			// a recovery copy is still written.
 			return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null,
 				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-				detail: `native send turn failed; recovery copy written`, code: "SEND_FAILED" };
+				detail: `native send turn dispatch failed; effect unproven, pending retained; recovery copy written`, code: "SEND_FAILED" };
 		}
 		const started = Date.now();
 		for (;;) {
@@ -887,10 +973,11 @@ export async function deliverToTernSeat(input: {
 		}
 		// ACT58506: a missing marker in journal and composer is NOT known-zero
 		// admission (capture can miss; the poll bound can be short). Retain
-		// pending uncertainty; refuse only when zero effects are proven
-		// (gates, unwireable payload, failed turn dispatch). Capture here is
-		// informational context for the operator, never a refusal oracle.
-		const cap = input.io.run([TERN_CTL_BIN, "--window", input.seat.windowKey, "capture", block, "--surfaces"]);
+		// pending uncertainty; refuse only when zero effects are proven before
+		// any run (gates, unwireable block). Capture here is informational
+		// context for the operator, never a refusal oracle.
+		const captureBlock = `${input.seat.session}/${observation.runtimeBinding.paneId}`;
+		const cap = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "capture", captureBlock, "--surfaces"]);
 		const capNote = cap.code !== 0 ? `capture failed (rc=${cap.code})`
 			: cap.out.includes(`[${marker}]`) ? `composer holds marker` : `composer shows no marker`;
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile: observation.sessionFile, offset: null,

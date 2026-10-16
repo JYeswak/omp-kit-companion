@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, buildNativeSendTurn, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, isBareGoalDirective, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, buildNativeSendTurn, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -414,8 +414,14 @@ test("TERN2.4 OK: USER marker past cursor proves delivery with offset", async ()
 		run: (argv: string[]) => {
 			f.taken.runs.push(argv);
 			if (argv.includes("carly")) {
-				const hit = /kit-send-[0-9a-f]+/.exec(argv.join("\n"))?.[0];
-				if (hit) sentMarker = hit;
+				// The payload string.char(...) group is the last one in the turn.
+				const groups = [...argv.join("\n").matchAll(/string\.char\(([0-9,]+)\)/g)];
+				const last = groups.length > 0 ? groups[groups.length - 1]![1]! : null;
+				if (last) {
+					const text = Buffer.from(last.split(",").map(Number)).toString("utf8");
+					const hit = /kit-send-[0-9a-f]+/.exec(text)?.[0];
+					if (hit) sentMarker = hit;
+				}
 			}
 			return { code: 0, out: "ok" };
 		},
@@ -445,8 +451,13 @@ test("TERN2.4 PENDING: composer holds marker but journal lacks it", async () => 
 		run: (argv: string[]) => {
 			f.taken.runs.push(argv);
 			if (argv.includes("carly")) {
-				const hit = /kit-send-[0-9a-f]+/.exec(argv.join("\n"))?.[0];
-				if (hit) sentMarker = hit;
+				const groups = [...argv.join("\n").matchAll(/string\.char\(([0-9,]+)\)/g)];
+				const last = groups.length > 0 ? groups[groups.length - 1]![1]! : null;
+				if (last) {
+					const text = Buffer.from(last.split(",").map(Number)).toString("utf8");
+					const hit = /kit-send-[0-9a-f]+/.exec(text)?.[0];
+					if (hit) sentMarker = hit;
+				}
 			}
 			if (argv.includes("capture")) return { code: 0, out: sentMarker ? `composer [${sentMarker}]` : "empty" };
 			return { code: 0, out: "ok" };
@@ -496,27 +507,35 @@ test("TERN2.4 capture failure keeps pending instead of refusing blind", async ()
 	expect(r.detail).toContain("capture failed");
 });
 
-test("TERN2.4 TEXT_UNWIREABLE: payload with lua close bracket refuses with zero runs", async () => {
+test("TERN2.4 brackets: payload with ]] proceeds to the turn and pends", async () => {
 	const f = ternFixture();
 	const dir = dropDir();
 	clearTernPending(dir);
 	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello ]] world", dropDir: dir, io: f.io,
 		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
-	expect(r.status).toBe("REFUSED");
-	expect(r.code).toBe("TEXT_UNWIREABLE");
-	expect(f.taken.runs.length).toBe(0);
-	expect(f.taken.reads).toBeGreaterThan(0);
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(f.taken.runs.filter(a => a.includes("carly")).length).toBe(1);
 });
 
-test("TERN2.4 builder: unwireable block or payload yields null turn", () => {
-	expect(buildNativeSendTurn("s/p", "hello [kit-send-abc]")).not.toBeNull();
-	expect(buildNativeSendTurn("s/p", "a ]] b")).toBeNull();
-	expect(buildNativeSendTurn('s/p"; evil() --', "hello")).toBeNull();
-	expect(buildNativeSendTurn("s\\p", "hello")).toBeNull();
-	expect(buildNativeSendTurn("s\np", "hello")).toBeNull();
+test("TERN2.4 builder: block must be bare digits; payload wires as byte codes", () => {
+	const turn = buildNativeSendTurn("1756641624115", "hello [kit-send-abc]");
+	expect(turn).not.toBeNull();
+	expect(buildNativeSendTurn("s/p", "hello")).toBeNull();
+	expect(buildNativeSendTurn('7"; evil() --', "hello")).toBeNull();
+	expect(buildNativeSendTurn("", "hello")).toBeNull();
+	// AM58562-1: commas/braces/]] in payload never reach source as literals.
+	const tricky = buildNativeSendTurn("7", "a, b ]] c {d} ? e")!;
+	expect(tricky.includes("a, b")).toBe(false);
+	expect(tricky.includes("string.char(")).toBe(true);
 });
 
-test("TERN2.4 INV03/F5: send turn failure is NOT_DELIVERED with drop and no phantom pending", async () => {
+test("TERN2.4 luaCharCodes: byte-exact round trip incl multibyte", () => {
+	expect(luaCharCodes("A,B?C")).toBe("65,44,66,63,67");
+	const s = "hi ✓\n";
+	expect(Buffer.from(luaCharCodes(s).split(",").map(Number)).toString("utf8")).toBe(s);
+});
+
+test("TERN2.4 INV03/F5: send turn failure is NOT_DELIVERED with drop and retained pending", async () => {
 	const f = ternFixture({ runRc: 1 });
 	const dir = dropDir();
 	clearTernPending(dir);
@@ -524,7 +543,8 @@ test("TERN2.4 INV03/F5: send turn failure is NOT_DELIVERED with drop and no phan
 		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
 	expect(r.status).toBe("NOT_DELIVERED");
 	expect(r.drop_path).not.toBeNull();
-	expect(!existsSync(join(dir, "..", "tern-pending")) || readdirSync(join(dir, "..", "tern-pending")).length === 0).toBe(true);
+	// AM58562-3: dispatch failure does not prove zero effects; the attempt stays pending.
+	expect(readdirSync(join(dir, "..", "tern-pending")).length).toBe(1);
 });
 
 test("TERN2.4 F1: session move between observe and effect refuses with zero sends", async () => {
@@ -555,10 +575,11 @@ test("TERN2.4 F4: stale and assistant-echo markers never prove", () => {
 test("TERN2.4 B5-7: unconsumed pending suppresses the new send; consumed pending clears", async () => {
 	const dir = dropDir();
 	const seatKey = "s_7_W";
+	const tag = createHash("sha256").update("s1", "utf8").digest("hex").slice(0, 16);
 	mkdirSync(join(dir, "..", "tern-pending"), { recursive: true });
-	const pendingPath = join(dir, "..", "tern-pending", `${seatKey}.${settledSha.slice(0, 16)}.json`);
+	const pendingPath = join(dir, "..", "tern-pending", `${seatKey}.${tag}.json`);
 	writeFileSync(pendingPath, JSON.stringify({ marker: "kit-send-oldoldold0", textSha256: "t", seatKey,
-		sessionSha: settledSha, leafId: "m1", cursorBytes: 0, createdAt: "2026-10-16T00:00:00Z" }) + "\n");
+		sessionSha: settledSha, sessionId: "s1", leafId: "m1", cursorBytes: 0, createdAt: "2026-10-16T00:00:00Z" }) + "\n");
 	const f = ternFixture();
 	const suppressed = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: f.io,
 		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
@@ -585,14 +606,61 @@ test("TERN2.4 B5-7: unconsumed pending suppresses the new send; consumed pending
 		observe: resumedObserve, identify: f.identify, pollMs: 1, deadlineMs: 10 });
 	// ACT58506: the send turn ran but neither journal nor composer ever showed
 	// the new marker — uncertainty, not known-zero admission. Pending is
-	// retained (rotated record exists), never auto-resent.
+	// retained under the same session identity, never auto-resent.
 	expect(resumed.status).toBe("PENDING_CONSUME");
 	expect(resumed.marker).not.toBe("kit-send-oldoldold0");
 	expect(resumed.code).toBe("PROOF_TIMEOUT");
-	expect(existsSync(pendingPath)).toBe(false);
-	const rotated = join(dir, "..", "tern-pending",
-		`${seatKey}.${createHash("sha256").update(consumedText, "utf8").digest("hex").slice(0, 16)}.json`);
-	expect(JSON.parse(readFileSync(rotated, "utf8")).marker).toBe(resumed.marker);
+	expect(JSON.parse(readFileSync(pendingPath, "utf8")).marker).toBe(resumed.marker);
+});
+
+test("TERN2.4 AM58562-4: journal append without consumption keeps suppression", async () => {
+	const dir = dropDir();
+	const seatKey = "s_7_W";
+	const tag = createHash("sha256").update("s1", "utf8").digest("hex").slice(0, 16);
+	mkdirSync(join(dir, "..", "tern-pending"), { recursive: true });
+	writeFileSync(join(dir, "..", "tern-pending", `${seatKey}.${tag}.json`), JSON.stringify({
+		marker: "kit-send-append0", textSha256: "t", seatKey, sessionSha: settledSha,
+		sessionId: "s1", leafId: "m1", cursorBytes: 0, createdAt: "2026-10-16T00:00:00Z" }) + "\n");
+	// Same session identity, new assistant line: content hash moves, marker unconsumed.
+	const appended = settledJournalText()
+		+ JSON.stringify({ id: "mx", parentId: "m1", type: "message",
+			message: { role: "assistant", stopReason: "stop", toolCallIds: [] },
+			toolCallId: null, asyncState: null, activeLeafId: null, offset: 999 }) + "\n";
+	const f = ternFixture({ reads: [appended] });
+	const appendedObserve = async (_seat: TernSeatBinding) => ({ ...ternIdle,
+		sessionSha: createHash("sha256").update(appended, "utf8").digest("hex") });
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: f.io,
+		observe: appendedObserve, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("SUPPRESSED_PENDING");
+	expect(r.marker).toBe("kit-send-append0");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 AM58562-4: dead incarnation releases suppression without resend", async () => {
+	const dir = dropDir();
+	const seatKey = "s_7_W";
+	const oldTag = createHash("sha256").update("old-sess", "utf8").digest("hex").slice(0, 16);
+	mkdirSync(join(dir, "..", "tern-pending"), { recursive: true });
+	const oldPath = join(dir, "..", "tern-pending", `${seatKey}.${oldTag}.json`);
+	writeFileSync(oldPath, JSON.stringify({ marker: "kit-send-dead000", textSha256: "t", seatKey,
+		sessionSha: "oldsha", sessionId: "old-sess", leafId: "m1", cursorBytes: 0,
+		createdAt: "2026-10-16T00:00:00Z" }) + "\n");
+	// New incarnation, settled, marker nowhere: old file swept, new send proceeds.
+	const journal2 = `{"type":"session","id":"s2","cwd":"/repo","version":3}\n`
+		+ `{"id":"m1","parentId":null,"type":"message","message":{"role":"assistant","stopReason":"stop","toolCallIds":[]},"toolCallId":null,"asyncState":null,"activeLeafId":null,"offset":0}\n`;
+	const f = ternFixture({ reads: [journal2] });
+	const obs2 = async (_seat: TernSeatBinding) => ({ ...ternIdle,
+		sessionSha: createHash("sha256").update(journal2, "utf8").digest("hex") });
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: f.io,
+		observe: obs2, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(existsSync(oldPath)).toBe(false);
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("PROOF_TIMEOUT");
+	expect(r.marker).not.toBe("kit-send-dead000");
+	expect(f.taken.runs.filter(a => a.includes("carly")).length).toBe(1);
+	const tag2 = createHash("sha256").update("s2", "utf8").digest("hex").slice(0, 16);
+	expect(JSON.parse(readFileSync(join(dir, "..", "tern-pending", `${seatKey}.${tag2}.json`), "utf8")).marker).toBe(r.marker);
 });
 
 test("TERN2.4 submitQueued disabled: IDLE provisioned seat still refused with zero calls", async () => {
