@@ -33,9 +33,9 @@ top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not in
 mkdir -p "$(pwd -P)/var/agent-tmp" || fail "cannot create var/agent-tmp"
 scratch=$(mktemp -d "$(pwd -P)/var/agent-tmp/publishability.$$.XXXXXX") || fail "cannot create scratch dir"
 printf 'pid=%s\nlabel=publishability\nrepo=%s\ncreated=%s\n' "$$" "$(pwd -P)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$scratch/.owner"
-TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"
+TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"; TMP_RCREP="$scratch/greprc"
 : > "$TMP_FINDINGS"
-trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_RCREP" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.
@@ -51,9 +51,17 @@ scan() {
 	count=$(grep -caoE -- "$2" "$3" 2>/dev/null) || grc=$?
 	[ "$grc" -le 1 ] || fail "grep failed on $3 (rc $grc): scan incomplete"
 	[ "$count" -gt 0 ] || return 0
-	grep -naoE -- "$2" "$3" 2>/dev/null | {
+	# The reporting grep runs in a pipeline whose exit is awk's, so its own
+	# status is recorded separately: a single digit, never matched values.
+	# An rc of 0/1 with an empty stream is a benign race (file changed between
+	# precheck and report); rc > 1 is an incomplete scan.
+	: > "$TMP_RCREP"
+	{ grep -naoE -- "$2" "$3" 2>/dev/null || echo "$?" > "$TMP_RCREP"; } | {
 		if [ -n "${4:-}" ]; then grep -vE -- "$4" || true; else cat; fi
-	} | cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS"
+	} | cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS" \
+		|| fail "report stream failed for $3: scan incomplete"
+	rrc=$(cat "$TMP_RCREP")
+	case "$rrc" in ""|1) ;; *) fail "grep failed on $3 (rc $rrc): scan incomplete";; esac
 }
 scanned=0
 while IFS= read -r file; do

@@ -185,6 +185,21 @@ for producer in git grep; do
 		fail=$((fail + 1)); printf 'FAIL failing-%s-fails-closed: rc=%s out<<<%s>>>\n' "$producer" "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
 	fi
 done
+# rz5.106.7 REWORK: a fault hitting ONLY the reporting grep (the count
+# precheck passes through) must still fail closed: the pipeline masks the
+# reporter status, so the scanner records it separately.
+mkdir -p "$TMP/stub-reporter"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-naoE" ] && { echo "grep: planted reporter error" >&2; exit 2; }; done\nexec "%s" "$@"\n' "$real_grep" > "$TMP/stub-reporter/grep"
+chmod +x "$TMP/stub-reporter/grep"
+rc=0
+PATH="$TMP/stub-reporter:$PATH" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "2" ] && ! grep -q 'publishability: OK' "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL reporter-fault-fails-closed: rc=%s out<<<%s>>>\n' "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+
 
 # rz5.106.7: zero scanned subjects is UNRUN (exit 2), never OK: an empty repo, and a plain directory
 # nested inside a repo (an extracted archive) whose files git does not track.
