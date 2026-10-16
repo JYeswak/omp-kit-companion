@@ -1,10 +1,13 @@
 #!/bin/sh
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
-# repo's hook chains.
+# repo's hook chains, plus the staged-imports pre-commit member.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
+# The staged-imports member (scripts/check-staged-imports.sh, with
+# check-commit-imports.sh beside it) is always installed: it refuses a commit
+# whose staged files import a path that is neither staged nor committed.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -111,7 +114,9 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
 		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
 		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
-		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh"; do
+		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
+		"hooks.d/pre-commit/45-omp-kit-staged-imports scripts/check-staged-imports.sh" \
+		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
@@ -293,6 +298,16 @@ install_ref_txn() {
 	printf 'installed ref-update bead guard: %s\n' "$member"
 }
 
+# install_staged_imports: the pre-commit member judges the staged tree; its
+# checker sits beside it, non-executable, so the runner never runs it arg-less.
+install_staged_imports() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/45-omp-kit-staged-imports"
+	place "$KITROOT/scripts/check-commit-imports.sh" "$dir/check-commit-imports.sh" -x
+	place "$KITROOT/scripts/check-staged-imports.sh" "$member" +x
+	printf 'installed staged-imports member: %s\n' "$member"
+}
+
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
 	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
@@ -336,10 +351,9 @@ install_on_main
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn
-if [ "$NATIVE_PRESERVATION" = 1 ]; then
-	ensure_chain pre-commit
-	install_native_preservation
-fi
+ensure_chain pre-commit
+install_staged_imports
+[ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
 # Verify the whole installed chain (any failure rolls every mutation back):
 # Leg 1: the moved bespoke must behave exactly as pre-flight. A pass that
