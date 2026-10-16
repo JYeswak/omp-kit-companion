@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { acquireRunLock, bunCapExec, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -186,3 +186,154 @@ test("SVC1: an unreadable or odd off entry still disables", () => {
 	mkdirSync(join(dir, "load-watch.off"), { recursive: true });
 	expect(readJobOff(join(dir, "load-watch.off"))).toEqual({ disabled: true, reason: null });
 });
+
+const treeFixture = join(repoRoot, "tests", "fixtures", "capped-process-tree.ts");
+const fixtureEnv = () => ({ ...process.env } as Record<string, string>);
+
+function recordedPids(root: string): number[] {
+	return ["child.pid", "grandchild.pid"].filter(name => existsSync(join(root, name))).map(name => {
+		const pid = Number(readFileSync(join(root, name), "utf8"));
+		if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`invalid owned fixture PID ${pid}`);
+		return pid;
+	});
+}
+
+function activePid(pid: number): boolean {
+	const state = Bun.spawnSync(["ps", "-p", String(pid), "-o", "stat="]);
+	return state.exitCode === 0 && !state.stdout.toString().trim().startsWith("Z");
+}
+
+// These integration specimens exercise OS signal delivery and inherited pipe
+// descriptors in separate real processes; fake timers cannot drive that clock.
+async function until(predicate: () => boolean, milliseconds = 3000): Promise<void> {
+	const deadline = Date.now() + milliseconds;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error("owned fixture condition exceeded deadline");
+		await Bun.sleep(10);
+	}
+}
+
+function cleanFixture(root: string): void {
+	for (const pid of recordedPids(root)) {
+		if (activePid(pid)) {
+			try { process.kill(pid, "SIGKILL"); } catch { /* only fixture-recorded descendants */ }
+		}
+	}
+}
+
+test("CANCELP0: default timeout kills TERM-ignoring descendants and closes inherited output", async () => {
+	const root = jobsDir();
+	const control = Bun.spawn(["/bin/sleep", "30"]);
+	try {
+		// Explicit executor exercises the default group contract too.
+		const run = runWithCap({ argv: [process.execPath, treeFixture, "tree", root],
+			cwd: root, env: fixtureEnv(), capMs: 500, exec: bunCapExec() });
+		await until(() => recordedPids(root).length === 2);
+		const pids = recordedPids(root);
+		let timer: NodeJS.Timeout | undefined;
+		const result = await Promise.race([run, new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error(`capped runner held output FDs; active PIDs: ${pids.filter(activePid)}`)), 3000);
+		})]).finally(() => clearTimeout(timer));
+		expect(result.status).toBe("TIMEOUT");
+		await until(() => pids.every(pid => !activePid(pid)));
+		expect(result.out).toContain("grandchild-ready");
+		expect(result.out).toContain("grandchild-stderr");
+		expect(activePid(control.pid)).toBe(true);
+	} finally {
+		cleanFixture(root);
+		control.kill("SIGKILL");
+		await control.exited;
+	}
+}, 10000);
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+	test(`CANCELP0: parent ${signal} cleans only its owned tree`, async () => {
+		const root = jobsDir();
+		const control = Bun.spawn(["/bin/sleep", "30"]);
+		const parent = Bun.spawn([process.execPath, treeFixture, "runner", root], { stdout: "pipe", stderr: "pipe" });
+		const stdout = new Response(parent.stdout).text();
+		const stderr = new Response(parent.stderr).text();
+		try {
+			await until(() => recordedPids(root).length === 2);
+			parent.kill(signal);
+			await until(() => parent.exitCode !== null && recordedPids(root).every(pid => !activePid(pid)));
+			expect(await parent.exited).not.toBe(0);
+			expect(await stdout).toContain("grandchild-ready");
+			expect(await stderr).toBe("");
+			expect(activePid(control.pid)).toBe(true);
+		} finally {
+			cleanFixture(root);
+			parent.kill("SIGKILL");
+			control.kill("SIGKILL");
+			await Promise.all([parent.exited, control.exited, stdout, stderr]);
+		}
+	}, 10000);
+}
+
+for (const code of [0, 7]) {
+	test(`CANCELP0: clean exit ${code} retains actual output and status`, async () => {
+		const root = jobsDir();
+		const result = await runWithCap({ argv: [process.execPath, treeFixture, "exit", root, String(code)],
+			cwd: root, env: fixtureEnv(), capMs: 3000 });
+		expect(result.status).toBe(code === 0 ? "OK" : "FAILED");
+		expect(result.exit).toBe(code);
+		expect(result.out).toBe("actual stdout\n\nactual stderr\n");
+	});
+}
+
+test("CANCELP0: stdout and stderr drain concurrently under pipe pressure", async () => {
+	const root = jobsDir();
+	const result = await runWithCap({ argv: [process.execPath, treeFixture, "pressure", root],
+		cwd: root, env: fixtureEnv(), capMs: 3000 });
+	expect(result.status).toBe("OK");
+	expect(result.out).toBe(`${"o".repeat(256 * 1024)}\n${"e".repeat(256 * 1024)}`);
+});
+
+test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout", async () => {
+	const root = jobsDir();
+	const bin = join(root, ".local", "bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "omp-kit"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(treeFixture)} tree ${JSON.stringify(root)}\n`, { mode: 0o755 });
+	const parent = Bun.spawn([process.execPath, join(repoRoot, "src", "cli.ts"), "service", "run", "omp-watch", "--json"], {
+		// OMP version discovery has its own 15s native deadline and is not
+		// under test here. Omit OMP from this isolated PATH (truthful null),
+		// rather than supplying an echo-version stub or timing that probe.
+		cwd: root, env: { ...fixtureEnv(), HOME: root, TMPDIR: root, PATH: `${bin}:/usr/bin:/bin`, XDG_STATE_HOME: join(root, ".local", "state"),
+			OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1000", AGENT_NAME: "CancelP0Fixture" },
+		stdout: "pipe", stderr: "pipe",
+	});
+	const stdout = new Response(parent.stdout).text();
+	const stderr = new Response(parent.stderr).text();
+	try {
+		await until(() => recordedPids(root).length === 2);
+		const pids = recordedPids(root);
+		await until(() => parent.exitCode !== null, 5000);
+		const result = { exit: await parent.exited, stdout: await stdout, stderr: await stderr };
+		console.log("CANCELP0 actual source runner smoke", JSON.stringify({ platform: process.platform, arch: process.arch, pids, ...result }));
+		expect(result.exit).toBe(1);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout).data.status).toBe("TIMEOUT");
+		const receipt = JSON.parse(readFileSync(join(root, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
+		expect(receipt.status).toBe("TIMEOUT");
+		await until(() => pids.every(pid => !activePid(pid)));
+		expect(existsSync(join(root, ".local", "state", "omp-kit", "jobs", "omp-watch.lock"))).toBe(false);
+	} finally {
+		cleanFixture(root);
+		parent.kill("SIGKILL");
+		await Promise.all([parent.exited, stdout, stderr]);
+	}
+}, 10000);
+
+test("CANCELP0: leader exit cannot leave a grandchild holding its pipes", async () => {
+	const root = jobsDir();
+	try {
+		const result = await runWithCap({ argv: [process.execPath, treeFixture, "orphan", root],
+			cwd: root, env: fixtureEnv(), capMs: 3000 });
+		expect(result.status).toBe("OK");
+		expect(result.exit).toBe(0);
+		expect(recordedPids(root)).toHaveLength(2);
+		await until(() => recordedPids(root).every(pid => !activePid(pid)));
+	} finally {
+		cleanFixture(root);
+	}
+}, 10000);

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { inspectMcpReadiness, mcpExample } from "../../src/mcp-readiness.ts";
+import { inspectMcpReadiness, judgeTimeoutFit, mcpExample, readProbeEvidence, readStartupFailures } from "../../src/mcp-readiness.ts";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -152,3 +152,88 @@ liveTest("real OMP proves two named calls and rejects disabled or timed-out fixt
   } finally { mock.kill(); await mock.exited; }
  }
 }, 120000);
+
+test("timeout fit judges configured timeout against probe evidence with a fix", () => {
+	expect(judgeTimeoutFit(30000, { server: "rea", maxCallMs: 54000, recentTimeouts: [] }))
+		.toEqual({ fit: "DRIFT", measuredMs: 54000, suggestedMs: 600000, fix: "rea=600000" });
+	expect(judgeTimeoutFit(600000, { server: "rea", maxCallMs: 54000, recentTimeouts: [] }))
+		.toMatchObject({ fit: "ALIGNED", fix: null });
+	expect(judgeTimeoutFit(null, { server: "r", maxCallMs: null, recentTimeouts: [] }).fit).toBe("UNPROBED");
+	expect(judgeTimeoutFit(600000, { server: "r", maxCallMs: 1000, recentTimeouts: [{ at: "2026-10-15T00:00:00Z", kind: "call" }] }).fit).toBe("DRIFT");
+	expect(judgeTimeoutFit(null, { server: "r", maxCallMs: 54000, recentTimeouts: [] }).fit).toBe("DRIFT");
+});
+
+test("probe evidence and startup failures read from fixture state and log dirs", () => {
+	const f = fixture();
+	const state = join(f.root, "state");
+	mkdirSync(join(state, "mcp-tests"), { recursive: true });
+	writeFileSync(join(state, "mcp-tests", "mcp-test-old.json"), JSON.stringify({ recorded_at: "2026-10-10T00:00:00Z",
+		profiles: [{ profile: "alpha", status: "PASS", servers: [{ server: "rea", status: "CALLABLE", connect_ms: 100,
+			call: { tool: "t", ms: 54000, bound_ms: 60000 } }] }] }));
+	writeFileSync(join(state, "mcp-tests", "mcp-test-new.json"), JSON.stringify({ recorded_at: "2026-10-15T00:00:00Z",
+		profiles: [{ profile: "alpha", status: "FAIL", servers: [{ server: "rea", status: "CALL_TIMEOUT", connect_ms: 200, call: null },
+			{ server: "other", status: "CALLABLE", connect_ms: 50, call: { tool: "t", ms: 1200, bound_ms: 120000 } }] }] }));
+	writeFileSync(join(state, "mcp-tests", "malformed.json"), "{ malformed");
+	const evidence = readProbeEvidence(state, "alpha");
+	expect(evidence.find(row => row.server === "rea")).toMatchObject({ maxCallMs: 54000, recentTimeouts: [{ kind: "call" }] });
+	expect(evidence.find(row => row.server === "other")).toMatchObject({ maxCallMs: 1200, recentTimeouts: [] });
+	expect(readProbeEvidence(state, "beta")).toEqual([]);
+	expect(readProbeEvidence(join(f.root, "missing"), "alpha")).toEqual([]);
+	const logs = join(f.root, "logs");
+	mkdirSync(logs);
+	writeFileSync(join(logs, "omp.2026-10-15.1.log"),
+		`${JSON.stringify({ timestamp: "2026-10-15T07:51:46-06:00", level: "error", message: "MCP tool load failed", path: "mcp:chatty", error: "Failed to parse JSONL" })}\nnot json\n${JSON.stringify({ timestamp: "2026-10-01T00:00:00Z", level: "error", message: "MCP tool load failed", path: "mcp:old", error: "x" })}\n`);
+	const failures = readStartupFailures(logs, Date.parse("2026-10-14T00:00:00Z"));
+	expect(failures).toEqual([{ server: "chatty", at: "2026-10-15T07:51:46-06:00", error: "Failed to parse JSONL" }]);
+	expect(readStartupFailures(join(f.root, "missing"), Date.now())).toEqual([]);
+});
+
+const DOCTOR_CLI = join(import.meta.dir, "../../src/cli.ts");
+const DOCTOR_OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+function doctorCli(args: string[], home: string, state: string, cwd: string) {
+	const result = Bun.spawnSync([process.execPath, DOCTOR_CLI, ...args], { cwd, stdout: "pipe", stderr: "pipe",
+		env: { ...process.env, HOME: home, XDG_STATE_HOME: state, TMPDIR: join(home, "tmp"),
+			PATH: `${dirname(DOCTOR_OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
+	return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
+
+test("doctor reports DRIFT with the fix at 30 s against a recorded 54 s call, ALIGNED at 600 s", () => {
+	if (!DOCTOR_OMP) throw new Error("doctor acceptance needs an installed OMP on PATH");
+	const f = fixture(); const dir = f.profile("alpha"); const exe = f.binary();
+	const state = join(f.root, "state"); const cwd = join(f.root, "cwd");
+	mkdirSync(join(state, "omp-kit", "mcp-tests"), { recursive: true }); mkdirSync(cwd, { recursive: true }); mkdirSync(join(f.home, "tmp"), { recursive: true });
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { rea: { command: exe, timeout: 30000 } } }));
+	writeFileSync(join(state, "omp-kit", "mcp-tests", "mcp-test-1.json"), JSON.stringify({ recorded_at: "2026-10-15T00:00:00Z",
+		profiles: [{ profile: "alpha", status: "PASS", servers: [{ server: "rea", status: "CALLABLE", connect_ms: 100,
+			call: { tool: "t", ms: 54000, bound_ms: 60000 } }] }] }));
+	const drifted = doctorCli(["doctor", "--scope", "mcp", "--profile", "alpha", "--json"], f.home, state, cwd);
+	expect(drifted.code).toBe(0);
+	const rea = JSON.parse(drifted.stdout).data.findings[0].evidence.servers.find((row: { name: string }) => row.name === "rea");
+	expect(rea).toMatchObject({ timeout_ms: 30000, timeout_fit: "DRIFT", measured_ms: 54000, timeout_fix: "rea=600000" });
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { rea: { command: exe, timeout: 600000 } } }));
+	const aligned = doctorCli(["doctor", "--scope", "mcp", "--profile", "alpha", "--json"], f.home, state, cwd);
+	expect(aligned.code).toBe(0);
+	expect(JSON.parse(aligned.stdout).data.findings[0].evidence.servers.find((row: { name: string }) => row.name === "rea"))
+		.toMatchObject({ timeout_ms: 600000, timeout_fit: "ALIGNED", timeout_fix: null });
+});
+
+test("doctor reports START_FAILED for a server failing at session start, OK for a probed healthy one", () => {
+	if (!DOCTOR_OMP) throw new Error("doctor acceptance needs an installed OMP on PATH");
+	const f = fixture(); const dir = f.profile("alpha"); const exe = f.binary();
+	const state = join(f.root, "state"); const cwd = join(f.root, "cwd");
+	mkdirSync(join(state, "omp-kit", "mcp-tests"), { recursive: true }); mkdirSync(cwd, { recursive: true }); mkdirSync(join(f.home, "tmp"), { recursive: true });
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { chatty: { command: exe }, healthy: { command: exe }, fresh: { command: exe } } }));
+	writeFileSync(join(state, "omp-kit", "mcp-tests", "mcp-test-1.json"), JSON.stringify({ recorded_at: "2026-10-15T00:00:00Z",
+		profiles: [{ profile: "alpha", status: "PASS", servers: [{ server: "healthy", status: "CALLABLE", connect_ms: 50,
+			call: { tool: "t", ms: 800, bound_ms: 120000 } }] }] }));
+	const logs = join(f.home, ".omp", "logs");
+	mkdirSync(logs, { recursive: true });
+	writeFileSync(join(logs, "omp.2026-10-15.1.log"), `${JSON.stringify({ timestamp: new Date(Date.now() - 3600000).toISOString(),
+		level: "error", message: "MCP tool load failed", path: "mcp:chatty", error: "MCP subprocess closed stdout before responding" })}\n`);
+	const result = doctorCli(["doctor", "--scope", "mcp", "--profile", "alpha", "--json"], f.home, state, cwd);
+	expect(result.code).toBe(0);
+	const servers = JSON.parse(result.stdout).data.findings[0].evidence.servers;
+	expect(servers.find((row: { name: string }) => row.name === "chatty")).toMatchObject({ startup: "START_FAILED" });
+	expect(servers.find((row: { name: string }) => row.name === "healthy")).toMatchObject({ startup: "OK" });
+	expect(servers.find((row: { name: string }) => row.name === "fresh")).toMatchObject({ startup: "UNKNOWN" });
+});

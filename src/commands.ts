@@ -16,6 +16,7 @@ export type DataSchema = {
 	readonly type: "object";
 	readonly required: readonly string[];
 	readonly properties: Readonly<Record<string, unknown>>;
+	readonly allOf?: readonly Readonly<Record<string, unknown>>[];
 };
 
 const textData: DataSchema = { type: "object", required: ["text"], properties: { text: { type: "string" } } };
@@ -134,6 +135,7 @@ const planningScoreData: DataSchema = { type: "object", required: ["kind", "stat
 const planningConvertData: DataSchema = { type: "object", required: ["kind", "overall", "mission", "plan_path", "db_dir", "candidate_blocks", "items_parsed", "beads_created", "total_beads_created", "created_items", "create_failures", "dependency_edges", "dependency_failures", "dependency_cycles", "uncovered_what_letters", "unparseable_blocks", "item_findings", "br_lint_exit_code", "br_lint_finding_count", "br_lint_clean", "br_lint_parse_error", "br_lint_stdout", "br_lint_stderr", "br_cycle_exit_code", "br_cycle_count", "br_cycle_clean", "br_cycle_parse_error", "br_cycle_stdout", "planning_score_bead_metrics", "text"], properties: {
 	kind: { enum: ["planning-convert"] }, overall: { enum: ["CLEAN", "FINDINGS", "REFUSED", "UNAVAILABLE"] },
 	mission: { type: "string" }, plan_path: { type: "string" }, db_dir: { type: "string" }, database_path: { type: "string" }, db_refusal: { type: "string" },
+	actor: { type: "string" },
 	candidate_blocks: { type: "number" }, items_parsed: { type: "number" }, beads_created: { type: "number" }, total_beads_created: { type: "number" }, parent_epic_id: { type: ["string", "null"] },
 	created_items: { type: "array", items: { type: "object", required: ["slug", "title", "id", "line", "external_ref"], properties: { slug: { type: "string" }, title: { type: "string" }, id: { type: "string" }, line: { type: "number" }, external_ref: { type: "string" } } } },
 	create_failures: { type: "array", items: { type: "object", required: ["slug", "line", "exit_code", "stdout", "stderr", "error"], properties: { slug: { type: "string" }, line: { type: ["number", "null"] }, exit_code: { type: ["number", "null"] }, stdout: { type: "string" }, stderr: { type: "string" }, error: { type: ["string", "null"] } } } },
@@ -282,6 +284,23 @@ const infraData: DataSchema = { type: "object", required: ["overall", "command"]
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
+	rootMetrics: { type: "array", items: { type: "object", required: ["root", "free_pct", "scratch_gb"], properties: {
+		root: { type: "string" }, free_pct: { type: ["number", "null"] }, scratch_gb: { type: "number" },
+	} } },
+	pressure: { enum: ["NORMAL", "WARN", "RECLAIM", "UNKNOWN"] },
+	quarantineBuckets: { type: "object", required: ["young", "expiredHeld", "failed", "oldestAgeMs", "readable", "ttlValid"], properties: {
+		young: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		expiredHeld: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		failed: { type: "object", required: ["entries", "bytes"], properties: { entries: { type: "number" }, bytes: { type: "number" } } },
+		oldestAgeMs: { type: ["number", "null"] }, readable: { type: "boolean" }, ttlValid: { type: "boolean" },
+	} },
+	receipt: { type: "object", properties: {
+		started_at: { type: "string" }, finished_at: { type: "string" },
+		free_pct_before: { type: ["number", "null"] }, free_pct_after: { type: ["number", "null"] },
+		reaped_gb: { type: "number" }, quarantined_gb: { type: "number" }, deleted_gb: { type: "number" },
+		failed_count: { type: "number" }, failed_gb: { type: "number" },
+		refused_count: { type: "number" }, refused_gb: { type: "number" },
+	} },
 	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
 		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
 		reason: { type: "string" }, sizeBytes: { type: "number" },
@@ -308,18 +327,34 @@ const loadData: DataSchema = { type: "object", required: ["scope", "overall", "v
 const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "changed"], properties: {
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 } };
+const convergeData: DataSchema = { type: "object", required: ["repo", "state", "reason", "applied", "pushed", "conflicts", "elapsed_s"], properties: {
+	repo: { type: "string" }, state: { enum: ["AHEAD", "FAST_FORWARD", "MERGED", "REFUSED", null] },
+	reason: { type: ["string", "null"] }, applied: { type: "boolean" }, pushed: { type: "boolean" },
+	conflicts: { type: "array", items: { type: "object", required: ["path", "kind"], properties: {
+		path: { type: "string" }, kind: { type: "string" }, detail: { type: "string" },
+		class: { enum: ["true_divergence"] }, hint: { enum: ["theirs_behind", "ours_behind"] },
+	} } },
+	old: { type: "string" }, up: { type: "string" }, new_head: { type: "string" },
+	paths: { type: "number" }, resolutions: { type: "object" }, elapsed_s: { type: "number" },
+	worktree_written: { type: "number" }, index_updated: { type: "number" },
+	races: { type: "array", items: { type: "string" } },
+	restore_skipped: { type: "array", items: { type: "string" } },
+	published_commits: { type: "number" }, remote_after: { type: "string" },
+} };
 const landData: DataSchema = { type: "object", required: ["overall", "commit", "owner", "paths", "base"], properties: {
-	overall: { enum: ["PUSHED"] }, commit: { type: "string" }, owner: { type: "string" },
+	overall: { enum: ["PUSHED", "SAVED_NOT_PUBLISHED", "SAVE_UNCERTAIN"] },
+	commit: { type: ["string", "null"] }, owner: { type: "string" },
 	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
-} };
-const alignData: DataSchema = { type: "object", required: ["overall", "verdict", "mode"], properties: {
-	overall: { enum: ["OK", "CHANGED", "FINDINGS", "NOT_RUN"] },
-	verdict: { enum: ["ALIGNED", "PRESERVED", "NO_CHANGE", "PLAN", "REFUSED", "UNKNOWN"] },
-	mode: { enum: ["apply", "dry-run", "preserve-only"] },
-	receipt: { type: ["object", "null"] },
-} };
+	localMain: { type: "string" }, convergence: convergeData,
+}, allOf: [{
+	if: { properties: { overall: { const: "SAVE_UNCERTAIN" } } },
+	then: { properties: { commit: { type: "null" } } },
+	else: { properties: { commit: { type: "string" } } },
+}] };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
-	overall: { enum: ["OK", "CHANGED", "FINDINGS"] }, verdict: { type: "string" }, receipt: { type: "object" },
+	overall: { enum: ["OK", "CHANGED", "FINDINGS"] },
+	verdict: { enum: ["NOT_FOUND", "NON_EMPTY", "TOO_YOUNG", "UNKNOWN", "APPLY_REFUSED", "HELD", "WOULD_MOVE", "CHANGED", "BUSY"] },
+	receipt: { type: ["object", "null"] },
 } };
 const missionData: DataSchema = { type: "object", required: ["overall", "mission_file", "identity", "stage", "pillars", "errors", "no_claim"], properties: {
 	overall: { enum: ["VALID", "UNREGISTERED", "INVALID"] }, mission_file: { type: "string" },
@@ -336,19 +371,34 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
+	{ name: "converge", description: "Report or owner-resolve shared-main convergence without overwriting peer state", usage: "converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...", flags: [
+		{ name: "--repo", value: "PATH", description: "Canonical Git repository to converge; required" },
+		{ name: "--apply", description: "Apply the reviewed path-scoped integration to shared main" },
+		{ name: "--push", description: "Apply and publish shared main with an ordinary non-force push" },
+		{ name: "--no-fetch", description: "Use the current origin/main snapshot without fetching" },
+		{ name: "--ours", value: "PATH", repeatable: true, description: "Explicit owner decision to keep the integrated local path" },
+		{ name: "--theirs", value: "PATH", repeatable: true, description: "Explicit owner decision to take the origin path" },
+	], example: "omp-kit converge --repo . --json", runnable: false, mutation: true, dataSchema: convergeData },
+	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes", flags: [
+		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file" },
+		{ name: "--message", value: "MSG", description: "Commit message for the shared-main commit" },
+		{ name: "--apply", description: "Request owner-bound save and publication" },
+		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
+	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "planning", description: "Score planning evidence or convert a plan into native beads in an isolated database or selected tracker", usage: "planning score|convert", flags: [], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run", subcommands: [
 		{ name: "score", description: "Score mission planning evidence without writing repository state", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [
 			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },
 			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
 		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
-		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in an isolated database or selected tracker", usage: "planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR) [--yes] [--json]", flags: [
+		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in an isolated database or selected tracker", usage: "planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--json]", flags: [
 			{ name: "--plan", value: "PATH", description: "Read the planning document; never modify it" },
 			{ name: "--mission", value: "M", description: "Mission slug to assign and score" },
 			{ name: "--dry-run", description: "Create native beads only in the fresh isolated --db directory" },
 			{ name: "--db", value: "DIR", description: "Fresh isolated database directory; valid only with --dry-run" },
 			{ name: "--apply", description: "Apply to the selected existing native tracker after full preflight; requires confirmation" },
 			{ name: "--tracker-root", value: "DIR", description: "Selected native tracker root; valid only with --apply" },
+			{ name: "--actor", value: "ACTOR", description: "Required with --apply: actual writer for native audit attribution; not verified identity or policy bypass; never exports JSONL" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
 		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, mutation: true, dataSchema: planningConvertData },
 	], runnable: false },
@@ -360,19 +410,6 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
-	{ name: "land", description: "Publish exactly reserved worktree paths onto fresh origin/main using an owner-bound private Git index and ordinary push", usage: "land --paths PATH... --message MSG --apply --yes", flags: [
-		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file" },
-		{ name: "--message", value: "MSG", description: "Commit message for the candidate" },
-		{ name: "--apply", description: "Request owner-bound publication" },
-		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
-	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
-	{ name: "align", description: "Align a shared checkout's main ref and index to origin/main under git's own index.lock: pins local-only commits under refs/preserve/, adopts or updates only provably unchanged paths, and refuses with a typed code on staged changes, peer edits or concurrent writers", usage: "align --repo DIR (--dry-run | --apply --yes) [--preserve-only]", flags: [
-		{ name: "--repo", value: "DIR", description: "Absolute root of the checkout (holds a .git directory)" },
-		{ name: "--dry-run", description: "Print the full preserve/adopt/update/stop plan; touches nothing" },
-		{ name: "--preserve-only", description: "Only pin local-only main commits under refs/preserve/; valid when local main is not an ancestor of origin/main" },
-		{ name: "--apply", description: "Request guarded alignment" },
-		{ name: "--yes", description: "Confirm the alignment in noninteractive mode" },
-	], example: "omp-kit align --repo ~/Developer/omp-kit-companion --dry-run --json", runnable: false, mutation: true, dataSchema: alignData },
 	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
@@ -384,7 +421,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
 	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
-	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], runnable: false, dataSchema: loadData },
+	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData },
 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--staged] [--deep --yes]", flags: [
 			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|dicklesworthstone|beads|reservations|identity|flywheel|fleet|derived|layout|public-files|github|secrets", description: "Restrict diagnosis to a named component; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit; identity checks pane identities for missing, shared and stale names; flywheel grades fleet practices from git and the tracker (set BEADS_DB to the tracker beads.db when --project is a code repo); fleet reads live tmux panes and Agent Mail for DIRECTOR_DOING_WORK and COMMUNICATION_PURGATORY; derived lists literal probe-readable facts in config files; layout reports standard repo layout deviations; public-files lists missing standard public files; github probes read-only GitHub capability rows; secrets compares file tokens against sha256 digests of every readable Infisical value (UNVERIFIED when Infisical is unreachable)" },
 		{ name: "--corpus-report", value: "ABS_FILE", description: "Rules calibration: read an F2 corpus JSON report without writing" },
@@ -431,7 +468,7 @@ export const COMMANDS: readonly Command[] = [
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
 	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, per-profile MCP callable proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON [--expect SERVER:REGEX]]... [--startup-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON [--expect SERVER:REGEX]]... [--startup-timeout-ms N] [--call-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -451,6 +488,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--call", value: "SERVER:TOOL:JSON", repeatable: true, description: "MCP only: one tool call per server with a JSON object of arguments; repeat per server" },
 		{ name: "--expect", value: "SERVER:REGEX", repeatable: true, description: "MCP only: a JS RegExp the --call result text for SERVER must match; without it a call is UNVERIFIED_RESULT, never CALLABLE" },
 		{ name: "--startup-timeout-ms", value: "N", description: "MCP only: bound for OMP's initial MCP connections and each /mcp test (default 180000)" },
+		{ name: "--call-timeout-ms", value: "N", description: "MCP only: bound for each scripted tool call (default 120000); a call unfinished in time reports CALL_TIMEOUT" },
 		{ name: "--repeat", value: "N", description: "Run live scenarios N times (1-1000) and judge the failure rate with exact binomial bounds plus Fisher against --baseline" },
 		{ name: "--scenario", value: "ID", description: "Repeat only: run just this live scenario id from tests/live/scenarios.json" },
 		{ name: "--metamorphic", description: "Report metamorphic relation breaks over authored cases through the G2 matcher path; exits 1 on any break" },
@@ -497,8 +535,8 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--profiles", value: "NAMES|all", description: "Select existing named profiles" },
 			{ name: "--include-default", description: "Include the default profile explicitly" },
 		], example: "omp-kit apply extensions --plan --json", runnable: false, mutation: true },
-		{ name: "mcp", description: "Import MCP servers from another harness config into OMP profiles' mcp.json, or edit servers already there (env !command values, re-enable), with a receipt and undo; interactive on a terminal without --servers/--profiles",
-			usage: "apply mcp --from claude|cursor|codex|project|ABS_PATH --servers NAMES|all --profiles NAMES|all [--plan|--apply --yes] [--startup-timeout-ms N|NAME=N,...] [--override NAME=ABS_JSON]... [--env-literal NAMES] | apply mcp --profiles NAMES|all [--env-command SERVER:KEY=!CMD]... [--enable NAMES] [--plan|--apply --yes]", flags: [...planApply,
+		{ name: "mcp", description: "Import MCP servers from another harness config into OMP profiles' mcp.json, or edit servers already there (env !command values, re-enable, timeouts), with a receipt and undo; interactive on a terminal without --servers/--profiles",
+			usage: "apply mcp --from claude|cursor|codex|project|ABS_PATH --servers NAMES|all --profiles NAMES|all [--plan|--apply --yes] [--startup-timeout-ms N|NAME=N,...] [--override NAME=ABS_JSON]... [--env-literal NAMES] | apply mcp --profiles NAMES|all [--env-command SERVER:KEY=!CMD]... [--enable NAMES] [--timeout-ms NAME=N,...] [--plan|--apply --yes]", flags: [...planApply,
 			{ name: "--from", value: "claude|cursor|codex|project|ABS_PATH", description: "Source harness config; claude reads ~/.claude.json and ~/.claude/mcp.json" },
 			{ name: "--servers", value: "NAMES|all", description: "Source servers to import" },
 			{ name: "--profiles", value: "NAMES|all", description: "Target OMP profiles; all is the default profile plus every named profile" },
@@ -507,6 +545,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--env-literal", value: "NAMES", description: "Copy these env values verbatim (secret-scanned, never printed); every other env value is written as an env-var reference" },
 			{ name: "--env-command", value: "SERVER:KEY=!CMD", repeatable: true, description: "Edit mode: set env KEY of an existing SERVER entry to an OMP !command value (OMP runs it and caches stdout), in place; every other byte is kept; the command text is secret-scanned" },
 			{ name: "--enable", value: "NAMES", description: "Edit mode: remove these servers from a profile's disabledServers list, in place" },
+			{ name: "--timeout-ms", value: "NAME=N,...", description: "Edit mode: set OMP's per-server timeout (ms) on existing SERVER entries, in place; N >= 1000; every other byte is kept" },
 		], example: "omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json", runnable: false, mutation: true },
 	], example: "omp-kit apply rules --plan --json", runnable: false, mutation: true },
 	{ name: "repair", description: "Plan a named reversible repair", usage: "repair --scope rules|policy|extensions|state|github [--plan|--apply --yes]", flags: [
@@ -606,7 +645,7 @@ export const COMMANDS: readonly Command[] = [
 	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: an unowned dir with fresh activity (newest mtime within 72h) stays LIVE; idle past 72h with no open fds goes to quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
 		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
-		{ name: "index-lock", description: "Report a stale holder-less empty .git/index.lock for one repo, or move it aside with --apply --yes; never touches non-empty, young, held, or unknown locks", usage: "scratch index-lock --repo DIR [--apply --yes]", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
+		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused and no lock is moved", usage: "scratch index-lock --repo DIR", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
 		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },

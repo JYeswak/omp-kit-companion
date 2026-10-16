@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { chooseMcpSelection, insertMcpServers, McpApplyError, parseEnvCommand, planMcpApply, removeDisabledServer, scanRenderedSecrets, setMcpEnvValue, validateJsonSchema } from "../../src/mcp-apply.ts";
+import { chooseMcpSelection, insertMcpServers, McpApplyError, parseEnvCommand, planMcpApply, planMcpEdit, removeDisabledServer, scanRenderedSecrets, setMcpEnvValue, setMcpTimeoutValue, validateJsonSchema } from "../../src/mcp-apply.ts";
 import { listOmpProfiles, readSource } from "../../src/mcp-sources.ts";
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
@@ -207,4 +207,60 @@ test("in-place edits keep every other byte in compact and pretty files", () => {
 	expect(setMcpEnvValue(compact, "w", "K", "!c")).toBe("{\"mcpServers\":{\"w\":{\"env\":{\"K\":\"!c\",\"L\":\"K\"}},\"env\":{\"K\":\"K\"}}}");
 	expect(setMcpEnvValue(compact, "w", "M", "!c")).toBeNull();
 	expect(setMcpEnvValue(compact, "absent", "K", "!c")).toBeNull();
+});
+
+test("edit mode sets a server timeout in place; absent servers conflict, equal values stay, and undo restores bytes", () => {
+	const f = fixture({});
+	const original = "{\"mcpServers\":{\"rea\":{\"command\":\"x\"},\"old\":{\"command\":\"y\",\"timeout\":30000}}}";
+	writeFileSync(f.alphaMcp, original);
+	const edit = (timeouts: ReadonlyMap<string, number>) => planMcpEdit({ profiles: listOmpProfiles(f.home).profiles,
+		stateRoot: f.state, schema: SCHEMA, schemaPath: SCHEMA_PATH, envCommands: [], enable: [], timeouts });
+	const plan = edit(new Map([["rea", 600000], ["old", 30000], ["absent", 5000]]));
+	const alpha = plan.profiles.find(row => row.profile === "alpha");
+	expect(alpha).toMatchObject({ action: "EDIT", added: ["rea timeout=600000"], already_present: ["old timeout=30000"],
+		conflicts: [expect.stringContaining("absent")] });
+	expect(plan.edits).toMatchObject({ timeouts: [{ server: "rea", ms: 600000 }, { server: "old", ms: 30000 }, { server: "absent", ms: 5000 }] });
+	expect(alpha?.diff).toContain("+");
+	expect(setMcpTimeoutValue("{\"mcpServers\":{\"r\":{\"command\":\"x\"}}}", "r", 600000))
+		.toBe("{\"mcpServers\":{\"r\":{\"command\":\"x\", \"timeout\": 600000}}}");
+	expect(setMcpTimeoutValue("{\"mcpServers\":{\"r\":{\"command\":\"x\",\"timeout\":30000}}}", "r", 600000))
+		.toBe("{\"mcpServers\":{\"r\":{\"command\":\"x\",\"timeout\":600000}}}");
+	expect(setMcpTimeoutValue(original, "old", 30000)).toBe(original);
+	expect(setMcpTimeoutValue(original, "absent", 5000)).toBeNull();
+	expect(setMcpTimeoutValue("{\"mcpServers\":{\"r\":{\"command\":\"x\",\"timeout\":\"fast\"}}}", "r", 5000)).toBeNull();
+	expect(() => edit(new Map([["rea", 999]]))).toThrow(McpApplyError);
+	expect(() => edit(new Map())).toThrow(McpApplyError);
+});
+
+test("edit mode --timeout-ms plans a one-key diff, applies with a receipt, and undo restores bytes", () => {
+	const f = fixture({});
+	const original = "{\n  \"mcpServers\": {\n    \"rea\": { \"command\": \"x\" }\n  }\n}\n";
+	writeFileSync(f.alphaMcp, original);
+	const args = ["apply", "mcp", "--profiles", "alpha", "--timeout-ms", "rea=600000", "--json"];
+	const planned = f.run([...args, "--plan"]);
+	expect(planned.code).toBe(0);
+	const plan = JSON.parse(planned.stdout).data;
+	expect(plan.profiles.find((row: { profile: string }) => row.profile === "alpha")).toMatchObject({ action: "EDIT", added: ["rea timeout=600000"] });
+	expect(plan.edits.timeouts).toEqual([{ server: "rea", ms: 600000 }]);
+	expect(plan.profiles.find((row: { profile: string }) => row.profile === "alpha").diff).toContain("+");
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
+	const applied = f.run([...args, "--apply", "--yes"]);
+	expect(applied.code).toBe(0);
+	const envelope = JSON.parse(applied.stdout).data;
+	expect(envelope.action).toBe("APPLIED");
+	const written = JSON.parse(readFileSync(f.alphaMcp, "utf8"));
+	expect(written.mcpServers.rea.timeout).toBe(600000);
+	expect(written.mcpServers.rea.command).toBe("x");
+	const again = f.run([...args, "--plan"]);
+	expect(JSON.parse(again.stdout).data.profiles.find((row: { profile: string }) => row.profile === "alpha").action).toBe("NO_CHANGE");
+	const undone = f.run(["undo", envelope.receipt_id, "--yes", "--json"]);
+	expect(undone.code).toBe(0);
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
+	const bad = f.run(["apply", "mcp", "--profiles", "alpha", "--timeout-ms", "rea=999", "--plan", "--json"]);
+	expect(bad.code).toBe(2);
+	expect(JSON.parse(bad.stdout).errors[0].code).toBe("INVALID_TIMEOUT");
+	const bare = f.run(["apply", "mcp", "--profiles", "alpha", "--timeout-ms", "600000", "--plan", "--json"]);
+	expect(bare.code).toBe(2);
+	expect(JSON.parse(bare.stdout).errors[0].code).toBe("INVALID_TIMEOUT");
+	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
 });

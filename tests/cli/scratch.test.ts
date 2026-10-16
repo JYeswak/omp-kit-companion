@@ -1,12 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import type { ScratchVerdict } from "../../src/scratch.ts";
+import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 
 const roots: string[] = [];
+const fixtureRepo = resolve(import.meta.dir, "../..");
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 const savedState = process.env.XDG_STATE_HOME;
 const savedTmp = process.env.TMPDIR;
+const savedConfig = process.env.XDG_CONFIG_HOME;
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -15,6 +19,8 @@ afterEach(() => {
   else process.env.TMPDIR = savedTmp;
   if (savedState === undefined) delete process.env.XDG_STATE_HOME;
   else process.env.XDG_STATE_HOME = savedState;
+  if (savedConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = savedConfig;
 });
 
 /** Isolated state dir for in-process apply tests (which append JSONL to XDG state). */
@@ -52,11 +58,11 @@ function ownerText(fields: Record<string, string>): string {
 function liveFields(label: string): Record<string, string> {
   const start = defaultLiveness().processStart(process.pid);
   if (start === null) throw new Error("process identity unavailable");
-  return { pid: String(process.pid), process_start: start, label, repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "test" };
+  return { pid: String(process.pid), process_start: start, label, repo: fixtureRepo, created_at: "2026-10-01T00:00:00Z", argv0: "test" };
 }
 
 function deadFields(label: string, pid: number): Record<string, string> {
-  return { pid: String(pid), process_start: "Thu Jan  1 00:00:00 1970", label, repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "test" };
+  return { pid: String(pid), process_start: "Thu Jan  1 00:00:00 1970", label, repo: fixtureRepo, created_at: "2026-10-01T00:00:00Z", argv0: "test" };
 }
 
 function sessionDir(root: string, label: string, pid: number | string): string {
@@ -102,7 +108,7 @@ test("releaseScratch refuses a reused owner PID before marking release", () => {
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const dir = sessionDir(root, "omp", process.pid);
   writeFileSync(join(dir, ".owner"), ownerText({
-    pid: String(process.pid), process_start: "stale-process-start", label: "omp", repo: home,
+    pid: String(process.pid), process_start: "stale-process-start", label: "omp", repo: fixtureRepo,
     created_at: new Date().toISOString(), argv0: "test",
   }));
   const result = releaseScratch(dir, home, depsFor({
@@ -177,12 +183,12 @@ test("one-line owner files: dead owner reaps with real size, live owner stays li
   roots.push(root);
   const gone = deadPid();
   const dead = sessionDir(root, "suite-snap", gone);
-  const deadOwner = `pid=${gone} label=suite-snap repo=test created=2026-10-01T00:00:00Z\n`;
+  const deadOwner = `pid=${gone} label=suite-snap repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`;
   writeFileSync(join(dead, ".owner"), deadOwner);
   const payload = "x".repeat(1024);
   writeFileSync(join(dead, "payload"), payload);
   const live = sessionDir(root, "suite-snap", process.pid);
-  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=suite-snap repo=test created=${new Date().toISOString()}\n`);
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=suite-snap repo=${fixtureRepo} created=${new Date().toISOString()}\n`);
   const deps = depsFor();
   const deadVerdict = inspectSession(dead, root, deps);
   expect(deadVerdict.action).toBe("REAP");
@@ -200,16 +206,16 @@ test("nested integrations work dirs reap on dead pid and stay live on live pid",
   const gone = deadPid();
   const dead = join(session, `omp-kit-integrations-${gone}-abc`);
   mkdirSync(dead, { recursive: true });
-  writeFileSync(join(dead, ".owner"), `pid=${gone} label=omp-kit-integrations repo=test created=2026-10-01T00:00:00Z\n`);
+  writeFileSync(join(dead, ".owner"), `pid=${gone} label=omp-kit-integrations repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`);
   const live = join(session, `omp-kit-integrations-${process.pid}-def`);
   mkdirSync(live, { recursive: true });
-  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=omp-kit-integrations repo=test created=${new Date().toISOString()}\n`);
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=omp-kit-integrations repo=${fixtureRepo} created=${new Date().toISOString()}\n`);
   const plan = planScratch(home, depsFor());
   expect(plan.sessions.find(session => session.dir === dead)?.action).toBe("REAP");
   expect(plan.sessions.find(session => session.dir === live)?.action).toBe("LIVE");
   const nestedWork = join(session, "omp-kit-work.xyz");
   mkdirSync(nestedWork, { recursive: true });
-  writeFileSync(join(nestedWork, ".owner"), `pid=${gone} label=omp-kit-work repo=test created=2026-10-01T00:00:00Z\n`);
+  writeFileSync(join(nestedWork, ".owner"), `pid=${gone} label=omp-kit-work repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`);
   const plan2 = planScratch(home, depsFor());
   expect(plan2.sessions.find(session => session.dir === nestedWork)?.action).toBe("REAP");
 });
@@ -222,7 +228,7 @@ test("runtime omp-kit-work dirs with dead owners are reaped from system temp", (
 	const work = join(root, "omp-kit-work.dead");
 	mkdirSync(work, { recursive: true });
 	const dead = deadPid();
-	writeFileSync(join(work, ".owner"), ownerText({ pid: String(dead), process_start: "Thu Jan  1 00:00:00 1970", label: "omp-kit-work", repo: "test", created_at: "2026-10-01T00:00:00Z", argv0: "runtime-adapter" }));
+	writeFileSync(join(work, ".owner"), ownerText({ pid: String(dead), process_start: "Thu Jan  1 00:00:00 1970", label: "omp-kit-work", repo: fixtureRepo, created_at: "2026-10-01T00:00:00Z", argv0: "runtime-adapter" }));
 	writeFileSync(join(work, "payload"), "runtime work\n");
 	const deps: ApplyDeps = { ...depsFor(), home };
 	const plan = planScratch(home, deps);
@@ -256,6 +262,85 @@ test("inspect refuses a dead owner with open descriptors and a name that mismatc
   writeFileSync(join(wrong, ".owner"), ownerText(deadFields("else", deadPid())));
   expect(inspectSession(wrong, root, depsFor()).reason).toBe("session-name-owner-mismatch");
 });
+
+test("a mismatched name with a dead idle owner quarantines; a live owner stays SKIP; a fresh malformed owner stays LIVE", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const dead = deadPid();
+  const stranded = join(root, "tb14-restore");
+  mkdirSync(stranded, { recursive: true });
+  writeFileSync(join(stranded, ".owner"), ownerText(deadFields("tb14-restore", dead)));
+  writeFileSync(join(stranded, "payload"), "lost\n");
+  backdateTree(stranded, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(stranded, root, deps);
+  expect(planned?.action).toBe("QUARANTINE");
+  expect(planned?.reason).toBe("mismatched-owner-idle-72h-would-quarantine");
+  const applied = applyUnowned(stranded, root, deps, planned!);
+  expect(applied.action).toBe("QUARANTINE");
+  expect(applied.reason).toBe("mismatched-owner-idle-72h-quarantined");
+  expect(existsSync(stranded)).toBe(false);
+  expect(readFileSync(join(applied.dir, "payload"), "utf8")).toBe("lost\n");
+
+  const live = join(root, "still-working");
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("still-working")));
+  writeFileSync(join(live, "notes"), "keep\n");
+  const liveVerdict = inspectOne(live, root, deps);
+  expect(liveVerdict?.action).toBe("SKIP");
+  expect(liveVerdict?.reason).toBe("session-name-owner-mismatch");
+
+  const fresh = join(root, "malformed-fresh");
+  mkdirSync(fresh, { recursive: true });
+  writeFileSync(join(fresh, ".owner"), "pid=not-an-integer\n");
+  writeFileSync(join(fresh, "data"), "new\n");
+  const freshVerdict = inspectOne(fresh, root, deps);
+  expect(freshVerdict?.action).toBe("LIVE");
+  expect(freshVerdict?.reason).toBe("malformed-owner-file-but-active");
+});
+
+test("idle malformed-owner dirs are quarantined without deletion", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const malformed = join(root, "malformed.3");
+  mkdirSync(malformed, { recursive: true });
+  writeFileSync(join(malformed, ".owner"), "pid=not-an-integer\n");
+  writeFileSync(join(malformed, "data"), "retain\n");
+  backdateTree(malformed, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(malformed, root, deps);
+  expect(planned?.action).toBe("QUARANTINE");
+  const applied = applyUnowned(malformed, root, deps);
+  expect(applied.action).toBe("QUARANTINE");
+  expect(existsSync(malformed)).toBe(false);
+  expect(existsSync(applied.dir)).toBe(true);
+  expect(readFileSync(join(applied.dir, "data"), "utf8")).toBe("retain\n");
+});
+test("idle dead mismatched owners are quarantined while live mismatches stay put", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const wrongDead = join(root, "renamed.3");
+  mkdirSync(wrongDead, { recursive: true });
+  const deadOwnerPid = deadPid();
+  writeFileSync(join(wrongDead, ".owner"), ownerText(deadFields("else", deadOwnerPid)));
+  writeFileSync(join(wrongDead, "data"), "preserve");
+  backdateTree(wrongDead, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(wrongDead, root, deps);
+  expect(planned?.action).toBe("QUARANTINE");
+  const applied = applyUnowned(wrongDead, root, deps);
+  expect(applied.action).toBe("QUARANTINE");
+  expect(existsSync(wrongDead)).toBe(false);
+  expect(existsSync(applied.dir)).toBe(true);
+});
+
+
 
 test.skipIf(!HAVE_LSOF)("a real open descriptor blocks a real lsof reap", () => {
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
@@ -296,8 +381,43 @@ test("apply removes a proven-dead session after quarantine and restores on an ow
   expect(restored.action).toBe("SKIP");
   expect(restored.reason).toBe("final-recheck-refused");
   expect(existsSync(raced)).toBe(true);
-  const failures = existsSync(reapLogPath(home)) ? readFileSync(reapLogPath(home), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.event === "failure") : [];
-  expect(failures.some(row => row.dir === raced && row.error === "final-recheck-refused")).toBe(true);
+  const logs = existsSync(reapLogPath(home)) ? readFileSync(reapLogPath(home), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+  const failures = logs.filter(row => row.event === "failure");
+  expect(failures.some(row => row.dir === raced && row.reason === "final-recheck-refused")).toBe(false);
+  const skips = logs.filter(row => row.event === "skip");
+  expect(skips.some(row => row.dir === raced && row.reason === "final-recheck-refused")).toBe(true);
+});
+
+test("apply records an owner race as a refused skip without failing the run", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-final-recheck-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const dir = sessionDir(root, "appeared", deadPid());
+  const pid = Number(dir.split(".").at(-1));
+  writeFileSync(join(dir, ".owner"), ownerText(deadFields("appeared", pid)));
+  writeFileSync(join(dir, "payload"), "preserve me");
+  const liveOwner = ownerText(liveFields("appeared"));
+  let lsofCalls = 0;
+  const run = (args: readonly string[]) => {
+    if (args[0] === "lsof" && ++lsofCalls === 2) writeFileSync(join(dir, ".owner"), liveOwner);
+    return clearRun();
+  };
+
+  const result = applyScratch(home, { ...depsFor({ run }), home });
+  expect(result.applied).toContainEqual(expect.objectContaining({
+    dir, action: "SKIP", reason: "final-recheck-refused",
+  }));
+  expect(result.receipt).toMatchObject({ failed_count: 0, refused_count: 1 });
+  expect(existsSync(dir)).toBe(true);
+  expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(liveOwner);
+  const logs = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(logs).toContainEqual(expect.objectContaining({
+    event: "skip", dir, reason: "final-recheck-refused",
+  }));
+  expect(logs).toContainEqual(expect.objectContaining({
+    event: "run-receipt", failed_count: 0, refused_count: 1,
+  }));
 });
 
 test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {
@@ -328,6 +448,110 @@ test("apply quarantines idle unowned dirs and deletes expired quarantine after r
   expect(existsSync(expired)).toBe(false);
   expect(isApplyFailure({ dir: "x", action: "SKIP", reason: "delete-failed", owner: null, sizeBytes: 0 })).toBe(true);
   expect(isApplyFailure({ dir: "x", action: "LIVE", reason: "owner-alive", owner: null, sizeBytes: 0 })).toBe(false);
+});
+
+test("quarantine expiry honors the 24-hour default and configured TTL", () => {
+  const home = useState();
+  const configHome = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  roots.push(configHome);
+  process.env.XDG_CONFIG_HOME = configHome;
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const createQuarantined = (label: string, ageHours: number) => {
+    const path = join(qt, quarantineEntryFor(label, new Date(now - ageHours * 3600 * 1000)));
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, "data"), label);
+    return path;
+  };
+  const overDefault = createQuarantined("over-default", 25);
+  const withinDefault = createQuarantined("within-default", 23);
+  const defaultResult = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(defaultResult.some(row => row.dir === overDefault && row.action === "DELETE")).toBe(true);
+  expect(existsSync(overDefault)).toBe(false);
+  expect(existsSync(withinDefault)).toBe(true);
+
+  const configDir = join(configHome, "omp-kit");
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(configDir, "scratch-reaper.json"), JSON.stringify({ quarantine_ttl_hours: 48 }), { mode: 0o600 });
+  const underConfigured = createQuarantined("under-configured", 25);
+  const overConfigured = createQuarantined("over-configured", 49);
+  const configuredResult = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(existsSync(underConfigured)).toBe(true);
+  expect(configuredResult.some(row => row.dir === overConfigured && row.action === "DELETE")).toBe(true);
+  expect(existsSync(overConfigured)).toBe(false);
+  writeFileSync(join(configDir, "scratch-reaper.json"), JSON.stringify({ quarantine_ttl_hours: 0 }), { mode: 0o600 });
+  const invalidConfig = createQuarantined("invalid-config", 25);
+  const invalidResult = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(invalidResult).toContainEqual(expect.objectContaining({ dir: qt, action: "SKIP", reason: "quarantine-ttl-config-invalid" }));
+  expect(existsSync(invalidConfig)).toBe(true);
+  expect(isApplyFailure(invalidResult[0]!)).toBe(true);
+});
+
+test("expired delete markers log their cause and are retried", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const pid = deadPid();
+  const marker = join(qt, `${quarantineEntryFor("retry.1", new Date(now - 25 * 3600 * 1000))}.delete-56789`);
+  mkdirSync(marker, { recursive: true });
+  writeFileSync(join(marker, ".owner"), ownerText(deadFields("retry", pid)));
+  const failedDeps = { ...depsFor(), home, now, remove: () => {
+    const error = new Error("permission denied") as NodeJS.ErrnoException;
+    error.code = "EACCES";
+    throw error;
+  } } as ApplyDeps;
+  const failed = applyQuarantineExpiry(home, failedDeps);
+  expect(failed).toContainEqual(expect.objectContaining({
+    dir: marker, action: "SKIP", reason: "delete-failed", cause: "permission",
+  }));
+  expect(existsSync(marker)).toBe(true);
+  const logs = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(logs).toContainEqual(expect.objectContaining({ event: "delete-failed", dir: marker, cause: "permission" }));
+
+  const retried = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(retried).toContainEqual(expect.objectContaining({ dir: marker, action: "DELETE" }));
+  expect(existsSync(marker)).toBe(false);
+});
+
+test("quarantineTimeOf accepts delete markers and rejects malformed or oversized names", () => {
+  const at = new Date("2026-10-13T06:00:00.000Z");
+  const entry = quarantineEntryFor("valid", at);
+  expect(quarantineTimeOf(entry)).toBe(at.getTime());
+  expect(quarantineTimeOf(`${entry}.delete-56789`)).toBe(at.getTime());
+  expect(quarantineTimeOf(`${entry}.delete-x`)).toBeNull();
+  expect(quarantineTimeOf(`${entry}x`)).toBeNull();
+  expect(quarantineTimeOf(`${"x".repeat(300)}${entry}`)).toBeNull();
+});
+
+test("delete failure reports immutable flags only when observed", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const createMarker = (label: string) => {
+    const path = join(qt, `${quarantineEntryFor(label, new Date(now - 25 * 3600 * 1000))}.delete-56789`);
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, ".owner"), ownerText(deadFields(label, deadPid())));
+    return path;
+  };
+  const immutablePath = createMarker("immutable");
+  const unverifiedPath = createMarker("unverified");
+  const run = (args: readonly string[]) => {
+    if (args[0] !== "/bin/ls") return clearRun();
+    const path = args[args.length - 1]!;
+    const flags = path === immutablePath ? "uchg" : "-";
+    return { code: 0, stdout: `drwxr-xr-x 2 josh staff ${flags} 64 Oct 13 06:00 ${path}`, stderr: "" };
+  };
+  const deps = { ...depsFor({ run }), home, now, remove: () => {
+    const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+    throw error;
+  } } as ApplyDeps;
+  const failed = applyQuarantineExpiry(home, deps);
+  expect(failed).toContainEqual(expect.objectContaining({ dir: immutablePath, cause: "immutable-flag" }));
+  expect(failed).toContainEqual(expect.objectContaining({ dir: unverifiedPath, cause: "unknown" }));
 });
 
 test("killOrphan reaps a real sleeper and reports a missing pid as gone", () => {
@@ -406,11 +630,11 @@ test("scratch release quarantines its live owner while leaving unreleased live s
   roots.push(root);
   const released = sessionDir(root, "omp", process.pid);
   writeFileSync(join(released, ".owner"),
-    `pid=${process.pid}\nlabel=omp\nrepo=${home}\ncreated=${new Date().toISOString()}\n`);
+    `pid=${process.pid}\nlabel=omp\nrepo=${fixtureRepo}\ncreated=${new Date().toISOString()}\n`);
   writeFileSync(join(released, "work"), "finished\n");
   const live = sessionDir(root, "live", process.pid);
   writeFileSync(join(live, ".owner"),
-    `pid=${process.pid}\nlabel=live\nrepo=${home}\ncreated=${new Date().toISOString()}\n`);
+    `pid=${process.pid}\nlabel=live\nrepo=${fixtureRepo}\ncreated=${new Date().toISOString()}\n`);
   backdateTree(live, 73 * 3600 * 1000, Date.now());
   const lsof = fakeLsof().dir;
   // Service runs gate on machine load; pin a quiet reading so the reaping
@@ -440,8 +664,6 @@ test("scratch release quarantines its live owner while leaving unreleased live s
     PATH: `${fakePs().dir}:${lsof}:${process.env.PATH ?? ""}` });
   expect(expired.code).toBe(0);
   expect(existsSync(join(quarantine, oldEntry))).toBe(false);
-  expect(expired.envelope.data.expired.some((v: { reason: string }) =>
-    v.reason === "quarantine-expired-7d-owner-released")).toBe(true);
  }, 30000);
 
 test("scratch release refuses a live directory owned by a different process", async () => {
@@ -529,6 +751,36 @@ test("service run applies scratch reaping and writes a receipt", () => {
   expect(typeof receipt.started_at).toBe("string");
   expect(receipt.exit).toBe(0);
 });
+test("manual scratch apply returns BUSY with the scheduled reaper holder PID", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const lockDir = join(state, "omp-kit", "jobs", "scratch-reaper.lock");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, "pid"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const run = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+  expect(run.code).toBe(4);
+  expect(run.envelope.data.overall).toBe("BUSY");
+  expect(run.envelope.data.holder_pid).toBe(process.pid);
+});
+
+test("scratch-reaper reports invalid quarantine TTL configuration", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const configHome = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  roots.push(root, configHome);
+  mkdirSync(join(configHome, "omp-kit"), { recursive: true });
+  writeFileSync(join(configHome, "omp-kit", "scratch-reaper.json"), JSON.stringify({ quarantine_ttl_hours: 0 }));
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, XDG_CONFIG_HOME: configHome,
+    OMP_KIT_LOAD_OVERRIDE: "0.5/8", PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const run = cli(["service", "run", "scratch-reaper"], home, env);
+  expect(run.code).toBe(1);
+  expect(run.envelope.data.expired).toContainEqual(expect.objectContaining({ action: "SKIP", reason: "quarantine-ttl-config-invalid" }));
+  const receipt = JSON.parse(readFileSync(join(state, "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
+  expect(receipt.exit).toBe(1);
+});
+
 
 test("resolveScratchRoots honors the override and skips symlinked components", () => {
   const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-home-"));
@@ -565,10 +817,10 @@ test("lsof forwards the per-dir timeout and treats a killed run as unavailable",
 		seen.push(opts ?? {});
 		return { code: 0, stdout: "", stderr: "" };
 	};
-	expect(lsofClear("/x", recording, 15000)).toBe(true);
+	expect(lsofClear("/x", recording, 15000)).toBeNull();
 	expect(seen).toEqual([{ timeoutMs: 15000 }]);
 	expect(lsofClear("/x", () => ({ code: null, stdout: "", stderr: "" }), 15000)).toBeNull();
-	expect(lsofClear("/x", recording)).toBe(true);
+	expect(lsofClear("/x", recording)).toBeNull();
 	expect(seen[seen.length - 1]).toEqual({});
 });
 
@@ -658,7 +910,7 @@ test("legacy owner with reused pid reaps instead of staying LIVE", () => {
 	roots.push(root);
 	const pid = deadPid();
 	const dir = sessionDir(root, "2nb8-head-ffea66a0", pid);
-	writeFileSync(join(dir, ".owner"), `pid=${pid}\nlabel=other-label\nrepo=/repo\ncreated=2026-10-01T00:00:00Z\n`);
+	writeFileSync(join(dir, ".owner"), `pid=${pid}\nlabel=other-label\nrepo=${fixtureRepo}\ncreated=2026-10-01T00:00:00Z\n`);
 	writeFileSync(join(dir, "bulk.bin"), "x".repeat(4096));
 	const reused = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Oct  5 00:00:01 2026" };
 	const verdict = inspectSession(dir, root, depsFor({ liveness: reused }));
@@ -678,7 +930,7 @@ test("every verdict carries its size, including mismatches", () => {
 	const pid = deadPid();
 	const dir = join(root, "wrong-name.99999");
 	mkdirSync(dir, { recursive: true });
-	writeFileSync(join(dir, ".owner"), ownerText({ pid: String(pid), label: "right-label", repo: "test", created: "2026-10-01T00:00:00Z" }));
+	writeFileSync(join(dir, ".owner"), ownerText({ pid: String(pid), label: "right-label", repo: fixtureRepo, created: "2026-10-01T00:00:00Z" }));
 	writeFileSync(join(dir, "bulk.bin"), "x".repeat(8192));
 	const verdict = inspectSession(dir, root, depsFor());
 	expect(verdict.reason).toBe("session-name-owner-mismatch");
@@ -703,7 +955,7 @@ test("owner pid as a whole middle dot segment is accepted; looser matches stay m
 	for (const name of [`a.${pid}1.y`, `b-${pid}`, `${pid}.c`]) {
 		expect(inspectSession(plant(name, deadFields("n", pid)), root, deps).reason).toBe("session-name-owner-mismatch");
 	}
-	const other = plant("doctor-parser-16985", { pid: "25601", label: "doctor-parser", repo: "test", created: "2026-10-01T00:00:00Z" });
+	const other = plant("doctor-parser-16985", { pid: "25601", label: "doctor-parser", repo: fixtureRepo, created: "2026-10-01T00:00:00Z" });
 	expect(inspectSession(other, root, deps).reason).toBe("session-name-owner-mismatch");
 });
 
@@ -792,4 +1044,226 @@ test("lsof snapshot prefix match does not confuse sibling names", () => {
 	const snap = takeLsofSnapshot(() => ({ code: 0, stdout: "p1\nn/a/bc/x\n", stderr: "" }));
 	expect(snapshotClear(snap, "/a/b")).toBe(true);
 	expect(snapshotClear(snap, "/a/bc")).toBe(false);
+});
+test("scratch pressure thresholds gate plan classification", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-pressure-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const now = Date.now();
+  const classify = (free: number | null) => {
+    const statfs = () => free === null ? null : { bavail: free, blocks: 100 };
+    return planScratch(home, { ...depsFor({ now }), now, statfs }).pressure;
+  };
+  expect(classify(19.99)).toBe("RECLAIM");
+  expect(classify(20)).toBe("RECLAIM");
+  expect(classify(20.01)).toBe("WARN");
+  expect(classify(25)).toBe("WARN");
+  expect(classify(25.01)).toBe("NORMAL");
+  expect(classify(null)).toBe("UNKNOWN");
+});
+test("pressure reclaims at 20 percent but does not apply above the threshold", () => {
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-pressure-trigger-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+
+  const highHome = useState();
+  const high = applyScratchForPressure(highHome, {
+    ...depsFor(), home: highHome, statfs: () => ({ bavail: 2001, blocks: 10000 }),
+  });
+  expect(high).toMatchObject({ free_pct: 20.01, pressure: "WARN", result: null });
+  expect(existsSync(reapLogPath(highHome))).toBe(false);
+
+  const lowHome = useState();
+  const low = applyScratchForPressure(lowHome, {
+    ...depsFor(), home: lowHome, statfs: () => ({ bavail: 20, blocks: 100 }),
+  });
+  expect(low).toMatchObject({ free_pct: 20, pressure: "RECLAIM", result: { receipt: { free_pct_before: 20 } } });
+  expect(existsSync(reapLogPath(lowHome))).toBe(true);
+});
+
+test("scheduled pressure watcher warns at 25 percent and kicks the reaper at 20", () => {
+  const job = KNOWN_JOBS["scratch-pressure"]!;
+  expect(job).toMatchObject({ intervalSeconds: 60, runAtLoad: false });
+  expect(systemdTimer(job)).toContain("OnUnitActiveSec=60s");
+  const calls: (readonly string[])[] = [];
+  const run = (args: readonly string[]) => {
+    calls.push([...args]);
+    return { code: 0, stdout: "started", stderr: "" };
+  };
+  expect(runScratchPressureTrigger(25, "darwin", run)).toMatchObject({ pressure: "WARN", action: "WARN" });
+  expect(runScratchPressureTrigger(20.01, "darwin", run)).toMatchObject({ pressure: "WARN", action: "WARN" });
+  expect(calls).toEqual([]);
+  expect(runScratchPressureTrigger(20, "darwin", run)).toMatchObject({
+    pressure: "RECLAIM",
+    action: "RECLAIM_TRIGGERED",
+    command: ["launchctl", "kickstart", `${domain()}/com.omp-kit.scratch-reaper`],
+  });
+  expect(calls).toEqual([["launchctl", "kickstart", `${domain()}/com.omp-kit.scratch-reaper`]]);
+});
+
+test("scratch-pressure chief route accepts configured destinations and refuses malformed ones", () => {
+  const home = useState();
+  const config = join(home, "fleet-watch.json");
+  writeFileSync(config, JSON.stringify({ chief: { session: "omp-test", pane: "%57", agent: "RedMaple" } }));
+  expect(scratchPressureChiefRoute(home, config)).toEqual({ session: "omp-test", pane: "%57", agent: "RedMaple" });
+
+  writeFileSync(config, JSON.stringify({ chief: { session: "omp-test\nwrong", pane: "%57" } }));
+  expect(scratchPressureChiefRoute(home, config)).toBeNull();
+  expect(scratchPressureChiefRoute(home, join(home, "missing.json"))).toBeNull();
+});
+
+test("scratch root report includes statfs free percent and usage GB", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-metrics-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const dir = sessionDir(root, "metrics", deadPid());
+  writeFileSync(join(dir, ".owner"), ownerText(deadFields("metrics", Number(dir.split(".").at(-1)))));
+  writeFileSync(join(dir, "payload"), "x".repeat(100));
+  const plan = planScratch(home, { ...depsFor(), statfs: () => ({ bavail: 195, blocks: 1000 }) });
+  expect(plan.rootMetrics ?? null).toEqual([
+    { root, free_pct: 19.5, scratch_gb: plan.totals.sizeByRoot[root]! / 1_000_000_000 },
+  ]);
+});
+
+test("quarantine report separates young, expired-held, and delete-failed bytes", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-buckets-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const now = Date.parse("2026-10-13T07:00:00.000Z");
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const plant = (label: string, ageHours: number, bytes: number, marker = false) => {
+    const entry = quarantineEntryFor(label, new Date(now - ageHours * 3600 * 1000)) + (marker ? ".delete-56789" : "");
+    const path = join(qt, entry);
+    mkdirSync(path, { recursive: true });
+    const fd = openSync(join(path, "payload"), "w");
+    ftruncateSync(fd, bytes);
+    closeSync(fd);
+  };
+  plant("young", 23, 7);
+  plant("held", 25, 5);
+  plant("failed", 26, 3, true);
+  const plan = planScratch(home, { ...depsFor({ now }), now });
+  expect(plan.quarantineBuckets).toEqual({
+    young: { entries: 1, bytes: 7 },
+    expiredHeld: { entries: 1, bytes: 5 },
+    failed: { entries: 1, bytes: 3 },
+    oldestAgeMs: 26 * 3600 * 1000,
+    readable: true,
+    ttlValid: true,
+  });
+});
+
+test("scratch apply progress reports the exact row total", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-progress-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const first = sessionDir(root, "first", process.pid);
+  const second = sessionDir(root, "second", process.pid);
+  writeFileSync(join(first, ".owner"), ownerText(liveFields("first")));
+  writeFileSync(join(second, ".owner"), ownerText(liveFields("second")));
+  const progress: { done: number; total: number }[] = [];
+  const onProgress = (_verdict: ScratchVerdict, current?: { done: number; total: number }) => {
+    if (current) progress.push(current);
+  };
+  applyScratch(home, { ...depsFor({ onProgress }), home });
+  expect(progress).toEqual([{ done: 1, total: 2 }, { done: 2, total: 2 }]);
+});
+
+test("scratch apply writes one metrics receipt and rotates logs at one MiB", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-receipt-"));
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const logPath = reapLogPath(home);
+  mkdirSync(join(home, "omp-kit"), { recursive: true });
+  writeFileSync(logPath, "x".repeat(1_048_577));
+  const now = Date.now();
+  const result = applyScratch(home, {
+    ...depsFor({ now, statfs: () => ({ bavail: 20, blocks: 100 }) }),
+    home,
+    now,
+  });
+  expect(readFileSync(logPath).byteLength).toBeLessThanOrEqual(1_048_576);
+  const lines = readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(lines.filter(row => row.event === "run-receipt")).toHaveLength(1);
+  expect(result.receipt ?? null).toMatchObject({
+    free_pct_before: 20,
+    free_pct_after: 20,
+    reaped_gb: 0,
+    quarantined_gb: 0,
+    failed_count: 0,
+    refused_count: 0,
+  });
+});
+test("failed expiry stays in the failed bucket across ticks", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const path = join(qt, quarantineEntryFor("failed-persist", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, "data"), "held");
+  const failed = applyQuarantineExpiry(home, {
+    ...depsFor(), home, now, remove: () => {
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    },
+  } as ApplyDeps);
+  const marked = `${path}.delete-${process.pid}`;
+  expect(failed).toContainEqual(expect.objectContaining({
+    dir: marked, reason: "delete-failed", cause: "permission",
+  }));
+  expect(existsSync(path)).toBe(false);
+  expect(existsSync(marked)).toBe(true);
+  expect(quarantineBuckets(home, now).failed.entries).toBe(1);
+  expect(quarantineBuckets(home, now).expiredHeld.entries).toBe(0);
+});
+
+test("failure marker does not rename an open or replaced quarantine directory", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const openPath = join(qt, quarantineEntryFor("open-failure", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(openPath, { recursive: true });
+  let lsofCalls = 0;
+  const openResult = applyQuarantineExpiry(home, {
+    ...depsFor(), home, now,
+    run: () => ++lsofCalls === 1 ? clearRun() : { code: 0, stdout: "open descriptor\n", stderr: "" },
+    remove: () => {
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    },
+  } as ApplyDeps);
+  expect(openResult).toContainEqual(expect.objectContaining({
+    dir: openPath, reason: "delete-failed", cause: "open-fd",
+  }));
+  expect(existsSync(openPath)).toBe(true);
+  expect(existsSync(`${openPath}.delete-${process.pid}`)).toBe(false);
+
+  const replacedPath = join(qt, quarantineEntryFor("replaced-failure", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(replacedPath, { recursive: true });
+  const displaced = join(qt, "displaced-original");
+  const replacedResult = applyQuarantineExpiry(home, {
+    ...depsFor(), home, now,
+    remove: () => {
+      renameSync(replacedPath, displaced);
+      mkdirSync(replacedPath);
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    },
+  } as ApplyDeps);
+  expect(replacedResult).toContainEqual(expect.objectContaining({
+    dir: replacedPath, reason: "delete-failed", cause: "permission",
+  }));
+  expect(existsSync(replacedPath)).toBe(true);
+  expect(existsSync(`${replacedPath}.delete-${process.pid}`)).toBe(false);
 });

@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { defaultLiveness, planScratch, type InspectDeps } from "../../src/scratch.ts";
 
 const roots: string[] = [];
+const fixtureRepo = resolve(import.meta.dir, "../..");
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 const savedState = process.env.XDG_STATE_HOME;
 afterEach(() => {
@@ -54,12 +55,12 @@ test("REAP2 planted: parent size excludes nested plan rows", () => {
   mkdirSync(parent, { recursive: true });
   const start = defaultLiveness().processStart(process.pid);
   if (start === null) throw new Error("process identity unavailable");
-  writeFileSync(join(parent, ".owner"), `pid=${process.pid}\nprocess_start=${start}\nlabel=session-omp-test\nrepo=test\ncreated_at=2026-10-01T00:00:00Z\nargv0=test\n`);
+  writeFileSync(join(parent, ".owner"), `pid=${process.pid}\nprocess_start=${start}\nlabel=session-omp-test\nrepo=${fixtureRepo}\ncreated_at=2026-10-01T00:00:00Z\nargv0=test\n`);
   sparse(join(parent, "own.bin"), MB);
   const gone = deadPid();
   const child = join(parent, `omp-kit-integrations-${gone}-nested`);
   mkdirSync(child, { recursive: true });
-  writeFileSync(join(child, ".owner"), `pid=${gone}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=omp-kit-integrations\nrepo=test\ncreated_at=2026-10-01T00:00:00Z\nargv0=test\n`);
+  writeFileSync(join(child, ".owner"), `pid=${gone}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=omp-kit-integrations\nrepo=${fixtureRepo}\ncreated_at=2026-10-01T00:00:00Z\nargv0=test\n`);
   sparse(join(child, "nested.bin"), 10 * MB);
   const plan = planScratch(state, depsFor());
   const parentRow = plan.sessions.find(entry => entry.dir === parent);

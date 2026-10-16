@@ -13,6 +13,7 @@ type PlanItem = {
 	labels: string[];
 	dependsOn: string[];
 	existing: string;
+	parent: string | null;
 	discoveredFrom: string;
 	what: string;
 	why: string;
@@ -68,6 +69,7 @@ type ConvertReport = {
 	kind: "planning-convert";
 	overall: "CLEAN" | "FINDINGS" | "REFUSED" | "UNAVAILABLE";
 	mission: string;
+	actor?: string;
 	plan_path: string;
 	db_dir: string;
 	candidate_blocks: number;
@@ -120,12 +122,12 @@ type BlockHeader = { slug: string; title: string; inlineType: string | null; inl
 const MAX_PLAN_BYTES = 8 * 1024 * 1024;
 const BR_TIMEOUT_MS = 60_000;
 const BR_MAX_BUFFER = 64 * 1024 * 1024;
-const KNOWN_FIELDS = ["type", "priority", "labels", "depends-on", "relates", "remove-depends-on", "existing", "discovered-from", "WHAT", "WHY", "ACCEPTANCE", "NO-CLAIM"] as const;
+const KNOWN_FIELDS = ["type", "priority", "labels", "depends-on", "relates", "remove-depends-on", "existing", "parent", "discovered-from", "WHAT", "WHY", "ACCEPTANCE", "NO-CLAIM"] as const;
 const ALLOWED_LABEL_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:";
 const ALLOWED_SLUG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-";
 const VALID_TYPES = ["task", "feature", "bug", "epic"];
 const REQUIRED_FIELDS = ["type", "priority", "labels", "depends-on", "existing", "discovered-from", "WHAT", "WHY", "ACCEPTANCE", "NO-CLAIM"];
-const ACTOR_ARGS = ["--no-auto-import", "--no-auto-flush", "--no-daemon", "--no-color"];
+const NATIVE_ARGS = ["--no-auto-import", "--no-auto-flush", "--no-daemon", "--no-color"];
 
 function splitLines(value: string): string[] {
 	const lines = value.split("\n");
@@ -263,6 +265,7 @@ function parseBlock(lines: string[], header: BlockHeader, line: number): { item:
 		const reason = requiredFieldError(fields, key);
 		if (reason) reasons.push(reason);
 	}
+	if (fields.has("parent") && !fieldValue(fields, "parent")) reasons.push("optional field `parent:` must not be empty when present");
 	if (reasons.length) return { item: null, reasons };
 	const labels = parseDelimited(fieldValue(fields, "labels"));
 	const item: PlanItem = {
@@ -274,6 +277,7 @@ function parseBlock(lines: string[], header: BlockHeader, line: number): { item:
 		labels,
 		dependsOn: parseDelimited(fieldValue(fields, "depends-on")),
 		existing: fieldValue(fields, "existing"),
+		parent: fieldValue(fields, "parent") || null,
 		discoveredFrom: fieldValue(fields, "discovered-from"),
 		what: fieldValue(fields, "WHAT"),
 		why: fieldValue(fields, "WHY"),
@@ -375,6 +379,8 @@ function itemFindings(items: PlanItem[], mission: string): ItemFinding[] {
 		if (item.type === "epic" && item.templateHeading !== "## Success Criteria")
 			findings.push({ line: item.line, slug: item.slug, code: "MISSING_EPIC_SUCCESS_CRITERIA", message: "epic item is missing `## Success Criteria`" });
 		if (!item.labels.includes("mission:" + mission)) findings.push({ line: item.line, slug: item.slug, code: "MISSION_LABEL_MISSING", message: "labels do not include `mission:" + mission + "`" });
+		if (item.labels.some((label) => label.startsWith("mission:") && label !== "mission:" + mission))
+			findings.push({ line: item.line, slug: item.slug, code: "MISSION_LABEL_CONFLICT", message: "labels include a different mission than `" + mission + "`" });
 	}
 	return findings;
 }
@@ -416,9 +422,9 @@ function planCycles(items: PlanItem[]): { cycles: PlanCycle[]; cycleEdges: Set<s
 	return { cycles: [...cyclesByKey.values()], cycleEdges };
 }
 
-function descriptionFor(item: PlanItem, planPath: string, textOnlyDependencies: string[]): string {
+function descriptionFor(item: PlanItem, planPath: string, textOnlyDependencies: string[], mission: string): string {
 	const sections = [
-		"Source item: core8:" + item.slug + " (" + planPath + ":" + item.line + ")",
+		"Source item: " + mission + ":" + item.slug + " (" + planPath + ":" + item.line + ")",
 		"",
 		"WHAT:", item.what,
 		"",
@@ -429,6 +435,7 @@ function descriptionFor(item: PlanItem, planPath: string, textOnlyDependencies: 
 	if (item.templateHeading) sections.push("", item.templateHeading, item.templateBody);
 	const metadata = [
 		["existing", item.existing],
+		["parent", item.parent],
 		["discovered-from", item.discoveredFrom],
 		["relates", item.relates],
 		["remove-depends-on", item.removeDependsOn],
@@ -511,22 +518,10 @@ function safeTrackerRoot(path: string, cwd: string): { trackerRoot: string; comm
 	}
 }
 
-function runApplyBr(args: string[], database: string, cwd: string, write: boolean, input?: string): CapturedCommand {
-	try {
-		const options = ["--no-auto-import", ...(write ? [] : ["--no-auto-flush"]), "--no-daemon", "--no-color", "--json"];
-		const result = spawnSync("br", [...args, "--db", database, ...options], {
-			cwd, input, encoding: "utf8", timeout: BR_TIMEOUT_MS, maxBuffer: BR_MAX_BUFFER,
-			env: { ...process.env, RUST_LOG: "warn" },
-		});
-		return { exit_code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "", error: result.error?.message ?? null };
-	} catch (error) {
-		return { exit_code: null, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
-	}
-}
 
-function runBr(args: string[], database: string, cwd: string, input?: string): CapturedCommand {
+function runBr(args: string[], database: string, cwd: string, input?: string, actor = "planning-convert-dry-run"): CapturedCommand {
 	try {
-		const result = spawnSync("br", [...args, "--db", database, ...ACTOR_ARGS, "--json"], {
+		const result = spawnSync("br", [...args, "--db", database, "--actor", actor, ...NATIVE_ARGS, "--json"], {
 			cwd, input, encoding: "utf8", timeout: BR_TIMEOUT_MS, maxBuffer: BR_MAX_BUFFER,
 			env: { ...process.env, RUST_LOG: "warn" },
 		});
@@ -556,27 +551,34 @@ function decodeNativeList(stdout: string): NativeList {
 	const issues: NativeIssue[] = [];
 	for (let index = 0; index < values.length; index++) {
 		const row = values[index];
-		if (typeof row !== "object" || row === null || Array.isArray(row) ||
-			!("id" in row) || typeof row.id !== "string" ||
+		if (typeof row !== "object" || row === null || Array.isArray(row))
+			return { issues: [], error: "br list issue " + index + " has an invalid shape" };
+		// Native br omits empty optional text/labels; present invalid values still refuse.
+		const description = "description" in row ? row.description ?? "" : "";
+		const acceptance = "acceptance_criteria" in row ? row.acceptance_criteria ?? "" : "";
+		const rawLabels = "labels" in row ? row.labels : undefined;
+		if (!("id" in row) || typeof row.id !== "string" ||
 			!("title" in row) || typeof row.title !== "string" ||
-			!("description" in row) || typeof row.description !== "string" ||
-			!("acceptance_criteria" in row) || typeof row.acceptance_criteria !== "string" ||
+			typeof description !== "string" ||
+			typeof acceptance !== "string" ||
 			!("status" in row) || typeof row.status !== "string" ||
 			!("priority" in row) || typeof row.priority !== "number" ||
 			!("issue_type" in row) || typeof row.issue_type !== "string" ||
-			!("labels" in row) || !Array.isArray(row.labels) ||
+			(rawLabels !== undefined && !Array.isArray(rawLabels)) ||
 			!("dependency_count" in row) || typeof row.dependency_count !== "number")
 			return { issues: [], error: "br list issue " + index + " has an invalid shape" };
 		const priority = ALLOWED_PRIORITIES.find((candidate) => candidate === row.priority);
 		if (priority === undefined) return { issues: [], error: "br list issue " + index + " has an invalid priority" };
 		const labels: string[] = [];
-		for (const label of row.labels) {
-			if (typeof label !== "string") return { issues: [], error: "br list issue " + index + " has a non-string label" };
-			labels.push(label);
+		if (rawLabels !== undefined) {
+			for (const label of rawLabels) {
+				if (typeof label !== "string") return { issues: [], error: "br list issue " + index + " has a non-string label" };
+				labels.push(label);
+			}
 		}
 		const externalRef = "external_ref" in row && typeof row.external_ref === "string" ? row.external_ref : null;
-		issues.push({ id: row.id, title: row.title, description: row.description, acceptance_criteria: row.acceptance_criteria,
-			status: row.status, priority, issue_type: row.issue_type, labels, dependency_count: row.dependency_count, external_ref: externalRef });
+		issues.push({ id: row.id, title: row.title, description,
+			status: row.status, priority, issue_type: row.issue_type, labels, dependency_count: row.dependency_count, external_ref: externalRef, acceptance_criteria: acceptance });
 	}
 	return { issues, error: null };
 }
@@ -590,10 +592,13 @@ function decodeNativeShow(stdout: string, requestedId: string): { issue: NativeI
 	if (typeof row !== "object" || row === null || Array.isArray(row)) return { issue: null, error: "br show issue has an invalid shape" };
 	const record = row as Record<string, unknown>;
 	if (record.id !== requestedId) return { issue: null, error: "br show returned a different issue id" };
-	if (typeof record.title !== "string" || typeof record.description !== "string" ||
-		typeof record.acceptance_criteria !== "string" || typeof record.status !== "string" ||
+	const description = record.description ?? "";
+	const acceptance = record.acceptance_criteria ?? "";
+	const rawLabels = record.labels;
+	if (typeof record.title !== "string" || typeof description !== "string" ||
+		typeof acceptance !== "string" || typeof record.status !== "string" ||
 		typeof record.priority !== "number" || !ALLOWED_PRIORITIES.includes(record.priority as Priority) ||
-		typeof record.issue_type !== "string" || !Array.isArray(record.labels))
+		typeof record.issue_type !== "string" || (rawLabels !== undefined && !Array.isArray(rawLabels)))
 		return { issue: null, error: "br show issue has an invalid field shape" };
 	if (typeof record.updated_at !== "string") return { issue: null, error: "br show issue has no updated_at value" };
 	if ("parent" in record && record.parent !== null && typeof record.parent !== "string")
@@ -601,16 +606,18 @@ function decodeNativeShow(stdout: string, requestedId: string): { issue: NativeI
 	if ("notes" in record && record.notes !== null && typeof record.notes !== "string")
 		return { issue: null, error: "br show issue has invalid notes" };
 	const labels: string[] = [];
-	for (const label of record.labels) {
-		if (typeof label !== "string") return { issue: null, error: "br show issue has a non-string label" };
-		labels.push(label);
+	if (rawLabels !== undefined) {
+		for (const label of rawLabels) {
+			if (typeof label !== "string") return { issue: null, error: "br show issue has a non-string label" };
+			labels.push(label);
+		}
 	}
 	if ("external_ref" in record && record.external_ref !== null && typeof record.external_ref !== "string")
 		return { issue: null, error: "br show issue has an invalid external_ref" };
 	return {
 		issue: {
-			id: requestedId, title: record.title, description: record.description,
-			acceptance_criteria: record.acceptance_criteria, status: record.status,
+			id: requestedId, title: record.title, description,
+			acceptance_criteria: acceptance, status: record.status,
 			priority: record.priority as Priority, issue_type: record.issue_type, labels,
 			dependency_count: 0, external_ref: typeof record.external_ref === "string" ? record.external_ref : null,
 			updated_at: record.updated_at, parent: typeof record.parent === "string" ? record.parent : null,
@@ -766,7 +773,7 @@ function reportText(data: ConvertReport): string {
 function finish(data: ConvertReport, code: BrExitCode): PresentationResult {
 	data.text = reportText(data);
 	const command = data.apply
-		? "omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR"
+		? "omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR --actor ACTOR"
 		: "omp-kit planning convert --plan PATH --mission M --dry-run --db DIR";
 	return { code, data, verification: code === 0 ? "PERFORMED" : "UNVERIFIED", commands: [command] };
 }
@@ -791,13 +798,13 @@ function descriptionDependencies(item: PlanItem, candidateSlugs: Set<string>): s
 	return item.dependsOn.filter((slug) => !candidateSlugs.has(slug));
 }
 
-function createArgs(item: PlanItem, parentId: string, planPath: string, candidateSlugs: Set<string>): { args: string[]; input: string } {
+function createArgs(item: PlanItem, parentId: string, planPath: string, candidateSlugs: Set<string>, mission: string): { args: string[]; input: string } {
 	const textOnlyDependencies = descriptionDependencies(item, candidateSlugs);
 	return {
 		args: ["create", "--title", item.title, "--type", item.type, "--priority", item.priority,
-			"--labels", item.labels.join(","), "--parent", parentId, "--external-ref", "core8:" + item.slug,
+			"--labels", item.labels.join(","), "--parent", parentId, "--external-ref", mission + ":" + item.slug,
 			"--description-file", "-", "--acceptance-criteria", item.acceptance],
-		input: descriptionFor(item, planPath, textOnlyDependencies),
+		input: descriptionFor(item, planPath, textOnlyDependencies, mission),
 	};
 }
 
@@ -834,6 +841,7 @@ function runPlanningConvertApply(
 	candidateSlugs: Set<string>,
 	cwd: string,
 	trackerRoot: string,
+	actor: string,
 ): PresentationResult {
 	data.writes_landed = [];
 	data.created_items = [];
@@ -855,8 +863,10 @@ function runPlanningConvertApply(
 	data.tracker_root = tracker.trackerRoot;
 	data.db_dir = tracker.trackerRoot;
 	data.database_path = tracker.database;
+	const runApplyBr = (args: string[], database: string, commandCwd: string, input?: string): CapturedCommand =>
+		runBr(args, database, commandCwd, input, actor);
 
-	const listResult = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+	const listResult = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd);
 	data.br_list_exit_code = listResult.exit_code;
 	if (listResult.exit_code !== 0 || listResult.error)
 		return refuse(listResult.error ?? (listResult.stderr.trim() || "br list failed"));
@@ -871,7 +881,7 @@ function runPlanningConvertApply(
 	const loadDetails = (id: string): NativeIssueDetails | null => {
 		const cached = detailsById.get(id);
 		if (cached) return cached;
-		const result = runApplyBr(["show", id], tracker.database, tracker.commandCwd, false);
+		const result = runApplyBr(["show", id], tracker.database, tracker.commandCwd);
 		if (result.exit_code !== 0 || result.error) {
 			detailsError = result.error ?? (result.stderr.trim() || "br show exited with status " + result.exit_code);
 			return null;
@@ -901,8 +911,12 @@ function runPlanningConvertApply(
 			if (!details) return refuse("cannot preflight target " + issue.id + ": " + (detailsError ?? "br show failed"));
 			if (details.status === "closed" || details.status === "tombstone")
 				return refuse("target " + issue.id + " is terminal and cannot be amended");
-			const contribution = "core8:" + item.slug;
-			const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", contribution], tracker.database, tracker.commandCwd, false);
+			if (item.parent && item.parent !== details.parent)
+				return refuse("declared parent does not match existing target " + issue.id + "; historical parents are never moved");
+			const contribution = data.mission + ":" + item.slug;
+			if (decodedList.issues.some((candidate) => candidate.external_ref === contribution && candidate.id !== issue.id))
+				return refuse("contribution " + contribution + " already belongs to another tracker issue by external_ref");
+			const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", contribution], tracker.database, tracker.commandCwd);
 			if (noteSearch.exit_code !== 0 || noteSearch.error)
 				return refuse(noteSearch.error ?? (noteSearch.stderr.trim() || "cannot search contribution notes for " + contribution));
 			const noteList = decodeNativeList(noteSearch.stdout);
@@ -917,9 +931,9 @@ function runPlanningConvertApply(
 			continue;
 		}
 
-		const token = "core8:" + item.slug;
+		const token = data.mission + ":" + item.slug;
 		const byExternalRef = decodedList.issues.filter((issue) => issue.external_ref === token);
-		const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", token], tracker.database, tracker.commandCwd, false);
+		const noteSearch = runApplyBr(["list", "--all", "--limit", "0", "--notes-contains", token], tracker.database, tracker.commandCwd);
 		if (noteSearch.exit_code !== 0 || noteSearch.error)
 			return refuse(noteSearch.error ?? (noteSearch.stderr.trim() || "cannot search contribution notes for " + token));
 		const noteList = decodeNativeList(noteSearch.stdout);
@@ -950,31 +964,49 @@ function runPlanningConvertApply(
 		});
 	}
 	data.foreign_targets = foreignTargets;
-	const needsCore8Epic = items.some((item) => item.existing === "(new)");
+	const needsMissionEpic = items.some((item) => item.existing === "(new)" && !item.parent);
 	const newItems = items.filter((item) => targetBySlug.get(item.slug)?.kind === "new");
+	for (const item of items) {
+		if (item.existing !== "(new)" || !item.parent) continue;
+		if (!issuesById.has(item.parent)) return refuse("declared parent " + item.parent + " is not in the selected tracker");
+		const parentDetails = loadDetails(item.parent);
+		if (!parentDetails) return refuse("cannot preflight declared parent " + item.parent + ": " + detailsError);
+		if (parentDetails.status === "closed" || parentDetails.status === "tombstone")
+			return refuse("declared parent " + item.parent + " is terminal");
+		if (targetBySlug.get(item.slug)?.kind !== "new") continue;
+		if (parentDetails.status === "blocked") return refuse("declared parent " + item.parent + " is blocked");
+		const parentDependencies = runApplyBr(["dep", "list", item.parent], tracker.database, tracker.commandCwd);
+		if (parentDependencies.exit_code !== 0 || parentDependencies.error)
+			return refuse(parentDependencies.error ?? (parentDependencies.stderr.trim() || "cannot preflight declared parent dependencies"));
+		const decodedParentDependencies = decodeNativeDependencies(parentDependencies.stdout, item.parent);
+		if (decodedParentDependencies.error) return refuse(decodedParentDependencies.error);
+		const blocker = decodedParentDependencies.dependencies.find((edge) => edge.type === "blocks" && edge.status !== "closed" && edge.status !== "tombstone");
+		if (blocker) return refuse("declared parent " + item.parent + " is blocked by " + blocker.depends_on_id);
+	}
 
-	const epicMatches = needsCore8Epic ? decodedList.issues.filter((issue) => issue.external_ref === "core8") : [];
-	if (epicMatches.length > 1) return refuse("multiple tracker issues use external_ref core8");
+	const epicMatches = needsMissionEpic ? decodedList.issues.filter((issue) => issue.external_ref === data.mission) : [];
+	if (epicMatches.length > 1) return refuse("multiple tracker issues use external_ref " + data.mission);
 	if (epicMatches.length === 1 && epicMatches[0]!.issue_type !== "epic")
-		return refuse("external_ref core8 is already used by a non-epic issue");
+		return refuse("external_ref " + data.mission + " is already used by a non-epic issue");
 	let parentId = epicMatches[0]?.id ?? null;
 	if (parentId) {
 		const parentDetails = loadDetails(parentId);
-		if (!parentDetails) return refuse("cannot preflight core8 epic " + parentId + ": " + (detailsError ?? "br show failed"));
+		if (!parentDetails) return refuse("cannot preflight mission epic " + parentId + ": " + (detailsError ?? "br show failed"));
 		if (parentDetails.status === "closed" || parentDetails.status === "tombstone")
-			return refuse("core8 epic " + parentId + " is terminal");
+			return refuse("mission epic " + parentId + " is terminal");
 	}
 	for (const item of items) {
 		const target = targetBySlug.get(item.slug)!;
-		if (target.reused && target.details && (!parentId || target.details.parent !== parentId))
-			return refuse("reused target " + target.id + " is not beneath the tracker core8 epic");
+		const expectedParent = item.parent ?? parentId;
+		if (target.reused && target.details && (!expectedParent || target.details.parent !== expectedParent))
+			return refuse("reused target " + target.id + " is not beneath the selected parent");
 	}
 	if (parentId) data.parent_epic_id = parentId;
 
 	const graphNode = (slug: string): string | null => {
 		const target = targetBySlug.get(slug);
 		if (!target || target.kind === "foreign") return null;
-		return target.kind === "existing" ? target.id : "__core8_new__" + slug;
+		return target.kind === "existing" ? target.id : "__new__" + slug;
 	};
 	const graphAdjacency = new Map<string, string[]>();
 	const existingBlockEdges = new Set<string>();
@@ -985,7 +1017,7 @@ function runPlanningConvertApply(
 	for (let index = 0; index < graphQueue.length; index++) {
 		const id = graphQueue[index]!;
 		if (graphAdjacency.has(id)) continue;
-		const result = runApplyBr(["dep", "list", id], tracker.database, tracker.commandCwd, false);
+		const result = runApplyBr(["dep", "list", id], tracker.database, tracker.commandCwd);
 		if (result.exit_code !== 0 || result.error)
 			return refuse(result.error ?? (result.stderr.trim() || "cannot preflight dependencies for " + id));
 		const decoded = decodeNativeDependencies(result.stdout, id);
@@ -1016,7 +1048,7 @@ function runPlanningConvertApply(
 		}
 	}
 	const placeholders = new Map(items.filter((item) => targetBySlug.get(item.slug)?.kind === "new")
-		.map((item) => ["__core8_new__" + item.slug, "new:" + item.slug]));
+		.map((item) => ["__new__" + item.slug, "new:" + item.slug]));
 	const mergedCycles = mergedGraphCycles(graphAdjacency).map((cycle) => cycle.map((id) => placeholders.get(id) ?? id));
 	if (mergedCycles.length) {
 		data.merged_dependency_cycles = mergedCycles;
@@ -1048,7 +1080,7 @@ function runPlanningConvertApply(
 					const item = items.find((candidate) => candidate.slug === write.slug);
 					if (item && !data.created_items.some((created) => created.id === write.id)) {
 						targetBySlug.set(item.slug, { kind: "existing", id: write.id, reused: false });
-						data.created_items.push({ slug: item.slug, title: item.title, id: write.id, line: item.line, external_ref: write.external_ref ?? "core8:" + item.slug });
+						data.created_items.push({ slug: item.slug, title: item.title, id: write.id, line: item.line, external_ref: write.external_ref ?? data.mission + ":" + item.slug });
 					}
 				} else if (write.kind === "AMENDED") {
 					data.amended_targets!.push({
@@ -1069,7 +1101,7 @@ function runPlanningConvertApply(
 		return finish(data, 1);
 	};
 	const reconcileCreated = (externalRef: string, item?: PlanItem): (() => ApplyReconciliation) => () => {
-		const result = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+		const result = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd);
 		if (result.exit_code !== 0 || result.error)
 			return { writes: [], error: result.error ?? (result.stderr.trim() || "br list reconciliation failed") };
 		const decoded = decodeNativeList(result.stdout);
@@ -1087,29 +1119,30 @@ function runPlanningConvertApply(
 	};
 
 	let parentCreated = false;
-	if (newItems.length && !parentId) {
-		const result = runApplyBr(["create", "--title", "core8 applied plan", "--type", "epic", "--priority", "0",
-			"--labels", "plan:core8,mission:core8", "--external-ref", "core8", "--description-file", "-",
-			"--acceptance-criteria", "- [ ] Every locally applied plan item is parented under this epic."],
-		tracker.database, tracker.commandCwd, true,
-		"## Success Criteria\nAll locally created plan items are children of this core8 epic; foreign targets remain untouched.");
+	if (newItems.some((item) => !item.parent) && !parentId) {
+		const result = runApplyBr(["create", "--title", data.mission + " applied plan", "--type", "epic", "--priority", "0",
+			"--labels", "plan:" + data.mission + ",mission:" + data.mission, "--external-ref", data.mission, "--description-file", "-",
+			"--acceptance-criteria", "- [ ] Every locally applied plan item without an explicit parent is parented under this epic."],
+		tracker.database, tracker.commandCwd,
+		"## Success Criteria\nLocally created " + data.mission + " plan items without explicit parents belong here; foreign targets remain untouched.");
 		const id = createdId(result.stdout);
 		if (result.exit_code !== 0 || result.error || !id)
-			return writeFailure("create-core8-epic", result, "br create did not return a parent epic id", reconcileCreated("core8"));
+			return writeFailure("create-mission-epic", result, "br create did not return a parent epic id", reconcileCreated(data.mission));
 		parentId = id;
 		parentCreated = true;
 		data.parent_epic_id = id;
-		data.writes_landed.push({ kind: "EPIC_CREATED", id, external_ref: "core8" });
+		data.writes_landed.push({ kind: "EPIC_CREATED", id, external_ref: data.mission });
 	}
 	for (const item of newItems) {
-		if (!parentId) return refuse("new plan items have no core8 parent epic");
-		const request = createArgs(item, parentId, data.plan_path, candidateSlugs);
-		const result = runApplyBr(request.args, tracker.database, tracker.commandCwd, true, request.input);
+		const selectedParent = item.parent ?? parentId;
+		if (!selectedParent) return refuse("new plan items have no selected parent");
+		const request = createArgs(item, selectedParent, data.plan_path, candidateSlugs, data.mission);
+		const result = runApplyBr(request.args, tracker.database, tracker.commandCwd, request.input);
 		const id = createdId(result.stdout);
 		if (result.exit_code !== 0 || result.error || !id)
-			return writeFailure("create-" + item.slug, result, "br create did not return an issue id", reconcileCreated("core8:" + item.slug, item));
+			return writeFailure("create-" + item.slug, result, "br create did not return an issue id", reconcileCreated(data.mission + ":" + item.slug, item));
 		targetBySlug.set(item.slug, { kind: "existing", id, reused: false });
-		const created = { slug: item.slug, title: item.title, id, line: item.line, external_ref: "core8:" + item.slug };
+		const created = { slug: item.slug, title: item.title, id, line: item.line, external_ref: data.mission + ":" + item.slug };
 		data.created_items.push(created);
 		data.writes_landed.push({ kind: "ITEM_CREATED", id, slug: item.slug, external_ref: created.external_ref });
 	}
@@ -1128,7 +1161,7 @@ function runPlanningConvertApply(
 		const acceptanceAdded: string[] = [];
 		const contributionsAdded: string[] = [];
 		for (const item of group.items) {
-			const token = "core8:" + item.slug;
+			const token = data.mission + ":" + item.slug;
 			if (noteLines.includes(token)) continue;
 			for (const box of acceptanceBoxes(item.acceptance))
 				acceptanceAdded.push("[" + box.letter + "] " + box.text);
@@ -1145,10 +1178,10 @@ function runPlanningConvertApply(
 		const args = ["update", id, "--if-unchanged", group.details.updated_at];
 		for (const criterion of acceptanceAdded) args.push("--add-acceptance", criterion);
 		for (const token of contributionsAdded) args.push("--append-notes", token);
-		const result = runApplyBr(args, tracker.database, tracker.commandCwd, true);
+		const result = runApplyBr(args, tracker.database, tracker.commandCwd);
 		if (result.exit_code !== 0 || result.error)
 			return writeFailure("amend-" + id, result, "br update failed", () => {
-				const check = runApplyBr(["show", id], tracker.database, tracker.commandCwd, false);
+				const check = runApplyBr(["show", id], tracker.database, tracker.commandCwd);
 				if (check.exit_code !== 0 || check.error)
 					return { writes: [], error: check.error ?? (check.stderr.trim() || "br show reconciliation failed") };
 				const after = decodeNativeShow(check.stdout, id);
@@ -1199,10 +1232,10 @@ function runPlanningConvertApply(
 			data.dependency_edges.push({ slug: dependency.item.slug, target: dependency.targetSlug, status: "ALREADY_PRESENT", issue_id: sourceId, depends_on_id: targetId });
 			continue;
 		}
-		const result = runApplyBr(["dep", "add", sourceId, targetId], tracker.database, tracker.commandCwd, true);
+		const result = runApplyBr(["dep", "add", sourceId, targetId], tracker.database, tracker.commandCwd);
 		if (result.exit_code !== 0 || result.error)
 			return writeFailure("dependency-" + dependency.item.slug + "-" + dependency.targetSlug, result, "br dep add failed", () => {
-				const check = runApplyBr(["dep", "list", sourceId], tracker.database, tracker.commandCwd, false);
+				const check = runApplyBr(["dep", "list", sourceId], tracker.database, tracker.commandCwd);
 				if (check.exit_code !== 0 || check.error)
 					return { writes: [], error: check.error ?? (check.stderr.trim() || "br dep list reconciliation failed") };
 				const decoded = decodeNativeDependencies(check.stdout, sourceId);
@@ -1218,7 +1251,7 @@ function runPlanningConvertApply(
 		data.writes_landed.push({ kind: "DEPENDENCY_ADDED", id: sourceId, slug: dependency.item.slug, target: dependency.targetSlug });
 	}
 
-	const finalList = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd, false);
+	const finalList = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd);
 	data.br_list_exit_code = finalList.exit_code;
 	if (finalList.exit_code !== 0 || finalList.error)
 		return writeFailure("final-readback", finalList, "br list readback failed");
@@ -1255,8 +1288,8 @@ function runPlanningConvertApply(
 }
 
 export type PlanningConvertOptions = { planPath: string; mission: string; cwd?: string } & (
-	| { apply: true; trackerRoot: string; dbDir?: never }
-	| { apply?: false; dbDir: string; trackerRoot?: never }
+	| { apply: true; trackerRoot: string; actor: string; dbDir?: never }
+	| { apply?: false; dbDir: string; actor?: never; trackerRoot?: never }
 );
 export function runPlanningConvert(options: PlanningConvertOptions): PresentationResult {
 	const cwd = resolve(options.cwd ?? process.cwd());
@@ -1271,6 +1304,13 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		initial.item_findings = [{ code: "INVALID_MISSION", message: "--mission must be a lowercase slug" }];
 		return finish(initial, 1);
 	}
+	if (options.apply && (typeof options.actor !== "string" || !options.actor.trim() || options.actor !== options.actor.trim()
+		|| Array.from(options.actor).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127))) {
+		initial.overall = "REFUSED";
+		initial.item_findings = [{ code: "INVALID_ACTOR", message: "--apply requires an explicit non-empty --actor without surrounding whitespace or control characters" }];
+		return finish(initial, 1);
+	}
+	if (options.apply) initial.actor = options.actor;
 	let source: string;
 	try {
 		const stat = lstatSync(planPath);
@@ -1294,7 +1334,7 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		uncovered_what_letters: coverage,
 		dependency_cycles: graph.cycles,
 	});
-	if (options.apply) return runPlanningConvertApply(initial, items, parsed.candidateSlugs, cwd, options.trackerRoot);
+	if (options.apply) return runPlanningConvertApply(initial, items, parsed.candidateSlugs, cwd, options.trackerRoot, options.actor);
 	const database = safeDbDirectory(requestedDb, cwd);
 	if ("error" in database) {
 		initial.overall = "REFUSED";
@@ -1308,29 +1348,29 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 	const created: CreatedItem[] = [];
 	const createFailures: CreateFailure[] = [];
 	const initialization = itemsToCreate.length
-		? runBr(["init", "--prefix", "core8"], database.database, database.directory)
+		? runBr(["init", "--prefix", mission], database.database, database.directory)
 		: null;
 	const initializationError = initialization && (initialization.exit_code !== 0 || initialization.error !== null)
 		? initialization.error ?? (initialization.stderr.trim() || "br init exited with status " + initialization.exit_code)
 		: null;
 	if (initialization && initializationError !== null)
-		createFailures.push({ slug: "core8-database-init", line: null, exit_code: initialization.exit_code,
+		createFailures.push({ slug: mission + "-database-init", line: null, exit_code: initialization.exit_code,
 			stdout: initialization.stdout, stderr: initialization.stderr, error: initializationError });
 	if (itemsToCreate.length && initializationError === null) {
-		const parentDescription = "## Success Criteria\nAll parsed plan items are children of this isolated core8 dry-run epic; no real tracker is modified.";
-		const parent = runBr(["create", "--title", "core8 isolated plan conversion", "--type", "epic", "--priority", "0",
-			"--labels", "plan:core8,mission:core8", "--description-file", "-", "--acceptance-criteria", "- [ ] Every parsed plan item is parented under this isolated epic."],
+		const parentDescription = "## Success Criteria\nAll parsed " + mission + " plan items are children of this isolated dry-run epic; explicit live parent IDs remain source metadata and no real tracker is modified.";
+		const parent = runBr(["create", "--title", mission + " isolated plan conversion", "--type", "epic", "--priority", "0",
+			"--labels", "plan:" + mission + ",mission:" + mission, "--external-ref", mission, "--description-file", "-", "--acceptance-criteria", "- [ ] Every parsed plan item is parented under this isolated epic."],
 		database.database, database.directory, parentDescription);
 		const parentIssueId = createdId(parent.stdout);
 		if (parent.exit_code === 0 && parentIssueId) parentId = parentIssueId;
-		else createFailures.push({ slug: "core8-parent-epic", line: null, exit_code: parent.exit_code, stdout: parent.stdout, stderr: parent.stderr, error: parent.error ?? (parent.exit_code === 0 ? "br create did not return a parent issue id" : "br create exited with status " + parent.exit_code) });
+		else createFailures.push({ slug: mission + "-parent-epic", line: null, exit_code: parent.exit_code, stdout: parent.stdout, stderr: parent.stderr, error: parent.error ?? (parent.exit_code === 0 ? "br create did not return a parent issue id" : "br create exited with status " + parent.exit_code) });
 	}
 	if (parentId) {
 		for (const item of itemsToCreate) {
-			const request = createArgs(item, parentId, planPath, parsed.candidateSlugs);
+			const request = createArgs(item, parentId, planPath, parsed.candidateSlugs, mission);
 			const result = runBr(request.args, database.database, database.directory, request.input);
 			const id = createdId(result.stdout);
-			if (result.exit_code === 0 && id) created.push({ slug: item.slug, title: item.title, id, line: item.line, external_ref: "core8:" + item.slug });
+			if (result.exit_code === 0 && id) created.push({ slug: item.slug, title: item.title, id, line: item.line, external_ref: mission + ":" + item.slug });
 			else createFailures.push({ slug: item.slug, line: item.line, exit_code: result.exit_code, stdout: result.stdout, stderr: result.stderr, error: result.error ?? (result.exit_code === 0 ? "br create did not return an issue id" : "br create exited with status " + result.exit_code) });
 		}
 	}

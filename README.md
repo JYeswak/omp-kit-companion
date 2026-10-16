@@ -90,6 +90,19 @@ omp-kit test --metamorphic --json         # metamorphic relations over the cases
 omp-kit corpus --sessions /absolute/sessions --json   # real fire rates from local transcripts
 ```
 
+For installed live proofs in caller-owned scratch, set `OMP_KIT_CASE_CWD` to the
+absolute caller workspace and `OMP_KIT_TEST_WORK_ROOT` to an existing directory
+under that workspace's `var/agent-tmp/`. The directory and its regular, non-symlink
+`.owner` marker must belong to the current user; the marker's multiline `repo=`
+field must name that workspace. Runtime HOME, XDG, Bun and scenario data remain
+inside private children of that root. An invalid supplied root is refused, never
+silently redirected to system temporary storage.
+
+`omp-kit test --integrations --profile claude --json` executes the packaged
+profile matrix. A completed command is not a claim that every integration is
+wired: inspect each matrix verdict and `realOmpIntegrity`, including reported
+limitations, before using the result as profile evidence.
+
 ### Guarded apply, receipts, undo
 
 Each `apply` subcommand plans by default. `--apply` requests the change and
@@ -172,9 +185,13 @@ omp-kit apply extensions --apply --yes --profiles all
   plugin links, and read-only settings.
 - **jeff-planning-enhanced:** the fleet planning protocol (plan, review,
   beads, polish), scored with `omp-kit planning score`.
-- **fleet-restart:** restarts every OMP pane in a tmux fleet onto the current
-  kit, plugin links and MCP servers, then hands off and re-dispatches with
-  operator approval before any send. `scripts/fleet_restart.py` has `env`,
+- **fleet-restart:** restarts every OMP pane in a tmux fleet onto the target OMP
+  build, kit, plugin links and MCP servers as one approved run. `run --plan`
+  writes a manifest; `run --apply` (approval bound to its sha256) pauses the
+  pane-acting watchers, saves sessions and advisor state, `/restart`s panes on
+  the target build and respawns the rest with `--resume`, verifies version and
+  session, re-applies advisors, resumes the watchers and reports.
+  `scripts/fleet_restart.py` also has `check-env`, `watchers`, `save`,
   `snapshot`, `align`, `plan`, `manifest`, `send` (dry-run by default),
   `approval-template`, `verify` and `handoff`; `scripts/sitrep.py` reports
   per-pane state, flags, MCP versions and last callback plus per-repo counts and
@@ -188,6 +205,7 @@ omp-kit apply extensions --apply --yes --profiles all
   arrived on time and was accepted, escalating a repeated blocker.
 
 ```sh
+python3 skills/fleet-restart/scripts/selftest.py
 python3 skills/fleet-restart/scripts/sitrep.py --selftest
 bun skills/fleet-round/scripts/fleet-round.ts check --config fleet.json --project app --focus app-e1,app-e2,app-e3
 omp-kit planning score --json
@@ -300,11 +318,12 @@ must be proven, shared across profiles, or audited. Neither replaces a sandbox.
 ## Installation
 
 Requirements: an existing OMP install with `omp` on PATH (for `status` and
-`test`), plus Python 3 and `curl` for the installer (the version one-liner uses
-`str.removeprefix`, so Python 3.9 or newer). Linux builds need
-GNU libc. `gh` is optional; when a release ships a Sigstore bundle the installer
-verifies it with `gh attestation verify`, otherwise it prints
-`warning: no attestation bundle; hash-only verification`.
+`test`), plus Python 3, GitHub CLI (`gh`) and `curl` for the installer (the version
+one-liner uses `str.removeprefix`, so Python 3.9 or newer). Linux builds need
+GNU libc. Installer and kit updates require a verifying Sigstore/SLSA bundle:
+GitHub Actions issuer, `JYeswak/omp-kit-companion` release workflow and the selected
+tag's authoritative source commit must match. Missing bundles, verifier or online
+tag authority refuse as `KIT_ATTESTATION_*`; there is no hash-only activation.
 
 ### 1. Latest release installer (recommended)
 
@@ -325,10 +344,13 @@ avoid the raw downloads, clone the tag instead:
 `git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git`
 and run `sh omp-kit-companion/installer/install.sh` with the same flags.
 
-The installer downloads only the archive for your platform, checks the archive
-SHA-256, manifest SHA-256, every file hash and USTAR safety, then writes
-`PREFIX/releases/<version>/` and points `PREFIX/bin/omp-kit` at it. It never
-installs OMP, Bun, models, profiles, or shell startup edits, and it refuses
+The online installer downloads only the archive for your platform and its bundle
+from GitHub's attestation store. It checks archive SHA-256, manifest SHA-256,
+every file hash, USTAR safety and provenance before writing
+`PREFIX/releases/<version>/` and pointing `PREFIX/bin/omp-kit` at it. Offline
+archives require an adjacent `<archive>.sigstore.json`; source-tag authority still
+requires network access. The updater uses this same verifier before extraction.
+It never installs OMP, Bun, models, profiles, or shell startup edits, and it refuses
 plain HTTP indexes, relative prefixes, and an existing release directory whose
 bytes differ. Upgrading by hand is the same commands with the new version.
 
@@ -436,7 +458,7 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
-| `omp-kit status` | `status` | Kit and OMP presence; changes nothing | `omp-kit status --json` |
+| `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |
@@ -456,14 +478,14 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Read-only reports for landed-but-open beads and stale in-progress claims (--project DIR reads DIR/.beads/beads.db; refused with --db) | `omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when `sbh` is missing | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
-| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Publishes exact actively reserved paths from fresh `origin/main` through an owner-bound private index and ordinary non-force push; preserves shared index, local `HEAD` and worktree | `omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json` |
-| `omp-kit align` | `align --repo DIR (--dry-run \| --apply --yes) [--preserve-only]` | Aligns a shared checkout's `main` and index to `origin/main` while holding git's `index.lock`: pins local-only commits under `refs/preserve/`, adopts or updates only provably unchanged paths, refuses with a typed code on staged changes, peer edits or a moved ref/index, and logs a receipt to `.git/omp-kit-align.jsonl` | `omp-kit align --repo ~/Developer/omp-kit-companion --dry-run --json` |
+| `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
+| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit exact actively reserved paths to shared main, then converge and publish; distinguish saved-but-unpublished and uncertain saves | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Send to a fleet pane and prove it landed | `omp-kit send omp-test %54 "status update" --json` |
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |
 | `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|apply [--apply --yes]` | Release, quarantine and delete scratch; idle 72 h goes to quarantine, quarantine expires after 7 days | `omp-kit scratch plan --json` |
-| `omp-kit scratch` | `scratch index-lock --repo DIR [--apply --yes]` | Report a stale holder-less empty .git/index.lock, or move it aside; never touches non-empty, young, held, or unknown locks | `omp-kit scratch index-lock --repo /repo --json` |
+| `omp-kit scratch` | `scratch index-lock --repo DIR` | Dry-run report for a stale holder-less empty .git/index.lock; `--apply` is always refused and no lock is moved | `omp-kit scratch index-lock --repo /repo --json` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo` | Pin the gate toolchain, test a candidate binary, and let a human promote it | `omp-kit infra pin --json` |
 | `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |
@@ -498,8 +520,26 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 | `infra undo` | Restore the pin file from a promote backup | `omp-kit infra undo --receipt PATH --apply --yes` |
 | `scratch plan` / `release DIR` / `apply` | Report, mark one task directory finished, or quarantine and delete per plan | `omp-kit scratch release /repo/var/agent-tmp/omp.123 --json` |
 | `examples memory-off` / `mnemopi-manual` / `model-roles` / `mcp` / `omp-watch` / `skill-set` | Versioned, unverified recipes for manual use; `omp-watch` renders the service file without installing it | `omp-kit examples omp-watch --json` |
-| `planning convert` | Fenced Markdown plan to native beads: `CLEAN`, `FINDINGS`, `REFUSED`, `UNAVAILABLE` | `omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json` |
+| `planning convert` | Fenced Markdown plan to native beads: dry-run uses a fresh isolated DB; apply requires `--tracker-root DIR --actor ACTOR --yes`, always disables native auto-import/export | `omp-kit planning convert --plan PLAN.md --mission M --dry-run --db var/agent-tmp/plan-run --json` |
 | `review reduce` | Minimize a public-synthetic false fire without weakening its benign context | `omp-kit review reduce --rules /abs/rules --fixture /abs/fixture.json --json` |
+
+`planning convert --apply --tracker-root DIR --actor ACTOR --yes` writes only the
+selected native tracker. `ACTOR` is the actual writer supplied explicitly for
+native audit attribution, **not** verified pane identity; native policy refusals
+remain failures. Every native invocation passes `--no-auto-import --no-auto-flush`:
+apply never exports JSONL, commits tracker changes, or writes a foreign tracker.
+An authorized export/publication is a separate owner operation. `--mission M`
+scopes parent epic identity, `M:<slug>` contributions and source references; each
+block must label that mission. Optional `parent: EXISTING_LOCAL_ID` on a new block
+creates its parent-child link in the same native create after checking the parent
+is present, nonterminal and has no open native `blocks` prerequisite. Open
+parent-child rollups alone are not code prerequisites; a closed blocker is satisfied.
+Without an explicit parent, new blocks use the selected mission epic.
+An amendment's explicit parent must match its historical parent, never move it.
+Amendments preserve existing acceptance, external refs, parents and dependencies;
+reapplying the same contributions adds nothing. Dry-run materializes all items
+under an isolated mission epic and retains declared live parent IDs as metadata;
+it does not certify those IDs exist in an apply tracker.
 
 ### Doctor scopes
 

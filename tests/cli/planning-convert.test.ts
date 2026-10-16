@@ -15,8 +15,8 @@ const childEnv = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch 
 
 type CliRunResult = { exitCode: number; stdout: string; stderr: string };
 
-function runCli(args: string[]): Promise<CliRunResult> {
-	const child = Bun.spawn([process.execPath, cli, ...args], { cwd: repoRoot, env: childEnv, stdout: "pipe", stderr: "pipe" });
+function runCli(args: string[], overrides: Record<string, string> = {}): Promise<CliRunResult> {
+	const child = Bun.spawn([process.execPath, cli, ...args], { cwd: repoRoot, env: { ...childEnv, ...overrides }, stdout: "pipe", stderr: "pipe" });
 	return Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]).then(([exitCode, stdout, stderr]) => {
 		if (!stdout.trim()) throw new Error("planning convert returned no stdout; stderr=" + stderr);
 		return { exitCode, stdout, stderr };
@@ -86,16 +86,17 @@ function median(values: number[]): number | null {
 	const middle = Math.floor(ordered.length / 2);
 	return ordered.length % 2 ? ordered[middle]! : (ordered[middle - 1]! + ordered[middle]!) / 2;
 }
-type ApplyPlanItem = { slug: string; existing: string; dependsOn?: string[] };
+type ApplyPlanItem = { slug: string; existing: string; dependsOn?: string[]; parent?: string };
 
-function planSource(items: ApplyPlanItem[]): string {
+function planSource(items: ApplyPlanItem[], mission = "core8"): string {
 	return items.map((item) => [
 		"```text",
 		"### " + item.slug + " — " + item.slug.replaceAll("-", " "),
 		"type: task priority: 1",
-		"labels: plan:core8, mission:core8, test:planning-convert",
+		"labels: plan:" + mission + ", mission:" + mission + ", test:planning-convert",
 		"depends-on: " + (item.dependsOn?.join(", ") || "(none)"),
 		"existing: " + item.existing,
+		...(item.parent ? ["parent: " + item.parent] : []),
 		"discovered-from: planning-convert-test",
 		"WHAT: (a) " + item.slug + " is applied to the selected tracker.",
 		"WHY: The selected tracker must retain unrelated state.",
@@ -107,9 +108,9 @@ function planSource(items: ApplyPlanItem[]): string {
 	].join("\n")).join("\n\n");
 }
 
-function writePlan(name: string, items: ApplyPlanItem[]): string {
+function writePlan(name: string, items: ApplyPlanItem[], mission = "core8"): string {
 	const path = join(scratch, name + ".md");
-	writeFileSync(path, planSource(items));
+	writeFileSync(path, planSource(items, mission));
 	return path;
 }
 
@@ -145,8 +146,98 @@ function applyResult(result: CliRunResult): Record<string, any> {
 	return JSON.parse(result.stdout).data;
 }
 
-function applyArgs(plan: string, trackerRoot: string): string[] {
-	return ["planning", "convert", "--plan", plan, "--mission", "core8", "--apply", "--tracker-root", trackerRoot, "--yes", "--json"];
+function applyArgs(plan: string, trackerRoot: string, mission = "core8", actor = "PlanningWriter"): string[] {
+	return ["planning", "convert", "--plan", plan, "--mission", mission, "--apply", "--tracker-root", trackerRoot, "--actor", actor, "--yes", "--json"];
+}
+
+function nativeShapeFixture(trackerRoot: string, targetId: string, mode: string): Record<string, string> {
+	const realBr = Bun.which("br");
+	if (!realBr) throw new Error("native br unavailable");
+	const bin = join(trackerRoot, "shape-bin");
+	mkdirSync(bin, { recursive: true });
+	const wrapper = join(bin, "br");
+	writeFileSync(wrapper, `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const result = Bun.spawnSync([${JSON.stringify(realBr)}, ...args], { stdout: "pipe", stderr: "pipe" });
+process.stderr.write(result.stderr);
+if (result.exitCode !== 0 || !["list", "show"].includes(args[0])) {
+  process.stdout.write(result.stdout);
+  process.exit(result.exitCode ?? 1);
+}
+const value = JSON.parse(result.stdout.toString());
+const rows = Array.isArray(value) ? value : value.issues;
+for (const row of rows ?? []) {
+  if (row.id !== process.env.SHAPE_TARGET) continue;
+  const [phase, field, kind] = process.env.SHAPE_MODE.split(":");
+  if (phase !== "both" && phase !== args[0]) continue;
+  if (kind === "missing") delete row[field];
+  else if (kind === "null") row[field] = null;
+  else if (kind === "number") row[field] = 17;
+  else if (kind === "string") row[field] = "wrong-shape";
+  else if (kind === "element") row[field] = [17];
+  else if (kind === "identity") row[field] = "another-issue";
+  else if (kind === "null-text") {
+    row.description = null;
+    row.acceptance_criteria = null;
+    delete row.labels;
+  }
+}
+process.stdout.write(JSON.stringify(value));
+`, { mode: 0o755 });
+	return { PATH: bin + ":" + childEnv.PATH, SHAPE_TARGET: targetId, SHAPE_MODE: mode };
+}
+
+for (const nullableText of [false, true]) {
+	test(`planning convert applies with native sparse optional fields (${nullableText ? "null text" : "omitted"})`, async () => {
+		const trackerRoot = join(scratch, "apply-sparse-" + nullableText);
+		initializeTracker(trackerRoot);
+		createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+		const sparse = nativeJson(["create", "--title", "Sparse native target", "--type", "task", "--priority", "1"], trackerRoot);
+		if (typeof sparse !== "object" || sparse === null || !("id" in sparse) || typeof sparse.id !== "string") {
+			throw new Error("native sparse create returned no id");
+		}
+		const before = showNativeIssue(trackerRoot, sparse.id);
+		expect(before.description ?? "").toBe("");
+		expect(before.acceptance_criteria ?? "").toBe("");
+		expect(before.labels ?? []).toEqual([]);
+		const plan = writePlan("sparse-" + nullableText, [
+			{ slug: "new-sparse-neighbor", existing: "(new)" },
+			{ slug: "amend-sparse-target", existing: sparse.id + " (amend)" },
+		]);
+		const result = await runCli(applyArgs(plan, trackerRoot),
+			nullableText ? nativeShapeFixture(trackerRoot, sparse.id, "both:description:null-text") : {});
+		expect(result.exitCode).toBe(0);
+		expect(applyResult(result).overall).toBe("CLEAN");
+		const after = showNativeIssue(trackerRoot, sparse.id);
+		expect(after.title).toBe("Sparse native target");
+		expect(after.description ?? "").toBe("");
+		expect(after.acceptance_criteria).toContain("amend-sparse-target contributes its positive acceptance criterion");
+		expect(applyResult(result).created_items).toMatchObject([{ slug: "new-sparse-neighbor" }]);
+	});
+}
+
+for (const mode of [
+	"list:description:number", "list:acceptance_criteria:number", "list:labels:null", "list:labels:element",
+	"list:id:missing", "list:title:missing", "list:status:missing", "list:priority:string",
+	"list:priority:missing",
+	"list:issue_type:missing", "list:dependency_count:missing",
+	"show:description:number", "show:labels:string", "show:id:identity", "show:updated_at:missing",
+]) {
+	test(`planning convert refuses malformed present native fields before writes (${mode})`, async () => {
+		const trackerRoot = join(scratch, "bad-native-" + mode.replaceAll(":", "-"));
+		initializeTracker(trackerRoot);
+		createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+		const target = createNativeIssue(trackerRoot, "Existing target");
+		const plan = writePlan("bad-native-" + mode.replaceAll(":", "-"), [
+			{ slug: "new-after-preflight", existing: "(new)" },
+			{ slug: "amend-after-preflight", existing: target + " (amend)" },
+		]);
+		const before = nativeOutput(["list", "--all", "--limit", "0"], trackerRoot);
+		const result = await runCli(applyArgs(plan, trackerRoot), nativeShapeFixture(trackerRoot, target, mode));
+		expect(result.exitCode).not.toBe(0);
+		expect(applyResult(result).overall).toBe("REFUSED");
+		expect(nativeOutput(["list", "--all", "--limit", "0"], trackerRoot)).toBe(before);
+	});
 }
 
 test("planning convert apply preserves prior acceptance while grouping repeated contributions", async () => {
@@ -310,8 +401,8 @@ test("planning convert apply creates new targets beneath one core8 epic and repo
 test("planning convert is a public dry-run and apply command with explicit mode flags", () => {
 	const planning = COMMANDS.find((command) => command.name === "planning");
 	const convert = planning?.subcommands?.find((command) => command.name === "convert");
-	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR) [--yes] [--json]");
-	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db", "--apply", "--tracker-root", "--yes"]);
+	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--json]");
+	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db", "--apply", "--tracker-root", "--actor", "--yes"]);
 	expect(convert?.mutation).toBe(true);
 });
 
@@ -406,4 +497,225 @@ test("missing explicit mode refuses before creating the requested database direc
 	expect(result.exitCode).not.toBe(0);
 	expect(JSON.parse(result.stdout).data.overall).toBe("NOT_RUN");
 	expect(existsSync(dbDir)).toBe(false);
+});
+
+function nativeAuthorityRecorder(trackerRoot: string, mode = "record"): { env: Record<string, string>; log: string } {
+	const realBr = Bun.which("br");
+	if (!realBr) throw new Error("native br unavailable");
+	const bin = join(trackerRoot, "authority-bin");
+	mkdirSync(bin, { recursive: true });
+	const log = join(trackerRoot, "native-argv.jsonl");
+	writeFileSync(join(bin, "br"), `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(process.env.AUTHORITY_LOG, JSON.stringify(args) + "\\n");
+if (process.env.AUTHORITY_MODE === "stale" && args[0] === "update") {
+  const changed = Bun.spawnSync([${JSON.stringify(realBr)}, "update", args[1], "--append-notes", "concurrent native context change",
+    "--db", args[args.indexOf("--db") + 1], "--actor", "ConcurrentWriter", "--no-auto-import", "--no-auto-flush", "--json"],
+    { stdout: "pipe", stderr: "pipe" });
+  if (changed.exitCode !== 0) { process.stderr.write(changed.stderr); process.exit(changed.exitCode ?? 1); }
+}
+const result = Bun.spawnSync([${JSON.stringify(realBr)}, ...args], { stdin: Buffer.from(await Bun.stdin.text()), stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+if (process.env.AUTHORITY_MODE === "partial-create" && args[0] === "create" && args[args.indexOf("--type") + 1] !== "epic" && result.exitCode === 0)
+  process.exit(1);
+process.exit(result.exitCode ?? 1);
+`, { mode: 0o755 });
+	return { env: { PATH: bin + ":" + childEnv.PATH, AUTHORITY_LOG: log, AUTHORITY_MODE: mode }, log };
+}
+
+function storedParentContract(issue: Record<string, unknown>): Record<string, unknown> {
+	// Native show computes these two views from children; creating the declared child must change them.
+	const { dependents, rollup, ...contract } = issue;
+	return contract;
+}
+
+test("noncore public dry-run and native apply preserve mission, actor, amendment, parents and exporter custody", async () => {
+	const mission = "frontier";
+	const trackerRoot = join(scratch, "authority-native-smoke");
+	initializeTracker(trackerRoot);
+	const coreParent = createNativeIssue(trackerRoot, "Unrelated core8 epic", { externalRef: "core8", type: "epic" });
+	const explicitParent = createNativeIssue(trackerRoot, "Original rollout parent", { type: "feature" });
+	const oldAcceptance = "- [ ] Keep the FULL old acceptance.\n- [x] Preserve checked status and punctuation: a:b!";
+	const target = createNativeIssue(trackerRoot, "Amend exactly this target", { parent: explicitParent, externalRef: "historical:identity", acceptance: oldAcceptance });
+	const unrelated = createNativeIssue(trackerRoot, "Never amend this other target");
+	nativeOutput(["dep", "add", target, unrelated], trackerRoot);
+	const parentBefore = showNativeIssue(trackerRoot, explicitParent);
+	const unrelatedBefore = showNativeIssue(trackerRoot, unrelated);
+	const targetBefore = showNativeIssue(trackerRoot, target);
+	const plan = writePlan("authority-native", [
+		{ slug: "default-child", existing: "(new)" },
+		{ slug: "explicit-child", existing: "(new)", parent: explicitParent },
+		{ slug: "amend-first", existing: target + " (amend)", dependsOn: ["default-child"] },
+		{ slug: "amend-second", existing: target },
+	], mission);
+	const dryDb = join(scratch, "authority-dry");
+	const dry = await runCli(["planning", "convert", "--plan", plan, "--mission", mission, "--dry-run", "--db", dryDb, "--json"]);
+	expect(dry.exitCode).toBe(0);
+	const dryReport = applyResult(dry);
+	expect(dryReport.br_lint_clean).toBe(true);
+	expect(dryReport.br_cycle_clean).toBe(true);
+	expect(issueRows(dryDb).every((row) => row.external_ref?.startsWith(mission))).toBe(true);
+	expect(issueRows(dryDb).find((row) => row.external_ref === mission)?.labels).toContain("mission:" + mission);
+
+	const exporterPath = join(trackerRoot, ".beads", "issues.jsonl");
+	const exporterBytes = "Exporter-owned bytes; native auto-import/export must remain disabled.\n";
+	writeFileSync(exporterPath, exporterBytes);
+	const recorder = nativeAuthorityRecorder(trackerRoot);
+	const first = await runCli(applyArgs(plan, trackerRoot, mission, "ActualWriter"), recorder.env);
+	expect(first.exitCode).toBe(0);
+	const report = applyResult(first);
+	expect(report.actor).toBe("ActualWriter");
+	expect(report.overall).toBe("CLEAN");
+	expect(report.parent_epic_id).not.toBe(coreParent);
+	const rows = issueRows(trackerRoot);
+	const missionParent = rows.find((row) => row.external_ref === mission)!;
+	expect(missionParent.labels).toEqual(["mission:frontier", "plan:frontier"]);
+	for (const slug of ["default-child", "explicit-child"]) {
+		const row = rows.find((candidate) => candidate.external_ref === mission + ":" + slug)!;
+		const details = showNativeIssue(trackerRoot, row.id);
+		expect(details.created_by).toBe("ActualWriter");
+		expect(details.parent).toBe(slug === "default-child" ? missionParent.id : explicitParent);
+		expect(row.labels).toContain("mission:frontier");
+		expect(row.description).toContain("Source item: frontier:" + slug);
+	}
+	const amended = showNativeIssue(trackerRoot, target);
+	expect(String(amended.acceptance_criteria).startsWith(String(targetBefore.acceptance_criteria))).toBe(true);
+	expect(amended.external_ref).toBe("historical:identity");
+	expect(amended.parent).toBe(explicitParent);
+	expect(JSON.stringify(amended.dependencies)).toContain(unrelated);
+	expect(amended.notes).toBe("frontier:amend-first\nfrontier:amend-second");
+	expect(storedParentContract(showNativeIssue(trackerRoot, explicitParent))).toEqual(storedParentContract(parentBefore));
+	expect(showNativeIssue(trackerRoot, unrelated)).toEqual(unrelatedBefore);
+	expect(readFileSync(exporterPath, "utf8")).toBe(exporterBytes);
+	const snapshots = rows.map((row) => showNativeIssue(trackerRoot, row.id));
+	const second = await runCli(applyArgs(plan, trackerRoot, mission, "ActualWriter"), recorder.env);
+	expect(second.exitCode).toBe(0);
+	expect(applyResult(second).writes_landed).toEqual([]);
+	expect(issueRows(trackerRoot).map((row) => showNativeIssue(trackerRoot, row.id))).toEqual(snapshots);
+	expect(readFileSync(exporterPath, "utf8")).toBe(exporterBytes);
+	const calls: string[][] = readFileSync(recorder.log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(calls.some((args) => args[0] === "create")).toBe(true);
+	expect(calls.some((args) => args[0] === "update")).toBe(true);
+	expect(calls.some((args) => args[0] === "dep" && args[1] === "add")).toBe(true);
+	for (const args of calls) {
+		expect(args).toContain("--no-auto-import");
+		expect(args).toContain("--no-auto-flush");
+		expect(args).not.toContain("--allow-stale");
+		expect(args[args.indexOf("--db") + 1]).toBe(join(trackerRoot, ".beads", "beads.db"));
+		expect(args[args.indexOf("--actor") + 1]).toBe("ActualWriter");
+	}
+}, 60_000);
+
+test("explicit parents do not create a substitute mission epic and reapply without parent changes", async () => {
+	const trackerRoot = join(scratch, "explicit-parent-only");
+	initializeTracker(trackerRoot);
+	const parent = createNativeIssue(trackerRoot, "Original feature", { acceptance: "- [ ] Full rollout contract remains unchanged.", type: "feature" });
+	const satisfiedPrerequisite = createNativeIssue(trackerRoot, "Satisfied code prerequisite");
+	nativeOutput(["dep", "add", parent, satisfiedPrerequisite], trackerRoot);
+	nativeOutput(["close", satisfiedPrerequisite], trackerRoot);
+	const before = showNativeIssue(trackerRoot, parent);
+	const plan = writePlan("explicit-parent-only", [{ slug: "runtime-leaf", existing: "(new)", parent }], "runtime");
+	const first = await runCli(applyArgs(plan, trackerRoot, "runtime"));
+	expect(first.exitCode).toBe(0);
+	expect(applyResult(first).parent_epic_id).toBe(null);
+	expect(issueRows(trackerRoot)).toHaveLength(2);
+	const child = issueRows(trackerRoot).find((row) => row.external_ref === "runtime:runtime-leaf")!;
+	expect(child.id.startsWith(parent + ".")).toBe(true);
+	expect(showNativeIssue(trackerRoot, child.id).parent).toBe(parent);
+	expect(nativeOutput(["ready"], trackerRoot)).toContain(child.id);
+	expect(storedParentContract(showNativeIssue(trackerRoot, parent))).toEqual(storedParentContract(before));
+	const second = await runCli(applyArgs(plan, trackerRoot, "runtime"));
+	expect(second.exitCode).toBe(0);
+	expect(applyResult(second).writes_landed).toEqual([]);
+});
+
+for (const actor of [null, "", "  WrongWriter", "WrongWriter\n"]) {
+	test("apply refuses missing or malformed explicit actor " + JSON.stringify(actor), async () => {
+		const trackerRoot = join(scratch, "bad-actor-" + String(actor).length);
+		initializeTracker(trackerRoot);
+		const plan = writePlan("bad-actor-" + String(actor).length, [{ slug: "no-write", existing: "(new)" }]);
+		const args = applyArgs(plan, trackerRoot);
+		const at = args.indexOf("--actor");
+		if (actor === null) args.splice(at, 2);
+		else args[at + 1] = actor;
+		const before = nativeOutput(["list", "--all"], trackerRoot);
+		const result = await runCli(args);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stdout).toContain(actor === null || actor === "" ? "--actor" : "INVALID_ACTOR");
+		expect(nativeOutput(["list", "--all"], trackerRoot)).toBe(before);
+	});
+}
+
+for (const conflict of ["missing-parent", "closed-parent", "blocked-parent", "moved-parent", "wrong-mission", "ref-target", "note-target", "reused-parent"]) {
+	test("apply refuses exact native target conflict before any write: " + conflict, async () => {
+		const trackerRoot = join(scratch, "authority-conflict-" + conflict);
+		initializeTracker(trackerRoot);
+		const parent = createNativeIssue(trackerRoot, "Original parent", { externalRef: "core8", type: "epic" });
+		const target = createNativeIssue(trackerRoot, "Selected target", { parent });
+		const other = createNativeIssue(trackerRoot, "Different target");
+		let items: ApplyPlanItem[] = [{ slug: "new-before-conflict", existing: "(new)" }];
+		if (conflict === "missing-parent") items.push({ slug: "conflict", existing: "(new)", parent: "other-missing" });
+		if (conflict === "closed-parent") {
+			nativeOutput(["close", other], trackerRoot);
+			items.push({ slug: "conflict", existing: "(new)", parent: other });
+		}
+		if (conflict === "blocked-parent") {
+			nativeOutput(["dep", "add", other, target], trackerRoot);
+			items.push({ slug: "conflict", existing: "(new)", parent: other });
+		}
+		if (conflict === "moved-parent") items.push({ slug: "conflict", existing: target + " (amend)", parent: other });
+		if (conflict === "ref-target") {
+			nativeOutput(["update", other, "--external-ref", "core8:conflict"], trackerRoot);
+			items.push({ slug: "conflict", existing: target + " (amend)" });
+		}
+		if (conflict === "note-target") {
+			nativeOutput(["update", other, "--append-notes", "core8:conflict"], trackerRoot);
+			items.push({ slug: "conflict", existing: target + " (amend)" });
+		}
+		if (conflict === "reused-parent") {
+			nativeOutput(["update", other, "--external-ref", "core8:conflict"], trackerRoot);
+			items.push({ slug: "conflict", existing: "(new)" });
+		}
+		const plan = writePlan("authority-conflict-" + conflict, items);
+		const before = nativeOutput(["list", "--all"], trackerRoot);
+		const result = await runCli(applyArgs(plan, trackerRoot, conflict === "wrong-mission" ? "another" : "core8"));
+		expect(result.exitCode).not.toBe(0);
+		expect(applyResult(result).overall).toBe("REFUSED");
+		expect(applyResult(result).writes_landed).toEqual([]);
+		if (conflict === "blocked-parent") expect(applyResult(result).apply_preflight_error).toBe("declared parent " + other + " is blocked by " + target);
+		expect(nativeOutput(["list", "--all"], trackerRoot)).toBe(before);
+	});
+}
+
+test("native amendment context mismatch remains a refusal without retry or acceptance overwrite", async () => {
+	const trackerRoot = join(scratch, "native-context-mismatch");
+	initializeTracker(trackerRoot);
+	const target = createNativeIssue(trackerRoot, "Concurrent amendment target");
+	const before = showNativeIssue(trackerRoot, target);
+	const plan = writePlan("native-context-mismatch", [{ slug: "amend", existing: target + " (amend)" }]);
+	const recorder = nativeAuthorityRecorder(trackerRoot, "stale");
+	const result = await runCli(applyArgs(plan, trackerRoot), recorder.env);
+	expect(result.exitCode).not.toBe(0);
+	const report = applyResult(result);
+	expect(report.apply_failure.step).toBe("amend-" + target);
+	expect(report.writes_landed).toEqual([]);
+	expect(showNativeIssue(trackerRoot, target).acceptance_criteria).toBe(before.acceptance_criteria);
+	const calls: string[][] = readFileSync(recorder.log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(calls.filter((args) => args[0] === "update")).toHaveLength(1);
+});
+
+test("native durable creation followed by failure is reconciled, never reported as zero writes", async () => {
+	const trackerRoot = join(scratch, "authority-partial-create");
+	initializeTracker(trackerRoot);
+	const plan = writePlan("authority-partial-create", [{ slug: "durable-child", existing: "(new)" }]);
+	const result = await runCli(applyArgs(plan, trackerRoot), nativeAuthorityRecorder(trackerRoot, "partial-create").env);
+	expect(result.exitCode).not.toBe(0);
+	const report = applyResult(result);
+	expect(report.overall).toBe("FINDINGS");
+	expect(report.apply_failure.step).toBe("create-durable-child");
+	const child = issueRows(trackerRoot).find((row) => row.external_ref === "core8:durable-child")!;
+	expect(report.writes_landed).toContainEqual({ kind: "ITEM_CREATED", id: child.id, slug: "durable-child", external_ref: "core8:durable-child" });
+	expect(showNativeIssue(trackerRoot, child.id).created_by).toBe("PlanningWriter");
 });

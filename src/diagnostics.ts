@@ -30,6 +30,8 @@ export interface DiagnoseInput {
 	home: string;
 	project?: string;
 	scope?: string;
+	/** Presence inventory only; runtime rule activation remains explicitly NOT_RUN. */
+	inventoryOnly?: boolean;
 	ompPath?: string;
 	jsmPath?: string;
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
@@ -37,6 +39,19 @@ export interface DiagnoseInput {
 	/** GitHub billing probe; when present the actions-billing finding is included. */
 	actionsBilling?: ActionsBillingProbe | null;
 }
+
+export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly string[]>> = {
+	kit: ["kit", "manifest", "planning_skill"],
+	beads: ["beads"],
+	omp: ["omp"],
+	rules: ["installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules"],
+	profile: ["effective_profile"],
+	settings: ["policy"],
+	extensions: ["extensions", "extension_imports"],
+	browsers: ["browsers"],
+	identity: ["identity"],
+	"regex-tools": ["regex-tools"],
+};
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
 export type RuleOwnershipRecord = { version: 1; rules: Record<string, Image> };
@@ -262,6 +277,7 @@ function inspectProfiles(home: string): { profiles: ConfigInspection[]; issue?: 
 		return { profiles, ...(issue ? { issue } : {}) };
 	} catch (error) { return { profiles, issue: `named profiles could not be listed: ${errorText(error)}` }; }
 }
+
 function inspectPluginLinks(root: string, home: string): Finding {
 	let installedRoot: string;
 	let installedHash: string;
@@ -271,6 +287,16 @@ function inspectPluginLinks(root: string, home: string): Finding {
 	} catch (error) {
 		return finding("plugin_links", "UNVERIFIED", `Installed kit plugin package could not be verified: ${errorText(error)}`,
 			"Use an intact, verified omp-kit release.", { release_root: root });
+	}
+	// STAMP1 (ompkit-fp72.3): the installed release's own version from its
+	// release-manifest.json. Profile plugin copies compare their package.json
+	// version against this baseline, not against another package.json copy.
+	let manifestBaseline: string | null = null;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(join(installedRoot, "release-manifest.json"), "utf8"));
+		if (parsed && typeof parsed === "object" && "version" in parsed && typeof parsed.version === "string") manifestBaseline = parsed.version;
+	} catch {
+		manifestBaseline = null;
 	}
 	const profiles = new Set(["default"]);
 	let inventoryIssue: string | undefined;
@@ -291,6 +317,7 @@ function inspectPluginLinks(root: string, home: string): Finding {
 
 	const observations: Array<Record<string, unknown>> = [];
 	const staleProfiles: string[] = [], missingProfiles: string[] = [], unverifiedProfiles: string[] = [];
+	const mismatchProfiles: string[] = [], mismatchDetail: Array<{ profile: string; plugin: string; release: string }> = [];
 	for (const profile of [...profiles].sort()) {
 		const parent = profile === "default"
 			? [".omp", "plugins", "node_modules"]
@@ -340,19 +367,48 @@ function inspectPluginLinks(root: string, home: string): Finding {
 				observations.push({ profile, path: linkPath, status: "UNVERIFIED", reason: errorText(error) });
 			}
 		}
+		// STAMP1: even a structurally current link can pin a stale plugin
+		// version in its lock file (live case: lock 0.2.37, release 0.2.38).
+		// A mismatch is DEGRADED with versionMismatch, not FAIL.
+		if (manifestBaseline !== null) {
+			try {
+				const lockDir = profile === "default"
+					? join(home, ".omp", "plugins")
+					: join(home, ".omp", "profiles", profile, "plugins");
+				const lockParsed: unknown = JSON.parse(readFileSync(join(lockDir, "omp-plugins.lock.json"), "utf8"));
+				if (lockParsed && typeof lockParsed === "object" && "plugins" in lockParsed) {
+					const lockPlugins = lockParsed.plugins;
+					if (lockPlugins && typeof lockPlugins === "object" && "omp-kit-companion" in lockPlugins) {
+						const lockEntry: unknown = lockPlugins["omp-kit-companion"];
+						if (lockEntry && typeof lockEntry === "object" && "version" in lockEntry) {
+							const lockVersion: unknown = lockEntry.version;
+							if (typeof lockVersion === "string" && lockVersion !== manifestBaseline) {
+								mismatchProfiles.push(profile);
+								mismatchDetail.push({ profile, plugin: lockVersion, release: manifestBaseline });
+								observations.push({ profile, path: join(lockDir, "omp-plugins.lock.json"), status: "STALE", versionMismatch: `${lockVersion} vs ${manifestBaseline}` });
+							}
+						}
+					}
+				}
+			} catch {
+				// No readable lock: the hash comparison above still guards integrity.
+			}
+		}
 	}
-	const status = staleProfiles.length ? "FAIL" : unverifiedProfiles.length || inventoryIssue ? "UNVERIFIED" : missingProfiles.length ? "DEGRADED" : "OK";
+	const status = staleProfiles.length ? "FAIL" : unverifiedProfiles.length || inventoryIssue ? "UNVERIFIED" : missingProfiles.length || mismatchProfiles.length ? "DEGRADED" : "OK";
 	const reason = staleProfiles.length
 		? `Plugin links for profile(s) ${staleProfiles.join(", ")} differ from installed release ${installedRoot}`
 		: missingProfiles.length ? `Kit plugin is not installed for profile(s) ${missingProfiles.join(", ")}`
-			: unverifiedProfiles.length || inventoryIssue ? `Plugin link inspection is incomplete${inventoryIssue ? `: ${inventoryIssue}` : ` for profile(s) ${unverifiedProfiles.join(", ")}`}`
-				: "All covered profile plugin links match the installed release";
-	const recommendedAction = staleProfiles.length || missingProfiles.length
+			: mismatchProfiles.length ? `Plugin lock version differs from installed release ${manifestBaseline} for profile(s) ${mismatchProfiles.join(", ")}`
+				: unverifiedProfiles.length || inventoryIssue ? `Plugin link inspection is incomplete${inventoryIssue ? `: ${inventoryIssue}` : ` for profile(s) ${unverifiedProfiles.join(", ")}`}`
+					: "All covered profile plugin links match the installed release";
+	const recommendedAction = staleProfiles.length || missingProfiles.length || mismatchProfiles.length
 		? "Run omp-kit apply plugin --apply --yes --profiles all --include-default; retain the plugin receipt so the relink can be undone."
 		: unverifiedProfiles.length || inventoryIssue ? "Resolve the unsafe or incomplete profile-path inspection, then rerun omp-kit doctor." : "No action required.";
 	return finding("plugin_links", status, reason, recommendedAction, {
 		release_root: installedRoot, expected_package_sha256: installedHash, links: observations,
 		stale_profiles: staleProfiles, missing_profiles: missingProfiles, unverified_profiles: unverifiedProfiles,
+		mismatch_profiles: mismatchProfiles, mismatch_detail: mismatchDetail,
 		...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}),
 	});
 }
@@ -1202,11 +1258,14 @@ function inspectTmuxSockets(home: string): Finding {
 
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
-	const rows: Finding[] = [inspectOmp(input.ompPath)];
+	const selected = input.scope ? DIAGNOSTIC_SCOPE_COMPONENTS[input.scope] ?? [input.scope] : undefined;
+	const wants = (...components: string[]) => !selected || components.some(component => selected.includes(component));
+	const rows: Finding[] = [];
+	if (wants("omp", "effective_rules", "omp_drift")) rows.push(inspectOmp(input.ompPath));
 	const root = resolve(input.root);
 	const home = resolve(input.home);
-	rows.push(inspectTmuxSockets(home));
-	if (input.scope === "kit" || pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file") {
+	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
+	if (wants("planning_skill") && (input.scope === "kit" || pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file")) {
 		rows.push(inspectPlanningSkill(root, home));
 	}
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
@@ -1217,8 +1276,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
 	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
 	if (input.scope === "public-files" && input.project) rows.push(...inspectPublicFilesScope(resolve(input.project), root));
-	if (input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
-	const manifest = readManifest(root);
+	if (wants("actions-billing") && input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
+	const manifest = wants("kit", "manifest", "installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules") ? readManifest(root) : undefined;
+	if (manifest) {
 	rows.push(finding("kit", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ? "Release rule inventory cannot be verified" : manifest.sourceUnverified ? "Shipped bytes match an uncommitted source pack; release provenance is unverified" : "Release rule inventory is readable", manifest.error || manifest.sourceUnverified ? "Use an intact, verified omp-kit release." : "No action required.", { release_root: root, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	rows.push(finding("manifest", manifest.error ? "FAIL" : manifest.sourceUnverified ? "UNVERIFIED" : "OK", manifest.error ?? (manifest.sourceUnverified ? "Shipped rule hashes match but pack is uncommitted" : "All manifest entries match shipped rule bytes"), manifest.error || manifest.sourceUnverified ? "Replace or repair the release before relying on its provenance." : "No action required.", { rule_count: manifest.rules.length, source_proof: manifest.sourceUnverified ? "SOURCE_UNVERIFIED" : manifest.error ? "INVALID" : "MANIFEST_HASHES" }));
 	if (manifest.error) {
@@ -1226,7 +1286,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		rows.push(finding("retired_rules", "UNVERIFIED", "Source manifest is invalid", "Replace the release before assessing retirement."));
 		rows.push(finding("unknown_rules", "UNVERIFIED", "Source manifest is invalid", "Replace the release before assessing extras."));
 		rows.push(finding("project_rules", "UNVERIFIED", "Source manifest is invalid", "Replace the release before assessing project shadows."));
-	} else {
+	} else if (wants("installed_rules", "retired_rules", "unknown_rules", "project_rules")) {
 		const target = join(home, ".agents", "rules");
 		const state = directoryPath(home, [".agents", "rules"]);
 		const matching: string[] = [], missing: string[] = [], drifted: string[] = [], unsafe: string[] = [];
@@ -1310,8 +1370,12 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 			rows.push(finding("project_rules", projectState === "unsafe" || projectState === "missing" && pathState(project) === "missing" || projectUnsafe.length ? "UNVERIFIED" : mismatched.length || shadows.length ? "DEGRADED" : "OK", projectState === "unsafe" ? "Project rule directory is unsafe" : projectState === "missing" && pathState(project) === "missing" ? "Selected project is missing; shadows were not inspected" : mismatched.length || shadows.length ? "Project-local rules shadow managed globals" : "No managed project-local shadows found", "Review the selected project and its .omp/rules before relying on global rule behavior.", { matching_shadows: shadows, mismatched_shadows: mismatched, unsafe: projectUnsafe, project }));
 		}
 	}
-	const profiles = inspectProfiles(home);
-	rows.push(inspectPluginLinks(root, home));
+	} // Manifest-dependent inventory.
+	const profiles = wants("effective_rules", "effective_profile", "policy", "extensions") ? inspectProfiles(home) : undefined;
+	if (wants("plugin_links")) rows.push(inspectPluginLinks(root, home));
+	if (wants("effective_rules") && input.inventoryOnly && !input.scope) {
+		rows.push(finding("effective_rules", "NOT_RUN", "Presence inventory did not probe runtime rule activation", "Run omp-kit doctor --scope rules --json for live per-profile rule evidence."));
+	} else if (wants("effective_rules") && input.ompPath && manifest && profiles) {
 	const effectiveOmpEvidence = rows.find(row => row.component === "omp")?.evidence;
 	let kitVersion: string | null = null;
 	try {
@@ -1319,20 +1383,20 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		kitVersion = record(packageValue) && typeof packageValue.version === "string" ? packageValue.version : null;
 	} catch {}
 	const alwaysRules = manifest.rules.filter(rule => { try { return /^alwaysApply:\s*true/m.test(fileBytes(join(root, "rules", `${rule.name}.md`)).toString("utf8")); } catch { return false; } }).map(rule => rule.name);
-	if (input.ompPath) {
 		const effectiveRules = !manifest.error
 			? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, profiles: profiles.profiles })
 			: finding("effective_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
 		rows.push(effectiveRules);
 	}
 	const project = input.project && resolve(input.project);
-	const projectConfig = inspectProjectConfig(project);
-	rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));
-	rows.push(inspectExtensions(root, home, profiles.profiles, projectConfig, profiles.issue));
-	rows.push(inspectExtensionImports(home));
-	rows.push(inspectRouter(input.jsmPath));
-	rows.push(inspectAgentMailGuard());
+	const projectConfig = wants("policy", "extensions") ? inspectProjectConfig(project) : undefined;
+	if (wants("policy") && profiles && projectConfig) rows.push(inspectPolicy(root, home, profiles.profiles, projectConfig, profiles.issue, project));
+	if (wants("extensions") && profiles && projectConfig) rows.push(inspectExtensions(root, home, profiles.profiles, projectConfig, profiles.issue));
+	if (wants("extension_imports")) rows.push(inspectExtensionImports(home));
+	if (wants("router")) rows.push(inspectRouter(input.jsmPath));
+	if (wants("agent_mail_guard")) rows.push(inspectAgentMailGuard());
 	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
+	if (wants("state_root")) {
 	const stateIssue = inspectStateRoot(stateRoot);
 	rows.push(stateIssue === null
 		? finding("state_root", "OK", "Private state root is absent or a private directory you own", "None.")
@@ -1340,7 +1404,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 			`Private state root has ${stateIssue.problem === "MODE" ? `mode ${stateIssue.mode}` : stateIssue.problem.toLowerCase()}; receipts, audit, undo and update refuse until it is a 0700 directory you own`,
 			stateIssue.problem === "MODE" ? "Run omp-kit repair --scope state --plan, then --apply --yes." : "Make it a real directory you own with mode 0700, or move it aside.",
 			{ path: stateRoot, problem: stateIssue.problem, mode: stateIssue.mode }));
+	}
 	// OMP moves under the kit (operator updaters run every few hours): compare against the last recorded test.
+	if (wants("omp_drift")) {
 	const ompEvidence = rows.find((row) => row.component === "omp")?.evidence;
 	const lastTest = readTestReceipt(stateRoot);
 	if (typeof ompEvidence?.location !== "string" || typeof ompEvidence.package_root !== "string")
@@ -1357,14 +1423,17 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 				? finding("omp_drift", "DEGRADED", `Last kit test against this OMP did not pass (${lastTest.status})`, "Run omp-kit test --record --json and read its failures.", evidence)
 				: finding("omp_drift", "DEGRADED", `OMP changed since the last kit test (${lastTest.version ?? "unknown"} → ${now.version ?? "unknown"})`, "Run omp-kit test --record (add --full for live scenarios) against the new OMP.", evidence));
 	}
+	}
+	if (wants("effective_profile") && profiles) {
 	const backupScope = [join(home, ".omp", "settings.json"),
 		...profiles.profiles.flatMap((profile) => [...CONFIG_NAMES, "agent.db"].map((name) => join(profile.dir, name)))];
 	if (input.project) backupScope.push(join(input.project, ".omp", "config.yml"), join(input.project, ".omp", "settings.json"), join(input.project, ".claude", "settings.json"));
 	rows.push(finding("effective_profile", "UNVERIFIED", "On-disk settings cannot prove OMP effective values, runtime overlays or activation",
 		"Inspect effective values with OMP itself: omp config list (named profiles: omp --profile NAME config list). Back up the files listed in evidence.backup_scope before changing any of them.",
 		{ profiles: profiles.profiles.map((profile) => profile.name), backup_scope: backupScope, ...(profiles.issue ? { inventory_issue: profiles.issue } : {}) }));
-	rows.push(finding("matcher", "NOT_RUN", "Matcher was not exercised by the inventory", "Run omp-kit test for matcher evidence."));
-	return rows.sort((a, b) => a.component.localeCompare(b.component));
+	}
+	if (wants("matcher")) rows.push(finding("matcher", "NOT_RUN", "Matcher was not exercised by the inventory", "Run omp-kit test for matcher evidence."));
+	return rows.filter(row => wants(row.component) || row.component === "omp").sort((a, b) => a.component.localeCompare(b.component));
 }
 
 /** Strict precedence never promotes an unperformed or uncertain probe to OK. */

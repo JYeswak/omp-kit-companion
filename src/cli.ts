@@ -9,7 +9,7 @@ import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand,
 import { RELEASE_DATA } from "./release-assets.ts";
 import { audit, undo, why } from "./audit.ts";
 import { landCommand } from "./land.ts";
-import { alignCommand } from "./align.ts";
+import { convergeCommand } from "./converge.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
@@ -20,7 +20,7 @@ import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInve
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
 import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
-import { diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
+import { DIAGNOSTIC_SCOPE_COMPONENTS, diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
 import { githubFinding, probeGithubCapabilities } from "./gh-doctor.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
@@ -74,9 +74,9 @@ import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
-import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
-import { readLessonsConfig, runFleetLessonsOnce } from "./fleet-lessons.ts";
+import { runFleetLessonsOnce } from "./fleet-lessons.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -240,7 +240,8 @@ function parse(args: readonly string[]): ParseResult {
 	if (flags.has("--plan") && flags.has("--apply") && !planIsInputFile)
 		return { failure: refusal("CONFLICTING_FLAGS", "--plan and --apply cannot be combined", `Choose one mode for ${command.name}.`), json };
 	if (flags.has("--deep") && !flags.has("--yes")) return { failure: refusal("CONSENT_REQUIRED", "doctor --deep requires explicit --yes", "Review the guarded deep probe, then supply --yes."), json };
-	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, ...(childArgs ? { commandArgs: childArgs } : {}), json, robot: flags.has("--robot") } };
+	const commandArgs = command.name === "converge" ? outerArgs : childArgs;
+	return { request: { command, parent, flags, argument: rest.join(" ") || undefined, ...(commandArgs ? { commandArgs } : {}), json, robot: flags.has("--robot") } };
 }
 
 function kitIdentity() {
@@ -363,19 +364,6 @@ ${GLOBAL_FLAGS.flatMap((flag) => [`complete -c omp-kit -l ${flag.name.slice(2)}`
 ${scoped}
 `;
 }
-
-const SCOPE_COMPONENTS: Record<string, readonly string[]> = {
-	kit: ["kit", "manifest", "planning_skill"],
-	beads: ["beads"],
-	omp: ["omp"],
-	rules: ["installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules"],
-	profile: ["effective_profile"],
-	settings: ["policy"],
-	extensions: ["extensions", "extension_imports"],
-	browsers: ["browsers"],
-	identity: ["identity"],
-	"regex-tools": ["regex-tools"],
-};
 
 /** Components a read-only inventory can prove. Everything else is reported but never judged by health. */
 const HEALTH_JUDGED_COMPONENTS: Record<string, true> = {
@@ -511,7 +499,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	const doctorScope = request.command.name === "doctor" && typeof request.flags.get("--scope") === "string" ? String(request.flags.get("--scope")) : undefined;
 	const projectFlag = request.flags.get("--project");
 	const diagnosticProject = typeof projectFlag === "string" && projectFlag ? resolve(projectFlag) : process.cwd();
-	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
+	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, inventoryOnly: request.command.name === "status", ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
 	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
 		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
 	const allFindings = nativeSettings ? [...diagnosedFindings.filter(item => item.component !== "policy"), nativeSettings] : diagnosedFindings;
@@ -537,7 +525,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 		} else if (scope === "github") {
 			findings = [githubFinding(await probeGithubCapabilities({ foreignRepo: "can1357/oh-my-pi", ownedRepo: "JYeswak/omp-kit-companion" }))];
 		} else if (typeof scope === "string") {
-			const selected = SCOPE_COMPONENTS[scope] ?? [scope];
+			const selected = DIAGNOSTIC_SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
 			findings = scoped.length ? scoped : [{
 				component: scope,
@@ -763,7 +751,8 @@ function mcpInventory(request: ParsedCommand): CliResult {
 		return refusal("PROFILE_UNAVAILABLE", "Selected named MCP profile does not exist as a directory", "Select an existing named OMP profile; this command never creates one.");
 	}
 	const report = inspectMcpReadiness({ home, profile: selected, project: process.cwd(), ompPath: omp.location,
-		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}) });
+		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}), ...(receiptStateRoot() ? { stateRoot: receiptStateRoot()! } : {}),
+		logDir: join(home, ".omp", "logs") });
 	const finding: Finding = { component: "mcp", status: report.status, reason: report.reason,
 		recommended_action: report.recommended_action, evidence: { ...report } };
 	// Configured MCP commands can live under the checkout; suppress all absolute identity paths.
@@ -986,9 +975,9 @@ function receiptCommand(request: ParsedCommand): CliResult {
 
 registerCommandHandler("audit", receiptCommand);
 registerCommandHandler("why", receiptCommand);
-registerCommandHandler("land", landCommand);
-registerCommandHandler("align", alignCommand);
 registerCommandHandler("undo", receiptCommand);
+registerCommandHandler("land", landCommand);
+registerCommandHandler("converge", convergeCommand);
 
 function rulesCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
@@ -1357,7 +1346,7 @@ const MCP_SELECTION_FLAGS = "--from claude|cursor|codex|project|ABS_PATH --serve
 /** A walk-through needs a real terminal on every stream and no machine-output mode; edit mode is never interactive. */
 function interactiveMcpApply(request: ParsedCommand): boolean {
 	return !request.json && !request.robot && !request.flags.has("--servers") && !request.flags.has("--profiles") &&
-		!request.flags.has("--env-command") && !request.flags.has("--enable") &&
+		!request.flags.has("--env-command") && !request.flags.has("--enable") && !request.flags.has("--timeout-ms") &&
 		!Object.hasOwn(process.env, "CI") && process.env.TERM !== "dumb" && isatty(0) && isatty(1) && isatty(2);
 }
 
@@ -1379,7 +1368,7 @@ function terminalIo(): WizardIo & { close(): void } {
 
 function mcpPlanText(plan: McpApplyPlan): string {
 	const lines = plan.source ? [`source: ${plan.source.id} (${plan.source.path})`, `schema: ${plan.schema.path}`]
-		: [`edit: ${[...(plan.edits?.env_commands ?? []).map(edit => `${edit.server} env.${edit.key}=${edit.command}`), ...(plan.edits?.enable ?? []).map(name => `enable ${name}`)].join("; ")}`, `schema: ${plan.schema.path}`];
+		: [`edit: ${[...(plan.edits?.env_commands ?? []).map(edit => `${edit.server} env.${edit.key}=${edit.command}`), ...(plan.edits?.enable ?? []).map(name => `enable ${name}`), ...(plan.edits?.timeouts ?? []).map(edit => `${edit.server} timeout=${edit.ms}`)].join("; ")}`, `schema: ${plan.schema.path}`];
 	for (const server of plan.servers) {
 		const notes = [server.env_refs.length ? `env refs ${server.env_refs.map(ref => ref.key === ref.var ? ref.key : `${ref.key}<-${ref.var}`).join(",")}` : "",
 			server.env_literal.length ? `env literal ${server.env_literal.join(",")}` : "", server.env_unset.length ? `UNSET NOW ${server.env_unset.join(",")}` : "",
@@ -1412,9 +1401,9 @@ function mcpApplyFailure(error: unknown): CliResult {
 /** Edit mode: change servers already in the profiles (env !command values, disabledServers removals); reads no source. */
 function applyMcpEdit(request: ParsedCommand, home: string, stateRoot: string): CliResult {
 	const flag = (name: string) => { const value = request.flags.get(name); return typeof value === "string" ? value : undefined; };
-	for (const name of ["--from", "--servers", "--override", "--env-literal", "--startup-timeout-ms"])
-		if (request.flags.has(name)) return refusal("INVALID_FLAG", `${name} belongs to import mode; --env-command and --enable edit servers already in the profiles`,
-			"Run an edit as omp-kit apply mcp --profiles NAMES|all [--env-command SERVER:KEY=!CMD]... [--enable NAMES] --plan, and imports separately.");
+	for (const name of ["--from", "--servers", "--override", "--env-literal"])
+		if (request.flags.has(name)) return refusal("INVALID_FLAG", `${name} belongs to import mode; --env-command, --enable, and --timeout-ms edit servers already in the profiles`,
+			"Run an edit as omp-kit apply mcp --profiles NAMES|all [--env-command SERVER:KEY=!CMD]... [--enable NAMES]... [--timeout-ms NAME=N]... --plan, and imports separately.");
 	const profileSelection = flag("--profiles");
 	if (!profileSelection) return refusal("MCP_SELECTION_REQUIRED", "apply mcp edit mode needs --profiles NAMES|all", "Pass --profiles all|NAME[,NAME], then --plan, or --apply --yes.");
 	const schema = ompMcpSchema();
@@ -1423,13 +1412,24 @@ function applyMcpEdit(request: ParsedCommand, home: string, stateRoot: string): 
 	try {
 		const envCommands = (flag("--env-command") ?? "").split("\n").filter(Boolean).map(parseEnvCommand);
 		const enable = (flag("--enable") ?? "").split(",").map(name => name.trim()).filter(Boolean);
-		const plan = planMcpEdit({ profiles: selectProfiles(allProfiles, profileSelection), stateRoot, schema: schema.schema, schemaPath: schema.path, envCommands, enable });
+		const timeoutRaw = flag("--timeout-ms") ?? (request.flags.has("--from") ? undefined : flag("--startup-timeout-ms"));
+		let timeouts = new Map<string, number>();
+		if (timeoutRaw !== undefined) {
+			if (/^\d+$/.test(timeoutRaw.trim())) throw new McpApplyError("INVALID_TIMEOUT", "Edit mode --timeout-ms needs NAME=N[,NAME=N]; a bare N names no server");
+			timeouts = new Map(timeoutRaw.split(",").map(part => {
+				const [name, raw] = part.split("=", 2);
+				if (!name || raw === undefined || !/^\d{1,9}$/.test(raw) || Number(raw) < 1000)
+					throw new McpApplyError("INVALID_TIMEOUT", "--timeout-ms needs NAME=N[,NAME=N] with N >= 1000");
+				return [name, Number(raw)] as [string, number];
+			}));
+		}
+		const plan = planMcpEdit({ profiles: selectProfiles(allProfiles, profileSelection), stateRoot, schema: schema.schema, schemaPath: schema.path, envCommands, enable, timeouts });
 		const text = mcpPlanText(plan);
 		const data = { overall: "UNVERIFIED", action: "PLAN", source: null, servers: [], edits: plan.edits, overrides: [], schema: plan.schema,
 			profiles: plan.profiles, skipped_profiles: skipped, receipt_id: null as string | null, text };
 		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
 		const applied = applyMcpPlan(plan);
-		const touched = [...new Set([...envCommands.map(edit => edit.server), ...enable])];
+		const touched = [...new Set([...envCommands.map(edit => edit.server), ...enable, ...timeouts.keys()])];
 		return { code: 0, data: { ...data, action: applied.receiptId ? "APPLIED" : "NO_CHANGE", receipt_id: applied.receiptId,
 			text: `${text}\n\n${applied.receiptId ? `APPLIED receipt ${applied.receiptId}; undo with: omp-kit undo ${applied.receiptId} --yes` : "NO_CHANGE"}` },
 			commands: applied.receiptId ? [`omp-kit undo ${applied.receiptId} --yes`, `omp-kit test --mcp --profiles ${profileSelection} --servers ${touched.join(",")}`] : [],
@@ -1441,7 +1441,8 @@ async function applyMcpCommand(request: ParsedCommand): Promise<CliResult> {
 	const home = process.env.HOME, stateRoot = receiptStateRoot();
 	if (!home || !isAbsolute(home) || !stateRoot)
 		return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and private state root are required", "Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; no profile was read.");
-	if (request.flags.has("--env-command") || request.flags.has("--enable")) return applyMcpEdit(request, home, stateRoot);
+	if (request.flags.has("--env-command") || request.flags.has("--enable") || request.flags.has("--timeout-ms")
+		|| (request.flags.has("--startup-timeout-ms") && !request.flags.has("--from"))) return applyMcpEdit(request, home, stateRoot);
 	const interactive = interactiveMcpApply(request);
 	const flag = (name: string) => { const value = request.flags.get(name); return typeof value === "string" ? value : undefined; };
 	if (!interactive && (!flag("--servers") || !flag("--profiles") || !flag("--from")))
@@ -1518,6 +1519,10 @@ async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 	const startupTimeoutMs = typeof timeoutRaw === "string" ? Number(timeoutRaw) : 180_000;
 	if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1000 || startupTimeoutMs > 3_600_000)
 		return refusal("INVALID_TIMEOUT", "--startup-timeout-ms needs an integer from 1000 to 3600000", "Pass milliseconds, e.g. --startup-timeout-ms 180000.");
+	const callTimeoutRaw = request.flags.get("--call-timeout-ms");
+	const callTimeoutMs = typeof callTimeoutRaw === "string" ? Number(callTimeoutRaw) : 120_000;
+	if (!Number.isInteger(callTimeoutMs) || callTimeoutMs < 1000 || callTimeoutMs > 3_600_000)
+		return refusal("INVALID_TIMEOUT", "--call-timeout-ms needs an integer from 1000 to 3600000", "Pass milliseconds, e.g. --call-timeout-ms 200000.");
 	let launcher: string;
 	try { launcher = resolveOmpIdentity(process.env).launcher; }
 	catch { return refusal("OMP_UNAVAILABLE", "No validated OMP launcher on PATH", "Install OMP and put omp on PATH; nothing was started."); }
@@ -1542,11 +1547,11 @@ async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	const workDir = mkdtempSync(join(tmpdir(), "omp-kit-mcp-test-"));
 	let rows;
-	try { rows = await probeMcpProfiles({ ompPath: launcher, profiles, ...(servers ? { servers } : {}), calls, startupTimeoutMs, workDir }); }
+	try { rows = await probeMcpProfiles({ ompPath: launcher, profiles, ...(servers ? { servers } : {}), calls, startupTimeoutMs, callTimeoutMs, workDir }); }
 	finally { rmSync(workDir, { recursive: true, force: true }); }
 	const pass = rows.length > 0 && rows.every(row => row.status === "PASS");
 	const receiptId = `mcp-test-${new Date().toISOString().replace(/[:.]/g, "")}-${process.pid}`;
-	const report = { schema_version: 1, receipt_id: receiptId, recorded_at: new Date().toISOString(), startup_timeout_ms: startupTimeoutMs,
+	const report = { schema_version: 1, receipt_id: receiptId, recorded_at: new Date().toISOString(), startup_timeout_ms: startupTimeoutMs, call_timeout_ms: callTimeoutMs,
 		method: "fresh omp --mode rpc per profile on a private mirror of its agent config; env references and !command values checked; /mcp test per server; one mock-model tool call per --call, judged by --expect and an error-text check",
 		claim_limit: "CALLABLE means the server answered one call through OMP with no error-shaped text and the answer matched --expect; it does not prove the answer is right beyond that pattern", profiles: rows };
 	ensureMutationStateRoot(stateRoot);
@@ -2027,7 +2032,7 @@ async function fastTestCommand(request: ParsedCommand): Promise<CliResult> {
 	if (request.flags.has("--capabilities")) return capabilitiesTestCommand(request);
 	if (request.flags.has("--integrations")) return integrationsCommand(request);
 	if (request.flags.has("--mcp")) return mcpTestCommand(request);
-	for (const flag of ["--profiles", "--servers", "--call", "--expect", "--startup-timeout-ms"])
+	for (const flag of ["--profiles", "--servers", "--call", "--expect", "--startup-timeout-ms", "--call-timeout-ms"])
 		if (request.flags.has(flag)) return refusal("INVALID_FLAG", `${flag} is only valid with test --mcp`, "Run omp-kit test --mcp --profiles all|NAME[,NAME].");
 	if (request.flags.has("--repeat")) return repeatTestCommand(request);
 	if (request.flags.has("--metamorphic")) return metamorphicCommand(request);
@@ -2374,6 +2379,33 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (off.disabled) {
 			return { code: 0, data: { overall: "OK", job: job.name, status: "OFF", ...(off.reason ? { reason: off.reason } : {}) }, verification: "UNVERIFIED" };
 		}
+		const delegatedClaim = process.env.OMP_KIT_FLEET_LESSONS_CLAIM;
+		if (delegatedClaim !== undefined) {
+			const keeper = readRunClaim(jobsDir, job.name);
+			if (job.name !== "fleet-lessons" || keeper === null || keeper.pid !== process.ppid
+				|| claimIncarnation(keeper) !== delegatedClaim) {
+				return refusal("FLEET_LESSONS_KEEPER_CHANGED", "The producer child is not bound to its current service keeper",
+					"Run service run fleet-lessons normally; no producer work was performed.");
+			}
+			const kitRoot = kitIdentity().release.root;
+			if (root === null || kitRoot === null) {
+				return refusal("FLEET_LESSONS_ROOT_UNAVAILABLE", "The producer needs a canonical kit and private state root",
+					"Run from a qualified kit release with absolute HOME and XDG_STATE_HOME.");
+			}
+			try {
+				const produced = runFleetLessonsOnce({ kitRoot, home, stateRoot: dirname(root) });
+				return { code: produced.status === "OK" ? 0 : 1,
+					data: { overall: produced.status === "OK" ? "OK" : "FINDINGS", job: job.name,
+						producer_status: produced.status, report_schema: produced.report.schema,
+						report_path: produced.report_path, archive_path: produced.archive_path, blockers: produced.blockers },
+					verification: "UNVERIFIED" };
+			} catch (error) {
+				return { code: 1, data: { overall: "FINDINGS", job: job.name },
+					errors: [{ code: "FLEET_LESSONS_FAILED", message: error instanceof Error ? error.message : String(error),
+						remediation: "Inspect the configured lesson inputs and producer state; the producer did not complete." }],
+					verification: "UNVERIFIED" };
+			}
+		}
 		try {
 			mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
 		} catch { /* acquireRunLock reports unusable directories */ }
@@ -2542,14 +2574,15 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		if (job.name === "scratch-reaper") {
 			const started = new Date().toISOString();
-			const result = applyScratch(home, { liveness: defaultLiveness(), run: scratchRunner, home });
+			const result = applyScratch(home, { liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root });
 			const browserInventory = collectBrowserProcesses();
 			const browserPlan = planBrowserReap(inspectBrowserProcesses(browserInventory.processes, browserInventory.sessions));
 			const browserResult = applyBrowserReap(browserPlan, {
 				kill: pid => defaultRunner(["kill", "-TERM", String(pid)]).code === 0,
 				quarantine: path => { try { const root = join(home, ".local", "state", "omp-kit", "browser-quarantine"); mkdirSync(root, { recursive: true, mode: 0o700 }); renameSync(path, join(root, `${Date.now()}-${path.split("/").pop() ?? "clone"}`)); return true; } catch { return false; } },
 			});
-			const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+			const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
+				+ result.expired.filter(isApplyFailure).length;
 			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: failed > 0 ? 1 : 0, omp_version: null };
 			try {
 				mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
@@ -2572,9 +2605,26 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 			verification: "UNVERIFIED" };
 		}
+		if (job.name !== "omp-watch" && job.name !== "fleet-lessons") {
+			lock.release();
+			return refusal("SERVICE_BODY_UNIMPLEMENTED", `No service body is implemented for ${job.name}`,
+				"Do not activate this job until its producer is wired; no matcher was substituted.");
+		}
+		const bodyCommand = job.name === "fleet-lessons" ? "service run fleet-lessons" : "test --record";
+		if (job.name === "fleet-lessons") {
+			if (bodyVersion === null) {
+				lock.release();
+				return refusal("FLEET_LESSONS_KEEPER_CHANGED", "The producer has no current keeper incarnation",
+					"Retry the ordinary service run; no producer work was performed.");
+			}
+			childEnv.OMP_KIT_FLEET_LESSONS_CLAIM = bodyVersion;
+		}
 		const started = new Date().toISOString();
-		const run = await runWithCap({ argv: [launcher, "test", "--record", "--json"], cwd: home, env: childEnv, capMs, exec: bunCapExec() });
-		const ompVersion = (() => { try { return ompIdentity().version; } catch { return null; } })();
+		const argv = job.name === "fleet-lessons"
+			? [launcher, "service", "run", "fleet-lessons", "--json"]
+			: [launcher, "test", "--record", "--json"];
+		const run = await runWithCap({ argv, cwd: home, env: childEnv, capMs });
+		const ompVersion = job.name === "omp-watch" ? (() => { try { return ompIdentity().version; } catch { return null; } })() : null;
 		if (run.status === "TIMEOUT") {
 			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: ompVersion, status: "TIMEOUT" };
 			if (!recordJobReceipt(home, job.name, receipt)) {
@@ -2585,11 +2635,32 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			}
 			lock.release();
 			return { code: 1, data: { overall: "FINDINGS", job: job.name, status: "TIMEOUT", receipt,
-					detail: `test --record exceeded the ${capMs} ms cap and was killed after ${run.elapsedMs} ms.` },
-				errors: [{ code: "TIMEOUT", message: `test --record exceeded the ${capMs} ms cap and was killed`,
+					detail: `${bodyCommand} exceeded the ${capMs} ms cap and was killed after ${run.elapsedMs} ms.` },
+				errors: [{ code: "TIMEOUT", message: `${bodyCommand} exceeded the ${capMs} ms cap and was killed`,
 					remediation: "Run the recorded command manually with --json and read its failures." }], verification: "UNVERIFIED" };
 		}
-		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: run.exit ?? 1, omp_version: ompVersion, status: run.status };
+		let exit = run.exit ?? 1;
+		let status = run.status;
+		let fleetResultInvalid = false;
+		if (job.name === "fleet-lessons" && run.status === "OK") {
+			let child: unknown;
+			try { child = JSON.parse(run.out); } catch { /* Refused below as an invalid producer outcome. */ }
+			const data = child && typeof child === "object" && "data" in child ? child.data : null;
+			if (child && typeof child === "object" && "ok" in child && child.ok === true
+				&& data && typeof data === "object" && "job" in data && data.job === job.name) {
+				if ("status" in data && data.status === "OFF") {
+					lock.release();
+					return { code: 0, data: { overall: "OK", job: job.name, status: "OFF",
+						...("reason" in data && typeof data.reason === "string" ? { reason: data.reason } : {}) }, verification: "UNVERIFIED" };
+				}
+				fleetResultInvalid = !("producer_status" in data && data.producer_status === "OK"
+					&& "report_schema" in data && data.report_schema === "omp-kit.fleet-lessons/v1");
+			} else {
+				fleetResultInvalid = true;
+			}
+			if (fleetResultInvalid) { exit = 1; status = "FAILED"; }
+		}
+		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit, omp_version: ompVersion, status };
 		try {
 			mkdirSync(dirname(jobReceiptPath(home, job.name)), { recursive: true, mode: 0o700 });
 			writeFileSync(jobReceiptPath(home, job.name), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
@@ -2600,13 +2671,14 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					remediation: "Repair the state root, then rerun; the test itself may have passed." }], verification: "UNVERIFIED" };
 		}
 		// The watcher exists to be seen when the post-update test fails: notify in-process, best-effort.
-		const notification = run.exit !== 0 && job.name === "omp-watch"
+		const notification = exit !== 0 && job.name === "omp-watch"
 			? notifyJobFailure({ title: "omp-kit", message: "omp-kit test did not pass after an OMP update. Run: omp-kit test --json",
 				platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null })
 			: { attempted: false, method: "none" as const };
 		lock.release();
-		return { code: run.exit === 0 ? 0 : 1, data: { overall: run.exit === 0 ? "OK" : "FINDINGS", job: job.name, status: run.status, receipt, notification }, verification: "UNVERIFIED",
-			errors: run.exit === 0 ? [] : [{ code: "JOB_FAILED", message: `test --record exited ${run.exit}: ${run.out.trim().slice(0, 300)}`,
+		return { code: exit === 0 ? 0 : 1, data: { overall: exit === 0 ? "OK" : "FINDINGS", job: job.name, status, receipt, notification }, verification: "UNVERIFIED",
+			errors: exit === 0 ? [] : [{ code: fleetResultInvalid ? "FLEET_LESSONS_RESULT_INVALID" : "JOB_FAILED",
+				message: fleetResultInvalid ? "The child exited successfully without confirming a fleet lessons report" : `${bodyCommand} exited ${exit}: ${run.out.trim().slice(0, 300)}`,
 				remediation: "Run the recorded command manually with --json and read its failures." }] };
 	}
 	return refusal("UNKNOWN_SERVICE_COMMAND", `Unknown service subcommand: ${sub}`, "Run omp-kit help service for exact grammar.");
@@ -3004,7 +3076,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
 				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
 	}
-	const deps = { liveness: defaultLiveness(), run: scratchRunner,
+	const deps = { liveness: defaultLiveness(), run: scratchRunner, runtimeRepo: kitIdentity().release.root,
 		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
 			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
 		} };
@@ -3027,8 +3099,22 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			return refusal("SCRATCH_REQUIRES_APPLY", "scratch apply deletes scratch and kills orphaned harness servers",
 				"Re-run with --apply --yes, or run scratch plan to preview without changing anything.");
 		}
-		const result = applyScratch(home, { ...deps, home });
-		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length;
+		const root = receiptStateRoot();
+		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
+		try {
+			mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+		} catch { /* acquireRunLock reports unusable directories */ }
+		const claimed = acquireRunLock(jobsDir, "scratch-reaper");
+		if (claimed.status !== "ACQUIRED")
+			return { code: OVERLAP_EXIT, data: { overall: "BUSY", holder_pid: claimed.holderPid }, verification: "UNVERIFIED" };
+		let result;
+		try {
+			result = applyScratch(home, { ...deps, home });
+		} finally {
+			claimed.lock.release();
+		}
+		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
+			+ result.expired.filter(isApplyFailure).length;
 		return { code: failed > 0 ? 1 : 0,
 			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
 				orphans: result.orphans, killed: result.killed, expired: result.expired,
@@ -3044,12 +3130,12 @@ async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResul
 	if (typeof repoFlag !== "string" || !isAbsolute(repoFlag) || resolve(repoFlag) !== repoFlag)
 		return refusal("SCRATCH_REPO_REQUIRED", "scratch index-lock needs --repo ABSOLUTE_DIR",
 			"Pass the repository root holding .git; nothing was changed.");
-	const apply = request.flags.has("--apply") && request.flags.has("--yes");
-	const gitDir = join(repoFlag, ".git");
-	const outcome = maybeMoveStaleIndexLock(gitDir, { run: scratchRunner, staleAfterMs: indexLockStaleAfterMs(), dryRun: !apply });
-	if (!apply) return { code: 0, data: { overall: "OK", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
-	return { code: outcome.verdict === "MOVED" ? 0 : 1,
-		data: { overall: outcome.verdict === "MOVED" ? "CHANGED" : "FINDINGS", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
+	if (request.flags.has("--apply"))
+		return { code: 1, data: { overall: "FINDINGS", verdict: "APPLY_REFUSED", receipt: null }, verification: "UNVERIFIED" };
+	const outcome = maybeMoveStaleIndexLock(join(repoFlag, ".git"), {
+		run: scratchRunner, staleAfterMs: indexLockStaleAfterMs(), dryRun: true,
+	});
+	return { code: 0, data: { overall: "OK", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
 }
 registerCommandHandler("scratch index-lock", scratchIndexLockCommand);
  
@@ -3060,9 +3146,9 @@ registerCommandHandler("scratch index-lock", scratchIndexLockCommand);
  	if (stateRoot === null) return refusal("CI_STATE_UNAVAILABLE", "ci status needs a canonical absolute HOME/state root",
  		"Set a canonical HOME and XDG_STATE_HOME; nothing was fetched.");
  	const cache = readCacheFile(join(stateRoot, CACHE_NAME));
- 	if (cache === null) return { code: 0, data: { overall: "UNAVAILABLE", stale_after_ms: STALE_AFTER_MS, repos: {} }, verification: "UNVERIFIED" };
+	if (cache === null) return { code: 3, data: { overall: "UNAVAILABLE", stale_after_ms: STALE_AFTER_MS, repos: {} }, verification: "UNVERIFIED" };
  	const data = readStatus(cache, Date.now());
- 	return { code: 0, data: { overall: data.overall, stale_after_ms: data.stale_after_ms, repos: data.repos }, verification: "UNVERIFIED" };
+	return { code: data.overall === "OK" ? 0 : 3, data: { overall: data.overall, stale_after_ms: data.stale_after_ms, repos: data.repos }, verification: "UNVERIFIED" };
  }
  registerCommandHandler("ci status", ciStatusCommand);
 async function fleetCommand(request: ParsedCommand): Promise<CliResult> {
@@ -3274,6 +3360,8 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },
 			errors: [{ code, message: "Previous kit/OMP update requires recovery",
 				remediation: "Inspect omp-kit audit and verify both component postimages before another update." }], verification: "UNVERIFIED" };
+		if (code.startsWith("KIT_ATTESTATION_")) return refusal(code.split(":", 1)[0]!, code,
+			"Supply the exact archive's authentic .sigstore.json bundle, gh and Python 3; restore GitHub tag/verification authority. No update was activated.");
 		return refusal("KIT_UPDATE_REFUSED", "Kit version, archive, state or lock failed locked revalidation",
 			"Inspect the exact archive and audit receipt; no completed update is claimed.");
 	}
@@ -3300,13 +3388,18 @@ function planningConvertCommand(request: ParsedCommand): CliResult {
 		return refusal("INVALID_FLAG", "--plan requires a non-empty Markdown path", "Use omp-kit planning convert --plan PATH --mission M with one explicit mode.");
 	if (typeof missionFlag !== "string" || !missionFlag.trim())
 		return refusal("INVALID_FLAG", "--mission requires a non-empty slug", "Use omp-kit planning convert --plan PATH --mission M with one explicit mode.");
+	const actor = request.flags.get("--actor");
+	if (request.flags.has("--actor") && !apply)
+		return refusal("INVALID_FLAG", "--actor is valid only with --apply.", "Dry-run writes use the synthetic planning-convert-dry-run actor, not a verified identity.");
 	if (apply) {
+		if (typeof actor !== "string" || !actor.trim())
+			return refusal("INVALID_FLAG", "--apply requires an explicit --actor for native audit attribution.", "Pass the actual writer name; this flag does not verify pane identity or authorize policy bypass.");
 		if (request.flags.has("--db"))
 			return refusal("INVALID_FLAG", "--db is valid only with --dry-run.", "Use --apply with --tracker-root DIR.");
 		const trackerRoot = request.flags.get("--tracker-root");
 		if (typeof trackerRoot !== "string" || !trackerRoot.trim())
-			return refusal("INVALID_FLAG", "--tracker-root requires a non-empty selected tracker path", "Use omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR.");
-		return runPlanningConvert({ planPath: planFlag, mission: missionFlag, apply: true, trackerRoot, cwd: process.cwd() });
+			return refusal("INVALID_FLAG", "--tracker-root requires a non-empty selected tracker path", "Use omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR --actor ACTOR.");
+		return runPlanningConvert({ planPath: planFlag, mission: missionFlag, apply: true, trackerRoot, actor, cwd: process.cwd() });
 	}
 	if (request.flags.has("--tracker-root"))
 		return refusal("INVALID_FLAG", "--tracker-root is valid only with --apply.", "Use --dry-run with --db DIR.");
@@ -3598,7 +3691,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
 	if (command.name === "examples") return { code: 0, data: { text: COMMANDS.map((item) => `${item.example}${isRunnable(item, item.name) ? "" : " # not yet available"}`).join("\n") }, verification: "PERFORMED" };
-	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD and --enable NAMES edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
+	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD, --enable NAMES, and --timeout-ms NAME=N edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
 	return refusal("HANDLER_UNAVAILABLE", `${path} is documented but its safe handler is not installed`, `Run omp-kit capabilities --json to see runnable commands; no ${command.mutation ? "mutation" : "probe"} was attempted.`);
 }
 

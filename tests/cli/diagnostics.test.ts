@@ -74,6 +74,89 @@ test("fresh release verifies shipped bytes but does not claim unapplied rules or
 	expect(finding(rows, "unknown_rules").status).toBe("UNVERIFIED");
 	expect(health(rows)).toBe("UNVERIFIED");
 });
+
+test("scoped diagnostics retain the corresponding full findings and uncertainty", async () => {
+	const f = fixture(); installOmp(f);
+	const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath };
+	const full = await diagnose(input);
+	const scopes: Record<string, string[]> = {
+		kit: ["kit", "manifest", "planning_skill"], omp: ["omp"], profile: ["effective_profile"],
+		settings: ["policy"], extensions: ["extensions", "extension_imports"], router: ["router"], state_root: ["state_root"],
+	};
+	for (const [scope, components] of Object.entries(scopes)) {
+		const scoped = await diagnose({ ...input, scope });
+		// kit deliberately diagnoses the missing planning skill as well.
+		expect(scoped.filter(row => components.includes(row.component) && row.component !== "planning_skill"))
+			.toEqual(full.filter(row => components.includes(row.component) && row.component !== "planning_skill"));
+		expect(scoped.every(row => components.includes(row.component))).toBe(true);
+	}
+	expect(finding(await diagnose({ ...input, scope: "kit" }), "planning_skill").status).toBe("UNVERIFIED");
+	expect(finding(await diagnose({ ...input, scope: "omp", ompPath: join(f.base, "missing") }), "omp").status).toBe("FAIL");
+	const unknown = await diagnose({ ...input, scope: "not-implemented" });
+	expect(unknown).toEqual([]);
+	expect(health(unknown)).toBe("UNVERIFIED");
+});
+
+test("scope filtering beats the real two-second bound and an eager negative breaches it", async () => {
+	const f = fixture(); installOmp(f);
+	mkdirSync(join(f.home, ".omp", "agent"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "agent", "config.yml"), "{}\n");
+	const calls = join(f.base, "native-probes.log");
+	// A real subprocess delay, not a fake clock. This is a synthetic regression
+	// fixture, never evidence about latency of the operator's installed OMP.
+	writeFileSync(f.ompPath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nsleep 2.1\nprintf '[]\\n'\n`);
+	const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath };
+	const began = performance.now();
+	const scoped = await diagnose({ ...input, scope: "omp" });
+	expect(performance.now() - began).toBeLessThan(2000);
+	expect(scoped.map(row => row.component)).toEqual(["omp"]);
+	expect(finding(scoped, "omp").status).toBe("OK");
+	expect(() => readFileSync(calls)).toThrow();
+	const inventory = await diagnose({ ...input, inventoryOnly: true });
+	expect(finding(inventory, "effective_rules").status).toBe("NOT_RUN");
+	expect(finding(inventory, "effective_rules").recommended_action).toContain("omp-kit doctor --scope rules --json");
+	expect(health(inventory)).not.toBe("OK");
+	expect(() => readFileSync(calls)).toThrow();
+	const eagerStart = performance.now();
+	const eager = await diagnose(input);
+	expect(performance.now() - eagerStart).toBeGreaterThan(2000);
+	expect(readFileSync(calls, "utf8").trim().split("\n").sort()).toEqual(["plugin list --json", "ttsr list --json"]);
+	expect(finding(eager, "effective_rules").evidence?.probe_method).toBe("bounded_async_native_spawn");
+	// The requested live scope still performs both checks and never reuses the
+	// inventory's NOT_RUN or a prior result.
+	const live = await diagnose({ ...input, scope: "rules", inventoryOnly: true });
+	expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(4);
+	expect(finding(live, "effective_rules").status).toBe(finding(eager, "effective_rules").status);
+	expect(finding(live, "installed_rules")).toEqual(finding(eager, "installed_rules"));
+}, 15_000);
+
+test("CLI scopes and bare presence inventory keep explicit unperformed evidence", () => {
+	const f = fixture(); installOmp(f);
+	const cli = join(import.meta.dir, "../../src/cli.ts");
+	const env = { ...process.env, HOME: f.home, PATH: `${dirname(f.ompPath)}:/usr/bin:/bin`, XDG_STATE_HOME: join(f.base, "state") };
+	for (const args of [["doctor", "--scope", "omp"], ["doctor", "--scope", "profile"], ["status"], []]) {
+		const began = performance.now();
+		const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], { cwd: f.project, env, stdout: "pipe", stderr: "pipe", timeout: 4000 });
+		expect(performance.now() - began, `${args.join(" ")}: ${result.stderr}`).toBeLessThan(2000);
+		const envelope = JSON.parse(result.stdout.toString());
+		const rows: Finding[] = envelope.data.findings;
+		if (args[0] === "doctor") {
+			expect(result.exitCode, result.stderr.toString()).toBe(0);
+			expect(rows.map(row => row.component)).toEqual([args[2] === "omp" ? "omp" : "effective_profile"]);
+			if (args[2] === "profile") expect(rows[0]?.status).toBe("UNVERIFIED");
+		} else {
+			expect(result.exitCode).toBe(rows.some(row => ["kit", "manifest", "plugin_links"].includes(row.component) && row.status === "FAIL") ? 1 : 0);
+			expect(finding(rows, "effective_rules").status).toBe("NOT_RUN");
+			expect(envelope.meta.verification).toBe("UNVERIFIED");
+			expect(envelope.data.overall).not.toBe("OK");
+		}
+	}
+	const missing = Bun.spawnSync([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
+		cwd: f.project, env: { ...env, PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe", timeout: 4000,
+	});
+	expect(missing.exitCode, missing.stderr.toString()).toBe(3);
+	expect(JSON.parse(missing.stdout.toString()).errors[0].code).toBe("OMP_UNAVAILABLE");
+});
 test("stale plugin symlink fails by profile and the installed release target passes", async () => {
 	const f = fixture();
 	mkdirSync(join(f.root, "extensions"));
@@ -103,6 +186,35 @@ test("stale plugin symlink fails by profile and the installed release target pas
 	expect(current.status).toBe("OK");
 	expect(current.evidence?.stale_profiles).toEqual([]);
 });
+test("STAMP1: lock version differing from the release manifest is DEGRADED with versionMismatch", async () => {
+	const f = fixture();
+	mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	writeFileSync(join(f.root, "release-manifest.json"), JSON.stringify({ version: "0.2.24" }));
+	mkdirSync(join(f.home, ".omp", "profiles", "claude", "agent"), { recursive: true });
+	const defaultLink = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	const claudeLink = join(f.home, ".omp", "profiles", "claude", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(defaultLink), { recursive: true });
+	mkdirSync(dirname(claudeLink), { recursive: true });
+	symlinkSync(f.root, defaultLink);
+	symlinkSync(f.root, claudeLink);
+	const lock = (version: string) => JSON.stringify({ plugins: { "omp-kit-companion": { version } } });
+	mkdirSync(join(f.home, ".omp", "plugins"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "plugins", "omp-plugins.lock.json"), lock("0.2.20"));
+	mkdirSync(join(f.home, ".omp", "profiles", "claude", "plugins"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "profiles", "claude", "plugins", "omp-plugins.lock.json"), lock("0.2.24"));
+
+	const degraded = finding(await diagnose({ root: f.root, home: f.home }), "plugin_links");
+	expect(degraded.status).toBe("DEGRADED");
+	expect(degraded.evidence?.mismatch_profiles).toEqual(["default"]);
+	expect((degraded.evidence?.links as Array<{ profile: string; versionMismatch?: string }>).find(row => row.profile === "default" && row.versionMismatch)?.versionMismatch).toBe("0.2.20 vs 0.2.24");
+
+	writeFileSync(join(f.home, ".omp", "plugins", "omp-plugins.lock.json"), lock("0.2.24"));
+	const current = finding(await diagnose({ root: f.root, home: f.home }), "plugin_links");
+	expect(current.status).toBe("OK");
+	expect(current.evidence?.mismatch_profiles).toEqual([]);
+});
+
 test("plugin-link inventory treats a named profile without an agent directory as unverified", async () => {
 	const f = fixture();
 	mkdirSync(join(f.root, "extensions"));

@@ -62,7 +62,7 @@ export interface McpApplyPlan {
 	/** Null in edit mode (--env-command / --enable), which reads no source. */
 	source: { id: string; path: string } | null;
 	servers: Omit<RenderedServer, "config">[];
-	edits: { env_commands: McpEnvCommand[]; enable: string[] } | null;
+	edits: { env_commands: McpEnvCommand[]; enable: string[]; timeouts: { server: string; ms: number }[] } | null;
 	profiles: McpProfilePlan[];
 	overrides: { name: string; path: string; sha256: string }[];
 	schema: { path: string; validated: true };
@@ -483,6 +483,26 @@ export function setMcpEnvValue(text: string, server: string, key: string, value:
 	return text.slice(0, tokens[at]!.start) + JSON.stringify(value) + text.slice(tokens[at]!.end);
 }
 
+/** Byte-preserving: sets the numeric mcpServers[server].timeout, inserting the key when absent; null when the server entry is absent, not an object, or holds a non-numeric timeout. */
+export function setMcpTimeoutValue(text: string, server: string, ms: number): string | null {
+	const tokens = tokenize(text);
+	const serverAt = memberValue(text, tokens, memberValue(text, tokens, 0, "mcpServers"), server);
+	if (serverAt < 0 || tokens[serverAt]?.kind !== "{") return null;
+	const timeoutAt = memberValue(text, tokens, serverAt, "timeout");
+	if (timeoutAt >= 0) {
+		const raw = text.slice(tokens[timeoutAt]!.start, tokens[timeoutAt]!.end);
+		if (!/^\d+$/.test(raw)) return null;
+		if (Number(raw) === ms) return text;
+		return text.slice(0, tokens[timeoutAt]!.start) + String(ms) + text.slice(tokens[timeoutAt]!.end);
+	}
+	const serverClose = closing(tokens, serverAt);
+	if (serverClose === serverAt + 1) return `${text.slice(0, tokens[serverAt]!.end - 1)}"timeout": ${ms}}${text.slice(tokens[serverAt]!.end)}`;
+	const multiline = text.includes("\n");
+	const at = tokens[serverClose - 1]!.end;
+	const insert = multiline ? `,\n${lineIndent(text, tokens[serverClose - 1]!.start)}"timeout": ${ms}` : `, "timeout": ${ms}`;
+	return text.slice(0, at) + insert + text.slice(at);
+}
+
 /** Byte-preserving: removes every `server` element of the root disabledServers array with one separator; null when not listed. */
 export function removeDisabledServer(text: string, server: string): string | null {
 	let changed = false;
@@ -528,12 +548,19 @@ export interface McpEditInput {
 	envCommands: readonly McpEnvCommand[];
 	/** Servers to remove from each profile's disabledServers list. */
 	enable: readonly string[];
+	/** Server -> timeout ms; sets mcpServers[server].timeout in place. Values need N >= 1000. */
+	timeouts: ReadonlyMap<string, number>;
 }
 
 /** Edit mode, read-only: env `!command` values and disabledServers removals, in place; every other byte is kept. Throws McpApplyError on any refusal. */
 export function planMcpEdit(input: McpEditInput): McpApplyPlan {
-	if (!input.envCommands.length && !input.enable.length) throw new McpApplyError("NO_EDIT", "Edit mode needs --env-command or --enable");
+	if (!input.envCommands.length && !input.enable.length && !input.timeouts.size)
+		throw new McpApplyError("NO_EDIT", "Edit mode needs --env-command, --enable, or --timeout-ms");
 	for (const name of input.enable) if (!SERVER_NAME.test(name)) throw new McpApplyError("INVALID_ENABLE", "--enable needs comma-separated server names");
+	for (const [server, ms] of input.timeouts) {
+		if (!SERVER_NAME.test(server)) throw new McpApplyError("INVALID_TIMEOUT", "--timeout-ms needs NAME=N[,NAME=N]");
+		if (!Number.isInteger(ms) || ms < 1000) throw new McpApplyError("INVALID_TIMEOUT", "--timeout-ms needs N >= 1000 or NAME=N[,NAME=N]");
+	}
 	if (new Set(input.envCommands.map(edit => `${edit.server}\n${edit.key}`)).size !== input.envCommands.length || new Set(input.enable).size !== input.enable.length)
 		throw new McpApplyError("DUPLICATE_EDIT", "Each --env-command SERVER:KEY and each --enable name may appear once");
 	for (const edit of input.envCommands) if (!referenceValue(edit.command))
@@ -582,6 +609,18 @@ export function planMcpEdit(input: McpEditInput): McpApplyPlan {
 			expected.disabledServers = listed.filter(item => item !== name);
 			base.added.push(label);
 		}
+		for (const [server, ms] of input.timeouts) {
+			const label = `${server} timeout=${ms}`;
+			const entry = entries[server];
+			if (!record(entry)) { base.conflicts.push(`${label}: server absent; left untouched`); continue; }
+			const edited = setMcpTimeoutValue(next, server, ms);
+			if (edited === null) { base.conflicts.push(`${label}: the entry is not an object or holds a non-numeric timeout; left untouched`); continue; }
+			if (edited === next) { base.already_present.push(label); continue; }
+			diffs.push(lineDiff(profile.mcpPath, next, edited));
+			next = edited;
+			entry.timeout = ms;
+			base.added.push(label);
+		}
 		if (!diffs.length) { profiles.push({ ...base, action: "NO_CHANGE", before_sha256: current?.image.sha256 ?? null, after_sha256: current?.image.sha256 ?? null }); continue; }
 		let reparsed: unknown;
 		try { reparsed = JSON.parse(next); } catch { throw new McpApplyError("RENDER_FAILED", `Edit of ${profile.name} produced invalid JSON`); }
@@ -600,7 +639,7 @@ export function planMcpEdit(input: McpEditInput): McpApplyPlan {
 		profiles.push({ ...base, action: "EDIT", diff: diffs.join("\n"), before_sha256: current!.image.sha256, after_sha256: hash(afterBytes) });
 	}
 	return {
-		source: null, servers: [], edits: { env_commands: [...input.envCommands], enable: [...input.enable] }, profiles, overrides: [],
+		source: null, servers: [], edits: { env_commands: [...input.envCommands], enable: [...input.enable], timeouts: [...input.timeouts].map(([server, ms]) => ({ server, ms })) }, profiles, overrides: [],
 		schema: { path: input.schemaPath, validated: true }, stateRoot: input.stateRoot, existing,
 		mutation: files.length ? planMutation({ stateRoot: input.stateRoot, roots, files }) : null,
 	};

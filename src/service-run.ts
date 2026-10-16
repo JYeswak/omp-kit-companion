@@ -1,5 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { finished } from "node:stream/promises";
 import { loadGate } from "./infra.ts";
 
 /**
@@ -192,25 +194,25 @@ export type CappedRun =
 	| { status: "TIMEOUT"; exit: null; elapsedMs: number; out: string };
 
 /**
- * SVC1 time cap: run argv to completion or SIGKILL it at capMs. A run that
- * outlives the cap is TIMEOUT (never OK/FAILED); elapsed time is measured on
- * the injected clock so tests are deterministic. Output travels with the
- * wait result so receipts can quote the tail.
+ * SVC1 finite-run cap: terminate the owned process group at capMs and bound
+ * reaping/output cleanup. Injected executors retain deterministic clock tests;
+ * the default executor owns all descendants which retain its POSIX group.
  */
 export async function runWithCap(input: {
 	argv: readonly string[];
 	cwd: string;
 	env: Record<string, string>;
 	capMs: number;
-	exec: CapExec;
+	exec?: CapExec;
 }): Promise<CappedRun> {
-	const started = input.exec.now();
-	const handle = input.exec.spawn(input.argv, { cwd: input.cwd, env: input.env });
+	const exec = input.exec ?? bunCapExec();
+	const started = exec.now();
+	const handle = exec.spawn(input.argv, { cwd: input.cwd, env: input.env });
 	const outcome = await Promise.race([
 		handle.wait().then(result => ({ kind: "done" as const, code: result.code, out: result.out })),
-		input.exec.sleep(input.capMs).then(() => ({ kind: "timeout" as const, code: null as number | null, out: "" })),
+		exec.sleep(input.capMs).then(() => ({ kind: "timeout" as const, code: null as number | null, out: "" })),
 	]);
-	const elapsedMs = input.exec.now() - started;
+	const elapsedMs = exec.now() - started;
 	if (outcome.kind === "timeout") {
 		handle.kill();
 		const killed = await handle.wait();
@@ -220,53 +222,73 @@ export async function runWithCap(input: {
 	return { status: "FAILED", exit: outcome.code, elapsedMs, out: outcome.out };
 }
 
-/** Live timers + SIGKILL for service run wiring (Bun runtime only). */
+/**
+ * Finite pipe-based jobs own a fresh POSIX group by default. Native PTYs and
+ * long-lived service launchers have separate lifecycle owners, not this adapter.
+ */
 export function bunCapExec(): CapExec {
 	return {
 		spawn: (argv, opts) => {
-			const child = Bun.spawn([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe" });
-			return {
-				pid: child.pid,
-				wait: async () => {
-					const code = await child.exited;
-					let out = "";
-					try {
-						out = await new Response(child.stdout).text();
-					} catch { /* killed pipes disturb the body; output is lost, verdict stands */ }
-					let err = "";
-					try {
-						err = await new Response(child.stderr).text();
-					} catch { /* same */ }
-					return { code, out: `${out}\n${err}` };
-				},
-				kill: () => {
-					try {
-						child.kill(9);
-					} catch { /* already gone is fine */ }
-					// A killed launcher's grandchildren (e.g. `sleep` under `sh`)
-					// can outlive it holding the pipes open; on Linux the pipe
-					// read in wait() then blocks until they exit (CI fail
-					// 2026-10-06: TIMEOUT plant hung 5 s on a sleep-20
-					// grandchild). Cancel our sides so wait() settles on the
-					// direct child's exit; orphaned grandchildren exit alone.
-					for (const stream of [child.stdout, child.stderr]) {
-						try {
-							const done = (stream as ReadableStream<Uint8Array> | null)?.cancel();
-							(done as Promise<void> | undefined)?.catch(() => { /* closed already */ });
-						} catch { /* already closed is fine */ }
-					}
-				},
+			const ownsGroup = process.platform === "darwin" || process.platform === "linux";
+			const child = Bun.spawn([...argv], { cwd: opts.cwd, env: opts.env, stdout: "pipe", stderr: "pipe", detached: ownsGroup });
+			const streams = [Readable.fromWeb(child.stdout), Readable.fromWeb(child.stderr)];
+			const output = ["", ""];
+			// Node's stream bridge drains both pipes immediately and destroy()
+			// cancels their actual readers, including an outstanding read.
+			const drained = Promise.all(streams.map((stream, index) => {
+				stream.setEncoding("utf8").on("data", chunk => { output[index] += chunk; });
+				return finished(stream).catch(() => { /* expected when cancellation destroys the pipe */ });
+			}));
+			let settled = false, cleanup: Promise<void> | undefined;
+			const { promise: stopped, resolve: resolveStopped } = Promise.withResolvers<void>();
+			const signal = (name: "SIGTERM" | "SIGKILL") => {
+				// Only the group/PID created above; never a discovered peer.
+				try { process.kill(ownsGroup ? -child.pid : child.pid, name); } catch { /* already exited */ }
 			};
+			const stop = (): Promise<void> => cleanup ??= (async () => {
+				signal("SIGTERM");
+				await Bun.sleep(100);
+				// The leader exiting does not imply descendants released their
+				// group or inherited FDs. Escalate even after child.exited.
+				signal("SIGKILL");
+				let timer: NodeJS.Timeout | undefined;
+				try {
+					await Promise.race([
+						Promise.all([child.exited, drained]),
+						new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); }),
+					]);
+				} finally {
+					clearTimeout(timer);
+					for (const stream of streams) stream.destroy();
+					resolveStopped();
+				}
+			})();
+			const kill = () => { if (!settled) void stop(); };
+			process.once("SIGTERM", kill);
+			process.once("SIGINT", kill);
+			const exited = child.exited.then(async code => {
+				// A reaped leader can still leave descendants holding its group.
+				if (ownsGroup && !cleanup && pidAlive(-child.pid)) await stop();
+				return code;
+			});
+			const result = Promise.race([
+				Promise.all([exited, drained]).then(([code]) => code),
+				stopped.then(() => child.exitCode),
+			]).then(async code => {
+				// Even early EOF is not proof that a TERM-ignoring process
+				// exited. Finish escalation before relinquishing group ownership.
+				if (cleanup) await cleanup;
+				settled = true;
+				process.off("SIGTERM", kill);
+				process.off("SIGINT", kill);
+				return { code, out: `${output[0]}\n${output[1]}` };
+			});
+			return { pid: child.pid, wait: () => result, kill };
 		},
 		sleep: (ms) => new Promise<void>((resolve) => {
 			const timer = setTimeout(resolve, ms);
-			// The deadline must never outlive the run: an unref'd timer fires
-			// while work is pending but cannot keep the CLI alive after the
-			// child settles (CI fail 2026-10-06: 300 s cap held `service run`
-			// past bun's 5 s test timeout). Guarded: runtimes without unref
-			// keep the old hold-the-loop behavior.
-			const t = timer as unknown as { unref?: () => void };
-			if (typeof t.unref === "function") t.unref();
+			// A completed finite run must not be kept alive by its cap.
+			timer.unref();
 		}),
 		now: () => Date.now(),
 	};

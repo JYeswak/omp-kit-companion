@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -5,6 +6,7 @@ import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
 import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
+import { classifyScratchPressure, type ScratchPressure } from "./scratch.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -16,11 +18,60 @@ export type ServiceCheckStatus = "PASS" | "WARN" | "FAIL";
 export interface ServiceCheck { id: string; status: ServiceCheckStatus; message: string; remediation: string }
 export interface ServiceRunResult { code: number; stdout: string; stderr: string }
 export type ServiceRunner = (args: readonly string[]) => ServiceRunResult;
+export interface ScratchJobRun { status: "COMPLETE" | "TIMEOUT" | "FAILED" | "CANCELLED"; exit: number; stdout: string; stderr: string; elapsedMs: number; lastAction: { action: string; path: string } | null }
+/** External supervisor: synchronous walks/probes run in an owned process group, never on this event loop. */
+export async function superviseScratchJob(argv: readonly string[], env: NodeJS.ProcessEnv, capMs: number): Promise<ScratchJobRun> {
+	const { promise, resolve: resolveResult } = Promise.withResolvers<ScratchJobRun>();
+	const started = Date.now();
+	const child = spawn(argv[0]!, argv.slice(1), { env, cwd: env.HOME, detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+	const stdout: string[] = [], stderr: string[] = [];
+	let outputChars = 0, terminal: "TIMEOUT" | "FAILED" | "CANCELLED" | null = null;
+	let lastAction: ScratchJobRun["lastAction"] = null;
+	child.on("message", message => {
+		if (message && typeof message === "object" && "action" in message && "path" in message &&
+			typeof message.action === "string" && typeof message.path === "string") lastAction = { action: message.action, path: message.path };
+	});
+	const stop = (status: "TIMEOUT" | "FAILED" | "CANCELLED") => {
+		if (terminal !== null) return;
+		terminal = status;
+		try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already exited */ }
+		try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+	};
+	const onSignal = () => stop("CANCELLED");
+	process.once("SIGTERM", onSignal);
+	process.once("SIGINT", onSignal);
+	const timer = setTimeout(() => stop("TIMEOUT"), capMs);
+	child.stdout?.setEncoding("utf8");
+	child.stderr?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		if (terminal !== null) return;
+		if (outputChars + chunk.length > 8 * 1024 * 1024) {
+			stderr.push("scratch-worker-output-budget-exhausted");
+			stop("FAILED");
+		} else { outputChars += chunk.length; stdout.push(chunk); }
+	});
+	child.stderr?.on("data", (chunk: string) => {
+		if (terminal !== null) return;
+		if (outputChars + chunk.length > 8 * 1024 * 1024) {
+			stderr.push("scratch-worker-output-budget-exhausted");
+			stop("FAILED");
+		} else { outputChars += chunk.length; stderr.push(chunk); }
+	});
+	child.once("error", error => { terminal ??= "FAILED"; stderr.push(error.message); });
+	child.once("close", code => {
+		clearTimeout(timer);
+		process.off("SIGTERM", onSignal);
+		process.off("SIGINT", onSignal);
+		resolveResult({ status: terminal ?? (code === 0 ? "COMPLETE" : "FAILED"), exit: code ?? 1, stdout: stdout.join(""), stderr: stderr.join(""), elapsedMs: Date.now() - started, lastAction });
+	});
+	return promise;
+}
 
 export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number; runAtLoad?: boolean }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
+	"scratch-pressure": { name: "scratch-pressure", label: "com.omp-kit.scratch-pressure", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
 	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
@@ -66,6 +117,63 @@ export function serviceLabel(name: string): string {
 	if (namespace === undefined || namespace === "") return `com.omp-kit.${name}`;
 	if (!TEST_NAMESPACE_PATTERN.test(namespace)) throw new Error(`refusing to build a service label from OMP_KIT_TEST_LABEL_NAMESPACE=${namespace}`);
 	return `${namespace}.${name}`;
+}
+
+export interface ScratchPressureTriggerResult {
+	pressure: ScratchPressure;
+	action: "NOOP" | "WARN" | "UNKNOWN" | "UNSUPPORTED" | "RECLAIM_TRIGGERED" | "RECLAIM_TRIGGER_FAILED";
+	command: readonly string[] | null;
+	result: ServiceRunResult | null;
+}
+
+/** A lightweight tick kicks the existing reaper; its own per-job lock serializes every apply. */
+export function runScratchPressureTrigger(freePct: number | null, platform: string,
+	run: ServiceRunner): ScratchPressureTriggerResult {
+	const pressure = classifyScratchPressure(freePct);
+	if (pressure !== "RECLAIM") return {
+		pressure,
+		action: pressure === "WARN" ? "WARN" : pressure === "UNKNOWN" ? "UNKNOWN" : "NOOP",
+		command: null,
+		result: null,
+	};
+	const job = KNOWN_JOBS["scratch-reaper"]!;
+	const command = platform === "darwin"
+		? ["launchctl", "kickstart", `${domain()}/${job.label}`]
+		: platform === "linux"
+			? ["systemctl", "--user", "start", `omp-kit-${job.name}.service`]
+			: null;
+	if (command === null) return { pressure, action: "UNSUPPORTED", command: null, result: null };
+	const result = run(command);
+	return {
+		pressure,
+		action: result.code === 0 ? "RECLAIM_TRIGGERED" : "RECLAIM_TRIGGER_FAILED",
+		command,
+		result,
+	};
+}
+
+export interface ScratchPressureChiefRoute { session: string; pane: string; agent: string | null }
+
+export function scratchPressureChiefRoute(home: string,
+	configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json")):
+	ScratchPressureChiefRoute | null {
+	let config: unknown;
+	try {
+		config = JSON.parse(readFileSync(configPath, "utf8"));
+	} catch {
+		return null;
+	}
+	if (typeof config !== "object" || config === null || Array.isArray(config)) return null;
+	const chief = (config as Record<string, unknown>).chief;
+	if (typeof chief !== "object" || chief === null || Array.isArray(chief)) return null;
+	const route = chief as Record<string, unknown>;
+	const session = route.session;
+	const pane = route.pane;
+	const agent = route.agent;
+	if (typeof session !== "string" || session.trim() === "" || session !== session.trim() || session.includes("\r") || session.includes("\n") ||
+		typeof pane !== "string" || pane.trim() === "" || pane !== pane.trim() || pane.includes("\r") || pane.includes("\n") ||
+		(agent !== undefined && typeof agent !== "string")) return null;
+	return { session, pane, agent: typeof agent === "string" && agent.trim() !== "" ? agent : null };
 }
 
 export function serviceHome(home?: string): string {
