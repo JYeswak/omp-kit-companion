@@ -84,7 +84,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Herdr land binds the native pane identity to project-scoped Agent Mail; installed Herdr consumer proof remains blocked pending an authorized pane and candidate route | ompkit-2giu.2 (BLOCKED) |
 | Finite Bash admissions reject disabled deadlines and known finite suites cannot be labeled as services; owner/job/proc cancellation verification remains blocked on native lifecycle evidence | ompkit-xa5s.22 (BLOCKED) |
 | Scratch plan/apply expose row sizes, malformed-owner counts, per-root/per-verdict totals, policy, and receipt through the public CLI | ompkit-rhy9.17 (IN REVIEW) |
-| Beads doctor and planning score report configured acceptance breadth with component-aware split suggestions | ompkit-rhy9.21 (IN REVIEW) |
+| Beads doctor and planning score report configured acceptance breadth with component-aware split suggestions | ompkit-rhy9.21 (BLOCKED: dirty overlap on CHANGELOG.md and package.json) |
 
 ## Next
 
