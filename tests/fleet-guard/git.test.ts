@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/git.ts";
+import { handleToolCall } from "../../extensions/fleet-guard.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-git-"));
@@ -44,5 +45,44 @@ describe("fleet guard main-only git checks", () => {
 		mkdirSync(join(repo, ".omp"), { recursive: true });
 		writeFileSync(join(repo, ".omp", "fleet-guard.json"), JSON.stringify({ branches: true }));
 		expect(check(event("git switch -c topic"), context)).toBeUndefined();
+	});
+
+	test("refuses unscoped git commit --amend in every wrapper form", () => {
+		for (const command of [
+			"git commit --amend --no-edit",
+			"git commit --amend",
+			"git commit -m msg --amend",
+			"git -C sub commit --amend",
+			"git -c user.name=t commit --amend",
+			"GIT_DIR=x git commit --amend",
+			"env GIT_SSH=x git commit --amend",
+			"git commit --amend --only -- some/path",
+			"git status && git commit --amend",
+		]) {
+			const result = check(event(command), context);
+			expect(result?.block, command).toBe(true);
+			expect(result?.reason, command).toContain("amend");
+		}
+	});
+
+	test("allows ordinary scoped commits and quiet quoted prose", () => {
+		for (const command of [
+			"git commit --only -m msg -- some/path",
+			"git commit -m msg",
+			"git commit --no-amend",
+			"git commit -m \"fix --amend stuff\"",
+			"git commit -m msg -- --amend",
+			"git --no-pager commit -m msg",
+			"printf 'git commit --amend fake'",
+			"git commit -amend -m msg",
+		]) {
+			expect(check(event(command), context), command).toBeUndefined();
+		}
+	});
+
+	test("native entry path blocks unscoped amend through the chained checks", async () => {
+		const result = await handleToolCall(event("git commit --amend --no-edit"), context);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("amend");
 	});
 });

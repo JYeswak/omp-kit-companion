@@ -120,6 +120,49 @@ function optionValue(words: readonly string[], option: string): string | undefin
 	return index >= 0 ? words[index + 1] : undefined;
 }
 
+const AMEND_REASON =
+	"fleet-guard history: unscoped git commit --amend rewrites shared history. Amend has no scoped form here; see AGENTS.md Working on main.";
+
+// Shell NAME=value assignment (env wrapper), never a git flag or subcommand.
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function stripEnvWrappers(words: readonly string[]): readonly string[] | undefined {
+	let index = 0;
+	if (words[index] === "env") {
+		index++;
+		while (index < words.length) {
+			const word = words[index]!;
+			if (word === "-i" || word === "--ignore-environment") { index++; continue; }
+			if (word === "-u" || word === "--unset") { index += 2; continue; }
+			if (ENV_ASSIGNMENT.test(word)) { index++; continue; }
+			break;
+		}
+	} else {
+		while (index < words.length && ENV_ASSIGNMENT.test(words[index]!)) index++;
+	}
+	if (index >= words.length) return undefined;
+	return words.slice(index);
+}
+
+function amendRewrite(words: readonly string[]): boolean {
+	let index = 1;
+	while (index < words.length) {
+		const word = words[index]!;
+		if (word === "--") { index++; break; }
+		if (!word.startsWith("-") || word === "-") break;
+		if (word === "-C" || word === "-c" || word === "--git-dir" || word === "--work-tree") { index += 2; continue; }
+		if (word.startsWith("--git-dir=") || word.startsWith("--work-tree=")) { index++; continue; }
+		index++;
+	}
+	if (index >= words.length || words[index] !== "commit") return false;
+	index++;
+	for (; index < words.length; index++) {
+		if (words[index] === "--") break;
+		if (words[index] === "--amend") return true;
+	}
+	return false;
+}
+
 function branchCreation(words: readonly string[]): boolean {
 	const subcommand = words[1];
 	if (subcommand === "worktree") return words.slice(2).includes("add");
@@ -147,11 +190,13 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 	if (!command) return undefined;
 	for (const segment of commandSegments(command)) {
 		const words = shellWords(segment);
-		if (words[0] !== "git") continue;
-		const commandCwd = optionValue(words, "-C");
+		const effective = stripEnvWrappers(words);
+		if (!effective || effective[0] !== "git") continue;
+		const commandCwd = optionValue(effective, "-C");
 		const root = repositoryRoot(commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd());
-		if (!root || !branchCreation(words) || branchesOptedOut(root)) continue;
-		return { block: true, reason: MAIN_ONLY_REASON };
+		if (!root) continue;
+		if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
+		if (amendRewrite(effective)) return { block: true, reason: AMEND_REASON };
 	}
 	return undefined;
 }
