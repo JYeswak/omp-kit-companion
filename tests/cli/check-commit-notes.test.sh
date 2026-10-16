@@ -27,7 +27,10 @@ new_repo() {
 	git -C "$dir" config user.email "test@invalid.example"
 	git -C "$dir" config user.name "Test"
 	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	git -C "$dir" commit -q --allow-empty --message "[test] root"
+	mkdir -p "$dir/changelog.d"
+	: > "$dir/changelog.d/.keep"
+	git -C "$dir" add changelog.d/.keep
+	git -C "$dir" commit -q --message "[test] root"
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 	[ -x "$dir/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
 	mkdir -p "$dir/scripts" "$dir/changelog.d" "$dir/docs"
@@ -84,6 +87,20 @@ git -C "$R" add scripts/a.sh scripts/b.sh
 out=$(commit "$R" --only scripts/a.sh -m "[test] fix a" -m "Bead: x-1")
 check "$?" "0" "only-head-fragment-pass" "x" "x"
 check "$(git -C "$R" diff-tree --no-commit-id --name-only -r HEAD)" "scripts/a.sh" "only-head-committed-alone" "x" "x"
+
+# 8. a repo with no changelog.d (jev, localbench, uds ...) never runs the notes gate: passes
+N="$TMP/no-fragments"
+mkdir -p "$N/scripts"
+git -C "$N" init -q 2>/dev/null
+git -C "$N" config user.email "test@invalid.example"
+git -C "$N" config user.name "Test"
+rm -f "$N/.git/hooks/commit-msg" "$N/.git/hooks/commit-msg-"* "$N/.git/hooks/pre-commit"
+git -C "$N" commit -q --allow-empty --message "[test] root"
+sh "$INSTALLER" "$N" > /dev/null 2>&1 || { printf 'FAIL install no-fragments\n' >&2; exit 1; }
+printf 'echo a\n' > "$N/scripts/a.sh"
+git -C "$N" add scripts/a.sh
+out=$(commit "$N" -m "[test] fix a x-1")
+check "$?" "0" "no-changelog-dir-pass" "x" "x"
 
 printf 'check-commit-notes: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

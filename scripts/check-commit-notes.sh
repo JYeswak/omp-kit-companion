@@ -9,6 +9,9 @@
 # stays a push-time remedy.
 set -u
 msg=${1:?usage: check-commit-notes.sh MSGFILE}
+# Only a repo that keeps changelog fragments runs the pushed-notes gate; elsewhere (jev,
+# localbench, uds, zestroku, cfsios have no changelog.d) this member must never refuse.
+git cat-file -e HEAD:changelog.d 2>/dev/null || exit 0
 
 first=""
 for path in $(git diff --cached --no-renames --name-only); do
