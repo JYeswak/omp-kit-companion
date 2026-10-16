@@ -88,6 +88,7 @@ describe("fleet guard main-only git checks", () => {
 	});
 
 	test("allows ordinary scoped commits and quiet quoted prose", () => {
+		const before = snapshotTree(repo);
 		for (const command of [
 			"git commit --only -m msg -- some/path",
 			"git commit -m msg",
@@ -100,6 +101,9 @@ describe("fleet guard main-only git checks", () => {
 		]) {
 			expect(check(event(command), context), command).toBeUndefined();
 		}
+		expect(snapshotTree(repo)).toEqual(before);
+		expect(readFileSync(join(repo, "ownA.txt"), "utf8")).toBe("owned bytes");
+		expect(readFileSync(join(repo, "foreignB.txt"), "utf8")).toBe("peer bytes");
 	});
 
 	test("native entry path blocks unscoped amend through the chained checks", async () => {
