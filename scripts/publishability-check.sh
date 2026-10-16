@@ -46,6 +46,10 @@ git -c core.quotePath=false ls-files > "$TMP_FILES" || fail "git ls-files failed
 # scan CLASS PATTERN FILE [EXEMPT]: report class: file:line for each match. Matched values never
 # touch disk: the count precheck prints only a number and the report stream carries line numbers.
 # EXEMPT is an ERE over line:match that drops a hit (documentation nets, the shared users dir).
+# The exempt filter lives in the same awk as the line split, so no middle
+# pipe stage can fail masked: every producer status is checked (grep via
+# RCREP, the stream via its exit). Exempt patterns stay interval-free
+# ({n,m}-free) for portable awk ERE.
 scan() {
 	grc=0
 	count=$(grep -caoE -- "$2" "$3" 2>/dev/null) || grc=$?
@@ -56,10 +60,10 @@ scan() {
 	# An rc of 0/1 with an empty stream is a benign race (file changed between
 	# precheck and report); rc > 1 is an incomplete scan.
 	: > "$TMP_RCREP"
-	{ grep -naoE -- "$2" "$3" 2>/dev/null || echo "$?" > "$TMP_RCREP"; } | {
-		if [ -n "${4:-}" ]; then grep -vE -- "$4" || true; else cat; fi
-	} | cut -d: -f1 | F="$3" C="$1" awk '{ print ENVIRON["C"] ": " ENVIRON["F"] ":" $0 }' >> "$TMP_FINDINGS" \
-		|| fail "report stream failed for $3: scan incomplete"
+	{ grep -naoE -- "$2" "$3" 2>/dev/null || echo "$?" > "$TMP_RCREP"; } | EX="${4:-}" F="$3" C="$1" awk '
+		ENVIRON["EX"] != "" && $0 ~ ENVIRON["EX"] { next }
+		{ n = $0; sub(/:.*$/, "", n); print ENVIRON["C"] ": " ENVIRON["F"] ":" n }
+	' >> "$TMP_FINDINGS" || fail "report stream failed for $3: scan incomplete"
 	rrc=$(cat "$TMP_RCREP")
 	case "$rrc" in ""|1) ;; *) fail "grep failed on $3 (rc $rrc): scan incomplete";; esac
 }

@@ -201,6 +201,21 @@ else
 fi
 
 
+# rz5.106.7 REWORK: a downstream stage failing AFTER consuming its input
+# must still fail closed: the fault injector drains stdin like the real
+# late -vE failure, then exits 2.
+mkdir -p "$TMP/stub-late"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\ncat > /dev/null\necho "awk: planted late error" >&2\nexit 2\n' > "$TMP/stub-late/awk"
+chmod +x "$TMP/stub-late/awk"
+rc=0
+PATH="$TMP/stub-late:$PATH" sh "$CHECK" "$TMP/fixture" > "$TMP/out" 2>&1 || rc=$?
+if [ "$rc" = "2" ] && ! grep -q 'publishability: OK' "$TMP/out" && ! grep -q "$fake_token_body" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL late-fault-fails-closed: rc=%s out<<<%s>>>\n' "$rc" "$(sed "s/$fake_token_body/<TOKEN-BODY>/g" "$TMP/out")"
+fi
+
 # rz5.106.7: zero scanned subjects is UNRUN (exit 2), never OK: an empty repo, and a plain directory
 # nested inside a repo (an extracted archive) whose files git does not track.
 mkfixture
