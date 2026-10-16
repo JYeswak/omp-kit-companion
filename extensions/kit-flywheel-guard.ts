@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import type { PullRefusal } from "../src/fleet-watch";
 
 /**
- * kit-flywheel-guard: two Agent Flywheel Guide invariants enforced at the act.
+ * kit-flywheel-guard: lifecycle invariants enforced at the act.
  *
  * COMPACTION_REREAD (Anti-Pattern "not re-reading AGENTS.md after compaction";
  * Kernel invariant 7). OMP emits `session_compact` once a compaction entry is
@@ -17,8 +18,12 @@ import { basename, dirname, join, resolve } from "node:path";
  * assignee (read-only `br show <id> --json` in the call's cwd) is one of the
  * caller's identities: `--actor`/`--agent-name` on the command, BR_ACTOR /
  * BR_AGENT_NAME / AGENT_NAME, or the Agent Mail pane identity file for
- * $TMUX_PANE. Missing data never blocks: an unknown identity, an empty
- * assignee or a failed `br show` allows the call with a warning.
+ * $TMUX_PANE. Unknown caller identities and missing assignees allow the call
+ * with a warning; failed or unparseable `br show` results block it.
+ *
+ * CLAIM_REFUSED: native claim/start prechecks name the current holder or
+ * unreadable prerequisite. br --claim remains the atomic award; an actor
+ * flag selects that native actor, never grants authority or transfers custody.
  */
 
 export interface FlywheelExecResult {
@@ -79,10 +84,19 @@ export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
-/** br options (global and `close`) that consume the next word. */
-const BR_VALUE_FLAGS: Record<string, true> = { "--db": true, "--actor": true, "--lock-timeout": true, "-r": true,
-	"--reason": true, "--transition-comment": true, "--session": true, "--agent-name": true, "--harness": true,
-	"--model": true, "--bypass-reason": true };
+/** br 0.7.4 global/close/update options that consume a value. */
+const BR_VALUE_FLAGS: Record<string, true> = {
+	"--db": true, "--actor": true, "--lock-timeout": true, "-r": true, "--reason": true,
+	"--transition-comment": true, "--session": true, "--agent-name": true, "--harness": true,
+	"--model": true, "--bypass-reason": true, "--title": true, "-d": true, "--description": true,
+	"--body": true, "--description-file": true, "--design": true, "--acceptance-criteria": true,
+	"--acceptance": true, "--prerequisites": true, "--check-acceptance": true, "--uncheck-acceptance": true,
+	"--add-acceptance": true, "--notes": true, "--append-notes": true, "-s": true, "--status": true,
+	"-p": true, "--priority": true, "-t": true, "--type": true, "--assignee": true, "--owner": true,
+	"--if-unchanged": true, "--due": true, "--defer": true, "--estimate": true, "--add-label": true,
+	"--remove-label": true, "--set-labels": true, "--labels": true, "--parent": true,
+	"--external-ref": true, "--source-repo": true, "--source-repo-path": true, "--agent-context": true,
+};
 const WRAPPERS: Record<string, true> = { env: true, command: true, exec: true, nohup: true, time: true, builtin: true };
 
 export function nearestAgentsMd(cwd: string): string | null {
@@ -207,13 +221,18 @@ export function shellCommands(command: string): string[][] {
 	return commands;
 }
 
-export interface CloseRequest {
+export interface TrackerRequest {
 	bin: string;
 	ids: string[];
 	cwd: string;
 	db?: string;
 	/** Identities this command line itself claims (flags and inline env assignments). */
 	identities: string[];
+	operation: "close" | "claim" | "start";
+	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
+	actor: string | null;
+	assignee: string | null;
+	force: boolean;
 }
 
 function expandHome(path: string, home: string): string {
@@ -233,13 +252,13 @@ function isAssignment(word: string): boolean {
 	return true;
 }
 
-/** Every `br close`/`bd close` in a bash command, with the cwd it runs in after leading `cd`s. */
-export function closeRequests(command: string, cwd: string, home: string): CloseRequest[] {
-	if (!command.includes("close")) return [];
-	const requests: CloseRequest[] = [];
+/** Supported close/claim/start mutations, with the cwd selected by leading cd commands. */
+export function trackerRequests(command: string, cwd: string, home: string): TrackerRequest[] {
+	const requests: TrackerRequest[] = [];
 	let current = cwd;
 	for (const raw of shellCommands(command)) {
 		const identities: string[] = [];
+		let inlineActor: string | null = null;
 		let at = 0;
 		while (at < raw.length) {
 			const word = raw[at]!;
@@ -247,6 +266,7 @@ export function closeRequests(command: string, cwd: string, home: string): Close
 				const eq = word.indexOf("=");
 				const name = word.slice(0, eq);
 				if ((IDENTITY_ENV as readonly string[]).includes(name) && word.length > eq + 1) identities.push(word.slice(eq + 1));
+				if (name === "BR_ACTOR") inlineActor = word.slice(eq + 1);
 				at += 1;
 			} else if (WRAPPERS[word] === true) at += 1;
 			else break;
@@ -263,6 +283,12 @@ export function closeRequests(command: string, cwd: string, home: string): Close
 		if (name !== "br" && name !== "bd") continue;
 		let db: string | undefined;
 		let subcommand: string | undefined;
+		let actor: string | null = null;
+		let assignee: string | null = null;
+		let status: string | null = null;
+		let claim = false;
+		let force = false;
+		let readOnly = false;
 		const ids: string[] = [];
 		let optionsDone = false;
 		for (let index = 1; index < argv.length; index += 1) {
@@ -274,17 +300,28 @@ export function closeRequests(command: string, cwd: string, home: string): Close
 			if (!optionsDone && word.startsWith("-") && word.length > 1) {
 				const eq = word.indexOf("=");
 				const flag = eq > 0 ? word.slice(0, eq) : word;
+				if (flag === "--help" || flag === "-h" || flag === "--version" || flag === "-V") { readOnly = true; continue; }
+				if (flag === "--claim") { claim = true; continue; }
+				if (flag === "--force" || flag === "-f") { force = true; continue; }
 				const value = eq > 0 ? word.slice(eq + 1) : BR_VALUE_FLAGS[flag] === true ? argv[++index] : undefined;
 				if (value === undefined) continue;
 				if (flag === "--actor" || flag === "--agent-name") identities.push(value);
-				if (flag === "--db") db = value;
+				if (flag === "--db") db = expandHome(value, home);
+				if (flag === "--actor") actor = value;
+				if (flag === "--assignee") assignee = value;
+				if (flag === "--status" || flag === "-s") status = value;
 				continue;
 			}
 			if (subcommand === undefined) subcommand = word;
 			else ids.push(word);
 		}
-		if (subcommand !== "close") continue;
-		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities });
+		if (readOnly) continue;
+		const nativeStatus = status?.toLowerCase();
+		const operation = subcommand === "close" ? "close"
+			: subcommand === "update" && claim ? "claim"
+				: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start" : null;
+		if (operation === null) continue;
+		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force });
 	}
 	return requests;
 }
@@ -344,10 +381,10 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 	return names;
 }
 
-export type BeadAssignee = { ok: true; assignee: string } | { ok: false; why: string };
+export type BeadState = { ok: true; id: string; status: string; assignee: string | null } | { ok: false; why: string };
 
-export async function beadAssignee(exec: FlywheelExec, request: CloseRequest, id: string): Promise<BeadAssignee> {
-	const args = ["show", id, "--json", ...(request.db ? ["--db", request.db] : [])];
+export async function readBeadState(exec: FlywheelExec, request: TrackerRequest, id: string): Promise<BeadState> {
+	const args = ["show", id, "--json", "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])];
 	let result: FlywheelExecResult;
 	try {
 		result = await exec(request.bin, args, { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
@@ -367,22 +404,70 @@ export async function beadAssignee(exec: FlywheelExec, request: CloseRequest, id
 	try {
 		const parsed: unknown = JSON.parse(result.stdout);
 		const rows: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
-		const assignee = field(rows.find(item => field(item, "id") === id) ?? rows[0], "assignee");
-		if (typeof assignee !== "string" || assignee.trim().length === 0) return { ok: false, why: `${id} has no assignee` };
-		return { ok: true, assignee: assignee.trim() };
+		const row = rows.find(item => field(item, "id") === id) ?? (rows.length === 1 ? rows[0] : undefined);
+		const canonical = field(row, "id");
+		const status = field(row, "status");
+		const assignee = field(row, "assignee");
+		if (typeof canonical !== "string" || canonical === "" || typeof status !== "string"
+			|| (assignee !== undefined && assignee !== null && typeof assignee !== "string")) {
+			return { ok: false, why: `${id} returned no qualified native issue/owner record` };
+		}
+		const owner = typeof assignee === "string" ? assignee.trim() : "";
+		return { ok: true, id: canonical, status, assignee: owner === "" ? null : owner };
 	} catch {
 		return { ok: false, why: `\`${request.bin} show ${id} --json\` returned unparseable output` };
 	}
 }
 
-export interface SelfCloseDeps {
+export interface TrackerMutationDeps {
 	exec: FlywheelExec;
 	env: Record<string, string | undefined>;
 	home: string;
 	sessionCwd: string;
 }
 
-export async function checkSelfClose(event: FlywheelToolCallEvent, deps: SelfCloseDeps): Promise<FlywheelToolCallResult | undefined> {
+function refuseClaim(refusal: PullRefusal): FlywheelToolCallResult {
+	return { block: true, reason: JSON.stringify({ guard: "kit-flywheel-guard", code: "CLAIM_REFUSED", refusal }) };
+}
+
+/** Native claim semantics are separate from non-author close identity policy. */
+async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	const actor = (request.actor ?? deps.env.BR_ACTOR)?.trim() ?? null;
+	if (actor === null || actor === "") return refuseClaim({
+		class: "unsupported_native", bead: request.ids[0] ?? null, actor: "UNKNOWN native actor",
+		next: "select the actual native --actor or BR_ACTOR before claiming; --agent-name is attribution only",
+	});
+	if (request.ids.length === 0) return refuseClaim({
+		class: "unsupported_native", bead: null, actor,
+		next: "name an explicit native issue id; a last-touched record is not a bound ownership claim",
+	});
+	if (request.force || request.assignee !== null) return refuseClaim({
+		class: "unsupported_native", bead: request.ids[0] ?? null, actor: "UNKNOWN director",
+		next: "use a normal atomic --claim, not a forced or manual assignment/start; route any qualified custody transfer through its owner",
+	});
+	for (const id of request.ids) {
+		const found = await readBeadState(deps.exec, request, id);
+		if (!found.ok) return refuseClaim({
+			class: "tool_read_failure", bead: id, actor: "UNKNOWN native controller",
+			next: `restore the native lookup for ${id} before claiming: ${found.why}`,
+		});
+		if (found.assignee !== null && found.assignee !== actor) return refuseClaim({
+			class: "unsafe_custody", bead: found.id, actor: found.assignee,
+			next: `${found.assignee} retains ${found.id}; read fresh native ready work instead of taking another holder's claim`,
+		});
+		if (found.status === "closed" || found.status === "tombstone") return refuseClaim({
+			class: "unsafe_custody", bead: found.id, actor: "UNKNOWN director",
+			next: `${found.id} is ${found.status}; consult the original disposition, do not reopen it to acquire work`,
+		});
+		if (request.operation === "start" && found.assignee === null) return refuseClaim({
+			class: "unsupported_native", bead: found.id, actor,
+			next: `use br update ${found.id} --claim --actor ${actor}; a status update alone does not atomically award ownership`,
+		});
+	}
+	return undefined;
+}
+
+export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
 	const cwd = field(event.input, "cwd");
@@ -390,38 +475,45 @@ export async function checkSelfClose(event: FlywheelToolCallEvent, deps: SelfClo
 	const callCwd = typeof cwd === "string" && cwd.trim()
 		? resolve(deps.sessionCwd, expandHome(cwd.trim(), deps.home))
 		: deps.sessionCwd;
-	const requests = closeRequests(command, callCwd, deps.home);
+	const requests = trackerRequests(command, callCwd, deps.home);
 	if (requests.length === 0) return undefined;
-	const envIdentities = IDENTITY_ENV.map(name => deps.env[name]?.trim()).filter((value): value is string => Boolean(value));
-	const pane = await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]);
+	const hasClose = requests.some(request => request.operation === "close");
+	const envIdentities = hasClose ? IDENTITY_ENV.map(name => deps.env[name]?.trim()).filter((value): value is string => Boolean(value)) : [];
+	const pane = hasClose ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
 	const warnings: string[] = [];
 	for (const request of requests) {
+		if (request.operation !== "close") {
+			const refusal = await checkNativeClaim(request, deps);
+			if (refusal !== undefined) return refusal;
+			continue;
+		}
 		const identities = [...new Set([...request.identities, ...envIdentities, ...pane])];
 		if (request.ids.length === 0) {
 			warnings.push(`\`${request.bin} close\` without an id closes the last-touched bead; its assignee was not checked`);
 			continue;
 		}
 		for (const id of request.ids) {
-			const found = await beadAssignee(deps.exec, request, id);
+			const found = await readBeadState(deps.exec, request, id);
 			if (!found.ok) {
-				if (found.why === `${id} has no assignee`) {
-					warnings.push(`self-close check skipped: ${found.why}`);
-					continue;
-				}
 				return {
 					block: true,
-					reason: `kit-flywheel-guard LOOKUP_REFUSED: cannot verify authorship of ${id}: ${found.why}. ` + `Resolve the lookup (or have someone else close it); the close was blocked, nothing was executed.`
+					reason: `kit-flywheel-guard LOOKUP_REFUSED: cannot verify authorship of ${id}: ${found.why}. Resolve the native lookup; no close was executed.`,
 				};
+			}
+			const assignee = found.assignee?.trim();
+			if (!assignee) {
+				warnings.push(`self-close check skipped: ${id} has no assignee`);
+				continue;
 			}
 			if (identities.length === 0) {
 				warnings.push(`self-close check skipped for ${id}: caller identity unknown (no --actor/--agent-name, BR_ACTOR, BR_AGENT_NAME, AGENT_NAME, or Agent Mail pane identity for TMUX_PANE)`);
 				continue;
 			}
-			const self = identities.find(name => name.toLowerCase() === found.assignee.toLowerCase());
+			const self = identities.find(name => name.toLowerCase() === assignee.toLowerCase());
 			if (self !== undefined) {
 				return {
 					block: true,
-					reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${id} is assigned to ${found.assignee}, which is you. `
+					reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id} is assigned to ${assignee}, which is you. `
 						+ "No self-certification (Flywheel Kernel invariant 9): report DONE with evidence (commit sha, exact commands, exit codes) "
 						+ "and let the director or an independent verifier run the close.",
 				};
@@ -450,13 +542,13 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	pi.on("tool_call", async (event, ctx) => {
 		try {
-			const result = await checkSelfClose(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
+			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
 			if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
 			return result;
 		} catch (error) {
-			const warning = `kit-flywheel-guard: self-close check failed (${error instanceof Error ? error.message : String(error)}); the call was allowed.`;
+			const warning = `kit-flywheel-guard LOOKUP_REFUSED: lifecycle check failed (${error instanceof Error ? error.message : String(error)}); mutation blocked, nothing was executed.`;
 			ctx.ui?.notify(warning, "warning");
-			return { additionalContext: warning };
+			return { block: true, reason: warning };
 		}
 	});
 }

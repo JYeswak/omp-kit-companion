@@ -29,7 +29,12 @@ export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDe
 
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
 export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction;
+/** A routing observation in the existing log, never a delivery or acceptance receipt. */
+export type FleetWatchPullAction = {
+	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
+	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
+};
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchPullAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -47,18 +52,38 @@ export interface ReadyRow {
 	issue_type: string;
 }
 
+/** Routing evidence, not authorization to act on a bead or a seat. */
+export interface PullRefusal {
+	class: "unsupported_native" | "unauthorized_hands" | "unsafe_custody" | "tool_read_failure";
+	bead: string | null;
+	actor: string;
+	next: string;
+	/** A native comment reference, never an authorization inferred from its wording. */
+	citation?: string;
+}
+
 export type PreassignVerdict =
-	| { ready: true }
-	| { ready: false; kind: "WRITE_LATCHED" | "NO_FREE_LEAF" | "UNKNOWN" | "NO_TRIAGE_PICK"; text: string };
+	| { ready: true; refusals?: readonly PullRefusal[] }
+	| { ready: false; kind: "WRITE_LATCHED" | "NO_FREE_LEAF" | "UNKNOWN" | "NO_TRIAGE_PICK"; text: string; refusals: readonly PullRefusal[] };
+
+export interface ReadyRowsResult {
+	rows: ReadyRow[] | null;
+	failure: string | null;
+}
 
 export interface PreassignProbes {
 	/** Unresolved recovery flag dirs, or null when unreadable (UNKNOWN). */
 	findRecoveryFlags: (repo: string) => string[] | null;
 	/** Ready rows plus the probe failure (null when rows read) for the UNKNOWN notice. */
-	listReadyRows: (repo: string, readyCommand?: string) => { rows: ReadyRow[] | null; failure: string | null };
+	listReadyRows: (repo: string, readyCommand?: string) => ReadyRowsResult;
 }
 
 const NON_LEAF_LABEL = /epic|umbrella/i;
+const WORKER_ROLE_EXCLUSIONS: Readonly<Record<string, true>> = { "human-gate": true, "owner-decision": true, "kind:process": true };
+
+function excludedWorkerLabel(label: string, configured: readonly string[]): boolean {
+	return WORKER_ROLE_EXCLUSIONS[label] === true || configured.includes(label);
+}
 const READY_TIMEOUT_MS = 15000;
 const READY_MAX_BUFFER = 16 * 1024 * 1024;
 const FAILURE_DETAIL_CHARS = 200;
@@ -95,10 +120,13 @@ export function runJson(argv: readonly string[], cwd: string | undefined, bounds
 	}
 }
 
-function defaultListReadyRows(repo: string, readyCommand?: string): { rows: ReadyRow[] | null; failure: string | null } {
+function defaultListReadyRows(repo: string, readyCommand?: string): ReadyRowsResult {
 	if (!existsSync(repo)) return { rows: null, failure: "repo missing" };
 	const argv = (readyCommand ?? "br ready --json").split(" ").filter((part) => part !== "");
-	if (argv[0] !== "br") return { rows: null, failure: "not a br command" };
+	if (argv[0] !== "br" || argv[1] !== "ready") return { rows: null, failure: "readiness requires a native br ready command" };
+	if (argv.includes("--no-db")) return { rows: null, failure: "JSONL-only output is not native claim-readiness authority" };
+	if (!argv.includes("--no-auto-import")) argv.push("--no-auto-import");
+	if (!argv.includes("--no-auto-flush")) argv.push("--no-auto-flush");
 	const outcome = runJson(argv, repo);
 	if (!outcome.ok) return { rows: null, failure: `br ready --json: ${describeRunFailure(outcome.failure)}` };
 	const rows = parseReadyRows(outcome.value);
@@ -149,7 +177,7 @@ export const defaultPreassignProbes: PreassignProbes = {
 function isClaimableLeaf(row: ReadyRow, skipLabels: readonly string[]): boolean {
 	if (row.status !== "open" || row.assignee !== null) return false;
 	if (row.issue_type.toLowerCase() === "epic") return false;
-	if (row.labels.some((label) => NON_LEAF_LABEL.test(label) || skipLabels.includes(label))) return false;
+	if (row.labels.some((label) => NON_LEAF_LABEL.test(label) || excludedWorkerLabel(label, skipLabels))) return false;
 	return true;
 }
 
@@ -174,28 +202,59 @@ export function preassignVerdict(
 /** Write-path gate shared by every nudge: grading and rework write the tracker too. */
 export function writeGate(sessionName: string, flags: string[] | null, recoveryKind: TrackerRecoveryResult["kind"] | null): PreassignVerdict {
 	if (flags === null) {
-		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (recovery flags unreadable); nudges resume when probes answer.` };
+		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (recovery flags unreadable); nudges resume when probes answer.`,
+			refusals: [{ class: "tool_read_failure", bead: null, actor: `UNKNOWN director for ${sessionName}`, next: "director restores a readable native write-readiness probe before any claim" }] };
 	}
 	if (flags.length > 0 && recoveryKind !== "RECOVERY_PROCEEDED") {
 		const names = flags.map((flag) => basename(flag)).join(", ");
-		return { ready: false, kind: "WRITE_LATCHED", text: `Fleet watch (WRITE_LATCHED): no nudge for ${sessionName} workers while the tracker write path is latched (${names}); recovery ${recoveryKind ?? "did not proceed"}; nudges resume when flags clear.` };
+		return { ready: false, kind: "WRITE_LATCHED", text: `Fleet watch (WRITE_LATCHED): no nudge for ${sessionName} workers while the tracker write path is latched (${names}); recovery ${recoveryKind ?? "did not proceed"}; nudges resume when flags clear.`,
+			refusals: [{ class: "unsafe_custody", bead: null, actor: `UNKNOWN director for ${sessionName}`, next: `director qualifies recovery and verifies that the native write latch clears: ${names}` }] };
 	}
 	return { ready: true };
 }
 
-function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: readonly string[], readyFailure: string | null = null): PreassignVerdict {
+function leafRefusal(row: ReadyRow, skipLabels: readonly string[], coordinator: string): PullRefusal | null {
+	if (isClaimableLeaf(row, skipLabels)) return null;
+	const custody = row.assignee !== null || row.status !== "open";
+	return {
+		class: custody ? "unsafe_custody" : "unsupported_native",
+		bead: row.id,
+		actor: row.assignee ?? coordinator,
+		next: custody
+			? `current holder or director resolves native custody and readiness for ${row.id}; do not take another actor's claim`
+			: `director resolves ${row.id} (${row.labels.join(", ") || row.issue_type}); only an eligible product leaf belongs in the worker pull`,
+	};
+}
+
+function noFreeLeafText(sessionName: string, rows: readonly ReadyRow[]): string {
+	let open = 0;
+	let held = 0;
+	let epics = 0;
+	for (const row of rows) {
+		if (row.status !== "open") continue;
+		open += 1;
+		if (row.assignee !== null) held += 1;
+		if (row.issue_type.toLowerCase() === "epic" || row.labels.some(label => NON_LEAF_LABEL.test(label))) epics += 1;
+	}
+	return `Fleet watch (NO_FREE_LEAF): no nudge for ${sessionName} workers: no claimable leaf (ready ${open}, held ${held}, epics ${epics}); nudges resume when a leaf frees.`;
+}
+
+function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: readonly string[], readyFailure: string | null = null, coordinator = `UNKNOWN director for ${sessionName}`): PreassignVerdict {
 	if (rows === null) {
 		const cause = readyFailure === null ? "ready rows unreadable" : `ready rows unreadable: ${readyFailure}`;
-		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (${cause}); nudges resume when probes answer.` };
+		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (${cause}); nudges resume when probes answer.`,
+			refusals: [{ class: "tool_read_failure", bead: null, actor: coordinator, next: `director repairs the native ready read; ${cause}` }] };
 	}
-	const open = rows.filter((row) => row.status === "open");
-	const leaves = open.filter((row) => isClaimableLeaf(row, skipLabels));
-	if (leaves.length === 0) {
-		const held = open.filter((row) => row.assignee !== null).length;
-		const epics = open.filter((row) => row.issue_type.toLowerCase() === "epic" || row.labels.some((label) => NON_LEAF_LABEL.test(label))).length;
-		return { ready: false, kind: "NO_FREE_LEAF", text: `Fleet watch (NO_FREE_LEAF): no nudge for ${sessionName} workers: no claimable leaf (ready ${open.length}, held ${held}, epics ${epics}); nudges resume when a leaf frees.` };
+	let claimable = false;
+	let refusals: PullRefusal[] | undefined;
+	for (const row of rows) {
+		const refusal = leafRefusal(row, skipLabels, coordinator);
+		if (refusal === null) claimable = true;
+		else (refusals ??= []).push(refusal);
 	}
-	return { ready: true };
+	if (claimable) return refusals === undefined ? { ready: true } : { ready: true, refusals };
+	return { ready: false, kind: "NO_FREE_LEAF", text: noFreeLeafText(sessionName, rows),
+		refusals: refusals ?? [{ class: "unsafe_custody", bead: null, actor: coordinator, next: "director supplies an eligible native product leaf; absence of supply is not permission to take protected work" }] };
 }
 type FleetWatchPaneState = { checks?: number; lastDecision?: number; lastSteeringCount?: number; parked?: true };
 type FleetWatchState = { version: 1; panes: Record<string, FleetWatchPaneState>; preassign?: Record<string, { kind: string; atMs: number }> };
@@ -337,7 +396,7 @@ export type PullPick =
 	| { kind: "REWORK"; id: string; implementer: string | null }
 	| { kind: "TRIAGE"; id: string; rank: number; epic: string | null }
 	| { kind: "READY"; id: string; reason: string; epic: string | null };
-export type PullChoice = { ready: true; pick: PullPick } | Extract<PreassignVerdict, { ready: false }>;
+export type PullChoice = { ready: true; pick: PullPick; refusals?: readonly PullRefusal[] } | Extract<PreassignVerdict, { ready: false }>;
 
 export interface PullProbes {
 	/** `.beads/policy.yaml`; the empty policy when absent, null when unparsable. */
@@ -350,6 +409,8 @@ export interface PullProbes {
 	triage: (repo: string) => TriageResult;
 	/** Agent Mail identity of a pane id (`am agents resolve-pane`), or null. */
 	resolveWorker: (repo: string, pane: string) => string | null;
+	/** Current blockers/owners from the same native namespace as readiness; never export authority. */
+	readNativeState: (repo: string, ids: readonly string[], coordinator: string | null, readyCommand?: string) => NativePullState;
 }
 
 const EMPTY_POLICY: TrackerPolicy = { statuses: [], transitions: {}, ready: ["open"] };
@@ -383,12 +444,13 @@ export function parsePolicy(value: unknown): TrackerPolicy | null {
 	return { statuses, transitions, ready };
 }
 
-/** Parked workflow states are never review work, even when the policy lets them close (FWDEFER1 rz5.102.1). */
-const PARKED_STATUSES: Record<string, true> = { deferred: true, blocked: true };
+/** Parked workflow states are never review work, even when they can close (ompkit-rz5.102.1
+ * FWDEFER1: jev deferred has a closed edge but is parked, not awaiting verification). */
+const PARKED_STATUSES = ["deferred", "blocked"];
 
 /** Statuses that hold work awaiting verification: reachable from in_progress, able to close, not ready work, never parked. */
 export function reviewStatuses(policy: TrackerPolicy): string[] {
-	return (policy.transitions.in_progress ?? []).filter((status) => status !== "closed" && !PARKED_STATUSES[status] && !policy.ready.includes(status) && (policy.transitions[status] ?? []).includes("closed"));
+	return (policy.transitions.in_progress ?? []).filter((status) => status !== "closed" && !policy.ready.includes(status) && !PARKED_STATUSES.includes(status) && (policy.transitions[status] ?? []).includes("closed"));
 }
 
 export function parseIssuesJsonl(text: string): TrackerIssue[] | null {
@@ -508,6 +570,16 @@ export function focusEpicOf(id: string, parents: ReadonlyMap<string, readonly st
 	return null;
 }
 
+export interface PullCoordinator {
+	actor: string | null;
+	session: string;
+	pane: string;
+}
+
+export type NativePullState =
+	| ({ ok: true } & NativePullFacts)
+	| { ok: false; reason: string };
+
 export interface PullInput {
 	sessionName: string;
 	/** The idle seat's identity; null when unresolved, which withholds grading (authorship unprovable). */
@@ -526,22 +598,152 @@ export interface PullInput {
 	skipLabels: readonly string[];
 	/** Beads already handed to another seat this tick. */
 	taken: ReadonlySet<string>;
+	/** Fresh native observations only; exported comments/edges are not decision or custody authority. */
+	nativeState?: NativePullState | undefined;
+	coordinator?: PullCoordinator;
+}
+
+interface NativeDecisionReference {
+	citation: string;
+	closed: boolean;
+}
+
+interface NativeIssueFacts {
+	nativeOwners: ReadonlyMap<string, string | null>;
+	decisions: ReadonlyMap<string, NativeDecisionReference>;
+}
+
+export interface NativePullFacts extends NativeIssueFacts {
+	blockers: ReadonlyMap<string, readonly string[]>;
+}
+
+function parseNativeBlockers(value: unknown): Map<string, readonly string[]> | undefined {
+	if (typeof value !== "object" || value === null || !("issues" in value) || !Array.isArray(value.issues)) return undefined;
+	const blockers = new Map<string, readonly string[]>();
+	for (const row of value.issues) {
+		if (typeof row !== "object" || row === null || Array.isArray(row) || !("id" in row) || typeof row.id !== "string" || !("blocked_by" in row)) return undefined;
+		const ids = stringList(row.blocked_by);
+		if (ids === null || ids.some(id => id === "")) return undefined;
+		blockers.set(row.id, ids);
+	}
+	return blockers;
+}
+
+function parseNativeIssues(value: unknown, coordinator: string | null): NativeIssueFacts | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const nativeOwners = new Map<string, string | null>();
+	const decisions = new Map<string, NativeDecisionReference>();
+	for (const row of value) {
+		if (typeof row !== "object" || row === null || Array.isArray(row) || !("id" in row) || typeof row.id !== "string"
+			|| !("status" in row) || typeof row.status !== "string" || nativeOwners.has(row.id)) return undefined;
+		const owner = "assignee" in row ? row.assignee : null;
+		if (owner !== null && typeof owner !== "string") return undefined;
+		nativeOwners.set(row.id, owner);
+		if (coordinator === null || !("comments" in row)) continue;
+		if (!Array.isArray(row.comments)) return undefined;
+		for (const comment of row.comments) {
+			if (typeof comment !== "object" || comment === null || Array.isArray(comment)
+				|| !("id" in comment) || typeof comment.id !== "number" || !Number.isInteger(comment.id) || comment.id <= 0
+				|| !("author" in comment) || typeof comment.author !== "string"
+				|| !("text" in comment) || typeof comment.text !== "string") return undefined;
+			if (comment.author !== coordinator || !comment.text.startsWith("DECISION:")) continue;
+			// A native reference, not generic DONE/PASS and not permission to execute.
+			decisions.set(row.id, { citation: `comment ${comment.id} by ${coordinator}`, closed: row.status === "closed" });
+		}
+	}
+	return { nativeOwners, decisions };
+}
+
+function triageRefusals(input: PullInput, coordinator: string, facts: NativePullFacts | undefined) {
+	if (!input.triage.usable) return undefined;
+	const observedOrExplained = new Set<string>();
+	for (const row of input.readyRows ?? []) observedOrExplained.add(row.id);
+	const state = input.nativeState;
+	let refusals: PullRefusal[] | undefined;
+	for (const id of input.triage.ids) {
+		if (observedOrExplained.has(id) || input.taken.has(id)) continue;
+		observedOrExplained.add(id);
+		const blockedBy = facts?.blockers.get(id);
+		if (blockedBy !== undefined && blockedBy.length > 0) {
+			for (const blocker of blockedBy) {
+				const owner = facts?.nativeOwners.get(blocker);
+				(refusals ??= []).push({
+					class: "tool_read_failure",
+					bead: id,
+					actor: typeof owner === "string" && owner !== "" ? owner : coordinator,
+					next: `stale export: native prerequisite ${blocker} must satisfy its original acceptance and receive a non-author close; then reread native ready for ${id}${typeof owner === "string" && owner !== "" ? "" : "; blocker owner UNKNOWN, director resolves the native controller"}`,
+				});
+			}
+			continue;
+		}
+		const owner = facts?.nativeOwners.get(id);
+		const why = input.readyRows === null ? "native ready UNKNOWN"
+			: state === undefined ? "native explanation UNKNOWN"
+				: !state.ok ? state.reason : "native ready does not include this exported candidate";
+		(refusals ??= []).push({
+			class: "tool_read_failure",
+			bead: id,
+			actor: typeof owner === "string" && owner !== "" ? owner : coordinator,
+			next: `verify native readiness of ${id}, not its export rank (${why}); keep unrelated eligible product work moving`,
+		});
+	}
+	return refusals;
+}
+
+function selectedPull(pick: PullPick, refusals: readonly PullRefusal[] | undefined): PullChoice {
+	if (refusals === undefined) return { ready: true, pick };
+	return { ready: true, pick, refusals };
+}
+
+/** Interpret current supply/evidence without choosing or awarding a task. */
+function workerSupplyVerdict(input: PullInput, rows: ReadyRow[] | null): PreassignVerdict {
+	const coordinator = input.coordinator?.actor ?? `UNKNOWN director for ${input.sessionName}${input.coordinator ? ` (${input.coordinator.session}:${input.coordinator.pane})` : ""}`;
+	const facts = input.nativeState?.ok ? input.nativeState : undefined;
+	const verdict = leafVerdict(input.sessionName, rows, input.skipLabels, input.readyFailure ?? null, coordinator);
+	const stale = triageRefusals(input, coordinator, facts);
+	let refusals = verdict.refusals;
+	if (stale !== undefined) {
+		const emptyFrontier = !verdict.ready && rows?.length === 0;
+		refusals = refusals === undefined || emptyFrontier ? stale : [...stale, ...refusals];
+	}
+	let unknownAuthors: PullRefusal[] | undefined;
+	for (const item of input.grading) {
+		if (item.author !== null || input.taken.has(item.id)) continue;
+		(unknownAuthors ??= []).push({
+			class: "unsafe_custody", bead: item.id, actor: coordinator,
+			next: `director resolves the actual implementer of ${item.id} before assigning an independent non-author verifier`,
+		});
+	}
+	if (unknownAuthors !== undefined) refusals = refusals === undefined ? unknownAuthors : [...refusals, ...unknownAuthors];
+	for (const refusal of refusals ?? []) {
+		if (refusal.bead === null) continue;
+		const decision = facts?.decisions.get(refusal.bead);
+		if (decision === undefined) continue;
+		refusal.citation = decision.citation;
+		if (refusal.class === "unsupported_native") {
+			refusal.actor = coordinator;
+			refusal.next = `director checks the current scope and applicability of ${decision.citation} for ${refusal.bead}; a later question is not new permission or a reason to reopen a resolved decision`;
+		}
+	}
+	if (refusals !== undefined) verdict.refusals = refusals;
+	return verdict;
 }
 
 export function choosePull(input: PullInput): PullChoice {
-	const grade = input.worker === null ? undefined : input.grading.find((item) => item.author !== input.worker && !input.taken.has(item.id) && !item.labels.some((label) => input.skipLabels.includes(label)));
+	const grade = input.worker === null ? undefined : input.grading.find((item) => item.author !== null && item.author !== input.worker && !input.taken.has(item.id) && !item.labels.some((label) => excludedWorkerLabel(label, input.skipLabels)));
 	if (grade !== undefined) {
 		const rework = (input.policy.transitions[grade.status] ?? []).includes(REWORK_LABEL) ? "set status rework" : `set status open, add label ${REWORK_LABEL}`;
 		return { ready: true, pick: { kind: "GRADE", id: grade.id, via: grade.via, author: grade.author, rework } };
 	}
 	// A rework item waits for its implementer while that implementer holds a live seat here.
-	const rework = input.rework.find((item) => !input.taken.has(item.id) && !item.labels.some((label) => input.skipLabels.includes(label))
+	const rework = input.rework.find((item) => !input.taken.has(item.id) && !item.labels.some((label) => excludedWorkerLabel(label, input.skipLabels))
 		&& (item.implementer === null || item.implementer === input.worker || !input.liveWorkers.has(item.implementer)));
 	if (rework !== undefined) return { ready: true, pick: { kind: "REWORK", id: rework.id, implementer: rework.implementer } };
 	const queued = new Set([...input.grading.map((item) => item.id), ...input.rework.map((item) => item.id)]);
 	const rows = input.readyRows?.filter((row) => !input.taken.has(row.id) && !queued.has(row.id)) ?? null;
-	const leaves = leafVerdict(input.sessionName, rows, input.skipLabels, input.readyFailure ?? null);
+	const leaves = workerSupplyVerdict(input, rows);
 	if (!leaves.ready) return leaves;
+	const refusals = leaves.refusals;
 	const leafRows = rows!.filter((row) => isClaimableLeaf(row, input.skipLabels));
 	const leafIds = new Set(leafRows.map((row) => row.id));
 	const parents = input.issues === null ? null : new Map(input.issues.map((issue) => [issue.id, issue.parents]));
@@ -551,20 +753,22 @@ export function choosePull(input: PullInput): PullChoice {
 		for (const [index, id] of input.triage.ids.entries()) {
 			if (!leafIds.has(id)) continue;
 			const epic = focusOn ? focusEpicOf(id, parents!, input.focus) : null;
-			if (!focusOn || epic !== null) return { ready: true, pick: { kind: "TRIAGE", id, rank: index + 1, epic } };
+			if (!focusOn || epic !== null) return selectedPull({ kind: "TRIAGE", id, rank: index + 1, epic }, refusals);
 		}
 		// FWFOCUS1 (ompkit-fp72.28): bv's top-N can hold no focus leaf while br ready does; take the first such leaf.
-		const fallback = focusOn ? leafRows.find((row) => focusEpicOf(row.id, parents!, input.focus) !== null) : undefined;
+		const fallback = focusOn ? leafRows.find((row) => focusEpicOf(row.id, parents!, input.focus) !== null) : leafRows[0];
 		if (fallback !== undefined)
-			return { ready: true, pick: { kind: "READY", id: fallback.id, reason: `bv top-${input.triage.ids.length} has no focus leaf`, epic: focusEpicOf(fallback.id, parents!, input.focus) } };
-		return { ready: false, kind: "NO_TRIAGE_PICK", text: `Fleet watch (NO_TRIAGE_PICK): ${input.sessionName} workers parked: nothing to grade or rework, and none of the ${input.triage.ids.length} bv --robot-triage recommendations is a claimable br ready leaf${focus}; set focus or unblock. Seats wake when an item becomes eligible.` };
+			return selectedPull({ kind: "READY", id: fallback.id, reason: `bv top-${input.triage.ids.length} has no ${focusOn ? "focus" : "eligible native"} leaf`, epic: focusOn ? focusEpicOf(fallback.id, parents!, input.focus) : null }, refusals);
+		return { ready: false, kind: "NO_TRIAGE_PICK", text: `Fleet watch (NO_TRIAGE_PICK): ${input.sessionName} workers parked: nothing to grade or rework, and none of the ${input.triage.ids.length} bv --robot-triage recommendations is a claimable br ready leaf${focus}; set focus or unblock. Seats wake when an item becomes eligible.`,
+			refusals: refusals ?? [{ class: "tool_read_failure", bead: null, actor: input.coordinator?.actor ?? `UNKNOWN director for ${input.sessionName}`, next: "director reconciles the exported triage with native ready eligibility and the selected focus" }] };
 	}
 	const reason = input.triage.usable ? "DAG unreadable (.beads/issues.jsonl)" : `bv unusable: ${input.triage.reason}`;
 	for (const row of leafRows) {
 		const epic = focusOn ? focusEpicOf(row.id, parents!, input.focus) : null;
-		if (!focusOn || epic !== null) return { ready: true, pick: { kind: "READY", id: row.id, reason, epic } };
+		if (!focusOn || epic !== null) return selectedPull({ kind: "READY", id: row.id, reason, epic }, refusals);
 	}
-	return { ready: false, kind: "NO_FREE_LEAF", text: `Fleet watch (NO_FREE_LEAF): ${input.sessionName} workers parked: nothing to grade or rework and no claimable br ready leaf${focus} (${reason}). Seats wake when an item becomes eligible.` };
+	return { ready: false, kind: "NO_FREE_LEAF", text: `Fleet watch (NO_FREE_LEAF): ${input.sessionName} workers parked: nothing to grade or rework and no claimable br ready leaf${focus} (${reason}). Seats wake when an item becomes eligible.`,
+		refusals: refusals ?? [{ class: "unsafe_custody", bead: null, actor: input.coordinator?.actor ?? `UNKNOWN director for ${input.sessionName}`, next: "director resolves the selected focus and supplies a native eligible product leaf" }] };
 }
 
 /** Null when the session may pull; otherwise why its workers are parked (round INSIGHT or pullEnabled false). */
@@ -731,6 +935,40 @@ export function loadFleetWatchConfig(path: string): FleetWatchConfig {
 	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions };
 }
 
+function readNativePullState(repo: string, ids: readonly string[], coordinator: string | null, readyCommand?: string): NativePullState {
+	if (!existsSync(repo)) return { ok: false, reason: "native inspection repo missing" };
+	const namespace: string[] = [];
+	const tokens = (readyCommand ?? "br ready --json").split(" ").filter(token => token !== "");
+	for (let index = 2; index < tokens.length; index += 1) {
+		const token = tokens[index]!;
+		if (token === "--no-db") return { ok: false, reason: "JSONL-only output cannot explain native claim eligibility" };
+		if (token === "--db") {
+			const path = tokens[++index];
+			if (path === undefined || path === "") return { ok: false, reason: "native inspection database scope missing" };
+			namespace.push("--db", path);
+		} else if (token.startsWith("--db=")) namespace.push("--db", token.slice(5));
+	}
+	const readFlags = ["--json", "--no-auto-import", "--no-auto-flush", ...namespace];
+	const blocked = runJson(["br", "blocked", "--limit", "0", ...readFlags], repo);
+	if (!blocked.ok) return { ok: false, reason: `br blocked: ${describeRunFailure(blocked.failure)}` };
+	const blockers = parseNativeBlockers(blocked.value);
+	if (blockers === undefined) return { ok: false, reason: "br blocked returned an unqualified native shape" };
+	const wanted = new Set(ids);
+	for (const id of ids) for (const blocker of blockers.get(id) ?? []) {
+		// Preserve typed external dependencies without pretending they are local issues.
+		if (!blocker.startsWith("external:")) wanted.add(blocker);
+	}
+	if (wanted.size === 0) return { ok: true, blockers, nativeOwners: new Map(), decisions: new Map() };
+	const observed = runJson(["br", "show", ...readFlags, "--", ...wanted], repo);
+	if (!observed.ok) return { ok: false, reason: `br show native subjects: ${describeRunFailure(observed.failure)}` };
+	const issues = parseNativeIssues(observed.value, coordinator);
+	if (issues === undefined) return { ok: false, reason: "br show returned an unqualified native issue/owner shape" };
+	for (const id of wanted) {
+		if (!issues.nativeOwners.has(id)) return { ok: false, reason: `br show omitted native subject ${id}` };
+	}
+	return { ok: true, blockers, ...issues };
+}
+
 export const defaultPullProbes: PullProbes = {
 	readPolicy: (repo) => {
 		const path = join(repo, ".beads", "policy.yaml");
@@ -752,13 +990,14 @@ export const defaultPullProbes: PullProbes = {
 		if (!existsSync(repo)) return { usable: false, reason: "repo missing" };
 		const started = performance.now();
 		const elapsed = (): number => Math.round(performance.now() - started);
-		const child = spawnSync("bv", ["--robot-triage"], { cwd: repo, encoding: "utf8", timeout: READY_TIMEOUT_MS, maxBuffer: READY_MAX_BUFFER });
+		const child = spawnSync("bv", ["--robot-triage", "--db", join(repo, ".beads", "issues.jsonl")], { cwd: repo, encoding: "utf8", timeout: READY_TIMEOUT_MS, maxBuffer: READY_MAX_BUFFER });
 		if (child.error) return { usable: false, reason: `bv --robot-triage did not run (${child.error.message}; status ${String(child.status)}, signal ${String(child.signal)}, ${elapsed()} ms)` };
 		if (child.status !== 0) return { usable: false, reason: `bv --robot-triage exited ${child.status} (signal ${String(child.signal)}, ${elapsed()} ms)${child.stderr ? `: ${child.stderr.split("\n", 1)[0]!.slice(0, FAILURE_DETAIL_CHARS)}` : ""}` };
 		try { return parseTriage(JSON.parse(child.stdout)); } catch { return { usable: false, reason: `bv --robot-triage printed non-JSON (status ${String(child.status)}, ${elapsed()} ms)` }; }
 	},
+	readNativeState: readNativePullState,
 	resolveWorker: (repo, pane) => {
-		if (!/^%\d+$/.test(pane)) return null;
+		if (pane.trim() === "") return null;
 		// am.agents.resolve-pane.v1 prints {schema_version, agent_name, pane_id, project_key, source, binding}.
 		const outcome = runJson(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], undefined);
 		if (!outcome.ok) return null;
@@ -794,6 +1033,54 @@ function admittedEffect(admission: AdmissionInput | undefined, action: string): 
 	if (admission === undefined) return true;
 	return admitActuator({ ...admission, packet: { ...admission.packet, action } }).verdict !== "REFUSE";
 }
+/** Query only native subjects that ranking or worker policy could not admit. */
+function nativeInspectionTargets(rows: readonly ReadyRow[] | null, triage: TriageResult, skipLabels: readonly string[]): string[] {
+	const targets = new Set<string>();
+	const nativeReady = new Set<string>();
+	for (const row of rows ?? []) {
+		nativeReady.add(row.id);
+		if (!isClaimableLeaf(row, skipLabels)) targets.add(row.id);
+	}
+	if (triage.usable) for (const id of triage.ids) if (!nativeReady.has(id)) targets.add(id);
+	return [...targets];
+}
+
+/** Persist a routing observation and attempt its admitted pointer; never claim delivery. */
+function recordPullNotice(
+	session: FleetWatchSession, action: FleetWatchPaneAction, choice: PullChoice,
+	deps: FleetWatchOnceDeps, watcher: FleetWatcher, actions: FleetWatchAction[],
+): boolean {
+	const refusals = choice.refusals;
+	const episode = refusals === undefined || refusals.length === 0 ? null : JSON.stringify(refusals);
+	if (!watcher.settlePreassignReport(session.session, episode)) return false;
+	if (refusals === undefined || refusals.length === 0) {
+		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "PREASSIGN_CLEARED", session: session.session, pane: action.pane, checks: action.checks, text: `pre-assignment clear for ${session.session}; nudges resume` }) + "\n");
+		return true;
+	}
+	const notice: FleetWatchPullAction = {
+		kind: choice.ready ? "PULL_WARNINGS" : choice.kind,
+		session: session.session, pane: action.pane, checks: action.checks,
+		text: choice.ready ? `Fleet watch: withheld native candidates for ${session.session}; eligible work continues.` : choice.text,
+		refusals,
+	};
+	appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...notice }) + "\n");
+	actions.push(notice);
+	if (!admittedEffect(deps.admission, "send")) {
+		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane: action.pane, text: "admission refused coordinator notice; no notice was sent" }) + "\n");
+		return true;
+	}
+	try {
+		deps.send(session.coordinatorSession, session.coordinatorPane, `${notice.text} Read ${refusals.length} structured refusal(s) in ${deps.logPath}.`);
+	} catch (error) {
+		appendFileSync(deps.logPath, JSON.stringify({
+			at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "NOTICE_UNPROVEN", session: session.session, pane: action.pane,
+			text: "coordinator notice raised; delivery UNKNOWN; no automatic resend and eligible work continues",
+			cause: error instanceof Error ? error.name : "non-error",
+		}) + "\n");
+	}
+	return true;
+}
+
 export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
 	if (!config.enabled) return [];
 	const statePath = deps.statePath === undefined
@@ -806,12 +1093,13 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 	const probes = deps.preassignProbes ?? defaultPreassignProbes;
 	const pull = deps.pullProbes ?? defaultPullProbes;
 	const flagCache = new Map<string, string[] | null>();
-	const rowsCache = new Map<string, ReadyRow[] | null>();
+	const rowsCache = new Map<string, ReadyRowsResult>();
 	const policyCache = new Map<string, TrackerPolicy | null>();
 	const statusCache = new Map<string, ReadyRow[] | null>();
 	const issuesCache = new Map<string, TrackerIssue[] | null>();
 	const triageCache = new Map<string, TriageResult>();
 	const seatCache = new Map<string, string | null>();
+	const nativeStateCache = new Map<string, NativePullState>();
 	const takenBySession = new Map<string, Set<string>>();
 	function cached<T>(cache: Map<string, T>, key: string, load: () => T): T {
 		if (!cache.has(key)) cache.set(key, load());
@@ -845,13 +1133,22 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const grading = gradingQueue(statusRows, issues, review);
 		const rework = reworkQueue(statusRows, readyRows, issues);
 		const seat = (seatPane: string) => cached(seatCache, `${session.repo}\0${seatPane}`, () => pull.resolveWorker(session.repo, seatPane));
+		const triage = cached(triageCache, session.repo, () => pull.triage(session.repo));
+		const targets = nativeInspectionTargets(readyRows, triage, session.skipLabels ?? []);
+		const coordinator: PullCoordinator = {
+			actor: targets.length === 0 ? null : seat(session.coordinatorPane),
+			session: session.coordinatorSession, pane: session.coordinatorPane,
+		};
+		const nativeState = targets.length === 0 ? undefined : cached(nativeStateCache,
+			`${session.repo}\0${session.readyCommand ?? ""}\0${coordinator.actor ?? ""}\0${targets.join("\0")}`,
+			() => pull.readNativeState(session.repo, targets, coordinator.actor, session.readyCommand));
 		return choosePull({
 			sessionName: session.session,
 			worker: grading.length > 0 || rework.length > 0 ? seat(pane) : null,
 			liveWorkers: new Set(rework.length > 0 ? session.workerPanes.flatMap((seatPane) => seat(seatPane) ?? []) : []),
 			grading,
 			rework,
-			triage: cached(triageCache, session.repo, () => pull.triage(session.repo)),
+			triage,
 			issues,
 			readyRows,
 			readyFailure: ready.failure,
@@ -859,6 +1156,8 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			focus: session.focusEpics ?? [],
 			skipLabels: session.skipLabels ?? [],
 			taken: takenBySession.get(session.session) ?? new Set(),
+			coordinator,
+			nativeState,
 		});
 	};
 	for (const session of config.sessions) for (const pane of session.workerPanes) {
@@ -877,22 +1176,15 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			let action = decision;
 			if (action.kind === "NUDGED" || action.kind === "ESCALATED") {
 				const choice = pullFor(session, pane);
+				if (recordPullNotice(session, action, choice, deps, activeWatcher, actions)) stateDirty = true;
 				if (!choice.ready) {
 					// NO-WORK: park the seat; it stays silent but is re-checked every idle tick.
 					if (choice.kind === "NO_FREE_LEAF" || choice.kind === "NO_TRIAGE_PICK") activeWatcher.setParked(session, pane, true);
 					stateDirty = true;
-					if (activeWatcher.settlePreassignReport(session.session, choice.kind)) {
-						appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: choice.kind, session: session.session, pane, checks: action.checks, text: choice.text }) + "\n");
-						deps.send(session.coordinatorSession, session.coordinatorPane, choice.text);
-						if (statePath !== null) saveFleetWatchState(statePath, activeWatcher.snapshot());
-					}
 					continue;
 				}
 				activeWatcher.setParked(session, pane, false);
 				stateDirty = true;
-				if (activeWatcher.settlePreassignReport(session.session, null)) {
-					appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "PREASSIGN_CLEARED", session: session.session, pane, checks: action.checks, text: `pre-assignment clear for ${session.session}; nudges resume` }) + "\n");
-				}
 				if (action.kind === "NUDGED") {
 					const taken = takenBySession.get(session.session) ?? new Set<string>();
 					taken.add(choice.pick.id);

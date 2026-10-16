@@ -83,6 +83,7 @@ function harness(config: FleetWatchConfig, current: { world: World }, busy: stri
 		readIssues: () => current.world.issues,
 		triage: () => current.world.triage,
 		resolveWorker: (_repo, pane) => current.world.seats[pane] ?? null,
+		readNativeState: () => ({ ok: false, reason: "synthetic selection fixture supplies no native custody observation" }),
 	};
 	const deps = {
 		capture: (_session: string, pane: string) => ({ code: 0, stdout: busy.includes(pane) ? "⠋ working" : "idle", stderr: "" }),
@@ -137,6 +138,20 @@ test("[grade] an unresolved seat identity is never handed a grading item (author
 	const [text] = run.worker("%1");
 	expect(text).not.toContain("x-9");
 	expect(text).toContain("take x-1 (bv --robot-triage #1, under x-epic)");
+});
+
+test("[grade] a known worker cannot verify unknown authorship while healthy product work remains", () => {
+	const choice = choosePull({
+		sessionName: "work", worker: "GreenWorker", liveWorkers: new Set(),
+		grading: [{ id: "x-unknown", status: "in_review", author: null, via: "in_review", labels: [] }],
+		rework: [], triage: { usable: true, ids: ["x-healthy"] }, issues: [],
+		readyRows: [leaf("x-healthy")], policy: OMP_KIT_POLICY, focus: [], skipLabels: [], taken: new Set(),
+		coordinator: { actor: "Director", session: "work", pane: "%54" },
+	});
+	expect(choice).toMatchObject({
+		ready: true, pick: { id: "x-healthy", kind: "TRIAGE" },
+		refusals: [{ bead: "x-unknown", class: "unsafe_custody", actor: "Director", next: expect.stringContaining("implementer") }],
+	});
 });
 
 test("[grade] DONE callbacks join the queue until another author answers", () => {
@@ -343,6 +358,20 @@ test("[shapes] captured bv, br and policy fixtures parse as the watcher reads th
 	expect(parseReadyRows(listed.issues)?.map((row) => `${row.id}:${row.status}:${row.assignee}`)).toEqual(["ompkit-114o:in_review:WhiteHarbor", "ompkit-1iku:in_review:LavenderFortress"]);
 	expect(reviewStatuses(OMP_KIT_POLICY)).toEqual(["in_review"]);
 	expect(reviewStatuses(UDS_POLICY)).toEqual(["in_review", "grading"]);
+	const JEV_POLICY: TrackerPolicy = {
+		statuses: ["open", "in_progress", "in_review", "rework", "blocked", "deferred", "closed"],
+		transitions: {
+			open: ["in_progress", "blocked", "deferred", "closed"],
+			in_progress: ["in_review", "open", "blocked", "deferred"],
+			in_review: ["closed", "rework"],
+			rework: ["in_progress"],
+			blocked: ["open", "in_progress"],
+			deferred: ["open", "closed"],
+			closed: ["open"],
+		},
+		ready: ["open", "rework"],
+	};
+	expect(reviewStatuses(JEV_POLICY)).toEqual(["in_review"]);
 	expect(OMP_KIT_POLICY.statuses).toContain("rework");
 	const issues = parseIssuesJsonl(readFileSync(join(fixtures, "issues.omp-kit-1iku.jsonl"), "utf8"))!;
 	expect(gradingQueue([], [{ ...issues[0]!, status: "in_progress" }], ["in_review"]).map((item) => item.author)).toEqual(["LavenderFortress"]);
@@ -471,9 +500,19 @@ test("[fallback] null ready rows carry the probe failure into the UNKNOWN notice
 	expect(text).toContain("timeout after 15000 ms");
 });
 
-test("[defer] parked states never count as review work (FWDEFER1 rz5.102.1)", () => {
-	const jevShaped = parsePolicy({ workflow: { statuses: ["open", "in_progress", "in_review", "deferred", "blocked", "closed"], transitions: { in_progress: ["in_review", "deferred", "blocked"], in_review: ["closed", "in_progress"], deferred: ["closed"], blocked: ["closed"] }, status_groups: { ready: ["open"] } } })!;
-	expect(reviewStatuses(jevShaped)).toEqual(["in_review"]);
-	expect(reviewStatuses(jevShaped)).not.toContain("deferred");
-	expect(reviewStatuses(jevShaped)).not.toContain("blocked");
+test("[defer] a close edge never promotes blocked or deferred work into the review queue", () => {
+	const policy = parsePolicy({
+		workflow: {
+			statuses: ["open", "in_progress", "in_review", "deferred", "blocked", "closed"],
+			transitions: {
+				in_progress: ["in_review", "deferred", "blocked"],
+				in_review: ["closed"],
+				deferred: ["closed"],
+				blocked: ["closed"],
+			},
+			status_groups: { ready: ["open"] },
+		},
+	});
+	if (policy === null) throw new Error("parked-work policy fixture is invalid");
+	expect(reviewStatuses(policy)).toEqual(["in_review"]);
 });
