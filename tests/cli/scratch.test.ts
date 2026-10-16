@@ -1389,3 +1389,33 @@ test("failure marker does not rename an open or replaced quarantine directory", 
   expect(existsSync(replacedPath)).toBe(true);
   expect(existsSync(`${replacedPath}.delete-${process.pid}`)).toBe(false);
 });
+
+test("lsof snapshot: a socket open-path holds its dir", () => {
+	const fab = takeLsofSnapshot(() => ({ code: 0, stdout: "p9\nn/cache/live.sock\n", stderr: "" }));
+	expect(snapshotClear(fab, "/cache")).toBe(false);
+	expect(snapshotClear(fab, "/other")).toBe(true);
+});
+
+test("lsof snapshot: a live unix socket holds its dir, a closed listener releases it", async () => {
+	// sun_path caps socket paths at 103 bytes; deeper harnesses (pre-push
+	// gate nesting) cannot bind one, so the live half is conditional while
+	// the static half above always runs.
+	const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "s"));
+	roots.push(dir);
+	const sock = join(dir, "s");
+	if (sock.length > 103) {
+		console.log(`SKIP live socket half: fixture path too long for sun_path: ${sock.length}`);
+		return;
+	}
+	const server = Bun.listen({ unix: sock, socket: { data() {} } });
+	try {
+		const held = takeLsofSnapshot(defaultRunner);
+		expect(held).not.toBeNull();
+		expect(snapshotClear(held, dir)).toBe(false);
+	} finally {
+		server.stop();
+	}
+	const released = takeLsofSnapshot(defaultRunner);
+	expect(released).not.toBeNull();
+	expect(snapshotClear(released, dir)).toBe(true);
+}, 60000);
