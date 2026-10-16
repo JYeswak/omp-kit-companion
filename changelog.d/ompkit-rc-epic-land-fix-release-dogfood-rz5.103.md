@@ -1,0 +1,1 @@
+- The reservation cache honors only covered results on read: a cached negative can never allow an edit, so a refusal followed by a grant inside the cache window is allowed on re-query.
