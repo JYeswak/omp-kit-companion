@@ -1,0 +1,273 @@
+{
+ "decision": "J-2026-10-16-04",
+ "rule": "one-time history repair of the unpublished companion range so 60366a8..63148c8^ carry src/plane-tern.ts",
+ "script": "~/.claude/skills/omp-kit-orchestration/scripts/history_repair.py (selftest 11/0)",
+ "base_origin_main": "033598f89e9b12c5449965ecf74e5e9baf024747",
+ "old_tip": "829265ae008a2004474f6bc3467b92c8d5fcd155",
+ "new_tip": "bd9aa740291e299d16024e83562fed7868e2784d",
+ "preserved_ref": "refs/preserve/history-repair/829265ae008a2004474f6bc3467b92c8d5fcd155",
+ "injected": {
+  "src/plane-tern.ts": "0ba1d3d638beb8ac83adf9050a3ddbdb7ad7a1a2"
+ },
+ "renamed_fragments": {
+  "changelog.d/7e9g.1.md": {
+   "old": "b613a3d30da8952ba7403715005e756795f187d5",
+   "new": "ecaeb9ae4686e93a8279448a5bab6260bf157435"
+  },
+  "changelog.d/ompkit-2giu.2.md": {
+   "old": "aabf569425eb9444b4afba5626109c88bdcc9978",
+   "new": "cc4bc450e03da40c797b955e6d43763f30111cf4"
+  },
+  "changelog.d/ompkit-774u.5.1.md": {
+   "old": "3a266cfc123e13362913f197c99c73cdabde2f71",
+   "new": "52f3aac76f05ab12cc224cee299a6dd0762c5def"
+  },
+  "changelog.d/ompkit-fp72.115.md": {
+   "old": "12a6312e700df1b57b826bc550abc70bc0037e00",
+   "new": "d3f55464429eec618af7d091846dafcb47f12c28"
+  },
+  "changelog.d/ompkit-kdbz.2.3.md": {
+   "old": "e418dc61a15ec7d62edb9ddb40db63ca348eed32",
+   "new": "bff7f1f0ed8d971ee8c857d85bfd071983d625f5"
+  },
+  "changelog.d/ompkit-o3da.1.md": {
+   "old": "cebaa3948fe6f029d163019e6dd2fcdaf375c1e6",
+   "new": "800a5f0b93c3ef53f9dfbbf376a73df60df1c9f9"
+  },
+  "changelog.d/ompkit-xa5s.20.md": {
+   "old": "b6bea2d873ac2a5293dd1927ce878b3d93a1242c",
+   "new": "531ec3669d2312bcaddb666398f4c7d98c30bf5a"
+  },
+  "changelog.d/rz5.138.md": {
+   "old": "d12e134031ea28812aa8f8a8d1495638577e4e17",
+   "new": "df504f6f989b01db48c1055e17ea16220d88e3d2"
+  }
+ },
+ "checks": {
+  "commit_imports_new_range": "exit 0",
+  "commit_imports_old_range_control": "exit 4 (60366a880b imports missing ./plane-tern.ts)",
+  "tip_tree_diff": "only the 8 renamed fragments"
+ },
+ "map": [
+  {
+   "old": "60366a880bff3abf0b6a36aa27d11e0b0c71cfee",
+   "new": "38991ddc6127c38e309acc4c8d590888f7cd6dd9",
+   "subject": "feat(tern): verified deliver plus disabled submitQueued in send envelope [test]"
+  },
+  {
+   "old": "c9b44451410a15850eb532458d99aead390ee656",
+   "new": "deab5caabfb941afa1bf33b91f70233529979f5c",
+   "subject": "fix(planning): reject decoy greens \u2014 16/0 CLI [pending]"
+  },
+  {
+   "old": "63148c83359022a81a8f2699f734a5313013cfdd",
+   "new": "cc0ad658f2202604a29e2825cd5ed46fe5828910",
+   "subject": "feat(tern): add session-backed observer ompkit-kdbz.2.3 [pending]"
+  },
+  {
+   "old": "5ffbc0840d32e9cb3cef1e59d8abaef517baf3ea",
+   "new": "04c43b0786f94e4dc71516015a962eec228c036e",
+   "subject": "test(tern): cover missing seat identity ompkit-kdbz.2.3 [pending]"
+  },
+  {
+   "old": "5f8e4495d6f5a135f61ff864392d5c7cf31919bf",
+   "new": "12c905b02eedabef01746d8a46b6b81b9394449b",
+   "subject": "docs(tern): Enter combo proven live; evsend has no CLI emit surface [test]"
+  },
+  {
+   "old": "fb812fe0064370b09832312b014c5afbb16ad480",
+   "new": "5a2ddc920f7a7ec0a948daefe4884d6d0f610617",
+   "subject": "docs(evidence): record three RED sessions and no-fix replay [pending]"
+  },
+  {
+   "old": "6bdcc1783ab9e5c9e9360de2655080221bf8b27d",
+   "new": "ba80a379e74f1bd248e5cb70f61d05120e826622",
+   "subject": "fix(hooks): the bead-id check ranks the repo's own ids first and reads the tracker read-only [test]"
+  },
+  {
+   "old": "c1f74a2f5bbfb4066d94ed21ab31bf158070a3c7",
+   "new": "140e3cea69aee79ccd6981704e972a1e4636da4b",
+   "subject": "fix(ci): stale rows UNAVAILABLE, 14/0 [pending] ompkit-o3da.1"
+  },
+  {
+   "old": "fc6e950a07196b6c61b9c927bef4d25635bd4718",
+   "new": "02ed6b5f02aac8e824bf8213aa1bfebbb1935d1c",
+   "subject": "fix(push): refuse pushes of commits not on the shared main [test]"
+  },
+  {
+   "old": "fb09aba6ca7fa5e6ebb638396d704ed14243e78d",
+   "new": "7bc240bad0280dc98c7e7b4c4a0b1d1b268e7dc9",
+   "subject": "test(commit1): hermetic chain-refusal cases in the installer test [test]"
+  },
+  {
+   "old": "8651d1f50f6963e85b57f814deb107786a9bc0b9",
+   "new": "b24743c0a80ef186a1a70f6c3232f5c70c5b753b",
+   "subject": "feat(tern): refuse bare /goal in send envelope; goal delivery requires /goal set BODY [test]"
+  },
+  {
+   "old": "8bafed96ce50533afdeee3bb5eddf921008acebd",
+   "new": "a8457a81619070ea8f6dedac0a9ca0403de5a781",
+   "subject": "fix(save): retire the private-index candidate route from the save guard and the rules [test]"
+  },
+  {
+   "old": "dcb923e04692442bb440b7428978134cd8db68f3",
+   "new": "4105d5ac9f8ee839c935dc0e7e064743f0fddc51",
+   "subject": "test(ci): stale CLI exit contract 16/0 [pending] ompkit-o3da.1"
+  },
+  {
+   "old": "77a4dc4ae9e693efabdc1869dfd98a6e4f680c91",
+   "new": "c0e9b2e37049783463079b4c50e72d2e110dcbc2",
+   "subject": "test(rules): land kit-rea-heavy-summary fire/quiet cases [test]"
+  },
+  {
+   "old": "0a0ec03eb4d5a672b69bb630272e78c02e51755e",
+   "new": "5a6580568cdef1da2432766502176871aadadcd6",
+   "subject": "fix(pull): retain native custody and claim evidence [pending]"
+  },
+  {
+   "old": "4e6793c0780410ae067ad28ab5a870ed8bbe3cd7",
+   "new": "175c50fe04a0871d6ea316163982d9c418299342",
+   "subject": "docs(chief): retain bounded RED cycle [pending]"
+  },
+  {
+   "old": "8c44b5a73f8c6ca0d8a9c8efbcd50c06dd0e2eee",
+   "new": "f9293a649f1d2c19f78649fd59a23af3551c9ac9",
+   "subject": "fix(ompkit-xa5s.20): guard tracker writes with Agent Mail leases [selftest]"
+  },
+  {
+   "old": "a74af4acd0152262e1b9332d26207ecaa4ffdccb",
+   "new": "19cf4eaa9d5caa3c40f620b25759a759807fa954",
+   "subject": "fix(tern): parse native v3 toolResult records and metadata chain [test]"
+  },
+  {
+   "old": "70bc8e570f887cfb86e856985f7857727a48b75b",
+   "new": "8940f1f545023aa3e3a07cc3ff9aaf647a9407ee",
+   "subject": "fix(tern): refuse toolResult with unsupported async state as UNKNOWN [test]"
+  },
+  {
+   "old": "90dde4fcc49462065fb8011ae97fb20f15eefc6d",
+   "new": "26dad9c5913f874c076f266c045b4c9c59c895a0",
+   "subject": "fix(tern): reconcile explicit completed/cancelled toolResults, refuse rest [test]"
+  },
+  {
+   "old": "fe4bc9a2a4081182fd2823007934f9ff74581f23",
+   "new": "e8543ce004c5d8e498c5f6d19b70b649b3ed7872",
+   "subject": "feat(cli): integrate coherent cohort [pending]"
+  },
+  {
+   "old": "8717146fe98ecf9ba42b203dcacfe587033c618b",
+   "new": "c47e788c95937950cd472abff8f3869c25d61468",
+   "subject": "fix(tern): refuse toolResults with conflicting id aliases [test]"
+  },
+  {
+   "old": "547df9672f90864d6efbd050a572320e11d5ddd7",
+   "new": "897048e0f82977f80a497b98b36ba53180dc769f",
+   "subject": "docs(changelog): attribute coherent CLI source unit [pending]"
+  },
+  {
+   "old": "55f4023dcbd62dce872657c9a4474e2692070ad3",
+   "new": "d761975b06566c34044ee571212713eb4b265383",
+   "subject": "docs(changelog): use supported security-fix category [pending]"
+  },
+  {
+   "old": "448587ffa2a8e9ade29beda7d32a9f1724f119e6",
+   "new": "b13dd54c02447ea06f932bf5f6c39e06924e3337",
+   "subject": "docs(changelog): cover saved Tern and admission changes [pending]"
+  },
+  {
+   "old": "2122f1f4c98d20181a891d46a3c976c41c229680",
+   "new": "be98d6cb48bdf68a3605d7f19108d6dd986b4481",
+   "subject": "fix(hooks): admit exact native tracker preservation [test]"
+  },
+  {
+   "old": "975259244885c1dd8719d3392ea626e07f261500",
+   "new": "a43df464f76c6ab96a5e91aa226fe35ac1897386",
+   "subject": "fix(service): supervise scheduled scratch work [pending]"
+  },
+  {
+   "old": "fa6c2d22aa0590a343ea494358c6e84c7b8d588e",
+   "new": "d4e0df6ae3a04fbe90f95ce80b90a473caa7c046",
+   "subject": "docs(changelog): name supervised integration successor [pending]"
+  },
+  {
+   "old": "245da9821a3b5c4de9f55c0844edef290c7cc342",
+   "new": "21f62822bd72aa9ba1f6b7886b48668a365cb7f0",
+   "subject": "feat: guard br create (ompkit-774u.5.1) [pending]"
+  },
+  {
+   "old": "097aab7c87c3f4bc27d3a20f7ef0d9fd8988e919",
+   "new": "abeb256bbe83632c894285dd74f6956397f66e50",
+   "subject": "fix(tern): native admission turn with retain-pending uncertainty [pending]"
+  },
+  {
+   "old": "0a8f46c572764ac99868f086bd4b2c3b0763a9bf",
+   "new": "d5cd33ddfa9b1fad7494ddae9662d6fc64cf1081",
+   "subject": "fix: bind land ownership to native Herdr panes (ompkit-2giu.2) [pending]"
+  },
+  {
+   "old": "721f33fcbbb8eab509e99c4a11b434b95a25b4af",
+   "new": "e0e3b7eee06cc7d5cd1d8e05b1631287873e498a",
+   "subject": "fix(tern): typed per-editor admission, identity-keyed pending, portable tern path [pending]"
+  },
+  {
+   "old": "a11e1af72f9f4cb2e5c2b6d2787080887020911a",
+   "new": "7096647c80c74697d6b6fa566846346b4956252c",
+   "subject": "fix(tern): observe-identify binding fence plus candidate type repairs [pending]"
+  },
+  {
+   "old": "e149702e2146333ed27aeff0f6c0f8fe0a1166ab",
+   "new": "426002c4a0059957a253ef0e3f641424942c4823",
+   "subject": "fix(test): bind MCP fixtures to verified installed SDK [test]"
+  },
+  {
+   "old": "85f327b25932e3c5b9b8e11f1c46a866b2c7fd40",
+   "new": "e1926915780803e549eeb1a81b522f04100720f1",
+   "subject": "docs(changelog): name 0a8f46c in its HERDRLAND fragment [selftest]"
+  },
+  {
+   "old": "09bd00d098f6a54363020c1a4fc4436ee9201f23",
+   "new": "410d083e90d5b4eb1d74e4a5a4bcabcc049773c7",
+   "subject": "docs(changelog): name 245da98 in its CREATEBUDGET1 fragment [selftest]"
+  },
+  {
+   "old": "ab733548a567c62b8b7ca49188254b0aef04f7d9",
+   "new": "849bd116d61cac221bc50c41ea5cdd30031c6e10",
+   "subject": "fix(planning): name acceptance prose proxy honestly (ompkit-rc-epic-land-fix-release-dogfood-rz5.123.4) [test]"
+  },
+  {
+   "old": "13c4d5d2328ca79d14e78d867cdb630424a5bfca",
+   "new": "8aac1a1f872811dea7be3ac3465a3fc1e2350181",
+   "subject": "fix(test): isolate filesystem failure from host census [test]"
+  },
+  {
+   "old": "15f1481b05c3668a87e6dbc914c02b17f0b6d7ac",
+   "new": "7ef7bef173293f1e326c9d684872dc1e7af169ca",
+   "subject": "ompkit-ae2u: Wire lessons and checkin through shared-main publication [test]"
+  },
+  {
+   "old": "ef508fba61e8a2a90a4463a1b7b3f626b7ec6a2f",
+   "new": "be800efcb26f78b3236d2b9716b0b82f00800446",
+   "subject": "fix: hash gh credential fingerprint output (ompkit-fp72.87) [pending]"
+  },
+  {
+   "old": "6ef3a8bd7b68934c17f043bbd8ea84dd12d84191",
+   "new": "099109e3861d2dd1b2777f3ce0d251259af16b3f",
+   "subject": "test(live): fire and near-miss scenarios for kit-rea-heavy-summary [test]"
+  },
+  {
+   "old": "5dff6fc0d7c885e9685b320bde53f4fa82f3784d",
+   "new": "42d8f60f7f3ea233a73dbc944dc3e4cac9fc99e1",
+   "subject": "fix(fleet): adopt frontier checks computing open unblocked tasks [test]"
+  },
+  {
+   "old": "362d59808daba5948dab9775f453a588abbcb342",
+   "new": "94545deac0a40ea9243ca79847969999c9eaa30e",
+   "subject": "fix(release): drop workflow-level concurrency so publish survives trains [test]"
+  },
+  {
+   "old": "829265ae008a2004474f6bc3467b92c8d5fcd155",
+   "new": "bd9aa740291e299d16024e83562fed7868e2784d",
+   "subject": "ompkit-ae2u: Mark record transport pending for normal verification hooks [test]"
+  }
+ ]
+}
