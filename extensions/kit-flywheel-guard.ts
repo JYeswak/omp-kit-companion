@@ -419,6 +419,90 @@ export async function readBeadState(exec: FlywheelExec, request: TrackerRequest,
 	}
 }
 
+const FINITE_SERVICE_VERBS: Record<string, true> = {
+	build: true, check: true, clippy: true, compile: true, lint: true,
+	test: true, typecheck: true, validate: true, verify: true, vet: true,
+};
+const FINITE_SERVICE_RUNNERS: Record<string, true> = {
+jest: true, mocha: true, pytest: true, ruff: true, shellcheck: true, tsc: true, vitest: true,
+};
+
+function serviceCommandIsFinite(command: string): boolean {
+	for (const words of shellCommands(command)) {
+		let executableIndex = 0;
+		while (executableIndex < words.length && (isAssignment(words[executableIndex]!) || WRAPPERS[words[executableIndex]!.toLowerCase()])) executableIndex += 1;
+		const executable = words[executableIndex];
+		if (!executable) continue;
+		const name = executable.slice(executable.lastIndexOf("/") + 1).toLowerCase();
+		const args = words.slice(executableIndex + 1).map(word => word.toLowerCase());
+		if (args.includes("--watch") || args.includes("--watchall") || args.includes("-w")) continue;
+		if (FINITE_SERVICE_RUNNERS[name] === true) return true;
+		if (name === "bun" && (args[0] === "test" || args[0] === "run" && FINITE_SERVICE_VERBS[args[1] ?? ""] === true)) return true;
+		if ((name === "npm" || name === "pnpm" || name === "yarn") &&
+			(args[0] === "test" || args[0] === "run" && FINITE_SERVICE_VERBS[args[1] ?? ""] === true)) return true;
+		if ((name === "cargo" || name === "go" || name === "make") && FINITE_SERVICE_VERBS[args[0] ?? ""] === true) return true;
+	}
+	return false;
+}
+
+function hasServiceReadiness(ready: unknown): boolean {
+	const log = field(ready, "log");
+	const port = field(ready, "port");
+	return typeof log === "string" && log.trim().length > 0
+		|| typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function bashAdmissionRefusal(code: string, command: string, detail: string, next: string): FlywheelToolCallResult {
+	const executable = shellCommands(command)[0]?.[0]?.split("/").at(-1) ?? "unknown";
+	const digest = createHash("sha256").update(command).digest("hex");
+	return {
+		block: true,
+		reason: JSON.stringify({
+			guard: "kit-flywheel-guard",
+			code,
+			command: { executable, sha256: digest },
+			detail,
+			next,
+		}),
+	};
+}
+
+/** Refuse finite Bash work that explicitly disables the OMP deadline. */
+export function checkBashAdmission(event: FlywheelToolCallEvent): FlywheelToolCallResult | undefined {
+	if (event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string" || command.trim().length === 0) return undefined;
+	const name = field(event.input, "name");
+	const service = typeof name === "string" && name.trim().length > 0;
+	const async = field(event.input, "async") === true;
+	const timeout = field(event.input, "timeout");
+	if (service) {
+		if (async || timeout !== undefined) return bashAdmissionRefusal(
+			"SERVICE_MODE_CONFLICT", command, "named services use readiness and lifecycle, not finite async or timeout fields",
+			"remove async and timeout, then provide a readiness condition for a long-lived service",
+		);
+		if (serviceCommandIsFinite(command)) return bashAdmissionRefusal(
+			"FINITE_SUITE_AS_SERVICE", command, "a recognized finite build, test, or validation command cannot use unbounded service mode",
+			"run finite work with its native positive deadline; reserve named services for long-lived commands",
+		);
+		if (!hasServiceReadiness(field(event.input, "ready"))) return bashAdmissionRefusal(
+			"SERVICE_READINESS_REQUIRED", command, "a named service needs a log or port readiness condition and native lifecycle",
+			"provide ready.log or a valid ready.port; finite work must use the finite-command path",
+		);
+		return undefined;
+	}
+	if (timeout === undefined) return undefined; // OMP 18.11.1 defaults finite Bash commands to 300 seconds.
+	if (typeof timeout !== "number" || !Number.isFinite(timeout)) return bashAdmissionRefusal(
+		"FINITE_JOB_DEADLINE_UNKNOWN", command, "the effective finite-command deadline cannot be determined",
+		"pass a positive numeric timeout or omit it to use OMP's bounded default",
+	);
+	if (timeout === 0) return bashAdmissionRefusal(
+		"FINITE_JOB_NO_DEADLINE", command, "timeout zero disables the finite-command deadline, including managed background execution",
+		"pass a positive timeout in seconds or use named service mode with readiness and lifecycle",
+	);
+	return undefined;
+}
+
 export interface TrackerMutationDeps {
 	exec: FlywheelExec;
 	env: Record<string, string | undefined>;
@@ -542,6 +626,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	pi.on("tool_call", async (event, ctx) => {
 		try {
+			const admission = checkBashAdmission(event);
+			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
 			if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
 			return result;

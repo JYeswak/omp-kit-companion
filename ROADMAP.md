@@ -82,6 +82,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | `test --full` reports an isolated OMP trust-guard refusal as an actionable `NOT_RUN` stage before CLI cases run; trust policy is unchanged | ompkit-i5oe |
 | Advisor restoration persists intent and pre-run WATCHDOG evidence; resume reconciles without a duplicate `/advisor on` | ompkit-rhy9.4 |
 | Herdr land binds the native pane identity to project-scoped Agent Mail; installed Herdr consumer proof remains blocked pending an authorized pane and candidate route | ompkit-2giu.2 (BLOCKED) |
+| Finite Bash admissions reject disabled deadlines and known finite suites cannot be labeled as services; owner/job/proc cancellation verification remains blocked on native lifecycle evidence | ompkit-xa5s.22 (BLOCKED) |
 
 ## Next
 

@@ -99,6 +99,11 @@ async function toolCall(h: FakeHost, cwd: string, command: string): Promise<Flyw
 	return result as FlywheelToolCallResult | undefined;
 }
 
+async function bashInput(h: FakeHost, input: Record<string, unknown>): Promise<FlywheelToolCallResult | undefined> {
+	const [result] = await h.emit("tool_call", { toolCallId: "c1", toolName: "bash", input }, h.ctx("/repo"));
+	return result as FlywheelToolCallResult | undefined;
+}
+
 // --- COMPACTION_REREAD ---------------------------------------------------
 
 test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.md and br show", async () => {
@@ -418,4 +423,28 @@ test("PULLADMIT1: ownership whitespace follows native same-holder claim semantic
 		expect(claimed.code).toBe(0);
 		expect(JSON.parse(claimed.stdout)).toEqual(expect.arrayContaining([expect.objectContaining({ id, assignee: "Worker", status: "in_progress" })]));
 	}
+});
+
+test("BGDEADLINE1: finite async bash jobs reject timeout zero and accept native bounded defaults", async () => {
+	const h = await host();
+	const unsafe = await bashInput(h, { command: "bun test", async: true, timeout: 0 });
+	expect(unsafe?.block).toBe(true);
+	expect(unsafe?.reason).toContain("FINITE_JOB_NO_DEADLINE");
+	expect(unsafe?.reason).toContain("positive timeout");
+	expect((await bashInput(h, { command: "cargo test", async: false, timeout: 0 }))?.block).toBe(true);
+	expect((await bashInput(h, { command: "bun test", async: true, timeout: "0" }))?.reason).toContain("FINITE_JOB_DEADLINE_UNKNOWN");
+	expect(await bashInput(h, { command: "bun test", async: true, timeout: 30 })).toBeUndefined();
+	expect(await bashInput(h, { command: "bun test", async: true })).toBeUndefined();
+	expect(h.execs).toHaveLength(0);
+});
+
+test("BGDEADLINE1: named services need readiness and cannot disguise a finite suite", async () => {
+	const h = await host();
+	const finite = await bashInput(h, { command: "cargo test", name: "tests", ready: { log: "completed" } });
+	expect(finite?.block).toBe(true);
+	expect(finite?.reason).toContain("FINITE_SUITE_AS_SERVICE");
+	const unready = await bashInput(h, { command: "bun run dev", name: "web" });
+	expect(unready?.block).toBe(true);
+	expect(unready?.reason).toContain("SERVICE_READINESS_REQUIRED");
+	expect(await bashInput(h, { command: "bun run dev", name: "web", ready: { port: 3000 } })).toBeUndefined();
 });
