@@ -325,6 +325,8 @@ jobs:
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Install the fleet disk observer (sbh) that heavy admission requires
+        run: sh scripts/ci-install-sbh.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
@@ -387,6 +389,8 @@ jobs:
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Install pinned TypeScript LSP for native route proof
         run: npm install --global typescript-language-server@5.1.3 typescript@5.9.3
+      - name: Install the fleet disk observer (sbh) that heavy admission requires
+        run: sh scripts/ci-install-sbh.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: candidate-${{ matrix.platform }}
