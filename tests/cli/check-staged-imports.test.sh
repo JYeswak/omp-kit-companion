@@ -85,5 +85,21 @@ git -C "$R" add src/app/other.ts
 out=$(commit "$R" -m "[test] parent import missing" -m "[no-changelog] fixture")
 check "$?" "1" "parent-missing-refused" "$out" "imports missing ../lib/nope.ts (from src/app/other.ts)"
 
+# 6. NodeNext emitted extensions resolve to their TypeScript sources
+#    (./b.js -> b.ts, ./m.mjs -> m.mts, ./v.jsx -> v.tsx); a .js spec with
+#    no source behind it is still refused.
+R=$(new_repo nodenext)
+printf 'export const b = 1;\n' > "$R/b.ts"
+printf 'export const m = 1;\n' > "$R/m.mts"
+printf 'export const v = 1;\n' > "$R/v.tsx"
+printf 'import { b } from "./b.js";\nimport { m } from "./m.mjs";\nimport { v } from "./v.jsx";\nconsole.log(b, m, v);\n' > "$R/a.ts"
+git -C "$R" add a.ts b.ts m.mts v.tsx
+out=$(commit "$R" -m "[test] nodenext imports" -m "[no-changelog] fixture")
+check "$?" "0" "nodenext-source-pass" "x" "x"
+printf 'import { c } from "./c.js";\nconsole.log(c);\n' > "$R/d.ts"
+git -C "$R" add d.ts
+out=$(commit "$R" -m "[test] nodenext missing" -m "[no-changelog] fixture")
+check "$?" "1" "nodenext-missing-refused" "$out" "imports missing ./c.js (from d.ts)"
+
 printf 'check-staged-imports: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

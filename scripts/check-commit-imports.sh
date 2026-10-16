@@ -47,6 +47,9 @@ resolve_spec() {
 	esac
 }
 
+# exists_at PATH: the commit being judged ($sha) carries PATH.
+exists_at() { git -C "$REPO" cat-file -e "$sha:$1" 2>/dev/null; }
+
 # All findings accumulate in $OUT (pipelines run in subshells, so no
 # early return across a pipe); a non-empty file is the refusal.
 check_commit() {
@@ -62,11 +65,22 @@ check_commit() {
 			target=$(resolve_spec "$dir" "$spec") || continue
 			found=""
 			for candidate in "$target" "$target.ts" "$target.tsx" "$target.mts" "$target/index.ts"; do
-				if git -C "$REPO" cat-file -e "$sha:$candidate" 2>/dev/null; then
+				if exists_at "$candidate"; then
 					found=1
 					break
 				fi
 			done
+			# NodeNext/Bundler sources import the emitted extension; TypeScript
+			# resolves it to the source: ./x.js -> x.ts, x.tsx or x.d.ts;
+			# ./x.jsx -> x.tsx; ./x.mjs -> x.mts or x.d.mts; ./x.cjs -> x.cts or x.d.cts.
+			if [ -z "$found" ]; then
+				case "$target" in
+					*.js) stem=${target%.js}; for candidate in "$stem.ts" "$stem.tsx" "$stem.d.ts"; do exists_at "$candidate" && { found=1; break; }; done ;;
+					*.jsx) exists_at "${target%.jsx}.tsx" && found=1 ;;
+					*.mjs) stem=${target%.mjs}; for candidate in "$stem.mts" "$stem.d.mts"; do exists_at "$candidate" && { found=1; break; }; done ;;
+					*.cjs) stem=${target%.cjs}; for candidate in "$stem.cts" "$stem.d.cts"; do exists_at "$candidate" && { found=1; break; }; done ;;
+				esac
+			fi
 			if [ -z "$found" ]; then
 				printf '%s imports missing %s (from %s)\n' "$sha" "$spec" "$file" >> "$OUT"
 			fi
