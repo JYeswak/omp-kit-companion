@@ -21,6 +21,7 @@ Triggers: "restart the fleet", "fleet-wide restart", "restart all agents on the 
 - **Installing or upgrading OMP itself.** The kit never installs OMP. Routing: `omp-kit doctor`, operator.
 - **A herdr pane whose foreground argv is not `omp`.** Shell panes and `__omp_worker*` stay out. An `omp` herdr pane is in the run (rule 16). It is not a tmux session named `skill-library-growth`.
 - **Planning the next work.** Re-dispatch here only sends the first message. Routing: `flywheel-end-to-end`, `jeff-planning-enhanced`.
+- **A crashed omp process.** Tern 0.8.4 does not restart a `kill -9` omp in either launch mode (block-program tab shows program zsh + command omp; typed-into-zsh tab keeps only its live shell) — measured 2026-10-16, omp 18.11.1, no new pid within 60 s (ompkit-kdbz.2.10). Re-dispatch manually; a live shell is never a resume.
 
 ## Hard rules (each one broke on a real restart)
 
