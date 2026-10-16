@@ -8,6 +8,9 @@
 # The staged-imports member (scripts/check-staged-imports.sh, with
 # check-commit-imports.sh beside it) is always installed: it refuses a commit
 # whose staged files import a path that is neither staged nor committed.
+# The commit-notes member (scripts/check-commit-notes.sh) is always installed:
+# it refuses a shipped-path commit the push notes gate would refuse (no single
+# Bead: trailer with a changelog.d fragment, and no [no-changelog] reason).
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -116,7 +119,8 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
 		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
 		"hooks.d/pre-commit/45-omp-kit-staged-imports scripts/check-staged-imports.sh" \
-		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh"; do
+		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh" \
+		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
@@ -308,6 +312,14 @@ install_staged_imports() {
 	printf 'installed staged-imports member: %s\n' "$member"
 }
 
+# install_commit_notes: the commit-msg member applies the push notes gate's
+# trailer+fragment rule to the staged tree; it runs after the bead-id member.
+install_commit_notes() {
+	member="$(chain_dir commit-msg)/46-omp-kit-commit-notes"
+	place "$KITROOT/scripts/check-commit-notes.sh" "$member" +x
+	printf 'installed commit-notes member: %s\n' "$member"
+}
+
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
 	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
@@ -346,6 +358,7 @@ fi
 
 ensure_chain commit-msg
 install_commit_msg
+install_commit_notes
 ensure_chain pre-push
 install_on_main
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push

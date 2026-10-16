@@ -148,6 +148,14 @@ grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/45-omp-kit-s
 ok "$?" "0" "check-missing-staged-imports-named"
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "check-missing-reinstall-rc"
+# 5c. --check names a missing commit-notes commit-msg member
+rm -f "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-notes" 2>&1
+ok "$?" "3" "check-missing-commit-notes-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" "$TMP/o-missing-notes"
+ok "$?" "0" "check-missing-commit-notes-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-notes-reinstall-rc"
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
@@ -236,7 +244,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"

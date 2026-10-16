@@ -78,11 +78,11 @@ mkdir -p "$R/src/lib" "$R/src/app"
 printf 'export const u = 1;\n' > "$R/src/lib/util.ts"
 printf 'import { u } from "../lib/util.ts";\nconsole.log(u);\n' > "$R/src/app/main.ts"
 git -C "$R" add src
-out=$(commit "$R" -m "[test] parent import")
+out=$(commit "$R" -m "[test] parent import" -m "[no-changelog] fixture")
 check "$?" "0" "parent-valid-pass" "x" "x"
 printf 'import { n } from "../lib/nope.ts";\nconsole.log(n);\n' > "$R/src/app/other.ts"
 git -C "$R" add src/app/other.ts
-out=$(commit "$R" -m "[test] parent import missing")
+out=$(commit "$R" -m "[test] parent import missing" -m "[no-changelog] fixture")
 check "$?" "1" "parent-missing-refused" "$out" "imports missing ../lib/nope.ts (from src/app/other.ts)"
 
 printf 'check-staged-imports: %s pass %s fail\n' "$pass" "$fail"
