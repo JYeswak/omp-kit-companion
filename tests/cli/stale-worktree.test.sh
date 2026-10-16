@@ -92,5 +92,41 @@ check "$?" "0" "peer-save-passes" "$out" ""
 check "$(cat "$R/pkg/peer.txt")" "peer bytes" "peer-bytes-identical" "$out" ""
 check "$(git -C "$R" status --porcelain -- pkg/peer.txt)" "?? pkg/peer.txt" "peer-still-untracked" "$out" ""
 
+# 7. native export regeneration: a serializer commit writes rows for two
+# issues; regenerating (reordered + reworded, no issue lost) under another
+# bead passes. Fails today: rule (b) blames the serializer's bead.
+new_export_repo() {
+	dir="$TMP/$1"
+	mkdir -p "$dir/.beads"
+	git -C "$dir" init -q 2>/dev/null
+	git -C "$dir" config user.email "test@invalid.example"
+	git -C "$dir" config user.name "Test"
+	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
+	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+	printf '%s' "$dir"
+}
+R=$(new_export_repo export-regen)
+printf '%s\n' '{"id":"t-1","title":"one"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
+S=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' '{"id":"t-2","title":"two reworded"}' '{"id":"t-1","title":"one"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+out=$(git -C "$R" commit --message "[test] export regen" --message "Bead: t-other" 2>&1)
+check "$?" "0" "export-regen-passes" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "2" "export-regen-landed" "$out" ""
+
+# 8. export regeneration that DROPS an issue's row is still refused
+R=$(new_export_repo export-loss)
+printf '%s\n' '{"id":"t-1","title":"one"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
+S=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' '{"id":"t-1","title":"one"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+out=$(git -C "$R" commit --message "[test] export drops t-2" --message "Bead: t-other" 2>&1)
+check "$?" "1" "export-loss-refused" "$out" "STALE_WORKTREE .beads/issues.jsonl reverts $S"
+check "$(git -C "$R" rev-list --count HEAD)" "1" "export-loss-head-unmoved" "$out" "STALE_WORKTREE"
+
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

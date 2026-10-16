@@ -5,7 +5,9 @@
 #       worktree write (the worktree predates the landing);
 #   (b) foreign-bead: a removed line blamed to a commit carrying a `Bead:`
 #       trailer different from this message's bead, unless the blamed sha is
-#       declared with a `Revert: <sha>` trailer line.
+#       declared with a `Revert: <sha>` trailer line. Native export
+#       regeneration of .beads/issues.jsonl (every removed row's issue id
+#       still present in the staged file) is not a revert: rule (b) skips it.
 # Same-bead rework passes silently. Pure additions pass. Unborn HEAD passes.
 # Reads the effective tree through the index (GIT_INDEX_FILE is respected, so
 # `git commit --only` temporary indexes are judged). Renames are read as
@@ -66,6 +68,25 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	diffout=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null) || continue
 	case "$diffout" in *Binary\ files\ *differ*) continue ;; esac
 	[ -n "$(removed_lines "$path")" ] || continue
+	# Native export regeneration (120.10 rework): the tracker rewrites
+	# .beads/issues.jsonl wholesale on every export, so removed rows blame
+	# to serializer commits. When every removed row's issue id still has a
+	# row in the staged file, no issue lost anything: it is regeneration,
+	# not a revert, and rule (b) does not apply. Any lost id, or no ids at
+	# all, falls through to the normal rules (fail closed).
+	export_regen=0
+	case "$path" in .beads/issues.jsonl|*/.beads/issues.jsonl)
+		removed_ids=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null | grep '^-' | grep -v '^---' | cut -c2- | grep -o '"id":"[^"]*"' | sort -u)
+		if [ -n "$removed_ids" ]; then
+			new_ids=$(git show "$tree:$path" 2>/dev/null | grep -o '"id":"[^"]*"' | sort -u)
+			lost=0
+			for id in $removed_ids; do
+				printf '%s\n' "$new_ids" | grep -qxF -- "$id" || lost=1
+			done
+			[ "$lost" -eq 0 ] && export_regen=1
+		fi
+		;;
+	esac
 	mt=$(mtime_of "$root/$path")
 	seen=""
 	for ln in $(removed_lines "$path"); do
@@ -86,8 +107,9 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
 			continue
 		fi
-		# Rule (b): foreign bead reverted without declaration.
-		if [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
+		# Rule (b): foreign bead reverted without declaration. Skipped on
+		# native export regeneration (no issue lost its row: rewriter, not revert).
+		if [ "$export_regen" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
 			printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$root/.git/stale-worktree-report.$$"
 			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
 		fi
