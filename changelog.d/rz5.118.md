@@ -1,3 +1,0 @@
-### Fixed
-
-- `omp-kit scratch` no longer takes a live owner's pid for a reused one when the `.owner` gives only a coarse `created` time. It used to read a bare date such as `created: "2026-10-15"` as UTC midnight. So any process started later that same day counted as reused, and its scratch was planned for REAP while it was still running. On 2026-10-16 this happened to a live eval kernel's review dir. Reuse is now proven only when the process started after the end of the created value's own precision: a whole day plus the widest UTC offset for a bare date, the whole minute for minute precision, and the whole second for second precision. Any other format counts as unprovable, so the dir stays LIVE. [test]

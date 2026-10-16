@@ -4,6 +4,25 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.41] - 2026-10-16
+
+### Added
+
+- Add `omp-kit tern` native SDK/control commands, context-aware Luau bindings, declaration and documentation drift checks, wire codecs, and optional native plugin assets; incomplete or ambiguous SDK replies fail closed, and native observations remain separate from coverage and fleet-promotion claims.
+
+### Changed
+
+- The doctor names rch daemon reachability distinctly: a live rchd whose socket path is missing or replaced reports FAIL as socket unlinked (with the kickstart restore route), never as missing worker capacity.
+- Beads doctor and planning score share configurable acceptance-breadth limits (5 files and 3 path-derived components by default), include component-aware split suggestions, and preserve UNKNOWN/UNVERIFIED for missing or unparseable scope.
+- After compaction, the flywheel guard blocks edit, write, br update/close/comments and git commit/push until it observes a successful read of the named AGENTS.md and a br show of the session's in_progress bead (or an empty br list); gate errors block.
+
+### Fixed
+
+- New `commit-msg` guard member refuses any commit that would revert lines landed in HEAD, naming path, commit and bead, unless the revert is declared with a `Revert: <sha>` trailer; same-bead rework still passes. New `doctor --scope stale-worktree` lists worktree paths that remove landed lines with their blamed commits. (ompkit-fp72.120.10)
+- Release certification no longer fails at once on every native target. `omp-kit heavy` now refuses with exit 69 when its disk observer (sbh) is missing, rather than skipping the disk check. The release train's `native-certification` and `real-home-journey` jobs never installed sbh, so the harness gate stopped there (train run 38956579974, `producer_rc=69` on all ship platforms). Both jobs now install the same pinned sbh as the ladders. [selftest]
+- `omp-kit scratch` no longer takes a live owner's pid for a reused one when the `.owner` gives only a coarse `created` time. It used to read a bare date such as `created: "2026-10-15"` as UTC midnight. So any process started later that same day counted as reused, and its scratch was planned for REAP while it was still running. On 2026-10-16 this happened to a live eval kernel's review dir. Reuse is now proven only when the process started after the end of the created value's own precision: a whole day plus the widest UTC offset for a bare date, the whole minute for minute precision, and the whole second for second precision. Any other format counts as unprovable, so the dir stays LIVE. [test]
+- The fleet guard's amend refusal also catches git called by its full path (`/usr/bin/git commit --amend`). It no longer misreads commit option values (`-m`, `--message`, `-F`, `--file`, `--author`, `--date`, reuse/reedit, and a trailing `-m` in a flag bundle) as flags. (ompkit-xa5s.25)
+
 ## [0.2.40] - 2026-10-16
 
 ### Breaking Changes
