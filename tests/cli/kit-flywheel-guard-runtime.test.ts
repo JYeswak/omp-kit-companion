@@ -102,7 +102,10 @@ test("the linked OMP plugin refuses an async timeout-zero command before it runs
 
 	const mock = Bun.spawn([process.execPath, join(REPO_ROOT, "tests/live/mock-model.mjs")], {
 		cwd: REPO_ROOT,
-		env: { ...env, SCEN: scenarioPath, LOG: logPath, PORTFILE: portPath, BUN_BE_BUN: "1" },
+		env: {
+			HOME: env.HOME, TMPDIR: env.TMPDIR, TMP: env.TMPDIR, TEMP: env.TMPDIR,
+			SCEN: scenarioPath, LOG: logPath, PORTFILE: portPath, BUN_BE_BUN: "1",
+		},
 		stdin: "ignore", stdout: "ignore", stderr: "pipe", timeout: 55_000,
 	});
 	const mockStderr = new Response(mock.stderr).text();
