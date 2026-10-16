@@ -398,7 +398,7 @@ function validateBaseLessons(bytes: Buffer): void {
 }
 
 /** Append only to a clean lesson path, commit it on shared main, then fast-forward origin. */
-export function commitLessonLines(repoRoot: string, lines: readonly string[], message = "LESSONS: append records"): LessonsCommitResult {
+export function commitLessonLines(repoRoot: string, lines: readonly string[], message = "LESSONS: append records [pending]"): LessonsCommitResult {
 	const root = resolve(repoRoot);
 	const rootInfo = lstatSync(root);
 	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("LESSONS_REPO_UNSAFE");
@@ -490,13 +490,13 @@ export function commitLessonLines(repoRoot: string, lines: readonly string[], me
 
 export function appendLessonAndCommit(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions = {}): { entry: LessonEntry; commit: LessonsCommitResult } {
 	const entry = lessonEntry(repoRoot, input, options);
-	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: add lesson");
+	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: add lesson [pending]");
 	return { entry, commit };
 }
 
 export function writeCheckinAndCommit(repoRoot: string, input: CheckinInput, options: CheckinOptions = {}): { entry: LessonEntry; commit: LessonsCommitResult } {
 	const entry = lessonCheckinEntry(repoRoot, input, options);
-	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: record check-in");
+	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: record check-in [pending]");
 	return { entry, commit };
 }
 

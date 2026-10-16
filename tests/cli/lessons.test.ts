@@ -75,6 +75,8 @@ function assertSharedMain(fixture: LessonCommitFixture, entry: LessonEntry, comm
 	expect(gitIn(fixture.local, "show", commit.commit + ":" + LESSONS_RELATIVE_PATH)).toBe(expected.trimEnd());
 	expect(readFileSync(join(fixture.local, LESSONS_RELATIVE_PATH), "utf8")).toBe(expected);
 	expect(gitIn(fixture.local, "status", "--porcelain", "--", LESSONS_RELATIVE_PATH)).toBe("");
+	const subject = gitIn(fixture.local, "show", "-s", "--format=%s", commit.commit);
+	expect(["[pending]", "[test]", "[selftest]", "[live]"].includes(subject.split(" ").pop() ?? "")).toBe(true);
 	gitIn(fixture.local, "merge-base", "--is-ancestor", commit.commit, "refs/heads/main");
 	gitIn(fixture.local, "merge-base", "--is-ancestor", commit.commit, "origin/main");
 }
