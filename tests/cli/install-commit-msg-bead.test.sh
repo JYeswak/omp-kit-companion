@@ -133,5 +133,68 @@ ok "$?" "3" "check-stale-rc"
 grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" "$TMP/o-stale"
 ok "$?" "0" "check-stale-named"
 
+# 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
+#    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
+F=$(new_repo restore)
+mkdir -p "$F/.git/hooks/hooks.d/commit-msg"
+printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+chmod +x "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+printf '#!/bin/sh\ncase "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac\n' > "$F/.git/hooks/commit-msg"
+chmod +x "$F/.git/hooks/commit-msg"
+sh "$INSTALLER" "$F" > /dev/null 2>&1
+ok "$?" "1" "restore-rollback-rc"
+grep -q "older member" "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+ok "$?" "0" "restore-member-restored"
+rc=0
+for leftover in "$F/.git/hooks/hooks.d/commit-msg"/.undo.*; do [ -e "$leftover" ] && rc=1; done
+ok "$rc" "0" "restore-no-backup-left"
+
+# 7. a full install over unpublished id-less history is refused before any
+#    mutation (exit 5); --no-pre-push installs the forward-only pair
+G=$(new_repo idless)
+mkdir -p "$G/.beads"
+: > "$G/.beads/beads.db"
+git -C "$G" commit -q --no-verify --allow-empty -m "unpublished with no identity"
+sh "$INSTALLER" "$G" > "$TMP/o-idless" 2>&1
+ok "$?" "5" "idless-full-refused"
+if [ ! -e "$G/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ] && [ ! -e "$G/.git/hooks/reference-transaction" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "idless-nothing-mutated"
+sh "$INSTALLER" --no-pre-push "$G" > /dev/null 2>&1
+ok "$?" "0" "idless-forward-only-rc"
+if [ -x "$G/.git/hooks/hooks.d/reference-transaction/40-omp-kit-ref-txn-bead" ] && [ ! -e "$G/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "idless-forward-only-members"
+sh "$INSTALLER" --check --no-pre-push "$G" > /dev/null 2>&1
+ok "$?" "0" "idless-forward-only-check-fresh"
+
+# 8. a bespoke stdin-reading reference-transaction keeps working beside the
+#    guard: the runner replays the update lines to each member (planted: the
+#    old runner let the first reader starve the guard, localbench 2026-10-16)
+H=$(new_repo stdin)
+mkdir -p "$H/.beads"
+: > "$H/.beads/beads.db"
+printf '#!/bin/sh\ncat >> "$(git rev-parse --git-dir)/bespoke-saw"\nexit 0\n' > "$H/.git/hooks/reference-transaction"
+chmod +x "$H/.git/hooks/reference-transaction"
+sh "$INSTALLER" --no-pre-push "$H" > /dev/null 2>&1
+ok "$?" "0" "stdin-install-rc"
+HB=$(git -C "$H" rev-parse HEAD)
+HP=$(printf 'replayed update with no identity\n' | git -C "$H" commit-tree "$HB^{tree}" -p "$HB")
+if git -C "$H" update-ref refs/heads/main "$HP" "$HB" 2> /dev/null; then rc=0; else rc=1; fi
+ok "$rc" "1" "stdin-guard-refused"
+ok "$(git -C "$H" rev-parse HEAD)" "$HB" "stdin-main-unmoved"
+grep -q "$HP refs/heads/main" "$H/.git/bespoke-saw"
+ok "$?" "0" "stdin-bespoke-saw-update"
+
+# 9. an installed runner of ours without stdin replay is upgraded in place
+I=$(new_repo upgrade)
+mkdir -p "$I/.git/hooks/hooks.d/reference-transaction"
+printf '#!/bin/sh\n# chain runner: run every executable NN-<name> member in hooks.d/<type> in\nset -u\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)\nrc=0\nfor hook in "$here/hooks.d/$(basename -- "$0")"/[0-9][0-9]-*; do [ -x "$hook" ] && { sh "$hook" "$@" || rc=$?; }; done\nexit $rc\n' > "$I/.git/hooks/reference-transaction"
+chmod +x "$I/.git/hooks/reference-transaction"
+sh "$INSTALLER" --no-pre-push "$I" > "$TMP/o-upgrade" 2>&1
+ok "$?" "0" "upgrade-install-rc"
+grep -q "upgraded chain runner" "$TMP/o-upgrade"
+ok "$?" "0" "upgrade-announced"
+grep -q 'replay one buffered copy' "$I/.git/hooks/reference-transaction"
+ok "$?" "0" "upgrade-runner-replays"
+
 printf 'install-commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

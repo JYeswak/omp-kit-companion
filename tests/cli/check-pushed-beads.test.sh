@@ -96,6 +96,14 @@ NEW_BAD=$(git -C "$ORIGIN_FIXTURE" rev-parse HEAD)
 out=$(sh "$CHECK" --repo "$ORIGIN_FIXTURE" --base "$ORIGIN_BASE" --tip "$NEW_BAD" --db "$DB" --br "$TMP/bin/br" 2>&1); rc=$?
 if [ "$rc" = "4" ] && printf '%s' "$out" | grep -q "$NEW_BAD"; then pass=$((pass + 1));
 else fail=$((fail + 1)); printf 'FAIL new-idless: rc=%s out<<<%s>>>\n' "$rc" "$out"; fi
+# 7. run from outside the repo with no --db: the repo's own tracker still
+#    judges the range (planted: before the fix the cwd held no tracker and the
+#    id-less commit passed)
+mkdir -p "$FIXTURE/.beads"
+: > "$FIXTURE/.beads/beads.db"
+out=$(CDPATH='' cd -- "$TMP" && env -u BEADS_DB sh "$CHECK" --repo "$FIXTURE" --base "$GOOD" --tip "$PLANTED" --br "$TMP/bin/br" 2>&1); rc=$?
+if [ "$rc" = "4" ] && printf '%s' "$out" | grep -q "$PLANTED"; then pass=$((pass + 1));
+else fail=$((fail + 1)); printf 'FAIL outside-cwd-repo-tracker: rc=%s out<<<%s>>>\n' "$rc" "$out"; fi
 
 printf 'check-pushed-beads: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

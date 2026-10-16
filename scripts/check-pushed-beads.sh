@@ -55,6 +55,10 @@ if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$TIP" ]; then
 	printf 'check-pushed-beads: needs --repo DIR --base SHA --tip SHA\n' >&2
 	exit 2
 fi
+# The tracker is the pushed repo's own unless --db names one. Left empty, the
+# message hook resolves it from the caller's cwd, and from outside the repo it
+# finds none and passes every commit (a false-clean fleet check, 2026-10-16).
+[ -n "$DB" ] || DB="$REPO/.beads/beads.db"
 HOOKDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 HOOK="$HOOKDIR/commit-msg-bead.sh"
 [ -f "$HOOK" ] || { printf 'check-pushed-beads: hook body missing at %s\n' "$HOOK" >&2; exit 2; }

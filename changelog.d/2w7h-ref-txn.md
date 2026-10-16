@@ -1,3 +1,0 @@
-### Fixed
-
-- An id-less commit can no longer reach a shared `main` through plumbing or `--no-verify`. `scripts/install-commit-msg-bead.sh` now also installs a `reference-transaction` guard. Git runs it for every update of `refs/heads/main`, however the update is made, and it refuses a new non-merge commit that is not already on origin and names no existing bead id. Merges, other refs, commits already on origin and repos without a tracker pass. The installer live-probes the guard and rolls back if it would let `main` move to a planted id-less commit, and `--check` reports the guard when missing or stale. On 2026-10-16 five id-less commits held fourteen others off origin. [test]
