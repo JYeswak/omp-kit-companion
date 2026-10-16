@@ -335,6 +335,37 @@ test("native toolResult with an unsupported async state stays unknown, never idl
 	expect(result).toMatchObject({ status: "UNKNOWN" });
 });
 
+test("native matching cancellation reconciles only its own tool", () => {
+	const cancelled = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: { async: { state: "cancelled" } } });
+	const final = nativeMessage("assistant-2", "tool-result-1", 4,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(5), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, cancelled, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false });
+});
+
+test("native matching completion reconciles only its own tool", () => {
+	const completed = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: { async: { state: "completed" } } });
+	const final = nativeMessage("assistant-2", "tool-result-1", 4,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(5), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, completed, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false });
+});
+
+test("native cancellation for another id never clears the pending tool", () => {
+	const other = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-2", toolName: "read", isError: false, content: [], details: { async: { state: "cancelled" } } });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "tool-result-1",
+		timestamp: stamp(4), activeLeafId: "tool-result-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, other, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+});
+
 test("native metadata records keep the parent chain usable", () => {
 	const custom = JSON.stringify({ type: "custom", id: "custom-1", parentId: "assistant-1",
 		timestamp: stamp(3), customType: "memory_recall", data: {} });

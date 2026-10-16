@@ -415,8 +415,9 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 			if (entry.asyncState === "running" || entry.asyncState === "pending") {
 				if (entry.toolCallId !== null) pendingTools.add(entry.toolCallId);
 				else unresolvedAsyncWithoutId = true;
-			} else if (entry.asyncState !== null) unsupportedAsyncState = true;
-			else if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
+			} else if (entry.asyncState === null || entry.asyncState === "completed" || entry.asyncState === "cancelled") {
+				if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
+			} else unsupportedAsyncState = true;
 		}
 	}
 	if (unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
