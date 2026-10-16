@@ -160,7 +160,7 @@ test('chunk interruption, expiry and incomplete streams keep structured errors',
         ['\x1b_tsp;r;c=a;1}\x1b\\', 1001],
     ] as const) {
         const d = new WireDecoder();
-        assert.deepEqual(d.feed(Buffer.from('\x1b_tsp;r;c=a;m=1;{"x":'), 0), []);
+        assert.deepEqual(d.feed(Buffer.from('\x1b_tsp;r;c=a;m=1;{"x":\x1b\\'), 0), []);
         assert.throws(() => d.feed(Buffer.from(next), now), { code: 'TSP_CHUNK_INTERRUPTED' });
     }
     for (const input of ['\x1b_', '\x1b[200~paste', '\x1b_tsp;r;c=a;m=1;{}\x1b\\']) {
