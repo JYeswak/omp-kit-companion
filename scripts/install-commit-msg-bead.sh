@@ -17,6 +17,12 @@
 # undo. A foreign REPO gets self-contained copies, never references into this
 # checkout. Exits nonzero naming anything left inactive; every install ends
 # with a live probe of the installed chain.
+# Opt-in native preservation adds a separate pre-commit member, not a
+# commit-message rule. Pass --native-preservation --native-br ABS
+# --native-br-sha256 SHA --native-guard-sha256 SHA from the reviewed candidate.
+# It only preserves an exact native snapshot; it grants no creator/grader role.
+# Existing bespoke pre-commit checks remain first. Their owner must retire a
+# replaced legacy snapshot checker; this installer never silently bypasses it.
 set -eu
 UNDO_MOVES=""
 UNDO_RM=""
@@ -24,10 +30,23 @@ UNDO_RESTORE=""
 KITROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 MODE=install
 PUSHED_BEADS=1
+NATIVE_PRESERVATION=0
+NATIVE_BR=""
+NATIVE_BR_SHA=""
+NATIVE_GUARD_SHA=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) MODE=check; shift ;;
 		--no-pushed-beads) PUSHED_BEADS=0; shift ;;
+		--native-preservation) NATIVE_PRESERVATION=1; shift ;;
+		--native-br|--native-br-sha256|--native-guard-sha256)
+			[ $# -ge 2 ] || { printf 'install-commit-msg-bead: %s needs a value\n' "$1" >&2; exit 2; }
+			case "$1" in
+				--native-br) NATIVE_BR=$2 ;;
+				--native-br-sha256) NATIVE_BR_SHA=$2 ;;
+				--native-guard-sha256) NATIVE_GUARD_SHA=$2 ;;
+			esac
+			shift 2 ;;
 		*) break ;;
 	esac
 done
@@ -38,6 +57,49 @@ case "$HOOKS" in
 	/*) ;;
 	*) HOOKS="$TARGET/$HOOKS" ;;
 esac
+
+# Both expected digests are explicit review inputs. No automatic PATH adoption
+# or environment override is copied into the installed authority boundary.
+if [ "$NATIVE_PRESERVATION" = 1 ]; then
+	python3 - "$KITROOT/scripts/native-br-preserve.py" "$NATIVE_GUARD_SHA" "$NATIVE_BR" "$NATIVE_BR_SHA" <<'PY'
+import hashlib, os, pathlib, sys
+helper, helper_sha, native, native_sha = sys.argv[1:]
+for path, expected in ((helper, helper_sha), (native, native_sha)):
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        sys.exit("install-commit-msg-bead: REFUSED invalid native-preservation digest")
+    p = pathlib.Path(path)
+    if not p.is_absolute() or not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest() != expected:
+        sys.exit("install-commit-msg-bead: REFUSED native-preservation source/executable changed")
+if not os.access(native, os.X_OK):
+    sys.exit("install-commit-msg-bead: REFUSED native executable unavailable")
+PY
+fi
+
+native_member() {
+	native_arg=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$NATIVE_BR") || return 1
+	cat <<EOF
+#!/bin/sh
+# Native-preservation-only member; execute exactly the digest-verified bytes.
+set -eu
+here=\$(CDPATH='' cd -- "\$(dirname -- "\$0")" && pwd -P)
+root=\$(git rev-parse --show-toplevel)
+exec python3 - "\$here/native-br-preserve.py" '$NATIVE_GUARD_SHA' "\$root" $native_arg '$NATIVE_BR_SHA' <<'PY'
+import hashlib, json, pathlib, sys
+path, expected, repo, native, native_sha = sys.argv[1:]
+try:
+    data = pathlib.Path(path).read_bytes()
+except OSError:
+    print(json.dumps({"status": "REFUSED", "reason": "INSTALLED_GUARD_UNAVAILABLE"}), file=sys.stderr)
+    sys.exit(4)
+if hashlib.sha256(data).hexdigest() != expected:
+    print(json.dumps({"status": "REFUSED", "reason": "INSTALLED_GUARD_CHANGED"}), file=sys.stderr)
+    sys.exit(4)
+sys.dont_write_bytecode = True
+sys.argv = [path, "--repo", repo, "--native-br", native, "--native-br-sha256", native_sha]
+exec(compile(data, path, "exec"), {"__name__": "__main__", "__file__": path})
+PY
+EOF
+}
 
 # --check names installed members that differ from this checkout (a stale
 # installed hook runs old rules after the source moves on). Exit 0 when every
@@ -63,6 +125,14 @@ if [ "$MODE" = "check" ]; then
 			stale=1
 		fi
 	done
+	if [ "$NATIVE_PRESERVATION" = 1 ]; then
+		dir="$HOOKS/hooks.d/pre-commit"
+		if ! cmp -s "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" ||
+			! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
+			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
+			stale=1
+		fi
+	fi
 	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
 	exit 3
 fi
@@ -223,6 +293,16 @@ install_ref_txn() {
 	printf 'installed ref-update bead guard: %s\n' "$member"
 }
 
+install_native_preservation() {
+	dir=$(chain_dir pre-commit)
+	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
+	wrapper=$(mktemp "${TMPDIR:-/tmp}/native-preserve-member.XXXXXX") || exit 2
+	native_member > "$wrapper" || rollback "cannot render native-preservation member"
+	place "$wrapper" "$dir/40-omp-kit-native-preserve" +x
+	rm -f "$wrapper"
+	printf 'installed digest-bound native-preservation member: %s\n' "$dir/40-omp-kit-native-preserve"
+}
+
 PROBE=$(mktemp "${TMPDIR:-/tmp}/bead-probe.XXXXXX") || exit 2
 PROBE_DB=$(mktemp "${TMPDIR:-/tmp}/bead-probe-db.XXXXXX") || exit 2
 trap 'rm -f "$PROBE" "$PROBE_DB"' EXIT INT TERM
@@ -256,6 +336,10 @@ install_on_main
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn
+if [ "$NATIVE_PRESERVATION" = 1 ]; then
+	ensure_chain pre-commit
+	install_native_preservation
+fi
 
 # Verify the whole installed chain (any failure rolls every mutation back):
 # Leg 1: the moved bespoke must behave exactly as pre-flight. A pass that
@@ -318,6 +402,14 @@ if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
 	esac
 else
 	printf 'install-commit-msg-bead: WARN: %s has no HEAD commit; pre-push and ref-guard probes skipped\n' "$TARGET" >&2
+fi
+# The new member is exercised read-only against the actual staged candidate.
+# A SKIPPED result is not acceptance of a snapshot; normal-commit qualification
+# still requires a real candidate and the owner's unchanged upstream chain.
+if [ "$NATIVE_PRESERVATION" = 1 ]; then
+	if ! (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"); then
+		rollback "native-preservation member refused the actual candidate in $TARGET"
+	fi
 fi
 # shellcheck disable=SC2086
 for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")"; done
