@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-16",
+  "contract": "NATIVE_GRAMMAR_DELEGATED: transmit the exact one-line command; native Tern owns argument validation and operation semantics. Mapping does not establish successful effects.",
+  "pages": {
+    "scripts/harness.html": ["size","wait","freeze-anims","thaw","motion-at","shot","move","down","up","click","dblclick","hover","wheel","key","keydown","keyup","type","preedit","commit","window-focus","pinch","rotate","smart-magnify","swipe","force-click","touch","drop","drag-end","appearance","reduce-motion","reduce-transparency","increase-contrast","differentiate-without-color","target","menu","menu-close","a11y","dialog","haptic-reply","notification-click","global-shortcut","open-files","open-url","second-instance","power","share-finish","webview","spelling"],
+    "scripts/control.html": ["dump","tree","pick","state","stats","layers","a11y","menus","system","css","perf","trace","resize","thaw","quit","webcall","webreports"],
+    "scripts/terminal.html": ["ready","git-read","link-read","run","expect","completing","split","close","zoom","equalize","focus","resize","tab","rename","palette","find","context","layout","font","font-family","font-weight","adjust-cell-height","ui-font","code-font","decorations","theme","themes","scroll","copy","alert","inbox","peek","melt","feed","surface-play","plugins"],
+    "scripts/navigation.html": ["tabs","filter","status-bar","pane-headers","style","interface-style","picker","goto","insert-path","running","drag-pane","move-pane","tidy","previous-tab","cross-session-click"],
+    "scripts/sessions.html": ["session","sessions","confirm-close","block","agent-command","new-blocks"],
+    "scripts/remote.html": ["remote"],
+    "scripts/prefs.html": ["prefs"],
+    "scripts/browser.html": ["browser","webview"],
+    "scripts/pip.html": ["pip"],
+    "scripts/files.html": ["files"],
+    "scripts/file.html": ["file"],
+    "scripts/procs.html": ["procs"],
+    "scripts/screen.html": ["screen"],
+    "scripts/git.html": ["git"],
+    "scripts/sqlite.html": ["sqlite"],
+    "scripts/notebook.html": ["notebook"],
+    "scripts/board.html": ["board"],
+    "scripts/profile.html": ["profile"],
+    "scripts/status.html": ["account","update","kickoff"],
+    "scripts/carly.html": ["carly"]
+  },
+  "native_cli": ["plugin list","plugin reload","plugin dir","plugin install","plugin remove","plugin link","plugin unlink","plugin types","plugin --help","shot","serve","--control","ctl","help dev","browser"],
+  "simulation_roots": ["account","update","kickoff","running","webview"],
+  "critical_notes": {
+    "run":"Only writes and briefly settles; not command completion.",
+    "resize":"Endpoint means window dimensions; scenario means pane direction. Never translate one into the other.",
+    "dump/tree/webreports":"Raw selector consumes remainder. Do not script-quote or append comments.",
+    "css":"Bare = list; name = drop; name+path = replace. Native parser cannot take spaces in these fields.",
+    "carly tool/lua":"Errors can be stored as last_tool.error with an ok script reply. Follow carly ok and correlate the answer.",
+    "plugin list":"Filesystem Ready or host Ready does not prove window entry loaded.",
+    "plugin install/remove/link/unlink":"Exit zero can accompany reload problems on stderr.",
+    "melt":"Even progress zero closes the session.",
+    "file wait / notebook wait / sqlite":"Work settled is not a successful load/query/code result.",
+    "shot/serve":"Headless settings and screen are synthetic; no plugins unless fixture loading; not live-fleet proof.",
+    "quit/close":"May await confirmations; acknowledgement is not closure.",
+    "remote state/setup":"Can simulate connection/setup rather than establish a real one. Never auto-trust a staged fingerprint."
+  }
+}

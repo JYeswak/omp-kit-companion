@@ -1,0 +1,4024 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-16",
+  "kit_base": "033598f89e9b12c5449965ecf74e5e9baf024747",
+  "sdk_commit": "f3f9fee82bf692166c2a477a895a347ac2a47ca2",
+  "sdk_git_blob": "0dcdd18378712fde1ae40322d18b7c022939950a",
+  "basis": "Manually normalized declaration inventory reviewed through the GitHub connector. coverage.ts independently extracts an installed or pinned tern.d.luau file; its full-byte check has not run in this build environment.",
+  "members": [
+    {
+      "symbol": "tern.log.debug",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.log.info",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.log.warn",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.log.error",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.json.encode",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.json.decode",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.json.array",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.base64.encode",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.base64.decode",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.now",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.getenv",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.timer",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.sleep",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.kv.get",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.kv.set",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.secrets.get",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.secrets.set",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.read",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.write",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.list",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.exists",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.mkdir",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fs.remove",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.process.run",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.fetch",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.span",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.link",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.path",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.text",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.col",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.lines",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.row",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.card",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.section",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.rule",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.badge",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.kv",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.table",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.meter_cell",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.meter_parts_cell",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.tree",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.list",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.code",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.diff",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.md",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.meter",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.progress",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.bars",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.spark",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.ansi",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.diagnostic",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.test_summary",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.overflow",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.node",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.ui.el",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/ui.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.parse.columns",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.parse.packed",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.parse.json_tree",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.parse.location",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.parse.size",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.block.define",
+      "kind": "function",
+      "contexts": [
+        "host"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.lens.define",
+      "kind": "function",
+      "contexts": [
+        "host"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.pane.write",
+      "kind": "function",
+      "contexts": [
+        "host"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.pane.list",
+      "kind": "function",
+      "contexts": [
+        "host"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.on",
+      "kind": "function",
+      "contexts": [
+        "host",
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.command",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.bind",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.override",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.route.open",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.route.link",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.chrome.tab_title",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.chrome.window_title",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.chrome.status",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.chrome.refresh",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.css",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.export",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.context",
+      "kind": "function",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.schedule",
+      "kind": "function",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.tasks",
+      "kind": "function",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.cancel",
+      "kind": "function",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "tern.carly.on_canvas",
+      "kind": "function",
+      "contexts": [
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": null,
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.current",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.create",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.switch",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.rename",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.close",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.lock",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.sessions.unlock",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.current",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.add",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.switch",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.trust",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.disconnect",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.hosts.terminal",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "HostsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.get",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.start",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.ask",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.wait",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.transcript",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.interrupt",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.agents.stop",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "AgentsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.find",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.children",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.signal",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.procs.profile",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ProcsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.actions.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ActionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.actions.run",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ActionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.actions.keys",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ActionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.actions.describe",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ActionsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.repo",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.status",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.log",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.diff",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.stage",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.unstage",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.commit",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.branches",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.checkout",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.create_branch",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.stash_push",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.stash_pop",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.git.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "GitCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.get",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.set",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.set_many",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.describe",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.themes",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.keybinds",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.bind",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.settings.unbind",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SettingsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.db.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DbCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.db.tables",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DbCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.db.schema",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DbCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.db.query",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DbCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.db.exec",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DbCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.boards",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.read",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.add",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.move",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.check",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.edit",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.remove",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.add_lane",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.rename_lane",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.board.remove_lane",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BoardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.browser.call",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BrowserCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.screen.displays",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ScreenCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.screen.share",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ScreenCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.screen.stop",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ScreenCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.screen.status",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ScreenCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.read",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.outline",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.write",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.edit",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.append",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.save",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.new_note",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.docs.search",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "DocsCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.canvas.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CanvasCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.canvas.set",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CanvasCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.canvas.get",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CanvasCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.canvas.list",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CanvasCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.whiteboard.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WhiteboardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.whiteboard.read",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WhiteboardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.whiteboard.edit",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WhiteboardCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.sessions",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.layout",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.find_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.find_session",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.tab_of",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.pane",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.read",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.surface",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.view",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.event",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.panes",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.tabs",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.focused",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.resolve",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.block_types",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.session.settle",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "SessionCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.new_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.split",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.focus",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.close",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.move",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.resize",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.move_to_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.move_to_new_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.float",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.dock",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.park",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.unpark",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.even",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.name_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.color_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.order_tab",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.rename_session",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.snapshot",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.restore",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.layout.arrange",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LayoutCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.cells",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.run",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.add",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.edit",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.kernel_status",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": true,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.notebook.kernel_restart",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "NotebookCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.run",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.open",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.new_block",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.command",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.action",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.ask_carly",
+      "kind": "method",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.pick",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.prompt",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": true,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.toast",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "cx.copy",
+      "kind": "method",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "WindowCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "effect.toast",
+      "kind": "method",
+      "contexts": [
+        "host-effect"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "EffectCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "effect.open",
+      "kind": "method",
+      "contexts": [
+        "host-effect"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "EffectCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "effect.copy",
+      "kind": "method",
+      "contexts": [
+        "host-effect"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "EffectCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "block.render",
+      "kind": "method",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "block.save",
+      "kind": "method",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "block.exit",
+      "kind": "method",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "block.frame",
+      "kind": "method",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "block.blob",
+      "kind": "method",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockCx",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.TimerHandle.cancel",
+      "kind": "handle",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "TimerHandle",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.Awaitable.next",
+      "kind": "handle",
+      "contexts": [
+        "host",
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-shared.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "Awaitable",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.ExportCall.reply",
+      "kind": "handle",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ExportCall",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.ExportCall.fail",
+      "kind": "handle",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ExportCall",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.ExportCall.wait",
+      "kind": "handle",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "ExportCall",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "handle.Agent.tocarly",
+      "kind": "handle",
+      "contexts": [
+        "window",
+        "carly"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "Agent",
+      "route": "native-luau",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.init",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.view",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.title",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.key",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.event",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.resize",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "BlockDef.save",
+      "kind": "callback",
+      "contexts": [
+        "host-block"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "BlockDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "LensDef.open",
+      "kind": "callback",
+      "contexts": [
+        "host-lens"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LensDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "LensDef.line",
+      "kind": "callback",
+      "contexts": [
+        "host-lens"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LensDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "LensDef.finish",
+      "kind": "callback",
+      "contexts": [
+        "host-lens"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LensDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "LensDef.view",
+      "kind": "callback",
+      "contexts": [
+        "host-lens"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LensDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "LensDef.event",
+      "kind": "callback",
+      "contexts": [
+        "host-lens"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-host.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "LensDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "CommandDef.available",
+      "kind": "callback",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CommandDef",
+      "route": "callback",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "CommandDef.run",
+      "kind": "callback",
+      "contexts": [
+        "window"
+      ],
+      "awaitable": false,
+      "read_only": false,
+      "source": "https://docs.stencil.so/tern/reference/api-window.html",
+      "declaration": "https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau",
+      "declaring_type": "CommandDef",
+      "route": "callback",
+      "runtime_verified": false
+    }
+  ],
+  "events": [
+    {
+      "symbol": "host:spawn",
+      "name": "spawn",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "host:command_started",
+      "name": "command_started",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "host:command_finished",
+      "name": "command_finished",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "host:cwd",
+      "name": "cwd",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "host:title",
+      "name": "title",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "host:pane_exited",
+      "name": "pane_exited",
+      "context": "host",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:window_start",
+      "name": "window_start",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:focus",
+      "name": "focus",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:pane_created",
+      "name": "pane_created",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:pane_closed",
+      "name": "pane_closed",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:tab_created",
+      "name": "tab_created",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:tab_closed",
+      "name": "tab_closed",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:command_started",
+      "name": "command_started",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:command_finished",
+      "name": "command_finished",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:cwd",
+      "name": "cwd",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:title",
+      "name": "title",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:agent_finished",
+      "name": "agent_finished",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    },
+    {
+      "symbol": "window:canvas_action",
+      "name": "canvas_action",
+      "context": "window",
+      "route": "tern.on",
+      "source": "https://docs.stencil.so/tern/reference/events.html",
+      "runtime_verified": false
+    }
+  ],
+  "properties": [
+    "tern.context",
+    "tern.plugin",
+    "tern.runtime",
+    "tern.json.null",
+    "ExportCall.cancelled",
+    "Agent.pane",
+    "LayoutSnapshot",
+    "ExportWait",
+    "Database"
+  ],
+  "known_deltas": [
+    {
+      "area": "tern.secrets.get/set",
+      "status": "SDK_DECLARED_REFERENCE_NOT_FOUND",
+      "note": "Present in pinned declarations; not found in reviewed shared API page. Window plugin only, not Carly. Do not serialize secret values into evidence."
+    },
+    {
+      "area": "window:agent_finished",
+      "status": "SDK_DECLARED_REFERENCE_NOT_FOUND",
+      "note": "Present in pinned event declaration commentary, absent in reviewed events reference."
+    },
+    {
+      "area": "ExportCall.reply",
+      "status": "DOC_SDK_CONFLICT",
+      "note": "Reviewed window reference says 16 KiB; pinned declaration says 1 MiB and truncates oversized strings. Adapter does not certify either runtime bound."
+    }
+  ]
+}
