@@ -606,10 +606,15 @@ function cliHome(): { home: string; state: string } {
   return { home, state };
 }
 
-function fakeLsof(): { dir: string } {
+function fakeLsof(options: { openPath?: string; unknown?: boolean } = {}): { dir: string } {
   const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
   roots.push(dir);
-  writeFileSync(join(dir, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const script = options.openPath !== undefined
+    ? `#!/bin/sh\nprintf '%s\\n' 'n${options.openPath}'\nexit 0\n`
+    : options.unknown
+      ? "#!/bin/sh\nprintf '%s\\n' 'lsof: permission denied' >&2\nexit 1\n"
+      : "#!/bin/sh\nexit 1\n";
+  writeFileSync(join(dir, "lsof"), script, { mode: 0o755 });
   chmodSync(join(dir, "lsof"), 0o755);
   return { dir };
 }
@@ -707,6 +712,64 @@ test("scratch plan reports planted sessions and apply refuses without consent", 
   expect(existsSync(dead)).toBe(true);
 });
 
+test("scratch plan public JSON exposes byte totals, malformed counts, sized skips, and the active rule", () => {
+	const { home, state } = cliHome();
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-plan-json-"));
+	roots.push(root);
+	const oneGb = 1024 * 1024 * 1024;
+	const writeSparse = (dir: string, name: string, bytes: number): void => {
+		const fd = openSync(join(dir, name), "w");
+		try { ftruncateSync(fd, bytes); } finally { closeSync(fd); }
+	};
+	const json = sessionDir(root, "json", process.pid);
+	writeFileSync(join(json, ".owner"), JSON.stringify(liveFields("json")) + "\n");
+	writeSparse(json, "live.bin", oneGb);
+	const multiline = sessionDir(root, "multiline", process.pid);
+	writeFileSync(join(multiline, ".owner"), ownerText(liveFields("multiline")));
+	writeFileSync(join(multiline, "data"), "live\n");
+	const oneLine = sessionDir(root, "one-line", process.pid);
+	writeFileSync(join(oneLine, ".owner"), `pid=${process.pid} label=one-line repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`);
+	writeFileSync(join(oneLine, "data"), "legacy\n");
+	const mismatch = join(root, "wrong-name.99999");
+	mkdirSync(mismatch, { recursive: true });
+	writeFileSync(join(mismatch, ".owner"), ownerText(deadFields("right-name", deadPid())));
+	writeSparse(mismatch, "skip.bin", oneGb);
+	const malformed = sessionDir(root, "malformed", deadPid());
+	writeFileSync(join(malformed, ".owner"), "not an owner record\n");
+	writeFileSync(join(malformed, "data"), "malformed\n");
+	const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof({ openPath: join(oneLine, "data") }).dir}:${process.env.PATH ?? ""}` };
+	const plan = cli(["scratch", "plan"], home, env);
+	expect(plan.code).toBe(0);
+	const rows = plan.envelope.data.sessions as Array<{ dir: string; action: string; reason: string; sizeBytes?: number }>;
+	const liveRow = rows.find(row => row.dir === json);
+	const skipRow = rows.find(row => row.dir === mismatch);
+	expect(liveRow?.action).toBe("LIVE");
+	expect(liveRow?.sizeBytes).toBeGreaterThanOrEqual(oneGb);
+	expect(skipRow?.action).toBe("SKIP");
+	expect(skipRow?.reason).toBe("session-name-owner-mismatch");
+	expect(skipRow?.sizeBytes).toBeGreaterThanOrEqual(oneGb);
+	const multilineRow = rows.find(row => row.dir === multiline);
+	const oneLineRow = rows.find(row => row.dir === oneLine);
+	expect(multilineRow?.action).toBe("LIVE");
+	expect(multilineRow?.sizeBytes).toBeGreaterThan(0);
+	expect(oneLineRow?.action).toBe("LIVE");
+	expect(oneLineRow?.reason).toBe("owner-dead-pid-reused-but-open-fds-present");
+	expect(oneLineRow?.sizeBytes).toBeGreaterThan(0);
+	expect(rows.find(row => row.dir === malformed)?.sizeBytes).toBeGreaterThan(0);
+	expect(rows.filter(row => row.action === "LIVE" || row.action === "SKIP")
+		.every(row => typeof row.sizeBytes === "number" && Number.isFinite(row.sizeBytes))).toBe(true);
+	expect(plan.envelope.data.totals.sizeByRoot[root]).toBeGreaterThanOrEqual(oneGb * 2);
+	expect(plan.envelope.data.totals.sizeByVerdict["SKIP:session-name-owner-mismatch"]).toBe(skipRow?.sizeBytes);
+	expect(plan.envelope.data.totals.countByVerdict["SKIP:session-name-owner-mismatch"]).toBe(1);
+	expect(plan.envelope.data.totals.sizeByVerdict[`LIVE:${liveRow?.reason}`]).toBeGreaterThanOrEqual(liveRow?.sizeBytes);
+	expect(plan.envelope.data.totals.malformedByRoot[root]).toBe(1);
+	expect(plan.envelope.data.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
+	expect(Array.isArray(plan.envelope.data.rootMetrics)).toBe(true);
+	const help = cli(["help", "scratch"], home);
+	expect(help.code).toBe(0);
+	expect(help.envelope.data.text).toContain(UNOWNED_ACTIVE_RULE);
+});
+
 test("scratch apply removes dead sessions, quarantines idle unowned, and logs JSONL", () => {
   const { home, state } = cliHome();
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
@@ -721,9 +784,15 @@ test("scratch apply removes dead sessions, quarantines idle unowned, and logs JS
   writeFileSync(join(old, "data"), "stale\n");
   backdateTree(old, 73 * 3600 * 1000, Date.now());
   const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const planned = cli(["scratch", "plan"], home, env);
+  expect(planned.envelope.data.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
+  expect(planned.envelope.data.sessions.find((value: { dir: string }) => value.dir === old)?.action).toBe("QUARANTINE");
+  expect(planned.envelope.data.sessions.find((value: { dir: string }) => value.dir === live)?.action).toBe("LIVE");
   const applied = cli(["scratch", "apply", "--apply", "--yes"], home, env);
   expect(applied.code).toBe(0);
   expect(applied.envelope.data.overall).toBe("OK");
+  expect(applied.envelope.data.unownedActiveRule).toBe(planned.envelope.data.unownedActiveRule);
+  expect(applied.envelope.data.receipt).toBeDefined();
   expect(existsSync(dead)).toBe(false);
   expect(existsSync(live)).toBe(true);
   expect(existsSync(old)).toBe(false);
@@ -732,6 +801,32 @@ test("scratch apply removes dead sessions, quarantines idle unowned, and logs JS
   const lines = readFileSync(join(state, "omp-kit", "scratch-reap-log.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   expect(lines.some(entry => entry.event === "reap" && entry.dir === dead)).toBe(true);
   expect(lines.some(entry => entry.event === "quarantine")).toBe(true);
+});
+
+test("scratch apply preserves 73-hour unowned dirs on open-fd and unknown lsof evidence", () => {
+	for (const fixture of [
+		{ open: true, reason: "owner-released-but-open-fds-present" },
+		{ open: false, reason: "lsof-evidence-unavailable" },
+	]) {
+		const { home, state } = cliHome();
+		const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-lsof-plan-"));
+		roots.push(root);
+		const stale = join(root, "stale.9");
+		mkdirSync(stale, { recursive: true });
+		writeFileSync(join(stale, "data"), "stale\n");
+		backdateTree(stale, 73 * 3600 * 1000, Date.now());
+		const lsof = fakeLsof(fixture.open ? { openPath: join(stale, "data") } : { unknown: true });
+		const applied = cli(["scratch", "apply", "--apply", "--yes"], home, {
+			OMP_KIT_SCRATCH_ROOTS: root,
+			XDG_STATE_HOME: state,
+			PATH: `${lsof.dir}:${process.env.PATH ?? ""}`,
+		});
+		const row = applied.envelope.data.sessions.find((value: { dir: string }) => value.dir === stale);
+		expect(existsSync(stale)).toBe(true);
+		expect(row?.action).toBe("SKIP");
+		expect(row?.reason).toBe(fixture.reason);
+		expect(applied.envelope.data.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
+	}
 });
 
 test("service run applies scratch reaping and writes a receipt", () => {

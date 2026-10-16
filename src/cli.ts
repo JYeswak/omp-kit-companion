@@ -3159,7 +3159,9 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);
 		return { code: 0, data: { overall: "OK", roots: plan.roots, sessions: plan.sessions, orphans: plan.orphans,
-			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes }, verification: "UNVERIFIED" };
+			reapableBytes: plan.reapableBytes, quarantinableBytes: plan.quarantinableBytes, totals: plan.totals,
+			rootMetrics: plan.rootMetrics, pressure: plan.pressure, quarantineBuckets: plan.quarantineBuckets,
+			unownedActiveRule: plan.unownedActiveRule }, verification: "UNVERIFIED" };
 	}
 	if (sub === "apply") {
 		if (!request.flags.has("--apply")) {
@@ -3184,8 +3186,10 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			+ result.expired.filter(isApplyFailure).length;
 		return { code: failed > 0 ? 1 : 0,
 			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
-				orphans: result.orphans, killed: result.killed, expired: result.expired,
-				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
+				orphans: result.orphans, killed: result.killed, expired: result.expired, receipt: result.receipt,
+				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes, totals: result.totals,
+				rootMetrics: result.rootMetrics, pressure: result.pressure, quarantineBuckets: result.quarantineBuckets,
+				unownedActiveRule: result.unownedActiveRule },
 			verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");

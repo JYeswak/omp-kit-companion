@@ -1,3 +1,4 @@
+import { UNOWNED_ACTIVE_RULE } from "./scratch.ts";
 import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
 
 export type Flag = {
@@ -301,14 +302,24 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 		failed_count: { type: "number" }, failed_gb: { type: "number" },
 		refused_count: { type: "number" }, refused_gb: { type: "number" },
 	} },
-	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason"], properties: {
+	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason", "sizeBytes", "owner"], properties: {
 		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
 		reason: { type: "string" }, sizeBytes: { type: "number" },
+		owner: { type: ["object", "null"], properties: { pid: { type: "number" }, processStart: { type: ["string", "null"] },
+			label: { type: "string" }, repo: { type: "string" }, createdAt: { type: "string" }, argv0: { type: ["string", "null"] } } },
+		cause: { enum: ["permission", "immutable-flag", "open-fd", "lsof-unavailable", "unknown", "delete-leftover"] },
 	} } },
 	orphans: { type: "array", items: { type: "object" } },
 	killed: { type: "array", items: { type: "object" } },
 	expired: { type: "array", items: { type: "object" } },
 	reapableBytes: { type: "number" }, quarantinableBytes: { type: "number" },
+	totals: { type: "object", required: ["sizeByVerdict", "countByVerdict", "sizeByRoot", "malformedByRoot"], properties: {
+		sizeByVerdict: { type: "object", additionalProperties: { type: "number" } },
+		countByVerdict: { type: "object", additionalProperties: { type: "number" } },
+		sizeByRoot: { type: "object", additionalProperties: { type: "number" } },
+		malformedByRoot: { type: "object", additionalProperties: { type: "number" } },
+	} },
+	unownedActiveRule: { type: "string" },
 } };
 const flushPendingData: DataSchema = { type: "object", required: ["overall", "applied", "panes", "stale_steer", "frozen_turn"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE"] }, applied: { type: "boolean" },
@@ -667,11 +678,13 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the restore in noninteractive mode" },
 		], example: "omp-kit infra undo --receipt PATH --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
-	{ name: "scratch", description: "Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: an unowned dir with fresh activity (newest mtime within 72h) stays LIVE; idle past 72h with no open fds goes to quarantine", usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
-		{ name: "plan", description: "Read-only reap report over all scratch roots; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+	{ name: "scratch",
+		description: `Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: ${UNOWNED_ACTIVE_RULE}. Plan and apply JSON include per-row sizes, per-root/per-verdict totals, malformed-owner counts and the exact policy; apply also includes a reaper receipt.`,
+		usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
+			{ name: "plan", description: "Read-only report over all scratch roots with sized rows and per-root/per-verdict totals; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it", usage: "scratch release DIR", argument: "DIR", flags: [], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
 		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused and no lock is moved", usage: "scratch index-lock --repo DIR", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
-		{ name: "apply", description: "Quarantine and delete per the plan, then kill orphaned harness servers", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "apply", description: "Apply the guarded plan, delete expired quarantine, then kill orphaned harness servers; the JSON response repeats the policy and totals and includes the reaper receipt", usage: "scratch apply [--apply --yes]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
 		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
