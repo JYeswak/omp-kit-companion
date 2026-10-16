@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { MEMBERS, member } from '../../src/tern/model.ts';
 import { compileProgram, luaString, luaValue, emitCall, memberAllowedInContext } from '../../src/tern/luau.ts';
 import { extractDeclarations, compareInventory, verifySdk, docsReport } from '../../src/tern/coverage.ts';
-import routes from '../../src/tern/script-routes.json' with { type: 'json' };
+import routes from '../../src/tern/script-routes.json';
 const nonce = 'a'.repeat(32);
 test('Lua strings are UTF-8 byte escaped and finite JSON has explicit empty/null representation', () => {
     assert.equal(luaString('"\n'), '"\\034\\010"');
