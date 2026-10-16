@@ -35,6 +35,27 @@ chmod 0755 "$dest/sbh"
 echo "$dest" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
 "$dest/sbh" --version
 
+# A GitHub macOS runner image ships with ~13% of its 343 GB volume free,
+# under sbh's own pressure floor (its verdict: free_pct 12.8,
+# threshold_pct 14.0, run 38977569094). heavy then (correctly) defers every
+# harness for 900 s. Make the runner meet the floor instead of moving it:
+# remove preinstalled SDKs this repo never uses, one at a time, until sbh
+# admits. Actions macOS runners only; the active Xcode and symlinks are kept.
+verdict=0
+"$dest/sbh" check --need 10G >/dev/null 2>&1 || verdict=$?
+if [ "$verdict" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ] && [ "$(uname -s)" = Darwin ]; then
+	active_xcode=$(cd -P "$(xcode-select -p)/../.." 2>/dev/null && pwd) || active_xcode=""
+	for dir in "${ANDROID_HOME:-}" "$HOME/.dotnet" /Applications/Xcode_*.app; do
+		[ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+		[ "$(cd -P "$dir" && pwd)" != "$active_xcode" ] || continue
+		sudo rm -rf "$dir"
+		echo "ci-install-sbh: reclaimed unused runner image dir $dir"
+		verdict=0
+		"$dest/sbh" check --need 10G >/dev/null 2>&1 || verdict=$?
+		[ "$verdict" = 1 ] || break
+	done
+fi
+
 # Diagnostic only: the runner's own verdict, so a pressure deferral in the
 # ladder is attributable from this log. heavy makes the admission decision.
 verdict=0
