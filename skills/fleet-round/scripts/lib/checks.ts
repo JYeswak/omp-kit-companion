@@ -254,13 +254,21 @@ function underAny(id: string, roots: string[], tracker: Tracker): boolean {
 
 export function checkFrontier(tracker: Tracker, options: CheckOptions): CheckResult {
 	const findings: Finding[] = [];
-	if (tracker.ready.length === 0) findings.push({ kind: "frontier-empty", status: "FAIL", detail: "br ready is empty" });
+	const openUnblocked: string[] = [];
+	for (const bead of tracker.beads.values()) {
+		if (bead.status !== "open" || bead.issue_type === "epic") continue;
+		if (bead.deps.some(dep => dep.type === "blocks" && !TERMINAL.includes(dep.status))) continue;
+		openUnblocked.push(bead.id);
+	}
+	openUnblocked.sort();
+	if (tracker.ready.length === 0 && openUnblocked.length > 0)
+		findings.push({ kind: "frontier-empty", status: "FAIL", detail: `br ready is empty despite open unblocked tasks: ${openUnblocked.join(", ")}` });
 	const top = tracker.ready.slice(0, options.frontierTop);
 	if (options.focus === null) findings.push({ kind: "focus-undeclared", status: "UNKNOWN", detail: "no focus epics declared; frontier membership cannot be judged" });
 	else
 		for (const id of top)
 			if (!underAny(id, options.focus, tracker)) findings.push({ kind: "frontier-outside-focus", status: "FAIL", id, detail: `ready item ${id} is not under any focus epic (${options.focus.join(", ")})` });
-	return verdict("frontier", findings, `${tracker.ready.length} ready; top ${top.length}: ${top.join(", ") || "(none)"}`, { ready: tracker.ready.length, top });
+	return verdict("frontier", findings, `${tracker.ready.length} ready; ${openUnblocked.length} open unblocked; top ${top.length}: ${top.join(", ") || "(none)"}`, { ready: tracker.ready.length, open_unblocked: openUnblocked.length, top });
 }
 
 export function checkFocus(tracker: Tracker, options: CheckOptions): CheckResult {
