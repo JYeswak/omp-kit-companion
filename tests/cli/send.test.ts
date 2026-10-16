@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, dispatchBeads, fleetBeadPrefixes, proveSend, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -304,4 +306,235 @@ test.skipIf(!tmuxAvailable)("TMUX1 unchanged: explicit TMUX_TMPDIR is honored an
 	} finally {
 		spawnSync("tmux", ["-S", socket, "kill-server"], { encoding: "utf8" });
 	}
+});
+// ---- Tern verified delivery fixtures (ompkit-kdbz.2.4) ----
+const ternSeat: TernSeatBinding = { session: "s", pane: "7", windowKey: "W", cwd: "/repo" };
+function clearTernPending(dir: string): void {
+	try { rmSync(join(dir, "..", "tern-pending"), { recursive: true, force: true }); } catch {}
+}
+const ternRuntimeBinding = { sessionId: 1, sessionFile: "/sf", sessionUuid: "u", paneId: 7,
+	foregroundPid: 11, foregroundStarted: 22, cwd: "/repo" };
+const settledSha = createHash("sha256").update(settledJournalText(), "utf8").digest("hex");
+const ternIdle: TernObservation = { state: "IDLE", working: false, oracleBusy: false, sessionFile: "/sf",
+	sessionSha: settledSha, fg: null, runtimeBinding: ternRuntimeBinding, evidence: [], reason: null };
+const ternIdentified: TernIdentityResult = { status: "IDENTIFIED", agent: "A", binding: "b", cwdOk: true,
+	runtimeBinding: ternRuntimeBinding };
+function settledJournalText(): string {
+	return `{"type":"session","id":"s1","cwd":"/repo","version":3}\n`
+		+ `{"id":"m1","parentId":null,"type":"message","message":{"role":"assistant","stopReason":"stop","toolCallIds":[]},"toolCallId":null,"asyncState":null,"activeLeafId":null,"offset":0}\n`;
+}
+interface TernTaken { runs: string[][]; reads: number; }
+function ternFixture(over: {
+	observe?: TernObservation; identify?: TernIdentityResult; reads?: (string | null)[] | null; runRc?: number;
+} = {}): { io: TernObserverIo; taken: TernTaken; observe: (seat: TernSeatBinding) => Promise<TernObservation>; identify: (seat: TernSeatBinding) => Promise<TernIdentityResult> } {
+	const taken: TernTaken = { runs: [], reads: 0 };
+	const reads = over.reads === undefined ? [settledJournalText()] : over.reads;
+	return {
+		taken,
+		io: {
+			run: (argv: string[]) => {
+				taken.runs.push(argv);
+				return { code: over.runRc ?? 0, out: "ok" };
+			},
+			readSessionFile: (_path: string) => {
+				taken.reads++;
+				if (reads === null) return null;
+				return taken.reads <= reads.length ? reads[taken.reads - 1]! : reads[reads.length - 1]!;
+			},
+			wait: noWait,
+		},
+		observe: async (_seat: TernSeatBinding) => over.observe ?? { ...ternIdle },
+		identify: async (_seat: TernSeatBinding) => over.identify ?? { ...ternIdentified },
+	};
+}
+function userLine(id: string, parent: string | null, text: string, offset: number): string {
+	return JSON.stringify({ id, parentId: parent, type: "message", message: { role: "user" },
+		toolCallId: null, asyncState: null, activeLeafId: null, offset, text }) + "\n";
+}
+
+test("TERN2.4 gates: paused/custody/pullEnabled/unadmitted/INSIGHT seats get zero sends", async () => {
+	for (const gate of [{ paused: true }, { custodyDisabled: true }, { pullEnabled: false }, { admitted: false }, { insight: true }]) {
+		const f = ternFixture();
+		const r = await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: f.io,
+			gate, observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+		expect(r.status).toBe("REFUSED");
+		expect(f.taken.runs.length).toBe(0);
+	}
+});
+
+test("TERN2.4 INV04: unbound seat refuses with zero sends", async () => {
+	const f = ternFixture();
+	const r = await deliverToTernSeat({ seat: { ...ternSeat, windowKey: "" }, text: "hi", dropDir: dropDir(),
+		io: f.io, observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("PLANE_SEAT_UNBOUND");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 observation gates: BUSY/DEAD/UNKNOWN get zero sends", async () => {
+	const busy = ternFixture({ observe: { ...ternIdle, state: "BUSY", working: true, reason: "working" } });
+	expect((await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: busy.io,
+		observe: busy.observe, identify: busy.identify, pollMs: 1, deadlineMs: 10 })).code).toBe("SEAT_BUSY");
+	expect(busy.taken.runs.length).toBe(0);
+	const dead = ternFixture({ observe: { ...ternIdle, state: "DEAD", working: false, sessionFile: null, sessionSha: null, runtimeBinding: null, reason: "exited" } });
+	expect((await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: dead.io,
+		observe: dead.observe, identify: dead.identify, pollMs: 1, deadlineMs: 10 })).code).toBe("SEAT_DEAD");
+	expect(dead.taken.runs.length).toBe(0);
+	const unknown = ternFixture({ observe: { ...ternIdle, state: "UNKNOWN", working: null, oracleBusy: null, sessionFile: null, sessionSha: null, runtimeBinding: null, reason: "nope" } });
+	expect((await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: unknown.io,
+		observe: unknown.observe, identify: unknown.identify, pollMs: 1, deadlineMs: 10 })).code).toBe("OBSERVATION_UNKNOWN");
+	expect(unknown.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 INV07: rebound identity refuses with zero sends", async () => {
+	const f = ternFixture({ identify: { status: "REFUSED", code: "SEAT_REBOUND", reason: "moved", agent: null,
+		binding: null, cwdOk: false, runtimeBinding: null } });
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("SEAT_REBOUND");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 eligibility: unsettled turn refuses with zero sends", async () => {
+	const live = `{"type":"session","id":"s1","cwd":"/repo","version":3}\n`
+		+ `{"id":"m1","parentId":null,"type":"message","message":{"role":"user"},"toolCallId":null,"asyncState":null,"activeLeafId":null,"offset":0}\n`;
+	const f = ternFixture({ reads: [live] });
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hi", dropDir: dropDir(), io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("ELIGIBILITY_UNSETTLED");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 OK: USER marker past cursor proves delivery with offset", async () => {
+	const base = settledJournalText();
+	let pasted = "";
+	const f = ternFixture({ reads: null });
+	const io: TernObserverIo = {
+		run: (argv: string[]) => {
+			f.taken.runs.push(argv);
+			if (argv.includes("paste")) pasted = argv[argv.length - 1] ?? "";
+			return { code: 0, out: "ok" };
+		},
+		readSessionFile: (_path: string) => {
+			f.taken.reads++;
+			if (!pasted) return base;
+			return base + userLine("m2", "m1", pasted, Buffer.byteLength(base, "utf8"));
+		},
+		wait: noWait,
+	};
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 100 });
+	expect(r.status).toBe("OK");
+	expect(r.sessionFile).toBe("/sf");
+	expect(typeof r.offset).toBe("number");
+	expect(r.drop_path).toBeNull();
+	expect(f.taken.runs.filter(a => a.includes("paste")).length).toBe(1);
+	expect(f.taken.runs.filter(a => a.includes("keys")).length).toBe(1);
+});
+
+test("TERN2.4 PENDING: sent but unconsumed never claims OK or NOT_DELIVERED", async () => {
+	const f = ternFixture();
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.status).not.toBe("OK");
+	expect(r.status).not.toBe("NOT_DELIVERED");
+	expect(r.drop_path).not.toBeNull();
+});
+
+test("TERN2.4 INV03/F5: paste failure is NOT_DELIVERED with drop and no phantom pending", async () => {
+	const f = ternFixture({ runRc: 1 });
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("NOT_DELIVERED");
+	expect(r.drop_path).not.toBeNull();
+	expect(!existsSync(join(dir, "..", "tern-pending")) || readdirSync(join(dir, "..", "tern-pending")).length === 0).toBe(true);
+});
+
+test("TERN2.4 F1: session move between observe and effect refuses with zero sends", async () => {
+	const moved = settledJournalText() + userLine("mx", "m1", "other", 9999);
+	const f = ternFixture({ reads: [settledJournalText(), moved] });
+	const f1dir = dropDir();
+	clearTernPending(f1dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: f1dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("SEAT_REBOUND");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+test("TERN2.4 F4: stale and assistant-echo markers never prove", () => {
+	const marker = "kit-send-aaaaaaaaaaaaaaaa";
+	const oldLine = JSON.stringify({ type: "message", message: { role: "user" }, text: `old [${marker}]` });
+	const echoLine = JSON.stringify({ type: "message", message: { role: "assistant" }, text: `echo [${marker}]` });
+	const newLine = JSON.stringify({ type: "message", message: { role: "user" }, text: `new [${marker}]` });
+	const text = [oldLine, echoLine, newLine].join("\n") + "\n";
+	const afterOld = Buffer.byteLength(oldLine, "utf8") + 1;
+	expect(findTernUserMarker(text, `[${marker}]`, afterOld)).toBe(
+		Buffer.byteLength(oldLine, "utf8") + 1 + Buffer.byteLength(echoLine, "utf8") + 1);
+	expect(findTernUserMarker(text, `[${marker}]`, Buffer.byteLength(text, "utf8"))).toBeNull();
+	expect(findTernUserMarker(JSON.stringify({ role: "user", text: `flat [${marker}]` }) + "\n", `[${marker}]`, -1)).toBe(0);
+});
+
+test("TERN2.4 B5-7: unconsumed pending suppresses the new send; consumed pending clears", async () => {
+	const dir = dropDir();
+	const seatKey = "s_7_W";
+	mkdirSync(join(dir, "..", "tern-pending"), { recursive: true });
+	const pendingPath = join(dir, "..", "tern-pending", `${seatKey}.${settledSha.slice(0, 16)}.json`);
+	writeFileSync(pendingPath, JSON.stringify({ marker: "kit-send-oldoldold0", textSha256: "t", seatKey,
+		sessionSha: settledSha, leafId: "m1", cursorBytes: 0, createdAt: "2026-10-16T00:00:00Z" }) + "\n");
+	const f = ternFixture();
+	const suppressed = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(suppressed.status).toBe("PENDING_CONSUME");
+	expect(suppressed.code).toBe("SUPPRESSED_PENDING");
+	expect(suppressed.marker).toBe("kit-send-oldoldold0");
+	expect(f.taken.runs.length).toBe(0);
+	const base = settledJournalText();
+	const settledAgain = base
+		+ userLine("m9", "m1", "old [kit-send-oldoldold0] done", Buffer.byteLength(base, "utf8"));
+	const m10offset = Buffer.byteLength(settledAgain, "utf8");
+	const consumedText = settledAgain
+		+ JSON.stringify({ id: "m10", parentId: "m9", type: "message",
+			message: { role: "assistant", stopReason: "stop", toolCallIds: [] },
+			toolCallId: null, asyncState: null, activeLeafId: null, offset: m10offset }) + "\n";
+	const consumedIo: TernObserverIo = {
+		run: f.io.run,
+		readSessionFile: (_path: string) => consumedText,
+		wait: noWait,
+	};
+	const resumedObserve = async (_seat: TernSeatBinding) => ({ ...ternIdle,
+		sessionSha: createHash("sha256").update(consumedText, "utf8").digest("hex") });
+	const resumed = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: consumedIo,
+		observe: resumedObserve, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(resumed.status).toBe("PENDING_CONSUME");
+	expect(resumed.marker).not.toBe("kit-send-oldoldold0");
+	expect(resumed.code).toBe("PROOF_TIMEOUT");
+	expect(existsSync(pendingPath)).toBe(false);
+	const rotated = join(dir, "..", "tern-pending",
+		`${seatKey}.${createHash("sha256").update(consumedText, "utf8").digest("hex").slice(0, 16)}.json`);
+	expect(JSON.parse(readFileSync(rotated, "utf8")).marker).toBe(resumed.marker);
+});
+
+test("TERN2.4 submitQueued disabled: IDLE provisioned seat still refused with zero calls", async () => {
+	let calls = 0;
+	const io: TernObserverIo = {
+		run: (_argv: string[]) => { calls++; return { code: 0, out: "" }; },
+		readSessionFile: (_path: string) => { calls++; return null; },
+		wait: noWait,
+	};
+	const r = submitQueuedToTernSeat(ternSeat);
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("SUBMITQUEUED_DISABLED");
+	expect(r.marker).toBe("");
+	expect(calls).toBe(0);
+	void io;
 });

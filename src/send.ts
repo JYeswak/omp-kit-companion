@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
+import { identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
+import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -526,4 +528,272 @@ export async function proveSend(input: {
 	} finally {
 		releaseLock();
 	}
+}
+
+/**
+ * Tern verified delivery (ompkit-kdbz.2.4 TERNSEND). Observation and identity
+ * come from Silver's plane-tern.ts (observeTernSeat/identifyTernSeat, owned
+ * on 2.3 — imported, never reimplemented); this file owns only the send
+ * envelope: gating, paste/Enter actuation via the `tern` CLI, session-file
+ * marker proof, pending persistence and drop files. tmux/herdr paths above
+ * are untouched.
+ *
+ * Proof model (no screen parsing, no API receipt — `tern pane.write` is
+ * fire-and-forget): the exact marker must appear as a USER-role journal line
+ * at a byte offset strictly past the pre-send cursor, in the same session
+ * file. Stale (offset<=cursor), assistant-echo (role!=user) and wrong-session
+ * markers never prove. See F4.
+ */
+import { createHash as ternCreateHash } from "node:crypto";
+import { identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
+import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
+
+export const TERN_PROOF_POLL_MS = 1000;
+export const TERN_PROOF_DEADLINE_MS = 20_000;
+/** `tern send` keys vocabulary is unverified live; T3 scratch proof must confirm. */
+export const TERN_ENTER_KEYS = ["Enter"];
+
+export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
+/** Caller-declared seat posture; any stated bad value refuses with zero sends. */
+export interface TernSendGate {
+	paused?: boolean;
+	custodyDisabled?: boolean;
+	pullEnabled?: boolean;
+	admitted?: boolean;
+	insight?: boolean;
+}
+export interface TernDeliverResult {
+	status: TernDeliverStatus;
+	marker: string;
+	sends: number;
+	sessionFile: string | null;
+	offset: number | null;
+	drop_path: string | null;
+	detail: string;
+	code: string;
+}
+export interface TernPendingRecord {
+	marker: string;
+	textSha256: string;
+	seatKey: string;
+	sessionSha: string;
+	leafId: string;
+	cursorBytes: number;
+	createdAt: string;
+}
+
+function readTernPending(path: string): TernPendingRecord | null {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(readFileSync(path, "utf8") as string) as unknown;
+	} catch {
+		return null;
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+	const rec = raw as { [key: string]: unknown };
+	const marker = typeof rec.marker === "string" ? rec.marker : null;
+	const textSha256 = typeof rec.textSha256 === "string" ? rec.textSha256 : null;
+	const seatKey = typeof rec.seatKey === "string" ? rec.seatKey : null;
+	const sessionSha = typeof rec.sessionSha === "string" ? rec.sessionSha : null;
+	const leafId = typeof rec.leafId === "string" ? rec.leafId : null;
+	const createdAt = typeof rec.createdAt === "string" ? rec.createdAt : null;
+	const cursorBytes = typeof rec.cursorBytes === "number" && Number.isInteger(rec.cursorBytes) && rec.cursorBytes >= 0
+		? rec.cursorBytes
+		: null;
+	if (marker === null || textSha256 === null || seatKey === null || sessionSha === null
+		|| leafId === null || createdAt === null || cursorBytes === null) return null;
+	return { marker, textSha256, seatKey, sessionSha, leafId, cursorBytes, createdAt };
+}
+/** Scan raw session text for the marker on a USER-role line past a cursor offset. */
+export function findTernUserMarker(text: string, marker: string, afterOffset: number): number | null {
+	let offset = 0;
+	for (const line of text.split("\n")) {
+		const start = offset;
+		offset += Buffer.byteLength(line, "utf8") + 1;
+		if (start < afterOffset || !line.includes(marker)) continue;
+		try {
+			const decoded: unknown = JSON.parse(line);
+			if (typeof decoded !== "object" || decoded === null) continue;
+			if ("role" in decoded && decoded.role === "user") return start;
+			if ("message" in decoded) {
+				const inner = decoded.message;
+				if (typeof inner === "object" && inner !== null && "role" in inner && inner.role === "user") return start;
+			}
+		} catch {
+			continue;
+		}
+	}
+	return null;
+}
+
+/**
+ * Deliver text to a bound Tern seat with session-file proof (2.4 [a]).
+ *
+ * Flow: gate flags -> validate seat -> observe (must be IDLE) -> identify
+ * (must be IDENTIFIED) -> journal eligibility (settled turn) -> clear any
+ * already-consumed pending marker (log status only, never resend) ->
+ * suppress-while-pending check -> persist attempt record -> lock ->
+ * re-read session file (incarnation unchanged) -> paste -> Enter once ->
+ * poll for the USER marker past the pre-send cursor (default 20 s).
+ *
+ * Statuses: OK (USER marker proven), PENDING_CONSUME (sent but consumption
+ * unproven, or suppressed by an unconsumed pending marker; recovery copy
+ * written, pending retained, never auto-resent), NOT_DELIVERED (send
+ * commands failed; recovery copy written), REFUSED (zero sends: gates,
+ * observation, identity, eligibility or incarnation).
+ */
+export async function deliverToTernSeat(input: {
+	seat: TernSeatBinding;
+	text: string;
+	dropDir: string;
+	io: TernObserverIo;
+	gate?: TernSendGate;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+	/** Overridable for tests; production passes Silver's plane-tern functions. */
+	observe?: typeof observeTernSeat;
+	identify?: typeof identifyTernSeat;
+}): Promise<TernDeliverResult> {
+	const observe = input.observe ?? observeTernSeat;
+	const identify = input.identify ?? identifyTernSeat;
+	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
+	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
+	const fail = (code: string, detail: string): TernDeliverResult =>
+		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code });
+	const gate = input.gate ?? {};
+	if (gate.paused === true) return fail("GATE_PAUSED", "seat is paused; zero sends");
+	if (gate.custodyDisabled === true) return fail("GATE_CUSTODY_DISABLED", "seat custody disabled; zero sends");
+	if (gate.pullEnabled === false) return fail("GATE_PULL_DISABLED", "pullEnabled is false; zero sends");
+	if (gate.admitted === false) return fail("GATE_UNADMITTED", "seat is unadmitted; zero sends");
+	if (gate.insight === true) return fail("GATE_INSIGHT", "INSIGHT seat; zero sends");
+	if (typeof input.seat.session !== "string" || !input.seat.session.trim()
+		|| typeof input.seat.windowKey !== "string" || !input.seat.windowKey.trim()) {
+		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session and explicit window key; zero sends");
+	}
+	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
+	const observation = await observe(input.seat, input.io);
+	if (observation.state === "BUSY") return fail("SEAT_BUSY", `seat is BUSY (${observation.reason ?? "working"}); zero sends`);
+	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
+	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
+		const code = observation.reason === "PLANE_SEAT_UNBOUND" || observation.reason === "TERN_WINDOW_UNBOUND"
+			|| observation.reason === "SEAT_REBOUND" || observation.reason === "SEAT_CWD_MISMATCH"
+			? observation.reason
+			: "OBSERVATION_UNKNOWN";
+		return fail(code, `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`);
+	}
+	const identity = await identify(input.seat, input.io);
+	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
+		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
+		return fail(code, `seat identity not bound (${identity.reason}); zero sends`);
+	}
+	if (observation.sessionFile === null) return fail("ELIGIBILITY_UNKNOWN", "no session file to prove against; zero sends");
+	const journalText = input.io.readSessionFile(observation.sessionFile);
+	if (journalText === null) return fail("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends");
+	const journal = parseSessionJournal(journalText);
+	if (journal.status !== "KNOWN" || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
+		|| journal.lastMessageRole !== "assistant") {
+		return fail("ELIGIBILITY_UNSETTLED", "turn not settled (parse, stop, pending tools or live user turn); zero sends");
+	}
+	const preCursor = Buffer.byteLength(journalText, "utf8");
+	const preSha = observation.sessionSha;
+	// A pending marker already consumed upgrades log status only: sweep every
+	// pending record for this seat (any incarnation) against the eligibility
+	// snapshot and clear consumed ones. Never resend old text. A remaining
+	// pending on THIS incarnation suppresses the new send.
+	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
+	let pendingDirNames: string[] = [];
+	try {
+		pendingDirNames = readdirSync(pendingDir);
+	} catch {
+		pendingDirNames = [];
+	}
+	for (const name of pendingDirNames) {
+		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
+		const rec = readTernPending(join(pendingDir, name));
+		if (rec !== null && findTernUserMarker(journalText, rec.marker, rec.cursorBytes) !== null) {
+			try { rmSync(join(pendingDir, name), { force: true }); } catch {}
+		}
+	}
+	const pendingPath = resolve(join(pendingDir, `${seatKey}.${(preSha ?? "").slice(0, 16)}.json`));
+	const pending = readTernPending(pendingPath);
+	if (pending !== null) {
+		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile: observation.sessionFile,
+			offset: null, drop_path: null, detail: `earlier marker unconsumed on this incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
+	}
+	// F5: persist the attempt BEFORE any irreversible effect; one lock per
+	// destination serializes concurrent senders.
+	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
+	const textSha256 = createHash("sha256").update(input.text, "utf8").digest("hex");
+	const attempt: TernPendingRecord = { marker, textSha256, seatKey, sessionSha: preSha ?? "",
+		leafId: journal.leafId, cursorBytes: preCursor, createdAt: new Date().toISOString() };
+	try {
+		mkdirSync(dirname(pendingPath), { recursive: true });
+		writeFileSync(pendingPath, JSON.stringify(attempt) + "\n", { flag: "wx" });
+	} catch {
+		return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
+	}
+	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.seat.session, input.seat.pane),
+		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
+	if (!releaseLock) {
+		try { rmSync(pendingPath, { force: true }); } catch {}
+		return { status: "UNDELIVERED", marker, sends: 0, sessionFile: null, offset: null,
+			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY" };
+	}
+	try {
+		// F1 atomic admission: the session file must be unchanged since the
+		// eligibility read; any incarnation move refuses before effect.
+		const fresh = input.io.readSessionFile(observation.sessionFile);
+		const freshSha = fresh === null ? null : createHash("sha256").update(fresh, "utf8").digest("hex");
+		if (fresh === null || freshSha !== preSha) {
+			try { rmSync(pendingPath, { force: true }); } catch {}
+			return { status: "REFUSED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null, drop_path: null,
+				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
+		}
+		const block = `${input.seat.session}/${observation.runtimeBinding.paneId}`;
+		const base = ["tern", "--window", input.seat.windowKey, "send", block];
+		if (input.io.run([...base, "paste", `${input.text}\n[${marker}]`]).code !== 0) {
+			try { rmSync(pendingPath, { force: true }); } catch {}
+			return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null,
+				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+				detail: `paste command failed; recovery copy written`, code: "SEND_FAILED" };
+		}
+		if (input.io.run([...base, "keys", ...TERN_ENTER_KEYS]).code !== 0) {
+			return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile: observation.sessionFile, offset: null,
+				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+				detail: `pasted but Enter unproven; consumption unknown, pending retained`, code: "ENTER_FAILED" };
+		}
+		const started = Date.now();
+		for (;;) {
+			const current = input.io.readSessionFile(observation.sessionFile);
+			if (current !== null) {
+				const at = findTernUserMarker(current, marker, preCursor);
+				if (at !== null) {
+					try { rmSync(pendingPath, { force: true }); } catch {}
+					return { status: "OK", marker, sends: 1, sessionFile: observation.sessionFile, offset: at,
+						drop_path: null, detail: `marker proven as USER entry at offset ${at}`, code: "PROVEN" };
+				}
+			}
+			if (Date.now() - started >= deadlineMs) break;
+			await wait(pollMs);
+		}
+		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile: observation.sessionFile, offset: null,
+			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+			detail: `sent but USER marker unproven within the bound; pending retained, never auto-resent`, code: "PROOF_TIMEOUT" };
+	} finally {
+		releaseLock();
+	}
+}
+
+/**
+ * submitQueued is DISABLED (2.4 F6): native queue-item/promotion/admission
+ * semantics are unqualified, so no M-Up/Enter actuation exists. Every call
+ * refuses with zero exec calls; the tests below pin the refusal so removing
+ * it fails them. Banner pixels, oracle state and seat posture change nothing.
+ */
+export function submitQueuedToTernSeat(_seat: TernSeatBinding): TernDeliverResult {
+	return { status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null,
+		detail: `submitQueued disabled pending native queue admission qualification (F6); zero sends`, code: "SUBMITQUEUED_DISABLED" };
 }
