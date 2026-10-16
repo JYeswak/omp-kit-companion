@@ -137,6 +137,12 @@ export BR_SHIM_TEST_ARGV="$TMP/argv"
 export AM_LOG="$TMP/am.log"
 export AM_EXPECTED_PROJECT="$REPO_ROOT"
 export AM_FAKE_MODE=clear
+# The shim resolves the Agent Mail project from the tracker path; without BEADS_DB it falls back
+# to `git rev-parse --show-toplevel`, which fails in the pre-push gate's git-less archive (every
+# write case refused BR_SHIM_RESERVATION_UNKNOWN there while passing in a checkout). The archive
+# also lacks the untracked .beads directory the path branch resolves through.
+mkdir -p "$REPO_ROOT/.beads"
+export BEADS_DB="$REPO_ROOT/.beads/beads.db"
 : > "$AM_LOG"
 export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
 export AGENT_NAME="TestShim"
