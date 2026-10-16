@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { superviseScratchJob } from "../../src/service.ts";
@@ -713,6 +713,22 @@ test("service run kit-update with poll-only config reaches the job instead of re
   expect(result.envelope.data).toMatchObject({ overall: "OK", job: "kit-update", status: "DISABLED" });
 }, 60000);
 
+test("scratch worker refuses a forged keeper before inspecting its root", () => {
+  const { home } = fixture();
+  const root = join(home, "var", "agent-tmp");
+  const blocked = join(root, "blocked.59999");
+  mkdirSync(blocked, { recursive: true });
+  expect(Bun.spawnSync(["mkfifo", join(blocked, ".owner")]).exitCode).toBe(0);
+  const result = cli(["service", "run", "scratch-reaper"], home, {
+    OMP_KIT_SCRATCH_ROOTS: root, OMP_KIT_SCRATCH_CLAIM: "forged", OMP_KIT_LOAD_OVERRIDE: "0/1",
+  });
+  expect(result.code).toBe(2);
+  expect(result.envelope.errors[0].code).toBe("SCRATCH_KEEPER_CHANGED");
+  expect(existsSync(join(blocked, ".owner"))).toBe(true);
+  expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.lock"))).toBe(false);
+  expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.json"))).toBe(false);
+});
+
 test("REAP1 whole scheduled scratch job preempts a synchronous owner read and releases single-flight", () => {
   const { home } = fixture();
   const root = join(home, "var", "agent-tmp");
@@ -1218,8 +1234,6 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
   // A separate CLI process exercises the real platform deadline; parent fake timers cannot drive it.
   const jobs = join(home, ".local", "state", "omp-kit", "jobs");
   mkdirSync(jobs, { recursive: true, mode: 0o700 });
-  const ready = Promise.withResolvers<void>();
-  const watcher = watch(jobs, { recursive: true }, () => { if (existsSync(join(jobs, "scratch-reaper.lock", "pid"))) ready.resolve(); });
   const first = Bun.spawn([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "service", "run", "scratch-reaper", "--json"], {
     cwd: home, env: { ...process.env, ...extraEnv, HOME: home, XDG_STATE_HOME: join(home, ".local", "state") }, stdout: "pipe", stderr: "pipe",
   });
@@ -1227,7 +1241,12 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
   const firstErrors = new Response(first.stderr).text();
   try {
     const lock = join(jobs, "scratch-reaper.lock");
-    await Promise.race([ready.promise, first.exited.then(() => { throw new Error("first job exited before its live single-flight marker"); })]);
+    // FSEvents may coalesce a short-lived nested marker. Read the actual lock,
+    // bounded by the existing test deadline and the owned child's termination.
+    while (!existsSync(join(lock, "pid"))) {
+      if (first.exitCode !== null) throw new Error(`first job exited before its live single-flight marker: ${await firstOutput}`);
+      await Bun.sleep(10);
+    }
     expect(existsSync(lock)).toBe(true);
     const overlap = cli(["service", "run", "scratch-reaper"], home, extraEnv);
     expect(overlap.envelope.data).toMatchObject({ status: "SKIPPED-OVERLAP", receipt: { status: "SKIPPED-OVERLAP" } });
@@ -1237,7 +1256,6 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
     expect(existsSync(lock)).toBe(false);
     expect(existsSync(join(blocked, ".owner"))).toBe(true);
   } finally {
-    watcher.close();
     if (first.exitCode === null) first.kill("SIGTERM");
     await first.exited;
     await firstErrors;

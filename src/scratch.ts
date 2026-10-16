@@ -259,7 +259,7 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 }
 
 export interface DiskCapacity { bavail: number; blocks: number }
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null }
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -1345,6 +1345,7 @@ function pressureForRoots(metrics: ScratchRootMetric[]): ScratchPressure {
 
 /** One directory through the full plan verdict (owner release, live/dead identity and unowned age). */
 export function inspectOne(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict | null {
+	deps.onInspect?.(dir);
 	try {
 		if (!statSync(dir).isDirectory() || isSymlink(dir)) return null;
 	} catch {
