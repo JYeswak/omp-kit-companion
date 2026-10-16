@@ -36,12 +36,20 @@ refuse() {
 if [ -z "${AGENT_NAME:-}" ]; then
 	fail "AGENT_NAME is required (pane identity)"
 fi
-if [ -n "$DB" ]; then
-	info=$(br --db "$DB" show "$BEAD" --json 2>/dev/null) || fail "cannot read bead $BEAD"
-else
-	info=$(br show "$BEAD" --json 2>/dev/null) || fail "cannot read bead $BEAD"
-fi
-assignee=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(d.get('assignee') or '')" 2>/dev/null) || fail "cannot parse bead $BEAD"
+read_bead() {
+	if [ -n "$DB" ]; then
+		br --db "$DB" show "$BEAD" --json 2>/dev/null
+	else
+		br show "$BEAD" --json 2>/dev/null
+	fi
+}
+# field NAME: print one bead field ('' when absent) from $info
+field() {
+	printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(d.get(sys.argv[1]) or '')" "$1" 2>/dev/null
+}
+info=$(read_bead) || fail "cannot read bead $BEAD"
+assignee=$(field assignee) || fail "cannot parse bead $BEAD"
+updated_at=$(field updated_at) || fail "cannot parse bead $BEAD"
 if [ -n "$assignee" ] && [ "$assignee" = "$AGENT_NAME" ]; then
 	refuse "caller $AGENT_NAME holds the claim on $BEAD; a different worker must close or grade"
 fi
@@ -71,6 +79,13 @@ BEGIN { want = tolower(trim(me)) }
 END { flush(); print out }') || hit=""
 if [ -n "$hit" ]; then
 	refuse "caller $AGENT_NAME has an Agent trailer on $BEAD commit $hit; a different worker must close or grade"
+fi
+# Native claim revision: the claim must not move while the guard decides.
+info=$(read_bead) || fail "cannot re-read bead $BEAD"
+assignee2=$(field assignee) || fail "cannot parse bead $BEAD"
+updated_at2=$(field updated_at) || fail "cannot parse bead $BEAD"
+if [ "$assignee2" != "$assignee" ] || [ "$updated_at2" != "$updated_at" ]; then
+	refuse "claim on $BEAD changed during the check (assignee $assignee->$assignee2 / updated_at $updated_at->$updated_at2); re-run"
 fi
  # LESSON1 (ompkit-ok3y): a close carries its lesson in the transition comment.
  # Only the close subcommand with a non-empty comment is judged; review/grading

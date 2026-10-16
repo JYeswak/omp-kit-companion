@@ -153,6 +153,37 @@ if (cd -- "$repo2" && AGENT_NAME=dave sh "$CHECK" fx-1.112 --db "$TMP/db" > "$TM
 else
 	pass=$((pass + 1))
 fi
+
+# 14-15 (ompkit-fp72.98): a claim revision that moves between the first read
+# and the decision is refused. This stub br serves bead.json on its first call
+# and bead2.json afterwards, counting calls in $TMP/br.count.
+mkdir -p "$TMP/bin2"
+cat > "$TMP/bin2/br" <<'EOF'
+#!/bin/sh
+n=$(cat "$BR_GUARD_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$BR_GUARD_COUNT"
+if [ "$n" -gt 1 ]; then cat "$BR_GUARD_JSON_FILE2"; else cat "$BR_GUARD_JSON_FILE"; fi
+EOF
+chmod +x "$TMP/bin2/br"
+set_bead '{"id":"fx-1.1","status":"in_progress","assignee":"Carol","updated_at":"2026-10-16T10:00:00Z","labels":[]}'
+printf '%s' '{"id":"fx-1.1","status":"in_progress","assignee":"Erin","updated_at":"2026-10-16T10:00:05Z","labels":[]}' > "$TMP/bead2.json"
+rm -f "$TMP/br.count"
+if (cd -- "$repo2" && PATH="$TMP/bin2:$PATH" BR_GUARD_COUNT="$TMP/br.count" BR_GUARD_JSON_FILE2="$TMP/bead2.json" AGENT_NAME=Dave sh "$CHECK" fx-1.1 --db "$TMP/db" > "$TMP/out" 2>&1); then
+	fail=$((fail + 1)); printf 'FAIL claim-moved: rc=0 out<<<%s>>>\n' "$(cat "$TMP/out")"
+else
+	rc=$?
+	if [ "$rc" = 4 ] && grep -q "changed during the check (assignee Carol->Erin" "$TMP/out"; then pass=$((pass + 1));
+	else fail=$((fail + 1)); printf 'FAIL claim-moved: rc=%s out<<<%s>>>\n' "$rc" "$(cat "$TMP/out")"; fi
+fi
+# 15. an unchanged second read proceeds
+cp "$TMP/bead.json" "$TMP/bead2.json"
+rm -f "$TMP/br.count"
+if (cd -- "$repo2" && PATH="$TMP/bin2:$PATH" BR_GUARD_COUNT="$TMP/br.count" BR_GUARD_JSON_FILE2="$TMP/bead2.json" AGENT_NAME=Dave sh "$CHECK" fx-1.1 --db "$TMP/db" > "$TMP/out" 2>&1); then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL claim-stable: out<<<%s>>>\n' "$(cat "$TMP/out")"
+fi
  
  printf 'close-guard: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]
