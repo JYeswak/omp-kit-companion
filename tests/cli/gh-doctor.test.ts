@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,7 +90,7 @@ describe("github capability probes", () => {
 			});
 			expect(rows.every(row => row.status === "PASS")).toBe(true);
 			expect(rows[0]!.credential.source).toBe("gh keyring");
-			expect(rows[0]!.credential.fingerprint_prefix).toBe("ghp_key");
+			expect(rows[0]!.credential.fingerprint_prefix).toBe(createHash("sha256").update("ghp_keyring999").digest("hex").slice(0, 16));
 			expect(JSON.stringify(rows)).not.toContain("ghp_keyring999");
 		} finally {
 			rmSync(base, { recursive: true, force: true });
@@ -102,11 +103,13 @@ describe("github capability probes", () => {
 			token: "ghp_classic123", tokenSource: "gh hosts.yml test",
 			fetchImpl: stubFetch(fullRoutes, seen),
 		});
- 		for (const row of rows) {
- 			expect(row.credential.source).toBe("gh hosts.yml test");
- 			expect(row.credential.fingerprint_prefix).toBe("ghp_cla");
- 			expect(JSON.stringify(row)).not.toContain("ghp_classic123");
- 		}
+		for (const row of rows) {
+			expect(row.credential.source).toBe("gh hosts.yml test");
+			expect(row.credential.fingerprint_prefix).toBe(createHash("sha256").update("ghp_classic123").digest("hex").slice(0, 16));
+			expect(JSON.stringify(row)).not.toContain("ghp_classic123");
+			expect(JSON.stringify(row)).not.toContain("ghp_cla");
+		}
+	
  	});
 });
 

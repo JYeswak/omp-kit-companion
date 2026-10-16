@@ -6,6 +6,7 @@
  * POST/PUT/PATCH/DELETE is ever made) plus local file reads. Live network is
  * used at most once per operator run; tests inject a stub fetch.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Finding } from "./diagnostics.ts";
 
@@ -14,7 +15,7 @@ export type GhCapabilityStatus = "PASS" | "FAIL" | "UNVERIFIED";
 export interface GhCredential {
 	/** Where the token came from; never the token itself. */
 	source: string;
-	/** First 7 chars (e.g. "ghp_abc"); enough to match `gh auth status`, not enough to use. */
+	/** First 16 hex characters of the SHA-256 digest; never token bytes. */
 	fingerprint_prefix: string;
 	kind: "classic" | "fine-grained" | "unknown";
 }
@@ -137,7 +138,7 @@ export async function probeGithubCapabilities(input: GhProbeInput): Promise<GhCa
 			({ capability, credential, status: "UNVERIFIED", remedy: "Authenticate gh (gh auth login) then rerun omp-kit doctor --scope github." });
 		return [unverified("issue_create_foreign"), unverified("push_owned"), unverified("workflow_dispatch"), unverified("run_read")];
 	}
-	const credential: GhCredential = { source: found.source, fingerprint_prefix: found.token.slice(0, 7), kind: kindOf(found.token) };
+	const credential: GhCredential = { source: found.source, fingerprint_prefix: createHash("sha256").update(found.token).digest("hex").slice(0, 16), kind: kindOf(found.token) };
 	const fetchImpl = input.fetchImpl ?? (async (url, init) => {
 		const res = await fetch(url, init);
 		const headers: Record<string, string> = {};
