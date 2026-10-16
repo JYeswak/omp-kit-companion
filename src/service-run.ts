@@ -1,8 +1,10 @@
-import { lstatSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { loadGate } from "./infra.ts";
+import { randomUUID } from "node:crypto";
+import { Database } from "bun:sqlite";
 
 /**
  * SVC1 single-flight: one running job per name. The second overlapping run
@@ -12,7 +14,6 @@ import { loadGate } from "./infra.ts";
  */
 
 export const OVERLAP_EXIT = 4;
-const LOCK_STALE_MS = 2 * 60 * 60 * 1000;
 
 export interface RunLock {
 	release(): void;
@@ -22,50 +23,68 @@ export type AcquireResult =
 	| { status: "ACQUIRED"; lock: RunLock }
 	| { status: "OVERLAP"; holderPid: number | null; holderAgeMs: number | null };
 
-interface LockClaim {
+export interface RunClaim {
 	pid: number;
 	startedAt: number;
+	token: string;
 }
 
-const EMPTY_DIR_GRACE_MS = 60 * 1000;
-
-/** A lock dir with no readable claim is dead only once it is older than the grace window. */
-function emptyDirIsStale(dir: string, nowMs: number): boolean {
-	try {
-		const age = nowMs - statSync(dir).mtimeMs;
-		return age > EMPTY_DIR_GRACE_MS;
-	} catch {
-		return false;
-	}
-}
+/** Only ESRCH proves death. EPERM and every other failed probe are unknown. */
 function pidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
-	} catch {
-		return false;
+	} catch (error) {
+		return !(error !== null && typeof error === "object" && "code" in error && error.code === "ESRCH");
 	}
 }
 
-function readClaim(dir: string, nowMs: number): (LockClaim & { stale: boolean }) | null {
-	let raw: string;
+function readClaim(dir: string): RunClaim | null {
 	try {
-		raw = readFileSync(join(dir, "pid"), "utf8");
+		if (!lstatSync(dir).isDirectory() || !lstatSync(join(dir, "pid")).isFile()) return null;
+		const value: unknown = JSON.parse(readFileSync(join(dir, "pid"), "utf8"));
+		if (value === null || typeof value !== "object" || Array.isArray(value)
+			|| !("pid" in value) || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid < 1
+			|| !("startedAt" in value) || typeof value.startedAt !== "number" || !Number.isSafeInteger(value.startedAt)
+			|| !("token" in value) || typeof value.token !== "string" || value.token.length === 0) return null;
+		return { pid: value.pid, startedAt: value.startedAt, token: value.token };
 	} catch {
 		return null;
 	}
-	let parsed: unknown;
+}
+
+/**
+ * A persistent SQLite inode supplies the kernel's cross-process writer lock.
+ * No SQL state or schema: BEGIN IMMEDIATE serializes claim-file mutations.
+ * Never unlink the gate, which would split existing and incoming waiters.
+ */
+function mutateClaim<T>(jobsDir: string, job: string, mutation: () => T): T | null {
+	let fd: number | undefined;
+	let db: Database | undefined;
 	try {
-		parsed = JSON.parse(raw);
+		if (!lstatSync(jobsDir).isDirectory()) return null;
+		const path = join(jobsDir, `${job}.gate.sqlite`);
+		fd = openSync(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+		const opened = fstatSync(fd);
+		if (!opened.isFile() || opened.nlink !== 1 || (opened.mode & 0o077) !== 0
+			|| (process.getuid !== undefined && opened.uid !== process.getuid())) return null;
+		db = new Database(path);
+		const current = lstatSync(path);
+		if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isFile()) return null;
+		db.exec("PRAGMA busy_timeout = 0");
+		db.exec("BEGIN IMMEDIATE");
+		const result = mutation();
+		db.exec("COMMIT");
+		return result;
 	} catch {
+		if (db?.inTransaction) {
+			try { db.exec("ROLLBACK"); } catch { /* Claim effects are unknown, never permission to steal. */ }
+		}
 		return null;
+	} finally {
+		db?.close();
+		if (fd !== undefined) closeSync(fd);
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-	const record = parsed as Record<string, unknown>;
-	if (typeof record["pid"] !== "number" || typeof record["startedAt"] !== "number") return null;
-	const claim: LockClaim = { pid: record["pid"] as number, startedAt: record["startedAt"] as number };
-	const stale = !pidAlive(claim.pid) || nowMs - claim.startedAt > LOCK_STALE_MS;
-	return { ...claim, stale };
 }
 
 function removeLock(dir: string): void {
@@ -78,69 +97,58 @@ function removeLock(dir: string): void {
 }
 
 /**
- * Claim the single-flight lock for a job. Pure filesystem + PID liveness:
- * no daemons, no ports. Stale (dead PID or older than the backstop) locks
- * are broken; anything unverifiable stays OVERLAP (fail closed).
+ * Claim one job. Only a verified dead PID can be reclaimed; age is not death.
+ * Missing, malformed and legacy claims remain OVERLAP until reconciled.
  */
 export function acquireRunLock(jobsDir: string, job: string, nowMs: number = Date.now()): AcquireResult {
-	const dir = join(jobsDir, `${job}.lock`);
-	let claimed = false;
-	for (let attempt = 0; attempt < 2 && !claimed; attempt++) {
+	const unknown: AcquireResult = { status: "OVERLAP", holderPid: null, holderAgeMs: null };
+	if (!Number.isSafeInteger(nowMs)) return unknown;
+	return mutateClaim(jobsDir, job, (): AcquireResult => {
+		const dir = join(jobsDir, `${job}.lock`);
 		try {
-			mkdirSync(dir, { recursive: false, mode: 0o700 });
-			claimed = true;
+			mkdirSync(dir, { mode: 0o700 });
 		} catch {
-			const claim = readClaim(dir, nowMs);
-			if (claim !== null && !claim.stale) {
-				return { status: "OVERLAP", holderPid: claim.pid, holderAgeMs: nowMs - claim.startedAt };
-			}
-			if (claim === null && !emptyDirIsStale(dir, nowMs)) {
-				return { status: "OVERLAP", holderPid: null, holderAgeMs: null };
+			const holder = readClaim(dir);
+			if (holder === null) return unknown;
+			if (pidAlive(holder.pid)) {
+				return { status: "OVERLAP", holderPid: holder.pid, holderAgeMs: nowMs - holder.startedAt };
 			}
 			removeLock(dir);
+			try { mkdirSync(dir, { mode: 0o700 }); } catch { return unknown; }
 		}
-	}
-	if (!claimed) return { status: "OVERLAP", holderPid: null, holderAgeMs: null };
-	try {
-		writeFileSync(join(dir, "pid"), JSON.stringify({ pid: process.pid, startedAt: nowMs }), { mode: 0o600 });
-	} catch {
-		removeLock(dir);
-		return { status: "OVERLAP", holderPid: null, holderAgeMs: null };
-	}
-	let released = false;
-	return { status: "ACQUIRED", lock: { release: () => {
-		if (released) return;
-		released = true;
-		removeLock(dir);
-	} } };
+		const owner = lstatSync(dir);
+		const claim: RunClaim = { pid: process.pid, startedAt: nowMs, token: randomUUID() };
+		try {
+			writeFileSync(join(dir, "pid"), JSON.stringify(claim), { mode: 0o600, flag: "wx" });
+		} catch {
+			// Do not remove a claim that appeared without our exclusive creation.
+			try { rmdirSync(dir); } catch { /* Unknown contents stay untouched. */ }
+			return unknown;
+		}
+		let released = false;
+		return { status: "ACQUIRED", lock: { release: () => {
+			if (released) return;
+			const result = mutateClaim(jobsDir, job, () => {
+				const current = readClaim(dir);
+				if (current === null || claimIncarnation(current) !== claimIncarnation(claim)) return true;
+				const identity = lstatSync(dir);
+				if (identity.dev !== owner.dev || identity.ino !== owner.ino) return true;
+				removeLock(dir);
+				return true;
+			});
+			if (result !== null) released = true;
+		} } };
+	}) ?? unknown;
 }
 
-/** Stable lock for tests and scripts that manage the lifecycle by hand. */
-export function forgeLockForTest(jobsDir: string, job: string, pid: number, startedAt: number): void {
-	const dir = join(jobsDir, `${job}.lock`);
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	writeFileSync(join(dir, "pid"), JSON.stringify({ pid, startedAt }), { mode: 0o600 });
+/** Read the current claim for the gate/body and delegated-child admission checks. */
+export function readRunClaim(jobsDir: string, job: string): RunClaim | null {
+	return readClaim(join(jobsDir, `${job}.lock`));
 }
 
-export interface RunClaim {
-	pid: number;
-	startedAt: number;
-}
-
-/**
- * ompkit-bj08.5: read the current single-flight claim for admission binding.
- * Returns the holder incarnation, or null when absent or unreadable (fail
- * closed downstream). Never throws. The admission double-read compares two
- * reads of this claim: a changed holder between gate and body refuses.
- */
-export function readRunClaim(jobsDir: string, job: string, nowMs: number = Date.now()): RunClaim | null {
-	const claim = readClaim(join(jobsDir, `${job}.lock`), nowMs);
-	return claim === null ? null : { pid: claim.pid, startedAt: claim.startedAt };
-}
-
-/** Stable incarnation token for a lock holder: pid bound to process start. */
+/** Per-acquisition identity, not a wall-clock claim about kernel process birth. */
 export function claimIncarnation(claim: RunClaim): string {
-	return `${claim.pid}:${claim.startedAt}`;
+	return `${claim.pid}:${claim.startedAt}:${claim.token}`;
 }
 
 export const LOAD_GATE_FACTOR = 2.5;

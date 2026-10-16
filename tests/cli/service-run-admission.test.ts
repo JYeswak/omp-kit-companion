@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { admitActuator, type AdmissionInput } from "../../src/actuator-admission.ts";
-import { claimIncarnation, forgeLockForTest, readRunClaim } from "../../src/service-run.ts";
+import { acquireRunLock, claimIncarnation, readRunClaim } from "../../src/service-run.ts";
 
 // ompkit-bj08.5: lock-claim incarnation binding for the service-run branch.
 // The cli run handler double-reads the claim (gate time vs pre-body) and
@@ -33,13 +33,6 @@ function serviceSnapshot(gateRead: string, bodyRead: string | null): AdmissionIn
 	};
 }
 
-test("[a] lock claim reads back holder incarnation for binding", () => {
-	const dir = jobsDir();
-	forgeLockForTest(dir, "load-watch", 4242, 1_791_276_000_000);
-	expect(readRunClaim(dir, "load-watch", 1_791_276_000_001)).toEqual({ pid: 4242, startedAt: 1_791_276_000_000 });
-	expect(claimIncarnation({ pid: 4242, startedAt: 1_791_276_000_000 })).toBe("4242:1791276000000");
-	expect(readRunClaim(dir, "missing-job", 1_791_276_000_001)).toBeNull();
-});
 
 test("[a] stable holder across gate and body admits one run", () => {
 	const decision = admitActuator(serviceSnapshot("4242:1791276000000", "4242:1791276000000"));
@@ -58,4 +51,23 @@ test("[b] planted: unreadable claim before body refuses fail-closed", () => {
 	const decision = admitActuator(serviceSnapshot("4242:1791276000000", null));
 	expect(decision.verdict).toBe("REFUSE");
 	expect(decision.admittedAction).toBeNull();
+});
+
+test("a previous claim cannot admit a reacquired keeper in the same clock tick", () => {
+	const dir = jobsDir();
+	const first = acquireRunLock(dir, "load-watch", 1_791_276_000_000);
+	if (first.status !== "ACQUIRED") throw new Error("expected first claim");
+	const gate = readRunClaim(dir, "load-watch");
+	first.lock.release();
+	const second = acquireRunLock(dir, "load-watch", 1_791_276_000_000);
+	if (second.status !== "ACQUIRED") throw new Error("expected next claim");
+	try {
+		const body = readRunClaim(dir, "load-watch");
+		if (gate === null || body === null) throw new Error("missing claim");
+		const decision = admitActuator(serviceSnapshot(claimIncarnation(gate), claimIncarnation(body)));
+		expect(decision.verdict).toBe("REFUSE");
+		expect(decision.admittedAction).toBeNull();
+	} finally {
+		second.lock.release();
+	}
 });

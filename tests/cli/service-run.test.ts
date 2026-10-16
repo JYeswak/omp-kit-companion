@@ -1,7 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, bunCapExec, forgeLockForTest, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -13,9 +13,81 @@ afterEach(() => {
 
 function jobsDir(): string {
 	const dir = mkdtempSync(join(scratchRoot, "service-run-"));
+	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=service-run-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	roots.push(dir);
 	return dir;
 }
+
+function writeClaimFixture(dir: string, pid: number, startedAt: number): void {
+	const lock = join(dir, "load-watch.lock");
+	mkdirSync(lock, { mode: 0o700 });
+	writeFileSync(join(lock, "pid"), JSON.stringify({ pid, startedAt, token: "fixture-claim" }), { mode: 0o600 });
+}
+
+test("SVC1: an unreadable liveness probe cannot authorize stealing a claim", () => {
+	const dir = jobsDir();
+	writeClaimFixture(dir, process.pid, 1_000_000);
+	const before = readFileSync(join(dir, "load-watch.lock", "pid"), "utf8");
+	const probe = spyOn(process, "kill").mockImplementation(() => {
+		throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+	});
+	try {
+		expect(acquireRunLock(dir, "load-watch", 1_001_000).status).toBe("OVERLAP");
+		expect(readFileSync(join(dir, "load-watch.lock", "pid"), "utf8")).toBe(before);
+	} finally {
+		probe.mockRestore();
+	}
+});
+
+test("SVC1: simultaneous stale-claim contenders admit only one owned process", async () => {
+	const dir = jobsDir();
+	writeClaimFixture(dir, 2147483647, 1_000_000);
+	// Pipe barriers keep the winner alive until every contender has reported.
+	const workers = Array.from({ length: 4 }, () => Bun.spawn([process.execPath, "-e", `
+		import { acquireRunLock } from ${JSON.stringify(join(repoRoot, "src", "service-run.ts"))};
+		const reader = Bun.stdin.stream().getReader();
+		if ((await reader.read()).done) process.exit(2);
+		const claim = acquireRunLock(${JSON.stringify(dir)}, "load-watch");
+		console.log(JSON.stringify({ status: claim.status, pid: process.pid }));
+		if (claim.status === "ACQUIRED") {
+			await reader.read();
+			claim.lock.release();
+		}
+	`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
+	let reported = false;
+	try {
+		for (const worker of workers) {
+			worker.stdin.write("go\n");
+			await worker.stdin.flush();
+		}
+		const results = await Promise.all(workers.map(async (worker) => {
+			const reader = worker.stdout.getReader();
+			const decoder = new TextDecoder();
+			let text = "";
+			try {
+				while (!text.includes("\n")) {
+					const chunk = await reader.read();
+					if (chunk.done) throw new Error(`worker ${worker.pid} exited without a claim report: ${text}`);
+					text += decoder.decode(chunk.value, { stream: true });
+				}
+				return JSON.parse(text.slice(0, text.indexOf("\n")));
+			} finally {
+				reader.releaseLock();
+			}
+		}));
+		expect(results.filter((result) => result.status === "ACQUIRED")).toHaveLength(1);
+		expect(results.filter((result) => result.status === "OVERLAP")).toHaveLength(3);
+		reported = true;
+	} finally {
+		for (const worker of workers) {
+			try { worker.stdin.end(); } catch { /* The owned contender may already have exited. */ }
+			if (!reported && worker.exitCode === null) worker.kill("SIGKILL");
+		}
+		await Promise.all(workers.map((worker) => worker.exited));
+	}
+	expect(workers.every((worker) => worker.exitCode === 0)).toBe(true);
+	expect(readRunClaim(dir, "load-watch")).toBeNull();
+}, 10000);
 
 test("SVC1 planted: two overlapping runs, the second exits SKIPPED-OVERLAP", () => {
 	const dir = jobsDir();
@@ -42,44 +114,85 @@ test("SVC1: release frees the job for the next run", () => {
 
 test("SVC1: a stale lock from a dead PID is broken", () => {
 	const dir = jobsDir();
-	forgeLockForTest(dir, "load-watch", 2147483647, 1_000_000);
+	writeClaimFixture(dir, 2147483647, 1_000_000);
 	const next = acquireRunLock(dir, "load-watch", 1_001_000);
 	expect(next.status).toBe("ACQUIRED");
 	if (next.status === "ACQUIRED") next.lock.release();
 });
 
-test("SVC1: an ancient lock is broken even with an uncheckable holder", () => {
-	const dir = jobsDir();
-	forgeLockForTest(dir, "load-watch", 1, 1_000_000);
-	const next = acquireRunLock(dir, "load-watch", 1_000_000 + 3 * 60 * 60 * 1000);
-	expect(next.status).toBe("ACQUIRED");
-	if (next.status === "ACQUIRED") next.lock.release();
-});
 
 test("SVC1: a live holder is never broken", () => {
 	const dir = jobsDir();
-	forgeLockForTest(dir, "load-watch", process.pid, Date.now());
+	writeClaimFixture(dir, process.pid, Date.now());
 	const next = acquireRunLock(dir, "load-watch", Date.now() + 1000);
 	expect(next.status).toBe("OVERLAP");
 	if (next.status !== "OVERLAP") throw new Error("expected OVERLAP");
 	expect(next.holderPid).toBe(process.pid);
 });
 
-test("SVC1: a stale empty lock dir is broken", () => {
-	const dir = jobsDir();
-	const lock = join(dir, "load-watch.lock");
-	mkdirSync(lock, { recursive: true, mode: 0o700 });
-	utimesSync(lock, new Date(1_000_000), new Date(1_000_000));
-	const next = acquireRunLock(dir, "load-watch", 1_000_000 + 120_000);
-	expect(next.status).toBe("ACQUIRED");
-	if (next.status === "ACQUIRED") next.lock.release();
-});
 
 test("SVC1: a fresh empty lock dir stays overlapped", () => {
 	const dir = jobsDir();
 	mkdirSync(join(dir, "load-watch.lock"), { recursive: true, mode: 0o700 });
 	const next = acquireRunLock(dir, "load-watch", Date.now());
 	expect(next.status).toBe("OVERLAP");
+});
+
+test("SVC1: an aged live keeper still excludes a second execution", () => {
+	const dir = jobsDir();
+	const start = 1_000_000;
+	const first = acquireRunLock(dir, "load-watch", start);
+	if (first.status !== "ACQUIRED") throw new Error("expected first keeper");
+	try {
+		const next = acquireRunLock(dir, "load-watch", start + 3 * 60 * 60 * 1000);
+		try {
+			expect(next.status).toBe("OVERLAP");
+			expect(readRunClaim(dir, "load-watch")?.startedAt).toBe(start);
+		} finally {
+			if (next.status === "ACQUIRED") next.lock.release();
+		}
+	} finally {
+		first.lock.release();
+	}
+});
+
+test("SVC1: releasing an old handle preserves a replacement claim", () => {
+	const dir = jobsDir();
+	const first = acquireRunLock(dir, "load-watch", 1_000_000);
+	if (first.status !== "ACQUIRED") throw new Error("expected first keeper");
+	renameSync(join(dir, "load-watch.lock"), join(dir, "retired-claim"));
+	const replacement = join(dir, "load-watch.lock");
+	mkdirSync(replacement, { mode: 0o700 });
+	const claim = { pid: process.pid, startedAt: 1_001_000, token: "replacement-claim" };
+	writeFileSync(join(replacement, "pid"), JSON.stringify(claim), { mode: 0o600 });
+	first.lock.release();
+	expect(JSON.parse(readFileSync(join(replacement, "pid"), "utf8"))).toEqual(claim);
+});
+
+test("SVC1: reacquisition in the same clock tick has a new incarnation", () => {
+	const dir = jobsDir();
+	const first = acquireRunLock(dir, "load-watch", 1_000_000);
+	if (first.status !== "ACQUIRED") throw new Error("expected first keeper");
+	const before = readRunClaim(dir, "load-watch");
+	first.lock.release();
+	const second = acquireRunLock(dir, "load-watch", 1_000_000);
+	if (second.status !== "ACQUIRED") throw new Error("expected next keeper");
+	try {
+		const after = readRunClaim(dir, "load-watch");
+		if (before === null || after === null) throw new Error("missing claim");
+		expect(claimIncarnation(before)).not.toBe(claimIncarnation(after));
+	} finally {
+		second.lock.release();
+	}
+});
+
+test("SVC1: age does not authorize claiming an unverifiable empty keeper", () => {
+	const dir = jobsDir();
+	const lock = join(dir, "load-watch.lock");
+	mkdirSync(lock, { mode: 0o700 });
+	utimesSync(lock, new Date(1_000_000), new Date(1_000_000));
+	expect(acquireRunLock(dir, "load-watch", 1_000_000 + 3 * 60 * 60 * 1000).status).toBe("OVERLAP");
+	expect(existsSync(lock)).toBe(true);
 });
 
 

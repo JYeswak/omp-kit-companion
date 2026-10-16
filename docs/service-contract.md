@@ -21,7 +21,7 @@ contract; `service doctor` enforces it item by item.
 | 6 | ProcessType Background | IMPLEMENTED in renderer | NEW: `contract-processtype` |
 | 7 | explicit absolute PATH/HOME from config | IMPLEMENTED in renderer | NEW: `contract-env`, `contract-systemd-env` |
 | 8 | no secrets or secret paths in the plist/unit (PUB1) | IMPLEMENTED by convention only | NEW: `contract-no-secrets`, `contract-systemd-no-secrets` (reuses canonical `looksSecret`, `src/mcp-sources.ts`) |
-| 9 | single-flight lock: overlap exits SKIPPED-OVERLAP | WIRED: `service run` acquires per-job lock first; second exits SKIPPED-OVERLAP (code 4) with receipt; every return releases | planted e2e overlap in `service-fleet.test.ts` |
+| 9 | single-flight lock: overlap exits SKIPPED-OVERLAP | SOURCE: per-job kernel-serialized claim updates; live or unknown holders are never age-stolen; release is fenced to the acquired nonce and directory identity. Installed qualification remains `rz5.113.1`. | `service-run.test.ts` and `service-run-admission.test.ts`: aged live keeper, unknown probe, replaced claim, same-clock reacquisition, and competing owned processes |
 | 10 | load gate: 1-min load > 2.5x cores writes SKIPPED-LOAD, no work; heavy steps via `omp-kit heavy` at nice 10 | WIRED: `service run` gates on entry (real loadavg, `OMP_KIT_LOAD_OVERRIDE` test seam); skip writes receipt, no work | planted e2e high-load in `service-fleet.test.ts` |
 | 11 | per-run time cap: kill past the cap, record TIMEOUT | WIRED for subprocess jobs (`omp-watch` via `runWithCap`+SIGKILL, per-job caps below cadence); in-process jobs are bounded by design, supervisor TimeoutStartSec covers installs | planted e2e TIMEOUT in `service-fleet.test.ts`; live `/bin/sleep` killed at cap |
 | 12 | one receipt per run (job, version, start, duration, exit, outcome counts) feeding VALUE1 | PARTIAL: `scratch-reaper` + default jobs write `JobReceipt`; `load-watch`, `kit-update`, `fleet-watch` do not | MISSING: `contract-receipt` (runtime; holder wires) |
@@ -30,6 +30,31 @@ contract; `service doctor` enforces it item by item.
 | 15 | launchd macOS / systemd user timers Linux | IMPLEMENTED (si4 tracks Linux) | `unit-present`, `unit-matches-renderer`, `loaded` (linux) |
 | 16 | one schedule owner per machine; doctor flags double scheduling | MISSING | MISSING: `contract-double-schedule` (runtime; holder wires) |
 | 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | FIXED: parser accepts declared `--all`; rows carry loaded/lastExit/runs/last_run_at (box-2 commit) | `service status --all`, `service list` |
+
+## Single-flight state and upgrade boundary
+
+Each job keeps its claim in `<job>.lock/pid` under the private jobs directory.
+The claim contains the keeper PID, acquisition time and a random per-acquisition
+token. The token distinguishes two acquisitions by the same PID in one clock
+tick; it is not a kernel process-start timestamp.
+
+`<job>.gate.sqlite` supplies SQLite's cross-process `BEGIN IMMEDIATE` writer
+lock around claim mutations. It stores no SQL authority or schema. Keep this
+inode: unlinking it would split current and incoming callers into different
+locks. A busy gate or an unreadable claim fails closed as `SKIPPED-OVERLAP`;
+that result does not prove a job body ran.
+
+Only `ESRCH` establishes a dead PID eligible for reclaim. Age, `EPERM`,
+malformed records and old records without a token do not authorize takeover.
+Legacy or unverifiable state needs owner reconciliation under quiescence,
+not an automatic age-based deletion. A releasing handle cannot remove a
+replacement claim, and SQLite rollback does not undo filesystem effects
+already performed if a mutation fails.
+
+The source regressions exercise owned fixtures and the actual source CLI
+timeout path. They do not establish an installed binary's source binding,
+authorize service activation or qualify production scratch reclamation.
+
 
 ## Resolved: RunAtLoad
 
