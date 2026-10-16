@@ -1,1 +1,0 @@
-- Scratch plan and apply expose row sizes, per-root and per-verdict totals, malformed-owner counts, and the same 72-hour unowned-active rule; apply results include the reaper receipt (commit 094f76f).

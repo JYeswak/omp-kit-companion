@@ -1,1 +1,0 @@
-- The flywheel guard blocks finite Bash calls that disable the native deadline, requires readiness for named services, and rejects recognized finite suites disguised as services (commit 6e7d94c).

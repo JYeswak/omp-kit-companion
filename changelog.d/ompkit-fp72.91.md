@@ -1,1 +1,0 @@
-- Finite service runs now own their process group by default on macOS and Linux, drain both output pipes concurrently, and bound descendant termination and descriptor cleanup on timeout or cancellation without changing native PTY or long-lived service launchers.
