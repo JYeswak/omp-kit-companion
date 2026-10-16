@@ -135,6 +135,8 @@ jobs:
             package/src/memory-backend/settings.ts \
             package/src/memory-backend/resolve.ts \
             package/src/config/settings.ts
+      - name: Install the fleet disk observer (sbh) that heavy admission requires
+        run: sh scripts/ci-install-sbh.sh
       - name: Exercise self-contained CLI and native matcher consumer contracts
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
@@ -242,6 +244,8 @@ jobs:
         env:
           OMP_VERSION: ${{ matrix.omp.version }}
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
+      - name: Install the fleet disk observer (sbh) that heavy admission requires
+        run: sh scripts/ci-install-sbh.sh
       - name: Check manifest and rule behavior
         run: sh scripts/ladder.sh
       - name: Check versioned installer against native archive

@@ -77,19 +77,31 @@ function testFakeLoad(): number | undefined {
  * HEAVYDISK1 (ompkit-fp72.52): disk admission uses the fleet sbh floor.
  * sbh contract: exit 0 healthy, 1 pressure, 2 error. sbhBin is a test seam
  * (fixture PATH shadows the real binary); production always uses "sbh".
+ * HEAVYCI1 (ompkit-fp72.117): an observer that cannot run, or answers outside
+ * that contract, is a missing prerequisite rather than pressure. Waiting cannot
+ * fix it, so admission fails fast with HEAVY_PREREQ_MISSING instead of
+ * deferring 75; the disk check is never skipped.
  */
 export const HEAVY_DISK_NEED = "10G";
-export async function diskBlockReason(sbhBin = "sbh"): Promise<string | null> {
+/** EX_UNAVAILABLE (sysexits.h): a required observer is missing; distinct from the 75 deferral. */
+export const HEAVY_PREREQ_MISSING = 69;
+export type DiskVerdict = { kind: "ok" } | { kind: "pressure"; text: string } | { kind: "unavailable"; text: string };
+export async function diskVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
 	let code: number;
 	try {
 		const proc = Bun.spawn([sbhBin, "check", "--need", HEAVY_DISK_NEED], { stdout: "ignore", stderr: "ignore" });
 		code = await proc.exited;
 	} catch {
-		return "disk check unavailable: sbh binary not runnable";
+		return { kind: "unavailable", text: "sbh binary not runnable" };
 	}
-	if (code === 0) return null;
-	if (code === 1) return `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure`;
-	return `disk check unavailable: sbh check exited ${code}`;
+	if (code === 0) return { kind: "ok" };
+	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure` };
+	return { kind: "unavailable", text: `sbh check exited ${code}` };
+}
+
+function prerequisiteMissing(text: string): number {
+	process.stderr.write(`heavy: sbh unavailable: ${text}; disk admission requires sbh; no command was run\n`);
+	return HEAVY_PREREQ_MISSING;
 }
 
 
@@ -244,6 +256,12 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		repo: currentRepo(cwd), cwd, agent: process.env.AGENT_NAME ?? process.env.OMP_AGENT_NAME ?? "unknown",
 		tmux_pane: process.env.TMUX_PANE ?? "", argv, state: "queued", queued_at: queuedAt,
 	};
+	// HEAVYCI1: observe the disk before queueing, whatever load and slots say,
+	// so a missing observer fails now instead of at the deadline. The first
+	// admission check reuses this same-moment verdict; later checks re-observe,
+	// so a long wait never admits on a stale reading.
+	let firstDisk: DiskVerdict | undefined = await diskVerdict();
+	if (firstDisk.kind === "unavailable") return prerequisiteMissing(firstDisk.text);
 	const deadline = Date.now() + config.max_wait_s * 1000;
 	let nextStatus = 0;
 	let signal: HeavySignal | null = null;
@@ -278,6 +296,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			}
 			let waitingJobs: HeavyJob[] = [];
 			let reason: string | null = null;
+			let missing: string | null = null;
 			try {
 				waitingJobs = readJobs(storage.jobs, liveness);
 				if (!waitingJobs.some((entry) => entry.id === id)) {
@@ -285,9 +304,18 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					rowCreated = true;
 					waitingJobs = [...waitingJobs, job];
 				}
-			reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
-				if (!reason) reason = await diskBlockReason();
+				reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
+				const observed = firstDisk;
+				firstDisk = undefined;
 				if (!reason) {
+					const disk = observed ?? await diskVerdict();
+					if (disk.kind === "unavailable") {
+						removeJob(storage.jobs, id);
+						rowCreated = false;
+						missing = disk.text;
+					} else if (disk.kind === "pressure") reason = disk.text;
+				}
+				if (!reason && missing === null) {
 					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
 					writeJob(storage.jobs, running);
 					rowCreated = true;
@@ -305,6 +333,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			} finally {
 				releaseLock(storage.lock, owner);
 			}
+			if (missing !== null) return prerequisiteMissing(missing);
 			if (child) {
 				const code = await child.exited;
 				await removeQueuedJob(storage, id, owner, liveness);

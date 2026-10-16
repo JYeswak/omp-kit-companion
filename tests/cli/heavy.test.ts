@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import { machineLoadBlockReason } from "../../src/heavy.ts";
+import { HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -20,10 +20,18 @@ function configure(root: string, values: { slots?: number; max_wait_s?: number }
 	writeFileSync(join(directory, "load.json"), JSON.stringify(values), { mode: 0o600 });
 }
 
+// Disk is machine state like load: every run puts a healthy stand-in sbh first
+// on PATH so the host's free space never decides a slot, signal or load test.
+// The HEAVYDISK1/HEAVYCI1 tests override PATH to plant each disk state.
+function heavyEnv(root: string, extraEnv: Record<string, string> = {}): Record<string, string | undefined> {
+	const healthy = fakeSbh(root, 0, "healthy-bin");
+	return { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${healthy}:${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv };
+}
+
 async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}) {
 	const child = Bun.spawn([process.execPath, entry, ...args], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv },
+		env: heavyEnv(root, extraEnv),
 		stdin: "ignore", stdout: "pipe", stderr: "pipe",
 	});
 	const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -116,7 +124,7 @@ test("a zero wait budget returns 75 when admission remains blocked", async () =>
 // Integration tests below drive real child processes (slot handoff, signal
 // delivery); fake timers cannot stand in, so coordination waits poll the job
 // ledger for the awaited state with a deadline instead of sleeping blindly.
-async function waitForLedgerState(root: string, want: "running" | "empty", timeoutMs: number): Promise<void> {
+async function waitForLedgerState(root: string, want: "queued" | "running" | "empty", timeoutMs: number): Promise<void> {
 	const directory = join(root, "state", "omp-kit", "load", "jobs");
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -125,10 +133,10 @@ async function waitForLedgerState(root: string, want: "running" | "empty", timeo
 			entries = readdirSync(directory).filter((name) => name.endsWith(".json"));
 		} catch { /* jobs dir appears on first write */ }
 		if (want === "empty" && entries.length === 0) return;
-		if (want === "running") {
+		if (want === "queued" || want === "running") {
 			for (const name of entries) {
 				try {
-					if (JSON.parse(readFileSync(join(directory, name), "utf8")).state === "running") return;
+					if (JSON.parse(readFileSync(join(directory, name), "utf8")).state === want) return;
 				} catch { /* concurrent write; keep polling */ }
 			}
 		}
@@ -171,7 +179,7 @@ test("SIGINT releases the slot with exit 130", async () => {
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "interruptible", "--", "sleep", "30"], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", ...QUIET_LOAD },
+		env: heavyEnv(root),
 		stdin: "ignore", stdout: "ignore", stderr: "pipe",
 	});
 	await waitForLedgerState(root, "running", 15000);
@@ -188,7 +196,7 @@ test("SIGTERM releases the slot with exit 143", async () => {
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "terminable", "--", "sleep", "30"], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", ...QUIET_LOAD },
+		env: heavyEnv(root),
 		stdin: "ignore", stdout: "ignore", stderr: "pipe",
 	});
 	await waitForLedgerState(root, "running", 15000);
@@ -269,10 +277,20 @@ test("GITHUB_ACTIONS load exemption preserves slot admission", async () => {
 	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual(["gha-slot-owner.json"]);
 });
 
-function fakeSbh(dir: string, code: number): string {
-	const bin = join(dir, "fakebin");
+function fakeSbh(dir: string, code: number, name = "fakebin"): string {
+	const bin = join(dir, name);
 	mkdirSync(bin, { recursive: true });
 	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nif [ "$1 $2 $3" = "check --need 10G" ]; then exit ${code}; fi\nexit 0\n`);
+	chmodSync(join(bin, "sbh"), 0o755);
+	return bin;
+}
+
+// First call healthy (the pre-queue observation); every later call exits laterCode.
+function countingSbh(dir: string, laterCode: number): string {
+	const bin = join(dir, "counting-bin");
+	const calls = join(dir, "sbh-calls");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nn=$(cat '${calls}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho "$n" > '${calls}'\n[ "$n" -le 1 ] && exit 0\nexit ${laterCode}\n`);
 	chmodSync(join(bin, "sbh"), 0o755);
 	return bin;
 }
@@ -300,17 +318,78 @@ test("HEAVYDISK1: healthy disk runs the command", async () => {
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 });
 
-test("HEAVYDISK1 planted: sbh error refuses explicitly without starting", async () => {
+test("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, queueing and starting nothing", async () => {
 	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1 });
+	configure(root, { slots: 8, max_wait_s: 20 });
+	const noSbhPath = "/usr/bin:/bin";
+	// Positive control for the planted state: this PATH must really lack sbh.
+	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: noSbhPath } }).exitCode).not.toBe(0);
+	const marker = join(root, "should-not-run");
+	const started = Date.now();
+	const result = await invoke(root, ["heavy", "--label", "nosbh", "--", "sh", "-c", `printf ran > '${marker}'`], { PATH: noSbhPath });
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("heavy: sbh unavailable: sbh binary not runnable");
+	// The pre-fix path waited out the whole 20 s budget and returned 75.
+	expect(Date.now() - started).toBeLessThan(8_000);
+	expect(existsSync(marker)).toBe(false);
+	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
+}, 40_000);
+
+test("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), never a 75 deferral", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 20 });
 	const bin = fakeSbh(root, 2);
 	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--no-wait", "--label", "diskerr-nowait", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
-	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("disk check unavailable");
+	const started = Date.now();
+	const result = await invoke(root, ["heavy", "--label", "diskerr", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("heavy: sbh unavailable: sbh check exited 2");
+	expect(Date.now() - started).toBeLessThan(8_000);
 	expect(existsSync(marker)).toBe(false);
+}, 40_000);
+
+test("HEAVYCI1: --no-wait with a missing sbh also returns 69, not 75", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "nosbh-nowait", "--", "sh", "-c", "exit 0"], { PATH: "/usr/bin:/bin" });
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("sbh unavailable");
 });
+
+test("HEAVYCI1: an observer lost while queued fails with 69 at admission and leaves no ledger row", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 20 });
+	const jobs = await seedJob(root, { id: "slot-owner" });
+	const bin = countingSbh(root, 2);
+	const marker = join(root, "should-not-run");
+	const run = invoke(root, ["heavy", "--label", "lost-observer", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	await waitForLedgerState(root, "queued", 15_000);
+	unlinkSync(join(jobs, "slot-owner.json"));
+	const result = await run;
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("heavy: sbh unavailable: sbh check exited 2");
+	expect(existsSync(marker)).toBe(false);
+	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual([]);
+}, 40_000);
+
+test("HEAVYCI1: a queued job re-observes the disk, so pressure that appears while waiting still defers", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 4 });
+	const jobs = await seedJob(root, { id: "slot-owner" });
+	const bin = countingSbh(root, 1);
+	const marker = join(root, "should-not-run");
+	const run = invoke(root, ["heavy", "--label", "late-pressure", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	await waitForLedgerState(root, "queued", 15_000);
+	unlinkSync(join(jobs, "slot-owner.json"));
+	const result = await run;
+	expect(result.code).toBe(75);
+	// Re-observed: the pre-queue reading (call 1) was not reused after the wait.
+	expect(Number(readFileSync(join(root, "sbh-calls"), "utf8").trim())).toBeGreaterThanOrEqual(2);
+	expect(existsSync(marker)).toBe(false);
+}, 40_000);
 
 test("HEAVYDISK1: waiting status names the disk reason", async () => {
 	const root = fixture();

@@ -270,7 +270,8 @@ since; a failed restore is reported as `PARTIAL_UNDO`, never hidden.
 never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
 unreachable vault makes the secrets scan `UNVERIFIED`; a stale CI cache is
 `UNAVAILABLE`. Exit codes are fixed: 0 success, 1 finding, 2 usage or blocked,
-3 unavailable, 4 retryable (and 75 for a deferred `heavy` job).
+3 unavailable, 4 retryable (and for `heavy`: 75 when a job is deferred, 69 when
+its disk observer `sbh` is missing).
 
 **Native OMP first.** Rule tests run through OMP's matcher, settings go through
 `omp config get/set`, and rules load through OMP's plugin loader. The
@@ -454,7 +455,7 @@ grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes (`VALID`, `UNREGISTERED`, `INVALID`); `anchor` reports the live-doc Mission statement against the record per repo (`AGREE` or `DRIFT` with reasons) | `omp-kit mission anchor --project ~/Developer/omp-kit --json` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Read-only reports for landed-but-open beads and stale in-progress claims (--project DIR reads DIR/.beads/beads.db; refused with --db) | `omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
-| `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load-admitted command at nice 10; exit 75 when deferred | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
+| `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when `sbh` is missing | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Publishes exact actively reserved paths from fresh `origin/main` through an owner-bound private index and ordinary non-force push; preserves shared index, local `HEAD` and worktree | `omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json` |
 | `omp-kit align` | `align --repo DIR (--dry-run \| --apply --yes) [--preserve-only]` | Aligns a shared checkout's `main` and index to `origin/main` while holding git's `index.lock`: pins local-only commits under `refs/preserve/`, adopts or updates only provably unchanged paths, refuses with a typed code on staged changes, peer edits or a moved ref/index, and logs a receipt to `.git/omp-kit-align.jsonl` | `omp-kit align --repo ~/Developer/omp-kit-companion --dry-run --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
