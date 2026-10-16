@@ -2,3 +2,4 @@
 - Preserve peer staged/worktree changes outside the lesson path and refuse existing lesson-path dirt, mode changes, detached checkouts, and detected state changes. Origin contention retains the local lesson commit and requires normal convergence; it never force-pushes.
 - Carry bead linkage into normal commit trailers, verify local/remote-main ancestry, and report post-save failures as unverified rather than claiming no mutation. Check-ins without explicit completed items use the existing activity reader and refuse unavailable coverage instead of recording false zeros.
 - Use a standalone `[pending]` verification level for generated record commits so the normal verification-level hook can accept transport without falsely certifying the lesson's content. (commit bd9aa74)
+- Classify non-fast-forward publication from Git's exact porcelain rejection record before guard diagnostics, so a remote pathname containing `pre-push` does not hide origin contention.

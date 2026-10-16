@@ -474,12 +474,15 @@ export function commitLessonLines(repoRoot: string, lines: readonly string[], me
 		throw new Error("LESSONS_COMMIT_STATE_CHANGED: lesson commit is not on shared main");
 	const push = runLessonGit(root, ["push", "--porcelain", "origin", "main"]);
 	if (push.code !== 0 || push.error) {
+		const contention = push.stdout.toString("utf8").split("\n").some((line: string) =>
+			line === "!\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)" ||
+			line === "!\trefs/heads/main:refs/heads/main\t[rejected] (fetch first)");
+		if (contention)
+			throw new Error("LESSONS_COMMIT_CAS_REJECTED: saved on main; converge the shared checkout before publishing");
 		const detail = (push.stderr.toString("utf8") + "\n" + push.stdout.toString("utf8")).toLowerCase();
 		if (detail.includes("pre-push") || detail.includes("reservation conflict") || detail.includes("mcp-agent-mail") ||
 			detail.includes("fresh-gate") || detail.includes("check-pushed-on-main"))
 			throw new Error("LESSONS_COMMIT_PUSH_GUARD_REFUSED: saved on main; publication refused");
-		if (detail.includes("non-fast-forward") || detail.includes("fetch first"))
-			throw new Error("LESSONS_COMMIT_CAS_REJECTED: saved on main; converge the shared checkout before publishing");
 		throw new Error("LESSONS_COMMIT_PUSH_FAILED: saved on main; publication failed");
 	}
 	if (runLessonGit(root, ["merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"]).code !== 0)

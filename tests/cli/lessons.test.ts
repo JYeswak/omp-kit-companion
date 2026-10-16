@@ -11,7 +11,8 @@ const now = new Date("2026-10-05T12:00:00.000Z");
 
 function fixture(): string {
 	mkdirSync(scratchRoot, { recursive: true });
-	const root = mkdtempSync(join(scratchRoot, "lessons-test-"));
+	// Archive gates put fixtures below a pre-push path; that text is not a guard verdict.
+	const root = mkdtempSync(join(scratchRoot, "lessons-test-pre-push-"));
 	roots.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid} label=lessons-test repo=${repoRoot} created=${new Date().toISOString()}\n`);
 	return root;
