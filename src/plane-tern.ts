@@ -111,10 +111,14 @@ export interface TernObserverIo {
 	wait(ms: number): Promise<void>;
 }
 
+/** Real OMP v3 metadata records: chain topology only, never verdicts. Unknown types still refuse. */
+const METADATA_TYPES: Record<string, true> = {
+	model_change: true, custom: true, thinking_level_change: true, credential_pin: true, title_change: true,
+};
 interface JournalEntry {
 	id: string;
 	parentId: string | null;
-	type: "message" | "tool_result" | "mode_change" | "model_usage";
+	type: "message" | "tool_result" | "mode_change" | "model_usage" | "metadata";
 	role: string | null;
 	stopReason: string | null;
 	toolCallIds: string[];
@@ -294,6 +298,15 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 				if (!toolCallIds.includes(id)) toolCallIds.push(id);
 			}
 		}
+		if (message.role === "toolResult") {
+			const toolCallId = typeof message.toolCallId === "string" && message.toolCallId ? message.toolCallId
+				: typeof message.callId === "string" && message.callId ? message.callId : null;
+			const details = objectValue(message.details);
+			const async = details ? objectValue(details.async) : null;
+			return { id: raw.id, parentId, type: "tool_result", role: "toolResult", stopReason: null,
+				toolCallIds: [], toolCallId, asyncState: async && typeof async.state === "string" ? async.state : null,
+				activeLeafId: null, offset };
+		}
 		return { id: raw.id, parentId, type, role: message.role,
 			stopReason: typeof message.stopReason === "string" ? message.stopReason : null,
 			toolCallIds, toolCallId: null, asyncState: null, activeLeafId: null, offset };
@@ -310,6 +323,10 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 	if (type === "mode_change") {
 		return { id: raw.id, parentId, type, role: null, stopReason: null, toolCallIds: [], toolCallId: null,
 			asyncState: null, activeLeafId: null, offset };
+	}
+	if (typeof type === "string" && METADATA_TYPES[type] === true) {
+		return { id: raw.id, parentId, type: "metadata", role: null, stopReason: null, toolCallIds: [],
+			toolCallId: null, asyncState: null, activeLeafId: null, offset };
 	}
 	return null;
 }

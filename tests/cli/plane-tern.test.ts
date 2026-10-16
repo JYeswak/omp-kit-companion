@@ -273,3 +273,77 @@ test("Tern identity refuses an Agent Mail row bound to another block", async () 
 	const result = await identifyTernSeat(seat, testIo(false, terminalJournal, wrongAgent));
 	expect(result).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null });
 });
+
+// ---- native OMP v3 toolResult records (ompkit-kdbz.2.12): toolCallId and details.async live
+// inside message, and real metadata records participate in the parent chain ----
+
+const stamp = (n: number): string => `2026-10-16T00:00:${String(n).padStart(2, "0")}.000Z`;
+function nativeMessage(id: string, parentId: string | null, n: number, message: unknown): string {
+	return JSON.stringify({ type: "message", id, parentId, timestamp: stamp(n), message });
+}
+const nativeUser = nativeMessage("user-1", null, 1, { role: "user", content: [{ type: "text", text: "go" }] });
+const nativeAssistantTools = nativeMessage("assistant-1", "user-1", 2,
+	{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "tool-1" }], toolCallIds: ["tool-1"] });
+const nativeToolDone = nativeMessage("tool-result-1", "assistant-1", 3,
+	{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: { resolvedPath: "/x" } });
+const nativeFinal = nativeMessage("assistant-2", "tool-result-1", 4,
+	{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+const nativeUsage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+	timestamp: stamp(5), activeLeafId: "assistant-2" });
+const nativeCompleted = [header, nativeUser, nativeAssistantTools, nativeToolDone, nativeFinal, nativeUsage].join("\n") + "\n";
+
+test("native completed tool roundtrip resolves KNOWN with no unresolved async tool", () => {
+	const result = parseSessionJournal(nativeCompleted);
+	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false });
+});
+
+test("native running async inside message.details stays unresolved, never idle", () => {
+	const running = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: { async: { state: "running" } } });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "tool-result-1",
+		timestamp: stamp(4), activeLeafId: "tool-result-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, running, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+});
+
+test("native completion for another id never clears the pending tool", () => {
+	const other = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-2", toolName: "read", isError: false, content: [], details: {} });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "tool-result-1",
+		timestamp: stamp(4), activeLeafId: "tool-result-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, other, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+});
+
+test("native running async without an id stays unresolved", () => {
+	const noid = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolName: "read", isError: false, content: [], details: { async: { state: "pending" } } });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "tool-result-1",
+		timestamp: stamp(4), activeLeafId: "tool-result-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, noid, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+});
+
+test("native metadata records keep the parent chain usable", () => {
+	const custom = JSON.stringify({ type: "custom", id: "custom-1", parentId: "assistant-1",
+		timestamp: stamp(3), customType: "memory_recall", data: {} });
+	const modelChange = JSON.stringify({ type: "model_change", id: "model-change-1", parentId: "custom-1",
+		timestamp: stamp(3), model: "m" });
+	const toolDone = nativeMessage("tool-result-1", "model-change-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: {} });
+	const final = nativeMessage("assistant-2", "tool-result-1", 4,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(5), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, custom, modelChange, toolDone, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false });
+});
+
+test("unknown record types still refuse the whole journal", () => {
+	const frob = JSON.stringify({ type: "frobnicator", id: "frob-1", parentId: "user-1", timestamp: stamp(2) });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "frob-1",
+		timestamp: stamp(3), activeLeafId: "frob-1" });
+	const result = parseSessionJournal([header, nativeUser, frob, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "UNKNOWN" });
+});
+
