@@ -366,6 +366,39 @@ test("native cancellation for another id never clears the pending tool", () => {
 	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
 });
 
+test("native toolResult with conflicting id aliases stays unknown, never idle", () => {
+	const ambiguous = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", callId: "tool-2", toolName: "read", isError: false, content: [], details: {} });
+	const toolTwoDone = nativeMessage("tool-result-2", "tool-result-1", 4,
+		{ role: "toolResult", toolCallId: "tool-2", toolName: "read", isError: false, content: [], details: {} });
+	const final = nativeMessage("assistant-2", "tool-result-2", 5,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(6), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, ambiguous, toolTwoDone, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "UNKNOWN" });
+});
+
+test("native toolResult with matching id aliases reconciles", () => {
+	const agreed = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", callId: "tool-1", toolName: "read", isError: false, content: [], details: {} });
+	const final = nativeMessage("assistant-2", "tool-result-1", 4,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(5), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, agreed, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false });
+});
+
+test("record-level tool_result with conflicting ids stays unknown", () => {
+	const ambiguous = JSON.stringify({ type: "tool_result", id: "tool-result-1", parentId: "assistant-1",
+		timestamp: stamp(3), toolCallId: "tool-1", callId: "tool-2", details: {} });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "tool-result-1",
+		timestamp: stamp(4), activeLeafId: "tool-result-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, ambiguous, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "UNKNOWN" });
+});
+
 test("native metadata records keep the parent chain usable", () => {
 	const custom = JSON.stringify({ type: "custom", id: "custom-1", parentId: "assistant-1",
 		timestamp: stamp(3), customType: "memory_recall", data: {} });

@@ -133,6 +133,14 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 	return value as Record<string, unknown>;
 }
 
+/** Resolve the two tool-call id spellings; conflicting aliases refuse the record. */
+function toolResultId(primary: unknown, alias: unknown): { id: string | null } | { conflict: true } {
+	const first = typeof primary === "string" && primary ? primary : null;
+	const second = typeof alias === "string" && alias ? alias : null;
+	if (first !== null && second !== null && first !== second) return { conflict: true };
+	return { id: first ?? second };
+}
+
 function paneNumber(seat: TernSeatBinding): number | null {
 	const value = seat.pane.startsWith("tern:") ? seat.pane.slice(5) : seat.pane;
 	const paneId = Number(value);
@@ -299,8 +307,9 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 			}
 		}
 		if (message.role === "toolResult") {
-			const toolCallId = typeof message.toolCallId === "string" && message.toolCallId ? message.toolCallId
-				: typeof message.callId === "string" && message.callId ? message.callId : null;
+			const resolved = toolResultId(message.toolCallId, message.callId);
+			if ("conflict" in resolved) return null;
+			const toolCallId = resolved.id;
 			const details = objectValue(message.details);
 			const async = details ? objectValue(details.async) : null;
 			return { id: raw.id, parentId, type: "tool_result", role: "toolResult", stopReason: null,
@@ -312,10 +321,11 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 			toolCallIds, toolCallId: null, asyncState: null, activeLeafId: null, offset };
 	}
 	if (type === "tool_result" || type === "toolResult") {
+		const resolved = toolResultId(raw.toolCallId, raw.callId);
+		if ("conflict" in resolved) return null;
+		const toolCallId = resolved.id;
 		const details = objectValue(raw.details);
 		const async = details ? objectValue(details.async) : null;
-		const toolCallId = typeof raw.toolCallId === "string" ? raw.toolCallId
-			: typeof raw.callId === "string" ? raw.callId : null;
 		return { id: raw.id, parentId, type: "tool_result", role: "toolResult", stopReason: null,
 			toolCallIds: [], toolCallId, asyncState: async && typeof async.state === "string" ? async.state : null,
 			activeLeafId: null, offset };
