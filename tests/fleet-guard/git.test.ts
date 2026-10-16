@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/git.ts";
@@ -7,10 +8,21 @@ import { handleToolCall } from "../../extensions/fleet-guard.ts";
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-git-"));
 const repo = join(scratch, "repo");
-mkdirSync(join(repo, ".git"), { recursive: true });
+mkdirSync(repo, { recursive: true });
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+const git = (args: string): string => execSync(`git ${args}`, { cwd: repo, encoding: "utf8", env: gitEnv }).trim();
+git("init -b main");
+git("config user.email t@t");
+git("config user.name t");
+git("config commit.gpgsign false");
 writeFileSync(join(repo, "ownA.txt"), "owned bytes");
-writeFileSync(join(repo, "foreignB.txt"), "peer bytes");
 writeFileSync(join(repo, "receipt.txt"), "receipt bytes");
+git("add ownA.txt receipt.txt");
+git("commit -m init");
+writeFileSync(join(repo, "foreignB.txt"), "peer bytes");
+git("add foreignB.txt");
+rmSync(join(repo, "receipt.txt"));
+const gitState = (): string => `${git("rev-parse HEAD")}\n${git("status --porcelain")}`;
 
 function snapshotTree(root: string): string[] {
 	const entries: string[] = [];
@@ -69,6 +81,7 @@ describe("fleet guard main-only git checks", () => {
 
 	test("refuses unscoped git commit --amend in every wrapper form", () => {
 		const before = snapshotTree(repo);
+		const gitBefore = gitState();
 		for (const command of [
 			"git commit --amend --no-edit",
 			"git commit --amend",
@@ -79,12 +92,14 @@ describe("fleet guard main-only git checks", () => {
 			"env GIT_SSH=x git commit --amend",
 			"git commit --amend --only -- some/path",
 			"git status && git commit --amend",
+			`/usr/bin/git -C ${repo} commit --amend --no-edit`,
 		]) {
 			const result = check(event(command), context);
 			expect(result?.block, command).toBe(true);
 			expect(result?.reason, command).toContain("amend");
 		}
 		expect(snapshotTree(repo)).toEqual(before);
+		expect(gitState()).toBe(gitBefore);
 	});
 
 	test("allows ordinary scoped commits and quiet quoted prose", () => {
@@ -95,6 +110,9 @@ describe("fleet guard main-only git checks", () => {
 			"git commit --no-amend",
 			"git commit -m \"fix --amend stuff\"",
 			"git commit -m msg -- --amend",
+			"git commit -m \"--amend\"",
+			"git commit -am \"--amend\"",
+			"git commit --author \"x <x@y>\" -m msg",
 			"git --no-pager commit -m msg",
 			"printf 'git commit --amend fake'",
 			"git commit -amend -m msg",

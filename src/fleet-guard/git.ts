@@ -156,10 +156,23 @@ function amendRewrite(words: readonly string[]): boolean {
 	}
 	if (index >= words.length || words[index] !== "commit") return false;
 	index++;
+	const COMMIT_VALUE_OPTIONS = ["-m", "--message", "-F", "--file", "--author", "--date", "--reuse-message", "--reedit-message"];
 	for (; index < words.length; index++) {
-		if (words[index] === "--") break;
-		if (words[index] === "--amend") return true;
+		const word = words[index]!;
+		if (word === "--") break;
+		if (word === "--amend") return true;
+		if (COMMIT_VALUE_OPTIONS.includes(word)) { index++; continue; }
+		if (isMessageBundle(word)) { index++; continue; }
 	}
+	return false;
+}
+
+function isMessageBundle(word: string): boolean {
+	if (!word.startsWith("-") || word.startsWith("--") || word.length < 3 || !word.endsWith("m")) return false;
+	for (const character of word.slice(1, -1)) {
+		if (character < "A" || (character > "Z" && character < "a") || character > "z") return false;
+	}
+	return true;
 	return false;
 }
 
@@ -191,7 +204,9 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 	for (const segment of commandSegments(command)) {
 		const words = shellWords(segment);
 		const effective = stripEnvWrappers(words);
-		if (!effective || effective[0] !== "git") continue;
+		if (!effective) continue;
+		const executable = effective[0]!;
+		if (executable.slice(executable.lastIndexOf("/") + 1) !== "git") continue;
 		const commandCwd = optionValue(effective, "-C");
 		const root = repositoryRoot(commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd());
 		if (!root) continue;
