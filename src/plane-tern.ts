@@ -402,6 +402,7 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 	let latestAssistant: JournalEntry | undefined;
 	const pendingTools = new Set<string>();
 	let unresolvedAsyncWithoutId = false;
+	let unsupportedAsyncState = false;
 	for (const entry of branch) {
 		if (entry.type === "message") {
 			lastMessageRole = entry.role;
@@ -414,9 +415,11 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 			if (entry.asyncState === "running" || entry.asyncState === "pending") {
 				if (entry.toolCallId !== null) pendingTools.add(entry.toolCallId);
 				else unresolvedAsyncWithoutId = true;
-			} else if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
+			} else if (entry.asyncState !== null) unsupportedAsyncState = true;
+			else if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
 		}
 	}
+	if (unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
 	const terminalAssistantStop = latestAssistant !== undefined
 		&& TERMINAL_STOP_REASONS[latestAssistant.stopReason ?? ""] === true;
 	const unresolvedAsyncTool = unresolvedAsyncWithoutId || pendingTools.size > 0;

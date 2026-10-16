@@ -324,6 +324,17 @@ test("native running async without an id stays unresolved", () => {
 	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
 });
 
+test("native toolResult with an unsupported async state stays unknown, never idle", () => {
+	const weird = nativeMessage("tool-result-1", "assistant-1", 3,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: { async: { state: "unknown_state" } } });
+	const final = nativeMessage("assistant-2", "tool-result-1", 4,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(5), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, weird, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "UNKNOWN" });
+});
+
 test("native metadata records keep the parent chain usable", () => {
 	const custom = JSON.stringify({ type: "custom", id: "custom-1", parentId: "assistant-1",
 		timestamp: stamp(3), customType: "memory_recall", data: {} });
