@@ -8,7 +8,8 @@
 set -u
 
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-CHECK="$REPO/scripts/close-guard.sh"
+# CLOSE_GUARD_CHECK runs the suite against another guard copy (planted negative).
+CHECK="${CLOSE_GUARD_CHECK:-$REPO/scripts/close-guard.sh}"
 REPO_TMP="$REPO/var/agent-tmp"
 mkdir -p "$REPO_TMP" || exit 1
 TMP="$REPO_TMP/close-guard-test.$$"
@@ -114,6 +115,44 @@ else
  else
  	fail=$((fail + 1)); printf 'FAIL review-ungated: rc!=0\n'
  fi
+
+# 10-12 (ompkit-fp72.98): every historical implementer is refused, not only the
+# first Agent trailer. Two commits: Alice then Bob; the claim moved to Carol.
+repo2="$TMP/repo2"
+mkdir -p "$repo2"
+git -C "$repo2" init -q
+git -C "$repo2" config user.email "test@example.invalid"
+git -C "$repo2" config user.name "worker-2"
+printf 'a\n' > "$repo2/f.txt"; git -C "$repo2" add f.txt
+git -C "$repo2" commit -qm "[test] first pass fx-1.1" -m "Agent: Alice" --no-verify 2>/dev/null
+printf 'b\n' > "$repo2/f.txt"; git -C "$repo2" add f.txt
+git -C "$repo2" commit -qm "[test] second pass fx-1.1" -m "Agent: Bob" --no-verify 2>/dev/null
+# an unrelated bead whose id extends fx-1.1 as a prefix
+printf 'c\n' > "$repo2/f.txt"; git -C "$repo2" add f.txt
+git -C "$repo2" commit -qm "[test] other bead fx-1.112" -m "Agent: Dave" --no-verify 2>/dev/null
+set_bead '{"id":"fx-1.1","status":"in_progress","assignee":"Carol","labels":[]}'
+for who in Bob Alice; do
+	if (cd -- "$repo2" && AGENT_NAME=$who sh "$CHECK" fx-1.1 --db "$TMP/db" > "$TMP/out" 2>&1); then
+		fail=$((fail + 1)); printf 'FAIL all-trailers %s: rc=0 out<<<%s>>>\n' "$who" "$(cat "$TMP/out")"
+	else
+		rc=$?
+		if [ "$rc" = 4 ] && grep -q "Agent trailer" "$TMP/out"; then pass=$((pass + 1));
+		else fail=$((fail + 1)); printf 'FAIL all-trailers %s: rc=%s out<<<%s>>>\n' "$who" "$rc" "$(cat "$TMP/out")"; fi
+	fi
+done
+# 12. Dave implemented only fx-1.112; he may close fx-1.1 (exact id token)
+if (cd -- "$repo2" && AGENT_NAME=Dave sh "$CHECK" fx-1.1 --db "$TMP/db" > "$TMP/out" 2>&1); then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL exact-id Dave: rc=%s out<<<%s>>>\n' "$?" "$(cat "$TMP/out")"
+fi
+# 13. Dave is still refused for his own bead fx-1.112
+set_bead '{"id":"fx-1.112","status":"in_progress","assignee":"","labels":[]}'
+if (cd -- "$repo2" && AGENT_NAME=dave sh "$CHECK" fx-1.112 --db "$TMP/db" > "$TMP/out" 2>&1); then
+	fail=$((fail + 1)); printf 'FAIL own-bead Dave: rc=0\n'
+else
+	pass=$((pass + 1))
+fi
  
  printf 'close-guard: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]

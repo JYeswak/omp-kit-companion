@@ -45,10 +45,33 @@ assignee=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.st
 if [ -n "$assignee" ] && [ "$assignee" = "$AGENT_NAME" ]; then
 	refuse "caller $AGENT_NAME holds the claim on $BEAD; a different worker must close or grade"
 fi
-trailer=$(git log --format=%B --grep="$BEAD" 2>/dev/null | grep -iE '^[[:space:]]*Agent:[[:space:]]' | head -1) || true
-if printf '%s' "$trailer" | grep -qiE "^[[:space:]]*Agent:[[:space:]]*${AGENT_NAME}[[:space:]]*$"; then
-	refuse "caller $AGENT_NAME has an Agent trailer on a $BEAD commit; a different worker must close or grade"
- fi
+# Every commit naming the bead id as an exact token (fixed-string candidates,
+# then a token-boundary check) is judged; any Agent trailer equal to the caller
+# (case-insensitive, trimmed) refuses, whichever implementer came first.
+hit=$(git log --fixed-strings --grep="$BEAD" --format='@@sha %H%n%B' 2>/dev/null | awk -v id="$BEAD" -v me="$AGENT_NAME" '
+function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+function flush() { if (sha != "" && named && mine && out == "") out = sha; sha = ""; named = 0; mine = 0 }
+function names(line,   rest, p, before, after) {
+	rest = line
+	while ((p = index(rest, id)) > 0) {
+		before = (p > 1) ? substr(rest, p - 1, 1) : ""
+		after = substr(rest, p + length(id), 1)
+		if (before !~ /[A-Za-z0-9._-]/ && after !~ /[A-Za-z0-9._-]/) return 1
+		rest = substr(rest, p + 1)
+	}
+	return 0
+}
+BEGIN { want = tolower(trim(me)) }
+/^@@sha [0-9a-f]+$/ { flush(); sha = substr($0, 7); next }
+{
+	if (names($0)) named = 1
+	l = $0
+	if (tolower(l) ~ /^[ \t]*agent:/) { sub(/^[ \t]*[Aa][Gg][Ee][Nn][Tt]:/, "", l); if (tolower(trim(l)) == want) mine = 1 }
+}
+END { flush(); print out }') || hit=""
+if [ -n "$hit" ]; then
+	refuse "caller $AGENT_NAME has an Agent trailer on $BEAD commit $hit; a different worker must close or grade"
+fi
  # LESSON1 (ompkit-ok3y): a close carries its lesson in the transition comment.
  # Only the close subcommand with a non-empty comment is judged; review/grading
  # entries and reason-less invocations keep the old behavior.
