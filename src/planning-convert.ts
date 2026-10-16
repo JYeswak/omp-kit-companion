@@ -676,11 +676,11 @@ function nativeCount(output: string, label: string, arrayKeys: string[], countKe
 
 function metricValue(score: MissionScore): BeadScoreMetrics {
 	const value = score.metrics.bead_self_contained?.value;
-	if (typeof value !== "object" || value === null || !("median_chars" in value) || !("test_share" in value) || !("deps_per_bead" in value) || !("mission_beads" in value))
+	if (typeof value !== "object" || value === null || !("median_chars" in value) || !("acceptance_present_share" in value) || !("deps_per_bead" in value) || !("mission_beads" in value))
 		return { median_chars: null, acceptance_share: null, deps_per_bead: null, mission_beads: null };
 	return {
 		median_chars: typeof value.median_chars === "number" ? value.median_chars : null,
-		acceptance_share: typeof value.test_share === "number" ? value.test_share : null,
+		acceptance_share: typeof value.acceptance_present_share === "number" ? value.acceptance_present_share : null,
 		deps_per_bead: typeof value.deps_per_bead === "number" ? value.deps_per_bead : null,
 		mission_beads: typeof value.mission_beads === "number" ? value.mission_beads : null,
 	};

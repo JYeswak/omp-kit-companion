@@ -263,10 +263,10 @@ function scoreOverall(metrics: Record<string, PlanningMetric>): { status: Planni
 }
 type MetricWriter = (name: string, value: unknown, target: unknown, status: PlanningStatus, evidence?: Record<string, unknown>) => void;
 function beadQualityTarget(target: (name: string, fallback: number | boolean) => number | boolean): Record<string, unknown> {
-	return { median_chars: target("bead_self_contained_median_chars", 300), test_share: target("bead_self_contained_test_share", 0.4), deps_per_bead: target("bead_self_contained_deps_per_bead", 1) };
+	return { median_chars: target("bead_self_contained_median_chars", 300), acceptance_present_share: target("bead_self_contained_acceptance_present_share", 0.4), deps_per_bead: target("bead_self_contained_deps_per_bead", 1) };
 }
 function beadQualityBounds(target: (name: string, fallback: number | boolean) => number | boolean): Record<string, string> {
-	return { median_chars: ">= " + target("bead_self_contained_median_chars", 300), test_share: ">= " + target("bead_self_contained_test_share", 0.4), deps_per_bead: ">= " + target("bead_self_contained_deps_per_bead", 1) };
+	return { median_chars: ">= " + target("bead_self_contained_median_chars", 300), acceptance_present_share: ">= " + target("bead_self_contained_acceptance_present_share", 0.4), deps_per_bead: ">= " + target("bead_self_contained_deps_per_bead", 1) };
 }
 function scorePlanPresence(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
 	if (snapshot.planExists === null || snapshot.beads === null || !snapshot.planPath) { put("plan_present", null, target("plan_present", true), "UNKNOWN"); return; }
@@ -311,13 +311,13 @@ function scoreBeadQuality(snapshot: PlanningScoreSnapshot, target: (name: string
 	const beads = safeMissionBeads(snapshot.beads, snapshot.mission, snapshot.planPath);
 	if (!beads?.length) { put("bead_self_contained", null, unknownTarget, "UNKNOWN"); return; }
 	const medianChars = median(beads.map((bead) => issueText(bead).length));
-	const testShare = beads.filter((bead) => (stringValue(bead.acceptance_criteria) ?? "").trim().length > 0).length / beads.length;
+	const acceptancePresentShare = beads.filter((bead) => (stringValue(bead.acceptance_criteria) ?? "").trim().length > 0).length / beads.length;
 	const depsPerBead = beads.reduce((sum, bead) => sum + (Array.isArray(bead.dependencies) ? bead.dependencies.length : 0), 0) / beads.length;
 	const medianTarget = numberValue(target("bead_self_contained_median_chars", 300)) ?? 300;
-	const testTarget = numberValue(target("bead_self_contained_test_share", 0.4)) ?? 0.4;
+	const acceptancePresentTarget = numberValue(target("bead_self_contained_acceptance_present_share", 0.4)) ?? 0.4;
 	const depsTarget = numberValue(target("bead_self_contained_deps_per_bead", 1)) ?? 1;
-	const status = medianChars !== null && medianChars >= medianTarget && testShare >= testTarget && depsPerBead >= depsTarget ? "PASS" : "FAIL";
-	put("bead_self_contained", { median_chars: medianChars, test_share: testShare, deps_per_bead: depsPerBead, mission_beads: beads.length }, beadQualityBounds(target), status);
+	const status = medianChars !== null && medianChars >= medianTarget && acceptancePresentShare >= acceptancePresentTarget && depsPerBead >= depsTarget ? "PASS" : "FAIL";
+	put("bead_self_contained", { median_chars: medianChars, acceptance_present_share: acceptancePresentShare, deps_per_bead: depsPerBead, mission_beads: beads.length }, beadQualityBounds(target), status);
 }
 function scorePlanToCode(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
 	const hours = planToCodeHours(snapshot.repoCommits, snapshot.mission);
@@ -424,7 +424,7 @@ function singleRepoEntry(options: PlanningScoreOptions, fleet: readonly FleetRep
 function targetForMetric(name: string, tuning: PlanningScoreTuning): unknown {
 	if (name === "bead_self_contained") return {
 		median_chars: ">= " + String(tuning.targets.bead_self_contained_median_chars ?? 300),
-		test_share: ">= " + String(tuning.targets.bead_self_contained_test_share ?? 0.4),
+		acceptance_present_share: ">= " + String(tuning.targets.bead_self_contained_acceptance_present_share ?? 0.4),
 		deps_per_bead: ">= " + String(tuning.targets.bead_self_contained_deps_per_bead ?? 1),
 	};
 	return tuning.targets[name] ?? null;
@@ -683,6 +683,8 @@ function parseTomlFile(path: string, optional: boolean): Record<string, unknown>
 	if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_TOML_BYTES) throw new Error("Unsafe or oversized planning-score config: " + path);
 	const parsed: unknown = Bun.TOML.parse(readFileSync(path, "utf8"));
 	if (!record(parsed)) throw new Error("Planning-score config must be a TOML table: " + path);
+	if (record(parsed.targets) && ("test_share" in parsed.targets || "bead_self_contained_test_share" in parsed.targets))
+		throw new Error("Rename legacy test_share / bead_self_contained_test_share to bead_self_contained_acceptance_present_share in " + path);
 	return parsed;
 }
 function mergeTable(base: unknown, override: unknown): Record<string, unknown> {
@@ -707,7 +709,7 @@ function validateTuning(raw: Record<string, unknown>): PlanningScoreTuning | nul
 	const targets = record(raw.targets) ? raw.targets : null;
 	const weights = record(raw.weights) ? raw.weights : null;
 	if (!targets || !weights) return null;
-	const requiredTargets = ["plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained_median_chars", "bead_self_contained_test_share", "bead_self_contained_deps_per_bead", "plan_to_code_hours", "plan_ship_ratio_7d"];
+	const requiredTargets = ["plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained_median_chars", "bead_self_contained_acceptance_present_share", "bead_self_contained_deps_per_bead", "plan_to_code_hours", "plan_ship_ratio_7d"];
 	for (const key of requiredTargets) if (numberValue(targets[key]) === null) return null;
 	if (typeof targets.plan_present !== "boolean" || typeof targets.main_green !== "boolean") return null;
 	for (const name of SCORE_METRIC_NAMES) if (numberValue(weights[name]) === null || numberValue(weights[name])! <= 0) return null;

@@ -30,7 +30,7 @@ const tuning = {
 	targets: {
 		plan_present: true, plan_rounds: 4, plan_last_diff: 0.05, converted_once: 1, coverage_checks: 1,
 		polish_rounds: 6, polish_last_changed: 0.05, bead_self_contained_median_chars: 300,
-		bead_self_contained_test_share: 0.4, bead_self_contained_deps_per_bead: 1, plan_to_code_hours: 24,
+		bead_self_contained_acceptance_present_share: 0.4, bead_self_contained_deps_per_bead: 1, plan_to_code_hours: 24,
 		plan_ship_ratio_7d: 2,
 	},
 	weights: { plan_present: 1, plan_rounds: 1, plan_last_diff: 1, converted_once: 1, coverage_checks: 1,
@@ -279,14 +279,59 @@ test("A3 A4 and A6 read local CI, plan path and build stage from repo config", a
 	expect(config.raw).toMatchObject({ missions: { demo: { plan: "docs/planning/packet.md", stage: "build" } }, ci: { mode: "local", check: "sh scripts/check.sh", branch: "develop", receipts: "receipts" } });
 });
 
+for (const scope of ["base", "override"] as const) {
+	for (const legacy of ["test_share", "bead_self_contained_test_share"]) {
+		for (const mixed of [false, true]) {
+			test(`A5 rejects ${legacy} in ${scope} targets${mixed ? " beside the new key" : ""}`, async () => {
+				const api = await scoreApi();
+				if (!api) return;
+				const label = scope + "-" + legacy + "-" + mixed;
+				const kitRoot = fixture("legacy-kit-" + label);
+				const repo = fixture("legacy-repo-" + label);
+				mkdirSync(join(kitRoot, "config"), { recursive: true });
+				mkdirSync(join(repo, ".omp"), { recursive: true });
+				const current = readFileSync(join(repoRoot, "config", "planning-score.toml"), "utf8");
+				const replacement = "bead_self_contained_acceptance_present_share";
+				const legacyBase = mixed
+					? current.replace("[targets]", "[targets]\n" + legacy + " = 0.9")
+					: current.replaceAll(replacement, legacy);
+				writeFileSync(join(kitRoot, "config", "planning-score.toml"), scope === "base" ? legacyBase : current);
+				if (scope === "override") writeFileSync(join(repo, ".omp", "planning-score.toml"),
+					"[targets]\n" + legacy + " = 0.9\n" + (mixed ? replacement + " = 0.1\n" : ""));
+				expect(() => api.loadPlanningScoreConfig(kitRoot, repo, fixture("legacy-home-" + label))).toThrow(replacement);
+			});
+		}
+	}
+}
 
-test("A5 filled acceptance_criteria counts as named tests", async () => {
+
+test("A5 prose acceptance is presence, not test evidence", async () => {
 	const api = await scoreApi();
 	if (!api) return;
 	const base = passingSnapshot();
-	const bead = { ...base.beads[0]!, description: "PLAN_demo.md " + "detail ".repeat(50), acceptance_criteria: "A concrete acceptance outcome is recorded." };
-	const result = api.scorePlanningSnapshot({ ...base, beads: [bead] }, tuning);
-	expect(result.metrics.bead_self_contained.value.test_share).toBe(1);
+	const prose = { ...base.beads[0]!, description: "PLAN_demo.md " + "detail ".repeat(50), acceptance_criteria: "looks good" };
+	const result = api.scorePlanningSnapshot({ ...base, beads: [prose] }, tuning);
+	const quality = result.metrics.bead_self_contained;
+	expect(quality.status).toBe("PASS");
+	expect(quality.value).toMatchObject({ acceptance_present_share: 1 });
+	expect(quality.value).not.toHaveProperty("test_share");
+	expect(quality.target).not.toHaveProperty("test_share");
+	const unreadable = api.scorePlanningSnapshot({ ...base, beads: null }, tuning);
+	expect(unreadable.metrics.bead_self_contained.target).not.toHaveProperty("test_share");
+});
+
+test("A5 acceptance presence respects its target and excludes blank prose", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const base = passingSnapshot();
+	const beads = [
+		{ ...base.beads[0]!, acceptance_criteria: "looks good" },
+		{ ...base.beads[1]!, acceptance_criteria: " \n\t " },
+	];
+	const strict = { ...tuning, targets: { ...tuning.targets, bead_self_contained_acceptance_present_share: 0.75 } };
+	const quality = api.scorePlanningSnapshot({ ...base, beads }, strict).metrics.bead_self_contained;
+	expect(quality.value).toMatchObject({ acceptance_present_share: 0.5 });
+	expect(quality.status).toBe("FAIL");
 });
 
 test("A6 build stage marks historical planning, conversion and polish metrics NOT_APPLICABLE", async () => {
