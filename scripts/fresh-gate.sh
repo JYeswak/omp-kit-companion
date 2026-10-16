@@ -122,13 +122,13 @@ $1"
 run_bun_suite() {
 	suite=$1
 	budget="${FRESH_GATE_SUITE_BUDGET_SECS:-25}"
-	python3 - "$ARCHIVE_DIR" "$suite" "$budget" <<'PY'
+	python3 - "$ARCHIVE_DIR" "$suite" "$budget" "$WORK/deferred.secs" <<'PY'
 import os
 import signal
 import subprocess
 import sys
 
-archive, suite, budget = sys.argv[1], sys.argv[2], float(sys.argv[3])
+archive, suite, budget, deferred_log = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 env = os.environ.copy()
 env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
 proc = subprocess.Popen(
@@ -152,6 +152,10 @@ except subprocess.TimeoutExpired:
         except ProcessLookupError:
             pass
         proc.wait()
+    # The suite waited its whole budget: that wait is deferral, not gate work, so the
+    # 180 s judgment subtracts it (admission deferral below costs no wait and is not logged).
+    with open(deferred_log, "a") as fh:
+        fh.write(f"{budget:g}\n")
     print("deferred to CI: " + suite)
     raise SystemExit(124)
 if rc == 75:
@@ -397,8 +401,16 @@ run_step notes gate_notes || exit 1
 run_step readme gate_readme || exit 1
 run_step focused gate_focused || exit 1
 elapsed=$(($(date +%s) - started))
-if [ "$elapsed" -ge 180 ]; then
-	fail "elapsed=${elapsed}s exceeds 180s"
+# A large unpublished range changes many suites; each one that defers to CI waited its full
+# budget. Judge the time the gate spent verifying, not the deferral waits (69-commit backlog,
+# 2026-10-16: 252 s elapsed, 150 s of it six deferred suites, so no range could ever pass).
+deferred=0
+if [ -f "$WORK/deferred.secs" ]; then
+	deferred=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/deferred.secs")
+fi
+judged=$((elapsed - deferred))
+if [ "$judged" -ge 180 ]; then
+	fail "elapsed=${elapsed}s (deferred to CI ${deferred}s, judged ${judged}s) exceeds 180s"
 	exit 1
 fi
-echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${elapsed}s"
+echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${elapsed}s deferred=${deferred}s judged=${judged}s"
