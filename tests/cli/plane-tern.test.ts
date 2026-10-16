@@ -85,7 +85,7 @@ const agentResolution = { schema_version: "am.agents.resolve-pane.v1", agent_nam
 function testIo(
 	working: boolean,
 	journal: string | string[],
-	agent = agentResolution,
+	agent: unknown = agentResolution,
 	waits: number[] = [],
 	processStart: string | string[] = "Wed Oct 14 19:39:32 2026 omp --profile codex\n",
 ) {
@@ -216,6 +216,10 @@ test("identity refuses a legacy-unverified Agent Mail pane binding", async () =>
 	const legacyAgent = { ...agentResolution, binding: "legacy-unverified" };
 	expect(await identifyTernSeat(seat, testIo(false, terminalJournal, legacyAgent)))
 		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", binding: "legacy-unverified", agent: null });
+});
+test("identity refuses an unregistered Agent Mail pane", async () => {
+	expect(await identifyTernSeat(seat, testIo(false, terminalJournal, null)))
+		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null });
 });
 test("identity accepts legacy binding only after the same runtime was bound", async () => {
 	const previousBinding = { sessionId: 41, sessionFile: "/sessions/session-1.jsonl", sessionUuid: "session-1",
