@@ -1,10 +1,11 @@
 #!/bin/sh
-# br-shim.sh — ID1 agent-identity shim (ompkit-rc-epic-land-fix-release-dogfood-rz5.108).
+# br-shim.sh — ID1 identity and TRACKLEASE1 tracker-write shim.
 # Installed as `br` ahead of the real binary on an agent pane's PATH. Every
 # invocation carries --actor "$AGENT_NAME": appended when absent, enforced when
-# present. Refuses to run anonymously or under another agent's name.
+# present. Mutations also require a registered Agent Mail identity and no
+# foreign exclusive lease on the repo's tracker files.
 # Real binary resolution: $BR_REAL, else the first `br` on PATH with this
-# shim's own directory removed. No dependencies beyond POSIX sh.
+# shim's own directory removed. Runtime dependencies: POSIX sh, awk, git, am.
 set -u
 
 fail() {
@@ -100,6 +101,77 @@ fi
 			elif [ -z "$gate_id" ]; then gate_id="$gate_arg"; fi ;;
 	esac
 done
+tracker_write=0
+case "$gate_sub" in
+	create|update|close|reopen|delete) tracker_write=1 ;;
+	comments) [ "$gate_id" = "add" ] && tracker_write=1 ;;
+	dep|label)
+		case "$gate_id" in add|remove) tracker_write=1 ;; esac
+		;;
+esac
+if [ "$gate_sub" = "sync" ]; then
+	sync_reconcile=0; sync_requires_apply=0; sync_apply=0; sync_dry_run=0
+	for sync_arg in "$@"; do
+		case "$sync_arg" in
+			--flush-only|--import-only|--merge) tracker_write=1 ;;
+			--reconcile) sync_reconcile=1 ;;
+			--reconcile-additive|--migrate-source-repo-path) sync_requires_apply=1 ;;
+			--apply) sync_apply=1 ;;
+			--dry-run) sync_dry_run=1 ;;
+		esac
+	done
+	if [ "$sync_reconcile" = 1 ] && [ "$sync_dry_run" = 0 ]; then tracker_write=1; fi
+	if [ "$sync_requires_apply" = 1 ] && [ "$sync_apply" = 1 ]; then tracker_write=1; fi
+fi
+if [ "$tracker_write" = 1 ]; then
+	tracker_db=${gate_db:-${BEADS_DB:-}}
+	if [ -n "$tracker_db" ]; then
+		case "$tracker_db" in
+			/*) tracker_db_path=$tracker_db ;;
+			*) tracker_db_path="$PWD/$tracker_db" ;;
+		esac
+		tracker_db_dir=$(dirname -- "$tracker_db_path") || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve tracker database directory"
+		if [ "$(basename -- "$tracker_db_dir")" = ".beads" ]; then
+			tracker_project=$(CDPATH='' cd -- "$tracker_db_dir/.." && pwd) || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve tracker project root"
+		else
+			tracker_project=$(git -C "$tracker_db_dir" rev-parse --show-toplevel 2>/dev/null) || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve project root from tracker database"
+		fi
+	else
+		tracker_project=$(git rev-parse --show-toplevel 2>/dev/null) || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve tracker project root"
+	fi
+	identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
+	identity_rc=$?
+	[ "$identity_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify $AGENT_NAME in $tracker_project (rc=$identity_rc): $identity_out"
+	conflict_out=$(am file_reservations conflicts "$tracker_project" .beads/issues.jsonl .beads/beads.db 2>&1)
+	conflict_rc=$?
+	[ "$conflict_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail reservation read failed for $tracker_project (rc=$conflict_rc): $conflict_out"
+	case "$conflict_out" in
+		"No conflicts detected."*) ;;
+		*" conflict(s) found:"*)
+			conflict_count=${conflict_out%% *}
+			case "$conflict_count" in ''|*[!0-9]*) fail "BR_SHIM_RESERVATION_UNKNOWN malformed Agent Mail conflict count: $conflict_out" ;; esac
+			tracker_tab=$(printf '\t')
+			conflict_rows=$(printf '%s\n' "$conflict_out" | awk 'NF >= 4 && $1 != "PATH" && $1 != "reservation_read_attestation:" { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $4 }')
+			row_count=$(printf '%s\n' "$conflict_rows" | awk 'NF { n++ } END { print n+0 }')
+			[ "$row_count" = "$conflict_count" ] || fail "BR_SHIM_RESERVATION_UNKNOWN incomplete Agent Mail conflict rows: $conflict_out"
+			foreign_rows=$(printf '%s\n' "$conflict_rows" | awk -F "$tracker_tab" -v agent="$AGENT_NAME" '$2 != agent { print }')
+			if [ -n "$foreign_rows" ]; then
+				reservation_list=$(am file_reservations list "$tracker_project" 2>&1)
+				list_rc=$?
+				[ "$list_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail reservation details failed for $tracker_project (rc=$list_rc): $reservation_list"
+				printf '%s\n' "$foreign_rows" | while IFS="$tracker_tab" read -r conflict_path holder pattern expires; do
+					[ -n "$conflict_path" ] || continue
+					reservation_ids=$(printf '%s\n' "$reservation_list" | awk -v pattern="$pattern" -v holder="$holder" -v expires="$expires" '$2 == pattern && $3 == holder && $4 == expires { if (ids != "") ids = ids ","; ids = ids $1 } END { print ids }')
+					[ -n "$reservation_ids" ] || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve reservation id for $holder/$pattern (expires=$expires)"
+					fail "BR_SHIM_TRACKER_RESERVED path=$conflict_path holder=$holder reservation=$reservation_ids expires=$expires"
+				done
+				reservation_check_rc=$?
+				[ "$reservation_check_rc" -eq 0 ] || exit "$reservation_check_rc"
+			fi
+			;;
+		*) fail "BR_SHIM_RESERVATION_UNKNOWN unrecognized Agent Mail conflict response: $conflict_out" ;;
+	esac
+fi
 gate_fire=0
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then gate_fire=1; fi

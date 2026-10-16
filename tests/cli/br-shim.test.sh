@@ -6,6 +6,7 @@
 set -u
 
 SHIM=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/br-shim.sh
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SHIM")/.." && pwd)
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/br-shim-test.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -22,6 +23,40 @@ else
 fi
 exit 0
 EOF
+cat > "$TMP/realbin/am" <<'EOF'
+#!/bin/sh
+printf '<%s>' "${AM_FAKE_MODE:-clear}" >> "$AM_LOG"
+for arg do printf ' <%s>' "$arg" >> "$AM_LOG"; done
+printf '\n' >> "$AM_LOG"
+mode=${AM_FAKE_MODE:-clear}
+case "$mode:$1:$2" in
+	unregistered:agents:show) printf 'AGENT_NOT_FOUND\n' >&2; exit 1 ;;
+	unreachable:agents:show) printf 'AM_UNAVAILABLE\n' >&2; exit 7 ;;
+	*:agents:show) printf '{"id":1,"name":"%s"}\n' "${AGENT_NAME:-}"; exit 0 ;;
+	query-fail:file_reservations:conflicts) printf 'AM_UNAVAILABLE\n' >&2; exit 7 ;;
+	foreign:file_reservations:conflicts)
+		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
+		printf '1 conflict(s) found:\nPATH HOLDER PATTERN EXPIRES\n.beads/issues.jsonl OtherWorker .beads/issues.jsonl 2099-12-31T23:59:59Z\n'
+		exit 0 ;;
+	own:file_reservations:conflicts)
+		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
+		printf '1 conflict(s) found:\nPATH HOLDER PATTERN EXPIRES\n.beads/issues.jsonl TestShim .beads/issues.jsonl 2099-12-31T23:59:59Z\n'
+		exit 0 ;;
+	foreign:file_reservations:list)
+		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
+		printf 'ID PATTERN AGENT EXPIRES REASON\n42 .beads/issues.jsonl OtherWorker 2099-12-31T23:59:59Z fixture\n'
+		exit 0 ;;
+	*:file_reservations:conflicts)
+		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
+		printf 'No conflicts detected.\n'
+		exit 0 ;;
+	*:file_reservations:list)
+		printf 'ID PATTERN AGENT EXPIRES REASON\n'
+		exit 0 ;;
+	*) printf 'unexpected Agent Mail command\n' >&2; exit 99 ;;
+esac
+EOF
+chmod +x "$TMP/realbin/am"
 chmod +x "$TMP/realbin/br"
 ln -s "$SHIM" "$TMP/shimbindir/br"
 printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
@@ -41,11 +76,15 @@ check() {
 }
 
 export BR_SHIM_TEST_ARGV="$TMP/argv"
+export AM_LOG="$TMP/am.log"
+export AM_EXPECTED_PROJECT="$REPO_ROOT"
+export AM_FAKE_MODE=clear
+: > "$AM_LOG"
 export PATH="$TMP/shimbindir:$TMP/realbin:$PATH"
 export AGENT_NAME="TestShim"
 
 # 1. every write kind gets --actor appended when absent
-for kind in "create --title t" "update X --status open" "comments add --message m X" "close X" "dep add X Y" "label add X y" "q quick" "delete X"; do
+for kind in "create --title t" "update X --status open" "comments add --message m X" "close X" "reopen X" "dep add X Y" "dep remove X Y" "label add X y" "label remove X y" "sync --flush-only" "q quick" "delete X"; do
 	: > "$TMP/argv"
 	# shellcheck disable=SC2086
 	br $kind > "$TMP/out" 2>&1
@@ -199,5 +238,91 @@ check "fresh-context-label-refused" 4 ""
  got_rc=$?
  check "close-lesson-none-passes" 0 "close X --reason done, all green --transition-comment none --actor TestShim"
  
+# 9. a caller's own exclusive lease does not block its write
+printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
+AM_FAKE_MODE=own
+: > "$TMP/argv"
+: > "$AM_LOG"
+br update X --status open > "$TMP/out" 2>&1
+got_rc=$?
+recorded=$(tr '\n' ' ' < "$TMP/argv" | sed 's/ $//')
+if [ "$got_rc" = "0" ] && [ "$recorded" = "update X --status open --actor TestShim" ] \
+	&& grep -Fq '<file_reservations> <conflicts>' "$AM_LOG" \
+	&& ! grep -Fq '<file_reservations> <list>' "$AM_LOG"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL own-lease-passes: rc=%s argv<<<%s>>> am<<<%s>>>\n' "$got_rc" "$recorded" "$(cat "$AM_LOG")"
+fi
+
+# 10. Agent Mail uses the explicit --db project over BEADS_DB
+mkdir -p "$TMP/db-project/.beads"
+AM_FAKE_MODE=clear
+AM_EXPECTED_PROJECT="$TMP/db-project"
+: > "$TMP/argv"
+: > "$AM_LOG"
+BEADS_DB="$TMP/ignored/.beads/beads.db" br --db "$TMP/db-project/.beads/beads.db" update X --status open > "$TMP/out" 2>&1
+got_rc=$?
+recorded=$(tr '\n' ' ' < "$TMP/argv" | sed 's/ $//')
+if [ "$got_rc" = "0" ] && [ "$recorded" = "--db $TMP/db-project/.beads/beads.db update X --status open --actor TestShim" ] \
+	&& grep -Fq "<$TMP/db-project>" "$AM_LOG" \
+	&& grep -Fq "<.beads/issues.jsonl>" "$AM_LOG" && grep -Fq "<.beads/beads.db>" "$AM_LOG"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL db-project-and-target-paths: rc=%s argv<<<%s>>> am<<<%s>>>\n' "$got_rc" "$recorded" "$(cat "$AM_LOG")"
+fi
+AM_EXPECTED_PROJECT="$REPO_ROOT"
+
+# 11. read-only commands never consult Agent Mail
+AM_FAKE_MODE=unreachable
+: > "$AM_LOG"
+for kind in "show X" "list" "ready" "search token" "sync --status"; do
+	: > "$TMP/argv"
+	# shellcheck disable=SC2086
+	br $kind > "$TMP/out" 2>&1
+	got_rc=$?
+	if [ "$got_rc" != "0" ]; then
+		fail=$((fail + 1))
+		printf 'FAIL read-only [%s]: rc=%s out<<<%s>>>\n' "$kind" "$got_rc" "$(cat "$TMP/out")"
+	fi
+done
+if [ ! -s "$AM_LOG" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL readonly-called-am: %s\n' "$(cat "$AM_LOG")"; fi
+
+# 12. every mutating command refuses a foreign exclusive lease before reaching real br
+AM_FAKE_MODE=foreign
+for kind in "create --title t" "update X --status open" "update X --status in_review" \
+	"close X" "reopen X" "comments add --message m X" "dep add X Y" "dep remove X Y" \
+	"label add X y" "label remove X y" "sync --flush-only" "delete X"; do
+	: > "$TMP/argv"
+	: > "$AM_LOG"
+	# shellcheck disable=SC2086
+	br $kind > "$TMP/out" 2>&1
+	got_rc=$?
+	if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] \
+		&& grep -Fq "OtherWorker" "$TMP/out" \
+		&& grep -Fq "reservation=42" "$TMP/out" \
+		&& grep -Fq "2099-12-31T23:59:59Z" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL foreign-lease [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$kind" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+	fi
+done
+
+# 13. unknown identity, unreachable Agent Mail and failed conflict reads all refuse
+for mode in unregistered unreachable query-fail; do
+	AM_FAKE_MODE=$mode
+	: > "$TMP/argv"
+	: > "$AM_LOG"
+	br update X --status open > "$TMP/out" 2>&1
+	got_rc=$?
+	if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "BR_SHIM_RESERVATION_UNKNOWN" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL fail-closed [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$mode" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+	fi
+done
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]
