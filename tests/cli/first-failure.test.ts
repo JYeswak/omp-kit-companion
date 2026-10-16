@@ -46,7 +46,14 @@ test("unremovable quarantine target fails with dir, errno and summary naming it"
 	const past = new Date(Date.now() - 73 * 3600 * 1000);
 	utimesSync(stuck, past, past);
 	chmodSync(root, 0o555);
-	const result = applyScratch(home, { liveness: defaultLiveness(), run: defaultRunner, home });
+	// This case exercises real filesystem failure and reporting, not host-wide
+	// descriptor discovery or orphan cleanup. Declare those fixture inputs.
+	const result = applyScratch(home, { liveness: defaultLiveness(), home,
+		run: (args, opts) => {
+			if (args[0] === "lsof") return { code: 1, stdout: "", stderr: "" };
+			if (args[0] === "ps" || args[0] === "/bin/ps") return { code: 0, stdout: "", stderr: "" };
+			return defaultRunner(args, opts);
+		} });
 	const terminal = result.applied.find(entry => entry.dir === stuck);
 	expect(terminal?.action).toBe("SKIP");
 	expect(terminal?.reason).toBe("atomic-quarantine-failed");
