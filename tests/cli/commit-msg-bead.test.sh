@@ -14,6 +14,7 @@ fail=0
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/br" <<EOF
 #!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/br-calls"
 id=""
 for arg in "\$@"; do id="\$arg"; done
 case " \$KNOWN_IDS " in
@@ -26,7 +27,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export BR_BIN="$TMP/bin/br"
 export BEADS_DB="$TMP/beads.db"
 : > "$BEADS_DB"
-export KNOWN_IDS="ompkit-2w7h ompkit-2w7h.1 rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r ompkit-kxdy ompkit-rc-epic-land-fix-release-dogfood-rz5.121.1"
+export KNOWN_IDS="ompkit-2w7h ompkit-2w7h.1 rz5.128 cfs-twenty-app-portfolio-hgub5.2.5 uds-6z2r ompkit-kxdy ompkit-rc-epic-land-fix-release-dogfood-rz5.121.1 jev-9odh zzt-abcd qq-xyz"
 
 run_case() {
 	name=$1
@@ -74,6 +75,25 @@ else fail=$((fail + 1)); printf 'FAIL missing-file\n'; fi
 printf '%s\n' "fix widgets ompkit-2w7h" > "$TMP/msg"
 if BEADS_DB="$TMP/absent.db" sh "$HOOK" "$TMP/msg" > /dev/null 2>&1; then pass=$((pass + 1));
 else fail=$((fail + 1)); printf 'FAIL no-tracker\n'; fi
+
+# 11. the repo's own issue_prefix ranks first: a real jev id after 36 earlier
+#     lexical tokens passes (planted: jev-9odh ranked 35th and was refused,
+#     JadeSpire AM57919, 2026-10-16)
+printf 'issue_prefix: jev\n' > "$TMP/config.yaml"
+LC_ALL=C run_case own-prefix-past-cap 0 "$LONG_PREFIX jev-9odh"
+LC_ALL=C run_case own-prefix-unknown-still-refused 4 "$LONG_PREFIX jev-nope"
+# 12. a commented template line still names the prefix (ompkit, cfs, zestroku
+#     trackers ship it commented); zzt-abcd is neither a fleet prefix nor bead-shaped
+printf '# issue_prefix: zzt\n' > "$TMP/config.yaml"
+LC_ALL=C run_case commented-prefix-past-cap 0 "$LONG_PREFIX zzt-abcd"
+rm -f "$TMP/config.yaml"
+# 13. a Bead: trailer value ranks first even when unshaped and unprefixed
+LC_ALL=C run_case trailer-past-cap 0 "$LONG_PREFIX
+
+Bead: qq-xyz"
+# 14. every tracker read is read-only (G13): no auto-import, no auto-flush
+if [ -s "$TMP/br-calls" ] && ! grep -v -e '--no-auto-import' "$TMP/br-calls" | grep -q . && ! grep -v -e '--no-auto-flush' "$TMP/br-calls" | grep -q .; then pass=$((pass + 1));
+else fail=$((fail + 1)); printf 'FAIL read-only-flags: %s\n' "$(grep -v -e '--no-auto-flush' "$TMP/br-calls" | head -n 1)"; fi
 
 printf 'commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

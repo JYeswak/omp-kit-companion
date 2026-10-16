@@ -32,10 +32,21 @@ fi
 [ -f "$DB" ] || exit 0
 MSG=$(cat -- "$FILE" 2>/dev/null) || exit 0
 TOKENS=$(printf '%s' "$MSG" | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}' | sort -u) || true
-BEAD_TOKENS=$(printf '%s\n' "$TOKENS" | grep -E '^(ompkit-|rz5[.]|cfs-|uds-)' || true)
-OTHER_TOKENS=$(printf '%s\n' "$TOKENS" | grep -Ev '^(ompkit-|rz5[.]|cfs-|uds-)' | grep -E '.{3,}' || true)
-# Keep the 20 local SQLite br show lookup cap; try recognized bead prefixes first.
-CANDIDATES=$(printf '%s\n%s\n' "$BEAD_TOKENS" "$OTHER_TOKENS" | grep -E '.{3,}' | head -20) || true
+# Candidate order, so a real id is never cut by the 20-lookup cap (jev-9odh
+# ranked 35th alphabetically and was refused, JadeSpire AM57919): Bead:/Beads:
+# trailer values; the repo's own issue_prefix (tracker config.yaml, the active
+# line, else the commented template); known fleet prefixes; any bead-shaped
+# token (prefix-hash with a digit); then everything else.
+CONFIG="$(dirname -- "$DB")/config.yaml"
+PREFIX=$(sed -n 's/^issue_prefix:[[:space:]]*\([A-Za-z0-9_-]\{1,\}\).*/\1/p' "$CONFIG" 2>/dev/null | head -n 1) || PREFIX=""
+if [ -z "$PREFIX" ]; then
+	PREFIX=$(sed -n 's/^#[[:space:]]*issue_prefix:[[:space:]]*\([A-Za-z0-9_-]\{1,\}\).*/\1/p' "$CONFIG" 2>/dev/null | head -n 1) || PREFIX=""
+fi
+TRAILER_TOKENS=$(printf '%s\n' "$MSG" | sed -n 's/^[[:space:]]*Beads\{0,1\}:[[:space:]]*//p' | tr -c 'A-Za-z0-9_.-' '\n' | grep -E '.{3,}') || true
+OWN_TOKENS=$(printf '%s\n' "$TOKENS" | awk -v p="$PREFIX" 'p != "" && (index($0, p "-") == 1 || index($0, p ".") == 1)') || true
+FLEET_TOKENS=$(printf '%s\n' "$TOKENS" | grep -E '^(ompkit-|rz5[.]|cfs-|uds-|jev-|kit-|zestroku-)' || true)
+SHAPED_TOKENS=$(printf '%s\n' "$TOKENS" | grep -E '^[A-Za-z][A-Za-z0-9]*-[A-Za-z]*[0-9][A-Za-z0-9]*([.][0-9]+)*$' || true)
+CANDIDATES=$(printf '%s\n%s\n%s\n%s\n%s\n' "$TRAILER_TOKENS" "$OWN_TOKENS" "$FLEET_TOKENS" "$SHAPED_TOKENS" "$TOKENS" | grep -E '.{3,}' | awk '!seen[$0]++' | head -20) || true
 if [ -z "$CANDIDATES" ]; then
 	printf 'commit-msg-bead: refusing commit with no bead-like token; name a bead id the tracker resolves\n' >&2
 	exit 4
@@ -43,7 +54,8 @@ fi
 # candidate tokens contain no glob characters by construction above
 # shellcheck disable=SC2086
 for id in $CANDIDATES; do
-	if "$BR" --db "$DB" show "$id" >/dev/null 2>&1; then
+	# Read-only lookup (G13): a commit hook never imports into or flushes the tracker.
+	if "$BR" --db "$DB" --no-auto-import --no-auto-flush show "$id" >/dev/null 2>&1; then
 		exit 0
 	fi
 done
