@@ -20,7 +20,7 @@ function runPayload(id: number, conclusion: string | null) {
 		conclusion, created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T01:00:00Z" };
 }
 
-interface FakePlan { etag: string; failFirstWith403?: boolean; resetOnly?: boolean; resetAtSec?: number; seen: string[]; }
+interface FakePlan { etag: string; failFirstWith403?: boolean; resetOnly?: boolean; resetAtSec?: number; rateLimitRemaining?: string; seen: string[]; }
 
 // In-process fake GitHub: no sockets, no listen race, no live polling.
 // The production fetch wrapper (Bun.fetch) is stdlib and needs no test.
@@ -31,6 +31,7 @@ function fakeFetch(plan: FakePlan, nowMs: number) {
 		if (plan.failFirstWith403 && plan.seen.length === 1) {
 			const out: Record<string, string> = { "x-ratelimit-reset": String(plan.resetAtSec ?? (Math.floor(Date.now() / 1000) + 3600)) };
 			if (!plan.resetOnly) out["retry-after"] = "2";
+			if (plan.rateLimitRemaining !== undefined) out["x-ratelimit-remaining"] = plan.rateLimitRemaining;
 			return { status: 403, headers: out, json: async () => ({}) };
 		}
 		if (headers["If-None-Match"] === plan.etag) return { status: 304, headers: {}, json: async () => ({}) };
@@ -47,6 +48,8 @@ test("a 200 stores rows with fetched_at and source, and the etag is reused", asy
 	expect(cache.repos["o/r"]?.etag).toBe('"v1"');
 	expect(cache.repos["o/r"]?.runs[0]).toMatchObject({ id: 1, source: "poll" });
 	expect(typeof cache.repos["o/r"]?.fetched_at).toBe("string");
+	expect(cache.repos["o/r"]?.last_checked_at).toBe(new Date(1_000_000).toISOString());
+	expect(readStatus(cache, 1_000_000).overall).toBe("OK");
 	const second = await pollRepos(fakeFetch(plan, 2_000_000), cache, ["o/r"]);
 	expect(second.repos["o/r"]?.status).toBe("NOT_MODIFIED");
 	expect(second.requestsMade).toBe(1);
@@ -72,13 +75,16 @@ test("a 403 with retry-after backs off and makes no further requests", async () 
 
 test("planted: a reset-only 403 sleeps until x-ratelimit-reset, not the 60s default", async () => {
 	const resetAtSec = Math.floor(9_000_000 / 1000) + 1800;
-	const plan: FakePlan = { etag: '"v9"', failFirstWith403: true, resetOnly: true, resetAtSec, seen: [] };
+	const plan: FakePlan = { etag: '"v9"', failFirstWith403: true, resetOnly: true, resetAtSec, rateLimitRemaining: "0", seen: [] };
 	process.env.OMP_KIT_GITHUB_API = "http://fake";
 	const cache: CiCacheFile = { version: 1, repos: {} };
 	const result = await pollRepos(fakeFetch(plan, 9_000_000), cache, ["o/r", "o/other"]);
 	expect(result.repos["o/r"]?.status).toBe("BACKOFF");
 	expect(result.backoffUntilMs).toBe(resetAtSec * 1000);
 	expect(cache.repos["o/r"]?.backoff_until_ms).toBe(resetAtSec * 1000);
+	expect(cache.repos["o/r"]?.backoff_reason).toBe("RATE_LIMIT");
+	expect(readStatus(cache, 9_000_000).repos["o/r"]).toMatchObject({ status: "UNAVAILABLE",
+		poller_state: "BACKOFF", backoff_reason: "RATE_LIMIT", backoff_until_ms: resetAtSec * 1000 });
 	expect(plan.seen.length).toBe(1);
 	expect(result.repos["o/other"]).toBeUndefined();
 });
@@ -89,6 +95,44 @@ test("readStatus marks rows stale past the window and reports no cache", () => {
 		fetched_at: new Date(1_000_000).toISOString(), source: "poll:200", backoff_until_ms: null, runs: [] } } };
 	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS).repos["o/r"]?.stale).toBe(false);
 	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS + 1).repos["o/r"]?.stale).toBe(true);
+	expect(readStatus(fresh, 1_000_000 + STALE_AFTER_MS + 1).overall).toBe("UNAVAILABLE");
+});
+test("a 304 refreshes status freshness without changing content-fetch timestamps", async () => {
+	const plan: FakePlan = { etag: '"v1"', seen: [] };
+	process.env.OMP_KIT_GITHUB_API = "http://fake";
+	const fetchedAt = new Date(1_000_000).toISOString();
+	const run: CiCacheFile["repos"][string]["runs"][number] = {
+		id: 1, name: "push", branch: "main", sha: "abc1234", status: "completed", conclusion: "success",
+		created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T01:00:00Z", fetched_at: fetchedAt, source: "poll",
+	};
+	const cache: CiCacheFile = { version: 1, repos: { "o/r": { etag: '"v1"', fetched_at: fetchedAt,
+		last_checked_at: fetchedAt, source: "poll:200", backoff_until_ms: null, backoff_reason: null, runs: [run] } } };
+	const nowMs = 1_000_000 + STALE_AFTER_MS + 5_000;
+	const result = await pollRepos(fakeFetch(plan, nowMs), cache, ["o/r"]);
+	expect(result.repos["o/r"]?.status).toBe("NOT_MODIFIED");
+	expect(cache.repos["o/r"]?.fetched_at).toBe(fetchedAt);
+	expect(cache.repos["o/r"]?.last_checked_at).toBe(new Date(nowMs).toISOString());
+	expect(cache.repos["o/r"]?.runs[0]?.fetched_at).toBe(fetchedAt);
+	expect(cache.repos["o/r"]?.runs[0]?.source).toBe("cache");
+	expect(readStatus(cache, nowMs).repos["o/r"]).toMatchObject({ status: "OK", stale: false, age_ms: 0 });
+});
+
+test("overall status is unavailable for any stale repo and exposes active rate-limit backoff", () => {
+	const nowMs = 9_000_000;
+	const freshAt = new Date(nowMs - 1_000).toISOString();
+	const staleAt = new Date(nowMs - STALE_AFTER_MS - 1).toISOString();
+	const resetAt = nowMs + 60_000;
+	const cache: CiCacheFile = { version: 1, repos: {
+		"o/fresh": { etag: null, fetched_at: freshAt, last_checked_at: freshAt, source: "poll:200",
+			backoff_until_ms: null, backoff_reason: null, runs: [] },
+		"o/stale": { etag: '"v9"', fetched_at: staleAt, last_checked_at: staleAt, source: "backoff:403",
+			backoff_until_ms: resetAt, backoff_reason: "RATE_LIMIT", runs: [] },
+	} };
+	const status = readStatus(cache, nowMs);
+	expect(status.overall).toBe("UNAVAILABLE");
+	expect(status.repos["o/fresh"]).toMatchObject({ status: "OK", stale: false, age_ms: 1_000 });
+	expect(status.repos["o/stale"]).toMatchObject({ status: "UNAVAILABLE", stale: true,
+		age_ms: STALE_AFTER_MS + 1, poller_state: "BACKOFF", backoff_reason: "RATE_LIMIT", backoff_until_ms: resetAt });
 });
 
 test("planted: ci status is wired through the documented grammar", () => {

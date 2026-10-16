@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
  * own `gh run watch`. One launchd job (`ci-poller`, 60s) polls tracked repos
  * with ETag/If-None-Match (a 304 costs no core quota), honours Retry-After
  * and x-ratelimit-reset (sleep until reset, no further requests), and writes
- * a cache file with fetched_at and source per row. `omp-kit ci status` reads
- * only the cache, never GitHub; rows older than STALE_AFTER_MS read stale.
+ * a cache file with content fetched_at and freshness last_checked_at per repo. `omp-kit ci status`
+ * reads only the cache, never GitHub; rows older than STALE_AFTER_MS are UNAVAILABLE.
  */
 
 export interface CiRunRow {
@@ -29,8 +29,11 @@ export interface CiRunRow {
 export interface CiRepoCache {
 	etag: string | null;
 	fetched_at: string;
+	/** Last successful cache validation; 304 updates this without refetching run content. */
+	last_checked_at?: string | null;
 	source: string;
 	backoff_until_ms: number | null;
+	backoff_reason?: string | null;
 	runs: CiRunRow[];
 }
 
@@ -98,6 +101,11 @@ function header(headers: Record<string, string>, name: string): string | null {
 	return null;
 }
 
+function preservedLastCheckedAt(previous: CiRepoCache | undefined): string | null {
+	if (previous === undefined) return null;
+	return previous.last_checked_at === undefined ? previous.fetched_at : previous.last_checked_at;
+}
+
 export function readCacheFile(path: string): CiCacheFile | null {
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as CiCacheFile;
@@ -129,14 +137,15 @@ export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: str
 			response = await deps.fetch(`${base}/repos/${repo}/actions/runs?per_page=10&branch=main`, headers);
 		} catch (error) {
 			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
-				source: `error:${error instanceof Error ? error.message : String(error)}`, backoff_until_ms: null, runs: previous?.runs ?? [] };
+				last_checked_at: preservedLastCheckedAt(previous),
+				source: `error:${error instanceof Error ? error.message : String(error)}`, backoff_until_ms: null, backoff_reason: null, runs: previous?.runs ?? [] };
 			result.repos[repo] = { status: "ERROR", runs: cache.repos[repo].runs.length };
 			continue;
 		}
 		result.requestsMade += 1;
 		if (response.status === 304) {
 			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
-				source: "poll:304", backoff_until_ms: null,
+				last_checked_at: nowIso, source: "poll:304", backoff_until_ms: null, backoff_reason: null,
 				runs: (previous?.runs ?? []).map(row => ({ ...row, source: "cache" })) };
 			result.repos[repo] = { status: "NOT_MODIFIED", runs: cache.repos[repo].runs.length };
 			continue;
@@ -144,24 +153,29 @@ export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: str
 		if (response.status === 403 || response.status === 429) {
 			const retryAfter = header(response.headers, "retry-after");
 			const reset = header(response.headers, "x-ratelimit-reset");
+			const rateLimitRemaining = header(response.headers, "x-ratelimit-remaining");
 			let until = nowMs + 60_000;
 			if (retryAfter !== null && /^\d+$/.test(retryAfter.trim())) until = nowMs + Number(retryAfter.trim()) * 1000;
 			else if (reset !== null && /^\d+$/.test(reset.trim())) until = Number(reset.trim()) * 1000;
+			const backoffReason = response.status === 429 || rateLimitRemaining?.trim() === "0" ? "RATE_LIMIT" : "HTTP_403";
 			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
-				source: `backoff:${response.status}`, backoff_until_ms: until, runs: previous?.runs ?? [] };
+				last_checked_at: preservedLastCheckedAt(previous),
+				source: `backoff:${response.status}`, backoff_until_ms: until, backoff_reason: backoffReason, runs: previous?.runs ?? [] };
 			result.repos[repo] = { status: "BACKOFF", runs: cache.repos[repo].runs.length };
 			result.backoffUntilMs = Math.max(result.backoffUntilMs ?? 0, until);
 			return result;
 		}
 		if (response.status !== 200) {
 			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
-				source: `error:http-${response.status}`, backoff_until_ms: null, runs: previous?.runs ?? [] };
+				last_checked_at: preservedLastCheckedAt(previous),
+				source: `error:http-${response.status}`, backoff_until_ms: null, backoff_reason: null, runs: previous?.runs ?? [] };
 			result.repos[repo] = { status: "ERROR", runs: cache.repos[repo].runs.length };
 			continue;
 		}
 		const body = await response.json() as { workflow_runs?: ApiRun[] };
 		const etag = header(response.headers, "etag");
-		cache.repos[repo] = { etag, fetched_at: nowIso, source: "poll:200", backoff_until_ms: null,
+		cache.repos[repo] = { etag, fetched_at: nowIso, last_checked_at: nowIso, source: "poll:200",
+			backoff_until_ms: null, backoff_reason: null,
 			runs: (body.workflow_runs ?? []).map(run => ({ id: run.id, name: run.name, branch: run.head_branch,
 				sha: run.head_sha, status: run.status, conclusion: run.conclusion, created_at: run.created_at,
 				updated_at: run.updated_at, fetched_at: nowIso, source: "poll" })) };
@@ -169,21 +183,41 @@ export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: str
 	}
 	return result;
 }
-
 export interface CiStatusData {
 	overall: string;
 	stale_after_ms: number;
-	repos: Record<string, { fetched_at: string; source: string; stale: boolean; runs: CiRunRow[] }>;
+	repos: Record<string, {
+		fetched_at: string;
+		last_checked_at: string | null;
+		source: string;
+		status: "OK" | "UNAVAILABLE";
+		stale: boolean;
+		age_ms: number | null;
+		poller_state: "UNKNOWN" | "BACKOFF" | "ERROR";
+		backoff_reason: string | null;
+		backoff_until_ms: number | null;
+		runs: CiRunRow[];
+	}>;
 }
 
 export function readStatus(cache: CiCacheFile | null, nowMs: number): CiStatusData {
 	if (cache === null) return { overall: "NO_CACHE", stale_after_ms: STALE_AFTER_MS, repos: {} };
 	const repos: CiStatusData["repos"] = {};
 	for (const [name, entry] of Object.entries(cache.repos)) {
-		const ageMs = nowMs - Date.parse(entry.fetched_at);
-		const stale = !(ageMs >= 0 && ageMs <= STALE_AFTER_MS);
-		repos[name] = { fetched_at: entry.fetched_at, source: entry.source, stale,
-			runs: entry.runs.map(row => ({ ...row, stale })) };
+		const lastCheckedAt = entry.last_checked_at === undefined ? entry.fetched_at : entry.last_checked_at;
+		const checkedAtMs = lastCheckedAt === null ? Number.NaN : Date.parse(lastCheckedAt);
+		const ageMs = Number.isFinite(checkedAtMs) ? nowMs - checkedAtMs : null;
+		const stale = ageMs === null || ageMs < 0 || ageMs > STALE_AFTER_MS;
+		const activeBackoff = entry.backoff_until_ms !== null && entry.backoff_until_ms > nowMs;
+		const pollerState = activeBackoff ? "BACKOFF" : entry.source.startsWith("error:") ? "ERROR" : "UNKNOWN";
+		repos[name] = {
+			fetched_at: entry.fetched_at, last_checked_at: lastCheckedAt, source: entry.source,
+			status: stale ? "UNAVAILABLE" : "OK", stale, age_ms: ageMs, poller_state: pollerState,
+			backoff_reason: entry.backoff_reason ?? (activeBackoff ? "UNKNOWN" : null),
+			backoff_until_ms: entry.backoff_until_ms,
+			runs: entry.runs.map(row => ({ ...row, stale })),
+		};
 	}
-	return { overall: "OK", stale_after_ms: STALE_AFTER_MS, repos };
+	const overall = Object.values(repos).some(repo => repo.status === "UNAVAILABLE") ? "UNAVAILABLE" : "OK";
+	return { overall, stale_after_ms: STALE_AFTER_MS, repos };
 }
