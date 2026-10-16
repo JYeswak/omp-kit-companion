@@ -1,0 +1,101 @@
+{
+ "authority": "pending",
+ "confidence": "derived",
+ "evidence_id": "ev_3ed14a9e95000901e7000255468c88e83127835283bcda043bce0fd4cc22d4f7",
+ "limitations": [
+  "No full original acceptance close PASS; exact source/test/publication/live classes remain separate."
+ ],
+ "operation": "chief-grades-074406-cycle",
+ "parameters": {
+  "bead": "ompkit-fp72.120",
+  "subject_sha256": "a359cce351e986c0384ed569a60e101f8c5af48e444d8c219aabd2d13630e5a0"
+ },
+ "producer": "StormyKnoll",
+ "result_ref": {
+  "audit_complete_producer": {
+   "argv": [
+    "python3",
+    "/Users/josh/.claude/skills/omp-kit-orchestration/scripts/fleet_seat_audit.py"
+   ],
+   "rc": 0,
+   "stderr": "",
+   "stdout": "seat audit 2026-10-16T09:15:45Z (baseline 1.0 close/worker/hour)\n\nomp-test  closes_1h=0 workers=4 per_worker_hour=0.0 seats_in_repo_cwd=5/5\n  flow: created_7d=487 closed_7d=58 inflow:outflow=8.4 created_24h=64 closed_24h=18 open=573 created_7d_without_mission_label=325\n  loop: in_review={'count': 1, 'oldest_min_lower_bound': 56, 'unreadable_updated_at': 0} needs_director={'count': 17, 'oldest_min_lower_bound': 495, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir    5 RusticPine       BUSY    goal=Y prompt=director-loop-objective@v8 held=['ompkit-rc-epic-land-fix-release-dogfood-rz5.138']\n  wor 4113 JadeThrush       BUSY    goal=Y prompt=unregistered held=[] CHURN-LOOP x7 bash\n  wor 4119 SilverCondor     BUSY    goal=Y prompt=worker-loop-objective@v9 held=[]\n  wor 4115 FrostyOrchid     BUSY    goal=Y prompt=worker-loop-objective@v11 held=['ompkit-kdbz.2.4'] CHURN-LOOP x3 bash\n  wor 4117 TurquoiseSummit  BUSY    goal=Y prompt=worker-loop-objective@v9 held=[] CHURN-LOOP x6 write\n\ncfsios  closes_1h=0 workers=4 per_worker_hour=0.0 seats_in_repo_cwd=5/5\n  flow: created_7d=68 closed_7d=18 inflow:outflow=3.78 created_24h=3 closed_24h=1 open=234 created_7d_without_mission_label=64\n  loop: in_review={'count': 1, 'oldest_min_lower_bound': 730, 'unreadable_updated_at': 0} needs_director={'count': 3, 'oldest_min_lower_bound': 145, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir 4178 CrimsonHorizon   BUSY    goal=Y prompt=director-loop-objective@v8 held=['cfs-local-origin-tracker-reconciliation-47b38']\n  wor 1473 RainyTurtle      BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 6065 AmberTower       IDLE    goal=Y prompt=worker-loop-objective@v11 held=[] CHURN-LOOP x6 bash\n  wor 8769 OliveBay         BUSY    goal=Y prompt=worker-loop-objective@v11 held=['cfs-twenty-app-portfolio-hgub5.66']\n  wor 3361 BrightForge      BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n\nzestroku  closes_1h=0 workers=4 per_worker_hour=0.0 seats_in_repo_cwd=5/5\n  flow: created_7d=70 closed_7d=27 inflow:outflow=2.59 created_24h=1 closed_24h=0 open=43 created_7d_without_mission_label=70\n  loop: in_review={} needs_director={'count': 0, 'oldest_min_lower_bound': 0, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir   15 JadeDuck         BUSY    goal=Y prompt=director-loop-objective@v8 held=['zestroku-zestroku-doctrine-a0h.13']\n  wor 4122 TurquoiseMaple   BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4128 SandyOrchid      IDLE    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4124 BeigeLeopard     IDLE    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4126 QuietStream      IDLE    goal=Y prompt=worker-loop-objective@v11 held=[]\n\nlocalbench  closes_1h=0 workers=4 per_worker_hour=0.0 seats_in_repo_cwd=5/5\n  flow: created_7d=123 closed_7d=27 inflow:outflow=4.56 created_24h=19 closed_24h=0 open=262 created_7d_without_mission_label=111\n  loop: in_review={'count': 20, 'oldest_min_lower_bound': 494, 'unreadable_updated_at': 0} needs_director={'count': 1, 'oldest_min_lower_bound': 0, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir    7 TopazTrout       BUSY    goal=Y prompt=director-loop-objective@v8 held=[]\n  wor 4105 WildFrog         BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4111 StormyCrane      BUSY    goal=Y prompt=worker-loop-objective@v8 held=['kit-qkmi.1']\n  wor 4107 FoggyOriole      BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4109 GrayDeer         IDLE    goal=n prompt=worker-loop-objective@v6 held=[]\n\njev  closes_1h=1 workers=4 per_worker_hour=0.25 seats_in_repo_cwd=5/5\n  flow: created_7d=129 closed_7d=77 inflow:outflow=1.68 created_24h=20 closed_24h=23 open=204 created_7d_without_mission_label=24\n  loop: in_review={'count': 0, 'oldest_min_lower_bound': 0, 'unreadable_updated_at': 0} needs_director={'count': 2, 'oldest_min_lower_bound': 134, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir   17 JadeSpire        BUSY    goal=Y prompt=director-loop-objective@v8 held=[]\n  wor 4097 DarkBear         UNKNOWN goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4103 RubyMeadow       IDLE    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4099 LavenderDune     BUSY    goal=Y prompt=worker-loop-objective@v11 held=[]\n  wor 4101 WildDog          BUSY    goal=Y prompt=worker-loop-objective@v11 held=[] CHURN-LOOP x8 bash\n\nuds  closes_1h=0 workers=4 per_worker_hour=0.0 seats_in_repo_cwd=5/5\n  flow: created_7d=177 closed_7d=9 inflow:outflow=19.67 created_24h=2 closed_24h=1 open=505 created_7d_without_mission_label=146\n  loop: in_review={'count': 3, 'oldest_min_lower_bound': 494, 'unreadable_updated_at': 0} needs_director={'count': 0, 'oldest_min_lower_bound': 0, 'unreadable_updated_at': 0} (oldest_min_lower_bound = minutes since last update, reset by any comment; None = UNKNOWN)\n  dir 4085 SapphireGoose    BUSY    goal=Y prompt=director-loop-objective@v8 held=['uds-81kq.24']\n  wor 4087 CreamPuma        IDLE    goal=Y prompt=unregistered held=[]\n  wor 4093 SapphireBadger   BUSY    goal=Y prompt=worker-loop-objective@v11 held=[] CHURN-LOOP x11 bash\n  wor 4091 DustyPrairie     IDLE    goal=Y prompt=unregistered held=[]\n  wor 4095 StormyCompass    IDLE    goal=Y prompt=unregistered held=[]\n"
+  },
+  "brenner_update": {
+   "H1": "sole worker disregard: downgraded by actual bad source producer; installed causal attribution not proved",
+   "H2": "producer plus consumer admit retired route: supported by source consumer27/0 characterization and exact callsites; source8baf retirement now independently replayed by Quiet58139",
+   "H3": "wording-only defect with safe consumer: refuted at source by matching unpublished commit/tree clearing save state",
+   "caveat": "retrospective evidence update, not cryptographic preregistration; live loaded-extension adoption remains separate",
+   "cheapest_test": "existing emitter/consumer source plus targeted consumer runtime; no unchanged live failure rerun",
+   "falsifier": "same actual orphan/private receipt remains pending and actual emitter never prescribes private off-main flow",
+   "question": "why does single-main publication keep diverging after J11 reminders?"
+  },
+  "close_replay_disposition": "REWORK/INCOMPLETE for this cycle: child .142 replay checked publication ancestry only, not whole original acceptance. Not a full bead PASS; no retroactive .142 false-close claim. It also ran git fetch in Kit despite its read-only brief; no general no-effects assertion adopted.",
+  "convergence": "original58035/58037 witnesses now pass at exact9bb/ba3; broader final-index-check/refCAS window remains REWORK perCrimson58169, not erased by44selftests. Child2/5 mutation-kill claim not adopted from boolean-only producer.",
+  "cycle_started_at": "2026-10-16T07:44:06Z",
+  "limitations": [
+   "No fullsuite/CI/installed-release/product-throughput success. Reopened/event history UNKNOWN, not0.",
+   "Full sitrep invocation earlier interrupted without a captured final numeric rc; later retained native rows08:06 read separately, not relabelled as that command passing.",
+   "This receipt binds observations and scope; it is not a full-close certificate or self-authorization."
+  ],
+  "meadows": {
+   "flow": "7d created177/67/70 versus retained currently-closed9/18/27 are proxies, not complete transition events or exact net change",
+   "intervention": "existing canonical guard/keeper/mail-wake corrections; no new watcher/framework or threshold waiver",
+   "loop": "delayed/blocked balancing review and exception outflow, against ongoing issue inflow",
+   "measurement": "joint closes/worker-hour, review/question ages, reopened-event availability and sampled pillar outcomes; never green from closes alone",
+   "source": "https://donellameadows.org/archives/leverage-points-places-to-intervene-in-a-system/",
+   "source_registry_retrieved_at": "2026-05-02T01:30:41Z",
+   "stock": "open505/233/43 in0744 audit; current complete audit above",
+   "system": "delegated uds/cfsios/zestroku flow"
+  },
+  "own_operating_grade": "RED: hourly CHIEF late and at least6 observed exception reply breaches; no invented p90 or zero unknowns",
+  "recorded_at": "2026-10-16T09:15:45.493502+00:00",
+  "sample_disposition": "4 enabling,1 obsolete,1 candidate outcome; no current full-acceptance PASS granted. Child truncations and old pre-close comments do not establish historical false closure. Original statuses unchanged.",
+  "sample_seed": "StormyKnoll/cycle-2026-10-16T07:44:06Z",
+  "sampled_beads": [
+   {
+    "classification": "enabling housekeeping",
+    "id": "uds-wnxb.23",
+    "session": "uds"
+   },
+   {
+    "classification": "enabling housekeeping",
+    "id": "uds-native-close-support-refusals-hijm",
+    "session": "uds"
+   },
+   {
+    "classification": "enabling housekeeping",
+    "id": "zestroku-zestroku-doctrine-a0h.4",
+    "session": "zestroku"
+   },
+   {
+    "classification": "candidate user-facing build outcome; current original acceptance UNVERIFIED",
+    "id": "zestroku-build-darwin-l6d",
+    "session": "zestroku"
+   },
+   {
+    "classification": "obsolete/not delivered here",
+    "id": "cfs-6rra3",
+    "session": "cfsios"
+   },
+   {
+    "classification": "enabling housekeeping",
+    "id": "cfs-self-pull-held-prewrite-5fo56",
+    "session": "cfsios"
+   }
+  ],
+  "selection": "two smallest sha256(seed/session/id) among trailing7d retained closed; native populations rc0: uds354/9recent,roku27/27,cfs2928/18",
+  "waitmail113": {
+   "before_rc": 1,
+   "limits": "author implementation proof; independent non-author review pending. CLI mail cadence remains30s, no10s wake claim. Initial rendering-based mutation attempt had IndentationError, not kills; wrong rendered hashc29f not a source hash.",
+   "native_selftest_checks": 19,
+   "native_selftest_rc": 0,
+   "public_real_mail": "new58183 woke=mail after30.8s; pre-existing58182 stayed quiet to40.0s, both CLIrc0",
+   "same_oracle_after_rc": 0,
+   "semantic_mutants": "normalrc0; adoptionrc1 on new reply; no-time-filterrc1 on stale reply; actual runtime function mutated in memory only",
+   "source_commit": "b990f42bfd212eb4d82436a55376733b1d8d7a9d",
+   "source_publication": "normal shared-main push rc0; fresh fetch and commit-origin/main ancestry rc0",
+   "source_sha256": "fa8815316cb113dda15da5075ac51bcece37348f432ba7271d318583a454da16"
+  }
+ }
+}
