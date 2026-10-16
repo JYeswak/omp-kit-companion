@@ -955,6 +955,8 @@ test("rch: default statSocket reads real fixture socket state", async () => {
 		expect(deps.statSocket(sock).kind).toBe("socket");
 		rmSync(sock);
 		expect(deps.statSocket(sock).kind).toBe("missing");
+		writeFileSync(sock, "not a socket\n");
+		expect(deps.statSocket(sock).kind).toBe("other");
 	} finally {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
