@@ -1019,6 +1019,33 @@ test("legacy owner with reused pid reaps instead of staying LIVE", () => {
 	expect(live.sizeBytes).toBeGreaterThanOrEqual(4096);
 });
 
+test("a coarse created timestamp proves reuse only after its whole precision window", () => {
+	const at = (iso: string) => ({ signalAlive: () => true, psVisible: () => true, processStart: () => iso });
+	const owner = (createdAt: string) => ({ pid: 1, processStart: null, label: "x", repo: "r", createdAt, argv0: null });
+	// Field case 2026-10-16: a live eval kernel started 07:16:16Z wrote created=2026-10-15 at
+	// 07:16:16.4Z; reading the bare date as UTC midnight called its own pid reused.
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-15T07:16:16Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-16T13:59:59Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-18T00:00:00Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45Z"), at("2026-10-15T14:45:30Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45Z"), at("2026-10-15T14:46:01Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45:10Z"), at("2026-10-15T14:45:11Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45:10Z"), at("2026-10-15T14:45:12Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("1792138027.113903"), at("2026-10-18T00:00:00Z"))).toBeNull();
+});
+
+test("planted: a date-only owner of a live process started that day stays LIVE, not REAP", () => {
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	roots.push(root);
+	const pid = deadPid();
+	const dir = sessionDir(root, "grzn1-review", pid);
+	writeFileSync(join(dir, ".owner"), JSON.stringify({ pid, label: "grzn1-review", repo: fixtureRepo, created: "2026-10-15" }));
+	const sameDay = { signalAlive: () => true, psVisible: () => true, processStart: () => "2026-10-15T07:16:16Z" };
+	const verdict = inspectSession(dir, root, depsFor({ liveness: sameDay }));
+	expect(verdict.action).toBe("LIVE");
+	expect(verdict.reason).toBe("owner-alive-start-unverified");
+});
+
 test("every verdict carries its size, including mismatches", () => {
 	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
 	roots.push(root);

@@ -383,17 +383,38 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 
 /**
  * PID-reuse proof for owners without process identity (legacy key=value or JSON):
- * the pid is alive, but the live process started after the owner's `created` time,
- * so it cannot be the process that wrote the owner file. Null when unprovable
- * (fail closed: the caller keeps the LIVE verdict).
+ * the pid is alive, but the live process started after the latest instant the owner
+ * could have been created, so it cannot be the process that wrote the owner file.
+ * Null when unprovable (fail closed: the caller keeps the LIVE verdict).
  */
 export function reuseAfterCreated(owner: ScratchOwner, liveness: LivenessDeps): boolean | null {
 	const start = liveness.processStart(owner.pid);
 	if (start === null) return null;
 	const startMs = parsePsStart(start) ?? Date.parse(start);
-	const createdMs = Date.parse(owner.createdAt);
-	if (Number.isNaN(startMs) || Number.isNaN(createdMs)) return null;
+	const createdMs = createdLatestMs(owner.createdAt);
+	if (Number.isNaN(startMs) || createdMs === null) return null;
 	return startMs > createdMs;
+}
+
+const CREATED_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const CREATED_MINUTE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?$/;
+const CREATED_SECOND = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?$/;
+const CREATED_FRACTION = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}(?:Z|[+-]\d{2}:?\d{2})?$/;
+/**
+ * The latest instant a `created` value can denote, from its own precision. A bare
+ * date names a whole day in an unknown zone (Date.parse reads it as UTC midnight),
+ * so it covers 24 h plus the widest UTC offset; a date-only owner written at 07:16Z
+ * by a live process must not read as that process's PID reused. Other formats are
+ * not trusted to carry their precision: null.
+ */
+export function createdLatestMs(created: string): number | null {
+	const ms = Date.parse(created);
+	if (Number.isNaN(ms)) return null;
+	if (CREATED_DATE.test(created)) return ms + (24 + 14) * 3600 * 1000;
+	if (CREATED_MINUTE.test(created)) return ms + 60 * 1000;
+	if (CREATED_SECOND.test(created)) return ms + 1000;
+	if (CREATED_FRACTION.test(created)) return ms + 1;
+	return null;
 }
 
 /** Latest activity in a tree: dir mtime first (cheap), then a bounded walk for newer entries. */
