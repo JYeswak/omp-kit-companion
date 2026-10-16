@@ -11,7 +11,19 @@ import type { PullRefusal } from "../src/fleet-watch";
  * Kernel invariant 7). OMP emits `session_compact` once a compaction entry is
  * committed; the guard injects a context message naming the AGENTS.md nearest
  * the session cwd and telling the agent to `br show` its in-progress bead
- * before it continues. Nothing else in a turn makes it speak.
+ * before it continues, and arms a pending-reread flag. While the flag is set,
+ * the `tool_call` handler blocks mutating calls (edit, write, br
+ * update/close/comments, git commit/push, classified by the exported pure
+ * function `isMutatingCall`). Only observed successful `tool_execution_end`
+ * results clear the flag: a read of exactly the named AGENTS.md with
+ * non-empty content, and a `br show` whose parsed output is in_progress (or
+ * rework) and assigned to a session identity (or a `br list` that returns
+ * empty). Call arguments, echoes, failures, wrong paths and foreign/closed
+ * beads never clear it. Nothing else in a turn makes it speak.
+ *
+ * Fail-open stays only where it already is: the self-close check keeps its
+ * fail-open behaviour, but the reread gate's own errors block — a crash in
+ * the gate leaves the flag set, so a crash cannot silently bypass it.
  *
  * SELF_CLOSE_REFUSED (Kernel invariant 9, no self-certification). A bash call
  * that runs `br close <id>` or `bd close <id>` is blocked when the bead's
@@ -48,8 +60,20 @@ export interface FlywheelContext {
 
 export interface FlywheelToolCallEvent {
 	type?: "tool_call";
+	toolCallId?: unknown;
 	toolName?: unknown;
 	input?: unknown;
+}
+
+/** Result side of a tool call. Same shape omp exposes (cf. kit-save-guard's
+ * SaveGuardToolExecutionEndEvent): `isError` marks failure, `result` carries
+ * the tool-specific details envelope. */
+export interface FlywheelToolExecutionEndEvent {
+	type?: "tool_execution_end";
+	toolCallId?: unknown;
+	toolName?: unknown;
+	result?: unknown;
+	isError?: unknown;
 }
 
 export interface FlywheelToolCallResult {
@@ -69,6 +93,7 @@ export interface FlywheelMessage {
 export interface FlywheelGuardApi {
 	on(event: "session_compact", handler: (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
+	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
 	sendMessage(message: FlywheelMessage, options?: { triggerTurn?: boolean; deliverAs?: "nextTurn" | "aside" }): void;
 	exec: FlywheelExec;
 }
@@ -119,6 +144,203 @@ export function compactionRereadMessage(cwd: string, identities: readonly string
 		`Before continuing: ${reread}, then run \`br list --status in_progress --assignee ${assignee}\` and \`br show <id>\` for your in-progress bead.`,
 		"</system-reminder>",
 	].join("\n");
+}
+
+const BR_REREAD_MUTATING_VERBS: Record<string, true> = { update: true, close: true, comments: true };
+const GIT_DIR_FLAGS: Record<string, true> = { "-C": true, "--git-dir": true, "--work-tree": true };
+const BEAD_OWNED_STATUSES: Record<string, true> = { in_progress: true, rework: true };
+const READ_CONTENT_KEYS = ["content", "text", "output", "stdout"] as const;
+
+/** First positional word, skipping flags and (for known flags) their values. */
+function firstVerb(words: string[], valueFlags: Record<string, true>): string | null {
+	for (let at = 0; at < words.length; at += 1) {
+		const word = words[at]!;
+		if (!word.startsWith("-") || word === "-") return word.toLowerCase();
+		const name = word.split("=")[0]!;
+		if (valueFlags[name] === true && !word.includes("=")) at += 1;
+	}
+	return null;
+}
+
+function simpleExecutable(words: string[]): { exe: string; rest: string[] } | null {
+	let at = 0;
+	while (at < words.length && (isAssignment(words[at]!) || WRAPPERS[words[at]!.toLowerCase()] === true)) at += 1;
+	const first = words[at];
+	if (first === undefined) return null;
+	return { exe: first.slice(first.lastIndexOf("/") + 1).toLowerCase(), rest: words.slice(at + 1) };
+}
+
+/**
+ * Pure classifier for the compaction reread gate: edit/write always mutate;
+ * bash mutates when any simple command runs `br|bd update|close|comments`
+ * or `git commit|push` (compound commands included; obfuscated invocations
+ * can evade the regex, accepted: guard against forgetting, not a boundary).
+ */
+export function isMutatingCall(event: FlywheelToolCallEvent): boolean {
+	const tool = typeof event.toolName === "string" ? event.toolName.toLowerCase() : "";
+	if (tool === "edit" || tool === "write") return true;
+	if (tool !== "bash") return false;
+	const command = field(event.input, "command");
+	if (typeof command !== "string" || command.trim() === "") return false;
+	for (const words of shellCommands(command)) {
+		const parsed = simpleExecutable(words);
+		if (parsed === null) continue;
+		if (parsed.exe === "br" || parsed.exe === "bd") {
+			const verb = firstVerb(parsed.rest, BR_VALUE_FLAGS);
+			if (verb !== null && BR_REREAD_MUTATING_VERBS[verb] === true) return true;
+		} else if (parsed.exe === "git") {
+			const sub = firstVerb(parsed.rest, GIT_DIR_FLAGS);
+			if (sub === "commit" || sub === "push") return true;
+		}
+	}
+	return false;
+}
+
+/** Pending reread state armed by `session_compact`; null when satisfied. */
+export interface PendingReread {
+	agentsPath: string | null;
+	identities: string[];
+	agentsOk: boolean;
+	beadOk: boolean;
+}
+
+/** Missing-read fragment for the block reason, built at the gate. */
+function rereadMissing(pending: PendingReread): string {
+	const missing: string[] = [];
+	if (!pending.agentsOk) missing.push(pending.agentsPath === null ? "AGENTS.md (none found)" : `read ${pending.agentsPath}`);
+	if (!pending.beadOk) missing.push("br show of your in_progress bead (or an empty br list)");
+	return missing.join(" and ");
+}
+
+function stringField(value: unknown, keys: readonly string[]): string | null {
+	if (typeof value === "string") return value;
+	if (value === null || typeof value !== "object") return null;
+	const record = value as Record<string, unknown>;
+	for (const key of keys) {
+		const candidate = key in record ? record[key] : undefined;
+		if (typeof candidate === "string") return candidate;
+		const nested = field(record["details"], key);
+		if (typeof nested === "string") return nested;
+	}
+	return null;
+}
+
+
+/** Failure/truncation/refusal markers anywhere in a result envelope. */
+function resultTainted(result: unknown): boolean {
+	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
+	const details = record !== null && typeof record["details"] === "object" && record["details"] !== null
+		? record["details"] as Record<string, unknown> : null;
+	for (const source of [details, record]) {
+		if (source === null) continue;
+		for (const key of ["truncated", "isTruncated", "partial"]) {
+			if (source[key] === true) return true;
+		}
+		for (const key of ["code", "exitCode"]) {
+			const code = source[key];
+			if (typeof code === "number" && code !== 0) return true;
+		}
+	}
+	return false;
+}
+
+function parseBeadRow(stdout: string, id: string): { status: string; assignee: string | null } | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return null;
+	}
+	const rows: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+	const row = rows.find(item => field(item, "id") === id) ?? (rows.length === 1 ? rows[0] : undefined);
+	const status = field(row, "status");
+	if (typeof status !== "string") return null;
+	const assignee = field(row, "assignee");
+	const owner = typeof assignee === "string" ? assignee.trim() : "";
+	return { status, assignee: owner === "" ? null : owner };
+}
+
+/** Ids named by `br|bd show` verbs in a bash command. */
+function brShowIds(command: string): string[] {
+	const ids: string[] = [];
+	for (const words of shellCommands(command)) {
+		const parsed = simpleExecutable(words);
+		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
+		let at = 0;
+		const rest = parsed.rest;
+		while (at < rest.length) {
+			const word = rest[at]!;
+			if (!word.startsWith("-") || word === "-") break;
+			const name = word.split("=")[0]!;
+			at += BR_VALUE_FLAGS[name] === true && !word.includes("=") ? 2 : 1;
+		}
+		if (rest[at]?.toLowerCase() !== "show") continue;
+		at += 1;
+		while (at < rest.length) {
+			const word = rest[at]!;
+			if (!word.startsWith("-") || word === "-") {
+				if (word !== "-") ids.push(word);
+				break;
+			}
+			const name = word.split("=")[0]!;
+			at += BR_VALUE_FLAGS[name] === true && !word.includes("=") ? 2 : 1;
+		}
+	}
+	return ids;
+}
+
+function isBrListCall(command: string): boolean {
+	for (const words of shellCommands(command)) {
+		const parsed = simpleExecutable(words);
+		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
+		if (firstVerb(parsed.rest, BR_VALUE_FLAGS) === "list") return true;
+	}
+	return false;
+}
+
+export interface RereadCall {
+	toolName: string;
+	input: unknown;
+	cwd: string;
+}
+
+/**
+ * Observe one successful tool result against the pending reread. Only
+ * observed results count: call arguments, echoes, failures, wrong paths and
+ * foreign/closed beads never set a flag. Returns true when both flags land.
+ */
+export function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string): boolean {
+	if (resultTainted(result)) return false;
+	const tool = call.toolName.toLowerCase();
+	if (tool === "read") {
+		const raw = field(call.input, "path");
+		if (typeof raw === "string" && pending.agentsPath !== null
+			&& resolve(call.cwd, expandHome(raw.trim(), home)) === pending.agentsPath) {
+			const content = stringField(result, READ_CONTENT_KEYS);
+			if (content !== null && content.length > 0) pending.agentsOk = true;
+		}
+	} else if (tool === "bash") {
+		const command = field(call.input, "command");
+		const stdout = typeof command === "string" ? stringField(result, READ_CONTENT_KEYS) : null;
+		if (stdout !== null && typeof command === "string") {
+			for (const id of brShowIds(command)) {
+				const row = parseBeadRow(stdout, id);
+				if (row !== null && BEAD_OWNED_STATUSES[row.status] === true && row.assignee !== null
+					&& pending.identities.some(name => name.toLowerCase() === row.assignee!.toLowerCase())) {
+					pending.beadOk = true;
+				}
+			}
+			if (!pending.beadOk && isBrListCall(command)) {
+				try {
+					const parsed: unknown = JSON.parse(stdout);
+					if (Array.isArray(parsed) && parsed.length === 0) pending.beadOk = true;
+				} catch {
+					// Non-JSON list output proves nothing; the flag stays unset.
+				}
+			}
+		}
+	}
+	return pending.agentsOk && pending.beadOk;
 }
 
 /** Split a shell command into simple-command word lists. Quotes are honoured; expansions are not evaluated. */
@@ -611,12 +833,16 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
+	let pendingReread: PendingReread | null = null;
+	const pendingCalls = new Map<string, RereadCall>();
 	pi.on("session_compact", async (_event, ctx) => {
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
 		let identities = envIdentities;
 		try {
 			identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
 		} catch { /* the reminder still goes out without a name */ }
+		pendingReread = { agentsPath: nearestAgentsMd(ctx.cwd), identities, agentsOk: false, beadOk: false };
+		pendingCalls.clear();
 		pi.sendMessage(
 			{ customType: "kit-flywheel-guard", content: compactionRereadMessage(ctx.cwd, identities), display: true,
 				details: { behavior: COMPACTION_REREAD } },
@@ -626,6 +852,16 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	pi.on("tool_call", async (event, ctx) => {
 		try {
+			if (typeof event.toolCallId === "string" && typeof event.toolName === "string") {
+				pendingCalls.set(event.toolCallId, { toolName: event.toolName, input: event.input, cwd: ctx.cwd });
+			}
+			if (pendingReread !== null && isMutatingCall(event)) {
+				const tool = typeof event.toolName === "string" ? event.toolName : "this call";
+				return {
+					block: true,
+					reason: `kit-flywheel-guard ${COMPACTION_REREAD}: ${tool} blocked until ${rereadMissing(pendingReread)} return successful results. Reading is always allowed.`,
+				};
+			}
 			const admission = checkBashAdmission(event);
 			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
@@ -635,6 +871,22 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const warning = `kit-flywheel-guard LOOKUP_REFUSED: lifecycle check failed (${error instanceof Error ? error.message : String(error)}); mutation blocked, nothing was executed.`;
 			ctx.ui?.notify(warning, "warning");
 			return { block: true, reason: warning };
+		}
+	});
+	pi.on("tool_execution_end", (_event, ctx) => {
+		try {
+			if (pendingReread === null) return;
+			if (typeof _event.toolCallId !== "string" || _event.isError === true) return;
+			const call = pendingCalls.get(_event.toolCallId);
+			if (call === undefined) return;
+			pendingCalls.delete(_event.toolCallId);
+			if (observeRereadResult(call, _event.result, pendingReread, home)
+				&& pendingReread.agentsOk && pendingReread.beadOk) {
+				pendingReread = null;
+			}
+		} catch (error) {
+			// Fail closed: the flags stay unset, so the gate keeps blocking.
+			ctx.ui?.notify(`kit-flywheel-guard ${COMPACTION_REREAD}: reread observation failed (${error instanceof Error ? error.message : String(error)}); still blocked.`, "warning");
 		}
 	});
 }

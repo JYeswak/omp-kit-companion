@@ -11,7 +11,7 @@ import kitFlywheelGuard, {
 	type FlywheelMessage,
 	type FlywheelToolCallResult,
 } from "./kit-flywheel-guard";
-import { trackerRequests } from "./kit-flywheel-guard";
+import { isMutatingCall, trackerRequests } from "./kit-flywheel-guard";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
 
@@ -23,28 +23,22 @@ interface ExecCall { command: string; args: string[]; options?: FlywheelExecOpti
 type Responder = (call: ExecCall) => FlywheelExecResult | Promise<FlywheelExecResult>;
 type CompactHandler = (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown;
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
-type HostRegistration = ["session_compact", CompactHandler] | ["tool_call", ToolHandler];
-
-interface FakeHost {
-	emit(type: string, event: Record<string, unknown>, ctx: FlywheelContext): Promise<unknown[]>;
-	ctx(cwd: string, idle?: boolean): FlywheelContext;
-	sent: { message: FlywheelMessage; options?: { deliverAs?: string } }[];
-	execs: ExecCall[];
-	notices: string[];
-}
-
+type EndHandler = (event: Record<string, unknown>, ctx: FlywheelContext) => unknown;
+type HostRegistration = ["session_compact", CompactHandler] | ["tool_call", ToolHandler] | ["tool_execution_end", EndHandler];
 /** Fake omp host: records handlers, sent messages and every exec the guard makes. */
 async function host(opts: { env?: Record<string, string | undefined>; home?: string; respond?: Responder } = {}): Promise<FakeHost> {
 	const compacts: CompactHandler[] = [];
 	const tools: ToolHandler[] = [];
+	const ends: EndHandler[] = [];
 	const sent: FakeHost["sent"] = [];
 	const execs: ExecCall[] = [];
 	const notices: string[] = [];
 	const respond: Responder = opts.respond ?? (() => ({ stdout: "", stderr: "not stubbed", code: 127 }));
 	const pi = {
 		on: (...args: HostRegistration) => {
-			if (args[0] === "session_compact") compacts.push(args[1]);
-			else tools.push(args[1]);
+		if (args[0] === "session_compact") compacts.push(args[1]);
+		else if (args[0] === "tool_execution_end") ends.push(args[1]);
+		else tools.push(args[1]);
 		},
 		sendMessage: (message: FlywheelMessage, options?: { deliverAs?: string }) => void sent.push({ message, options }),
 		exec: async (command: string, args: string[], options?: FlywheelExecOptions) => {
@@ -60,6 +54,8 @@ async function host(opts: { env?: Record<string, string | undefined>; home?: str
 			for (const handler of compacts) results.push(await handler({ type: "session_compact" }, ctx));
 		} else if (type === "tool_call") {
 			for (const handler of tools) results.push(await handler({ ...event, type: "tool_call" }, ctx));
+		} else if (type === "tool_execution_end") {
+			for (const handler of ends) results.push(await handler({ ...event, type: "tool_execution_end" }, ctx));
 		}
 		return results;
 	};
@@ -447,4 +443,137 @@ test("BGDEADLINE1: named services need readiness and cannot disguise a finite su
 	expect(unready?.block).toBe(true);
 	expect(unready?.reason).toContain("SERVICE_READINESS_REQUIRED");
 	expect(await bashInput(h, { command: "bun run dev", name: "web", ready: { port: 3000 } })).toBeUndefined();
+});
+
+// --- COMPACTION_REREAD gate (ompkit-xa5s.24) ----------------------------------
+
+/** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
+async function rereadHost(extra: string[] = []): Promise<{ h: FakeHost; cwd: string; agents: string }> {
+	const cwd = mkdtempSync(join(base, "reread-"));
+	const agents = join(cwd, "AGENTS.md");
+	writeFileSync(agents, "rules\n");
+	for (const name of extra) writeFileSync(join(cwd, name), "x\n");
+	const h = await host({ env: { BR_ACTOR: "TestWorker" } });
+	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
+	return { h, cwd, agents };
+}
+
+async function callAs(h: FakeHost, cwd: string, id: string, toolName: string, input: Record<string, unknown>): Promise<unknown[]> {
+	return h.emit("tool_call", { toolCallId: id, toolName, input }, h.ctx(cwd));
+}
+
+async function endAs(h: FakeHost, cwd: string, id: string, toolName: string, result: unknown, isError = false): Promise<unknown[]> {
+	return h.emit("tool_execution_end", { toolCallId: id, toolName, result, isError }, h.ctx(cwd));
+}
+
+function showStdout(id: string, status: string, assignee: string | null): string {
+	return JSON.stringify([{ id, title: "t", status, assignee }]);
+}
+
+test("REREAD: compact then edit with no reread is blocked (planted negative)", async () => {
+	const { h, cwd } = await rereadHost();
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
+	const [push] = await callAs(h, cwd, "g1", "bash", { command: "git push origin master" });
+	expect((push as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: AGENTS read plus owned in_progress br show unblocks the edit", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	expect(await callAs(h, cwd, "r1", "read", { path: agents })).toEqual([undefined]);
+	await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } });
+	expect(await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" })).toEqual([undefined]);
+	await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-1", "in_progress", "TestWorker") } });
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+	expect(await callAs(h, cwd, "g1", "bash", { command: "cd sub && git commit -m done" })).toEqual([undefined]);
+});
+
+test("REREAD: a failed read never clears the flag", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } }, true);
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: reading the wrong AGENTS.md never clears the flag", async () => {
+	const outer = mkdtempSync(join(base, "reread-outer-"));
+	writeFileSync(join(outer, "AGENTS.md"), "outer\n");
+	const cwd = mkdtempSync(join(base, "reread-inner-"));
+	const agents = join(cwd, "AGENTS.md");
+	writeFileSync(agents, "inner\n");
+	const h = await host({ env: { BR_ACTOR: "TestWorker" } });
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	await callAs(h, cwd, "r1", "read", { path: join(outer, "AGENTS.md") });
+	await endAs(h, cwd, "r1", "read", { details: { content: "outer\n" } });
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-1", "in_progress", "TestWorker") } });
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
+});
+
+test("REREAD: br show of a closed or foreign bead never clears the flag", async () => {
+	for (const [status, assignee] of [["closed", "TestWorker"], ["in_progress", "SomebodyElse"]] as const) {
+		const { h, cwd, agents } = await rereadHost();
+		await callAs(h, cwd, "r1", "read", { path: agents });
+		await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } });
+		await callAs(h, cwd, "s1", "bash", { command: "br show k-9 --json" });
+		await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-9", status, assignee) } });
+		const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	}
+});
+
+test("REREAD: call arguments alone never clear the flag", async () => {
+	const { h, cwd } = await rereadHost();
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: an empty br list clears the bead flag", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", { content: "rules\n" });
+	await callAs(h, cwd, "s1", "bash", { command: "br list --assignee TestWorker --json" });
+	await endAs(h, cwd, "s1", "bash", { details: { stdout: "[]" } });
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("REREAD: read and grep stay allowed while pending", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	expect(await callAs(h, cwd, "r1", "read", { path: agents })).toEqual([undefined]);
+	expect(await callAs(h, cwd, "g1", "grep", { pattern: "COMPACTION", path: cwd })).toEqual([undefined]);
+	expect(await callAs(h, cwd, "b1", "bash", { command: "git status --short" })).toEqual([undefined]);
+	expect(await callAs(h, cwd, "b2", "bash", { command: "br show k-1 --json" })).toEqual([undefined]);
+});
+
+test("REREAD: without compaction nothing is blocked", async () => {
+	const cwd = mkdtempSync(join(base, "reread-plain-"));
+	const h = await host({ env: { BR_ACTOR: "TestWorker" }, respond: brTable({ "k-1": bead("k-1", null) }) });
+	const c = h.ctx(cwd);
+	expect(await h.emit("tool_call", { toolCallId: "e1", toolName: "edit", input: { path: "f" } }, c)).toEqual([undefined]);
+	expect(await h.emit("tool_call", { toolCallId: "b1", toolName: "bash", input: { command: "git push" } }, c)).toEqual([undefined]);
+	expect(await h.emit("tool_call", { toolCallId: "b2", toolName: "bash", input: { command: "br update k-1 --status open" } }, c)).toEqual([undefined]);
+});
+
+test("isMutatingCall: edit/write, br mutations and git commit/push; never reads or queries", () => {
+	const mutating = (toolName: string, input: Record<string, unknown> = {}): boolean =>
+		isMutatingCall({ toolName, input });
+	expect(mutating("edit", { path: "f" })).toBe(true);
+	expect(mutating("write", { path: "f" })).toBe(true);
+	expect(mutating("bash", { command: "br update k-1 --status open" })).toBe(true);
+	expect(mutating("bash", { command: "bd close k-1" })).toBe(true);
+	expect(mutating("bash", { command: "br comments add k-1 'evidence'" })).toBe(true);
+	expect(mutating("bash", { command: "cd sub && git commit -m done" })).toBe(true);
+	expect(mutating("bash", { command: "git -C sub push origin master" })).toBe(true);
+	expect(mutating("bash", { command: "git commit -m push" })).toBe(true);
+	expect(mutating("read", { path: "AGENTS.md" })).toBe(false);
+	expect(mutating("grep", { pattern: "x" })).toBe(false);
+	expect(mutating("bash", { command: "git status --short" })).toBe(false);
+	expect(mutating("bash", { command: "br show k-1 --json" })).toBe(false);
+	expect(mutating("bash", { command: "git log --grep=push" })).toBe(false);
+	expect(mutating("bash", {})).toBe(false);
 });
