@@ -5,9 +5,10 @@
 # secret-shaped tokens, absolute home paths, private IPs and LAN hostnames.
 # Skips var/agent-tmp scratch and .git. Prints `class: file:line` and never the matched text
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.7): this repo is public, so a printed token
-# lands in a public CI log and in the pre-push gate.log. Binary files are scanned too (-a), and an
-# unreadable tracked file is itself a finding (fail closed). Exit 1 when any finding exists, 0
-# when clean. Neutral fixtures (worker-1, example.invalid, 192.0.2.x) pass. Local check: no network, no GitHub.
+# lands in a public CI log and in the pre-push gate.log. Binary files are scanned too (-a).
+# A tracked file that is missing or unreadable ends the run incomplete
+# (exit 2): unscanned bytes are not clean bytes. Exit 1 when any finding
+# exists, 0 when clean. Neutral fixtures (worker-1, example.invalid, 192.0.2.x) pass. Local check: no network, no GitHub.
 # Patterns follow the regex-engineering skill: literal-anchored, bounded
 # classes, no nested quantifiers (linear in grep -E / ripgrep default).
 # Usage: publishability-check.sh [ROOT]
