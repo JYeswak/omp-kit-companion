@@ -75,7 +75,7 @@ import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
-import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput, type LessonClass } from "./lessons.ts";
+import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { runFleetLessonsOnce } from "./fleet-lessons.ts";
 
 const SCHEMA_VERSION = "1";
@@ -3546,6 +3546,63 @@ registerCommandHandler("drain stale-claims", drainStaleClaimsCommand);
 
 registerCommandHandler("update", updateCommand);
 
+function lessonRecordCommand(request: ParsedCommand): CliResult {
+	const flags = request.flags;
+	const root = resolve(String(flags.get("--project") ?? process.cwd()));
+	const bead = flags.get("--bead");
+	if (flags.has("--commit") && (typeof bead !== "string" || bead.trim().length === 0))
+		return refusal("LESSONS_COMMIT_BEAD_REQUIRED", "--commit requires an explicit --bead", "Name the bead for the normal commit hooks; no hook is bypassed.");
+	try {
+		if (request.command.name === "checkin") {
+			const items = (flag: string): string[] => typeof flags.get(flag) === "string" ? String(flags.get(flag)).split("\n") : [];
+			const input: CheckinInput = {
+				...(flags.has("--done") ? { done: items("--done") } : {}),
+				blocked: items("--blocked"), next: items("--next"),
+				...(flags.has("--minutes") ? { minutes: Number(flags.get("--minutes")) } : {}),
+				...(flags.has("--tokens") ? { tokens: Number(flags.get("--tokens")) } : {}),
+				...(typeof bead === "string" ? { bead } : {}),
+			};
+			const identity = lessonIdentity(root);
+			const previous = readLessonsLog(root);
+			if (previous.status === "INVALID") throw new Error("LESSONS_LOG_INVALID");
+			const activity = flags.has("--done") ? undefined : collectCheckinActivity(root,
+				existsSync(join(root, ".beads")) ? root : null, identity, latestCheckinAt(previous.entries, identity.agent));
+			if (activity && activity.status !== "OK")
+				return refusal("CHECKIN_ACTIVITY_UNAVAILABLE", activity.warnings.join("; "),
+					"Restore the native activity source, or pass explicit --done items; no check-in was written.");
+			const options = { identity, ...(activity ? { activity: activity.events } : {}) };
+			if (flags.has("--commit")) {
+				const result = writeCheckinAndCommit(root, input, options);
+				return { code: 0, data: { overall: "OK", ...result }, verification: "PERFORMED" };
+			}
+			return { code: 0, data: { overall: "OK", entry: writeCheckin(root, input, options), commit: null }, verification: "PERFORMED" };
+		}
+		const kind = String(flags.get("--kind") ?? "LESSON");
+		const classification = String(flags.get("--class") ?? "");
+		if ((kind !== "LESSON" && kind !== "GAP" && kind !== "NEGATIVE") || !isLessonClass(classification))
+			return refusal("LESSON_KIND_OR_CLASS_INVALID", "Name a supported lesson kind and class", "Run omp-kit help lessons add.");
+		const input: AddLessonInput = {
+			kind, class: classification, what: String(flags.get("--what") ?? ""), evidence: String(flags.get("--evidence") ?? ""),
+			...(typeof bead === "string" ? { bead } : {}),
+		};
+		if (flags.has("--commit")) {
+			const result = appendLessonAndCommit(root, input);
+			return { code: 0, data: { overall: "OK", ...result }, verification: "PERFORMED" };
+		}
+		return { code: 0, data: { overall: "OK", entry: appendLesson(root, input), commit: null }, verification: "PERFORMED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = message.split(":")[0] ?? "LESSONS_FAILED";
+		if (code.startsWith("LESSONS_COMMIT_")) {
+			return { code: 1, data: { overall: "UNVERIFIED" },
+				errors: [{ code, message, remediation: "Rows may already be saved locally; preserve them and resolve the named hook or convergence refusal." }],
+				verification: "UNVERIFIED" };
+		}
+		return refusal(code.startsWith("LESSON") || code.startsWith("CHECKIN") ? code : "LESSONS_FAILED",
+			message, "Preserve local rows and peer changes; resolve the named path, hook or publication refusal before retrying.");
+	}
+}
+
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
 	const { command, parent, flags } = request;
 	const path = `${parent ? `${parent.name} ` : ""}${command.name}`;
@@ -3555,6 +3612,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		const kit = kitIdentity();
 		return { code: 0, data: { ...kit, omp: ompIdentity(), dependencies: { bun: "embedded when compiled", omp: "optional for help; required for status/test" } }, verification: "UNVERIFIED" };
 	}
+	if (path === "lessons") return { code: 0, data: { text: help(command) }, verification: "PERFORMED" };
+	if (path === "lessons add" || path === "checkin") return lessonRecordCommand(request);
 	const handler = handlers.get(path);
 	if (handler && (STATE_ROOT_COMMANDS[path] || (path === "test" && flags.has("--record"))) && !(path === "repair" && flags.get("--scope") === "state")) {
 		const stateRoot = receiptStateRoot();

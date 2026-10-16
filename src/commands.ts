@@ -366,6 +366,10 @@ const missionData: DataSchema = { type: "object", required: ["overall", "mission
 	errors: { type: "array", items: { type: "string" } }, no_claim: { type: "string" },
 } };
 
+const lessonData: DataSchema = { type: "object", required: ["overall", "entry", "commit"], properties: {
+	overall: { enum: ["OK"] }, entry: { type: "object" }, commit: { type: ["object", "null"] },
+} };
+
 export const COMMANDS: readonly Command[] = [
 	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
@@ -386,6 +390,27 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
+	{ name: "lessons", description: "Append evidence-backed lessons to this repository", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE] [--project PATH] [--commit --bead ID]", flags: [], subcommands: [
+		{ name: "add", description: "Append a validated lesson; --commit saves and publishes its clean path on shared main", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE] [--project PATH] [--commit --bead ID]", flags: [
+			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+			{ name: "--kind", value: "KIND", description: "LESSON, GAP or NEGATIVE; defaults to LESSON" },
+			{ name: "--class", value: "CLASS", description: "Canonical lesson class or OTHER:name" },
+			{ name: "--what", value: "TEXT", description: "Concrete lesson or observed defect" },
+			{ name: "--evidence", value: "TEXT", description: "Evidence supporting the lesson; required" },
+			{ name: "--bead", value: "ID", description: "Related bead and normal commit trailer; required with --commit" },
+			{ name: "--commit", description: "Commit only the clean lesson path on main and publish main; refuses existing path dirt" },
+		], example: "omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --bead br-123 --commit --json", mutation: true, runnable: true, dataSchema: lessonData },
+	], example: "omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --json", runnable: true, dataSchema: textData },
+	{ name: "checkin", description: "Record verified own activity or explicit completed, blocked and next items", usage: "checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]", flags: [
+		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		{ name: "--done", value: "TEXT", repeatable: true, description: "Explicit completed item; omit to derive activity, refusing unavailable sources" },
+		{ name: "--blocked", value: "TEXT", repeatable: true, description: "Blocked item; repeat for each item" },
+		{ name: "--next", value: "TEXT", repeatable: true, description: "Next item; repeat for each item" },
+		{ name: "--minutes", value: "N", description: "Nonnegative elapsed minutes" },
+		{ name: "--tokens", value: "N", description: "Nonnegative token count" },
+		{ name: "--bead", value: "ID", description: "Related bead and normal commit trailer; required with --commit" },
+		{ name: "--commit", description: "Commit only the clean lesson path on main and publish main; refuses existing path dirt" },
+	], example: "omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json", mutation: true, runnable: true, dataSchema: lessonData },
 	{ name: "planning", description: "Score planning evidence or convert a plan into native beads in an isolated database or selected tracker", usage: "planning score|convert", flags: [], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run", subcommands: [
 		{ name: "score", description: "Score mission planning evidence without writing repository state", usage: "planning score [--repo PATH] [--fleet] [--json]", flags: [
 			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },

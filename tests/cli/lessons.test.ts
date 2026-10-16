@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, LESSONS_RELATIVE_PATH, readLessonsLog, writeCheckin, writeCheckinAndCommit, type LessonEntry } from "../../src/lessons.ts";
 
@@ -26,7 +26,16 @@ function gitIn(root: string, ...args: string[]): string {
 	return result.stdout.toString().trim();
 }
 
-function privateCommitFixture(): { root: string; local: string; remote: string; base: string; baseContent: string; peerLine: string } {
+interface LessonCommitFixture {
+	root: string;
+	local: string;
+	remote: string;
+	base: string;
+	baseContent: string;
+	peerLine: string;
+}
+
+function commitFixture(): LessonCommitFixture {
 	const root = fixture();
 	const local = join(root, "repo");
 	const remote = join(root, "origin.git");
@@ -39,6 +48,8 @@ function privateCommitFixture(): { root: string; local: string; remote: string; 
 	const hooksPath = join(root, "hooks");
 	mkdirSync(hooksPath);
 	gitIn(local, "config", "core.hooksPath", hooksPath);
+	writeFileSync(join(hooksPath, "pre-push"),
+		`#!/bin/sh\nexec sh "${join(repoRoot, "scripts/check-pushed-on-main.sh")}" "$@"\n`, { mode: 0o755 });
 	mkdirSync(join(local, ".omp"));
 	const baseEntry = { ...{
 		ts: "2026-10-05T10:00:00.000Z", repo: "lesson-fixture", agent: "BaseAgent", pane: null, model: "fixture",
@@ -56,19 +67,16 @@ function privateCommitFixture(): { root: string; local: string; remote: string; 
 	return { root, local, remote, base, baseContent, peerLine };
 }
 
-function assertPeerRowStayedUncommitted(fixture: ReturnType<typeof privateCommitFixture>, entry: LessonEntry, commit: { base: string; commit: string }): void {
-	const path = join(fixture.local, LESSONS_RELATIVE_PATH);
-	const ownLine = JSON.stringify(entry);
-	const remoteHead = gitIn(fixture.remote, "rev-parse", "refs/heads/main");
-	const pushed = gitIn(fixture.local, "show", remoteHead + ":" + LESSONS_RELATIVE_PATH);
+function assertSharedMain(fixture: LessonCommitFixture, entry: LessonEntry, commit: { base: string; commit: string }): void {
+	const expected = fixture.baseContent + JSON.stringify(entry) + "\n";
 	expect(commit.base).toBe(fixture.base);
-	expect(commit.commit).toBe(remoteHead);
-	expect(gitIn(fixture.local, "show", "-s", "--format=%P", remoteHead)).toBe(fixture.base);
-	expect(pushed).toBe(fixture.baseContent.trimEnd() + "\n" + ownLine);
-	expect(readFileSync(path, "utf8")).toBe(fixture.baseContent + fixture.peerLine + "\n" + ownLine + "\n");
-	expect(gitIn(fixture.local, "show", ":" + LESSONS_RELATIVE_PATH)).toBe(fixture.baseContent.trimEnd());
-	expect(gitIn(fixture.local, "status", "--porcelain", "--", LESSONS_RELATIVE_PATH)).toContain(LESSONS_RELATIVE_PATH);
-	expect(gitIn(fixture.local, "diff", "--cached", "--name-only")).toBe("");
+	expect(gitIn(fixture.local, "rev-parse", "refs/heads/main")).toBe(commit.commit);
+	expect(gitIn(fixture.remote, "rev-parse", "refs/heads/main")).toBe(commit.commit);
+	expect(gitIn(fixture.local, "show", commit.commit + ":" + LESSONS_RELATIVE_PATH)).toBe(expected.trimEnd());
+	expect(readFileSync(join(fixture.local, LESSONS_RELATIVE_PATH), "utf8")).toBe(expected);
+	expect(gitIn(fixture.local, "status", "--porcelain", "--", LESSONS_RELATIVE_PATH)).toBe("");
+	gitIn(fixture.local, "merge-base", "--is-ancestor", commit.commit, "refs/heads/main");
+	gitIn(fixture.local, "merge-base", "--is-ancestor", commit.commit, "origin/main");
 }
 
 
@@ -76,22 +84,126 @@ afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-test("lesson add --commit pushes only its new row and leaves a peer row unstaged", () => {
-	const fixture = privateCommitFixture();
-	writeFileSync(join(fixture.local, LESSONS_RELATIVE_PATH), fixture.baseContent + fixture.peerLine + "\n");
-	const result = appendLessonAndCommit(fixture.local, {
-		kind: "LESSON", class: "MISSING_EDGE", what: "The caller's lesson is isolated from peer rows.", evidence: "commit lesson-caller",
-	}, { identity, now: new Date("2026-10-05T11:00:00.000Z") });
-	assertPeerRowStayedUncommitted(fixture, result.entry, result.commit);
+test("lesson add --commit publishes shared main through PUSHGUARD1 and preserves peer index and worktree", () => {
+	const f = commitFixture();
+	writeFileSync(join(f.local, "peer.txt"), "peer staged\n");
+	gitIn(f.local, "add", "--", "peer.txt");
+	writeFileSync(join(f.local, "peer.txt"), "peer working\n");
+	writeFileSync(join(f.local, "untracked.txt"), "peer untracked\n");
+	const result = appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Publish the caller's lesson on shared main.", evidence: "commit lesson-caller",
+		bead: "fixture-lesson",
+	}, { identity, now });
+	assertSharedMain(f, result.entry, result.commit);
+	expect(gitIn(f.local, "show", ":peer.txt")).toBe("peer staged");
+	expect(readFileSync(join(f.local, "peer.txt"), "utf8")).toBe("peer working\n");
+	expect(readFileSync(join(f.local, "untracked.txt"), "utf8")).toBe("peer untracked\n");
+	expect(gitIn(f.local, "diff", "--cached", "--name-only")).toBe("peer.txt");
 });
 
-test("checkin --commit pushes only its new row and leaves a peer row unstaged", () => {
-	const fixture = privateCommitFixture();
-	writeFileSync(join(fixture.local, LESSONS_RELATIVE_PATH), fixture.baseContent + fixture.peerLine + "\n");
-	const result = writeCheckinAndCommit(fixture.local, { blocked: ["waiting for peer review"], next: ["finish the fleet report"] }, {
-		identity, now: new Date("2026-10-05T11:00:00.000Z"), activity: [],
+test("checkin --commit publishes its record on local and remote main", () => {
+	const f = commitFixture();
+	const result = writeCheckinAndCommit(f.local, { blocked: ["waiting for peer review"], next: ["finish the consumer"], bead: "fixture-lesson" }, {
+		identity, now, activity: [],
 	});
-	assertPeerRowStayedUncommitted(fixture, result.entry, result.commit);
+	assertSharedMain(f, result.entry, result.commit);
+});
+
+test("lesson commit refuses a peer's dirty lesson log before appending or staging", () => {
+	const f = commitFixture();
+	const path = join(f.local, LESSONS_RELATIVE_PATH);
+	const peerBytes = f.baseContent + f.peerLine + "\n";
+	writeFileSync(path, peerBytes);
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Must not adopt a peer row.", evidence: "dirty-path control",
+		bead: "fixture-lesson",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_LOG_DIRTY");
+	expect(readFileSync(path, "utf8")).toBe(peerBytes);
+	expect(gitIn(f.local, "show", ":" + LESSONS_RELATIVE_PATH)).toBe(f.baseContent.trimEnd());
+	expect(gitIn(f.local, "rev-parse", "HEAD")).toBe(f.base);
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(f.base);
+});
+
+test("lesson commit refuses a peer's staged lesson log without changing its bytes", () => {
+	const f = commitFixture();
+	const path = join(f.local, LESSONS_RELATIVE_PATH);
+	const peerBytes = f.baseContent + f.peerLine + "\n";
+	writeFileSync(path, peerBytes);
+	gitIn(f.local, "add", "--", LESSONS_RELATIVE_PATH);
+	expect(() => writeCheckinAndCommit(f.local, { next: ["keep peer ownership"], bead: "fixture-lesson" }, {
+		identity, now, activity: [],
+	})).toThrow("LESSONS_COMMIT_LOG_DIRTY");
+	expect(readFileSync(path, "utf8")).toBe(peerBytes);
+	expect(gitIn(f.local, "show", ":" + LESSONS_RELATIVE_PATH)).toBe(peerBytes.trimEnd());
+	expect(gitIn(f.local, "rev-parse", "HEAD")).toBe(f.base);
+});
+
+test("lesson commit refuses detached HEAD before writing the log", () => {
+	const f = commitFixture();
+	gitIn(f.local, "checkout", "--detach", f.base);
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Must stay on main.", evidence: "detached control",
+		bead: "fixture-lesson",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_NOT_ON_MAIN");
+	expect(readFileSync(join(f.local, LESSONS_RELATIVE_PATH), "utf8")).toBe(f.baseContent);
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(f.base);
+});
+
+test("commit API requires bead linkage before writing any row", () => {
+	const f = commitFixture();
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Missing commit linkage.", evidence: "bead-boundary control",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_BEAD_REQUIRED");
+	expect(readFileSync(join(f.local, LESSONS_RELATIVE_PATH), "utf8")).toBe(f.baseContent);
+	expect(gitIn(f.local, "rev-parse", "HEAD")).toBe(f.base);
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(f.base);
+});
+
+test("lesson commit refuses mode-only peer dirt without changing its content", () => {
+	const f = commitFixture();
+	gitIn(f.local, "config", "core.filemode", "true");
+	const path = join(f.local, LESSONS_RELATIVE_PATH);
+	chmodSync(path, 0o755);
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Do not adopt a peer mode change.", evidence: "mode control", bead: "fixture-lesson",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_LOG_DIRTY");
+	expect(readFileSync(path, "utf8")).toBe(f.baseContent);
+	expect(gitIn(f.local, "diff", "--summary", "--", LESSONS_RELATIVE_PATH)).toContain("100644 => 100755");
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(f.base);
+});
+
+test("a checkout switched by a normal commit hook never reports published lessons", () => {
+	const f = commitFixture();
+	gitIn(f.local, "branch", "peer-branch", f.base);
+	writeFileSync(join(f.root, "hooks", "pre-commit"),
+		"#!/bin/sh\ngit symbolic-ref HEAD refs/heads/peer-branch\n", { mode: 0o755 });
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Branch changed during commit.", evidence: "normal hook race", bead: "fixture-lesson",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_");
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(f.base);
+});
+
+test("a moved origin refuses publication and retains the lesson on local shared main", () => {
+	const f = commitFixture();
+	const peer = join(f.root, "peer");
+	gitIn(f.root, "clone", "--branch", "main", f.remote, peer);
+	gitIn(peer, "config", "user.name", "Peer");
+	gitIn(peer, "config", "user.email", "peer@example.invalid");
+	gitIn(peer, "config", "commit.gpgsign", "false");
+	gitIn(peer, "config", "core.hooksPath", join(f.root, "hooks"));
+	writeFileSync(join(peer, "peer.txt"), "independently published peer work\n");
+	gitIn(peer, "add", "--", "peer.txt");
+	gitIn(peer, "commit", "-m", "fixture peer advance");
+	gitIn(peer, "push", "origin", "main");
+	const peerHead = gitIn(peer, "rev-parse", "HEAD");
+	expect(() => appendLessonAndCommit(f.local, {
+		kind: "LESSON", class: "MISSING_EDGE", what: "Keep the saved lesson after contention.", evidence: "origin race", bead: "fixture-lesson",
+	}, { identity, now })).toThrow("LESSONS_COMMIT_CAS_REJECTED");
+	const saved = gitIn(f.local, "rev-parse", "refs/heads/main");
+	expect(saved).not.toBe(f.base);
+	expect(gitIn(f.remote, "rev-parse", "refs/heads/main")).toBe(peerHead);
+	expect(gitIn(f.local, "show", saved + ":" + LESSONS_RELATIVE_PATH)).toContain("Keep the saved lesson after contention.");
+	expect(gitIn(f.local, "status", "--porcelain", "--", LESSONS_RELATIVE_PATH)).toBe("");
 });
 
 

@@ -277,12 +277,16 @@ omp-kit robot-docs guide                    # guidance for agents driving the CL
 
 ## Design philosophy
 
-**Plan before apply.** Every mutating command defaults to a plan. Writes need
-`--apply`, and non-interactive writes also need `--yes`.
+**Plan before apply.** Guarded apply and repair commands default to a plan.
+Their writes need `--apply`, and non-interactive writes also need `--yes`.
+Append-only `lessons add` and `checkin` record their explicit invocation;
+publishing those records additionally requires `--commit --bead ID`.
 
 **Receipts and undo.** Each mutation is recorded as a receipt in the private
 state root. `undo` restores from that receipt and refuses when a file changed
 since; a failed restore is reported as `PARTIAL_UNDO`, never hidden.
+Lesson records are append-only, not undo receipts. If publication fails after
+a normal save, the rows and local commit remain available for convergence.
 
 **Fail closed.** Anything the CLI cannot observe is `UNVERIFIED` or `NOT_RUN`,
 never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
@@ -454,11 +458,20 @@ applied. `omp-kit quickstart` prints the same safe first commands.
 
 Every command accepts `--json` (one envelope: `ok`, `tool_version`, `data`,
 `meta`, `warnings`, `commands`, `errors`) and `omp-kit help COMMAND` prints its
-grammar. Mutating commands need `--apply` and, non-interactively, `--yes`.
+grammar. Guarded apply operations need `--apply` and, non-interactively, `--yes`.
+
+`lessons add` and `checkin` append to `.omp/lessons.jsonl`. Their `--commit`
+mode requires a clean lesson path and shared `main`, runs normal commit/push
+hooks, and never adopts another writer's staged or working lesson rows.
+Check-ins without `--done` require complete native activity coverage; an
+unavailable source refuses before writing. Use repeatable `--done` for an
+explicit report rather than inventing zero activity.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
+| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --json` |
+| `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable automatic coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |

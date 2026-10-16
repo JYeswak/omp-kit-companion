@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync, closeSync } from "node:fs";
+import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync, closeSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 export const LESSONS_RELATIVE_PATH = ".omp/lessons.jsonl";
@@ -88,6 +87,7 @@ export interface CheckinInput {
 	next?: readonly string[];
 	minutes?: number | null;
 	tokens?: number | null;
+	bead?: string | null;
 }
 
 export interface LessonsReadResult {
@@ -149,7 +149,13 @@ function validNonblank(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0 && !/[\r\n]/.test(value);
 }
 
-function validClass(value: unknown): value is LessonClass {
+function optionalLessonField(value: unknown, field: "BEAD" | "PROPOSED_FIX"): string | null {
+	if (value === undefined || value === null) return null;
+	if (!validNonblank(value)) throw new Error(`LESSON_${field}_INVALID`);
+	return value.trim();
+}
+
+export function isLessonClass(value: unknown): value is LessonClass {
 	return typeof value === "string" && (Object.prototype.hasOwnProperty.call(LESSON_CLASS_DESCRIPTIONS, value) || /^OTHER:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value));
 }
 
@@ -176,7 +182,7 @@ function parseLessonEntry(value: unknown): LessonEntry | null {
 			!Array.isArray(row.next) || !row.next.every(validNonblank) ||
 			!(row.minutes === null || finiteNonnegative(row.minutes)) ||
 			!(row.tokens === null || finiteNonnegative(row.tokens))) return null;
-	} else if (!validClass(row.class) || !validNonblank(row.evidence)) {
+	} else if (!isLessonClass(row.class) || !validNonblank(row.evidence)) {
 		return null;
 	}
 	return row as unknown as LessonEntry;
@@ -249,14 +255,11 @@ export function readLessonsLog(repoRoot: string): LessonsReadResult {
 
 function lessonEntry(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions): LessonEntry {
 	if (!Object.prototype.hasOwnProperty.call(LESSON_KINDS, input.kind)) throw new Error("LESSON_KIND_INVALID");
-	if (!validClass(input.class)) throw new Error("LESSON_CLASS_INVALID");
+	if (!isLessonClass(input.class)) throw new Error("LESSON_CLASS_INVALID");
 	if (!validNonblank(input.what)) throw new Error("LESSON_WHAT_REQUIRED");
 	if (!validNonblank(input.evidence)) throw new Error("LESSON_EVIDENCE_REQUIRED");
 	if (input.applies_to !== undefined && input.applies_to !== "repo" && input.applies_to !== "fleet") throw new Error("LESSON_APPLIES_TO_INVALID");
 	if (input.cost_minutes !== undefined && input.cost_minutes !== null && !finiteNonnegative(input.cost_minutes)) throw new Error("LESSON_COST_INVALID");
-	for (const [name, value] of [["proposed_fix", input.proposed_fix], ["bead", input.bead]] as const) {
-		if (value !== undefined && value !== null && !validNonblank(value)) throw new Error(`LESSON_${name.toUpperCase()}_INVALID`);
-	}
 	const now = options.now ?? new Date();
 	if (!Number.isFinite(now.getTime())) throw new Error("LESSON_TIMESTAMP_INVALID");
 	const identity = options.identity ?? lessonIdentity(repoRoot);
@@ -265,11 +268,11 @@ function lessonEntry(repoRoot: string, input: AddLessonInput, options: LessonEnt
 		ts: now.toISOString(), repo: identity.repo, agent: identity.agent, pane: identity.pane, model: identity.model,
 		kind: input.kind, class: input.class, what: input.what.trim(), evidence: input.evidence.trim(),
 		cost_minutes: input.cost_minutes ?? null, applies_to: input.applies_to ?? "repo",
-		proposed_fix: input.proposed_fix?.trim() || null, bead: input.bead?.trim() || null,
+		proposed_fix: optionalLessonField(input.proposed_fix, "PROPOSED_FIX"), bead: optionalLessonField(input.bead, "BEAD"),
 	};
 }
 
-function appendEntry(repoRoot: string, entry: LessonEntry): void {
+function appendLessonText(repoRoot: string, text: string): void {
 	const root = resolve(repoRoot);
 	const rootInfo = lstatSync(root);
 	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("LESSONS_REPO_UNSAFE");
@@ -287,7 +290,7 @@ function appendEntry(repoRoot: string, entry: LessonEntry): void {
 	}
 	const fd = openSync(path, OPEN_APPEND, 0o644);
 	try {
-		const bytes = Buffer.from(JSON.stringify(entry) + "\n", "utf8");
+		const bytes = Buffer.from(text, "utf8");
 		let offset = 0;
 		while (offset < bytes.length) {
 			const written = writeSync(fd, bytes, offset, bytes.length - offset);
@@ -298,6 +301,10 @@ function appendEntry(repoRoot: string, entry: LessonEntry): void {
 	} finally {
 		closeSync(fd);
 	}
+}
+
+function appendEntry(repoRoot: string, entry: LessonEntry): void {
+	appendLessonText(repoRoot, JSON.stringify(entry) + "\n");
 }
 
 export function appendLesson(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions = {}): LessonEntry {
@@ -335,7 +342,7 @@ function lessonCheckinEntry(repoRoot: string, input: CheckinInput, options: Chec
 		ts: now.toISOString(), repo: identity.repo, agent: identity.agent, pane: identity.pane, model: identity.model,
 		kind: "CHECKIN", class: null,
 		what: `Check-in recorded with ${doneItems.length} done, ${blocked.length} blocked, and ${next.length} next item(s).`,
-		evidence, cost_minutes: null, applies_to: "repo", proposed_fix: null, bead: null,
+		evidence, cost_minutes: null, applies_to: "repo", proposed_fix: null, bead: optionalLessonField(input.bead, "BEAD"),
 		done: doneItems, blocked, next, minutes: input.minutes ?? null, tokens: input.tokens ?? null,
 	};
 }
@@ -358,21 +365,21 @@ interface LessonGitResult {
 	error?: Error;
 }
 
-function runLessonGit(repoRoot: string, args: readonly string[], extraEnv: Record<string, string> = {}, input?: Buffer): LessonGitResult {
+function runLessonGit(repoRoot: string, args: readonly string[]): LessonGitResult {
 	const env = { ...process.env };
 	delete env.GIT_DIR;
 	delete env.GIT_WORK_TREE;
 	delete env.GIT_COMMON_DIR;
 	delete env.GIT_INDEX_FILE;
-	Object.assign(env, extraEnv);
+	env.GIT_TERMINAL_PROMPT = "0";
 	const result = spawnSync("git", ["-C", repoRoot, ...args], {
-		env, input, timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
+		env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
 	});
 	return { code: result.status, stdout: Buffer.from(result.stdout ?? []), stderr: Buffer.from(result.stderr ?? []), ...(result.error ? { error: result.error } : {}) };
 }
 
-function lessonGitText(repoRoot: string, args: readonly string[], failureCode: string, extraEnv: Record<string, string> = {}): string {
-	const result = runLessonGit(repoRoot, args, extraEnv);
+function lessonGitText(repoRoot: string, args: readonly string[], failureCode: string): string {
+	const result = runLessonGit(repoRoot, args);
 	if (result.code !== 0 || result.error) throw new Error(failureCode);
 	return result.stdout.toString("utf8").trim();
 }
@@ -390,103 +397,105 @@ function validateBaseLessons(bytes: Buffer): void {
 	}
 }
 
-/** Pushes only caller-provided JSONL rows, built from a private index based on fetched origin/main. */
+/** Append only to a clean lesson path, commit it on shared main, then fast-forward origin. */
 export function commitLessonLines(repoRoot: string, lines: readonly string[], message = "LESSONS: append records"): LessonsCommitResult {
 	const root = resolve(repoRoot);
 	const rootInfo = lstatSync(root);
 	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("LESSONS_REPO_UNSAFE");
 	if (lines.length === 0 || !validNonblank(message)) throw new Error("LESSONS_COMMIT_INPUT_INVALID");
+	let commitMessage = message;
+	let hasBead = false;
 	for (const line of lines) {
 		if (!validNonblank(line) || /[\r\n]/.test(line)) throw new Error("LESSONS_COMMIT_LINES_INVALID");
 		let parsed: unknown;
 		try { parsed = JSON.parse(line); }
 		catch { throw new Error("LESSONS_COMMIT_LINES_INVALID"); }
-		if (!parseLessonEntry(parsed)) throw new Error("LESSONS_COMMIT_LINES_INVALID");
+		const entry = parseLessonEntry(parsed);
+		if (!entry || (entry.bead !== null && !validNonblank(entry.bead))) throw new Error("LESSONS_COMMIT_LINES_INVALID");
+		if (entry.bead !== null) {
+			commitMessage += "\n\nBead: " + entry.bead;
+			hasBead = true;
+		}
 	}
+	if (!hasBead) throw new Error("LESSONS_COMMIT_BEAD_REQUIRED");
 	const top = lessonGitText(root, ["rev-parse", "--show-toplevel"], "LESSONS_COMMIT_REPOSITORY_INVALID");
 	if (resolve(top) !== root) throw new Error("LESSONS_COMMIT_REPOSITORY_INVALID");
-	const commonDir = lessonGitText(root, ["rev-parse", "--git-common-dir"], "LESSONS_COMMIT_REPOSITORY_INVALID");
-	const gitDir = resolve(root, commonDir);
-	const id = randomUUID();
-	const baseRef = "refs/omp-kit/lessons/base/" + id;
-	const commitRef = "refs/omp-kit/lessons/commit/" + id;
-	let privateDir: string | null = null;
-	let baseRefCreated = false;
-	let commitRefCreated = false;
-	try {
-		const fetch = runLessonGit(root, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", "refs/heads/main:" + baseRef]);
-		if (fetch.code !== 0 || fetch.error) throw new Error("LESSONS_COMMIT_FETCH_FAILED");
-		baseRefCreated = true;
-		const base = lessonGitText(root, ["rev-parse", "--verify", baseRef + "^{commit}"], "LESSONS_COMMIT_BASE_INVALID");
-		if (!/^[a-f0-9]{40,64}$/i.test(base)) throw new Error("LESSONS_COMMIT_BASE_INVALID");
-		const treeListing = runLessonGit(root, ["ls-tree", "-z", base, "--", LESSONS_RELATIVE_PATH]);
-		if (treeListing.code !== 0 || treeListing.error) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
-		const records = treeListing.stdout.toString("utf8").split("\0").filter(Boolean);
-		if (records.length > 1) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
-		let baseBytes = Buffer.alloc(0);
-		if (records.length === 1) {
-			const record = records[0]!;
-			const tab = record.indexOf("\t");
-			const [mode, type, oid] = record.slice(0, tab).split(" ");
-			if (tab < 0 || record.slice(tab + 1) !== LESSONS_RELATIVE_PATH || mode !== "100644" || type !== "blob" || !oid)
-				throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
-			const blob = runLessonGit(root, ["cat-file", "blob", oid]);
-			if (blob.code !== 0 || blob.error) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
-			baseBytes = blob.stdout;
-		}
-		validateBaseLessons(baseBytes);
-		const separator = baseBytes.length > 0 && baseBytes.at(-1) !== 0x0a ? "\n" : "";
-		const suffix = Buffer.from(separator + lines.join("\n") + "\n", "utf8");
-		const content = Buffer.concat([baseBytes, suffix]);
-		privateDir = mkdtempSync(join(gitDir, "omp-kit-lessons-index-"));
-		const indexPath = join(privateDir, "index");
-		const indexEnv = { GIT_INDEX_FILE: indexPath };
-		const readTree = runLessonGit(root, ["read-tree", base], indexEnv);
-		if (readTree.code !== 0 || readTree.error) throw new Error("LESSONS_COMMIT_INDEX_FAILED");
-		const blob = lessonGitTextFromResult(runLessonGit(root, ["hash-object", "-w", "--stdin"], {}, content), "LESSONS_COMMIT_BLOB_FAILED");
-		const update = runLessonGit(root, ["update-index", "--add", "--cacheinfo", "100644", blob, LESSONS_RELATIVE_PATH], indexEnv);
-		if (update.code !== 0 || update.error) throw new Error("LESSONS_COMMIT_INDEX_FAILED");
-		const tree = lessonGitText(root, ["write-tree"], "LESSONS_COMMIT_INDEX_FAILED", indexEnv);
-		const commit = lessonGitText(root, ["commit-tree", tree, "-p", base, "-m", message], "LESSONS_COMMIT_OBJECT_FAILED");
-		const ref = runLessonGit(root, ["update-ref", commitRef, commit]);
-		if (ref.code !== 0 || ref.error) throw new Error("LESSONS_COMMIT_OBJECT_FAILED");
-		commitRefCreated = true;
-		const changed = lessonGitText(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", base, commit], "LESSONS_COMMIT_DIFF_INVALID");
-		const changedRows = changed.split("\n").filter(Boolean);
-		if (changedRows.length !== 1 || !/^[AM]\t\.omp\/lessons\.jsonl$/.test(changedRows[0] ?? "")) throw new Error("LESSONS_COMMIT_DIFF_INVALID");
-		const stat = lessonGitText(root, ["show", "--stat", "--format=", "--first-parent", commit], "LESSONS_COMMIT_DIFF_INVALID");
-		if (/\b[1-9]\d*\s+deletions?\b/.test(stat)) throw new Error("LESSONS_COMMIT_DIFF_INVALID");
-		const push = runLessonGit(root, ["push", "--porcelain", "--force-with-lease=refs/heads/main:" + base,
-			"origin", commitRef + ":refs/heads/main"]);
-		if (push.code !== 0 || push.error) {
-			const detail = (push.stderr.toString("utf8") + "\n" + push.stdout.toString("utf8")).toLowerCase();
-			if (/stale info|non-fast-forward|fetch first|rejected.*main/.test(detail)) throw new Error("LESSONS_COMMIT_CAS_REJECTED");
-			if (/pre-push|reservation conflict|mcp-agent-mail|fresh-gate/.test(detail)) throw new Error("LESSONS_COMMIT_PUSH_GUARD_REFUSED");
-			throw new Error("LESSONS_COMMIT_PUSH_FAILED");
-		}
-		return { base, commit };
-	} finally {
-		if (commitRefCreated) runLessonGit(root, ["update-ref", "-d", commitRef]);
-		if (baseRefCreated) runLessonGit(root, ["update-ref", "-d", baseRef]);
-		if (privateDir !== null) {
-			try { rmSync(privateDir, { recursive: true, force: true }); } catch { /* Keep a successful push successful; only this private scratch directory is affected. */ }
-		}
+	const branch = lessonGitText(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], "LESSONS_COMMIT_NOT_ON_MAIN");
+	if (branch !== "main") throw new Error("LESSONS_COMMIT_NOT_ON_MAIN");
+	const base = lessonGitText(root, ["rev-parse", "--verify", "HEAD^{commit}"], "LESSONS_COMMIT_BASE_INVALID");
+	const treeListing = runLessonGit(root, ["ls-tree", "-z", base, "--", LESSONS_RELATIVE_PATH]);
+	if (treeListing.code !== 0 || treeListing.error) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
+	const records = treeListing.stdout.toString("utf8").split("\0").filter(Boolean);
+	if (records.length > 1) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
+	let baseBytes = Buffer.alloc(0);
+	if (records.length === 1) {
+		const record = records[0]!;
+		const tab = record.indexOf("\t");
+		const [mode, type, oid] = record.slice(0, tab).split(" ");
+		if (tab < 0 || record.slice(tab + 1) !== LESSONS_RELATIVE_PATH || mode !== "100644" || type !== "blob" || !oid)
+			throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
+		const blob = runLessonGit(root, ["cat-file", "blob", oid]);
+		if (blob.code !== 0 || blob.error) throw new Error("LESSONS_COMMIT_BASE_LOG_INVALID");
+		baseBytes = blob.stdout;
 	}
+	validateBaseLessons(baseBytes);
+	let workingBytes: Buffer;
+	try { workingBytes = readRegularFile(join(root, LESSONS_RELATIVE_PATH)); }
+	catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+		workingBytes = Buffer.alloc(0);
+	}
+	const staged = runLessonGit(root, ["status", "--porcelain=v1", "-z", "--", LESSONS_RELATIVE_PATH]);
+	if (staged.code !== 0 || staged.error || staged.stdout.length !== 0 || !workingBytes.equals(baseBytes))
+		throw new Error("LESSONS_COMMIT_LOG_DIRTY: preserve the lesson path and resolve with its current reservation holder");
+	const suffix = lines.join("\n") + "\n";
+	const expected = Buffer.concat([baseBytes, Buffer.from(suffix, "utf8")]);
+	appendLessonText(root, suffix);
+	const stagedAgain = runLessonGit(root, ["diff", "--cached", "--quiet", "--", LESSONS_RELATIVE_PATH]);
+	const modeChanges = runLessonGit(root, ["diff", "--summary", "--", LESSONS_RELATIVE_PATH]);
+	if (!readRegularFile(join(root, LESSONS_RELATIVE_PATH)).equals(expected) ||
+		lessonGitText(root, ["rev-parse", "HEAD"], "LESSONS_COMMIT_BASE_INVALID") !== base ||
+		lessonGitText(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], "LESSONS_COMMIT_NOT_ON_MAIN") !== "main" ||
+		stagedAgain.code !== 0 || stagedAgain.error || modeChanges.code !== 0 || modeChanges.error || modeChanges.stdout.length !== 0)
+		throw new Error("LESSONS_COMMIT_STATE_CHANGED");
+	if (records.length === 0) {
+		const add = runLessonGit(root, ["add", "--", LESSONS_RELATIVE_PATH]);
+		if (add.code !== 0 || add.error) throw new Error("LESSONS_COMMIT_INDEX_FAILED");
+	}
+	const saved = runLessonGit(root, ["commit", "--only", "-m", commitMessage, "--", LESSONS_RELATIVE_PATH]);
+	if (saved.code !== 0 || saved.error) throw new Error("LESSONS_COMMIT_SAVE_REFUSED: the appended rows remain local");
+	const commit = lessonGitText(root, ["rev-parse", "HEAD"], "LESSONS_COMMIT_OBJECT_FAILED");
+	const changed = lessonGitText(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", base, commit], "LESSONS_COMMIT_DIFF_INVALID");
+	const committed = runLessonGit(root, ["show", commit + ":" + LESSONS_RELATIVE_PATH]);
+	if (changed !== LESSONS_RELATIVE_PATH || committed.code !== 0 || committed.error || !committed.stdout.equals(expected))
+		throw new Error("LESSONS_COMMIT_STATE_CHANGED: saved main is retained; publication refused");
+	if (lessonGitText(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], "LESSONS_COMMIT_NOT_ON_MAIN") !== "main" ||
+		runLessonGit(root, ["merge-base", "--is-ancestor", commit, "refs/heads/main"]).code !== 0)
+		throw new Error("LESSONS_COMMIT_STATE_CHANGED: lesson commit is not on shared main");
+	const push = runLessonGit(root, ["push", "--porcelain", "origin", "main"]);
+	if (push.code !== 0 || push.error) {
+		const detail = (push.stderr.toString("utf8") + "\n" + push.stdout.toString("utf8")).toLowerCase();
+		if (detail.includes("pre-push") || detail.includes("reservation conflict") || detail.includes("mcp-agent-mail") ||
+			detail.includes("fresh-gate") || detail.includes("check-pushed-on-main"))
+			throw new Error("LESSONS_COMMIT_PUSH_GUARD_REFUSED: saved on main; publication refused");
+		if (detail.includes("non-fast-forward") || detail.includes("fetch first"))
+			throw new Error("LESSONS_COMMIT_CAS_REJECTED: saved on main; converge the shared checkout before publishing");
+		throw new Error("LESSONS_COMMIT_PUSH_FAILED: saved on main; publication failed");
+	}
+	if (runLessonGit(root, ["merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"]).code !== 0)
+		throw new Error("LESSONS_COMMIT_PUSH_UNVERIFIED: remote-main ancestry was not established");
+	return { base, commit };
 }
 
-function lessonGitTextFromResult(result: LessonGitResult, failureCode: string): string {
-	if (result.code !== 0 || result.error) throw new Error(failureCode);
-	return result.stdout.toString("utf8").trim();
-}
 
 export function appendLessonAndCommit(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions = {}): { entry: LessonEntry; commit: LessonsCommitResult } {
-	const entry = appendLesson(repoRoot, input, options);
+	const entry = lessonEntry(repoRoot, input, options);
 	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: add lesson");
 	return { entry, commit };
 }
 
 export function writeCheckinAndCommit(repoRoot: string, input: CheckinInput, options: CheckinOptions = {}): { entry: LessonEntry; commit: LessonsCommitResult } {
-	const entry = writeCheckin(repoRoot, input, options);
+	const entry = lessonCheckinEntry(repoRoot, input, options);
 	const commit = commitLessonLines(repoRoot, [JSON.stringify(entry)], "LESSONS: record check-in");
 	return { entry, commit };
 }
