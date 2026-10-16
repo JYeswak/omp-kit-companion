@@ -1,0 +1,79 @@
+{
+ "decision": "J-2026-10-16-07",
+ "rule": "import-class repair of unpublished companion commits dead2a62b9/94ed6f4fd6 (kdbz.2.13): inject src/tern/model.ts, catalog.json, script-routes.json from 989afedd9c",
+ "script": "~/.claude/skills/omp-kit-orchestration/scripts/history_repair.py",
+ "base_origin_main": "bc8c743044cf1d125a700c32b9d98139f3fbef02",
+ "old_tip": "20e3ffb0fc12da3c4bd795b61bff3dc7dccc3471",
+ "new_tip": "26cb7991de706dc7e60b6fcd42a0a40ea94e5648",
+ "preserved_ref": "refs/preserve/history-repair/20e3ffb0fc12da3c4bd795b61bff3dc7dccc3471",
+ "injected": {
+  "src/tern/model.ts": "018e2f6d7de9955b0857c957f788fcf8742bded9",
+  "src/tern/catalog.json": "bf538a2ed76cb213c5c18a078eb09019bf074bca",
+  "src/tern/script-routes.json": "0f0cf2d93cb75ab35e63d4690f7877ac0aba71c7"
+ },
+ "renamed_fragments": {
+  "changelog.d/ompkit-rhy9.17.md": {
+   "old": "808190dca195c91403e84090ddaa183c0de5402e",
+   "new": "513764ac14bfbeb0b36a63902692de2fc49fd1bd"
+  }
+ },
+ "checks": {
+  "commit_imports_new_range": "exit 0",
+  "commit_imports_old_range_control": "exit 4",
+  "regexploit": "exit 0",
+  "notes": "exit 0"
+ },
+ "published": "origin/main bc8c743044 -> 20b5649dcf -> 3de77c79e9",
+ "map": [
+  {
+   "old": "dead2a62b9d7d711b7d9193e898a45a626f31b3c",
+   "new": "a92a55e8f88e05995331f31fa8dc888676baa335",
+   "subject": "[pending] feat(tern): add scoped SDK and drift coverage"
+  },
+  {
+   "old": "94ed6f4fd6297b041236f2d5bf1ad1808766e637",
+   "new": "6ed9fb925420732eff15c2cc17ffdcb5f968c6c2",
+   "subject": "[pending] fix(tern): preserve framed payload bytes"
+  },
+  {
+   "old": "989afedd9c8d7e1d14fe327526303a1d7628946d",
+   "new": "1ae82b80fcd3fd1c1285dd614defa6135be25430",
+   "subject": "feat(tern): save complete SDK module dependency unit [pending]"
+  },
+  {
+   "old": "f455ecd1ffde9390fc6c4a2bdb6d228f1c20ea58",
+   "new": "8d66310158be50e5a5a2dbd77b4915131d4f2a5d",
+   "subject": "test(live): fire scenario carries firing bytes in text turn [test]"
+  },
+  {
+   "old": "32ab78143460699cb88dc395c43b5f29af6772d7",
+   "new": "6bd52414899b21b9359290eb890fc9687988d310",
+   "subject": "feat(hooks): refuse a commit whose staged files import an unstaged path [test]"
+  },
+  {
+   "old": "968ba80f13b5acc82140fa50fcf24deb7a352e6e",
+   "new": "094f76fc21185d32e7c1b1ad347d09a925f977ef",
+   "subject": "feat: expose scratch plan totals and policy (ompkit-rhy9.17) [pending]"
+  },
+  {
+   "old": "42ad6a10dc00ba959dbfb9ca39ca5b6dd0050c19",
+   "new": "a53d550e435b10d2a41af5bba8490cdd9bf84c1c",
+   "subject": "fix(tern): terminate the chunk interruption fixture [test]"
+  },
+  {
+   "old": "37ffa0fb20a73ee34a94913cdba48acf076aeebb",
+   "new": "9412f1ada076eb9803c4a1872245469ecd9a4e93",
+   "subject": "docs(changelog): split kdbz.2.13 fragment into one category each [selftest]"
+  },
+  {
+   "old": "4a340a3bb8147ac28a53b7eb531fc9143e4e62d7",
+   "new": "1dbff4b19c86fb196bc7bc40ecd7837c4e1ec411",
+   "subject": "feat(hooks): refuse a shipped-path commit with no Bead trailer+fragment at commit time [test]"
+  },
+  {
+   "old": "20e3ffb0fc12da3c4bd795b61bff3dc7dccc3471",
+   "new": "26cb7991de706dc7e60b6fcd42a0a40ea94e5648",
+   "subject": "docs(changelog): name 968ba80 in its rhy9.17 fragment [selftest]"
+  }
+ ]
+}
