@@ -1,0 +1,53 @@
+Tern — a multiplexing terminal
+
+usage:
+  tern [DIR]                   open a window with a tab in DIR, beside the sessions the daemon keeps
+                               (also --dir DIR, which only a fresh session starts in; default: the
+                               current directory when typed in a shell, on Windows also Explorer's
+                               address bar or Run, or the folder a Linux file manager starts it in;
+                               else no tab, a fresh session at home)
+  tern FILE[:LINE[:COL]]       open a window in FILE's directory, FILE in a tab
+  tern -e COMMAND [ARGS...]    open a window with a tab running COMMAND in the current directory
+                               (first argument only: how desktops start a terminal for a command)
+  tern open [--split right|down|--tab|--preview] [--wait] PATH[:LINE[:COL]]...
+                               show files in file blocks beside the block it runs in, starting Tern
+                               when none runs; --wait returns once they close, so EDITOR='tern open
+                               --wait' works
+  tern ls|inspect|new|split|run|move|pip|dock|rename|focus|close|kill|wait|keep-open|send|capture|
+      process|events|browser ...
+                               script sessions from the command line, every window following live,
+                               with Tern running or inside a Tern pane (`tern COMMAND --help` shows
+                               a command's arguments)
+  tern whoami [--json]         the identity chain of the pane it runs in
+  tern ctl COMMAND...          in a Tern pane, a control command (`tern help dev`) for the window
+                               showing it, such as css reload after editing Tern's CSS, state or
+                               shot NAME (--control EP: a window or serve started with that
+                               endpoint)
+  tern ssh [SSH ARGUMENTS...]  ssh as Tern's shells run it, copying Tern's terminfo entry to a host
+                               that lacks it (else TERM=xterm-256color there), for scripts, tmux
+                               bindings and `command ssh`
+  tern --version               this build's version and commit (also -V)
+  tern plugin list|reload|dir|install|remove|link|unlink|types ...
+                               manage the plugins in the plugins directory (`tern plugin --help`)
+  tern daemon [--socket PATH] [--login]
+                               the session daemon keeping panes' programs alive between windows
+                               (windows start it; --login starts it in the background unless it
+                               runs, as Start at login does)
+  tern remote serve|install|login|trust|hosts|discover ...
+                               remoting: the network service in front of session daemons, and its
+                               tools
+  tern web serve [--listen ADDR:PORT] [--token FILE] [--assets DIR] [--allow-origin ORIGIN]...
+      [--access FILE]
+                               serve the web client and the daemon to browsers
+  tern register                make Tern this user's handler of its URL schemes and file types
+  tern unregister              undo `register`
+  tern help [dev]              this help, or the developer tooling's: shots, headless sessions, the
+                               control endpoint and the scenario commands
+
+environment:
+  TERN_CONFIG_DIR=DIR      where settings.json and the rest of Tern's state live
+  TERN_DAEMON_SOCKET=PATH  the session daemon's socket
+  TERN_AUTH_URL=ORIGIN     sign in to the Stencil account the closed beta requires at ORIGIN
+                           (default https://auth.stencil.so)
+  TERN_BUILD_URL=ORIGIN    take updates from the build service at ORIGIN (default
+                           https://build.stencil.so)
