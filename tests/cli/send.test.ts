@@ -3,9 +3,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, isBareGoalDirective, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, buildNativeSendTurn, deliverToTernSeat, dispatchBeads, findTernUserMarker, fleetBeadPrefixes, isBareGoalDirective, proveSend, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
-
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -409,18 +408,21 @@ test("TERN2.4 eligibility: unsettled turn refuses with zero sends", async () => 
 
 test("TERN2.4 OK: USER marker past cursor proves delivery with offset", async () => {
 	const base = settledJournalText();
-	let pasted = "";
+	let sentMarker = "";
 	const f = ternFixture({ reads: null });
 	const io: TernObserverIo = {
 		run: (argv: string[]) => {
 			f.taken.runs.push(argv);
-			if (argv.includes("paste")) pasted = argv[argv.length - 1] ?? "";
+			if (argv.includes("carly")) {
+				const hit = /kit-send-[0-9a-f]+/.exec(argv.join("\n"))?.[0];
+				if (hit) sentMarker = hit;
+			}
 			return { code: 0, out: "ok" };
 		},
 		readSessionFile: (_path: string) => {
 			f.taken.reads++;
-			if (!pasted) return base;
-			return base + userLine("m2", "m1", pasted, Buffer.byteLength(base, "utf8"));
+			if (!sentMarker) return base;
+			return base + userLine("m2", "m1", `hello\n[${sentMarker}]`, Buffer.byteLength(base, "utf8"));
 		},
 		wait: noWait,
 	};
@@ -432,15 +434,29 @@ test("TERN2.4 OK: USER marker past cursor proves delivery with offset", async ()
 	expect(r.sessionFile).toBe("/sf");
 	expect(typeof r.offset).toBe("number");
 	expect(r.drop_path).toBeNull();
-	expect(f.taken.runs.filter(a => a.includes("paste")).length).toBe(1);
-	expect(f.taken.runs.filter(a => a.includes("keys")).length).toBe(1);
+	expect(f.taken.runs.filter(a => a.includes("carly")).length).toBe(1);
+	expect(f.taken.runs.some(a => a.includes("paste") || a.includes("keys"))).toBe(false);
 });
 
-test("TERN2.4 PENDING: sent but unconsumed never claims OK or NOT_DELIVERED", async () => {
+test("TERN2.4 PENDING: composer holds marker but journal lacks it", async () => {
 	const f = ternFixture();
+	let sentMarker = "";
+	const io: TernObserverIo = {
+		run: (argv: string[]) => {
+			f.taken.runs.push(argv);
+			if (argv.includes("carly")) {
+				const hit = /kit-send-[0-9a-f]+/.exec(argv.join("\n"))?.[0];
+				if (hit) sentMarker = hit;
+			}
+			if (argv.includes("capture")) return { code: 0, out: sentMarker ? `composer [${sentMarker}]` : "empty" };
+			return { code: 0, out: "ok" };
+		},
+		readSessionFile: (_path: string) => { f.taken.reads++; return settledJournalText(); },
+		wait: noWait,
+	};
 	const dir = dropDir();
 	clearTernPending(dir);
-	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io: f.io,
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io,
 		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
 	expect(r.status).toBe("PENDING_CONSUME");
 	expect(r.status).not.toBe("OK");
@@ -448,7 +464,59 @@ test("TERN2.4 PENDING: sent but unconsumed never claims OK or NOT_DELIVERED", as
 	expect(r.drop_path).not.toBeNull();
 });
 
-test("TERN2.4 INV03/F5: paste failure is NOT_DELIVERED with drop and no phantom pending", async () => {
+test("TERN2.4 ACT58506: timeout with empty composer retains pending (uncertainty, never refusal)", async () => {
+	const f = ternFixture();
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("PROOF_TIMEOUT");
+	expect(r.drop_path).not.toBeNull();
+	expect(readdirSync(join(dir, "..", "tern-pending")).length).toBe(1);
+});
+
+test("TERN2.4 capture failure keeps pending instead of refusing blind", async () => {
+	const f = ternFixture();
+	const io: TernObserverIo = {
+		run: (argv: string[]) => {
+			f.taken.runs.push(argv);
+			if (argv.includes("capture")) return { code: 1, out: "" };
+			return { code: 0, out: "ok" };
+		},
+		readSessionFile: (_path: string) => { f.taken.reads++; return settledJournalText(); },
+		wait: noWait,
+	};
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("PROOF_TIMEOUT");
+	expect(r.detail).toContain("capture failed");
+});
+
+test("TERN2.4 TEXT_UNWIREABLE: payload with lua close bracket refuses with zero runs", async () => {
+	const f = ternFixture();
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello ]] world", dropDir: dir, io: f.io,
+		observe: f.observe, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("TEXT_UNWIREABLE");
+	expect(f.taken.runs.length).toBe(0);
+	expect(f.taken.reads).toBeGreaterThan(0);
+});
+
+test("TERN2.4 builder: unwireable block or payload yields null turn", () => {
+	expect(buildNativeSendTurn("s/p", "hello [kit-send-abc]")).not.toBeNull();
+	expect(buildNativeSendTurn("s/p", "a ]] b")).toBeNull();
+	expect(buildNativeSendTurn('s/p"; evil() --', "hello")).toBeNull();
+	expect(buildNativeSendTurn("s\\p", "hello")).toBeNull();
+	expect(buildNativeSendTurn("s\np", "hello")).toBeNull();
+});
+
+test("TERN2.4 INV03/F5: send turn failure is NOT_DELIVERED with drop and no phantom pending", async () => {
 	const f = ternFixture({ runRc: 1 });
 	const dir = dropDir();
 	clearTernPending(dir);
@@ -515,6 +583,9 @@ test("TERN2.4 B5-7: unconsumed pending suppresses the new send; consumed pending
 		sessionSha: createHash("sha256").update(consumedText, "utf8").digest("hex") });
 	const resumed = await deliverToTernSeat({ seat: ternSeat, text: "new", dropDir: dir, io: consumedIo,
 		observe: resumedObserve, identify: f.identify, pollMs: 1, deadlineMs: 10 });
+	// ACT58506: the send turn ran but neither journal nor composer ever showed
+	// the new marker — uncertainty, not known-zero admission. Pending is
+	// retained (rotated record exists), never auto-resent.
 	expect(resumed.status).toBe("PENDING_CONSUME");
 	expect(resumed.marker).not.toBe("kit-send-oldoldold0");
 	expect(resumed.code).toBe("PROOF_TIMEOUT");
