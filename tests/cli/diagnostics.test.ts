@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRegexTools, type Finding } from "../../src/diagnostics.ts";
+import { defaultRchReachability, diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchReachability, inspectRegexTools, type Finding, type RchReachabilityDeps } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
@@ -851,4 +852,110 @@ test("doctor lists tmux socket paths without a live server", async () => {
 	expect(sockets?.status).toBe("DEGRADED");
 	expect(sockets?.evidence?.stale_sockets).toEqual([stale]);
 	expect(sockets?.reason).toContain(stale);
+});
+
+// --- RCHSOCK1 reachability (ompkit-774u.6.4) ------------------------------------
+
+function unixListener(path: string): Promise<Server> {
+	const server = createServer();
+	return new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(path, () => {
+			server.off("error", reject);
+			resolve();
+		});
+	}).then(() => server);
+}
+
+function rchDeps(sockPath: string, over: Partial<RchReachabilityDeps> = {}): RchReachabilityDeps {
+	return {
+		uid: 501,
+		daemon: () => ({ running: true, socketPath: sockPath }),
+		launchdPid: () => 424242,
+		lsofUnixSockets: () => [sockPath],
+		statSocket: () => ({ kind: "missing", ino: null }),
+		...over,
+	};
+}
+
+function noCapacity(row: Finding): void {
+	expect(`${row.reason} ${row.recommended_action}`.toLowerCase()).not.toContain("capacity");
+}
+
+test("rch: live listener on a present socket is RUNNING", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-run-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const row = inspectRchReachability(rchDeps(sock, { statSocket: () => ({ kind: "socket", ino: 7 }) }));
+		expect(row.component).toBe("rch");
+		expect(row.status).toBe("OK");
+		expect(row.evidence?.state).toBe("RUNNING");
+		noCapacity(row);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("rch: unlinked path under a live holder is SOCKET_UNLINKED, never capacity", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-unlink-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		rmSync(sock);
+		const row = inspectRchReachability(rchDeps(sock));
+		expect(row.status).toBe("FAIL");
+		expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
+		expect(row.reason).toContain("unlinked");
+		expect(row.recommended_action).toContain("launchctl kickstart");
+		noCapacity(row);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("rch: path replaced by a regular file is SOCKET_UNLINKED", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-replaced-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	writeFileSync(sock, "not a socket\n");
+	const row = inspectRchReachability(rchDeps(sock, { statSocket: () => ({ kind: "other", ino: null }) }));
+	expect(row.status).toBe("FAIL");
+	expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
+	noCapacity(row);
+});
+
+test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED", async () => {
+	const sock = join(tmpdir(), "rch-absent.sock");
+	const stopped = inspectRchReachability(rchDeps(sock, { daemon: () => ({ running: false, socketPath: sock }) }));
+	expect(stopped.status).toBe("OK");
+	expect(stopped.evidence?.state).toBe("NOT_RUNNING");
+	for (const [state, over] of [
+		["RCH_UNAVAILABLE", { daemon: () => null }],
+		["SOCKET_PATH_UNKNOWN", { daemon: () => ({ running: true, socketPath: null }) }],
+		["PID_UNKNOWN", { launchdPid: () => null }],
+		["LSOF_UNAVAILABLE", { lsofUnixSockets: () => null }],
+	] as const) {
+		const row = inspectRchReachability(rchDeps(sock, over));
+		expect(row.evidence?.state).toBe(state);
+		expect(row.status).toBe("UNVERIFIED");
+		noCapacity(row);
+	}
+});
+
+test("rch: default statSocket reads real fixture socket state", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-default-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const deps = defaultRchReachability();
+		expect(deps.statSocket(sock).kind).toBe("socket");
+		rmSync(sock);
+		expect(deps.statSocket(sock).kind).toBe("missing");
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
 });

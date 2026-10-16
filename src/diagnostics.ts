@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
@@ -51,6 +51,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	browsers: ["browsers"],
 	identity: ["identity"],
 	"regex-tools": ["regex-tools"],
+	rch: ["rch"],
 };
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
@@ -1307,6 +1308,123 @@ function inspectTmuxSockets(home: string): Finding {
 	return finding("tmux_sockets", status, reason, stale.length ? "Confirm no tmux server uses the listed paths before removing stale socket entries." : uncertain.length ? "Resolve the inspection failure and rerun omp-kit doctor." : "No action required.", { socket_directory: directory, live_sockets: live, stale_sockets: stale, ...(uncertain.length ? { unverified_sockets: uncertain } : {}) });
 }
 
+/** RCHSOCK1 (ompkit-774u.6.4): rchd alive but its socket path unlinked. Read-only. */
+export interface RchDaemonReport {
+	running: boolean;
+	/** The socket path the daemon itself reports, or null when unreported. */
+	socketPath: string | null;
+}
+
+export interface RchReachabilityDeps {
+	/** Login uid for the launchd lookup, or null when unavailable. */
+	uid: number | null;
+	/** Parsed `rch --json daemon status`, or null when rch is missing/unrunnable/unparseable. */
+	daemon(): RchDaemonReport | null;
+	/** Live pid of com.rch.daemon, or null when none. */
+	launchdPid(): number | null;
+	/** Unix-socket paths the pid holds listening, or null when lsof is unavailable. */
+	lsofUnixSockets(pid: number): string[] | null;
+	/** lstat view of a path: socket with inode, non-socket, or missing. */
+	statSocket(path: string): { kind: "socket" | "other" | "missing"; ino: number | null };
+}
+
+export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
+	const report = deps.daemon();
+	if (report === null) {
+		return finding("rch", "UNVERIFIED", "rch is unavailable; daemon reachability was not inspected",
+			"Install rch or put it on PATH, then rerun omp-kit doctor.", { state: "RCH_UNAVAILABLE" });
+	}
+	if (!report.running) {
+		return finding("rch", "OK", "rchd reports it is not running; remote builds are unavailable until it starts",
+			"No action required unless remote builds are needed.", { state: "NOT_RUNNING" });
+	}
+	const path = report.socketPath;
+	if (path === null || path === "") {
+		return finding("rch", "UNVERIFIED", "rchd reports running but names no socket path; reachability is unknown",
+			"Inspect `rch --json daemon status` output, then rerun omp-kit doctor.", { state: "SOCKET_PATH_UNKNOWN" });
+	}
+	const base = { socket_path: path };
+	const pid = deps.launchdPid();
+	if (pid === null) {
+		return finding("rch", "UNVERIFIED", `rchd reports running on ${path} but no live com.rch.daemon pid was found; reachability is unknown`,
+			"Check the daemon under the login launchd domain, then rerun omp-kit doctor.", { ...base, state: "PID_UNKNOWN" });
+	}
+	const held = deps.lsofUnixSockets(pid);
+	if (held === null) {
+		return finding("rch", "UNVERIFIED", `rchd pid ${pid} is live but its held sockets could not be listed; reachability is unknown`,
+			"Ensure lsof is available, then rerun omp-kit doctor.", { ...base, state: "LSOF_UNAVAILABLE", pid });
+	}
+	const bound = held.includes(path);
+	const stat = deps.statSocket(path);
+	const restore = `Restore with \`launchctl kickstart -k gui/${deps.uid ?? "<uid>"}/com.rch.daemon\` only when \`rch status --jobs\` shows an empty queue; verify with \`rch status\` (Daemon Running, workers, slots). Never automate the kickstart from doctor.`;
+	if (stat.kind === "missing" && bound) {
+		return finding("rch", "FAIL", `rchd pid ${pid} is alive and holds ${path}, but the path is missing: the socket was unlinked under the live daemon`,
+			restore, { ...base, state: "SOCKET_UNLINKED", pid });
+	}
+	if (stat.kind !== "socket" || !bound) {
+		return finding("rch", "FAIL", `rchd pid ${pid} is alive but ${path} is not its bound socket (path ${stat.kind}${bound ? "" : ", not held by the daemon"})`,
+			restore, { ...base, state: "SOCKET_UNLINKED", pid });
+	}
+	return finding("rch", "OK", `rchd pid ${pid} is reachable on ${path}`, "No action required.", { ...base, state: "RUNNING", pid });
+}
+
+function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { code: number; out: string } | null {
+	try {
+		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env }, timeout: timeoutMs });
+		return { code: run.exitCode, out: run.stdout.toString() };
+	} catch {
+		return null;
+	}
+}
+
+function parseRchStatus(out: string): RchDaemonReport | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(out);
+	} catch {
+		return null;
+	}
+	const data = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>)["data"] : undefined;
+	if (typeof data !== "object" || data === null) return null;
+	const record = data as Record<string, unknown>;
+	if (typeof record["running"] !== "boolean") return null;
+	const socketPath = record["socket_path"];
+	return { running: record["running"], socketPath: typeof socketPath === "string" && socketPath !== "" ? socketPath : null };
+}
+
+export function defaultRchReachability(): RchReachabilityDeps {
+	const uid = process.getuid?.() ?? null;
+	return {
+		uid,
+		daemon: () => {
+			const status = rchArgs("rch", ["--json", "daemon", "status"], 5000);
+			if (status === null || status.code !== 0) return null;
+			return parseRchStatus(status.out);
+		},
+		launchdPid: () => {
+			if (uid === null) return null;
+			const printed = rchArgs("launchctl", ["print", `gui/${uid}/com.rch.daemon`], 5000);
+			if (printed === null || printed.code !== 0) return null;
+			const match = printed.out.match(/\bpid\s*=\s*(\d+)/);
+			return match?.[1] ? Number(match[1]) : null;
+		},
+		lsofUnixSockets: (pid) => {
+			const listed = rchArgs("lsof", ["-a", "-p", String(pid), "-U", "-Fn"], 15000);
+			if (listed === null || listed.code !== 0) return null;
+			return listed.out.split("\n").filter((line) => line.startsWith("n/")).map((line) => line.slice(1));
+		},
+		statSocket: (path) => {
+			let info: Stats;
+			try {
+				info = lstatSync(path);
+			} catch {
+				return { kind: "missing", ino: null };
+			}
+			return info.isSocket() ? { kind: "socket", ino: info.ino } : { kind: "other", ino: null };
+		},
+	};
+}
+
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
 	const selected = input.scope ? DIAGNOSTIC_SCOPE_COMPONENTS[input.scope] ?? [input.scope] : undefined;
@@ -1316,6 +1434,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const root = resolve(input.root);
 	const home = resolve(input.home);
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
+	if (wants("rch")) rows.push(inspectRchReachability(defaultRchReachability()));
 	if (wants("planning_skill") && (input.scope === "kit" || pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file")) {
 		rows.push(inspectPlanningSkill(root, home));
 	}
