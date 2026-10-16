@@ -1,5 +1,5 @@
 #!/bin/sh
-# br-shim.test.sh — ID1 shim contract (ompkit-rc-epic-land-fix-release-dogfood-rz5.108).
+# br-shim.test.sh — ID1 and CREATEBUDGET1 shim contract.
 # A fake `br` records its argv; the shim under test sits ahead of it on PATH.
 # Follows ~/AGENTS.md producer truth: every verdict comes from the recorded
 # argv file plus the shim's exit code, never from a filtered excerpt.
@@ -11,15 +11,59 @@ REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/br-shim-test.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-mkdir -p "$TMP/realbin" "$TMP/shimbindir"
+mkdir -p "$TMP/realbin" "$TMP/shimbindir" "$TMP/sendbin"
 cat > "$TMP/realbin/br" <<'EOF'
 #!/bin/sh
 # SYNC1 box 4: answer `show` with canned bead JSON for the close gate;
-# record every other invocation for argv assertions.
+# the creation guard reads a complete issue envelope before dispatch.
 if [ "$1" = "show" ]; then
 	cat "$BR_GUARD_JSON_FILE"
-else
-	printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
+	exit 0
+fi
+if [ "$1" = "list" ]; then
+	cat "$BR_CREATE_FIXTURE"
+	exit 0
+fi
+if [ "$1" = "create" ] && printf '%s\n' "$@" | grep -Fqx -- "--help"; then
+	printf 'Usage: br create [OPTIONS] [TITLE]\n'
+	exit 0
+fi
+printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
+if [ -n "${BR_CREATE_LOG:-}" ]; then
+	printf '<%s>' "$@" >> "$BR_CREATE_LOG"
+	printf '\n' >> "$BR_CREATE_LOG"
+fi
+if [ "$1" = "create" ]; then
+	create_id=${BR_CREATE_ID:-new-p0}
+	create_title=${BR_CREATE_TITLE:-new issue}
+	create_priority=${BR_CREATE_PRIORITY:-2}
+	if [ -n "${BR_CREATE_CREATED:-}" ]; then printf '%s\n' "$create_id" >> "$BR_CREATE_CREATED"; fi
+	if { [ "$create_priority" = "0" ] || [ "$create_priority" = "P0" ]; } && [ -n "${BR_CREATE_P0_STATE:-}" ]; then
+		printf '%s\n' "$create_id" >> "$BR_CREATE_P0_STATE"
+	fi
+	if [ -n "${BR_CREATE_GATE_DIR:-}" ]; then
+		: > "$BR_CREATE_GATE_DIR/entered-$create_id"
+		while [ ! -f "$BR_CREATE_GATE_DIR/release" ]; do sleep 0.01; done
+	fi
+	if [ "${BR_CREATE_MUTATE_FIXTURE:-0}" = "1" ]; then
+		python3 - "$BR_CREATE_FIXTURE" "$create_id" "$create_title" "$create_priority" "${AGENT_NAME:-}" <<'PY'
+import datetime, json, sys
+path, issue_id, title, priority, actor = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+rows = payload["issues"] if isinstance(payload, dict) else payload
+rows.append({"id": issue_id, "title": title, "status": "open", "priority": int(priority.removeprefix("P")),
+             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+             "created_by": actor})
+if isinstance(payload, dict):
+    payload["total"] = len(rows)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+	fi
+	if printf '%s\n' "$@" | grep -Fqx -- "--json"; then
+		printf '{"id":"%s","title":"%s","status":"open","priority":%s}\n' "$create_id" "$create_title" "$create_priority"
+	fi
 fi
 exit 0
 EOF
@@ -75,12 +119,26 @@ check() {
 	fi
 }
 
+export BR_CREATE_FIXTURE="$TMP/create-fixture.json"
+export BR_CREATE_LOG="$TMP/create.log"
+export BR_CREATE_ID="new-p0"
+export BR_CREATE_TITLE="new issue"
+printf '{"issues":[],"total":0,"offset":0,"has_more":false}\n' > "$BR_CREATE_FIXTURE"
+cat > "$TMP/sendbin/omp-kit" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >> "$OMP_KIT_SEND_LOG"
+printf '{"status":"OK","overall":"OK"}\n'
+EOF
+chmod +x "$TMP/sendbin/omp-kit"
+export OMP_KIT_SEND_LOG="$TMP/send.log"
+export OMP_KIT_FLEET_WATCH_CONFIG="$TMP/fleet-watch.json"
+printf '{"sessions":[{"repo":"%s","coordinatorSession":"fixture-director","coordinatorPane":"%%57","p0Cap":1}]}\n' "$REPO_ROOT" > "$OMP_KIT_FLEET_WATCH_CONFIG"
 export BR_SHIM_TEST_ARGV="$TMP/argv"
 export AM_LOG="$TMP/am.log"
 export AM_EXPECTED_PROJECT="$REPO_ROOT"
 export AM_FAKE_MODE=clear
 : > "$AM_LOG"
-export PATH="$TMP/shimbindir:$TMP/realbin:$PATH"
+export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
 export AGENT_NAME="TestShim"
 
 # 1. every write kind gets --actor appended when absent
@@ -324,5 +382,11 @@ for mode in unregistered unreachable query-fail; do
 		printf 'FAIL fail-closed [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$mode" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 	fi
 done
+export BEADS_DB="$REPO_ROOT/.beads/beads.db"
+export XDG_STATE_HOME="$TMP/state"
+export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
+# shellcheck source=lib/br-create-guard-tests.sh
+. "$REPO_ROOT/tests/cli/lib/br-create-guard-tests.sh"
+
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]

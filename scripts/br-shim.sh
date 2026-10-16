@@ -1,11 +1,11 @@
 #!/bin/sh
-# br-shim.sh — ID1 identity and TRACKLEASE1 tracker-write shim.
+# br-shim.sh — ID1 identity, TRACKLEASE1 reservation and CREATEBUDGET1 create guards.
 # Installed as `br` ahead of the real binary on an agent pane's PATH. Every
 # invocation carries --actor "$AGENT_NAME": appended when absent, enforced when
 # present. Mutations also require a registered Agent Mail identity and no
 # foreign exclusive lease on the repo's tracker files.
 # Real binary resolution: $BR_REAL, else the first `br` on PATH with this
-# shim's own directory removed. Runtime dependencies: POSIX sh, awk, git, am.
+# shim's own directory removed. Runtime dependencies: POSIX sh, awk, git, am; create guard uses python3 and omp-kit.
 set -u
 
 fail() {
@@ -139,6 +139,7 @@ if [ "$tracker_write" = 1 ]; then
 	else
 		tracker_project=$(git rev-parse --show-toplevel 2>/dev/null) || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve tracker project root"
 	fi
+	tracker_db_path=${tracker_db_path:-"$tracker_project/.beads/beads.db"}
 	identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
 	identity_rc=$?
 	[ "$identity_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify $AGENT_NAME in $tracker_project (rc=$identity_rc): $identity_out"
@@ -172,6 +173,18 @@ if [ "$tracker_write" = 1 ]; then
 		*) fail "BR_SHIM_RESERVATION_UNKNOWN unrecognized Agent Mail conflict response: $conflict_out" ;;
 	esac
 fi
+if [ "$gate_sub" = "create" ]; then
+	create_guard="$(dirname -- "$self_path")/br-create-guard.py"
+	[ -f "$create_guard" ] || fail "BR_CREATE_ADMISSION_UNKNOWN creation guard is missing: $create_guard"
+	if [ -n "$found" ]; then
+		BR_SHIM_REAL="$real" BR_SHIM_DB="$tracker_db_path" BR_SHIM_PROJECT="$tracker_project" \
+			BR_SHIM_AGENT="$AGENT_NAME" BR_SHIM_ENTRY="$0" exec python3 "$create_guard" "$@"
+	else
+		BR_SHIM_REAL="$real" BR_SHIM_DB="$tracker_db_path" BR_SHIM_PROJECT="$tracker_project" \
+			BR_SHIM_AGENT="$AGENT_NAME" BR_SHIM_ENTRY="$0" exec python3 "$create_guard" "$@" --actor "$AGENT_NAME"
+	fi
+fi
+
 gate_fire=0
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then gate_fire=1; fi
