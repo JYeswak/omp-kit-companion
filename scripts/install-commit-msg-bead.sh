@@ -30,7 +30,9 @@ if [ "$MODE" = "check" ]; then
 	stale=0
 	for pair in "hooks.d/commit-msg/40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh" \
 		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
-		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh"; do
+		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
+		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
+		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		dest="$HOOKS/$1"
@@ -153,6 +155,20 @@ EOF
 	printf 'installed pushed-beads member: %s\n' "$member"
 }
 
+# install_ref_txn: the plumbing backstop. commit-tree + update-ref and
+# --no-verify never run commit-msg; git runs reference-transaction for every
+# ref update. The judge sits beside the member, non-executable (see above).
+install_ref_txn() {
+	dir=$(chain_dir reference-transaction)
+	member="$dir/40-omp-kit-ref-txn-bead"
+	cp "$KITROOT/scripts/ref-txn-bead.sh" "$member"
+	cp "$KITROOT/scripts/commit-msg-bead.sh" "$dir/commit-msg-bead.sh"
+	chmod +x "$member"
+	chmod -x "$dir/commit-msg-bead.sh" 2>/dev/null || true
+	UNDO_RM="$UNDO_RM $member $dir/commit-msg-bead.sh"
+	printf 'installed ref-update bead guard: %s\n' "$member"
+}
+
 PROBE=$(mktemp "${TMPDIR:-/tmp}/bead-probe.XXXXXX") || exit 2
 PROBE_DB=$(mktemp "${TMPDIR:-/tmp}/bead-probe-db.XXXXXX") || exit 2
 trap 'rm -f "$PROBE" "$PROBE_DB"' EXIT INT TERM
@@ -172,6 +188,8 @@ ensure_chain commit-msg
 install_commit_msg
 ensure_chain pre-push
 install_pre_push
+ensure_chain reference-transaction
+install_ref_txn
 
 # Verify the whole installed chain (any failure rolls every mutation back):
 # Leg 1: the moved bespoke must behave exactly as pre-flight. A pass that
@@ -194,11 +212,26 @@ case "$PROBE_OUT" in
 	*) rollback "refusal did not come from the bead-id member: $(printf '%s' "$PROBE_OUT" | head -1)" ;;
 esac
 # Leg 3: the pre-push member must pass an empty range (valid pushes flow).
+# Leg 4: the ref guard must refuse moving main to a planted id-less commit
+# and must pass the same update of any other ref. Nothing is moved: the hook
+# is fed the update line directly; the probe commit is a dangling object.
 if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
 	if ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
 		rollback "pre-push member rejects an empty range in $TARGET"
 	fi
+	PLANT=$(printf 'probe: id-less ref-guard plant\n' | GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@invalid GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@invalid \
+		git -C "$TARGET" commit-tree "$HEAD_SHA^{tree}" -p "$HEAD_SHA") || rollback "cannot write the ref-guard probe commit in $TARGET"
+	if REF_OUT=$(printf '%s %s refs/heads/main\n' "$HEAD_SHA" "$PLANT" | (CDPATH='' cd -- "$TARGET" && BEADS_DB="$PROBE_DB" sh "$HOOKS/reference-transaction" prepared) 2>&1); then
+		rollback "ref guard let main move to an id-less commit in $TARGET"
+	fi
+	case "$REF_OUT" in
+		*ref-txn-bead*) ;;
+		*) rollback "ref refusal did not come from the bead guard: $(printf '%s' "$REF_OUT" | head -1)" ;;
+	esac
+	if ! printf '%s %s refs/heads/probe-other\n' "$HEAD_SHA" "$PLANT" | (CDPATH='' cd -- "$TARGET" && BEADS_DB="$PROBE_DB" sh "$HOOKS/reference-transaction" prepared) >/dev/null 2>&1; then
+		rollback "ref guard refused an update of a ref other than main in $TARGET"
+	fi
 else
-	printf 'install-commit-msg-bead: WARN: %s has no HEAD commit; pre-push probe skipped\n' "$TARGET" >&2
+	printf 'install-commit-msg-bead: WARN: %s has no HEAD commit; pre-push and ref-guard probes skipped\n' "$TARGET" >&2
 fi
 printf 'verified active in %s\n' "$TARGET"
