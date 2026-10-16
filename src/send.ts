@@ -637,10 +637,12 @@ export function findTernUserMarker(text: string, marker: string, afterOffset: nu
  * poll for the USER marker past the pre-send cursor (default 20 s).
  *
  * Statuses: OK (USER marker proven), PENDING_CONSUME (sent but consumption
- * unproven, or suppressed by an unconsumed pending marker; recovery copy
  * written, pending retained, never auto-resent), NOT_DELIVERED (send
  * commands failed; recovery copy written), REFUSED (zero sends: gates,
  * observation, identity, eligibility or incarnation).
+ *
+ * Actuation note: `tern send BLOCK keys Enter` is accepted with rc 0 on an
+ * owned sandbox pane (2026-10-16); evsend has no CLI/Lua emit surface found.
  */
 export async function deliverToTernSeat(input: {
 	seat: TernSeatBinding;
