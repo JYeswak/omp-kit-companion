@@ -1,7 +1,8 @@
 #!/bin/sh
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
-# repo's hook chains, plus the staged-imports pre-commit member.
+# repo's hook chains, plus the staged-imports, staged-fragments and
+# staged-regexploit pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
@@ -11,6 +12,12 @@
 # The commit-notes member (scripts/check-commit-notes.sh) is always installed:
 # it refuses a shipped-path commit the push notes gate would refuse (no single
 # Bead: trailer with a changelog.d fragment, and no [no-changelog] reason).
+# The staged-fragments member (scripts/check-staged-fragments.sh) is always
+# installed: it refuses a commit whose staged changelog.d fragments the repo's
+# own scripts/release-notes.sh cannot fold (passes where the repo has none).
+# The staged-regexploit member (scripts/check-staged-regexploit.sh) is always
+# installed: it refuses a commit whose staged JS/TS/Python files fail the
+# repo's own scripts/regexploit-gate.py (passes where the repo has none).
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -120,7 +127,9 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
 		"hooks.d/pre-commit/45-omp-kit-staged-imports scripts/check-staged-imports.sh" \
 		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh" \
-		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh"; do
+		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh" \
+		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
+		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
@@ -312,6 +321,21 @@ install_staged_imports() {
 	printf 'installed staged-imports member: %s\n' "$member"
 }
 
+# install_staged_fragments / install_staged_regexploit: pre-commit members
+# that run the repo's own validators (release-notes.sh fold, regexploit-gate.py)
+# over the staged tree; no helper beside them, since they resolve the repo root.
+install_staged_fragments() {
+	member="$(chain_dir pre-commit)/47-omp-kit-staged-fragments"
+	place "$KITROOT/scripts/check-staged-fragments.sh" "$member" +x
+	printf 'installed staged-fragments member: %s\n' "$member"
+}
+
+install_staged_regexploit() {
+	member="$(chain_dir pre-commit)/48-omp-kit-staged-regexploit"
+	place "$KITROOT/scripts/check-staged-regexploit.sh" "$member" +x
+	printf 'installed staged-regexploit member: %s\n' "$member"
+}
+
 # install_commit_notes: the commit-msg member applies the push notes gate's
 # trailer+fragment rule to the staged tree; it runs after the bead-id member.
 install_commit_notes() {
@@ -366,6 +390,8 @@ ensure_chain reference-transaction
 install_ref_txn
 ensure_chain pre-commit
 install_staged_imports
+install_staged_fragments
+install_staged_regexploit
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
 # Verify the whole installed chain (any failure rolls every mutation back):

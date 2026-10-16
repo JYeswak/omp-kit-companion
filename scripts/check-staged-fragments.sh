@@ -1,0 +1,35 @@
+#!/bin/sh
+# check-staged-fragments.sh — pre-commit member (ompkit-1wgy, SHIFTLEFT1).
+# Staged changelog fragments must be promotable: the push notes gate
+# (check-pushed-notes.sh) folds CHANGELOG.md plus every changelog.d/*.md of
+# the candidate and refuses on any fold error. This member writes the staged
+# index (GIT_INDEX_FILE is respected, so `git commit --only` temporary indexes
+# are judged) as an unreferenced probe commit on HEAD and runs the repo's own
+# scripts/release-notes.sh fold over the probe tree. No ref moves. Runs only
+# when a changelog.d/*.md is staged Added or Modified and the repo ships
+# scripts/release-notes.sh. Exit 1 refuses the commit; an unborn HEAD passes.
+set -u
+root=$(git rev-parse --show-toplevel) || { printf 'staged-fragments: not inside a work tree\n' >&2; exit 1; }
+git rev-parse -q --verify 'HEAD^{commit}' > /dev/null || exit 0
+staged=$(git diff --cached --name-only --diff-filter=AM -- 'changelog.d/*.md') || { printf 'staged-fragments: cannot list staged paths\n' >&2; exit 1; }
+[ -n "$staged" ] || exit 0
+[ -f "$root/scripts/release-notes.sh" ] || exit 0
+tree=$(git write-tree) || { printf 'staged-fragments: cannot write the staged tree\n' >&2; exit 1; }
+probe=$(printf 'staged-fragments probe\n' | GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@invalid GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@invalid \
+	git commit-tree "$tree" -p HEAD) || { printf 'staged-fragments: cannot write the probe commit\n' >&2; exit 1; }
+scratch_parent=${TMPDIR:-$root/var/agent-tmp}
+mkdir -p "$scratch_parent" || { printf 'staged-fragments: cannot make %s\n' "$scratch_parent" >&2; exit 1; }
+scratch=$(mktemp -d "$scratch_parent/staged-fragments.XXXXXX") || { printf 'staged-fragments: cannot make a scratch dir\n' >&2; exit 1; }
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+validation="$scratch/validation"
+mkdir -p "$validation/changelog.d"
+paths=changelog.d
+git cat-file -e "$probe:CHANGELOG.md" 2>/dev/null && paths="CHANGELOG.md changelog.d"
+# shellcheck disable=SC2086
+git archive "$probe" $paths | tar -x -C "$validation" || { printf 'staged-fragments: cannot extract the staged changelog\n' >&2; exit 1; }
+git -C "$validation" init -q || { printf 'staged-fragments: cannot init the validation dir\n' >&2; exit 1; }
+if err=$(cd "$validation" && sh "$root/scripts/release-notes.sh" fold 2>&1 >/dev/null); then
+	exit 0
+fi
+printf 'staged-fragments: REFUSED: staged changelog fragments are not promotable; the push notes gate will refuse them\n%s\n' "$err" >&2
+exit 1
