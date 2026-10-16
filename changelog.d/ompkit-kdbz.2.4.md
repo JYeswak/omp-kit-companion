@@ -1,0 +1,3 @@
+- Prevent `fleet flush-pending` from submitting an empty or changed draft after dequeue; ambiguous queues require manual handling.
+- Add session-file proof and explicit pending/refused outcomes for Tern delivery; queued Tern submission remains disabled pending qualification.
+- Refuse bare goal directives before transport effects; use the explicit `/goal set` form instead.
