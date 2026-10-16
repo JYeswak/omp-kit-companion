@@ -570,9 +570,6 @@ export async function proveSend(input: {
  * file. Stale (offset<=cursor), assistant-echo (role!=user) and wrong-session
  * markers never prove. See F4.
  */
-import { createHash as ternCreateHash } from "node:crypto";
-import { identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
-import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const TERN_PROOF_POLL_MS = 1000;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
@@ -860,7 +857,21 @@ export async function deliverToTernSeat(input: {
 	const identity = await identify(input.seat, input.io);
 	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
 		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
-		return fail(code, `seat identity not bound (${identity.reason}); zero sends`);
+		const reason = identity.status === "IDENTIFIED" ? "binding lost" : identity.reason;
+		return fail(code, `seat identity not bound (${reason}); zero sends`);
+	}
+	// ACT58584 (Jade58584 replay): the seat must not move between observe and
+	// identify. Compare the stable runtime identity fields (the codebase's
+	// sameRuntime predicate minus cwd/fg-argv, which may legitimately differ
+	// across ticks); any move refuses before eligibility, persistence or
+	// effect, with zero sends.
+	const ob = observation.runtimeBinding;
+	const ib = identity.runtimeBinding;
+	if (ob === null || ib === null) return fail("OBSERVATION_UNKNOWN", `runtime binding lost after identification; zero sends`);
+	if (ob.sessionFile !== ib.sessionFile || ob.sessionUuid !== ib.sessionUuid
+		|| ob.paneId !== ib.paneId || ob.sessionId !== ib.sessionId
+		|| ob.foregroundPid !== ib.foregroundPid || ob.foregroundStarted !== ib.foregroundStarted) {
+		return fail("SEAT_REBOUND", `observe/identify runtime bindings differ; seat moved, zero sends`);
 	}
 	if (observation.sessionFile === null) return fail("ELIGIBILITY_UNKNOWN", "no session file to prove against; zero sends");
 	const journalText = input.io.readSessionFile(observation.sessionFile);
@@ -921,7 +932,7 @@ export async function deliverToTernSeat(input: {
 		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
 	if (!releaseLock) {
 		try { rmSync(pendingPath, { force: true }); } catch {}
-		return { status: "UNDELIVERED", marker, sends: 0, sessionFile: null, offset: null,
+		return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: null, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
 			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY" };
 	}

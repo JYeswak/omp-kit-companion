@@ -559,6 +559,22 @@ test("TERN2.4 F1: session move between observe and effect refuses with zero send
 	expect(f.taken.runs.length).toBe(0);
 });
 
+test("TERN2.4 ACT58584: mismatched observe/identify bindings refuse with zero sends", async () => {
+	const f = ternFixture();
+	// Jade58584 shape: same pane/session file, different sessionUuid and foreground.
+	const reboundIdentify = async (_seat: TernSeatBinding) => ({ ...ternIdentified,
+		runtimeBinding: { ...ternRuntimeBinding, sessionUuid: "other-uuid", foregroundPid: 99,
+			foregroundStarted: "rebound" } });
+	const dir = dropDir();
+	clearTernPending(dir);
+	const r = await deliverToTernSeat({ seat: ternSeat, text: "hello", dropDir: dir, io: f.io,
+		observe: f.observe, identify: reboundIdentify, pollMs: 1, deadlineMs: 10 });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("SEAT_REBOUND");
+	expect(f.taken.runs.length).toBe(0);
+});
+
+
 test("TERN2.4 F4: stale and assistant-echo markers never prove", () => {
 	const marker = "kit-send-aaaaaaaaaaaaaaaa";
 	const oldLine = JSON.stringify({ type: "message", message: { role: "user" }, text: `old [${marker}]` });
