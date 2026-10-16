@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectMcpReadiness, judgeTimeoutFit, mcpExample, readProbeEvidence, readStartupFailures } from "../../src/mcp-readiness.ts";
+import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -190,9 +191,12 @@ test("probe evidence and startup failures read from fixture state and log dirs",
 
 const DOCTOR_CLI = join(import.meta.dir, "../../src/cli.ts");
 const DOCTOR_OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+// Bind installed SDK inputs before HOME changes; inventory checks never install an SDK.
+const DOCTOR_SOURCE_CACHE = ompSourceCacheRoot(process.env);
 function doctorCli(args: string[], home: string, state: string, cwd: string) {
 	const result = Bun.spawnSync([process.execPath, DOCTOR_CLI, ...args], { cwd, stdout: "pipe", stderr: "pipe",
 		env: { ...process.env, HOME: home, XDG_STATE_HOME: state, TMPDIR: join(home, "tmp"),
+			OMP_KIT_OMP_SRC_CACHE: DOCTOR_SOURCE_CACHE ?? undefined, OMP_KIT_OMP_SRC_FETCH: "0",
 			PATH: `${dirname(DOCTOR_OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
 	return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }

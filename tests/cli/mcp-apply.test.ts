@@ -3,10 +3,17 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { dirname, join } from "node:path";
 import { chooseMcpSelection, insertMcpServers, McpApplyError, parseEnvCommand, planMcpApply, planMcpEdit, removeDisabledServer, scanRenderedSecrets, setMcpEnvValue, setMcpTimeoutValue, validateJsonSchema } from "../../src/mcp-apply.ts";
 import { listOmpProfiles, readSource } from "../../src/mcp-sources.ts";
+import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 if (!OMP) throw new Error("mcp-apply tests require an installed OMP on PATH (its mcp-schema.json is the contract)");
-const SCHEMA_PATH = join(dirname(dirname(realpathSync(OMP))), "src", "config", "mcp-schema.json");
+const OMP_IDENTITY = resolveOmpIdentity({ ...process.env, OMP_KIT_OMP_SRC_FETCH: "0",
+	PATH: `${dirname(OMP)}:${process.env.PATH ?? ""}` });
+if (realpathSync(OMP) !== OMP_IDENTITY.launcher) throw new Error("mcp-apply test launcher disagrees with the canonical OMP identity");
+const SCHEMA_PATH = join(OMP_IDENTITY.source, "config", "mcp-schema.json");
+// HOME isolates mutable profile state, not the installed, version-verified SDK input.
+const OMP_SOURCE_CACHE = ompSourceCacheRoot(process.env);
 const SCHEMA: unknown = JSON.parse(readFileSync(SCHEMA_PATH, "utf8"));
 const CLI = join(import.meta.dir, "../../src/cli.ts");
 // Assembled so no credential-shaped literal sits in the source.
@@ -25,7 +32,9 @@ function fixture(servers: Record<string, unknown>) {
 	writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: servers }));
 	const run = (args: string[]) => {
 		const result = Bun.spawnSync([process.execPath, CLI, ...args], { cwd, stdout: "pipe", stderr: "pipe",
-			env: { ...process.env, HOME: home, XDG_STATE_HOME: state, TMPDIR: root, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
+			env: { ...process.env, HOME: home, XDG_STATE_HOME: state, TMPDIR: root,
+				OMP_KIT_OMP_SRC_CACHE: OMP_SOURCE_CACHE ?? undefined, OMP_KIT_OMP_SRC_FETCH: "0",
+				PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
 		return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 	};
 	const plan = (names: string[]) => planMcpApply({ source: readSource("claude", home, cwd), servers: names, profiles: listOmpProfiles(home).profiles,
