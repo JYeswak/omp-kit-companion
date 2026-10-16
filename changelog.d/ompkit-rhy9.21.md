@@ -1,0 +1,1 @@
+- Beads doctor and planning score share configurable acceptance-breadth limits (5 files and 3 path-derived components by default), include component-aware split suggestions, and preserve UNKNOWN/UNVERIFIED for missing or unparseable scope.

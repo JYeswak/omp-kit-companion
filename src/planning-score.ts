@@ -14,6 +14,22 @@ export type PlanningCommit = {
 	changedPaths?: readonly string[];
 	planDiffRatio?: number | null;
 };
+export type BeadBreadthLimits = { maxFiles: number; maxComponents: number };
+export type BeadBreadthSpan = {
+	id: string;
+	title: string;
+	files: string[];
+	components: string[];
+	file_count: number;
+	component_count: number;
+	split_suggestion: string;
+};
+export type BeadBreadthAnalysis = {
+	active_beads: number;
+	checked_beads: number;
+	oversized_beads: BeadBreadthSpan[];
+	unknown_ids: string[];
+};
 export type LocalCheckReceipt = { sha?: unknown; exit_code?: unknown; time?: unknown };
 type PlanningHostedRun = {
 	databaseId: number;
@@ -67,7 +83,7 @@ export type MissionScore = {
 
 type TaggedSubject = { mission: string; action: string };
 type FleetRepo = { name: string; path: string; tracker?: string };
-type LoadedConfig = {
+export type LoadedPlanningScoreConfig = {
 	raw: Record<string, unknown>;
 	tuning: PlanningScoreTuning;
 	fleet: FleetRepo[];
@@ -76,7 +92,7 @@ type LoadedConfig = {
 type RepositoryScoreContext = {
 	repoPath: string;
 	trackerPath: string;
-	config: LoadedConfig;
+	config: LoadedPlanningScoreConfig;
 	repoCommits: readonly PlanningCommit[];
 	trackerCommits: readonly PlanningCommit[];
 	beads: PlanningBead[] | null;
@@ -88,9 +104,14 @@ const SECONDS_PER_DAY = 86_400;
 const MAX_TOML_BYTES = 1_048_576;
 const MAX_TRACKER_BYTES = 64 * 1_048_576;
 const MAX_RECEIPT_BYTES = 1_048_576;
-const SCORE_METRIC_NAMES = ["plan_present", "plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained", "plan_to_code_hours", "plan_ship_ratio_7d", "main_green"] as const;
+const SCORE_METRIC_NAMES = ["plan_present", "plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained", "bead_breadth", "plan_to_code_hours", "plan_ship_ratio_7d", "main_green"] as const;
 const HISTORICAL_METRICS = ["plan_present", "plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "plan_to_code_hours"] as const;
 const CODE_EXTENSIONS = new Set([".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".jsx", ".mjs", ".php", ".py", ".rb", ".rs", ".sh", ".swift", ".ts", ".tsx", ".vue"]);
+const ROOT_BREADTH_EXTENSIONS: Record<string, true> = {
+	".md": true, ".json": true, ".toml": true, ".yaml": true, ".yml": true, ".txt": true,
+	".jsonl": true, ".tsv": true, ".xml": true, ".html": true, ".css": true, ".sql": true,
+	".csv": true, ".lock": true, ".plist": true, ".ini": true, ".patch": true,
+};
 
 function stringValue(value: unknown): string | null { return typeof value === "string" ? value : null; }
 function numberValue(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
@@ -180,6 +201,125 @@ function isMissionBead(bead: PlanningBead, mission: string, planPath: string | n
 function isParked(bead: PlanningBead): boolean {
 	const status = stringValue(bead.status)?.toLowerCase();
 	return status === "parked" || status === "deferred" || hasIssueLabel(bead, "parked") || hasIssueLabel(bead, "deferred");
+}
+
+function normalizedBreadthPath(raw: string): string | null {
+	const leading = "`'\"([{<";
+	const trailing = "`'\".,;:!?)]}>";
+	let start = 0;
+	let end = raw.length;
+	while (start < end && leading.includes(raw[start]!)) start++;
+	while (end > start && trailing.includes(raw[end - 1]!)) end--;
+	let path = raw.slice(start, end);
+	const colon = path.lastIndexOf(":");
+	if (colon > path.lastIndexOf("/")) {
+		const suffix = path.slice(colon + 1).split("-");
+		let numericSuffix = suffix.length > 0;
+		for (const part of suffix) {
+			if (!part.length) { numericSuffix = false; break; }
+			for (const char of part) {
+				if (char < "0" || char > "9") { numericSuffix = false; break; }
+			}
+			if (!numericSuffix) break;
+		}
+		if (numericSuffix) path = path.slice(0, colon);
+	}
+	if (path.startsWith("./")) path = path.slice(2);
+	if (!path || path.startsWith("/") || path.includes("\\") || path.includes("://") || path.includes("*") || path.includes("?"))
+		return null;
+	const parts = path.split("/");
+	for (const part of parts) if (!part || part === "." || part === "..") return null;
+	const filename = parts.at(-1)!;
+	const dot = filename.lastIndexOf(".");
+	if (dot === 0) return filename.length > 1 ? path : null;
+	if (dot <= 0 || dot === filename.length - 1) return null;
+	const extension = filename.slice(dot).toLowerCase();
+	if (parts.length === 1 && !CODE_EXTENSIONS.has(extension) && ROOT_BREADTH_EXTENSIONS[extension] !== true) return null;
+	const suffix = filename.slice(dot + 1);
+	for (const char of suffix) if (char < "0" || char > "9") return path;
+	return null;
+}
+
+function explicitAcceptanceFiles(acceptance: string): string[] | null {
+	const files = new Set<string>();
+	let cursor = 0;
+	while (cursor < acceptance.length) {
+		const start = acceptance.indexOf("`", cursor);
+		if (start < 0) break;
+		let width = 1;
+		while (acceptance[start + width] === "`") width++;
+		const marker = "`".repeat(width);
+		const end = acceptance.indexOf(marker, start + width);
+		if (end < 0) return null;
+		const code = acceptance.slice(start + width, end);
+		let tokenStart = 0;
+		while (tokenStart < code.length) {
+			while (tokenStart < code.length && (code[tokenStart] === "," || code[tokenStart] === ";" || code[tokenStart]!.trim().length === 0)) tokenStart++;
+			if (tokenStart >= code.length) break;
+			let tokenEnd = tokenStart;
+			while (tokenEnd < code.length && code[tokenEnd] !== "," && code[tokenEnd] !== ";" && code[tokenEnd]!.trim().length > 0) tokenEnd++;
+			const path = normalizedBreadthPath(code.slice(tokenStart, tokenEnd));
+			if (path) files.add(path);
+			tokenStart = tokenEnd + 1;
+		}
+		cursor = end + width;
+	}
+	return [...files].sort();
+}
+
+function breadthComponent(path: string): string {
+	const parts = path.split("/");
+	const filename = parts.at(-1)!;
+	const dot = filename.lastIndexOf(".");
+	const stem = dot > 0 ? filename.slice(0, dot) : filename;
+	if (parts.length === 1) return "root/" + stem;
+	if (parts.length === 2) return parts[0]! + "/" + stem;
+	return parts.slice(0, 2).join("/");
+}
+
+function breadthSplitSuggestion(id: string, groups: ReadonlyMap<string, readonly string[]>, limits: BeadBreadthLimits): string {
+	const children: string[] = [];
+	for (const component of [...groups.keys()].sort()) {
+		const files = groups.get(component) ?? [];
+		for (let start = 0; start < files.length; start += limits.maxFiles)
+			children.push(component + ": " + files.slice(start, start + limits.maxFiles).join(", "));
+	}
+	return `Split ${id} into child beads grouped by component, with at most ${limits.maxFiles} files each: ${children.join("; ")}. Keep cross-component integration acceptance in the parent.`;
+}
+
+/** Only backtick-delimited acceptance paths count; nested files group by their first two path segments. */
+export function analyzeBeadBreadth(beads: readonly PlanningBead[], limits: BeadBreadthLimits): BeadBreadthAnalysis {
+	const active = beads.filter((bead) => {
+		const status = stringValue(bead.status)?.toLowerCase();
+		return stringValue(bead.issue_type)?.toLowerCase() !== "epic" && status !== "closed" && status !== "tombstone" && !isParked(bead);
+	});
+	const oversizedBeads: BeadBreadthSpan[] = [];
+	const unknownIds = new Set<string>();
+	let checkedBeads = 0;
+	for (const bead of active) {
+		const id = stringValue(bead.id)?.trim();
+		const title = stringValue(bead.title) ?? "";
+		const files = explicitAcceptanceFiles(stringValue(bead.acceptance_criteria) ?? "");
+		if (!id || !files || !files.length) {
+			unknownIds.add(id || "UNKNOWN");
+			continue;
+		}
+		const groups = new Map<string, string[]>();
+		for (const file of files) {
+			const component = breadthComponent(file);
+			const group = groups.get(component);
+			if (group) group.push(file);
+			else groups.set(component, [file]);
+		}
+		const components = [...groups.keys()].sort();
+		checkedBeads++;
+		if (files.length <= limits.maxFiles && components.length <= limits.maxComponents) continue;
+		oversizedBeads.push({
+			id, title, files, components, file_count: files.length, component_count: components.length,
+			split_suggestion: breadthSplitSuggestion(id, groups, limits),
+		});
+	}
+	return { active_beads: active.length, checked_beads: checkedBeads, oversized_beads: oversizedBeads, unknown_ids: [...unknownIds].sort() };
 }
 function stableValue(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(stableValue);
@@ -319,6 +459,42 @@ function scoreBeadQuality(snapshot: PlanningScoreSnapshot, target: (name: string
 	const status = medianChars !== null && medianChars >= medianTarget && acceptancePresentShare >= acceptancePresentTarget && depsPerBead >= depsTarget ? "PASS" : "FAIL";
 	put("bead_self_contained", { median_chars: medianChars, acceptance_present_share: acceptancePresentShare, deps_per_bead: depsPerBead, mission_beads: beads.length }, beadQualityBounds(target), status);
 }
+
+function scoreBeadBreadth(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
+	const maxFiles = target("bead_breadth_max_files", 5);
+	const maxComponents = target("bead_breadth_max_components", 3);
+	const metricTarget = { max_files: maxFiles, max_components: maxComponents };
+	if (!positiveInteger(maxFiles) || !positiveInteger(maxComponents)) {
+		put("bead_breadth", null, metricTarget, "UNKNOWN", { reason: "file and component limits must be positive integers" });
+		return;
+	}
+	if (snapshot.beads === null) {
+		put("bead_breadth", null, metricTarget, "UNKNOWN", { reason: "tracker bead evidence is unavailable" });
+		return;
+	}
+	const beads = safeMissionBeads(snapshot.beads, snapshot.mission, snapshot.planPath) ?? [];
+	const analysis = analyzeBeadBreadth(beads, { maxFiles, maxComponents });
+	const oversizedIds: string[] = [];
+	for (const bead of analysis.oversized_beads) oversizedIds.push(bead.id);
+	const evidence = {
+		active_beads: analysis.active_beads, checked_beads: analysis.checked_beads,
+		oversized_ids: oversizedIds, oversized_beads: analysis.oversized_beads,
+		unknown_ids: analysis.unknown_ids,
+	};
+	if (!analysis.active_beads) {
+		put("bead_breadth", null, metricTarget, "NOT_APPLICABLE", { ...evidence, reason: "no active mission beads" });
+		return;
+	}
+	if (analysis.oversized_beads.length) {
+		put("bead_breadth", { oversized_count: analysis.oversized_beads.length, oversized_ids: evidence.oversized_ids }, metricTarget, "FAIL", evidence);
+		return;
+	}
+	if (analysis.unknown_ids.length) {
+		put("bead_breadth", null, metricTarget, "UNKNOWN", evidence);
+		return;
+	}
+	put("bead_breadth", { oversized_count: 0, oversized_ids: [] }, metricTarget, "PASS", evidence);
+}
 function scorePlanToCode(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
 	const hours = planToCodeHours(snapshot.repoCommits, snapshot.mission);
 	const maxHours = numberValue(target("plan_to_code_hours", 24)) ?? 24;
@@ -333,6 +509,7 @@ export function scorePlanningSnapshot(snapshot: PlanningScoreSnapshot, tuning: P
 	if (stage === "build") for (const name of HISTORICAL_METRICS) put(name, null, name === "plan_present" || name === "converted_once" ? true : tuning.targets[name] ?? null, "NOT_APPLICABLE", { stage: "build" });
 	else { scorePlanPresence(snapshot, target, put); scoreHistoryMetrics(snapshot, target, put); scorePlanToCode(snapshot, target, put); }
 	scoreBeadQuality(snapshot, target, put);
+	scoreBeadBreadth(snapshot, target, put);
 	const planShip = planShipRatio(snapshot, tuning);
 	put("plan_ship_ratio_7d", planShip.value, "<= " + String(target("plan_ship_ratio_7d", 2)), planShip.status, planShip.evidence);
 	const ci = localMainGreenOrHosted(snapshot.ci);
@@ -368,7 +545,7 @@ export type PlanningScoreOptions = { kitRoot: string; repoPath?: string; fleet?:
 function scoreRepoEntry(entry: FleetRepo, kitRoot: string, home: string, defaultTuning: PlanningScoreTuning, nowEpochSeconds: number): MissionScore[] {
 	const repoPath = expandPath(entry.path, home, kitRoot);
 	const trackerPath = expandPath(entry.tracker ?? entry.path, home, kitRoot);
-	let config: LoadedConfig;
+	let config: LoadedPlanningScoreConfig;
 	try { config = loadPlanningScoreConfig(kitRoot, repoPath, home); }
 	catch (error) { return [unknownScore(entry.name, repoPath, "UNKNOWN", defaultTuning, error instanceof Error ? error.message : String(error))]; }
 	const repoCommits = readGitLog(repoPath);
@@ -426,6 +603,10 @@ function targetForMetric(name: string, tuning: PlanningScoreTuning): unknown {
 		median_chars: ">= " + String(tuning.targets.bead_self_contained_median_chars ?? 300),
 		acceptance_present_share: ">= " + String(tuning.targets.bead_self_contained_acceptance_present_share ?? 0.4),
 		deps_per_bead: ">= " + String(tuning.targets.bead_self_contained_deps_per_bead ?? 1),
+	};
+	if (name === "bead_breadth") return {
+		max_files: tuning.targets.bead_breadth_max_files ?? 5,
+		max_components: tuning.targets.bead_breadth_max_components ?? 3,
 	};
 	return tuning.targets[name] ?? null;
 }
@@ -709,10 +890,11 @@ function validateTuning(raw: Record<string, unknown>): PlanningScoreTuning | nul
 	const targets = record(raw.targets) ? raw.targets : null;
 	const weights = record(raw.weights) ? raw.weights : null;
 	if (!targets || !weights) return null;
-	const requiredTargets = ["plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained_median_chars", "bead_self_contained_acceptance_present_share", "bead_self_contained_deps_per_bead", "plan_to_code_hours", "plan_ship_ratio_7d"];
+	const requiredTargets = ["plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained_median_chars", "bead_self_contained_acceptance_present_share", "bead_self_contained_deps_per_bead", "bead_breadth_max_files", "bead_breadth_max_components", "plan_to_code_hours", "plan_ship_ratio_7d"];
 	for (const key of requiredTargets) if (numberValue(targets[key]) === null) return null;
-	if (typeof targets.plan_present !== "boolean" || typeof targets.main_green !== "boolean") return null;
+	if (!positiveInteger(targets.bead_breadth_max_files) || !positiveInteger(targets.bead_breadth_max_components)) return null;
 	for (const name of SCORE_METRIC_NAMES) if (numberValue(weights[name]) === null || numberValue(weights[name])! <= 0) return null;
+	if (typeof targets.plan_present !== "boolean" || typeof targets.main_green !== "boolean") return null;
 	return { targets: targets as Record<string, number | boolean>, weights: weights as Record<string, number> };
 }
 function readFleetConfig(kitRoot: string, home: string): { raw: Record<string, unknown>; tuning: PlanningScoreTuning; fleet: FleetRepo[]; planDefault: string } | null {
@@ -725,12 +907,12 @@ function readFleetConfig(kitRoot: string, home: string): { raw: Record<string, u
 	if (!tuning || !fleet || !planDefault) return null;
 	return { raw, tuning, fleet, planDefault };
 }
-function parseConfigError(root: string, home: string): LoadedConfig {
+function parseConfigError(root: string, home: string): LoadedPlanningScoreConfig {
 	const loaded = readFleetConfig(root, home);
 	if (!loaded) throw new Error("Default planning-score config is invalid or unreadable");
 	return loaded;
 }
-export function loadPlanningScoreConfig(kitRoot: string, repoPath: string, home = process.env.HOME ?? ""): LoadedConfig {
+export function loadPlanningScoreConfig(kitRoot: string, repoPath: string, home = process.env.HOME ?? ""): LoadedPlanningScoreConfig {
 	const base = readFleetConfig(resolve(kitRoot), home);
 	if (!base) throw new Error("Default planning-score config is invalid or unreadable");
 	const raw = mergeRepoConfig(base.raw, loadOverride(resolve(repoPath)));

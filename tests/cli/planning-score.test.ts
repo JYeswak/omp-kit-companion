@@ -30,11 +30,12 @@ const tuning = {
 	targets: {
 		plan_present: true, plan_rounds: 4, plan_last_diff: 0.05, converted_once: 1, coverage_checks: 1,
 		polish_rounds: 6, polish_last_changed: 0.05, bead_self_contained_median_chars: 300,
-		bead_self_contained_acceptance_present_share: 0.4, bead_self_contained_deps_per_bead: 1, plan_to_code_hours: 24,
-		plan_ship_ratio_7d: 2,
+		bead_self_contained_acceptance_present_share: 0.4, bead_self_contained_deps_per_bead: 1,
+		bead_breadth_max_files: 5, bead_breadth_max_components: 3, plan_to_code_hours: 24, plan_ship_ratio_7d: 2,
 	},
 	weights: { plan_present: 1, plan_rounds: 1, plan_last_diff: 1, converted_once: 1, coverage_checks: 1,
-		polish_rounds: 1, polish_last_changed: 1, bead_self_contained: 1, plan_to_code_hours: 1, plan_ship_ratio_7d: 1, main_green: 1 },
+		polish_rounds: 1, polish_last_changed: 1, bead_self_contained: 1, bead_breadth: 1,
+		plan_to_code_hours: 1, plan_ship_ratio_7d: 1, main_green: 1 },
 };
 const now = 1_800_000_000;
 const day = 86_400;
@@ -43,7 +44,7 @@ function commit(sha: string, subject: string, timestamp: number, extra: Record<s
 }
 function bead(id: string, extra: Record<string, unknown> = {}) {
 	return { id, title: "Mission item", description: "Plan: PLAN_demo.md section 1. " + "detail ".repeat(55) + "Names tests.",
-		acceptance_criteria: "Test outcomes are verified.", status: "open", dependencies: [{ depends_on_id: "root", type: "blocks" }], ...extra };
+		acceptance_criteria: "Test outcomes are verified in `src/demo/worker.ts`.", status: "open", dependencies: [{ depends_on_id: "root", type: "blocks" }], ...extra };
 }
 function passingSnapshot() {
 	const planBeads = Array.from({ length: 20 }, (_, i) => bead("b" + i));
@@ -129,7 +130,7 @@ test("fleet weighted score includes each mission metric instance", async () => {
 	const passing = api.scorePlanningSnapshot(passingSnapshot(), tuning);
 	const failing = api.scorePlanningSnapshot({ ...passingSnapshot(), mission: "broken", planExists: false }, tuning);
 	const overall = api.scorePlanningFleet([passing, failing], tuning);
-	expect(overall).toMatchObject({ status: "FAIL", weighted_score: 72.73 });
+	expect(overall).toMatchObject({ status: "FAIL", weighted_score: 75 });
 });
 
 test("planted planning defects fail only their own metric", async () => {
@@ -380,6 +381,125 @@ function writeBeadProject(label: string, issues: unknown[]): { root: string; hom
 	writeFileSync(join(root, ".beads", "issues.jsonl"), (issues as Record<string, unknown>[]).map((issue) => JSON.stringify(issue)).join("\n") + "\n");
 	return { root, home };
 }
+
+test("A9 doctor and planning score CLI share configured bead breadth", () => {
+	const { root, home } = writeBeadProject("bead-breadth-cli", []);
+	const cli = join(repoRoot, "src", "cli.ts");
+	mkdirSync(join(root, ".omp"), { recursive: true });
+	const issue = (id: string, paths: readonly string[]) => {
+		let acceptance = "- [ ] Outcome is verified";
+		for (const path of paths) acceptance += " `" + path + "`";
+		return {
+			id, title: id, description: "Acceptance defines the affected file scope.", acceptance_criteria: acceptance,
+			status: "open", issue_type: "task", labels: ["mission:demo"], dependencies: [],
+		};
+	};
+	const issues = [
+		issue("over-files", ["src/payments/a.ts", "src/payments/b.ts", "src/payments/c.ts", "src/payments/d.ts", "src/payments/e.ts"]),
+		issue("over-components", ["src/capture/a.ts", "src/settlement/a.ts", "src/ledger/a.ts"]),
+		issue("one-component", ["src/shared/start.ts", "src/shared/finish.ts"]),
+		issue("at-limit", ["src/reports/a.ts", "src/reports/b.ts", "src/export/a.ts", "src/export/b.ts"]),
+		issue("repeated", ["src/repeated/one.ts", "src/repeated/one.ts", "src/repeated/one.ts"]),
+		issue("missing", []),
+		issue("unparseable", ["src/unparseable"]),
+	];
+	const lines: string[] = [];
+	for (const item of issues) lines.push(JSON.stringify(item));
+	writeFileSync(join(root, ".beads", "issues.jsonl"), lines.join("\n") + "\n");
+	const writeConfig = (maxFiles: number, maxComponents: number) => {
+		const config = `[targets]\nbead_breadth_max_files = ${maxFiles}\nbead_breadth_max_components = ${maxComponents}\n` +
+			"[missions.demo]\nstage = \"build\"\n[ci]\nmode = \"local\"\ncheck = \"true\"\nbranch = \"main\"\nreceipts = \"receipts\"\n";
+		writeFileSync(join(root, ".omp", "planning-score.toml"), config);
+	};
+	const git = (args: string[]) => {
+		const result = Bun.spawnSync(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+	};
+	git(["init", "--quiet"]);
+	git(["config", "user.name", "Bead Fixture"]);
+	git(["config", "user.email", "bead-fixture@example.invalid"]);
+	git(["commit", "--allow-empty", "-m", "fixture [test]"]);
+	git(["branch", "-M", "main"]);
+	const env = { ...process.env, HOME: home, PATH: "/usr/bin:/bin", XDG_STATE_HOME: join(home, "state"), TMPDIR: scratch };
+	for (const key of ["BEADS_DB", "OMP", "OMP_BIN", "OMP_PATH", "OMP_PROFILE", "PI_PROFILE", "PI_CODING_AGENT_DIR"]) delete env[key];
+	const doctorBreadth = () => {
+		const result = Bun.spawnSync([process.execPath, cli, "doctor", "--scope", "beads", "--project", root, "--json"], {
+			cwd: root, env, stdout: "pipe", stderr: "pipe", timeout: 10_000,
+		});
+		expect(result.exitCode, result.stderr.toString()).not.toBe(null);
+		expect(result.stderr.toString()).toBe("");
+		const parsed: unknown = JSON.parse(result.stdout.toString());
+		if (!record(parsed) || !record(parsed.data) || !Array.isArray(parsed.data.findings)) return null;
+		const findings = parsed.data.findings as unknown[];
+		for (const finding of findings) if (record(finding) && finding.component === "bead_breadth") return finding;
+		return null;
+	};
+	const planningMission = () => {
+		const result = Bun.spawnSync([process.execPath, cli, "planning", "score", "--repo", root, "--json"], {
+			cwd: repoRoot, env, stdout: "pipe", stderr: "pipe", timeout: 10_000,
+		});
+		expect(result.exitCode, result.stderr.toString()).not.toBe(null);
+		const rows: Record<string, unknown>[] = [];
+		for (const line of result.stdout.toString().trim().split("\n")) {
+			if (!line.trim()) continue;
+			const parsed: unknown = JSON.parse(line);
+			if (record(parsed) && record(parsed.data)) rows.push(parsed.data);
+		}
+		for (const row of rows) if (row.kind === "mission") return row;
+		return null;
+	};
+	const breadthMetric = (mission: Record<string, unknown> | null) => {
+		if (!mission || !record(mission.metrics)) return null;
+		const breadth = mission.metrics.bead_breadth;
+		return record(breadth) ? breadth : null;
+	};
+	writeConfig(4, 2);
+	const diagnosed = doctorBreadth();
+	const scored = breadthMetric(planningMission());
+	if (!diagnosed || !record(diagnosed.evidence) || !scored) throw new Error("A9 CLI output omitted bead breadth evidence");
+	const diagnosedEvidence = diagnosed.evidence;
+	const scoredEvidence = record(scored.evidence) ? scored.evidence : null;
+	const oversizedIds = ["over-files", "over-components"];
+	expect(diagnosed.status).toBe("FAIL");
+	expect(diagnosedEvidence.oversized_ids).toEqual(oversizedIds);
+	expect(diagnosedEvidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(scored.status).toBe("FAIL");
+	if (!record(scored.value) || !scoredEvidence) throw new Error("A9 planning score omitted breadth evidence");
+	expect(scored.value.oversized_ids).toEqual(oversizedIds);
+	expect(scoredEvidence.oversized_ids).toEqual(oversizedIds);
+	expect(scoredEvidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	const details = diagnosedEvidence.oversized_beads;
+	if (!Array.isArray(details)) throw new Error("A9 doctor omitted measured spans");
+	let filesSuggestion = "";
+	let componentsSuggestion = "";
+	let fileCount = 0;
+	let componentCount = 0;
+	for (const item of details) {
+		if (!record(item)) continue;
+		if (item.id === "over-files") {
+			filesSuggestion = typeof item.split_suggestion === "string" ? item.split_suggestion : "";
+			fileCount = typeof item.file_count === "number" ? item.file_count : 0;
+			componentCount = typeof item.component_count === "number" ? item.component_count : 0;
+		}
+		if (item.id === "over-components" && typeof item.split_suggestion === "string") componentsSuggestion = item.split_suggestion;
+	}
+	expect(fileCount).toBe(5);
+	expect(componentCount).toBe(1);
+	expect(filesSuggestion).toContain("src/payments");
+	expect(componentsSuggestion).toContain("src/capture");
+	writeConfig(5, 3);
+	const relaxedDoctor = doctorBreadth();
+	const relaxedMetric = breadthMetric(planningMission());
+	if (!relaxedDoctor || !record(relaxedDoctor.evidence) || !relaxedMetric || !record(relaxedMetric.evidence))
+		throw new Error("A9 relaxed CLI output omitted bead breadth evidence");
+	expect(relaxedDoctor.status).toBe("UNVERIFIED");
+	expect(relaxedDoctor.evidence.oversized_ids).toEqual([]);
+	expect(relaxedDoctor.evidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(relaxedMetric.status).toBe("UNKNOWN");
+	expect(relaxedMetric.value).toBeNull();
+	expect(relaxedMetric.evidence.oversized_ids).toEqual([]);
+	expect(relaxedMetric.evidence.unknown_ids).toEqual(["missing", "unparseable"]);
+}, 30_000);
 
 
 

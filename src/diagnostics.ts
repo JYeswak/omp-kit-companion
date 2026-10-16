@@ -14,8 +14,8 @@ import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
-import { record } from "./mcp-sources.ts";
 import { pluginPackageHash } from "./apply-plugin.ts";
+import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
 export interface Finding {
@@ -42,7 +42,7 @@ export interface DiagnoseInput {
 
 export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly string[]>> = {
 	kit: ["kit", "manifest", "planning_skill"],
-	beads: ["beads"],
+	beads: ["beads", "bead_breadth"],
 	omp: ["omp"],
 	rules: ["installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules"],
 	profile: ["effective_profile"],
@@ -1198,6 +1198,57 @@ function inspectBeadDuplicates(project: string): Finding {
 		? finding("beads", "FAIL", "Likely duplicate beads share most of their title, description and acceptance text", "Merge each pair into one canonical bead, keeping the richer testing specs and dependency chain.", { tracker_path: trackerPath, duplicate_pairs: pairs })
 		: finding("beads", "OK", "No live bead pair shares enough text to look duplicated", "No action required.", { tracker_path: trackerPath, checked_beads: tokenized.length, duplicate_pairs: pairs });
 }
+
+function inspectBeadBreadth(project: string, kitRoot: string, home: string): Finding {
+	const trackerPath = join(project, ".beads", "issues.jsonl");
+	if (pathState(trackerPath) !== "file")
+		return finding("bead_breadth", "UNVERIFIED", "Tracker issues export is missing or unsafe", "Run doctor --scope beads --project PATH on the tracker repository.", { tracker_path: trackerPath });
+	let rows: unknown[];
+	try {
+		rows = [];
+		for (const line of fileBytes(trackerPath).toString("utf8").split("\n")) {
+			if (!line.trim()) continue;
+			rows.push(JSON.parse(line));
+		}
+	} catch {
+		return finding("bead_breadth", "UNVERIFIED", "Tracker issues export cannot be read as JSONL", "Repair the read-only tracker export before measuring bead breadth.", { tracker_path: trackerPath });
+	}
+	let config: LoadedPlanningScoreConfig;
+	try { config = loadPlanningScoreConfig(kitRoot, project, home); }
+	catch (error) {
+		return finding("bead_breadth", "UNVERIFIED", "Planning-score breadth limits are missing or invalid",
+			"Restore valid bead breadth limits in config/planning-score.toml or the repository override.",
+			{ tracker_path: trackerPath, config_error: error instanceof Error ? error.message : String(error) });
+	}
+	const maxFiles = config.tuning.targets.bead_breadth_max_files;
+	const maxComponents = config.tuning.targets.bead_breadth_max_components;
+	if (typeof maxFiles !== "number" || typeof maxComponents !== "number")
+		return finding("bead_breadth", "UNVERIFIED", "Planning-score breadth limits are unavailable",
+			"Restore valid bead breadth limits in config/planning-score.toml or the repository override.", { tracker_path: trackerPath });
+	const beads: PlanningBead[] = [];
+	let malformedRows = false;
+	for (const row of rows) {
+		if (record(row)) beads.push(row);
+		else malformedRows = true;
+	}
+	const analysis = analyzeBeadBreadth(beads, { maxFiles, maxComponents });
+	const oversizedIds: string[] = [];
+	for (const bead of analysis.oversized_beads) oversizedIds.push(bead.id);
+	const unknownIds = [...analysis.unknown_ids];
+	if (malformedRows && !unknownIds.includes("UNKNOWN")) unknownIds.push("UNKNOWN");
+	unknownIds.sort();
+	const status = analysis.oversized_beads.length ? "FAIL" : unknownIds.length ? "UNVERIFIED" : "OK";
+	const reason = analysis.oversized_beads.length ? "Active beads exceed the configured file or component breadth limits" :
+		unknownIds.length ? "Some active beads lack parseable acceptance file evidence" : "No active bead exceeds the configured breadth limits";
+	const recommendation = analysis.oversized_beads.length
+		? "Split oversized beads into child beads grouped by the reported components; keep integration acceptance in the parent."
+		: unknownIds.length ? "Add backtick-delimited repository-relative file paths to active acceptance criteria, or repair malformed tracker rows." : "No action required.";
+	const evidence = {
+		tracker_path: trackerPath, limits: { max_files: maxFiles, max_components: maxComponents }, active_beads: analysis.active_beads,
+		checked_beads: analysis.checked_beads, oversized_ids: oversizedIds, oversized_beads: analysis.oversized_beads, unknown_ids: unknownIds,
+	};
+	return finding("bead_breadth", status, reason, recommendation, evidence);
+}
 /** DRAIN1 (ompkit-kdbz.1): stale in-progress claims from the tracker's beads.db. Read-only. */
 function inspectDrainStaleClaims(project: string): Finding {
 	const dir = resolve(project);
@@ -1270,6 +1321,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	}
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadDuplicates(resolve(input.project)));
+	if (input.scope === "beads" && input.project) rows.push(inspectBeadBreadth(resolve(input.project), root, home));
 	if (input.scope === "beads" && input.project) rows.push(inspectDrainStaleClaims(resolve(input.project)));
 	if (input.scope === "identity" && input.project) rows.push(inspectPaneIdentity(defaultPaneIdentity(resolve(input.project))));
 	if (input.scope === "flywheel" && input.project) rows.push(...inspectFlywheelScope(resolve(input.project)));
