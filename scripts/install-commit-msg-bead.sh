@@ -129,6 +129,7 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh" \
 		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh" \
 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
+		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
@@ -344,6 +345,15 @@ install_commit_notes() {
 	printf 'installed commit-notes member: %s\n' "$member"
 }
 
+# install_stale_worktree: the commit-msg member refuses commits that would
+# revert lines landed in HEAD (STALEWT1, ompkit-fp72.120.10); it runs after
+# the notes member.
+install_stale_worktree() {
+	member="$(chain_dir commit-msg)/49-omp-kit-stale-worktree"
+	place "$KITROOT/scripts/check-stale-worktree.sh" "$member" +x
+	printf 'installed stale-worktree member: %s\n' "$member"
+}
+
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
 	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
@@ -383,6 +393,7 @@ fi
 ensure_chain commit-msg
 install_commit_msg
 install_commit_notes
+install_stale_worktree
 ensure_chain pre-push
 install_on_main
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push

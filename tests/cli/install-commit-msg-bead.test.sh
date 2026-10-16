@@ -254,7 +254,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh check-staged-fragments.sh check-staged-regexploit.sh; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"

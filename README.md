@@ -44,7 +44,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 30 named scopes, opt-in guard extensions
+Around that core sit diagnostics for 31 named scopes, opt-in guard extensions
 for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Why use omp-kit
@@ -54,7 +54,7 @@ for multi-agent fleets, service jobs, and a self-updating release channel.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 30 components, from OMP identity to leaked secrets |
+| See what is broken | `omp-kit doctor --scope NAME` covers 31 components, from OMP identity to leaked secrets |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -122,7 +122,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 30 diagnostic scopes
+### Doctor: 31 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -589,6 +589,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope public-files` | Missing standard public files | `omp-kit doctor --scope public-files --project PATH` |
 | `--scope github` | Read-only GitHub capability probes | `omp-kit doctor --scope github` |
 | `--scope secrets` | Files holding an Infisical value, by file and vault name; `--staged` for the pre-commit hook | `omp-kit doctor --scope secrets --staged` |
+| `--scope stale-worktree` | Worktree paths that remove lines landed in HEAD, with the blamed commit and bead | `omp-kit doctor --scope stale-worktree --project PATH` |
 
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus

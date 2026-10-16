@@ -27,6 +27,7 @@ import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, pla
 import { inspectOmpSessions } from "./session-doctor.ts";
 import { censusLoad } from "./load-doctor.ts";
 import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
+import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
 import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -395,6 +396,12 @@ function secretsDoctor(request: ParsedCommand): CliResult {
 	const root = request.flags.get("--root");
 	const report = inspectSecrets(secretsScanInputFromEnv(process.env, { ...(typeof root === "string" ? { root } : {}), staged: request.flags.has("--staged"), cwd: process.cwd() }));
 	return { code: report.overall === "PASS" ? 0 : report.overall === "FAIL" ? 1 : 3, data: report, commands: ["omp-kit doctor --scope secrets --json"], verification: report.overall === "UNVERIFIED" ? "UNVERIFIED" : "PERFORMED" };
+}
+function staleWorktreeDoctor(request: ParsedCommand): CliResult {
+	const projectFlag = request.flags.get("--project");
+	const dir = typeof projectFlag === "string" && projectFlag ? projectFlag : process.cwd();
+	const report = inspectStaleWorktree(dir);
+	return { code: report.overall === "FAIL" ? 1 : 0, data: report, commands: ["omp-kit doctor --scope stale-worktree --json"], verification: report.overall === "UNVERIFIED" ? "UNVERIFIED" : "PERFORMED" };
 }
 function loadWatchCommand(): CliResult {
 	const stateRoot = join(process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "", ".local", "state"), "omp-kit", "load");
@@ -3652,6 +3659,7 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
 	if (command.name === "doctor" && flags.get("--scope") === "load") return loadDoctor();
 	if (command.name === "doctor" && flags.get("--scope") === "secrets") return secretsDoctor(request);
+	if (command.name === "doctor" && flags.get("--scope") === "stale-worktree") return staleWorktreeDoctor(request);
 	if (command.name === "doctor" && flags.has("--staged")) return refusal("INVALID_FLAG", "--staged is only valid for doctor --scope secrets", "Use omp-kit doctor --scope secrets --staged in a Git repository.");
 	if (command.name === "doctor" && flags.has("--deep")) return diagnosticInventory(request);
 	if (command.name === "doctor" && flags.has("--profile") && !["memory", "mcp", "context"].includes(String(flags.get("--scope")))) {
