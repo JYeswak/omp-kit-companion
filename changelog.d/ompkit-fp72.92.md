@@ -1,1 +1,0 @@
-- Filter doctor scopes before diagnostic work, avoiding unrelated OMP profile probes. Status and bare invocation retain on-disk findings and explicitly report runtime rule activation as NOT_RUN; use `omp-kit doctor --scope rules --json` for live per-profile checks. Health and full doctor retain their requested checks.
