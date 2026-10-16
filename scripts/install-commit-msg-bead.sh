@@ -1,11 +1,15 @@
 #!/bin/sh
-# Install the bead-id commit-msg hook, the reference-transaction ref guard and
-# the pushed-beads pre-push member into a repo's hook chains.
-# Usage: install-commit-msg-bead.sh [--check] [--no-pre-push] [REPO] (default: this kit checkout).
-# --no-pre-push installs the forward-only pair (commit-msg + ref guard): new
-# id-less commits are refused, existing history is not judged. A full install
-# refuses (exit 5) when the unpublished range already holds id-less commits,
-# because the pre-push member would then block every push of that repo.
+# Install the bead-id commit-msg hook, the reference-transaction ref guard,
+# the shared-main pre-push member and the pushed-beads pre-push member into a
+# repo's hook chains.
+# Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
+# The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
+# it judges only where a push moves the remote main, never old messages.
+# --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
+# shared-main member): new id-less commits are refused, existing history is not
+# judged. A full install refuses (exit 5) when the unpublished range already
+# holds id-less commits, because the pushed-beads member would then block
+# every push of that repo.
 # For each hook type the installer handles three states: absent (creates a
 # chain runner), bespoke (moves the existing entry to hooks.d/<type>/10-<name>
 # and creates a runner that calls it first, then ours), chain (adds our
@@ -19,11 +23,11 @@ UNDO_RM=""
 UNDO_RESTORE=""
 KITROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 MODE=install
-PREPUSH=1
+PUSHED_BEADS=1
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) MODE=check; shift ;;
-		--no-pre-push) PREPUSH=0; shift ;;
+		--no-pushed-beads) PUSHED_BEADS=0; shift ;;
 		*) break ;;
 	esac
 done
@@ -41,13 +45,14 @@ esac
 if [ "$MODE" = "check" ]; then
 	stale=0
 	for pair in "hooks.d/commit-msg/40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh" \
+		"hooks.d/pre-push/30-omp-kit-on-main scripts/check-pushed-on-main.sh" \
 		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
 		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
 		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
 		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh"; do
 		# shellcheck disable=SC2086
 		set -- $pair
-		case "$1" in hooks.d/pre-push/*) [ "$PREPUSH" = 1 ] || continue ;; esac
+		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
 		dest="$HOOKS/$1"
 		src="$KITROOT/$2"
 		if [ ! -f "$dest" ]; then
@@ -198,6 +203,15 @@ EOF
 	printf 'installed pushed-beads member: %s\n' "$member"
 }
 
+# install_on_main: the shared-main member reads the pre-push lines itself and
+# runs before the pushed-beads member and any 40- gate, so an off-main push is
+# refused before a slow gate starts.
+install_on_main() {
+	member="$(chain_dir pre-push)/30-omp-kit-on-main"
+	place "$KITROOT/scripts/check-pushed-on-main.sh" "$member" +x
+	printf 'installed shared-main push member: %s\n' "$member"
+}
+
 # install_ref_txn: the plumbing backstop. commit-tree + update-ref and
 # --no-verify never run commit-msg; git runs reference-transaction for every
 # ref update. The judge sits beside the member, non-executable (see above).
@@ -227,9 +241,9 @@ fi
 # A pushed-range member installed over unpublished id-less commits would
 # refuse every later push of this repo (2026-10-16: five held fourteen). Refuse
 # before any mutation and name the remedies.
-if [ "$PREPUSH" = 1 ] && git -C "$TARGET" rev-parse -q --verify HEAD > /dev/null; then
+if [ "$PUSHED_BEADS" = 1 ] && git -C "$TARGET" rev-parse -q --verify HEAD > /dev/null; then
 	if ! RANGE_OUT=$(CDPATH='' cd -- "$TARGET" && sh "$KITROOT/scripts/check-pushed-beads.sh" --repo "$TARGET" --base HEAD --tip HEAD 2>&1); then
-		printf 'install-commit-msg-bead: REFUSED: %s already holds unpublished id-less commits (%s); a pre-push member would block every push. Name their bead ids first, or rerun with --no-pre-push for the forward-only guard.\n' \
+		printf 'install-commit-msg-bead: REFUSED: %s already holds unpublished id-less commits (%s); a pushed-beads member would block every push. Name their bead ids first, or rerun with --no-pushed-beads for the forward-only set.\n' \
 			"$TARGET" "$(printf '%s' "$RANGE_OUT" | head -1)" >&2
 		exit 5
 	fi
@@ -237,10 +251,9 @@ fi
 
 ensure_chain commit-msg
 install_commit_msg
-if [ "$PREPUSH" = 1 ]; then
-	ensure_chain pre-push
-	install_pre_push
-fi
+ensure_chain pre-push
+install_on_main
+[ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn
 
@@ -264,13 +277,13 @@ case "$PROBE_OUT" in
 	*commit-msg-bead*) ;;
 	*) rollback "refusal did not come from the bead-id member: $(printf '%s' "$PROBE_OUT" | head -1)" ;;
 esac
-# Leg 3: the pre-push member must pass the current range (valid pushes flow).
+# Leg 3: the pre-push members must pass the current range (valid pushes flow).
 # Leg 4: the ref guard must refuse moving main to a planted id-less commit
 # and must pass the same update of any other ref. The guard member is fed the
 # update line directly, so no bespoke hook in the chain sees a synthetic
 # update; nothing is moved and the probe commit is a dangling object.
 if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
-	if [ "$PREPUSH" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
+	if [ "$PUSHED_BEADS" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
 		rollback "pre-push member rejects the current range in $TARGET"
 	fi
 	GUARD="$HOOKS/hooks.d/reference-transaction/40-omp-kit-ref-txn-bead"
@@ -286,6 +299,23 @@ if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
 	if ! printf '%s %s refs/heads/probe-other\n' "$HEAD_SHA" "$PLANT" | (CDPATH='' cd -- "$TARGET" && BEADS_DB="$PROBE_DB" sh "$GUARD" prepared) >/dev/null 2>&1; then
 		rollback "ref guard refused an update of a ref other than main in $TARGET"
 	fi
+	# Leg 5: the shared-main member must pass local main and refuse the probe
+	# commit (a child of HEAD that main does not hold) pushed to the remote main.
+	ONMAIN="$HOOKS/hooks.d/pre-push/30-omp-kit-on-main"
+	if MAIN_SHA=$(git -C "$TARGET" rev-parse -q --verify 'refs/heads/main^{commit}'); then
+		if ! printf 'refs/heads/main %s refs/heads/main %s\n' "$MAIN_SHA" "$MAIN_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$ONMAIN") >/dev/null 2>&1; then
+			rollback "shared-main member refused local main in $TARGET"
+		fi
+	else
+		printf 'install-commit-msg-bead: WARN: %s has no refs/heads/main; the shared-main member refuses every push to the remote main\n' "$TARGET" >&2
+	fi
+	if MAIN_OUT=$(printf 'refs/heads/probe %s refs/heads/main %s\n' "$PLANT" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$ONMAIN") 2>&1); then
+		rollback "shared-main member let an off-main commit move the remote main in $TARGET"
+	fi
+	case "$MAIN_OUT" in
+		*check-pushed-on-main*) ;;
+		*) rollback "off-main refusal did not come from the shared-main member: $(printf '%s' "$MAIN_OUT" | head -1)" ;;
+	esac
 else
 	printf 'install-commit-msg-bead: WARN: %s has no HEAD commit; pre-push and ref-guard probes skipped\n' "$TARGET" >&2
 fi

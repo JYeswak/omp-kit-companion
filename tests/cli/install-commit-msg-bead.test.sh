@@ -2,7 +2,8 @@
 # install-commit-msg-bead.test.sh — COMMIT1 installer contract (ompkit-2w7h).
 # Fixture repos: one with no commit-msg hook, one with a plain bash hook.
 # Asserts dispatcher creation, bespoke preservation + chaining, pre-push
-# member install, and nonzero exit whenever a member would be inactive.
+# member install (shared-main always, pushed-beads unless opted out), and
+# nonzero exit whenever a member would be inactive.
 set -u
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
@@ -108,8 +109,8 @@ ok "$?" "0" "refusing-install-rc"
 [ -x "$E/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]
 ok "$?" "0" "refusing-member-present"
 
-# 3. pre-push member installed and dispatcher executable
-[ -x "$A/.git/hooks/pre-push" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ]
+# 3. pre-push members installed and dispatcher executable
+[ -x "$A/.git/hooks/pre-push" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]
 ok "$?" "0" "prepush-installed"
 # The member resolves its repo from the cwd (pre-push protocol), so run the
 # chain from inside the fixture like a real push does.
@@ -128,10 +129,13 @@ mkdir -p "$TMP/oldkit/scripts"
 cp "$INSTALLER" "$TMP/oldkit/scripts/install-commit-msg-bead.sh"
 printf '#!/bin/sh\n# old hook predating the fix\nexit 0\n' > "$TMP/oldkit/scripts/commit-msg-bead.sh"
 printf '# old checker\n' > "$TMP/oldkit/scripts/check-pushed-beads.sh"
+printf '# old shared-main guard\n' > "$TMP/oldkit/scripts/check-pushed-on-main.sh"
 sh "$TMP/oldkit/scripts/install-commit-msg-bead.sh" --check "$A" > "$TMP/o-stale" 2>&1
 ok "$?" "3" "check-stale-rc"
 grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" "$TMP/o-stale"
 ok "$?" "0" "check-stale-named"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" "$TMP/o-stale"
+ok "$?" "0" "check-stale-on-main-named"
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
@@ -150,7 +154,8 @@ for leftover in "$F/.git/hooks/hooks.d/commit-msg"/.undo.*; do [ -e "$leftover" 
 ok "$rc" "0" "restore-no-backup-left"
 
 # 7. a full install over unpublished id-less history is refused before any
-#    mutation (exit 5); --no-pre-push installs the forward-only pair
+#    mutation (exit 5); --no-pushed-beads installs the forward-only set, which
+#    still carries the shared-main member (it never judges old messages)
 G=$(new_repo idless)
 mkdir -p "$G/.beads"
 : > "$G/.beads/beads.db"
@@ -159,11 +164,11 @@ sh "$INSTALLER" "$G" > "$TMP/o-idless" 2>&1
 ok "$?" "5" "idless-full-refused"
 if [ ! -e "$G/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ] && [ ! -e "$G/.git/hooks/reference-transaction" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "idless-nothing-mutated"
-sh "$INSTALLER" --no-pre-push "$G" > /dev/null 2>&1
+sh "$INSTALLER" --no-pushed-beads "$G" > /dev/null 2>&1
 ok "$?" "0" "idless-forward-only-rc"
-if [ -x "$G/.git/hooks/hooks.d/reference-transaction/40-omp-kit-ref-txn-bead" ] && [ ! -e "$G/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ]; then rc=0; else rc=1; fi
+if [ -x "$G/.git/hooks/hooks.d/reference-transaction/40-omp-kit-ref-txn-bead" ] && [ -x "$G/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ] && [ ! -e "$G/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "idless-forward-only-members"
-sh "$INSTALLER" --check --no-pre-push "$G" > /dev/null 2>&1
+sh "$INSTALLER" --check --no-pushed-beads "$G" > /dev/null 2>&1
 ok "$?" "0" "idless-forward-only-check-fresh"
 
 # 8. a bespoke stdin-reading reference-transaction keeps working beside the
@@ -174,7 +179,7 @@ mkdir -p "$H/.beads"
 : > "$H/.beads/beads.db"
 printf '#!/bin/sh\ncat >> "$(git rev-parse --git-dir)/bespoke-saw"\nexit 0\n' > "$H/.git/hooks/reference-transaction"
 chmod +x "$H/.git/hooks/reference-transaction"
-sh "$INSTALLER" --no-pre-push "$H" > /dev/null 2>&1
+sh "$INSTALLER" --no-pushed-beads "$H" > /dev/null 2>&1
 ok "$?" "0" "stdin-install-rc"
 HB=$(git -C "$H" rev-parse HEAD)
 HP=$(printf 'replayed update with no identity\n' | git -C "$H" commit-tree "$HB^{tree}" -p "$HB")
@@ -189,12 +194,48 @@ I=$(new_repo upgrade)
 mkdir -p "$I/.git/hooks/hooks.d/reference-transaction"
 printf '#!/bin/sh\n# chain runner: run every executable NN-<name> member in hooks.d/<type> in\nset -u\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)\nrc=0\nfor hook in "$here/hooks.d/$(basename -- "$0")"/[0-9][0-9]-*; do [ -x "$hook" ] && { sh "$hook" "$@" || rc=$?; }; done\nexit $rc\n' > "$I/.git/hooks/reference-transaction"
 chmod +x "$I/.git/hooks/reference-transaction"
-sh "$INSTALLER" --no-pre-push "$I" > "$TMP/o-upgrade" 2>&1
+sh "$INSTALLER" --no-pushed-beads "$I" > "$TMP/o-upgrade" 2>&1
 ok "$?" "0" "upgrade-install-rc"
 grep -q "upgraded chain runner" "$TMP/o-upgrade"
 ok "$?" "0" "upgrade-announced"
 grep -q 'replay one buffered copy' "$I/.git/hooks/reference-transaction"
 ok "$?" "0" "upgrade-runner-replays"
+
+# 10. a real push through the installed chain: main publishes; a candidate
+#     committed on origin's main but not on local main is refused, and the
+#     remote keeps its main (planted: the private-index publication that split
+#     zestroku into two histories, 1818d71, 2026-10-16)
+J=$(new_repo pushreal)
+git -C "$J" branch -M main
+git init -q --bare "$TMP/pushreal-origin.git"
+git -C "$J" remote add origin "$TMP/pushreal-origin.git"
+sh "$INSTALLER" "$J" > /dev/null 2>&1
+ok "$?" "0" "pushreal-install-rc"
+git -C "$J" push -q origin main > /dev/null 2>&1
+ok "$?" "0" "pushreal-main-published"
+JB=$(git -C "$J" rev-parse main)
+JX=$(printf 'private candidate on origin main\n' | git -C "$J" commit-tree "$JB^{tree}" -p "$JB")
+(CDPATH='' cd -- "$J" && git push origin "$JX:refs/heads/main") > "$TMP/o-pushreal" 2>&1
+ok "$?" "1" "pushreal-candidate-refused"
+grep -q "check-pushed-on-main: REFUSED $JX" "$TMP/o-pushreal"
+ok "$?" "0" "pushreal-refusal-named"
+ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-unmoved"
+
+# 11. an inert shared-main member (passes an off-main commit) is caught by the
+#     live probe: the install rolls back and leaves no member behind
+mkdir -p "$TMP/inertkit/scripts"
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh; do
+	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
+done
+printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
+K=$(new_repo inert)
+git -C "$K" branch -M main
+sh "$TMP/inertkit/scripts/install-commit-msg-bead.sh" "$K" > "$TMP/o-inert" 2>&1
+ok "$?" "1" "inert-member-rollback-rc"
+grep -q "shared-main member let an off-main commit move the remote main" "$TMP/o-inert"
+ok "$?" "0" "inert-member-named"
+[ ! -e "$K/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]
+ok "$?" "0" "inert-member-removed"
 
 printf 'install-commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
