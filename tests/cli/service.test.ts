@@ -641,9 +641,33 @@ test("planted: systemd doctor rejects TMPDIR outside private state scratch", () 
   }
 });
 
+function cliOmpBin(home: string): string {
+  const prefix = join(home, "fixture-omp");
+  const bin = join(prefix, "bin");
+  if (existsSync(join(bin, "omp"))) return bin;
+  const pkg = join(prefix, "package");
+  for (const dir of ["dist", "src/export", "src/capability", "src/discovery", "node_modules/@oh-my-pi/pi-natives"]) {
+    mkdirSync(join(pkg, dir), { recursive: true });
+  }
+  writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "1.0.0" }));
+  writeFileSync(join(pkg, "dist", "cli.js"), "#!/bin/sh\nprintf 'omp/1.0.0\\n'\n", { mode: 0o755 });
+  writeFileSync(join(pkg, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
+  for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(pkg, "src", file), "export {};\n");
+  mkdirSync(bin, { recursive: true });
+  symlinkSync(join(pkg, "dist", "cli.js"), join(bin, "omp"));
+  return bin;
+}
+
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
+  const env: Record<string, string | undefined> = {
+    ...process.env, HOME: home, XDG_STATE_HOME: extraEnv.XDG_STATE_HOME ?? join(home, ".local", "state"),
+    // Fixture-owned admission and OMP metadata; production observers remain independently tested.
+    OMP_KIT_LOAD_OVERRIDE: "0/1", ...extraEnv,
+    PATH: `${cliOmpBin(home)}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
+  };
+  for (const key of ["OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC"]) delete env[key];
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home, XDG_STATE_HOME: extraEnv.XDG_STATE_HOME ?? join(home, ".local", "state"), ...extraEnv }, stdout: "pipe", stderr: "pipe",
+    cwd: home, env, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }
@@ -658,7 +682,7 @@ test("service run executes the stable launcher and writes a job receipt", () => 
   mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
   chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
   const result = cli(["service", "run", "omp-watch"], home);
-  expect(result.code).toBe(0);
+  expect(result.code, JSON.stringify(result.envelope)).toBe(0);
   expect(result.envelope.data).toMatchObject({ overall: "OK", job: "omp-watch" });
   const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
   expect(receipt).toMatchObject({ exit: 0 });
@@ -676,7 +700,7 @@ test("service run maps a failing launcher to FINDINGS without losing the receipt
   mkdirSync(join(home, ".local", "state", "omp-kit"), { recursive: true, mode: 0o700 });
   chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
   const result = cli(["service", "run", "omp-watch"], home);
-  expect(result.code).toBe(1);
+  expect(result.code, JSON.stringify(result.envelope)).toBe(1);
   expect(result.envelope.data).toMatchObject({ overall: "FINDINGS", job: "omp-watch" });
   expect(result.envelope.errors[0].code).toBe("JOB_FAILED");
   const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
@@ -1058,6 +1082,16 @@ function runHome(exitCode: number): string {
   return home;
 }
 
+test("service run under explicit overload refuses before executing the launcher", () => {
+  const home = runHome(0);
+  const marker = join(home, "launcher-ran");
+  writeFileSync(join(home, ".local", "bin", "omp-kit"), "#!/bin/sh\n: > \"$HOME/launcher-ran\"\nexit 0\n", { mode: 0o755 });
+  const result = cli(["service", "run", "omp-watch"], home, { OMP_KIT_LOAD_OVERRIDE: "1000/1" });
+  expect(result.code, JSON.stringify(result.envelope)).toBe(4);
+  expect(result.envelope.data).toMatchObject({ status: "SKIPPED-LOAD", receipt: { exit: 4, status: "SKIPPED-LOAD" } });
+  expect(existsSync(marker)).toBe(false);
+});
+
 test("service run notifies on failure and stays silent on success", () => {
   if (process.platform !== "darwin" && process.platform !== "linux") {
     console.info("skip: desktop notification only exists on macOS and Linux");
@@ -1066,7 +1100,7 @@ test("service run notifies on failure and stays silent on success", () => {
   const { dir, log } = fakebin();
   const path = `${dir}:${process.env.PATH ?? ""}`;
   const failing = cli(["service", "run", "omp-watch"], runHome(3), { PATH: path, NOTIFY_LOG: log });
-  expect(failing.code).toBe(1);
+  expect(failing.code, JSON.stringify(failing.envelope)).toBe(1);
   expect(failing.envelope.data.notification.attempted).toBe(true);
   expect(readFileSync(log, "utf8")).toContain("omp-kit test did not pass after an OMP update");
   rmSync(log, { force: true });

@@ -1,10 +1,10 @@
 name: CI
 
-# Every push to main runs the fast Linux gate (CLI contracts, ladder) to completion, one run per commit, so
-# every landed commit gets its own verdict (agents push after every commit). Pull requests into main run the
-# same fast gate; on any ref other than main a newer push cancels the older run.
-# Push/PR CLI contracts run as three parallel suites; cli-contracts aggregates them
-# under the stable required check name. Non-push workflows keep the full test matrix.
+# Every push to main runs the fast required gate to completion, one run per commit, so
+# every landed commit gets its own verdict. Pull requests run the same Linux suites
+# and targeted macOS service contracts; on other refs a newer push cancels the older run.
+# cli-contracts aggregates both under the stable required check name.
+# Non-push workflows keep the full test matrix.
 # The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
 # (workflow_call from release.yml), on OMP certification (workflow_call from omp-certify.yml) and daily.
 # There is no manual dispatch: 99 manual full-native runs in Oct 1-4 were most of the macOS minutes;
@@ -85,6 +85,28 @@ jobs:
             printf 'certified=%s\n' "$certified"
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
+  mac-service-contracts:
+    if: github.event.repository.private == false && (github.event_name == 'push' || github.event_name == 'pull_request')
+    needs: resolve-omp-versions
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Install the certified OMP for service receipt contracts
+        env:
+          OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
+        run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
+      - name: Generate the source manifest and fixture parent
+        run: |
+          mkdir -p var/agent-tmp
+          sh scripts/build-manifest.sh
+      - name: Verify macOS service execution, receipts, notifications and admission
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bun test --timeout 120000 ./tests/cli/service.test.ts
   cli-contracts-suites:
     if: github.event.repository.private == false
     needs: resolve-omp-versions
@@ -237,7 +259,7 @@ jobs:
   cli-contracts:
     name: cli-contracts (${{ matrix.os }})
     if: ${{ always() && github.event.repository.private == false && needs.resolve-omp-versions.result == 'success' }}
-    needs: [resolve-omp-versions, cli-contracts-suites]
+    needs: [resolve-omp-versions, cli-contracts-suites, mac-service-contracts]
     strategy:
       fail-fast: false
       matrix:
@@ -247,10 +269,16 @@ jobs:
       - name: Require all CLI contract suites to pass
         env:
           SUITES_RESULT: ${{ needs.cli-contracts-suites.result }}
+          MAC_SERVICE_REQUIRED: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+          MAC_SERVICE_RESULT: ${{ needs.mac-service-contracts.result }}
         run: |
           set -euo pipefail
           if [[ "$SUITES_RESULT" != "success" ]]; then
             echo "CLI contract suites result: $SUITES_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$MAC_SERVICE_REQUIRED" == "true" && "$MAC_SERVICE_RESULT" != "success" ]]; then
+            echo "macOS service contracts result: $MAC_SERVICE_RESULT" >&2
             exit 1
           fi
   ladder:
