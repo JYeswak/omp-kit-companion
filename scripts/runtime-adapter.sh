@@ -1,6 +1,7 @@
 #!/bin/sh
 # runtime-adapter.sh [private-stage-options] <allowlisted-script> [args...]
 # runtime-adapter.sh --workdir
+# runtime-adapter.sh --validate-work-root
 # Packaged scripts never discover or execute a host bun from PATH.
 set -u
 
@@ -24,6 +25,10 @@ system_tmp_root() {
 
 private_temp_contains() {
   candidate=$1
+  if [ -n "${OMP_KIT_TEST_WORK_ROOT:-}" ]; then
+    case "$candidate" in "$caller_work_root"/*) return 0 ;; esac
+    return 1
+  fi
   primary=$(system_tmp_root) || return 1
   case "$candidate" in "$primary"/*) return 0 ;; esac
   if [ "$(/usr/bin/uname -s)" = Darwin ] && [ -d /private/tmp ]; then
@@ -45,24 +50,65 @@ private_owner_mode() {
   [ "$owner" = "$(/usr/bin/id -u)" ] && [ "$mode" = 700 ]
 }
 
+same_uid() {
+  if [ "$(/usr/bin/uname -s)" = Darwin ]; then
+    file_uid=$(/usr/bin/stat -f '%u' "$1" 2>/dev/null) || return 1
+  else
+    file_uid=$(/usr/bin/stat -c '%u' "$1" 2>/dev/null) || return 1
+  fi
+  [ "$file_uid" = "$(/usr/bin/id -u)" ]
+}
+
+validate_work_root() {
+  case "${OMP_KIT_TEST_WORK_ROOT:-}" in /*) ;; *) die "OMP_KIT_TEST_WORK_ROOT must be absolute" ;; esac
+  case "${OMP_KIT_CASE_CWD:-}" in /*) ;; *) die "OMP_KIT_CASE_CWD must be an absolute caller workspace" ;; esac
+  caller_repo=$(CDPATH='' cd -- "$OMP_KIT_CASE_CWD" 2>/dev/null && pwd -P) || die "caller workspace is unavailable"
+  checked_path=$OMP_KIT_TEST_WORK_ROOT
+  while [ "$checked_path" != / ]; do
+    [ ! -L "$checked_path" ] || die "OMP_KIT_TEST_WORK_ROOT must not contain symlinks"
+    checked_path=$(dirname "$checked_path")
+  done
+  caller_work_root=$(CDPATH='' cd -- "$OMP_KIT_TEST_WORK_ROOT" 2>/dev/null && pwd -P) || die "OMP_KIT_TEST_WORK_ROOT is unavailable"
+  case "$caller_work_root" in "$caller_repo/var/agent-tmp"/*) ;; *) die "OMP_KIT_TEST_WORK_ROOT must resolve under $caller_repo/var/agent-tmp" ;; esac
+  same_uid "$caller_work_root" || die "OMP_KIT_TEST_WORK_ROOT must be owned by this user"
+  marker="$caller_work_root/.owner"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || die "OMP_KIT_TEST_WORK_ROOT needs a regular nonsymlink .owner marker"
+  same_uid "$marker" || die "OMP_KIT_TEST_WORK_ROOT .owner must be owned by this user"
+  marker_repo=; repo_count=0
+  while IFS= read -r owner_line || [ -n "$owner_line" ]; do
+    case "$owner_line" in repo=*) marker_repo=${owner_line#repo=}; repo_count=$((repo_count + 1)) ;; esac
+  done < "$marker"
+  [ "$repo_count" = 1 ] && [ "$marker_repo" = "$caller_repo" ] || die "OMP_KIT_TEST_WORK_ROOT .owner repo must match the caller workspace"
+}
+
+caller_work_root=; caller_repo=
+if [ "${OMP_KIT_TEST_WORK_ROOT+x}" = x ]; then
+  validate_work_root
+fi
+if [ "${1:-}" = --validate-work-root ]; then
+  [ "$#" -eq 1 ] || die "--validate-work-root takes no arguments"
+  [ -n "$caller_work_root" ] || die "OMP_KIT_TEST_WORK_ROOT is required"
+  printf '%s\n' "$caller_work_root"
+  exit 0
+fi
+
 new_workdir() {
-	# os.tmpdir() semantics, not a literal path and never the release tree:
-	# honor TMPDIR (under the fleet guard it lands in the repo's var/agent-tmp;
-	# on a user machine, the system temp), else /tmp. A TMPDIR inside the
-	# release root (e.g. an agent session under the fleet guard) falls back to
-	# /tmp: the --work-dir validation below requires system-temp containment
-	# outside the release/HOME, and the release snapshot fails on any leftover
-	# under the release tree. Callers trap-remove the work root.
-	base="${TMPDIR:-/tmp}"
-	base_real=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || base_real=""
-	root_real=$(CDPATH='' cd -- "$ROOT" && pwd -P) || die "cannot resolve release root"
-	case "$base_real" in
-	"$root_real"|"$root_real"/*)
-		echo "runtime-adapter: TMPDIR ($base) is inside the release tree; falling back to /tmp" >&2
-		base=/tmp ;;
-	esac
-	if [ -z "$base" ] || [ ! -d "$base" ]; then
-		die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})"
+	# Explicit caller scratch never falls back to system temp. Default off-fleet
+	# behavior still honors TMPDIR outside the release tree.
+	if [ -n "$caller_work_root" ]; then
+		base=$caller_work_root
+	else
+		base="${TMPDIR:-/tmp}"
+		base_real=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || base_real=""
+		root_real=$(CDPATH='' cd -- "$ROOT" && pwd -P) || die "cannot resolve release root"
+		case "$base_real" in
+		"$root_real"|"$root_real"/*)
+			echo "runtime-adapter: TMPDIR ($base) is inside the release tree; falling back to /tmp" >&2
+			base=/tmp ;;
+		esac
+		if [ -z "$base" ] || [ ! -d "$base" ]; then
+			die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})"
+		fi
 	fi
 	umask 077
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
@@ -73,10 +119,10 @@ new_workdir() {
 	argv0=$(/usr/bin/ps -p "$owner_pid" -o comm= 2>/dev/null || true)
 	if [ -n "$process_start" ] && [ -n "$argv0" ]; then
 		printf 'pid=%s\nprocess_start=%s\nlabel=omp-kit-work\nrepo=%s\ncreated_at=%s\nargv0=%s\n' \
-			"$owner_pid" "$process_start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
+			"$owner_pid" "$process_start" "${caller_repo:-$ROOT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
 	else
 		printf 'pid=%s\nlabel=omp-kit-work\nrepo=%s\ncreated=%s\n' \
-			"$owner_pid" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.owner"
+			"$owner_pid" "${caller_repo:-$ROOT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.owner"
 	fi
 	printf '%s\n' "$work"
 }
@@ -143,7 +189,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
   sandbox_real=$(CDPATH='' cd -- "$sandbox" && pwd -P) || die "cannot resolve isolated sandbox"
 # The P01 runtime creates each sandbox with this mkdtemp prefix; caller-shaped XDG trees refuse.
   case "${sandbox_real##*/}" in omp-kit-runtime-*) ;; *) die "sandbox was not created by embedded runtime" ;; esac
-  private_temp_contains "$sandbox_real" || die "isolated sandbox is outside the system temporary roots"
+  private_temp_contains "$sandbox_real" || die "isolated sandbox is outside the permitted temporary root"
   case "$sandbox_real" in "$ROOT"|"$ROOT"/*|"$HOME"|"$HOME"/*) die "isolated sandbox overlaps the release or HOME" ;; esac
   private_owner_mode "$sandbox_real" || die "sandbox must be owned by this user and mode 700"
   for directory in home tmp xdg-config xdg-cache xdg-data xdg-state bun-install; do
@@ -159,7 +205,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
       die "--work-dir is absent or symlinked"
     fi
     work_real=$(CDPATH='' cd -- "$work_dir" && pwd -P) || die "cannot resolve --work-dir"
-    private_temp_contains "$work_real" || die "--work-dir is outside the system temporary roots"
+    private_temp_contains "$work_real" || die "--work-dir is outside the permitted temporary root"
     case "$work_real" in "$ROOT"|"$ROOT"/*|"$HOME"|"$HOME"/*) die "--work-dir overlaps the release or HOME" ;; esac
     private_owner_mode "$work_real" || die "--work-dir must be owned by this user and mode 700"
   fi
@@ -169,6 +215,11 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     [ "$work_set" = 1 ] || die "live scenario data requires --work-dir"
     case "$data_path" in "$work_real"/*) ;; *) die "live scenario data escaped --work-dir" ;; esac
   done
+  if [ -n "$caller_work_root" ]; then
+    set -- "OMP_KIT_TEST_WORK_ROOT=$caller_work_root" BUN_BE_BUN=1 "$executable" "$script" "$@"
+  else
+    set -- BUN_BE_BUN=1 "$executable" "$script" "$@"
+  fi
   exec /usr/bin/env -i \
     PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
@@ -181,7 +232,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     OMP_KIT_CASE_CWD="${OMP_KIT_CASE_CWD:-}" \
     OMP_KIT_WORK_DIR="$work_real" \
     SCEN="$scenario" LOG="$log_file" PORTFILE="$port_file" \
-    BUN_BE_BUN=1 "$executable" "$script" "$@"
+    "$@"
 fi
 
 # A checkout is the only place where a separately installed Bun is an allowed fallback.
