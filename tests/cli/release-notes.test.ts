@@ -509,3 +509,54 @@ test("rolling source notes release a green ancestor without consuming newer main
 	expect(empty.exitCode).toBe(4);
 	expect(empty.output).toContain("nothing to release");
 });
+
+test("source notes retain direct-commit coverage after notes are folded into an unpublished version", () => {
+	const dir = changelogFixture("folded-direct-source", releasedChangelog, {});
+	const localGit = (...args: string[]) => {
+		const child = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
+		expect(child.exitCode, child.stderr.toString()).toBe(0);
+		return child.stdout.toString().trim();
+	};
+	localGit("config", "user.name", "Folded Source Fixture");
+	localGit("config", "user.email", "folded-source@example.invalid");
+	localGit("config", "commit.gpgsign", "false");
+	localGit("config", "core.hooksPath", "/dev/null");
+	localGit("add", ".");
+	localGit("commit", "-qm", "published baseline [test]");
+	localGit("tag", "v0.2.2");
+	mkdirSync(join(dir, "src"));
+	writeFileSync(join(dir, "src/guard.ts"), "guard source\n");
+	localGit("add", ".");
+	localGit("commit", "-qm", "legacy guard without a trailer [test]");
+	const direct = localGit("rev-parse", "HEAD");
+	const folded = releasedChangelog.replace("## [0.2.2] - 2026-10-02",
+		"## [0.2.3] - 2026-10-03\n\n### Fixed\n\n- The guard is documented. (commit 0000000)\n\n## [0.2.2] - 2026-10-02");
+	writeFileSync(join(dir, "CHANGELOG.md"), folded);
+	localGit("add", ".");
+	localGit("commit", "-qm", "folded note names the wrong commit [test]");
+	const output = join(workspace, "folded-direct-notes.md");
+	const wrong = releaseIn(dir, "source", "--base-tag", "v0.2.2", "--head", "HEAD", "--version", "0.2.4", "--output", output);
+	expect(wrong.exitCode).toBe(1);
+	expect(existsSync(output)).toBe(false);
+	writeFileSync(join(dir, "CHANGELOG.md"), folded.replace("(commit 0000000)", `(commit ${direct.slice(0, 7)})`));
+	localGit("add", ".");
+	localGit("commit", "-qm", "folded note names the actual commit [test]");
+	const qualified = localGit("rev-parse", "HEAD");
+	const covered = releaseIn(dir, "source", "--base-tag", "v0.2.2", "--head", qualified, "--version", "0.2.4", "--output", output);
+	expect(covered.exitCode, covered.output).toBe(0);
+	expect(readFileSync(output, "utf8")).toBe(`### Fixed\n\n- The guard is documented. (commit ${direct.slice(0, 7)})\n`);
+	expect(localGit("rev-parse", "HEAD")).toBe(qualified);
+	expect(localGit("status", "--porcelain")).toBe("");
+});
+
+test("release check identifies all uncovered direct commits in one pass", () => {
+	git("update-ref", "refs/heads/main", releaseHead);
+	const first = commitTree(treeWithFiles(releaseHead, { "src/first-uncovered.ts": "first\n" }), [releaseHead], "First uncovered change [test]", []);
+	const second = commitTree(treeWithFiles(first, { "src/second-uncovered.ts": "second\n" }), [first], "Second uncovered change [test]", []);
+	git("update-ref", "refs/heads/main", second);
+	const uncovered = release("check", "--base-tag", "v0.2.2", "--head", "HEAD");
+	expect(uncovered.exitCode).toBe(1);
+	expect(uncovered.output).toContain(first.slice(0, 7));
+	expect(uncovered.output).toContain(second.slice(0, 7));
+	git("update-ref", "refs/heads/main", releaseHead);
+});

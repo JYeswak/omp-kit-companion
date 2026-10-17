@@ -278,7 +278,22 @@ function collectHistory(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolea
 	// Do not re-emit historical notes when their fragments are edited after the base release.
 	const currentFragments = fragments.filter(fragment => !fragment.pr || !baseReleasedPrs.has(fragment.pr));
 	for (const pr of baseReleasedPrs) byPr.delete(pr);
-	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, [...currentFragments, ...folded]);
+	// Folded notes may be the only surviving reference after an unpublished
+	// promotion or history repair. Use entries from this source, never newer main.
+	const priorChangelogEntries = new Set(bodyEntries(parseBody(
+		baseReleaseSection.lines.filter(line => !line.startsWith("# ") && !UNRELEASED_HEADING.test(line) && !VERSION_HEADING.test(line)),
+		"CHANGELOG.md at the release floor",
+	)).map(entryKey));
+	const namedFoldedNotes: Fragment[] = [];
+	for (const entry of bodyEntries(parseBody(
+		unreleased.lines.filter(line => !line.startsWith("# ") && !UNRELEASED_HEADING.test(line) && !VERSION_HEADING.test(line)),
+		"CHANGELOG.md in the selected source",
+	))) {
+		if (priorChangelogEntries.has(entryKey(entry))) continue;
+		const content = entry.join("\n");
+		if (content.includes("(commit ")) namedFoldedNotes.push({ path: "CHANGELOG.md", content });
+	}
+	const directCommits = collectDirectCommitCoverage(git, gitRaw, base, head, [...currentFragments, ...folded, ...namedFoldedNotes]);
 	return { mergedPrs, fragments: currentFragments, byPr, unreleasedByPr, directCommits };
 }
 
@@ -302,6 +317,7 @@ function collectDirectCommitCoverage(
 		"log", "--first-parent", "--reverse", "--format=%H%x00%P%x00%B%x00", `${base}..${head}`,
 	]).split("\0");
 	const coverages: DirectCommitCoverage[] = [];
+	const errors: string[] = [];
 	for (let index = 0; index + 2 < fields.length; index += 3) {
 		const hash = fields[index]!.trim();
 		const parents = fields[index + 1]!.trim().split(/\s+/).filter(Boolean);
@@ -317,10 +333,16 @@ function collectDirectCommitCoverage(
 
 		const shortHash = hash.slice(0, 7);
 		const waivers = [...body.matchAll(/^[ \t]*\[no-changelog\][ \t]*(.*)$/gm)];
-		if (waivers.length > 1) fail(`direct commit ${shortHash} has multiple [no-changelog] reasons`);
+		if (waivers.length > 1) {
+			errors.push(`direct commit ${shortHash} has multiple [no-changelog] reasons`);
+			continue;
+		}
 		if (waivers.length === 1) {
 			const reason = waivers[0]![1]!.trim();
-			if (!reason) fail(`direct commit ${shortHash} has an empty [no-changelog] reason`);
+			if (!reason) {
+				errors.push(`direct commit ${shortHash} has an empty [no-changelog] reason`);
+				continue;
+			}
 			coverages.push({ hash: shortHash, noChangelogReason: reason });
 			continue;
 		}
@@ -331,17 +353,25 @@ function collectDirectCommitCoverage(
 			coverages.push({ hash: shortHash, bead: beads[0] ?? "-", fragment: referenced });
 			continue;
 		}
-		if (beads.length !== 1)
-			fail(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason, or a fragment naming (commit ${shortHash})`);
+		if (beads.length !== 1) {
+			errors.push(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason, or a fragment naming (commit ${shortHash})`);
+			continue;
+		}
 		const bead = beads[0]!;
 		const slug = bead.split("-").at(-1)!;
-		if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(slug))
-			fail(`direct commit ${shortHash} has an invalid Bead: trailer: ${bead}`);
+		if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(slug)) {
+			errors.push(`direct commit ${shortHash} has an invalid Bead: trailer: ${bead}`);
+			continue;
+		}
 		const paths = [`changelog.d/${slug}.md`, `changelog.d/${bead}.md`];
 		const fragment = fragments.find(candidate => paths.includes(candidate.path));
-		if (!fragment) fail(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${paths[0]}`);
+		if (!fragment) {
+			errors.push(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${paths[0]}`);
+			continue;
+		}
 		coverages.push({ hash: shortHash, bead, fragment });
 	}
+	if (errors.length) fail(errors.join("\n"));
 	return coverages;
 }
 
