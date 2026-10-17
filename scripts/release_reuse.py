@@ -763,6 +763,42 @@ def _published(repository: str) -> set[str]:
     return {row["tag_name"] for page in pages for row in page if not row["draft"] and not row["prerelease"]}
 
 
+AUTHORITY_JOB_GROUPS = ("attest", "attest-index", "signed-consumers")
+
+
+def _sign_authority_complete(repository: str, sign_run: dict[str, Any]) -> bool:
+    """True only when the signing run's exact attempt executed AND succeeded every attestation and signed-consumer job.
+
+    A skipped, failed, cancelled or absent group is incomplete. Matrix jobs are named "<group> (<leg>)"."""
+    attempt = sign_run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        raise ValueError("signing run has no authoritative native attempt")
+    pages = _api(repository, f"actions/runs/{sign_run['id']}/attempts/{attempt}/jobs?per_page=100", paginate=True)
+    jobs = [job for page in pages for job in page["jobs"]]
+    for group in AUTHORITY_JOB_GROUPS:
+        members = [job for job in jobs if job.get("name") == group or str(job.get("name", "")).startswith(f"{group} (")]
+        if not members or any(job.get("status") != "completed" or job.get("conclusion") != "success" for job in members):
+            return False
+    return True
+
+
+def _signing_cannot_complete(repository: str, rows: list[dict[str, Any]], qualification: dict[str, Any]) -> bool:
+    """A finished qualification whose latest tag-ref signing run is terminal-green but never ran its authority jobs.
+
+    The tag-ref workflow is immutable, so re-dispatching its publisher can only refuse again. Healthy, in-flight,
+    failed-signing (existing diagnose path) and fully-authorized candidates are never classified here."""
+    if qualification.get("status") != "completed" or qualification.get("conclusion") != "success":
+        return False
+    _, version, sha, train = qualification["display_title"].split()
+    signs = [row for row in rows if row.get("display_title") == release_title("sign", version, sha, train[6:])]
+    if not signs:
+        return False
+    latest = max(signs, key=_attempt_order)
+    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+        return False
+    return not _sign_authority_complete(repository, latest)
+
+
 def pending_candidate(rows: list[dict[str, Any]], published: set[str], published_floor: str | None) -> dict[str, Any] | None:
     """Resume native qualification independently of unrelated tag reservations."""
     floor = tuple(map(int, published_floor.split("."))) if published_floor is not None else None
@@ -964,11 +1000,18 @@ def _drive(args: argparse.Namespace) -> int:
                     published.discard(f"v{prior_version}")
     remaining = list(rows)
     authority: tuple[dict[str, Any], dict[str, Any], bytes] | None = None
+    # Sources whose immutable tag-ref signing finished green WITHOUT its authority/consumer jobs. Their tag and bytes
+    # are retained as evidence; they are neither resumed nor re-signed, and are never selected again.
+    unsignable_shas: set[str] = set()
     while True:
         pending = pending_candidate(remaining, published, recovery_floor)
         if pending is None:
             break
-        _, _, _, train = pending["display_title"].split()
+        _, _, prior_sha_value, train = pending["display_title"].split()
+        if _signing_cannot_complete(repository, rows, pending):
+            unsignable_shas.add(prior_sha_value)
+            remaining = [row for row in remaining if row["id"] != pending["id"]]
+            continue
         try:
             authority = _find_owner_for_qualification(repository, train[6:], str(pending["id"]))
         except UnboundQualification:
@@ -1027,6 +1070,10 @@ def _drive(args: argparse.Namespace) -> int:
         sha = select_source(ci_runs, history, args.requested)
         if not sha:
             print("TRAIN=skip REASON=no-qualified-unreleased-source")
+            return _store_plan(args, {"kind": "skip"})
+        if sha in unsignable_shas:
+            # Its immutable tag-ref workflow cannot gain the fix; only a newer source carrying it can release.
+            print(f"TRAIN=skip REASON=selected-source-signing-unrepairable source_sha={sha}")
             return _store_plan(args, {"kind": "skip"})
         # Signing runs from the eventual source tag, not this owner's main
         # checkout. Compare its implementation, never a manually bumped label.

@@ -1247,6 +1247,90 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertEqual(plan["source_sha"], source)
             dispatch.assert_not_called()
 
+    @staticmethod
+    def _prior_cut(source_sha: str, *, qualification: dict[str, Any] | None = None, sign: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """A finished qualification for 0.2.20 plus (optionally) its tag-ref signing run, as the native API lists them."""
+        qualify = dict(candidate_run(source_sha), id=500, display_title=release_reuse.release_title("qualify", "0.2.20", source_sha, "800"),
+                       **(qualification or {}))
+        rows = [qualify]
+        if sign is not None:
+            rows.append(dict(candidate_run(source_sha), id=777, head_branch="v0.2.20",
+                             display_title=release_reuse.release_title("sign", "0.2.20", source_sha, "800"), **sign))
+        return rows
+
+    def _drive_with_prior_cut(self, build_rows, *, authority_complete: bool = False, owner_lookup=None, **case):
+        with self.published_floor_case(unpublished_tag="v0.2.20", **case) as (args, root, source, dispatch):
+            rows = build_rows(source)
+            def runs(repository, workflow, event="workflow_dispatch", **kwargs):
+                return list(rows) if workflow == "release.yml" else []
+            owner = patch.object(release_reuse, "_find_owner_for_qualification",
+                                 side_effect=owner_lookup or AssertionError("owner lookup must not be reached"))
+            with patch.object(release_reuse, "_run_rows", side_effect=runs), \
+                 patch.object(release_reuse, "_sign_authority_complete", return_value=authority_complete), owner:
+                try:
+                    release_reuse._drive(args)
+                    error = None
+                except Exception as caught:  # noqa: BLE001 - the tests assert the exact outcome below
+                    error = caught
+            plan = json.loads((root / "plan.json").read_text()) if (root / "plan.json").exists() else None
+            return plan, error, source, dispatch
+
+    def test_green_signing_without_authority_jobs_does_not_trap_recovery_on_the_old_cut(self) -> None:
+        old = "b" * 40
+        plan, error, source, dispatch = self._drive_with_prior_cut(lambda _s: self._prior_cut(old, sign={"conclusion": "success"}))
+        self.assertIsNone(error)
+        self.assertEqual((plan["kind"], plan["source_sha"], plan["version"]), ("allocate", source, "0.2.21"))
+        dispatch.assert_not_called()
+
+    def test_unsignable_source_is_never_reallocated_while_it_is_the_newest_green_source(self) -> None:
+        plan, error, source, dispatch = self._drive_with_prior_cut(
+            lambda source: self._prior_cut(source, sign={"conclusion": "success"}))
+        self.assertIsNone(error)
+        self.assertEqual(plan, {"kind": "skip"})
+        dispatch.assert_not_called()
+
+    def test_healthy_or_authorized_or_failed_signing_cuts_are_never_abandoned(self) -> None:
+        reached = RuntimeError("owner lookup reached")
+        old = "b" * 40
+        cases = {
+            "in-flight qualification": (lambda _s: self._prior_cut(old, qualification={"status": "in_progress", "conclusion": None}), False),
+            "qualified, signing not started": (lambda _s: self._prior_cut(old), False),
+            "signing in flight": (lambda _s: self._prior_cut(old, sign={"status": "in_progress", "conclusion": None}), False),
+            "signing with every authority job green": (lambda _s: self._prior_cut(old, sign={"conclusion": "success"}), True),
+        }
+        for name, (build, authority_complete) in cases.items():
+            with self.subTest(name):
+                plan, error, _, dispatch = self._drive_with_prior_cut(build, authority_complete=authority_complete, owner_lookup=reached)
+                self.assertIs(error, reached)
+                dispatch.assert_not_called()
+        with self.subTest("failed signing keeps the diagnose-forward refusal"):
+            plan, error, _, _ = self._drive_with_prior_cut(lambda _s: self._prior_cut(old, sign={"conclusion": "failure"}),
+                                                           owner_lookup=lambda *a, **k: (_ for _ in ()).throw(reached))
+            self.assertIsNotNone(error)
+            self.assertNotEqual(plan and plan.get("kind"), "allocate")
+
+    def test_signing_authority_requires_every_attestation_and_consumer_job_to_succeed(self) -> None:
+        def run_with(jobs):
+            with patch.object(release_reuse, "_api", return_value=[{"jobs": jobs}]):
+                return release_reuse._sign_authority_complete(REPOSITORY, {"id": 777, "run_attempt": 1})
+        def job(name, conclusion="success"):
+            return {"name": name, "status": "completed", "conclusion": conclusion}
+        complete = [job("attest (linux-x64-gnu)"), job("attest (darwin-arm64-none)"), job("attest-index"),
+                    job("signed-consumers (linux-x64-gnu, ubuntu-24.04)"), job("validate-tag")]
+        self.assertTrue(run_with(complete))
+        for name, jobs in {
+            "skipped attest (the v0.2.44 sign run)": [job("attest", "skipped"), job("attest-index", "skipped"), job("signed-consumers", "skipped")],
+            "one failed consumer leg": complete[:3] + [job("signed-consumers (linux-x64-gnu, ubuntu-24.04)", "failure")],
+            "attest-index missing": [j for j in complete if j["name"] != "attest-index"],
+            "attest-index cannot stand in for attest": [job("attest-index"), job("signed-consumers (a)")],
+            "a cancelled leg": complete + [job("attest (linux-arm64-gnu)", "cancelled")],
+        }.items():
+            with self.subTest(name):
+                self.assertFalse(run_with(jobs))
+        with patch.object(release_reuse, "_api", return_value=[{"jobs": complete}]):
+            with self.assertRaises(ValueError):
+                release_reuse._sign_authority_complete(REPOSITORY, {"id": 777})
+
     def test_missing_published_tag_reserves_its_version_without_blocking_allocation(self) -> None:
         with self.published_floor_case(orphan=True) as (args, root, source, dispatch):
             self.assertEqual(release_reuse._drive(args), 0)

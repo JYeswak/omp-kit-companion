@@ -1,0 +1,2 @@
+### Fixed
+- Release recovery no longer resumes a qualification forever when its immutable tag-ref signing run finished green without executing every attestation and signed-consumer job. That cut is retained as evidence, its tag and bytes are never moved or re-signed, and the train allocates the newest qualified source that can still be signed. A source whose signing already proved unrepairable is never reallocated, and healthy in-flight, failed-signing and fully authorized cuts are unchanged.
