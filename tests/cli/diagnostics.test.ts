@@ -1,17 +1,47 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { defaultRchReachability, diagnose, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchReachability, inspectRegexTools, type Finding, type RchReachabilityDeps } from "../../src/diagnostics.ts";
+import { delimiter, dirname, join } from "node:path";
+import { defaultRchReachability, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchReachability, inspectRegexTools, type Finding, type RchReachabilityDeps } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const fixtures: string[] = [];
-interface Fixture { base: string; root: string; home: string; project: string; bytes: string; ompPath: string }
+interface Fixture { base: string; root: string; home: string; project: string; bunRoot: string; bytes: string; ompPath: string }
 afterEach(() => { for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+const environmentKeys = ["PATH", "HOME", "BUN_INSTALL", "OMP_KIT_OMP_SRC_CACHE", "OMP_KIT_OMP_SRC_FETCH", "OMP_PATH", "OMP_BIN", "OMP", "OMP_SRC"] as const;
+async function withEnvironment<T>(environment: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
+	const previous: Record<string, string | undefined> = {};
+	for (const key of environmentKeys) {
+		previous[key] = process.env[key];
+		const value = environment[key];
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	try {
+		return await run();
+	} finally {
+		for (const key of environmentKeys) {
+			const value = previous[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+type DiagnoseInput = Parameters<typeof diagnoseNative>[0];
+async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
+	if (!input.ompPath) return diagnoseNative(input);
+	return withEnvironment({
+		PATH: dirname(input.ompPath),
+		HOME: input.home,
+		BUN_INSTALL: dirname(dirname(input.ompPath)),
+		OMP_KIT_OMP_SRC_CACHE: join(input.home, "omp-source-cache"),
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	}, () => diagnoseNative(input));
+}
 
 function fixture(): Fixture {
 	const base = mkdtempSync(join(tmpdir(), "omp-kit-diagnostics-"));
@@ -19,6 +49,7 @@ function fixture(): Fixture {
 	const root = join(base, "release");
 	const home = join(base, "home");
 	const project = join(base, "project");
+	const bunRoot = join(base, "bun");
 	mkdirSync(join(root, "rules"), { recursive: true });
 	mkdirSync(join(root, "retired"));
 	mkdirSync(home);
@@ -26,22 +57,53 @@ function fixture(): Fixture {
 	const bytes = "# Rule A\n";
 	writeFileSync(join(root, "rules", "rule-a.md"), bytes);
 	writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nrule-a\t${hash(bytes)}\ttripwire\tabc1234\n`);
-	return { base, root, home, project, bytes, ompPath: join(base, "omp", "bin", "omp") };
+	return { base, root, home, project, bunRoot, bytes, ompPath: join(bunRoot, "bin", "omp") };
 }
-function installOmp(f: Fixture, version: string | null = "18.4.0") {
-	const pkg = join(f.base, "omp", "releases", "v1");
+function writeOmpPackage(pkg: string, version: string | null, launcherLog: string): void {
 	mkdirSync(join(pkg, "dist"), { recursive: true });
 	mkdirSync(join(pkg, "src", "export"), { recursive: true });
 	mkdirSync(join(pkg, "src", "capability"), { recursive: true });
 	mkdirSync(join(pkg, "src", "discovery"), { recursive: true });
 	mkdirSync(join(pkg, "node_modules", "@oh-my-pi", "pi-natives"), { recursive: true });
-	mkdirSync(join(f.base, "omp", "bin"), { recursive: true });
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", ...(version ? { version } : {}) }));
 	writeFileSync(join(pkg, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
 	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(pkg, "src", file), "export {};\n");
-	writeFileSync(join(pkg, "dist", "cli.js"), "#!/bin/sh\nexit 91\n");
-	chmodSync(join(pkg, "dist", "cli.js"), 0o755);
+	const launcherVersion = version ?? "18.4.0";
+	const launcher = join(pkg, "dist", "cli.js");
+	writeFileSync(launcher, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${launcherLog}'\nif [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then exit 91; fi\nprintf 'omp/${launcherVersion}\\n'\n`);
+	chmodSync(launcher, 0o755);
+}
+function installOmp(f: Fixture, version: string | null = "18.4.0", launcherLog = join(f.base, "bun-omp-argv.txt")): string {
+	const pkg = join(f.bunRoot, "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
+	mkdirSync(join(f.bunRoot, "bin"), { recursive: true });
+	writeOmpPackage(pkg, version, launcherLog);
 	symlinkSync(join(pkg, "dist", "cli.js"), f.ompPath);
+	return pkg;
+}
+function installTernOmp(f: Fixture, version: string, stateVersion = version, sourceVersion = version): { app: string; bin: string; launcher: string; cache: string } {
+	const app = join(f.base, "tern-app");
+	const bin = join(app, "bin");
+	const launcher = join(bin, "omp");
+	const binary = join(app, "versions", version);
+	const cache = join(f.base, "tern-omp-src");
+	mkdirSync(bin, { recursive: true });
+	mkdirSync(join(app, "versions"), { recursive: true });
+	writeFileSync(binary, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${join(f.base, "tern-omp-argv.txt")}'\nif [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then exit 91; fi\nprintf 'omp/${version}\\n'\n`);
+	chmodSync(binary, 0o755);
+	symlinkSync(join("..", "versions", version), launcher);
+	writeFileSync(join(app, "state.json"), JSON.stringify({ installed: { version: stateVersion } }));
+	writeOmpPackage(join(cache, version, "node_modules", "@oh-my-pi", "pi-coding-agent"), sourceVersion, join(f.base, "tern-source-omp-argv.txt"));
+	return { app, bin, launcher, cache };
+}
+function installUnmanagedOmp(f: Fixture, version: string): string {
+	const root = join(f.base, "unmanaged-omp");
+	const bin = join(root, "bin");
+	const launcher = join(bin, "omp");
+	const pkg = join(root, "package");
+	mkdirSync(bin, { recursive: true });
+	writeOmpPackage(pkg, version, join(f.base, "unmanaged-omp-argv.txt"));
+	symlinkSync(join(pkg, "dist", "cli.js"), launcher);
+	return launcher;
 }
 function tree(dir: string, prefix = ""): string[] {
 	return readdirSync(dir).sort().flatMap((name) => {
@@ -105,7 +167,7 @@ test("scope filtering beats the real two-second bound and an eager negative brea
 	const calls = join(f.base, "native-probes.log");
 	// A real subprocess delay, not a fake clock. This is a synthetic regression
 	// fixture, never evidence about latency of the operator's installed OMP.
-	writeFileSync(f.ompPath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nsleep 2.1\nprintf '[]\\n'\n`);
+	writeFileSync(f.ompPath, `#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then printf 'omp/18.4.0\\n'; exit 0; fi\nprintf '%s\\n' "$*" >> '${calls}'\n/bin/sleep 2.1\nprintf '[]\\n'\n`);
 	const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath };
 	const began = performance.now();
 	const scoped = await diagnose({ ...input, scope: "omp" });
@@ -387,6 +449,189 @@ test("missing OMP and unverifiable package version stay distinct from verified O
 	expect(finding(rows, "omp").status).toBe("UNVERIFIED");
 	expect(finding(rows, "omp").evidence?.version).toBe(null);
 });
+test("OMP doctor reports both manager-installed versions and the exact PATH winner without mutation", async () => {
+	const f = fixture();
+	const tern = installTernOmp(f, "18.4.0");
+	installOmp(f, "18.5.0");
+	const homeBefore = tree(f.home);
+	const ternBefore = tree(tern.app);
+	const bunBefore = tree(f.bunRoot);
+	const ternEnvironment = {
+		PATH: `${tern.bin}${delimiter}${dirname(f.ompPath)}`,
+		HOME: f.home,
+		BUN_INSTALL: f.bunRoot,
+		OMP_KIT_OMP_SRC_CACHE: tern.cache,
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	};
+	const ternFinding = finding(await withEnvironment(ternEnvironment, () => diagnoseNative({ root: f.root, home: f.home, scope: "omp", ompPath: tern.launcher })), "omp");
+	expect(ternFinding.status).toBe("OK");
+	expect(ternFinding.evidence).toMatchObject({
+		availability: "PRESENT",
+		location: realpathSync(tern.launcher),
+		manager_source: "tern",
+		manager_versions: {
+			tern: { status: "PRESENT", version: "18.4.0", provenance: "TERN_STATE" },
+			bun: { status: "PRESENT", version: "18.5.0", provenance: "BUN_PACKAGE_METADATA" },
+		},
+		version: "18.4.0",
+		version_proof: "PACKAGE_METADATA",
+		launcher_version: "18.4.0",
+		launcher_version_proof: "OMP_LAUNCHER",
+	});
+	const bunEnvironment = { ...ternEnvironment, PATH: `${dirname(f.ompPath)}${delimiter}${tern.bin}` };
+	const bunFinding = finding(await withEnvironment(bunEnvironment, () => diagnoseNative({ root: f.root, home: f.home, scope: "omp", ompPath: f.ompPath })), "omp");
+	expect(bunFinding.status).toBe("OK");
+	expect(bunFinding.evidence).toMatchObject({
+		availability: "PRESENT",
+		location: realpathSync(f.ompPath),
+		manager_source: "bun",
+		manager_versions: {
+			tern: { status: "PRESENT", version: "18.4.0", provenance: "TERN_STATE" },
+			bun: { status: "PRESENT", version: "18.5.0", provenance: "BUN_PACKAGE_METADATA" },
+		},
+		version: "18.5.0",
+		version_proof: "PACKAGE_METADATA",
+		launcher_version: "18.5.0",
+		launcher_version_proof: "OMP_LAUNCHER",
+	});
+	expect(tree(f.home)).toEqual(homeBefore);
+	expect(tree(tern.app)).toEqual(ternBefore);
+	expect(tree(f.bunRoot)).toEqual(bunBefore);
+	expect(readFileSync(join(f.base, "tern-omp-argv.txt"), "utf8").trim().split("\n").every(arg => arg === "--version")).toBe(true);
+	expect(readFileSync(join(f.base, "bun-omp-argv.txt"), "utf8").trim().split("\n").every(arg => arg === "--version")).toBe(true);
+});
+test("native doctor CLI reports exact Tern and Bun manager observations", () => {
+	const f = fixture();
+	const tern = installTernOmp(f, "18.4.0");
+	installOmp(f, "18.5.0");
+	const cli = join(import.meta.dir, "../../src/cli.ts");
+	const common = {
+		...process.env,
+		HOME: f.home,
+		BUN_INSTALL: f.bunRoot,
+		OMP_KIT_OMP_SRC_CACHE: tern.cache,
+		OMP_KIT_OMP_SRC_FETCH: "0",
+		XDG_STATE_HOME: join(f.base, "state"),
+		OMP_PATH: "",
+		OMP_BIN: "",
+		OMP: "",
+		OMP_SRC: "",
+	};
+	const agentConfigDir = join(f.home, ".omp", "agent");
+	mkdirSync(agentConfigDir, { recursive: true });
+	writeFileSync(join(agentConfigDir, "config.yml"), "extensions: []\n");
+	const before = { config: tree(agentConfigDir), tern: tree(tern.app), bun: tree(f.bunRoot) };
+	for (const [manager, bin, expectedVersion] of [
+		["tern", tern.bin, "18.4.0"],
+		["bun", dirname(f.ompPath), "18.5.0"],
+	] as const) {
+		const env = { ...common, PATH: `${bin}${delimiter}${manager === "tern" ? dirname(f.ompPath) : tern.bin}${delimiter}/usr/bin:/bin` };
+		const result = Bun.spawnSync([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
+			cwd: f.project, env, stdout: "pipe", stderr: "pipe", timeout: 5_000,
+		});
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		const envelope = JSON.parse(result.stdout.toString());
+		const rows: Finding[] = envelope.data.findings;
+		expect(rows.map(row => row.component)).toEqual(["omp"]);
+		expect(finding(rows, "omp")).toMatchObject({
+			status: "OK",
+			evidence: {
+				location: realpathSync(join(bin, "omp")),
+				manager_source: manager,
+				manager_versions: {
+					tern: { status: "PRESENT", version: "18.4.0", provenance: "TERN_STATE" },
+					bun: { status: "PRESENT", version: "18.5.0", provenance: "BUN_PACKAGE_METADATA" },
+				},
+				version: expectedVersion,
+				version_proof: "PACKAGE_METADATA",
+				launcher_version: expectedVersion,
+				launcher_version_proof: "OMP_LAUNCHER",
+			},
+		});
+	}
+	expect({ config: tree(agentConfigDir), tern: tree(tern.app), bun: tree(f.bunRoot) }).toEqual(before);
+	expect(readFileSync(join(f.base, "tern-omp-argv.txt"), "utf8").trim().split("\n").every(arg => arg === "--version")).toBe(true);
+	expect(readFileSync(join(f.base, "bun-omp-argv.txt"), "utf8").trim().split("\n").every(arg => arg === "--version")).toBe(true);
+});
+test("an unknown OMP manager is explicit and cannot yield a verified current finding", async () => {
+	const f = fixture();
+	const launcher = installUnmanagedOmp(f, "18.6.0");
+	const environment = {
+		PATH: dirname(launcher),
+		HOME: f.home,
+		BUN_INSTALL: join(f.base, "missing-bun"),
+		OMP_KIT_OMP_SRC_CACHE: join(f.home, "omp-source-cache"),
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	};
+	const row = finding(await withEnvironment(environment, () => diagnoseNative({ root: f.root, home: f.home, scope: "omp", ompPath: launcher })), "omp");
+	expect(row.status).toBe("UNVERIFIED");
+	expect(row.evidence).toMatchObject({
+		availability: "UNVERIFIED",
+		location: realpathSync(launcher),
+		manager_source: "unknown",
+		manager_versions: {
+			tern: { status: "UNAVAILABLE", version: null, provenance: "TERN_STATE" },
+			bun: { status: "UNAVAILABLE", version: null, provenance: "BUN_PACKAGE_METADATA" },
+		},
+		version: "18.6.0",
+		launcher_version: "18.6.0",
+	});
+});
+test("a conflicting requested launcher cannot override the PATH winner", async () => {
+	const f = fixture();
+	const tern = installTernOmp(f, "18.4.0");
+	installOmp(f, "18.5.0");
+	const environment = {
+		PATH: `${dirname(f.ompPath)}${delimiter}${tern.bin}`,
+		HOME: f.home,
+		BUN_INSTALL: f.bunRoot,
+		OMP_KIT_OMP_SRC_CACHE: tern.cache,
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	};
+	const row = finding(await withEnvironment(environment, () => diagnoseNative({ root: f.root, home: f.home, scope: "omp", ompPath: tern.launcher })), "omp");
+	expect(row.status).toBe("UNVERIFIED");
+	expect(row.reason).toContain("PATH-selected launcher");
+	expect(row.evidence).toMatchObject({
+		availability: "UNVERIFIED",
+		location: realpathSync(f.ompPath),
+		requested_location: realpathSync(tern.launcher),
+		manager_source: "bun",
+	});
+});
+test("stale Tern manager state and wrong-version source remain unverified", async () => {
+	const stale = fixture();
+	const staleTern = installTernOmp(stale, "18.4.0", "18.3.0");
+	const staleEnvironment = {
+		PATH: staleTern.bin,
+		HOME: stale.home,
+		BUN_INSTALL: join(stale.base, "missing-bun"),
+		OMP_KIT_OMP_SRC_CACHE: staleTern.cache,
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	};
+	const staleRow = finding(await withEnvironment(staleEnvironment, () => diagnoseNative({ root: stale.root, home: stale.home, scope: "omp", ompPath: staleTern.launcher })), "omp");
+	expect(staleRow.status).toBe("UNVERIFIED");
+	expect(staleRow.evidence).toMatchObject({
+		manager_source: "tern",
+		manager_versions: { tern: { status: "UNVERIFIED", version: "18.3.0", provenance: "TERN_STATE" } },
+	});
+
+	const wrongSource = fixture();
+	const wrongTern = installTernOmp(wrongSource, "18.4.0", "18.4.0", "18.3.0");
+	const wrongEnvironment = {
+		PATH: wrongTern.bin,
+		HOME: wrongSource.home,
+		BUN_INSTALL: join(wrongSource.base, "missing-bun"),
+		OMP_KIT_OMP_SRC_CACHE: wrongTern.cache,
+		OMP_KIT_OMP_SRC_FETCH: "0",
+	};
+	const wrongRow = finding(await withEnvironment(wrongEnvironment, () => diagnoseNative({ root: wrongSource.root, home: wrongSource.home, scope: "omp", ompPath: wrongTern.launcher })), "omp");
+	expect(wrongRow.status).toBe("UNVERIFIED");
+	expect(wrongRow.evidence).toMatchObject({
+		manager_source: "tern",
+		manager_versions: { tern: { status: "PRESENT", version: "18.4.0", provenance: "TERN_STATE" } },
+		version: null,
+	});
+});
 
 test("recognized default and named YAML compare policy and extension bytes without asserting runtime activation", async () => {
 	const f = fixture(); installOmp(f);
@@ -550,7 +795,7 @@ test("omp_drift tracks the OMP of the last recorded test and clears only after a
 	record("PASS");
 	expect((await drift()).status).toBe("OK");
 	// An updater rewrites the package: same launcher bytes, new version.
-	const pkg = join(f.base, "omp", "releases", "v1");
+	const pkg = join(f.bunRoot, "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.5" }));
 	const updated = await drift();
 	expect(updated.status).toBe("DEGRADED");

@@ -1,0 +1,1 @@
+- `omp-kit doctor --scope omp` reports the PATH-selected OMP launcher, whether it is Tern- or Bun-managed, and the independently observed Tern and Bun installed versions; missing or inconsistent manager evidence remains unverified. Diagnostics do not modify either installation. (ompkit-fp72.106)

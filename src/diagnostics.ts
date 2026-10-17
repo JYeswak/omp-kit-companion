@@ -5,7 +5,7 @@ import type { Dirent, Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
-import { resolveOmpIdentity } from "./paths.ts";
+import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
 import { readDrainStore, staleClaims } from "./drain.ts";
 import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
 import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
@@ -33,6 +33,8 @@ export interface DiagnoseInput {
 	/** Presence inventory only; runtime rule activation remains explicitly NOT_RUN. */
 	inventoryOnly?: boolean;
 	ompPath?: string;
+	/** Isolated environment for PATH-selected OMP diagnostics; omitted by CLI callers. */
+	ompEnvironment?: Record<string, string | undefined>;
 	jsmPath?: string;
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
 	stateRoot?: string;
@@ -208,22 +210,76 @@ function legacyRecord(home: string, rules: readonly ManifestRule[]): "LEGACY_REC
 		return expected.size ? "UNVERIFIED" : "LEGACY_RECORD_ONLY";
 	} catch { return "UNVERIFIED"; }
 }
-function inspectOmp(path?: string): Finding {
+function inspectOmp(path?: string, env: Record<string, string | undefined> = process.env): Finding {
+	const managers = observeOmpManagers(env);
+	const managerEvidence = {
+		manager_source: managers.source,
+		manager_source_provenance: managers.sourceProvenance,
+		manager_versions: managers.versions,
+	};
+	if (path && !isAbsolute(path)) {
+		return finding("omp", "UNVERIFIED", "OMP launcher must be an absolute path", "Use the exact PATH-selected OMP launcher and inspect its manager metadata.", {
+			availability: "UNVERIFIED", location: managers.launcher, requested_location: path, version: null, version_proof: "UNVERIFIED", launcher_version: null, launcher_version_proof: "UNVERIFIED", ...managerEvidence,
+		});
+	}
+	if (path && pathState(path) === "missing") {
+		return finding("omp", "FAIL", "OMP launcher is unavailable", "Install OMP or supply the PATH-selected OMP launcher.", {
+			availability: "UNAVAILABLE", location: managers.launcher, requested_location: path, version: null, version_proof: "UNVERIFIED", launcher_version: null, launcher_version_proof: "UNVERIFIED", ...managerEvidence,
+		});
+	}
+	if (!managers.launcher) {
+		return finding("omp", "FAIL", "OMP executable not found on PATH", "Install OMP and put its launcher on PATH.", {
+			availability: "UNAVAILABLE", location: null, version: null, version_proof: "UNVERIFIED", launcher_version: null, launcher_version_proof: "UNVERIFIED", ...managerEvidence,
+		});
+	}
 	try {
-		if (path && !isAbsolute(path)) throw new Error("OMP launcher must be an absolute path");
-		const provided = path && pathState(path) === "missing";
-		if (provided) return finding("omp", "FAIL", "OMP launcher is unavailable", "Install OMP or supply an existing OMP launcher.", { availability: "UNAVAILABLE", version: null });
-		const identity = resolveOmpIdentity(path ? { PATH: dirname(path) } : process.env);
-		if (path && realpathSync(path) !== identity.launcher) throw new Error("OMP launcher identity differs from requested path");
+		const requested = path ? realpathSync(path) : managers.launcher;
+		if (requested !== managers.launcher) {
+			return finding("omp", "UNVERIFIED", "Requested OMP launcher differs from the PATH-selected launcher", "Use the PATH winner or resolve its manager metadata before relying on its version.", {
+				availability: "UNVERIFIED", location: managers.launcher, requested_location: requested, version: null, version_proof: "UNVERIFIED", launcher_version: null, launcher_version_proof: "UNVERIFIED", ...managerEvidence,
+			});
+		}
+		const identity = resolveOmpIdentity(env);
+		if (identity.launcher !== managers.launcher) throw new Error("PATH-selected OMP launcher changed during inspection");
 		const metadata: unknown = JSON.parse(fileBytes(join(identity.packageRoot, "package.json")).toString("utf8"));
 		const version = metadata && typeof metadata === "object" && "version" in metadata && typeof metadata.version === "string" && metadata.version.trim() ? metadata.version : null;
-		return finding("omp", version ? "OK" : "UNVERIFIED", version ? "OMP launcher and package version resolved from metadata" : "OMP launcher resolved but package version is not verifiable", version ? "No action required." : "Inspect the installed OMP package metadata before relying on its version.", {
-			availability: "PRESENT", location: identity.launcher, package_root: identity.packageRoot, version, version_proof: version ? "PACKAGE_METADATA" : "UNVERIFIED",
-		});
+		const launcherVersion = observeOmpLauncherVersion(identity.launcher, env);
+		const managerVersion = managers.source === "tern" ? managers.versions.tern : managers.source === "bun" ? managers.versions.bun : null;
+		const mismatches: string[] = [];
+		if (managers.source === "unknown") mismatches.push("manager source is unknown");
+		else if (!managerVersion || managerVersion.status !== "PRESENT") mismatches.push(managerVersion?.reason ?? "manager version is unverified");
+		if (!version) mismatches.push("OMP package metadata version is unavailable");
+		if (!launcherVersion) mismatches.push("OMP launcher version is unavailable");
+		if (managerVersion?.status === "PRESENT" && version !== managerVersion.version) mismatches.push("manager and package versions disagree");
+		if (version && launcherVersion !== version) mismatches.push("launcher and package versions disagree");
+		const verified = mismatches.length === 0;
+		const reason = verified ? "PATH-selected OMP manager, launcher and package versions agree" : `OMP manager/version evidence is unverified: ${mismatches.join("; ")}`;
+		return finding("omp", verified ? "OK" : "UNVERIFIED", reason,
+			verified ? "No action required." : "Inspect the PATH-selected OMP launcher and manager metadata before relying on its version.", {
+				availability: verified ? "PRESENT" : "UNVERIFIED",
+				location: identity.launcher,
+				package_root: identity.packageRoot,
+				manager_version: managerVersion?.version ?? null,
+				manager_version_provenance: managerVersion?.provenance ?? "UNVERIFIED",
+				version,
+				version_proof: version ? "PACKAGE_METADATA" : "UNVERIFIED",
+				launcher_version: launcherVersion,
+				launcher_version_proof: launcherVersion ? "OMP_LAUNCHER" : "UNVERIFIED",
+				...managerEvidence,
+			});
 	} catch (error) {
 		const reason = errorText(error);
-		const unavailable = reason.includes("executable not found on PATH") || (path !== undefined && pathState(path) === "missing");
-		return finding("omp", unavailable ? "FAIL" : "UNVERIFIED", reason, unavailable ? "Install OMP and put its launcher on PATH." : "Inspect the OMP launcher, package metadata and identity before testing.", { availability: unavailable ? "UNAVAILABLE" : "UNVERIFIED", version: null });
+		const unavailable = managers.launcher === null || (path !== undefined && pathState(path) === "missing");
+		return finding("omp", unavailable ? "FAIL" : "UNVERIFIED", reason, unavailable ? "Install OMP and put its launcher on PATH." : "Inspect the OMP launcher, manager metadata and package identity before testing.", {
+			availability: unavailable ? "UNAVAILABLE" : "UNVERIFIED",
+			location: managers.launcher,
+			requested_location: path,
+			version: null,
+			version_proof: "UNVERIFIED",
+			launcher_version: managers.launcher ? observeOmpLauncherVersion(managers.launcher, env) : null,
+			launcher_version_proof: "UNVERIFIED",
+			...managerEvidence,
+		});
 	}
 }
 
@@ -1430,7 +1486,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const selected = input.scope ? DIAGNOSTIC_SCOPE_COMPONENTS[input.scope] ?? [input.scope] : undefined;
 	const wants = (...components: string[]) => !selected || components.some(component => selected.includes(component));
 	const rows: Finding[] = [];
-	if (wants("omp", "effective_rules", "omp_drift")) rows.push(inspectOmp(input.ompPath));
+	if (wants("omp", "effective_rules", "omp_drift")) rows.push(inspectOmp(input.ompPath, input.ompEnvironment ?? process.env));
 	const root = resolve(input.root);
 	const home = resolve(input.home);
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));

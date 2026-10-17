@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { ensureOmpSource, ompSourceCacheRoot } from "./omp-source-cache.ts";
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
@@ -27,6 +27,20 @@ export interface OmpIdentity {
 	source: string;
 	/** Real installed native dependency root used by OMP's source modules. */
 	nativeRoot: string;
+}
+export type OmpManagerSource = "tern" | "bun" | "unknown";
+export type OmpManagerVersionStatus = "PRESENT" | "UNAVAILABLE" | "UNVERIFIED";
+export interface OmpManagerVersionObservation {
+	status: OmpManagerVersionStatus;
+	version: string | null;
+	provenance: "TERN_STATE" | "BUN_PACKAGE_METADATA";
+	reason?: string;
+}
+export interface OmpManagerObservation {
+	launcher: string | null;
+	source: OmpManagerSource;
+	sourceProvenance: "TERN_PATH_LAYOUT" | "BUN_GLOBAL_PACKAGE_PATH" | "UNKNOWN";
+	versions: { tern: OmpManagerVersionObservation; bun: OmpManagerVersionObservation };
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -100,7 +114,7 @@ function enclosingPackage(start: string): { root: string; version: unknown } | n
 	}
 }
 
-function launcherVersion(launcher: string, env: Record<string, string | undefined>): string | null {
+export function observeOmpLauncherVersion(launcher: string, env: Record<string, string | undefined>): string | null {
 	// From the launcher's own directory: a trust-gated launcher refuses to run inside an untrusted
 	// project, which is exactly where the kit is often invoked.
 	const run = spawnSync(launcher, ["--version"], {
@@ -108,6 +122,133 @@ function launcherVersion(launcher: string, env: Record<string, string | undefine
 	});
 	if (run.status !== 0) return null;
 	return /(\d+\.\d+\.\d+)/.exec(run.stdout)?.[1] ?? null;
+}
+export function resolveOmpLauncher(env: Record<string, string | undefined> = process.env): string | null {
+	return executablesFromPath("omp", env.PATH)[0] ?? null;
+}
+interface TernManagerState {
+	pathVersion: string;
+	version: string | null;
+	status: OmpManagerVersionStatus;
+	reason?: string;
+}
+function ternManagerState(launcher: string): TernManagerState | null {
+	let real: string;
+	try {
+		real = realpathSync(launcher);
+	} catch {
+		return null;
+	}
+	if (basename(dirname(real)) !== "versions") return null;
+	const pathVersion = basename(real);
+	const statePath = join(dirname(dirname(real)), "state.json");
+	try {
+		const info = lstatSync(statePath);
+		if (info.isSymbolicLink() || !info.isFile()) {
+			return { pathVersion, version: null, status: "UNVERIFIED", reason: "Tern state.json is not a regular file" };
+		}
+		const parsed: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+		if (typeof parsed !== "object" || parsed === null || !("installed" in parsed)) {
+			return { pathVersion, version: null, status: "UNVERIFIED", reason: "Tern state.json has no installed record" };
+		}
+		const installed = parsed.installed;
+		if (typeof installed !== "object" || installed === null || !("version" in installed) ||
+			typeof installed.version !== "string" || !installed.version.trim()) {
+			return { pathVersion, version: null, status: "UNVERIFIED", reason: "Tern state.json has no installed version" };
+		}
+		const version = installed.version;
+		return version === pathVersion
+			? { pathVersion, version, status: "PRESENT" }
+			: { pathVersion, version, status: "UNVERIFIED", reason: "Tern state version disagrees with its PATH launcher" };
+	} catch (error) {
+		const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
+		return {
+			pathVersion,
+			version: null,
+			status: "UNVERIFIED",
+			reason: code === "ENOENT" ? "Tern state.json is missing" : "Tern state.json is unreadable",
+		};
+	}
+}
+interface BunManagerPackage {
+	root: string | null;
+	packageRoot: string | null;
+	observation: OmpManagerVersionObservation;
+}
+function bunManagerPackage(env: Record<string, string | undefined>): BunManagerPackage {
+	const configuredRoot = env.BUN_INSTALL ?? (env.HOME ? join(env.HOME, ".bun") : null);
+	if (!configuredRoot) {
+		return { root: null, packageRoot: null, observation: { status: "UNAVAILABLE", version: null, provenance: "BUN_PACKAGE_METADATA", reason: "BUN_INSTALL and HOME are unavailable" } };
+	}
+	let root: string;
+	try {
+		root = realpathSync(configuredRoot);
+		if (!statSync(root).isDirectory()) throw new Error("BUN_INSTALL is not a directory");
+	} catch {
+		return { root: null, packageRoot: null, observation: { status: "UNAVAILABLE", version: null, provenance: "BUN_PACKAGE_METADATA", reason: "Bun install root is unavailable" } };
+	}
+	const expectedPackageRoot = join(root, "install", "global", "node_modules", ...PACKAGE_NAME.split("/"));
+	try {
+		const packageRoot = realpathSync(expectedPackageRoot);
+		if (!isWithin(root, packageRoot)) {
+			return { root, packageRoot: null, observation: { status: "UNVERIFIED", version: null, provenance: "BUN_PACKAGE_METADATA", reason: "Bun OMP package escapes BUN_INSTALL" } };
+		}
+		const manifest = join(packageRoot, "package.json");
+		const info = lstatSync(manifest);
+		if (info.isSymbolicLink() || !info.isFile()) {
+			return { root, packageRoot: null, observation: { status: "UNVERIFIED", version: null, provenance: "BUN_PACKAGE_METADATA", reason: "Bun OMP package metadata is not a regular file" } };
+		}
+		const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+		if (typeof parsed !== "object" || parsed === null || !("name" in parsed) || parsed.name !== PACKAGE_NAME ||
+			!("version" in parsed) || typeof parsed.version !== "string" || !parsed.version.trim()) {
+			return { root, packageRoot, observation: { status: "UNVERIFIED", version: null, provenance: "BUN_PACKAGE_METADATA", reason: "Bun OMP package metadata has no verifiable version" } };
+		}
+		return { root, packageRoot, observation: { status: "PRESENT", version: parsed.version, provenance: "BUN_PACKAGE_METADATA" } };
+	} catch (error) {
+		const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
+		return {
+			root,
+			packageRoot: null,
+			observation: {
+				status: code === "ENOENT" ? "UNAVAILABLE" : "UNVERIFIED",
+				version: null,
+				provenance: "BUN_PACKAGE_METADATA",
+				reason: code === "ENOENT" ? "Bun OMP package is not installed" : "Bun OMP package metadata is unreadable",
+			},
+		};
+	}
+}
+export function observeOmpManagers(env: Record<string, string | undefined> = process.env): OmpManagerObservation {
+	const launchers = executablesFromPath("omp", env.PATH);
+	const launcher = launchers[0] ?? null;
+	let tern: OmpManagerVersionObservation = {
+		status: "UNAVAILABLE", version: null, provenance: "TERN_STATE", reason: "No Tern-managed OMP launcher is on PATH",
+	};
+	let firstTern: TernManagerState | null = null;
+	for (const candidate of launchers) {
+		const state = ternManagerState(candidate);
+		if (!state) continue;
+		if (!firstTern) firstTern = state;
+		else if (firstTern.version !== state.version || firstTern.status !== state.status) {
+			tern = { status: "UNVERIFIED", version: null, provenance: "TERN_STATE", reason: "Multiple Tern-managed OMP versions are on PATH" };
+			firstTern = null;
+			break;
+		}
+	}
+	if (firstTern) {
+		tern = { status: firstTern.status, version: firstTern.version, provenance: "TERN_STATE", ...(firstTern.reason ? { reason: firstTern.reason } : {}) };
+	}
+	const bun = bunManagerPackage(env);
+	let source: OmpManagerSource = "unknown";
+	let sourceProvenance: OmpManagerObservation["sourceProvenance"] = "UNKNOWN";
+	if (launcher && ternManagerState(launcher)) {
+		source = "tern";
+		sourceProvenance = "TERN_PATH_LAYOUT";
+	} else if (launcher && bun.root && bun.packageRoot && isWithin(bun.packageRoot, launcher)) {
+		source = "bun";
+		sourceProvenance = "BUN_GLOBAL_PACKAGE_PATH";
+	}
+	return { launcher, source, sourceProvenance, versions: { tern, bun: bun.observation } };
 }
 
 /**
@@ -119,22 +260,8 @@ function launcherVersion(launcher: string, env: Record<string, string | undefine
  */
 /** A manager-laid-out omp: `<app>/versions/<V>` binary beside a state.json naming it. */
 function ternManagedPackage(launcher: string, version: string | null, env: Record<string, string | undefined>): string | null {
-	if (version === null) return null;
-	let real: string;
-	try {
-		real = realpathSync(launcher);
-	} catch {
-		return null;
-	}
-	if (basename(real) !== version || basename(dirname(real)) !== "versions") return null;
-	let stated: unknown;
-	try {
-		stated = JSON.parse(readFileSync(join(dirname(dirname(real)), "state.json"), "utf8"));
-	} catch {
-		return null;
-	}
-	if (!stated || typeof stated !== "object" || !("installed" in stated) || !stated.installed ||
-		typeof stated.installed !== "object" || !("version" in stated.installed) || stated.installed.version !== version) return null;
+	const state = ternManagerState(launcher);
+	if (version === null || !state || state.status !== "PRESENT" || state.version !== version) return null;
 	const root = ompSourceCacheRoot(env);
 	if (!root) return null;
 	const pkg = join(root, version, "node_modules", ...PACKAGE_NAME.split("/"));
@@ -153,7 +280,7 @@ function ternManagedPackage(launcher: string, version: string | null, env: Recor
 function packageRootFor(launcher: string, env: Record<string, string | undefined>): string {
 	const own = enclosingPackage(launcher);
 	if (own) return own.root;
-	const version = launcherVersion(launcher, env);
+	const version = observeOmpLauncherVersion(launcher, env);
 	const bunRoot = env.BUN_INSTALL ?? (env.HOME ? join(env.HOME, ".bun") : null);
 	const candidates = executablesFromPath("omp", env.PATH).filter(other => other !== launcher);
 	if (bunRoot) candidates.push(join(bunRoot, "install", "global", "node_modules", ...PACKAGE_NAME.split("/"), "package.json"));
@@ -238,7 +365,7 @@ export function resolveBundledScript(script: string, root: string): string {
 /** Resolve the PATH-selected OMP package and reject every inherited identity override that disagrees. */
 export function resolveOmpIdentity(env: Record<string, string | undefined> = process.env): OmpIdentity {
 	const pathValue = env.PATH;
-	const pathLauncher = executablesFromPath("omp", pathValue)[0];
+	const pathLauncher = resolveOmpLauncher(env);
 	if (!pathLauncher) throw new Error("omp executable not found on PATH");
 	const identity = identityFor(pathLauncher, env);
 
