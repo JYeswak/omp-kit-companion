@@ -17,19 +17,21 @@ function sculpt(): Healthy {
 	const release = join(base, "release");
 	const home = join(base, "home");
 	const project = join(base, "project");
-	const ompPackage = join(base, "omp", "releases", "v1");
+	const ompPackage = join(base, "ternapp");
 	const ompBin = join(base, "omp", "bin");
 	const binary = join(release, "bin", "omp-kit");
 	for (const dir of [
 		join(release, "bin"), join(release, "rules"), join(release, "retired"), home, project, ompBin,
-		join(ompPackage, "dist"), join(ompPackage, "src", "export"), join(ompPackage, "src", "capability"),
+		join(ompPackage, "versions"), join(ompPackage, "src", "export"), join(ompPackage, "src", "capability"),
 		join(ompPackage, "src", "discovery"), join(ompPackage, "node_modules", "@oh-my-pi", "pi-natives"),
 	]) mkdirSync(dir, { recursive: true });
 	writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.0" }));
+	writeFileSync(join(ompPackage, "state.json"), JSON.stringify({ installed: { version: "18.4.0" } }));
 	writeFileSync(join(ompPackage, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
 	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(ompPackage, "src", file), "export {};\n");
-	const launcher = join(ompPackage, "dist", "cli.js");
-	writeFileSync(launcher, "#!/bin/sh\nexit 91\n");
+	// Faithful Tern-managed launcher: <app>/versions/<V> beside state.json naming V.
+	const launcher = join(ompPackage, "versions", "18.4.0");
+	writeFileSync(launcher, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"18.4.0\"; else exit 91; fi\n");
 	chmodSync(launcher, 0o755);
 	symlinkSync(launcher, join(ompBin, "omp"));
 	const rule = "# Rule A\n";
