@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { LessonEntry } from "../../src/lessons.ts";
 import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, readLessonsConfig, runClefShadow, runFleetLessonsOnce, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { bunCapExec, runWithCap } from "../../src/service-run.ts";
 import { writeReleaseManifest } from "./release-manifest-fixture.ts";
@@ -577,23 +577,17 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 	const env = { PATH: fixturePath, HOME: home, TMPDIR: home,
 		XDG_CONFIG_HOME: join(home, "build-config"), XDG_CACHE_HOME: join(home, "build-cache"),
 		XDG_DATA_HOME: join(home, "build-data"), XDG_STATE_HOME: join(home, ".local", "state"),
-		BUN_INSTALL: join(home, "build-bun"), OMP_KIT_CASE_CWD: repoRoot,
+		BUN_INSTALL: join(home, "build-bun"),
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repoRoot,
 		OMP: identity.launcher, OMP_BIN: identity.launcher, OMP_PATH: identity.launcher, OMP_SRC: identity.source };
-	const revision = Bun.spawnSync(["git", "rev-parse", "--verify", "HEAD"], {
-		cwd: repoRoot, env, stdout: "pipe", stderr: "pipe",
-	});
-	expect(revision.exitCode, revision.stderr.toString()).toBe(0);
-	const resources = join(home, "resources.tar");
-	// Read-only exact-commit export for the packaged runtime, never an editable scratch checkout.
-	const archived = Bun.spawnSync(["git", "archive", "--format=tar", "--output=" + resources,
-		revision.stdout.toString().trim(), "--", "rules", "retired", "cases", "policy", "extensions", "scripts", "src", "config"], {
-		cwd: repoRoot, env, stdout: "pipe", stderr: "pipe",
-	});
-	expect(archived.exitCode, archived.stderr.toString()).toBe(0);
-	const extracted = Bun.spawnSync(["tar", "-xf", resources, "-C", release], {
-		cwd: home, env, stdout: "pipe", stderr: "pipe",
-	});
-	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+	// Package only runtime assets, as the matcher fixtures do; an archive has no Git HEAD.
+	for (const directory of ["rules", "retired", "cases", "policy", "extensions"]) {
+		cpSync(join(repoRoot, directory), join(release, directory), { recursive: true });
+	}
+	mkdirSync(join(release, "scripts"), { recursive: true });
+	for (const file of ["build-manifest.sh", "runtime-adapter.sh", "rule-class.ts", "ttsr-harness.ts"]) {
+		cpSync(join(repoRoot, "scripts", file), join(release, "scripts", file));
+	}
 	const executable = join(release, "bin", "omp-kit");
 	const built = Bun.spawnSync([process.execPath, "build", join(repoRoot, "src", "cli.ts"),
 		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
