@@ -286,8 +286,9 @@ kit_env() {
   (
     cd "$FIXTURE_HOME" || exit 125
     unset XDG_STATE_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
-    HOME=$FIXTURE_HOME TMPDIR=$WORK/tmp
-    export HOME TMPDIR
+    # Case scopes must resolve against the repository, not the fixture under var/agent-tmp.
+    HOME=$FIXTURE_HOME TMPDIR=$WORK/tmp OMP_KIT_CASE_CWD=$ROOT
+    export HOME TMPDIR OMP_KIT_CASE_CWD
     exec "$@"
   )
 }
