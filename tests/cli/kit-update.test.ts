@@ -195,11 +195,19 @@ test("checksum-correct archive with a rejected attestation refuses without a can
 test("unavailable authority verifier never becomes integrity-only activation", async () => fixture(async ctx => {
  const plan = await planKitUpdate(input(ctx));
  if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ const python = Bun.which("python3");
+ if (!python) throw new Error("fixture requires python3");
+ const verifierPath = join(ctx.root, "without-authority");
+ mkdirSync(verifierPath);
+ symlinkSync(python, join(verifierPath, "python3"));
  const previousPath = process.env.PATH;
- process.env.PATH = "/usr/bin:/bin";
+ // Keep the real installer verifier runnable, but no ambient gh or credential helper.
+ process.env.PATH = verifierPath;
  try { await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
  finally { process.env.PATH = previousPath; }
  expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
+ expect(auditMutations(ctx.stateRoot)).toEqual([]);
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
 }));
 

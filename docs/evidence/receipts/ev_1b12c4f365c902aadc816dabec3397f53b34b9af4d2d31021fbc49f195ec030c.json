@@ -1,0 +1,17 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_1b12c4f365c902aadc816dabec3397f53b34b9af4d2d31021fbc49f195ec030c",
+ "limitations": [
+  "Synthetic updater refusal and direct installer smoke only; no installed auth or authentic signature qualification"
+ ],
+ "operation": "updater-authority-fixture",
+ "parameters": {
+  "subject_sha256": "bb1277aa3b13253acb8c3f503fa66a4f7591521c40af0e2a611c92332f42fc44"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 1209,
+  "sha256": "242759df259c4b6f897e67329cbb1f54ce8a1796b4fc19cbd84643ba99633190"
+ }
+}
