@@ -766,37 +766,52 @@ def _published(repository: str) -> set[str]:
 AUTHORITY_JOB_GROUPS = ("attest", "attest-index", "signed-consumers")
 
 
-def _sign_authority_complete(repository: str, sign_run: dict[str, Any]) -> bool:
-    """True only when the signing run's exact attempt executed AND succeeded every attestation and signed-consumer job.
+def _sign_authority_state(repository: str, sign_run: dict[str, Any]) -> str:
+    """Positively classify a canonical, terminal-green signing run's mandatory authority groups from its own attempt.
 
-    A skipped, failed, cancelled or absent group is incomplete. Matrix jobs are named "<group> (<leg>)"."""
+    Returns "executed" (every job of every group succeeded), "unexecuted" (every group present and terminal, none failed
+    or cancelled, at least one skipped) or "unknown" (absent group, incomplete or foreign snapshot, failure, cancellation,
+    or a changed attempt). Only "unexecuted" is a proved skipped DAG; "unknown" never classifies anything.
+    Matrix jobs are named "<group> (<leg>)"."""
     attempt = sign_run.get("run_attempt")
     if type(attempt) is not int or attempt < 1:
-        raise ValueError("signing run has no authoritative native attempt")
+        return "unknown"
     pages = _api(repository, f"actions/runs/{sign_run['id']}/attempts/{attempt}/jobs?per_page=100", paginate=True)
     jobs = [job for page in pages for job in page["jobs"]]
+    totals = {page["total_count"] for page in pages if "total_count" in page}
+    if not jobs or (totals and totals != {len(jobs)}) or any(job.get("run_id") != sign_run["id"] for job in jobs):
+        return "unknown"
+    # Fence the attempt: the run must still be the same completed native attempt after the snapshot was read.
+    after = _api(repository, f"actions/runs/{sign_run['id']}")
+    if (not isinstance(after, dict) or after.get("id") != sign_run["id"] or after.get("run_attempt") != attempt
+            or after.get("status") != "completed" or after.get("conclusion") != "success"):
+        return "unknown"
+    skipped = False
     for group in AUTHORITY_JOB_GROUPS:
         members = [job for job in jobs if job.get("name") == group or str(job.get("name", "")).startswith(f"{group} (")]
-        if not members or any(job.get("status") != "completed" or job.get("conclusion") != "success" for job in members):
-            return False
-    return True
+        if not members or any(job.get("status") != "completed" or job.get("conclusion") not in ("success", "skipped") for job in members):
+            return "unknown"
+        skipped = skipped or any(job["conclusion"] == "skipped" for job in members)
+    return "unexecuted" if skipped else "executed"
 
 
-def _signing_cannot_complete(repository: str, rows: list[dict[str, Any]], qualification: dict[str, Any]) -> bool:
-    """A finished qualification whose latest tag-ref signing run is terminal-green but never ran its authority jobs.
+def _signing_cannot_complete(repository: str, rows: list[dict[str, Any]], allocation: dict[str, Any]) -> bool:
+    """True only for an owner-authorized cut whose canonical tag-ref signing run is terminal-green with mandatory
+    authority groups positively established as skipped.
 
-    The tag-ref workflow is immutable, so re-dispatching its publisher can only refuse again. Healthy, in-flight,
-    failed-signing (existing diagnose path) and fully-authorized candidates are never classified here."""
-    if qualification.get("status") != "completed" or qualification.get("conclusion") != "success":
-        return False
-    _, version, sha, train = qualification["display_title"].split()
-    signs = [row for row in rows if row.get("display_title") == release_title("sign", version, sha, train[6:])]
+    The identity comes from the immutable owner allocation, never from a title. The signing run is fetched natively and
+    must satisfy final_run_matches (repository, tag-ref workflow, dispatch event, tag/source, version, train, phase,
+    terminal success). The tag-ref workflow is immutable, so re-dispatching its publisher can only refuse again. In-flight,
+    failed-signing (existing diagnose path), fully executed and unknown/transient snapshots are never classified."""
+    version, sha, train_id = allocation["version"], allocation["source_sha"], allocation["train_run_id"]
+    signs = [row for row in rows if row.get("display_title") == release_title("sign", version, sha, train_id)]
     if not signs:
         return False
     latest = max(signs, key=_attempt_order)
-    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+    run = _api(repository, f"actions/runs/{latest['id']}")
+    if not final_run_matches(run, repository=repository, source_sha=sha, version=version, train_id=train_id, phase="sign"):
         return False
-    return not _sign_authority_complete(repository, latest)
+    return _sign_authority_state(repository, run) == "unexecuted"
 
 
 def pending_candidate(rows: list[dict[str, Any]], published: set[str], published_floor: str | None) -> dict[str, Any] | None:
@@ -1000,18 +1015,15 @@ def _drive(args: argparse.Namespace) -> int:
                     published.discard(f"v{prior_version}")
     remaining = list(rows)
     authority: tuple[dict[str, Any], dict[str, Any], bytes] | None = None
-    # Sources whose immutable tag-ref signing finished green WITHOUT its authority/consumer jobs. Their tag and bytes
-    # are retained as evidence; they are neither resumed nor re-signed, and are never selected again.
+    # Cuts whose immutable tag-ref signing is canonical, terminal-green and positively shows the mandatory authority
+    # groups skipped. Their tag and bytes are retained as evidence; they are neither resumed nor re-signed, and the
+    # source is never selected again. Classification needs established owner authority, never a title alone.
     unsignable_shas: set[str] = set()
     while True:
         pending = pending_candidate(remaining, published, recovery_floor)
         if pending is None:
             break
-        _, _, prior_sha_value, train = pending["display_title"].split()
-        if _signing_cannot_complete(repository, rows, pending):
-            unsignable_shas.add(prior_sha_value)
-            remaining = [row for row in remaining if row["id"] != pending["id"]]
-            continue
+        _, _, _, train = pending["display_title"].split()
         try:
             authority = _find_owner_for_qualification(repository, train[6:], str(pending["id"]))
         except UnboundQualification:
@@ -1019,6 +1031,18 @@ def _drive(args: argparse.Namespace) -> int:
                 raise
             remaining = [row for row in remaining if row["id"] != pending["id"]]
             continue
+        if pending.get("status") == "completed" and pending.get("conclusion") == "success":
+            allocation, canonical, owner_notes = authority
+            selection = dict(allocation, qualification_run_id=canonical.get("qualification_run_id"),
+                             allocation_artifact_id=canonical.get("allocation_artifact_id"),
+                             allocation_sha256=canonical.get("allocation_sha256"), qualification_attempt=pending.get("run_attempt"))
+            if (owner_allocation_matches(allocation, canonical, selection, owner_notes, qualification_id=str(pending["id"]),
+                                         qualification_attempt=int(pending.get("run_attempt", 0)))
+                    and _signing_cannot_complete(repository, rows, allocation)):
+                unsignable_shas.add(allocation["source_sha"])
+                remaining = [row for row in remaining if row["id"] != pending["id"]]
+                authority = None
+                continue
         break
     publisher_floor = 0
     recovery_ids: set[str] = set()
