@@ -682,14 +682,15 @@ def _published(repository: str) -> set[str]:
     return {row["tag_name"] for page in pages for row in page if not row["draft"] and not row["prerelease"]}
 
 
-def pending_candidate(rows: list[dict[str, Any]], published: set[str], tag_floor: str) -> dict[str, Any] | None:
-    """Resume successful/in-flight qualification instead of allocating its version again."""
-    floor = tuple(map(int, tag_floor.split(".")))
+def pending_candidate(rows: list[dict[str, Any]], published: set[str], published_floor: str | None) -> dict[str, Any] | None:
+    """Resume native qualification independently of unrelated tag reservations."""
+    floor = tuple(map(int, published_floor.split("."))) if published_floor is not None else None
     for row in sorted(rows, key=lambda row: int(row["id"]), reverse=True):
         fields = row.get("display_title", "").split()
         if len(fields) != 4 or fields[0] != "qualify" or not stable_version(fields[1]) or not _git_sha(fields[2]) or not fields[3].startswith("train-"):
             continue
-        if not fields[3][6:].isdigit() or f"v{fields[1]}" in published or tuple(map(int, fields[1].split("."))) < floor:
+        if (not fields[3][6:].isdigit() or f"v{fields[1]}" in published
+                or (floor is not None and tuple(map(int, fields[1].split("."))) < floor)):
             continue
         if row.get("status") != "completed" or row.get("conclusion") in (None, "success"):
             return row
@@ -843,15 +844,17 @@ def _drive(args: argparse.Namespace) -> int:
         raise ValueError("no stable release floor exists")
     max_tag = max(tags, key=lambda tag: tuple(map(int, tag[1:].split("."))))
     released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
+    recovery_floor: str | None = None
     if released:
         latest_released = max(released, key=lambda tag: tuple(map(int, tag[1:].split("."))))
+        recovery_floor = latest_released[1:]
         if tuple(map(int, latest_released[1:].split("."))) > tuple(map(int, max_tag[1:].split("."))):
             raise ValueError(f"published stable release {latest_released} exceeds fetched tag floor {max_tag}; restore/fetch its authenticated tag before allocation")
     rows = _run_rows(repository, "release.yml")
     # A stable release left by a failed publisher is not a completed outcome.
     # Drafts already stay out of `published`; this also recovers pre-existing
     # stable partial releases rather than skipping their successful candidate.
-    unfinished = pending_candidate(rows, set(), max_tag[1:])
+    unfinished = pending_candidate(rows, set(), recovery_floor)
     if unfinished:
         _, prior_version, prior_sha, prior_train = unfinished["display_title"].split()
         if f"v{prior_version}" in published:
@@ -871,7 +874,7 @@ def _drive(args: argparse.Namespace) -> int:
     remaining = list(rows)
     authority: tuple[dict[str, Any], dict[str, Any], bytes] | None = None
     while True:
-        pending = pending_candidate(remaining, published, max_tag[1:])
+        pending = pending_candidate(remaining, published, recovery_floor)
         if pending is None:
             break
         _, _, _, train = pending["display_title"].split()
@@ -917,12 +920,16 @@ def _drive(args: argparse.Namespace) -> int:
                                  "rehearsal": "false", "publisher_floor": publisher_floor, "recovery_ids": sorted(recovery_ids),
                                  "publisher_runs": publisher_runs})
     else:
-        # An unrecognized orphan tag is not a license to skip a newer certified release.
-        if max_tag not in published:
-            raise ValueError(f"{max_tag} is unpublished and has no recoverable qualification; preserve it for owner repair")
+        # Native work owns the lane; a tag only reserves a version number.
+        # Unknown active runs still require reconciliation, never a competing allocation.
+        if any(row.get("status") != "completed" for row in rows):
+            raise ValueError("native release work is still active or unresolved; wait before allocation")
         head = _command(["git", "rev-parse", "origin/main"])
-        floor = _command(["git", "rev-parse", f"{max_tag}^{{commit}}"])
-        _command(["git", "merge-base", "--is-ancestor", floor, head])
+        published_floors = [tag for tag in tags if tag in published and _is_ancestor(tag, head)]
+        if not published_floors:
+            raise ValueError("no authenticated published ancestor release floor exists")
+        published_tag = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))
+        floor = _command(["git", "rev-parse", f"{published_tag}^{{commit}}"])
         history = _command(["git", "rev-list", "--topo-order", head, f"^{floor}"]).splitlines()
         # Query only commits after the promoted floor; GitHub pagination is complete.
         since = _command(["git", "show", "-s", "--format=%cI", floor])

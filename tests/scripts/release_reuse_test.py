@@ -961,7 +961,8 @@ class RollingReleaseTest(unittest.TestCase):
 
 
     @contextlib.contextmanager
-    def published_floor_case(self, *, orphan=False, with_published_tag=False):
+    def published_floor_case(self, *, orphan=False, with_published_tag=False,
+                             unpublished_tag: str | None = None, tag_on_source=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
@@ -987,11 +988,15 @@ class RollingReleaseTest(unittest.TestCase):
             git("tag", "v0.2.19")
             if with_published_tag:
                 git("tag", "v0.2.22")
+            if unpublished_tag and not tag_on_source:
+                git("tag", unpublished_tag)
             (root / "changelog.d").mkdir()
             (root / "changelog.d/floor.md").write_text("- A new qualified source note.\n")
             git("add", ".")
             git("commit", "-qm", "eligible source")
             source = git("rev-parse", "HEAD")
+            if unpublished_tag and tag_on_source:
+                git("tag", unpublished_tag)
             git("update-ref", "refs/remotes/origin/main", source)
             environment["GITHUB_SHA"] = source
             stable = [{"tag_name": "v0.2.19", "draft": False, "prerelease": False}]
@@ -1039,6 +1044,69 @@ class RollingReleaseTest(unittest.TestCase):
                 self.assertEqual(plan["version"], expected)
                 self.assertEqual(plan["source_sha"], source)
                 self.assertEqual(plan["kind"], "allocate")
+                dispatch.assert_not_called()
+
+    def test_unpublished_tags_reserve_versions_without_starving_qualified_source(self) -> None:
+        for patch_number in (22, 47):
+            for tag_on_source in (False, True):
+                reserved = f"v0.2.{patch_number}"
+                with self.subTest(tag=reserved, tag_on_source=tag_on_source), \
+                     self.published_floor_case(unpublished_tag=reserved, tag_on_source=tag_on_source) as (args, root, source, dispatch):
+                    before = release_reuse._command(["git", "rev-parse", reserved])
+                    self.assertEqual(release_reuse._drive(args), 0)
+                    plan = json.loads((root / "plan.json").read_text())
+                    self.assertEqual(plan["kind"], "allocate")
+                    self.assertEqual(plan["version"], f"0.2.{patch_number + 1}")
+                    self.assertEqual(plan["source_sha"], source)
+                    self.assertEqual(plan["base_tag"], "v0.2.19")
+                    self.assertEqual(release_reuse._command(["git", "rev-parse", reserved]), before)
+                    self.assertEqual(release_reuse._command(["git", "rev-parse", "HEAD"]), source)
+                    dispatch.assert_not_called()
+
+    def test_unpublished_high_tag_cannot_hide_authenticated_inflight_candidate(self) -> None:
+        with self.published_floor_case(unpublished_tag="v0.2.47") as (args, root, _, dispatch):
+            pending = dict(candidate_run(), status="in_progress", conclusion=None,
+                           display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"))
+            with patch.object(release_reuse, "_run_rows", return_value=[pending]), \
+                 patch.object(release_reuse, "_find_owner_for_qualification", return_value=owner_fixture()):
+                self.assertEqual(release_reuse._drive(args), 0)
+            plan = json.loads((root / "plan.json").read_text())
+            self.assertEqual(plan["kind"], "resume")
+            self.assertEqual(plan["qualification_run_id"], RUN_ID)
+            self.assertEqual(plan["version"], BASE_VERSION)
+            dispatch.assert_not_called()
+
+    def test_native_running_release_blocks_allocation_not_its_tag(self) -> None:
+        for status in ("queued", "in_progress", "waiting", None):
+            with self.subTest(status=status), \
+                 self.published_floor_case(unpublished_tag="v0.2.22") as (args, root, _, dispatch):
+                active = dict(candidate_run(), status=status, conclusion=None,
+                              display_title="Unrecognized active release")
+                with patch.object(release_reuse, "_run_rows", return_value=[active]):
+                    with self.assertRaises(ValueError):
+                        release_reuse._drive(args)
+                self.assertFalse((root / "plan.json").exists())
+                dispatch.assert_not_called()
+
+    def test_unpublished_tag_with_no_qualified_source_skips_without_allocating(self) -> None:
+        with self.published_floor_case(unpublished_tag="v0.2.22") as (args, root, _, dispatch), \
+             patch.object(release_reuse, "select_source", return_value=None):
+            self.assertEqual(release_reuse._drive(args), 0)
+            self.assertEqual(json.loads((root / "plan.json").read_text()), {"kind": "skip"})
+            dispatch.assert_not_called()
+
+    def test_terminal_unbound_failures_do_not_lock_future_qualified_allocation(self) -> None:
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            with self.subTest(conclusion=conclusion), \
+                 self.published_floor_case(unpublished_tag="v0.2.22") as (args, root, source, dispatch):
+                terminal = dict(candidate_run(source), conclusion=conclusion,
+                                display_title="Unrecognized terminal release")
+                with patch.object(release_reuse, "_run_rows", return_value=[terminal]):
+                    self.assertEqual(release_reuse._drive(args), 0)
+                plan = json.loads((root / "plan.json").read_text())
+                self.assertEqual(plan["kind"], "allocate")
+                self.assertEqual(plan["version"], "0.2.23")
+                self.assertEqual(plan["source_sha"], source)
                 dispatch.assert_not_called()
 
 

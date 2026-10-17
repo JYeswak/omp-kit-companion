@@ -1,0 +1,2 @@
+### Fixed
+- Release scheduling no longer treats an unpublished tag as a global lock or as the source-history floor. Tags reserve version numbers without being deleted or reused; published ancestors bound source selection and release notes, while authenticated native qualification runs control recovery. An unrelated higher tag cannot hide an in-flight candidate. Active or unresolved native runs still prevent competing allocation, and source qualification, artifact authority, signing and publication gates remain mandatory.

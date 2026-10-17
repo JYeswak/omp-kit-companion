@@ -170,8 +170,11 @@ ancestor; an actually newer green supersedes pending older sources.
   the release. A recovered older release cannot take Latest from a newer tag.
 - Successful unfinished candidates are resumed rather than allocating their
   untagged in-flight version again. Failed exact-source qualification requires
-  diagnosis forward, not an automatic rerun or a weakened gate. An orphan tag
-  without recoverable evidence refuses and names the owner-repair prerequisite.
+  diagnosis forward, not an automatic rerun or a weakened gate. Unpublished tags
+  reserve their version numbers without locking the scheduler or hiding an
+  authenticated in-flight candidate. Native active or unresolved runs prevent
+  competing allocation; eligible source history and notes use a published
+  ancestor floor, not the highest unpublished tag. No tag is deleted or reused.
 - Same-repository workflow names and `head_branch=main` are not code trust: a tag
   can also be named main. Shared authority validation fetches literal
   `refs/heads/main` from the expected repository into a dedicated full ref,
