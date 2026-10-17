@@ -114,10 +114,14 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
-        suite: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["core", "package-release", "kit-update"]') || fromJSON('["all"]') }}
+        suite: [core, package-release, kit-update]
     runs-on: ${{ matrix.os }}
-    # macOS suite measured 25m41s without the sbh step (release run 39016349469 attempt 2 minus
-    # sbh install 4m03s). Finite bound with ~50% headroom; every check still runs (no speedup or skip).
+    # Every event runs the same three groups. Together they select exactly the tests the former single 'all'
+    # job ran (tests/cli + tests/fleet-guard, minus the two one-file groups: 155 = 153 + 1 + 1 files, checked
+    # against Bun's own selection). The former macOS 'all' job took 39.2 min (test step 37.8) against this
+    # 40 min cap (run 39073904994); the 25m41s the cap was first sized from was cut short by the older
+    # 30 min cancellation. Ubuntu groups take 7.9-10.8 min (13 push runs). macOS groups are not yet
+    # measured, so no speedup is claimed. Every check still runs; the cap is unchanged.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -135,7 +139,7 @@ jobs:
           base_tag="$(python3 scripts/release_reuse.py notes-floor --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA")"
           sh scripts/release-notes.sh check --base-tag "$base_tag" --head "$GITHUB_SHA"
       - name: Install bubblewrap for Linux integration containment
-        if: runner.os == 'Linux' && (matrix.suite == 'package-release' || matrix.suite == 'all')
+        if: runner.os == 'Linux' && matrix.suite == 'package-release'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -204,34 +208,29 @@ jobs:
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test ./tests/cli/kit-update.test.ts
-      - name: Exercise complete CLI and native matcher contracts outside push/PR
-        if: matrix.suite == 'all'
-        env:
-          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
-        run: bun test tests/cli tests/fleet-guard
       - name: Exercise memory readiness against the installed certified OMP source
-        if: matrix.suite == 'core' || matrix.suite == 'all'
+        if: matrix.suite == 'core'
         run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/certified detached native receipts
-        if: matrix.suite == 'core' || matrix.suite == 'all'
+        if: matrix.suite == 'core'
         run: python3 tests/cli/native_candidate_test.py
       - name: Test exact-SHA release reuse validation
-        if: matrix.suite == 'core' || matrix.suite == 'all'
+        if: matrix.suite == 'core'
         run: python3 tests/scripts/release_reuse_test.py
       - name: Check README currency (every command and doctor scope documented, no pinned release version)
-        if: matrix.suite == 'core' || matrix.suite == 'all'
+        if: matrix.suite == 'core'
         run: bun scripts/readme-check.ts
       - name: Exercise the release train, release-bump and doc-drift contracts
-        if: matrix.suite == 'core' || matrix.suite == 'all'
+        if: matrix.suite == 'core'
         run: |
           mkdir -p var/agent-tmp
           sh tests/cli/release-train.test.sh
           sh tests/cli/doc-drift.test.sh
       - name: Run differential native-vs-kit oracle
-        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'all')
+        if: runner.os == 'Linux' && matrix.suite == 'core'
         run: bun scripts/differential-oracle.ts
       - name: Verify differential oracle rejects a planted mismatch
-        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'all')
+        if: runner.os == 'Linux' && matrix.suite == 'core'
         shell: bash
         run: |
           set -euo pipefail
