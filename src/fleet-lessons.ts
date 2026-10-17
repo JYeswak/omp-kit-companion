@@ -510,9 +510,15 @@ function jsonValue(text: string): unknown {
 }
 
 function trackerIssues(value: unknown): Record<string, unknown>[] | null {
-	const source = Array.isArray(value) ? value : objectValue(value)?.issues;
-	if (!Array.isArray(source)) return null;
-	return source.map(objectValue).filter((item): item is Record<string, unknown> => item !== null);
+	const page = Array.isArray(value) ? null : objectValue(value);
+	const source = page ? page.issues : value;
+	if (!Array.isArray(source) || (page && (page.has_more !== false || page.offset !== 0 ||
+		(page.total !== undefined && page.total !== source.length)))) return null;
+	return source.every((item): item is Record<string, unknown> => {
+		const row = objectValue(item);
+		return row !== null && typeof row.id === "string" && row.id.trim().length > 0 &&
+			(row.external_ref === undefined || row.external_ref === null || typeof row.external_ref === "string");
+	}) ? source : null;
 }
 
 function findIssueRecord(value: unknown, match: (issue: Record<string, unknown>) => boolean): Record<string, unknown> | null {
@@ -556,6 +562,9 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 	const now = options.now ?? new Date();
 	if (!Number.isFinite(now.getTime()) || !isAbsolute(options.kitRoot) || !isAbsolute(options.home) || !isAbsolute(options.stateRoot)) throw new Error("FLEET_LESSONS_ROOT_INVALID");
 	const config = readLessonsConfig(options.kitRoot, options.home);
+	const intakeDatabase = trackerDatabase(config.intakeTracker);
+	if (!config.repos.some(repo => repo.trackerPath !== null && trackerDatabase(repo.trackerPath) === intakeDatabase))
+		throw new Error("FLEET_LESSONS_INTAKE_NOT_REGISTERED");
 	const kitStateDirectory = join(options.stateRoot, "omp-kit");
 	const reportDirectory = join(kitStateDirectory, "fleet-lessons");
 	const archiveDirectory = join(reportDirectory, "reports");
@@ -598,8 +607,7 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 		if (entry.bead) group.beads.add(entry.bead);
 		if (entry.proposed_fix) group.fixes.add(entry.proposed_fix);
 	}
-	const intakeDatabase = trackerDatabase(config.intakeTracker);
-	const issueList = runFleetTracker(intakeDatabase, ["list", "--status", "all", "--label", "uphill", "--label", "lesson", "--format", "json"], dependencies);
+	const issueList = runFleetTracker(intakeDatabase, ["list", "--status", "all", "--label", "uphill", "--label", "lesson", "--limit", "0", "--format", "json"], dependencies);
 	const listedIssues = issueList.code === 0 ? trackerIssues(jsonValue(issueList.stdout)) : null;
 	const inventoryAvailable = listedIssues !== null;
 	const existingIssues = listedIssues ?? [];
@@ -695,7 +703,7 @@ function gradeTriggers(repos: readonly FleetRepoConfig[], dependencies: FleetLes
 	const triggers: FleetLessonsTrigger[] = [];
 	for (const [database, repoNames] of trackers) {
 		const repoName = repoNames[0] ?? "unknown";
-		const search = runFleetTracker(database, ["search", "--status", "all", "--format", "json", "GRADE_FAIL:"], dependencies);
+		const search = runFleetTracker(database, ["search", "--status", "all", "--limit", "0", "--format", "json", "GRADE_FAIL:"], dependencies);
 		if (search.code !== 0) { blockers.push("grade-marker-search-unavailable:" + repoName); continue; }
 		const matches = trackerIssues(jsonValue(search.stdout));
 		if (matches === null) { blockers.push("grade-marker-search-invalid:" + repoName); continue; }

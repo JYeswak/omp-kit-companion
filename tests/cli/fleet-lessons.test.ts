@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { LessonEntry } from "../../src/lessons.ts";
-import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, runClefShadow, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
+import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, readLessonsConfig, runClefShadow, runFleetLessonsOnce, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { bunCapExec, runWithCap } from "../../src/service-run.ts";
+import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 function lesson(repo: string, what: string, lessonClass: LessonEntry["class"] = "SCOPE_GAP"): LessonEntry {
 	return {
@@ -268,3 +273,371 @@ test("target-stage survey emits every metric for each mission and not the aggreg
 		{ repo: "repo", mission: "build", stage: "implementation", target: "plan_present", status: "PASS", value: true },
 	]);
 });
+
+test("A11 scheduled learning writes a real fleet report instead of accepting matcher success", async () => {
+	const repoRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const home = mkdtempSync(join(scratchRoot, `a11-consumer.${process.pid}.`));
+	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-consumer\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
+	const kitRoot = join(home, "release");
+	for (const directory of ["release/bin", "release/config", "build-config", "build-cache", "build-data", "build-state", "build-bun"])
+		mkdirSync(join(home, directory), { recursive: true });
+	const fixtureEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: home,
+		XDG_CONFIG_HOME: join(home, "build-config"), XDG_CACHE_HOME: join(home, "build-cache"),
+		XDG_DATA_HOME: join(home, "build-data"), XDG_STATE_HOME: join(home, "build-state"),
+		BUN_INSTALL: join(home, "build-bun") };
+	const executable = join(kitRoot, "bin", "omp-kit");
+	const built = Bun.spawnSync([process.execPath, "build", join(repoRoot, "src", "cli.ts"),
+		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
+		"--outfile=" + executable], { cwd: repoRoot, env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
+	expect(built.exitCode, built.stderr.toString()).toBe(0);
+	const fixtureConfig = readFileSync(join(repoRoot, "config", "lessons.toml"), "utf8")
+		.replace('mode = "shadow"', 'mode = "off"');
+	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig);
+	writeFileSync(join(kitRoot, "config", "planning-score.toml"), readFileSync(join(repoRoot, "config", "planning-score.toml")));
+	const config = readLessonsConfig(kitRoot, home);
+	for (const repo of config.repos) {
+		mkdirSync(join(repo.path, ".omp"), { recursive: true });
+		const entry = { ...lesson(repo.name, "Shared fixture failure requiring a fleet intake."),
+			proposed_fix: "Existing fixture remediation is recorded." };
+		writeFileSync(join(repo.path, ".omp", "lessons.jsonl"), JSON.stringify(entry) + "\n");
+		if (repo.trackerPath) {
+			mkdirSync(repo.trackerPath, { recursive: true });
+			const initialized = Bun.spawnSync(["br", "--db", join(repo.trackerPath, ".beads", "beads.db"), "init", "--prefix", "a11"], { cwd: repo.trackerPath,
+				env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
+			expect(initialized.exitCode, initialized.stderr.toString()).toBe(0);
+		}
+	}
+	const intakeDatabase = join(config.intakeTracker, ".beads", "beads.db");
+	const seededRefs: string[] = [];
+	for (let index = 0; index < 51; index++) {
+		const externalRef = "fixture-existing:" + index;
+		const seeded = Bun.spawnSync(["br", "--db", intakeDatabase, "--no-auto-import", "--no-auto-flush",
+			"create", "--title", "Existing unrelated intake " + index, "--labels", "uphill,lesson",
+			"--external-ref", externalRef, "--json"], {
+			cwd: config.intakeTracker, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+		});
+		expect(seeded.exitCode, seeded.stderr.toString()).toBe(0);
+		seededRefs.push(externalRef);
+	}
+	const launcher = join(home, ".local", "bin", "omp-kit");
+	mkdirSync(dirname(launcher), { recursive: true });
+	writeFileSync(launcher, "#!/bin/sh\nif [ \"$1\" = test ]; then printf '%s\\n' '{\"legacy_matcher\":true}'; exit 0; fi\nexec "
+		+ JSON.stringify(executable) + " \"$@\"\n", { mode: 0o755 });
+	const reportPath = join(home, ".local", "state", "omp-kit", "fleet-lessons", "latest.json");
+	const incumbent = Bun.spawnSync([launcher, "test", "--record", "--json"], {
+		cwd: home, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+	});
+	expect(incumbent.exitCode, incumbent.stderr.toString()).toBe(0);
+	expect(JSON.parse(incumbent.stdout.toString())).toEqual({ legacy_matcher: true });
+	expect(existsSync(reportPath)).toBe(false);
+	async function runService(extra: Record<string, string> = {}) {
+		const child = Bun.spawn([executable, "service", "run", "fleet-lessons", "--json"], {
+			cwd: home, env: { ...fixtureEnv, XDG_STATE_HOME: join(home, ".local", "state"),
+				OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "10000", AGENT_NAME: "A11Fixture", ...extra },
+			stdout: "pipe", stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		return { stdout, stderr, code, envelope: JSON.parse(stdout) };
+	}
+	const { stdout, stderr, code, envelope } = await runService();
+	expect(existsSync(reportPath), `service exit=${code}\nstdout=${stdout}\nstderr=${stderr}`).toBe(true);
+	const produced = JSON.parse(readFileSync(reportPath, "utf8"));
+	expect(produced.schema).toBe("omp-kit.fleet-lessons/v1");
+	expect(produced.classifier.status).toBe("DISABLED");
+	expect(produced.survey.intake_beads).toEqual([{
+		external_ref: produced.intake_plan[0].external_ref, status: "CREATED", bead_id: expect.any(String),
+	}]);
+	const intakeId = produced.survey.intake_beads[0].bead_id;
+	const readback = Bun.spawnSync(["br", "--db", intakeDatabase, "--no-auto-import", "--no-auto-flush",
+		"show", intakeId, "--json"], { cwd: config.intakeTracker, env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
+	expect(readback.exitCode, readback.stderr.toString()).toBe(0);
+	const intake = JSON.parse(readback.stdout.toString())[0];
+	expect(intake.external_ref).toBe(produced.intake_plan[0].external_ref);
+	expect(intake.status).toBe("open");
+	expect(intake.labels).toEqual(["lesson", "uphill"]);
+	expect(intake.description).toContain("Shared fixture failure requiring a fleet intake.");
+	for (const repo of config.repos) {
+		expect(intake.description).toContain(repo.name);
+		if (!repo.trackerPath || repo.trackerPath === config.intakeTracker) continue;
+		const foreign = Bun.spawnSync(["br", "--db", join(repo.trackerPath, ".beads", "beads.db"),
+			"--no-auto-import", "--no-auto-flush", "list", "--status", "all", "--limit", "0", "--json"], {
+			cwd: repo.trackerPath, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+		});
+		expect(foreign.exitCode, foreign.stderr.toString()).toBe(0);
+		expect(JSON.parse(foreign.stdout.toString()).issues).toEqual([]);
+	}
+	// These fixture repos deliberately have no planning inputs; a created intake is not a healthy planning score.
+	expect(produced.run_status).toBe("BLOCKED");
+	expect(produced.blockers).toEqual(["planning-score-unavailable"]);
+	expect(envelope.data.receipt.exit).toBe(1);
+	expect(envelope.data.receipt.status).toBe("FAILED");
+	expect(code).toBe(1);
+
+	const replay = await runService();
+	const replayReport = JSON.parse(readFileSync(reportPath, "utf8"));
+	expect(replay.code).toBe(1);
+	expect(replayReport.blockers).toEqual(["planning-score-unavailable"]);
+	expect(replayReport.intake_plan).toEqual([]);
+	expect(replayReport.survey.intake_beads).toEqual([]);
+	const inventory = Bun.spawnSync(["br", "--db", intakeDatabase, "--no-auto-import", "--no-auto-flush",
+		"list", "--status", "all", "--limit", "0", "--json"], {
+		cwd: config.intakeTracker, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+	});
+	expect(inventory.exitCode, inventory.stderr.toString()).toBe(0);
+	expect(JSON.parse(inventory.stdout.toString()).issues.map((issue: { external_ref: string }) => issue.external_ref).sort())
+		.toEqual([...seededRefs, intake.external_ref].sort());
+
+	const unregisteredRoot = join(home, "not-registered");
+	mkdirSync(unregisteredRoot, { recursive: true });
+	const unregisteredDatabase = join(unregisteredRoot, ".beads", "beads.db");
+	const initializedOutside = Bun.spawnSync(["br", "--db", unregisteredDatabase, "init", "--prefix", "outside"], {
+		cwd: unregisteredRoot, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+	});
+	expect(initializedOutside.exitCode, initializedOutside.stderr.toString()).toBe(0);
+	const beforeOutside = readFileSync(reportPath, "utf8");
+	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig.replace(
+		'intake_tracker = "~/Developer/omp-kit"', "intake_tracker = " + JSON.stringify(unregisteredRoot)));
+	const refusedOutside = await runService();
+	expect(refusedOutside.code).toBe(1);
+	expect(refusedOutside.envelope.data.receipt.status).toBe("FAILED");
+	expect(readFileSync(reportPath, "utf8")).toBe(beforeOutside);
+	const outsideInventory = Bun.spawnSync(["br", "--db", unregisteredDatabase, "--no-auto-import", "--no-auto-flush",
+		"list", "--status", "all", "--limit", "0", "--json"], {
+		cwd: unregisteredRoot, env: fixtureEnv, stdout: "pipe", stderr: "pipe",
+	});
+	expect(outsideInventory.exitCode, outsideInventory.stderr.toString()).toBe(0);
+	expect(JSON.parse(outsideInventory.stdout.toString()).issues).toEqual([]);
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "fleet-lessons.lock"))).toBe(false);
+	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig);
+
+	const beforeRefusal = readFileSync(reportPath, "utf8");
+	const refused = await runService({ OMP_KIT_FLEET_LESSONS_CLAIM: "not-a-current-keeper" });
+	expect(refused.code).toBe(2);
+	expect(refused.envelope.errors[0].code).toBe("FLEET_LESSONS_KEEPER_CHANGED");
+	expect(readFileSync(reportPath, "utf8")).toBe(beforeRefusal);
+
+	writeFileSync(join(config.repos[0]!.path, ".omp", "lessons.jsonl"), "invalid lesson JSON\n");
+	const failed = await runService();
+	const failedReport = JSON.parse(readFileSync(reportPath, "utf8"));
+	expect(failedReport.run_status).toBe("BLOCKED");
+	expect(failedReport.blockers).toContain("repo-log-invalid:" + config.repos[0]!.name);
+	expect(failed.code).toBe(1);
+	expect(failed.envelope.data.receipt.exit).toBe(1);
+	expect(failed.envelope.data.receipt.status).toBe("FAILED");
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "fleet-lessons.lock"))).toBe(false);
+
+	const beforeTimeout = readFileSync(reportPath, "utf8");
+	const timed = await runService({ OMP_KIT_RUN_CAP_MS: "1" });
+	expect(timed.code).toBe(1);
+	expect(timed.envelope.data.status).toBe("TIMEOUT");
+	expect(timed.envelope.data.receipt.status).toBe("TIMEOUT");
+	expect(readFileSync(reportPath, "utf8")).toBe(beforeTimeout);
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "fleet-lessons.lock"))).toBe(false);
+}, 60000);
+
+test("fleet producer refuses an intake tracker outside its registered repositories before effects", () => {
+	const repoRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const home = mkdtempSync(join(scratchRoot, `a11-intake.${process.pid}.`));
+	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-intake\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
+	const kitRoot = join(home, "kit");
+	mkdirSync(join(kitRoot, "config"), { recursive: true });
+	writeFileSync(join(kitRoot, "config", "lessons.toml"), configText.replace(
+		'intake_tracker = "~/Developer/omp-kit"', 'intake_tracker = "~/unregistered-intake"'));
+	const stateRoot = join(home, "state");
+	expect(() => runFleetLessonsOnce({ kitRoot, home, stateRoot }, {
+		planningScore: () => { throw new Error("unexpected planning work"); },
+		tracker: () => { throw new Error("unexpected tracker work"); },
+	})).toThrow("FLEET_LESSONS_INTAKE_NOT_REGISTERED");
+	expect(existsSync(stateRoot)).toBe(false);
+	expect(existsSync(join(home, "unregistered-intake"))).toBe(false);
+});
+
+test("a fleet lessons OFF transition before child execution is no-run, not a success receipt", async () => {
+	const kitRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(kitRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const home = mkdtempSync(join(scratchRoot, `a11-off-race.${process.pid}.`));
+	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-off-race\nrepo=${kitRoot}\ncreated=${new Date().toISOString()}\n`);
+	const launcher = join(home, ".local", "bin", "omp-kit");
+	mkdirSync(dirname(launcher), { recursive: true });
+	writeFileSync(launcher, "#!/bin/sh\nprintf '%s\\n' 'race-injected' > "
+		+ JSON.stringify(join(home, ".local", "state", "omp-kit", "fleet-lessons.off"))
+		+ "\nexec " + JSON.stringify(process.execPath) + " " + JSON.stringify(join(kitRoot, "src", "cli.ts")) + " \"$@\"\n", { mode: 0o755 });
+	const child = Bun.spawn([process.execPath, join(kitRoot, "src", "cli.ts"), "service", "run", "fleet-lessons", "--json"], {
+		cwd: home, env: { ...process.env, HOME: home, TMPDIR: home, XDG_STATE_HOME: join(home, ".local", "state"),
+			OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "10000", AGENT_NAME: "A11OffFixture" },
+		stdout: "pipe", stderr: "pipe",
+	});
+	const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+	expect(code, stderr).toBe(0);
+	const envelope = JSON.parse(stdout);
+	expect(envelope.data.status).toBe("OFF");
+	expect(envelope.data.reason).toBe("race-injected");
+	expect(envelope.data.receipt).toBeUndefined();
+	const state = join(home, ".local", "state", "omp-kit");
+	expect(existsSync(join(state, "jobs", "fleet-lessons.json"))).toBe(false);
+	expect(existsSync(join(state, "jobs", "fleet-lessons.lock"))).toBe(false);
+	expect(existsSync(join(state, "fleet-lessons", "latest.json"))).toBe(false);
+}, 30000);
+
+test("a capped producer group leaves no active nested process after timeout", async () => {
+	const kitRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(kitRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const scratch = mkdtempSync(join(scratchRoot, `a11-descendant.${process.pid}.`));
+	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=a11-descendant\nrepo=${kitRoot}\ncreated=${new Date().toISOString()}\n`);
+	const marker = join(scratch, "descendant.pid");
+	const result = await runWithCap({
+		argv: ["/bin/sh", "-c", "sleep 60 & kid=$!; printf '%s\\n' \"$kid\" > " + JSON.stringify(marker) + "; wait \"$kid\""],
+		cwd: scratch, env: { PATH: process.env.PATH ?? "", HOME: scratch, TMPDIR: scratch },
+		capMs: 300, exec: bunCapExec(),
+	});
+	const pid = Number(readFileSync(marker, "utf8").trim());
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Owned descendant PID was not recorded");
+	const state = Bun.spawnSync(["ps", "-p", String(pid), "-o", "stat="], { stdout: "pipe", stderr: "pipe" });
+	const active = state.exitCode === 0 && !state.stdout.toString().trim().startsWith("Z");
+	try {
+		expect(result.status).toBe("TIMEOUT");
+		expect(active, `owned descendant ${pid} remains ${state.stdout.toString()}`).toBe(false);
+	} finally {
+		if (active) {
+			try { process.kill(pid, "SIGKILL"); } catch { /* only our recorded descendant, already exited */ }
+		}
+	}
+}, 10000);
+
+test.each([
+	{ name: "malformed row", inventory: [null] },
+	{ name: "partial page", inventory: { issues: [], total: 1, offset: 0, has_more: true } },
+	{ name: "unknown inventory", inventory: { unexpected: [] } },
+])("fleet intake holds native writes for $name", ({ inventory }) => {
+	const repoRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const home = mkdtempSync(join(scratchRoot, `a11-inventory.${process.pid}.`));
+	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-inventory\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
+	const kitRoot = join(home, "kit");
+	mkdirSync(join(kitRoot, "config"), { recursive: true });
+	writeFileSync(join(kitRoot, "config", "lessons.toml"), configText.replace('mode = "shadow"', 'mode = "off"'));
+	const config = readLessonsConfig(kitRoot, home);
+	for (const repo of config.repos) {
+		mkdirSync(join(repo.path, ".omp"), { recursive: true });
+		writeFileSync(join(repo.path, ".omp", "lessons.jsonl"), JSON.stringify({
+			...lesson(repo.name, "Do not create intake from an untrustworthy inventory."),
+			proposed_fix: "An existing remediation is recorded.",
+		}) + "\n");
+	}
+	const database = join(config.intakeTracker, ".beads", "beads.db");
+	mkdirSync(config.intakeTracker, { recursive: true });
+	const env = { ...process.env, HOME: home, TMPDIR: home };
+	const initialized = Bun.spawnSync(["br", "--db", database, "init", "--prefix", "a11"], {
+		cwd: config.intakeTracker, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(initialized.exitCode, initialized.stderr.toString()).toBe(0);
+	const produced = runFleetLessonsOnce({ kitRoot, home, stateRoot: join(home, "state") }, {
+		tracker: (path, args) => {
+			if (args[0] === "list") return { code: 0, stdout: JSON.stringify(inventory), stderr: "" };
+			const result = Bun.spawnSync(["br", "--db", path, "--no-auto-import", "--no-auto-flush", ...args], {
+				cwd: config.intakeTracker, env, stdout: "pipe", stderr: "pipe",
+			});
+			return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+		},
+	});
+	const readback = Bun.spawnSync(["br", "--db", database, "--no-auto-import", "--no-auto-flush",
+		"list", "--status", "all", "--limit", "0", "--json"], {
+		cwd: config.intakeTracker, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(readback.exitCode, readback.stderr.toString()).toBe(0);
+	expect(JSON.parse(readback.stdout.toString()).issues).toEqual([]);
+	expect(produced.report.blockers).toContain("intake-tracker-list-invalid");
+	expect(produced.report.classifier.status).toBe("DISABLED");
+});
+
+test("service bodies refuse unsupported jobs while omp-watch still executes the native matcher", async () => {
+	const repoRoot = resolve(import.meta.dir, "../..");
+	const scratchRoot = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const home = mkdtempSync(join(scratchRoot, `a11-service-bodies.${process.pid}.`));
+	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-service-bodies\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
+	const release = join(home, "release");
+	mkdirSync(join(release, "bin"), { recursive: true });
+	const selected = resolveOmpIdentity(process.env);
+	const packageMetadata = JSON.parse(readFileSync(join(selected.packageRoot, "package.json"), "utf8"));
+	if (typeof packageMetadata.bin?.omp !== "string") throw new Error("real OMP package declares no omp executable");
+	const identityBin = join(home, "omp-identity-bin");
+	mkdirSync(identityBin, { recursive: true });
+	// A host wrapper can depend on HOME. Pin the same real package's declared executable instead.
+	symlinkSync(resolve(selected.packageRoot, packageMetadata.bin.omp), join(identityBin, "omp"));
+	const fixturePath = identityBin + delimiter + (process.env.PATH ?? "/usr/bin:/bin");
+	const identity = resolveOmpIdentity({ PATH: fixturePath });
+	const env = { PATH: fixturePath, HOME: home, TMPDIR: home,
+		XDG_CONFIG_HOME: join(home, "build-config"), XDG_CACHE_HOME: join(home, "build-cache"),
+		XDG_DATA_HOME: join(home, "build-data"), XDG_STATE_HOME: join(home, ".local", "state"),
+		BUN_INSTALL: join(home, "build-bun"), OMP_KIT_CASE_CWD: repoRoot,
+		OMP: identity.launcher, OMP_BIN: identity.launcher, OMP_PATH: identity.launcher, OMP_SRC: identity.source };
+	const revision = Bun.spawnSync(["git", "rev-parse", "--verify", "HEAD"], {
+		cwd: repoRoot, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(revision.exitCode, revision.stderr.toString()).toBe(0);
+	const resources = join(home, "resources.tar");
+	// Read-only exact-commit export for the packaged runtime, never an editable scratch checkout.
+	const archived = Bun.spawnSync(["git", "archive", "--format=tar", "--output=" + resources,
+		revision.stdout.toString().trim(), "--", "rules", "retired", "cases", "policy", "extensions", "scripts", "src", "config"], {
+		cwd: repoRoot, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(archived.exitCode, archived.stderr.toString()).toBe(0);
+	const extracted = Bun.spawnSync(["tar", "-xf", resources, "-C", release], {
+		cwd: home, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+	const executable = join(release, "bin", "omp-kit");
+	const built = Bun.spawnSync([process.execPath, "build", join(repoRoot, "src", "cli.ts"),
+		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
+		"--outfile=" + executable], { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" });
+	expect(built.exitCode, built.stderr.toString()).toBe(0);
+	const manifest = Bun.spawnSync(["sh", join(release, "scripts", "build-manifest.sh"), "--stdout"], {
+		cwd: home, env, stdout: "pipe", stderr: "pipe",
+	});
+	expect(manifest.exitCode, manifest.stderr.toString()).toBe(0);
+	writeFileSync(join(release, "MANIFEST.tsv"), manifest.stdout);
+	writeReleaseManifest(release);
+	const launcher = join(home, ".local", "bin", "omp-kit");
+	const matcherOutput = join(home, "matcher-output.json");
+	mkdirSync(dirname(launcher), { recursive: true });
+	const preload = join(home, "register-fixture-job.ts");
+	// Exercise a genuinely missing body without pretending an implemented job is unsupported.
+	writeFileSync(preload, "import { KNOWN_JOBS } from " + JSON.stringify(join(repoRoot, "src", "service.ts"))
+		+ ';\nKNOWN_JOBS["fixture-unimplemented"] = { name: "fixture-unimplemented", label: "com.omp-kit.fixture-unimplemented", kind: "interval", intervalSeconds: 60, runAtLoad: false };\n');
+	writeFileSync(launcher, "#!/bin/sh\n" + JSON.stringify(executable) + " \"$@\" > " + JSON.stringify(matcherOutput)
+		+ "\nchild_rc=$?\ncat " + JSON.stringify(matcherOutput) + "\nexit \"$child_rc\"\n", { mode: 0o755 });
+	async function runJob(job: string) {
+		const child = Bun.spawn([process.execPath, "--preload", preload, join(repoRoot, "src", "cli.ts"), "service", "run", job, "--json"], {
+			cwd: home, env: { ...env,
+				OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "60000", AGENT_NAME: "A11BodyFixture" },
+			stdout: "pipe", stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		return { code, stdout, stderr, envelope: JSON.parse(stdout) };
+	}
+	for (const [job, error] of [["not-a-job", "UNKNOWN_JOB"], ["fixture-unimplemented", "SERVICE_BODY_UNIMPLEMENTED"]] as const) {
+		const refused = await runJob(job);
+		expect(refused.code, refused.stderr).toBe(2);
+		expect(refused.envelope.errors[0].code).toBe(error);
+		expect(existsSync(matcherOutput)).toBe(false);
+		expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", job + ".lock"))).toBe(false);
+	}
+	const watched = await runJob("omp-watch");
+	expect(existsSync(matcherOutput), watched.stdout + "\n" + watched.stderr).toBe(true);
+	const matcher = JSON.parse(readFileSync(matcherOutput, "utf8")).data.test;
+	expect(matcher.proofs.G1_registration.status, JSON.stringify(matcher.blocker)).toBe("PASS");
+	expect(matcher.proofs.G2_payload.status).toBe("PASS");
+	expect(matcher.proofs.G3_quiet_prefix.status).toBe("PASS");
+	const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "last-test.json"), "utf8"));
+	expect(receipt).toMatchObject({ scope: "fast", status: matcher.status });
+	expect(watched.envelope.data.receipt.exit).toBe(matcher.exitCode);
+	expect(watched.code).toBe(matcher.exitCode === 0 ? 0 : 1);
+}, 90000);

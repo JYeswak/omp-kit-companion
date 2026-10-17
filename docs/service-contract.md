@@ -31,6 +31,26 @@ contract; `service doctor` enforces it item by item.
 | 16 | one schedule owner per machine; doctor flags double scheduling | MISSING | MISSING: `contract-double-schedule` (runtime; holder wires) |
 | 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | FIXED: parser accepts declared `--all`; rows carry loaded/lastExit/runs/last_run_at (box-2 commit) | `service status --all`, `service list` |
 
+## Fleet lesson report producer
+
+`service run fleet-lessons` runs the existing `omp-kit.fleet-lessons/v1`
+producer in a keeper-bound, capped child; it does not substitute the matcher.
+Cross-repository groups can create open `uphill,lesson` intake beads only in
+the configured intake tracker, which must also be registered by a configured
+repository. This check precedes producer writes.
+
+Native intake and grade-marker reads request the complete inventory. Malformed
+records, partial pages, nonzero offsets and inconsistent supplied totals are
+not an authoritative empty inventory: intake creation is held and the report
+names the failed input. Classifier shadow output remains advisory; `mode = "off"`
+disables that optional request.
+
+The compiled-CLI fixture exercises real native intake creation/readback,
+replay deduplication and registered-only writes. Missing planning inputs still
+produce a `BLOCKED` report and failed job receipt, not a healthy planning claim.
+Fixture evidence does not qualify an installed release or authorize activation;
+the broader learning and skill-admission criteria remain separate.
+
 ## Single-flight state and upgrade boundary
 
 Each job keeps its claim in `<job>.lock/pid` under the private jobs directory.
