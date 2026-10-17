@@ -86,7 +86,9 @@ jobs:
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # macOS release run 39016349469 attempt 2: suite 25m41s + sbh install 4m03s, so 30 min cancelled a healthy
+    # job twice. Finite bound with ~50% headroom; every check still runs (no speedup or skip).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
