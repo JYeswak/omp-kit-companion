@@ -277,6 +277,24 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertIn("G4 live scenario planted-fail", detail["failures"])
         self.assertEqual(detail["missing_scenarios"], ["planted-fail"])
 
+    def test_refusal_detail_keeps_failing_stage_producer_tail_only_on_failure(self) -> None:
+        producer = {"producer_rc": 1, "stdout": "x" * 6000 + "coverage producer_rc=2\nRED   e2e-live producer_rc=2", "stderr": "e" * 3000 + "launcher boom"}
+        failing = {"data": {"test": {"status": "FAIL", "stages": {"e2e-live": {"status": "FAIL"}},
+                                     "failures": ["Stage e2e-live returned producer_rc=2"],
+                                     "live_scenarios": {"expected_ids": [], "observed_ids": []}, "producer": producer}}, "errors": []}
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(failing).encode(), stderr=b"tail")
+        detail = native_candidate.refusal_detail("test --full", child)
+        self.assertTrue(detail["producer_stdout_tail"].endswith("RED   e2e-live producer_rc=2"))
+        self.assertIn("coverage producer_rc=2", detail["producer_stdout_tail"])
+        self.assertTrue(detail["producer_stderr_tail"].endswith("launcher boom"))
+        self.assertLessEqual(len(detail["producer_stdout_tail"]), 2500)
+        self.assertLessEqual(len(detail["producer_stderr_tail"]), 1000)
+        passing = {"data": {"test": {"status": "PASS", "stages": {"e2e-live": {"status": "PASS"}},
+                                     "failures": [], "live_scenarios": {"expected_ids": [], "observed_ids": []}, "producer": producer}}, "errors": []}
+        detail = native_candidate.refusal_detail("test --full", types.SimpleNamespace(returncode=1, stdout=json.dumps(passing).encode(), stderr=b"tail"))
+        self.assertNotIn("producer_stdout_tail", detail)
+        self.assertNotIn("producer_stderr_tail", detail)
+
     def test_refusal_detail_attaches_probe_tail_on_failing_deep_probe(self) -> None:
         payload = {
             "data": {"deep_probe": {

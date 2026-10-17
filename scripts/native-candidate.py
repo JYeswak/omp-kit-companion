@@ -227,6 +227,14 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
                       failed_stages=[stage for stage, value in (test.get("stages") or {}).items() if value.get("status") == "FAIL"],
                       failures=(test.get("failures") or [])[:20],
                       missing_scenarios=sorted(set(scenarios.get("expected_ids") or []) - set(scenarios.get("observed_ids") or [])))
+        failed_stage_names = [stage for stage, value in (test.get("stages") or {}).items() if value.get("status") == "FAIL"]
+        producer = test.get("producer") if isinstance(test.get("producer"), dict) else {}
+        if failed_stage_names:
+            # The ladder's own output holds the failing stage's message; failures[] alone drops it (run 39061124857).
+            for key in ("stdout", "stderr"):
+                text = producer.get(key)
+                if isinstance(text, str) and text:
+                    detail[f"producer_{key}_tail"] = text[-2500:] if key == "stdout" else text[-1000:]
         if expected_live_ids is not None and omp_version is not None:
             detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail
