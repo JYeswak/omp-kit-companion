@@ -74,7 +74,46 @@ cleanup() {
 		find "$dir" -depth -type d -empty -delete 2>/dev/null || true
 	done
 }
-trap cleanup EXIT HUP INT TERM
+# ompkit-fp72.40: an interrupted run is red, not clean. The INT/TERM handlers mark the run red
+# BEFORE cleanup, so the failed parent keeps exactly .owner + gate.log (AC3) while the extract
+# tree is removed (AC2). Owned pipeline children are shut down first so nothing recreates the
+# tree after cleanup; shutdown is TERM-only, never KILL.
+# shellcheck disable=SC2329,SC2317
+kill_owned_children() {
+	grace=0
+	for child in $(ps -o pid= -o ppid= 2>/dev/null | awk -v me="$$" '$2 == me && $1 != me { print $1 }'); do
+		kill -TERM "$child" 2>/dev/null || true
+	done
+	while [ "$grace" -lt 30 ]; do
+		alive=""
+		for child in $(ps -o pid= -o ppid= 2>/dev/null | awk -v me="$$" '$2 == me && $1 != me { print $1 }'); do
+			alive="$alive $child"
+		done
+		[ -z "$alive" ] && return 0
+		sleep 0.1
+		grace=$((grace + 1))
+	done
+	return 0
+}
+# shellcheck disable=SC2329,SC2317
+on_int() {
+	trap - EXIT HUP INT TERM
+	gate_red=1
+	kill_owned_children
+	cleanup
+	exit 130
+}
+# shellcheck disable=SC2329,SC2317
+on_term() {
+	trap - EXIT HUP INT TERM
+	gate_red=1
+	kill_owned_children
+	cleanup
+	exit 143
+}
+trap cleanup EXIT HUP
+trap on_int INT
+trap on_term TERM
 archive_root=$(owned_dir pre-push-gate) || { printf 'pre-push-gate: cannot stage archive\n' >&2; exit 1; }
 # Both owned dirs are made here, in the shell that owns the trap: the body below runs in a subshell,
 # and cleanup must know every dir it has to remove.
@@ -131,7 +170,8 @@ for checker_test in \
 	br-shim.test.sh \
 	public-files.test.sh \
 	commit-msg-bead.test.sh \
-	check-pushed-beads.test.sh
+	check-pushed-beads.test.sh \
+	release-train.test.sh
 do
 	test_path="$gate_scripts/tests/cli/$checker_test"
 	if [ ! -f "$test_path" ]; then

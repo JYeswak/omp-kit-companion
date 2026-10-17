@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC1091
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # pre-push-gate.test.sh — GATE1 base-authoritative gate contract
@@ -20,7 +21,7 @@ create_checker_test_stubs() {
 	repo=$1
 	failing_test=${2:-}
 	mkdir -p "$repo/tests/cli"
-	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh; do
+	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh; do
 		test_path="$repo/tests/cli/$checker_test"
 		if [ "$checker_test" = "$failing_test" ]; then
 			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
@@ -391,6 +392,31 @@ if [ -s "$TMP/gate.pid" ] && [ "$verdicts" = " REAP REAP" ]; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL killed-gate-extract-reapable: verdicts=%s plan-stderr<<<%s>>> out<<<%s>>>\n' "$verdicts" "$(cat "$TMP/plan.err" 2>/dev/null)" "$(cat "$TMP/killed.out" 2>/dev/null)"
+fi
+# ompkit-fp72.40: SIGTERM interrupts the gate mid-run. The trap marks the run red BEFORE
+# cleanup, so the extract tree is removed (AC2) while the failed parent keeps exactly .owner
+# + gate.log naming the dead gate pid (AC3). Never SIGKILL here: that skips the trap and
+# tests a different path (see killed-gate-extract-reapable above).
+repo=$(mkrepo termred "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30" 'echo HEAD-GATE')
+printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/term.in"
+rm -f "$TMP/term.pid"
+( cd -- "$repo" && GATE_PIDFILE="$TMP/term.pid" exec sh "$ADAPTER" ) < "$TMP/term.in" > "$TMP/term.out" 2>&1 &
+tapid=$!
+ti=0
+while [ ! -s "$TMP/term.pid" ] && [ "$ti" -lt 300 ]; do sleep 0.1; ti=$((ti + 1)); done
+kill -TERM "$tapid" 2>/dev/null
+wait "$tapid" 2>/dev/null
+trc=$?
+tkept=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate.*' ! -name 'pre-push-gate-base.*')
+tfiles=$( [ -n "$tkept" ] && (cd "$tkept" && find . ! -type d | sort | tr '\n' ' ') )
+tdead=0; kill -0 "$tapid" 2>/dev/null || tdead=1
+tbase=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate-base.*')
+if [ "$trc" = "143" ] && [ -n "$tkept" ] && [ "$tfiles" = "./.owner ./gate.log " ] \
+	&& [ ! -d "$tkept/tree" ] && grep -qx "pid=$tapid" "$tkept/.owner" && [ "$tdead" = "1" ] \
+	&& [ -z "$tbase" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL term-interrupt-keeps-log-not-tree: rc=%s kept=%s files=<%s> base=<%s>\n' "$trc" "$tkept" "$tfiles" "$tbase"
 fi
 # RX5: a real local Git push must run the archive gate and refuse a planted vulnerable regex.
 realrepo="$TMP/real-regexploit-push"
