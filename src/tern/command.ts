@@ -5,7 +5,7 @@ import { CATALOG, MEMBERS, TernError, record } from './model.ts';
 import type { Context } from './model.ts';
 import { TERN_COMMAND } from './registry.ts';
 import type { Parsed } from './registry.ts';
-import routes from './script-routes.json';
+import routes from '../../scripts/tern-script-routes.json';
 import { bindingModule, compileProgram, emitCall, memberAllowedInContext } from './luau.ts';
 import { verifySdk, docsReport } from './coverage.ts';
 import { executeProgram } from './api.ts';
@@ -179,19 +179,22 @@ async function execute(p: Parsed, env: Environment): Promise<CommandResult> {
     if (p.command === 'doctor') {
         const checks: Record<string, unknown>[] = [];
         const binary = str(p, '--binary', 'tern');
+        const timeoutMs = integer(p, '--timeout-ms', 5000);
         try {
-            const r = await nativeProcess(binary, ['--version'], integer(p, '--timeout-ms', 5000));
+            const r = await nativeProcess(binary, ['--version'], timeoutMs);
             checks.push({ name: 'native_binary', ...parseNativeResult(r), proof: 'VERSION_ONLY' });
         }
         catch (e) {
+            if (e instanceof TernError && e.exit === 2) throw e;
             checks.push({ name: 'native_binary', status: 'UNAVAILABLE', code: e instanceof TernError ? e.code : 'ERROR' });
         }
         if (p.flags['--endpoint'])
             try {
-                const r = await control(['state'], { endpoint: str(p, '--endpoint'), timeoutMs: integer(p, '--timeout-ms', 5000) });
+                const r = await control(['state'], { endpoint: str(p, '--endpoint'), timeoutMs });
                 checks.push({ name: 'endpoint', status: 'CONNECTED', proof: 'ONE_STATE_REPLY', reply_count: r.replies.length });
             }
             catch (e) {
+                if (e instanceof TernError && e.exit === 2) throw e;
                 checks.push({ name: 'endpoint', status: 'UNAVAILABLE', code: e instanceof TernError ? e.code : 'ERROR' });
             }
         else

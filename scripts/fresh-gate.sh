@@ -132,7 +132,7 @@ archive, suite, budget, deferred_log = sys.argv[1], sys.argv[2], float(sys.argv[
 env = os.environ.copy()
 env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
 proc = subprocess.Popen(
-    ["bun", "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--label", "fresh-gate-" + suite, "--no-wait", "--", "bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", suite],
+    ["bun", "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--label", "fresh-gate-" + suite, "--no-wait", "--", "bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", "./" + suite],
     cwd=archive,
     env=env,
     start_new_session=True,

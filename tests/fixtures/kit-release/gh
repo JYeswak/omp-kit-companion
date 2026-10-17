@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Subprocess policy double only; never evidence of a real Sigstore signature.
+
+Shared by installer and update regression tests. Rejects weakened authority flags
+and all bundles except the explicitly synthetic control. Public smoke uses real gh.
+"""
+import json
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args[:1] == ["api"]:
+    if any(item.startswith("repos/JYeswak/omp-kit-companion/commits/v") for item in args):
+        # Deterministic original-path replacement at the authority boundary.
+        # Only this explicitly synthetic subprocess double supports these knobs.
+        if os.environ.get("SYNTHETIC_GH_REPLACE_ARCHIVE"):
+            Path(os.environ["SYNTHETIC_GH_REPLACE_ARCHIVE"]).write_bytes(b"substituted original archive")
+        print("a" * 40)
+        sys.exit(0)
+    if any("/attestations/sha256:" in item for item in args):
+        print('{"fixture":true}')
+        sys.exit(0)
+elif args[:2] == ["attestation", "verify"]:
+    policy = {
+        "--hostname": "github.com",
+        "--repo": "JYeswak/omp-kit-companion",
+        "--cert-oidc-issuer": "https://token.actions.githubusercontent.com",
+        "--signer-workflow": "JYeswak/omp-kit-companion/.github/workflows/release.yml",
+        "--source-digest": "a" * 40,
+        "--predicate-type": "https://slsa.dev/provenance/v1",
+    }
+    try:
+        assert all(args[args.index(key) + 1] == value for key, value in policy.items())
+        assert json.loads(Path(args[args.index("--bundle") + 1]).read_text()) == {"fixture": True}
+        if os.environ.get("SYNTHETIC_GH_EXPECT_SHA256"):
+            assert hashlib.sha256(Path(args[2]).read_bytes()).hexdigest() == os.environ["SYNTHETIC_GH_EXPECT_SHA256"]
+        sys.exit(0)
+    except (AssertionError, ValueError, IndexError, OSError):
+        pass
+print("synthetic verifier: bundle or authority policy refused", file=sys.stderr)
+sys.exit(1)

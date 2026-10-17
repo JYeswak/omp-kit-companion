@@ -77,6 +77,9 @@ export interface Program {
     steps: Step[];
 }
 const handleProducers = new Set(['cx.layout.snapshot', 'cx.agents.get', 'cx.db.open']);
+export function isOpaqueHandleProducer(symbol: unknown): boolean {
+    return typeof symbol === 'string' && handleProducers.has(symbol);
+}
 function argument(value: unknown, known: Set<string>, depth = 0): string {
     if (depth > 64)
         throw new TernError('VALUE_TOO_DEEP', 'Argument depth exceeds 64');

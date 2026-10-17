@@ -1,0 +1,256 @@
+symbol	kind	contexts	route	source	native_runtime
+tern.log.debug	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.log.info	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.log.warn	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.log.error	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.json.encode	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.json.decode	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.json.array	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.base64.encode	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.base64.decode	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.now	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.getenv	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.timer	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.sleep	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.kv.get	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.kv.set	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.secrets.get	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.secrets.set	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.read	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.write	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.list	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.exists	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.mkdir	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fs.remove	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.process.run	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.fetch	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.span	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.link	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.path	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.text	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.col	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.lines	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.row	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.card	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.section	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.rule	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.badge	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.kv	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.table	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.meter_cell	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.meter_parts_cell	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.tree	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.list	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.code	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.diff	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.md	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.meter	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.progress	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.bars	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.spark	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.ansi	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.diagnostic	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.test_summary	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.overflow	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.node	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.ui.el	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.parse.columns	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.parse.packed	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.parse.json_tree	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.parse.location	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.parse.size	function	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.block.define	function	host	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.lens.define	function	host	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.pane.write	function	host	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.pane.list	function	host	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.on	function	host,window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.command	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.bind	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.override	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.route.open	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.route.link	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.chrome.tab_title	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.chrome.window_title	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.chrome.status	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.chrome.refresh	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.css	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.export	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.context	function	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.schedule	function	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.tasks	function	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.cancel	function	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+tern.carly.on_canvas	function	carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.current	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.create	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.switch	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.rename	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.close	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.lock	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.sessions.unlock	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.current	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.add	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.switch	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.trust	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.disconnect	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.hosts.terminal	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.get	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.start	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.ask	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.wait	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.transcript	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.interrupt	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.agents.stop	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.find	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.children	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.signal	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.procs.profile	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.actions.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.actions.run	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.actions.keys	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.actions.describe	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.repo	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.status	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.log	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.diff	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.stage	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.unstage	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.commit	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.branches	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.checkout	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.create_branch	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.stash_push	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.stash_pop	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.git.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.get	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.set	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.set_many	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.describe	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.themes	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.keybinds	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.bind	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.settings.unbind	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.db.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.db.tables	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.db.schema	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.db.query	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.db.exec	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.boards	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.read	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.add	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.move	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.check	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.edit	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.remove	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.add_lane	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.rename_lane	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.board.remove_lane	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.browser.call	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.screen.displays	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.screen.share	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.screen.stop	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.screen.status	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.read	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.outline	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.write	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.edit	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.append	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.save	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.new_note	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.docs.search	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.canvas.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.canvas.set	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.canvas.get	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.canvas.list	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.whiteboard.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.whiteboard.read	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.whiteboard.edit	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.sessions	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.layout	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.find_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.find_session	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.tab_of	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.pane	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.read	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.surface	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.view	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.event	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.panes	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.tabs	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.focused	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.resolve	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.block_types	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.session.settle	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.new_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.split	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.focus	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.close	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.move	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.resize	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.move_to_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.move_to_new_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.float	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.dock	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.park	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.unpark	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.even	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.name_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.color_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.order_tab	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.rename_session	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.snapshot	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.restore	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.layout.arrange	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.cells	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.run	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.add	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.edit	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.kernel_status	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.notebook.kernel_restart	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.run	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.open	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.new_block	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.command	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.action	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.ask_carly	method	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.pick	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.prompt	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.toast	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+cx.copy	method	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+effect.toast	method	host-effect,host-block,host-lens	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+effect.open	method	host-effect,host-block,host-lens	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+effect.copy	method	host-effect,host-block,host-lens	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+block.render	method	host-block	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+block.save	method	host-block	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+block.exit	method	host-block	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+block.frame	method	host-block	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+block.blob	method	host-block	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.TimerHandle.cancel	handle	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.Awaitable.next	handle	host,window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.ExportCall.reply	handle	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.ExportCall.fail	handle	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.ExportCall.wait	handle	window	sdk module / sdk emit, in native plugin context	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+handle.Agent.tocarly	handle	window,carly	api --member or same-VM program; sdk module	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.init	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.view	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.title	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.key	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.event	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.resize	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+BlockDef.save	callback	host-block	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+LensDef.open	callback	host-lens	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+LensDef.line	callback	host-lens	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+LensDef.finish	callback	host-lens	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+LensDef.view	callback	host-lens	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+LensDef.event	callback	host-lens	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+CommandDef.available	callback	window	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN
+CommandDef.run	callback	window	sdk emit (caller supplies the callback)	https://github.com/stencil-hq/tern-sdk/blob/f3f9fee82bf692166c2a477a895a347ac2a47ca2/plugins/tern.d.luau	NOT_RUN

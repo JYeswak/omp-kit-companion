@@ -841,16 +841,26 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-cli-"));
 	const home = path.join(tmp, "home");
 	fs.mkdirSync(home);
-	// Isolated HOME, no inherited profile: OMP_PROFILE would load the profile's files.
-	// --rule loads only the named file.
+	// An isolated HOME can make omp-trust-guard refuse before any CLI case is meaningful.
+	// Probe once before spawning the full corpus so the refusal is reported, not 429 parser errors.
 	const env: Record<string, string> = {};
 	for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
 	delete env.OMP_PROFILE;
 	delete env.PI_PROFILE;
-	// BUN_BE_BUN is for invoking embedded omp-kit, not the nested OMP CLI launcher.
 	delete env.BUN_BE_BUN;
 	delete env.PI_CODING_AGENT_DIR;
 	env.HOME = home;
+	const versionProbe = Bun.spawnSync([OMP_BIN, "--version"], { cwd: tmp, env, stdout: "pipe", stderr: "pipe" });
+	const versionOutput = versionProbe.stdout.toString() + versionProbe.stderr.toString();
+	const guardFailure = /omp-trust-guard: FAIL-CLOSED:[^\r\n]*/i.exec(versionOutput)?.[0];
+	if (versionProbe.exitCode === 3 && guardFailure !== undefined) {
+		console.log(`OMP_TRUST_GUARD_FAIL_CLOSED: ${guardFailure}`);
+		fs.rmSync(tmp, { recursive: true, force: true });
+		return 3;
+	}
+	const version = versionProbe.stdout.toString().trim();
+	// Isolated HOME, no inherited profile: OMP_PROFILE would load the profile's files.
+	// --rule loads only the named file.
 	let disagreements = 0;
 	let errors = 0;
 	const todo = cases.filter(c => byName.get(c.rule)?.cls !== "always" && byName.has(c.rule));
@@ -893,7 +903,6 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 	await Promise.all(Array.from({ length: Math.max(1, jobs) }, worker));
 	fs.rmSync(tmp, { recursive: true, force: true });
 	for (const r of results) console.log(r);
-	const version = Bun.spawnSync([OMP_BIN, "--version"], { env }).stdout.toString().trim();
 	console.log(`== summary: ${version}, cases=${todo.length} agree=${todo.length - disagreements - errors} disagreements=${disagreements} errors=${errors}`);
 	console.log(disagreements === 0 && errors === 0 ? "CROSSCHECK: GREEN" : "CROSSCHECK: RED");
 	return disagreements === 0 && errors === 0 ? 0 : 1;

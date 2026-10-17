@@ -1,11 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
-import { runtimeTempRoot, sanitizedEnv, runIsolatedShell } from "../../src/runtime.ts";
-import { once } from "node:events";
+import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
 
 const fixtures: string[] = [];
 
@@ -64,6 +63,23 @@ function snapshotTree(root: string): string {
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
+function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_WORK_ROOT" | "OMP_KIT_CASE_CWD", string> } {
+	let root = process.env.OMP_KIT_TEST_WORK_ROOT;
+	let caller = process.env.OMP_KIT_CASE_CWD ?? REPO_ROOT;
+	if (!root) {
+		const scratch = join(REPO_ROOT, "var", "agent-tmp");
+		mkdirSync(scratch, { recursive: true, mode: 0o700 });
+		root = mkdtempSync(join(scratch, "runtime-tests."));
+		fixtures.push(root);
+		caller = REPO_ROOT;
+		writeFileSync(join(root, ".owner"),
+			`pid=${process.pid}\nlabel=runtime-tests\nrepo=${caller}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	}
+	const base = mkdtempSync(join(root, "omp-kit-runtime-"));
+	fixtures.push(base);
+	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
+}
+
 test("isolated children retain the logical workspace root for case path scopes", () => {
 	const identity = {
 		launcher: resolve("omp/bin/omp"),
@@ -77,6 +93,138 @@ test("isolated children retain the logical workspace root for case path scopes",
 		.toBe(resolve("var/agent-tmp/fixture"));
 	expect(sanitizedEnv(identity, {}, privateRoot).OMP_KIT_CASE_CWD).toBe(process.cwd());
 });
+test("native stage progress opt-in survives child environment sanitization", () => {
+	const identity = {
+		launcher: resolve("omp/bin/omp"),
+		packageRoot: resolve("omp"),
+		source: resolve("omp/src"),
+		nativeRoot: resolve("omp/node_modules/@oh-my-pi/pi-natives"),
+	};
+	expect(sanitizedEnv(identity, { OMP_KIT_NATIVE_STAGE_PROGRESS: "1" }, resolve("private-root")).OMP_KIT_NATIVE_STAGE_PROGRESS)
+		.toBe("1");
+	expect(sanitizedEnv(identity, { OMP_KIT_NATIVE_STAGE_PROGRESS: "0" }, resolve("private-root")).OMP_KIT_NATIVE_STAGE_PROGRESS)
+		.toBeUndefined();
+});
+
+for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) {
+	test(`isolated ${interruption} drains real stage evidence and stops its owned descendants before scratch cleanup`, async () => {
+		const { base, admission } = ownedRuntimeFixture();
+		const release = join(base, "release");
+		const executable = join(release, "bin", "omp-kit");
+		const omp = createOmp(join(base, "omp"), "v1");
+		for (const directory of ["release/bin", "release/scripts", "operator-home", "tmp"]) mkdirSync(join(base, directory), { recursive: true });
+		writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+		writeFileSync(join(release, "scripts", "ladder.sh"), [
+			`trap 'if [ -d "$HOME" ]; then printf "scratch-present-during-stop\\n" >&2; else printf "scratch-missing-during-stop\\n" >&2; fi; exit 0' TERM`,
+			`/bin/sh -c 'trap "" TERM; printf "%s\\n" "$$" > "$1/grandchild.pid"; while :; do /bin/sleep 1; done' descendant "$1" &`,
+			`descendant=$!`,
+			`printf '%s\\n' "$$" > "$1/child.pid"`,
+			`printf '%s\\n' "$HOME" > "$1/private-home"`,
+			`while [ ! -s "$1/grandchild.pid" ]; do /bin/sleep 0.01; done`,
+			`printf 'OMP_KIT_STAGE_START name=e2e-live\\n'`,
+			`printf 'current-stage-output\\n'`,
+			`printf 'current-stage-diagnostic\\n' >&2`,
+			interruption === "leader-exit" ? "exit 7" : `wait "$descendant"`,
+		].join("\n"));
+		// Fault only the reader, never the producer or its captured output.
+		const runner = `
+			import { Readable } from "node:stream";
+			import { runIsolatedShell } from ${JSON.stringify(join(REPO_ROOT, "src/runtime.ts"))};
+			import { recoverInterruptedRun, currentStageReport } from ${JSON.stringify(join(REPO_ROOT, "src/full-test-runner.ts"))};
+			if (${JSON.stringify(interruption)} === "stream-error") {
+				const fromWeb = Readable.fromWeb;
+				Readable.fromWeb = (...args) => {
+					Readable.fromWeb = fromWeb;
+					const stream = fromWeb(...args);
+					stream.on("data", chunk => {
+						if (String(chunk).includes("current-stage-output")) queueMicrotask(() => stream.destroy(
+							Object.assign(new Error("read failed at " + process.env.HOME + " Bearer synthetic-reader-credential"), { code: "STREAM_READ_FAILED" })
+						));
+					});
+					return stream;
+				};
+			}
+			try {
+				const result = await runIsolatedShell("scripts/ladder.sh", [${JSON.stringify(base)}], ${JSON.stringify(release)}, ${JSON.stringify(executable)});
+				process.stdout.write(JSON.stringify({ result, current_stage: currentStageReport(result.in_flight_stage ?? null) }));
+				process.exitCode = result.code;
+			} catch (error) {
+				const recovered = recoverInterruptedRun(error, [${JSON.stringify(base)}]);
+				process.stdout.write(JSON.stringify({ ...recovered, current_stage: currentStageReport(recovered.result.in_flight_stage ?? null) }));
+				process.exitCode = 3;
+			}
+		`;
+		const child = Bun.spawn([process.execPath, "--eval", runner], {
+			cwd: base, detached: true, stdout: "pipe", stderr: "pipe",
+			env: {
+				PATH: [dirname(omp.launcher), dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+				HOME: join(base, "operator-home"), TMPDIR: join(base, "tmp"),
+				OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+				...admission, OMP_KIT_NATIVE_STAGE_PROGRESS: "1",
+			},
+		});
+		const { promise: ready, resolve: markReady } = Promise.withResolvers<void>();
+		const stdout = new Response(child.stdout).text();
+		let diagnostics = "";
+		const stderr = (async () => {
+			const reader = child.stderr.getReader(), decoder = new TextDecoder();
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				diagnostics += decoder.decode(value, { stream: true });
+				if (diagnostics.includes("OMP_KIT_STAGE_START name=e2e-live")) markReady();
+			}
+			diagnostics += decoder.decode();
+			return diagnostics;
+		})();
+		// A watchdog bounds a real OS-process test; readiness is signaled by actual stage output, not a sleep.
+		let timer: NodeJS.Timeout | undefined;
+		const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("owned runtime interruption deadline")), 6000); });
+		try {
+			if (interruption === "SIGTERM") {
+				await Promise.race([ready, deadline, child.exited.then(() => { throw new Error("runner exited before stage readiness"); })]);
+				child.kill("SIGTERM");
+			}
+			const [code, output, diagnostic] = await Promise.race([Promise.all([child.exited, stdout, stderr]), deadline]);
+			expect(code, diagnostic).toBe(interruption === "leader-exit" ? 7 : 3);
+			const report = JSON.parse(output);
+			if (interruption !== "leader-exit") {
+				expect(report.cause.cause_code).toBe(interruption === "stream-error" ? "STREAM_READ_FAILED" : "SIGTERM");
+				if (interruption === "stream-error") {
+					expect(report.cause.cause_message).toContain("read failed at <private-path>/operator-home");
+					expect(JSON.stringify(report.cause)).not.toContain("synthetic-reader-credential");
+				}
+			}
+			expect(report.result.stdout).toContain("current-stage-output\n");
+			expect(report.result.stderr).toContain("current-stage-diagnostic\n");
+			if (interruption !== "leader-exit") {
+				expect(report.result.stderr).toContain("scratch-present-during-stop\n");
+				expect(report.result.stderr).not.toContain("scratch-missing-during-stop");
+			}
+			expect(report.current_stage.name).toBe("e2e-live");
+			expect(report.current_stage.elapsed_ms).toBeGreaterThan(0);
+			const privateHome = readFileSync(join(base, "private-home"), "utf8").trim();
+			expect(existsSync(dirname(privateHome))).toBe(false);
+			for (const file of ["child.pid", "grandchild.pid"]) {
+				const pid = Number(readFileSync(join(base, file), "utf8").trim());
+				const probe = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
+				const state = probe.stdout.toString().trim();
+				expect(state === "" || state.startsWith("Z"), `${file} remains live: ${state}`).toBe(true);
+			}
+		} finally {
+			clearTimeout(timer);
+			if (child.exitCode === null) child.kill("SIGKILL");
+			const pidPath = join(base, "child.pid");
+			if (existsSync(pidPath)) {
+				const pid = Number(readFileSync(pidPath, "utf8").trim());
+				if (Number.isSafeInteger(pid) && pid > 1) {
+					try { process.kill(-pid, "SIGKILL"); } catch { /* Only this fixture's owned process group. */ }
+				}
+			}
+			await Promise.allSettled([child.exited, stdout, stderr]);
+		}
+	}, 12_000);
+}
 
 describe("release paths", () => {
 	test("follows the stable launcher to the moved versioned release", () => {
@@ -119,7 +267,7 @@ describe("release paths", () => {
 	});
 
 	test("runs the packaged rule classifier and refuses the retired local-model checker", () => {
-		const base = fixtureRoot();
+		const { base, admission } = ownedRuntimeFixture();
 		const prefix = join(base, "kit");
 		const versioned = join(prefix, "releases", "v1.2.3");
 		const executable = join(versioned, "bin", "omp-kit");
@@ -177,6 +325,7 @@ describe("release paths", () => {
 			...hostile, PATH: [dirname(fakeOmp.launcher), "/usr/bin", "/bin"].join(delimiter),
 			TMPDIR: hostileTmp, TMP: hostileTmp, TEMP: hostileTmp,
 			OMP: fakeOmp.launcher, OMP_BIN: fakeOmp.launcher, OMP_PATH: fakeOmp.launcher, OMP_SRC: fakeOmp.source,
+			...admission,
 		};
 		const releaseBefore = snapshotTree(prefix);
 		const canariesBefore = snapshotTree(canaries);
@@ -211,8 +360,8 @@ describe("release paths", () => {
 });
 
 test("terminating the packaged adapter closes its mock server and output streams", async () => {
-	const base = mkdtempSync(join(runtimeTempRoot(), "omp-kit-runtime-"));
-	fixtures.push(base);
+	const readinessDeadline = performance.now() + 15_000;
+	const { base, admission } = ownedRuntimeFixture();
 	const release = join(base, "release");
 	const workspace = join(base, "work");
 	for (const directory of ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install", "work", "release/bin", "release/scripts", "release/tests/live"]) {
@@ -241,9 +390,8 @@ test("terminating the packaged adapter closes its mock server and output streams
 		XDG_DATA_HOME: join(base, "xdg-data"), XDG_STATE_HOME: join(base, "xdg-state"),
 		BUN_INSTALL: join(base, "bun-install"), OMP: omp.launcher, OMP_BIN: omp.launcher,
 		OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+		...admission,
 	};
-	const watcher = watch(workspace);
-	let changed = once(watcher, "change");
 	const server = Bun.spawn([adapter, "--work-dir", workspace, "--scenario", scenario,
 		"--log", join(workspace, "requests.jsonl"), "--port-file", portFile, mock], {
 		cwd: release, env, stdout: "pipe", stderr: "pipe", stdin: "ignore",
@@ -251,11 +399,15 @@ test("terminating the packaged adapter closes its mock server and output streams
 	const stdout = new Response(server.stdout).text(), stderr = new Response(server.stderr).text();
 	let descendants: number[] = [];
 	try {
+		// FSEvents can miss nested-file creation: poll the authoritative file,
+		// as in service-run's bounded condition waits, never a sleep-as-proof.
 		while (!existsSync(portFile) || !readFileSync(portFile, "utf8").trim()) {
-			await Promise.race([changed, server.exited.then(code => { throw new Error("mock exited before readiness: " + code); })]);
-			changed = once(watcher, "change");
+			if (performance.now() >= readinessDeadline) throw new Error("mock PORTFILE readiness exceeded the existing whole-test deadline");
+			await Promise.race([
+				Bun.sleep(10),
+				server.exited.then(code => { throw new Error("mock exited before PORTFILE readiness: " + code); }),
+			]);
 		}
-		watcher.close();
 		const url = "http://127.0.0.1:" + readFileSync(portFile, "utf8").trim() + "/v1/chat/completions";
 		const request = { method: "POST", body: JSON.stringify({ messages: [], stream: true }) };
 		const ready = await fetch(url, request);
@@ -275,7 +427,6 @@ test("terminating the packaged adapter closes its mock server and output streams
 		} catch { /* Connection refusal is the required shutdown effect. */ }
 		expect(stillListening).toBe(false);
 	} finally {
-		watcher.close();
 		if (server.exitCode === null) server.kill("SIGTERM");
 		for (const pid of descendants) { try { process.kill(pid, "SIGTERM"); } catch {} }
 		await server.exited;
@@ -335,6 +486,36 @@ describe("OMP installation identity", () => {
 			writeFileSync(join(install.source, "..", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
 			return install;
 		}
+		for (const explicitCache of [false, true]) {
+			test(`isolated opaque OMP retains its ${explicitCache ? "explicit" : "default"} source cache across HOME changes`, () => {
+				const root = fixtureRoot(), version = "18.4.2";
+				const launcher = compiledOmp(root, version);
+				const original = versionedOmp(join(root, "original"), version);
+				const other = versionedOmp(join(root, "other"), version);
+				const callerHome = join(root, "caller-home"), privateRoot = join(root, "private");
+				const cache = explicitCache ? join(root, "explicit-cache")
+					: join(callerHome, ".local", "opt", "omp-kit", "omp-src");
+				const seedCache = (cacheRoot: string, source: string) => {
+					const versionRoot = join(cacheRoot, version);
+					const pkg = join(versionRoot, "node_modules", "@oh-my-pi", "pi-coding-agent");
+					mkdirSync(dirname(pkg), { recursive: true });
+					symlinkSync(dirname(source), pkg);
+					writeFileSync(join(versionRoot, ".verified.json"), "{}\n");
+				};
+				seedCache(cache, original.source);
+				seedCache(join(privateRoot, "home", ".local", "opt", "omp-kit", "omp-src"), other.source);
+				const inherited = {
+					PATH: `${dirname(launcher)}:/usr/bin:/bin`, HOME: callerHome,
+					BUN_INSTALL: join(root, "empty-global"), OMP_KIT_OMP_SRC_FETCH: "0",
+					...(explicitCache ? { OMP_KIT_OMP_SRC_CACHE: cache } : {}),
+				};
+				const identity = resolveOmpIdentity(inherited);
+				const isolated = { ...sanitizedEnv(identity, inherited, privateRoot), OMP_KIT_OMP_SRC_FETCH: "0" };
+				expect(resolveOmpIdentity(isolated)).toEqual(identity);
+				expect(() => resolveOmpIdentity({ ...isolated, OMP_SRC: other.source }))
+					.toThrow("OMP_SRC conflicts with the PATH-selected OMP source");
+			});
+		}
 
 		test("takes the same version's package from a later omp on PATH and keeps the compiled launcher", () => {
 			const root = fixtureRoot();
@@ -371,29 +552,29 @@ describe("OMP installation identity", () => {
 	});
 });
 
-test("--workdir falls back to /tmp when TMPDIR is inside the release tree", () => {
-	const adapter = join(REPO_ROOT, "scripts", "runtime-adapter.sh");
-	const nested = join(REPO_ROOT, "var", "agent-tmp");
-	mkdirSync(nested, { recursive: true });
-	const planted = Bun.spawnSync(["/bin/sh", adapter, "--workdir"], {
-		stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: nested },
-	});
-	expect(planted.exitCode).toBe(0);
-	const fallback = planted.stdout.toString().trim();
-	expect(realpathSync(fallback)).toBe(fallback);
-	expect(fallback.startsWith(nested)).toBe(false);
-	expect(planted.stderr.toString()).toContain("falling back to /tmp");
-	rmSync(fallback, { recursive: true, force: true });
-	const normalBase = mkdtempSync(join(tmpdir(), "omp-kit-workdir-"));
-	fixtures.push(normalBase);
-	const normal = Bun.spawnSync(["/bin/sh", adapter, "--workdir"], {
-		stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: normalBase },
-	});
-	expect(normal.exitCode).toBe(0);
-	const normalDir = normal.stdout.toString().trim();
-	expect(normalDir.startsWith(realpathSync(normalBase))).toBe(true);
-	expect(realpathSync(normalDir)).toBe(normalDir);
+test("caller-owned scratch root stays in its workspace and rejects missing or foreign ownership", () => {
+	const base = fixtureRoot();
+	const workspace = join(base, "caller");
+	const owned = join(workspace, "var", "agent-tmp", "live.123");
+	mkdirSync(owned, { recursive: true });
+	const keys = ["OMP_KIT_CASE_CWD", "OMP_KIT_TEST_WORK_ROOT"] as const;
+	const before = keys.map(key => process.env[key]);
+	process.env.OMP_KIT_CASE_CWD = workspace;
+	process.env.OMP_KIT_TEST_WORK_ROOT = owned;
+	try {
+		expect(() => runtimeTempRoot()).toThrow("caller-owned scratch");
+		writeFileSync(join(owned, ".owner"), `pid=${process.pid}\nlabel=live\nrepo=${workspace}\ncreated=2026-10-13T00:00:00Z\n`);
+		expect(runtimeTempRoot()).toBe(realpathSync(owned));
+		const foreign = join(base, "other", "var", "agent-tmp", "live.123");
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(join(foreign, ".owner"), `pid=${process.pid}\nlabel=live\nrepo=${join(base, "other")}\ncreated=2026-10-13T00:00:00Z\n`);
+		process.env.OMP_KIT_TEST_WORK_ROOT = foreign;
+		expect(() => runtimeTempRoot()).toThrow("caller-owned scratch");
+	} finally {
+		keys.forEach((key, index) => { if (before[index] === undefined) delete process.env[key]; else process.env[key] = before[index]; });
+	}
 });
+
 function systemTempRoot(): string {
 	if (process.platform === "darwin") {
 		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]);
@@ -402,6 +583,22 @@ function systemTempRoot(): string {
 	}
 	return realpathSync("/tmp");
 }
+
+describe("runtime temporary roots without caller admission", () => {
+	let previousRoot: string | undefined;
+	let previousCaller: string | undefined;
+	beforeEach(() => {
+		previousRoot = process.env.OMP_KIT_TEST_WORK_ROOT;
+		previousCaller = process.env.OMP_KIT_CASE_CWD;
+		delete process.env.OMP_KIT_TEST_WORK_ROOT;
+		delete process.env.OMP_KIT_CASE_CWD;
+	});
+	afterEach(() => {
+		if (previousRoot === undefined) delete process.env.OMP_KIT_TEST_WORK_ROOT;
+		else process.env.OMP_KIT_TEST_WORK_ROOT = previousRoot;
+		if (previousCaller === undefined) delete process.env.OMP_KIT_CASE_CWD;
+		else process.env.OMP_KIT_CASE_CWD = previousCaller;
+	});
 
 test("runtime temp root rejects TMPDIR outside system temporary roots", () => {
 	const base = fixtureRoot();
@@ -475,10 +672,12 @@ test("runtime temp root avoids caller HOME when TMPDIR is nested there", () => {
 		else process.env.TMPDIR = previousTmpdir;
 	}
 });
+});
 
-test("isolated children preserve GitHub Actions for CI-only behavior", () => {
-	// Heavy-work admission uses GITHUB_ACTIONS to distinguish hosted CI from
-	// local runners; non-allowlisted environment keys stay scrubbed either way.
+test("isolated children inherit the CI judge signal through runIsolatedShell", () => {
+	// RELEASE BLOCKER A3: the nested ladder keys --judge-regardless-of-load on
+	// GITHUB_ACTIONS; sanitizedEnv must carry it or macOS certification refuses
+	// with producer_rc=75. Non-allowlisted keys stay scrubbed either way.
 	const identity = { launcher: "/bin/omp", packageRoot: "/pkg", source: "/src", nativeRoot: "/native" };
 	const withSignal = sanitizedEnv(identity, { CI: "true", GITHUB_ACTIONS: "true", PATH: "/usr/bin:/bin", SECRET: "x" }, "/private");
 	expect(withSignal.GITHUB_ACTIONS).toBe("true");
@@ -487,40 +686,4 @@ test("isolated children preserve GitHub Actions for CI-only behavior", () => {
 	const withoutSignal = sanitizedEnv(identity, { CI: "true", PATH: "/usr/bin:/bin" }, "/private");
 	expect("GITHUB_ACTIONS" in withoutSignal).toBe(false);
 	expect(withoutSignal.CI).toBe("true");
-});
-
-test("native stage markers reach the outer certification process", async () => {
-	const root = fixtureRoot();
-	const omp = createOmp(join(root, "omp"), "18.10.3");
-	const binary = join(root, "bin", "omp-kit");
-	mkdirSync(dirname(binary), { recursive: true });
-	writeFileSync(binary, "#!/bin/sh\nexit 0\n");
-	chmodSync(binary, 0o755);
-	mkdirSync(join(root, "scripts"), { recursive: true });
-	const marker = "OMP_KIT_STAGE_START name=e2e-live started_at_ms=123";
-	const script = join(root, "scripts", "ladder.sh");
-	writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' '${marker}' >&2\nprintf 'runner stderr stays\\n' >&2\n`);
-	chmodSync(script, 0o755);
-	const keys = ["PATH", "OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC", "OMP_KIT_NATIVE_STAGE_PROGRESS"];
-	const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-	const originalWrite = process.stderr.write;
-	let forwarded = "";
-	process.stderr.write = ((chunk: string | Uint8Array) => {
-		forwarded += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-		return true;
-	}) as typeof process.stderr.write;
-	process.env.PATH = dirname(omp.launcher);
-	for (const key of keys.slice(1)) delete process.env[key];
-	process.env.OMP_KIT_NATIVE_STAGE_PROGRESS = "1";
-	try {
-		const result = await runIsolatedShell("scripts/ladder.sh", [], root, binary);
-		expect(result.stderr).toBe(`${marker}\nrunner stderr stays\n`);
-	} finally {
-		process.stderr.write = originalWrite;
-		for (const [key, value] of Object.entries(previous)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	}
-	expect(forwarded).toContain(`${marker}\n`);
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { CATALOG, MEMBERS, record, TernError } from './model.ts';
-import routes from './script-routes.json';
+import routes from '../../scripts/tern-script-routes.json';
 /** Lexes declaration syntax, excluding comments and string contents. No SDK name list is used here. */
 export function tokens(source: string): string[] {
     const out: string[] = [];

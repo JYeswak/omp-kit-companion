@@ -224,6 +224,26 @@ function inspectKitArchive(archive: Uint8Array, plan: KitReleasePreview): { veri
   if (regular[i]!.path !== manifest.files[i]!.path) fail("FILE_INVENTORY_MISMATCH");
   if (sha256(regular[i]!.bytes) !== manifest.files[i]!.sha256) fail("FILE_DIGEST_MISMATCH");
  }
+ // STAMP1 (ompkit-fp72.3): the archived package.json must carry the release
+ // version. A tree built without stamping (or a tampered package.json that
+ // still matches its own digest) is refused here, not at install time.
+ const packaged = members.find(member => member.kind === "file" && member.path === "package.json");
+ if (packaged) {
+  let packagedJson: unknown;
+  try {
+   packagedJson = JSON.parse(packaged.bytes.toString("utf8"));
+  } catch {
+   return fail("PACKAGE_VERSION_MISMATCH");
+  }
+  if (!packagedJson || typeof packagedJson !== "object" || Array.isArray(packagedJson)) return fail("PACKAGE_VERSION_MISMATCH");
+  const packagedVersions: string[] = [];
+  if ("version" in packagedJson && typeof packagedJson.version === "string") packagedVersions.push(packagedJson.version);
+  if ("omp" in packagedJson) {
+   const packagedOmp: unknown = packagedJson.omp;
+   if (packagedOmp && typeof packagedOmp === "object" && "version" in packagedOmp && typeof packagedOmp.version === "string") packagedVersions.push(packagedOmp.version);
+  }
+  if (!packagedVersions.length || packagedVersions.some(version => version !== manifest.version)) return fail("PACKAGE_VERSION_MISMATCH");
+ }
  for (const member of members) {
   if (member.kind === "directory" && !manifest.files.some(file => file.path.startsWith(`${member.path}/`))) fail("FILE_INVENTORY_MISMATCH");
  }
@@ -268,7 +288,7 @@ export async function stageKitRelease(input: StageKitInput): Promise<StagedKitRe
      if (written <= 0) fail("STAGING_FAILED");
      offset += written;
     }
-    fchmodSync(fd, member.path === RELEASE_BINARY_NAME || member.path.startsWith("scripts/") && member.path.endsWith(".sh") ? 0o755 : 0o644);
+    fchmodSync(fd, member.path === RELEASE_BINARY_NAME || member.path === "scripts/receipt.py" || member.path.startsWith("scripts/") && member.path.endsWith(".sh") ? 0o755 : 0o644);
     fsyncSync(fd);
    } finally { closeSync(fd); }
   }

@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
-import { runFullTest, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
+import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt, writePrivate } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
 import { parseRuleManifest } from "./diagnostics.ts";
 import { countCaseRows, type FastTestExpectations } from "./test-runner.ts";
 import { isSha256Hex } from "./regex-guards.ts";
+import installerVerifierPath from "../installer/install.py";
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
 function shaFile(path: string): string {
  const digest = createHash("sha256");
@@ -25,7 +26,7 @@ const RECEIPT_ID = /^[a-f0-9-]+$/;
 type KitInstallation = { version: string; sha256: string; target: string; binary: string };
 export type KitUpdateInput = {
  prefix: string; stateRoot: string; home: string; project?: string; platform: ReleasePlatform;
- /** Explicit local integrity-only fixture. No public index or publisher provenance is available yet. */
+ /** Explicit local index/archive tuple; activation additionally requires its authentic sibling Sigstore bundle. */
  indexPath: string; archivePath: string; version: string; sourceTag: string;
 };
 export type KitUpdatePlan = KitUpdateInput & {
@@ -34,9 +35,20 @@ export type KitUpdatePlan = KitUpdateInput & {
 };
 export type KitUpdateRefusal = { status: "REFUSED" | "NETWORK_UNAVAILABLE"; exitCode: 2 | 4; reason: string; provenance: "UNVERIFIED" };
 export type KitUpdatePreview = KitUpdatePlan | KitUpdateRefusal;
-export type KitPostcheck = { status: "PASS" | "FAIL" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string };
-export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" };
+export type KitPostcheck = { status: "PASS" | "FAIL" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string; cause?: FullTestCause };
+export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" | "SIGSTORE_VERIFIED" };
 export type KitUndoInput = { prefix: string; stateRoot: string; receiptId: string };
+export function updateFailureCause(error: unknown, roots: readonly string[] = []): FullTestCause {
+ const isError = error instanceof Error;
+ const record = error !== null && typeof error === "object" ? error as { code?: unknown } : null;
+ const message = isError ? error.message : String(error);
+ return redactFullTestCause({
+  cause_code: typeof record?.code === "string" ? record.code : isError ? error.name : "UNKNOWN_ERROR",
+  cause_name: isError ? error.name : typeof error,
+  cause_message: message,
+  cause_stack_head: isError && error.stack ? error.stack : null,
+ }, roots);
+}
 
 type ActivationReceipt = { schema_version: 1; id: string; before: KitInstallation; after: KitInstallation; state: "READY" | "UNDO_PENDING" | "RESTORED" };
 
@@ -243,6 +255,35 @@ function sameOmpSnapshot(before: OmpSnapshot | null, after: OmpSnapshot | null):
   before.matcherSha256 === after.matcherSha256;
 }
 
+/** Verify the exact in-memory archive subsequently staged, never a mutable source pathname. */
+async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): Promise<void> {
+ const bundlePath = `${plan.archivePath}.sigstore.json`;
+ const bundleStat = lstatSync(bundlePath, { throwIfNoEntry: false });
+ if (!bundleStat?.isFile() || bundleStat.isSymbolicLink()) throw new Error("KIT_ATTESTATION_BUNDLE_MISSING");
+ if (bundleStat.size > 16 * 1024 * 1024) throw new Error("KIT_ATTESTATION_BUNDLE_INVALID");
+ const bundle = regular(bundlePath);
+ const snapshot = mkdtempSync(join(plan.stateRoot, "kit-attestation-"));
+ try {
+  const artifact = join(snapshot, basename(plan.archivePath));
+  writeFileSync(artifact, archive, { mode: 0o600, flag: "wx" });
+  writeFileSync(`${artifact}.sigstore.json`, bundle, { mode: 0o600, flag: "wx" });
+  let child;
+  try {
+   child = Bun.spawn(["python3", "-I", "-c", readFileSync(installerVerifierPath, "utf8"), "attestation", artifact, plan.version, "unused"], {
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: plan.home, TMPDIR: snapshot, XDG_CACHE_HOME: join(snapshot, "cache"),
+     ...(process.env.GH_CONFIG_DIR ? { GH_CONFIG_DIR: process.env.GH_CONFIG_DIR } : {}) },
+    stdout: "pipe", stderr: "pipe",
+   });
+  } catch { throw new Error("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
+  const [code, , stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  if (code !== 0) {
+   const reason = ["KIT_ATTESTATION_BUNDLE_MISSING", "KIT_ATTESTATION_BUNDLE_INVALID", "KIT_ATTESTATION_SOURCE_UNVERIFIED", "KIT_ATTESTATION_VERIFIER_UNAVAILABLE"]
+    .find(code => stderr.includes(code)) ?? "KIT_ATTESTATION_UNVERIFIED";
+   throw new Error(`${reason}: ${stderr.trim().slice(-1200)}`);
+  }
+ } finally { rmSync(snapshot, { recursive: true, force: true }); }
+}
+
 
 /** Retains the update lock across staged activation, the real matcher, and the isolated P09 ladder. */
 export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResult> {
@@ -262,8 +303,10 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   const targetRoot = join(plan.prefix, "releases", plan.release.version);
   if (lstatSync(targetRoot, { throwIfNoEntry: false })) throw new Error("KIT_TARGET_EXISTS");
   const selectedOmp = selectedOmpSnapshot();
-  // An archive is read only from the explicit source paired to the revalidated index.
-  const staged = await stageKitRelease({ archive: regular(source.archivePath), plan: plan.release, stagingParent: join(plan.prefix, "releases"), probeBinaryInfo: binaryInfo });
+  // Authenticate a private snapshot before any extraction, candidate execution, or activation.
+  const archive = regular(source.archivePath);
+  await authenticateUpdateArchive(plan, archive);
+  const staged = await stageKitRelease({ archive, plan: plan.release, stagingParent: join(plan.prefix, "releases"), probeBinaryInfo: binaryInfo });
   const expectedCounts = releaseTestExpectations(staged);
   const next: KitInstallation = { version: staged.version, target: relativeTarget(staged.version), binary: installedBinary(plan.prefix, staged.version),
    sha256: staged.manifest.files.find(file => file.path === "bin/omp-kit")!.sha256 };
@@ -294,15 +337,17 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    reconcileKitUpdateReceipt(plan.stateRoot, heldLock, receiptId, () => matches(plan.prefix, next) &&
     verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256) &&
     sameOmpSnapshot(selectedOmp, selectedOmpSnapshot()) && postcheck.status === "PASS");
-   return { status: "UPDATED", exitCode: 0, receiptId, activeVersion: next.version, postcheck, provenance: "INTEGRITY_ONLY" };
+   return { status: "UPDATED", exitCode: 0, receiptId, activeVersion: next.version, postcheck, provenance: "SIGSTORE_VERIFIED" };
   } catch (error) {
    if (!receiptId) throw error;
+   const cause = updateFailureCause(error, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
    const message = error instanceof Error ? error.message : "KIT_UPDATE_INTERRUPTED";
    return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: matches(plan.prefix, next) ? next.version : matches(plan.prefix, current) ? current.version : null,
-    postcheck: { ...postcheck, reason: /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_INTERRUPTED" }, provenance: "INTEGRITY_ONLY" };
+    postcheck: { ...postcheck, reason: /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_INTERRUPTED", cause }, provenance: "SIGSTORE_VERIFIED" };
   }
  } catch (error) {
   const message = error instanceof Error ? error.message : "KIT_UPDATE_REFUSED";
+  if (error instanceof Error && message.startsWith("KIT_ATTESTATION_")) throw error;
   throw new Error(/^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_REFUSED");
  } finally { heldLock.release(); }
 }
@@ -310,6 +355,8 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
 /** The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act. */
 export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
  const report = outcome.postcheck.report;
+ const originalCause = report?.cause ?? outcome.postcheck.cause;
+ const cause = originalCause ? redactFullTestCause(originalCause, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]) : null;
  const postcheckDetail = report ? {
   status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
   failed_stages: [
@@ -317,9 +364,11 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
    ...(report.fast.status !== "PASS" ? ["fast-test"] : []),
    ...(report.omp_version === null ? ["omp-version"] : []),
   ],
+  current_stage: report.current_stage,
+  cause,
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
   failures: report.failures.slice(0, 20),
- } : null;
+ } : cause ? { current_stage: null, cause, failures: [] } : null;
  const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
  return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
   scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,

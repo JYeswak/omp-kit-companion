@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { validateReleaseIndex, validateReleaseManifest, previewKitRelease, verifyKitArchive, assertFreshKitPlan, stageKitRelease, type KitReleasePlan } from "../../src/kit-release";
 
 const fixture = join(import.meta.dir, "..", "fixtures", "kit-release", "release-manifest.json");
@@ -88,6 +88,25 @@ describe("versioned release contract", () => {
   const linked = tar([{ name: "bin/omp-kit", bytes: Buffer.alloc(0), type: "2" }, manifest]);
   expect(() => verifyKitArchive({ archive: linked, plan: { ...plan, asset: { ...asset, sha256: digest(linked) } }, binaryInfo: info })).toThrow("ARCHIVE_UNSAFE_MEMBER");
  });
+ test("rejects an archive whose package.json version disagrees with its manifest", async () => {
+  const plan = await fixturePlan();
+  const baseManifest = JSON.parse(manifestBytes.toString());
+  const goodPkg = Buffer.from(JSON.stringify({ name: "omp-kit-companion", version: "1.2.3", omp: { version: "1.2.3" } }));
+  const goodManifest = { ...baseManifest, files: [...baseManifest.files, { path: "package.json", sha256: digest(goodPkg) }] };
+  const goodManifestBytes = Buffer.from(JSON.stringify(goodManifest));
+  const goodArchive = tar([executable, { name: "release-manifest.json", bytes: goodManifestBytes }, { name: "package.json", bytes: goodPkg }]);
+  const goodPlan = { ...plan, asset: { ...asset, sha256: digest(goodArchive), manifest_sha256: digest(goodManifestBytes) } };
+  expect(verifyKitArchive({ archive: goodArchive, plan: goodPlan, binaryInfo: info }).files).toContain("package.json");
+  // Skewed tree: manifest honestly lists the package bytes, but the package
+  // version was never stamped to the release version.
+  const badPkg = Buffer.from(JSON.stringify({ name: "omp-kit-companion", version: "9.9.9", omp: { version: "9.9.9" } }));
+  const skewManifest = { ...baseManifest, files: [...baseManifest.files, { path: "package.json", sha256: digest(badPkg) }] };
+  const skewManifestBytes = Buffer.from(JSON.stringify(skewManifest));
+  const skewArchive = tar([executable, { name: "release-manifest.json", bytes: skewManifestBytes }, { name: "package.json", bytes: badPkg }]);
+  const skewPlan = { ...plan, asset: { ...asset, sha256: digest(skewArchive), manifest_sha256: digest(skewManifestBytes) } };
+  expect(() => verifyKitArchive({ archive: skewArchive, plan: skewPlan, binaryInfo: info })).toThrow("PACKAGE_VERSION_MISMATCH");
+ });
+
  test("rejects mismatched archive binary identity despite valid bytes", async () => {
   const plan = await fixturePlan();
   expect(() => verifyKitArchive({ archive, plan, binaryInfo: { ...info, source_tag: "v1.2.2" } })).toThrow("BINARY_IDENTITY_MISMATCH");
@@ -112,4 +131,71 @@ describe("versioned release contract", () => {
    expect(readdirSync(stagingParent)).toEqual([staged.root.slice(stagingParent.length + 1)]);
   } finally { rmSync(stagingParent, { recursive: true, force: true }); }
  });
+ for (const route of ["staging", "standalone"] as const) {
+  test(`installed receipt CLI remains executable through ${route} without trusting arbitrary archive modes`, async () => {
+   const repo = join(import.meta.dir, "..", "..");
+   const base = join(repo, "var", "agent-tmp");
+   mkdirSync(base, { recursive: true });
+   const work = mkdtempSync(join(base, `receipt-install.${process.pid}.`));
+   writeFileSync(join(work, ".owner"), `pid=${process.pid}\nlabel=receipt-install\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
+   try {
+    const probeData = { version: info.version, release: { source_tag: info.source_tag }, platform: info.platform };
+    const files = [
+     { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
+     { name: "scripts/receipt.py", bytes: readFileSync(join(repo, "scripts/receipt.py")) },
+     { name: "scripts/ordinary.py", bytes: Buffer.from("print('ordinary data file')\n") },
+    ].sort((left, right) => left.name.localeCompare(right.name));
+    const releaseManifest = Buffer.from(JSON.stringify({
+     schema_version: 1, version: "1.2.3", source_tag: "v1.2.3",
+     files: files.map(file => ({ path: file.name, sha256: digest(file.bytes) })),
+    }));
+    const releaseArchive = tar([...files, { name: "release-manifest.json", bytes: releaseManifest }]);
+    const releaseAsset = { ...asset, sha256: digest(releaseArchive), manifest_sha256: digest(releaseManifest) };
+    const key = `${platform.os}-${platform.arch}-${platform.libc}`;
+    const releaseIndex = { ...index, assets: { [key]: releaseAsset } };
+    let installed: string;
+    if (route === "staging") {
+     const plan = await previewKitRelease({ currentVersion: "1.2.2", sourceTag: "v1.2.3", platform, fetchIndex: async () => releaseIndex });
+     if (plan.exitCode !== 0) throw new Error(plan.reason);
+     const staged = await stageKitRelease({
+      archive: releaseArchive, plan, stagingParent: work,
+      probeBinaryInfo: async executablePath => {
+       const child = Bun.spawn([executablePath, "--info"], { stdout: "pipe", stderr: "pipe" });
+       const output = await new Response(child.stdout).text();
+       expect(await child.exited).toBe(0);
+       const observed = JSON.parse(output).data;
+       return { version: observed.version, source_tag: observed.release.source_tag, platform: observed.platform };
+      },
+     });
+     installed = staged.root;
+    } else {
+     const archivePath = join(work, releaseAsset.filename);
+     const indexPath = join(work, "index.json");
+     const prefix = join(work, "installed");
+     writeFileSync(archivePath, releaseArchive);
+     writeFileSync(indexPath, JSON.stringify(releaseIndex));
+     // This policy double is explicitly synthetic; no real Sigstore claim.
+     writeFileSync(`${archivePath}.sigstore.json`, '{"fixture":true}\n');
+     const result = Bun.spawnSync(["python3", join(repo, "installer/install.py"), "install",
+      indexPath, "1.2.3", key, archivePath, prefix, "0"], {
+      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1",
+       PATH: [join(repo, "tests/fixtures/kit-release"), process.env.PATH ?? ""].join(delimiter) },
+      stdout: "pipe", stderr: "pipe",
+     });
+     expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+     installed = join(prefix, "releases", "1.2.3");
+    }
+    const receipt = join(installed, "scripts/receipt.py");
+    expect(statSync(receipt).mode & 0o111).toBe(0o111);
+    expect(statSync(join(installed, "scripts/ordinary.py")).mode & 0o111).toBe(0);
+    const result = Bun.spawnSync([receipt, "selftest"], {
+     cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1" },
+     stdout: "pipe", stderr: "pipe",
+    });
+    expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+   } finally {
+    rmSync(work, { recursive: true, force: true });
+   }
+  }, 15_000);
+ }
 });

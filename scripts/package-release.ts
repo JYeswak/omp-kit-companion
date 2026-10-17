@@ -17,12 +17,15 @@ const platformTargets: Record<string, string> = {
 	"aarch64-unknown-linux-gnu": "bun-linux-arm64",
 	"x86_64-unknown-linux-gnu": "bun-linux-x64",
 };
-const roots = new Set(["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills"]);
+const roots = new Set(["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "plugins/omp-kit-tern"]);
 for (const file of RELEASE_DATA_FILES) {
 	const directory = dirname(file);
 	if (directory !== ".") roots.add(directory);
 }
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
+	"scripts/receipt.py",
+	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
+	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
@@ -38,7 +41,7 @@ function header(path: string, size: number, directory: boolean): Buffer {
 	if (Buffer.byteLength(entry) > 100 || entry.startsWith("/") || entry.split("/").some(part => part === ".." || part === ".")) fail("USTAR_PATH_UNSUPPORTED");
 	const block = Buffer.alloc(512);
 	block.write(entry, 0, 100, "utf8");
-	octal(block, 100, 8, directory ? 0o755 : path === RELEASE_BINARY_NAME || path.endsWith(".sh") ? 0o755 : 0o644);
+	octal(block, 100, 8, directory ? 0o755 : path === RELEASE_BINARY_NAME || path === "scripts/receipt.py" || path.endsWith(".sh") ? 0o755 : 0o644);
 	octal(block, 108, 8, 0);
 	octal(block, 116, 8, 0);
 	octal(block, 124, 12, size);
@@ -57,6 +60,34 @@ function writeAll(fd: number, bytes: Uint8Array): void {
 		offset += count;
 	}
 }
+/**
+ * STAMP1 (ompkit-fp72.3): stamp the release version into the archived
+ * package.json (.version and, when present, .omp.version) so the archive
+ * carries the version it was built for, independent of the source tree's
+ * working version. Key order and other fields are preserved; only the two
+ * version values change. Refuses an unparseable package.json fail-closed.
+ */
+function stampPackageVersion(source: Buffer, version: string): Buffer {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(source.toString("utf8"));
+	} catch {
+		fail("PACKAGE_VERSION_UNSTAMPABLE");
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fail("PACKAGE_VERSION_UNSTAMPABLE");
+	const stamped: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(parsed)) stamped[key] = value;
+	stamped.version = version;
+	const omp = stamped.omp;
+	if (omp && typeof omp === "object" && !Array.isArray(omp)) {
+		const ompOut: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(omp)) ompOut[key] = value;
+		ompOut.version = version;
+		stamped.omp = ompOut;
+	}
+	return Buffer.from(JSON.stringify(stamped, null, 2) + "\n");
+}
+
 function safeSource(name: string): Buffer {
 	const source = join(root, name);
 	const stat = lstatSync(source);
@@ -126,18 +157,20 @@ async function run(): Promise<void> {
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
 		for (const path of roots) expand(path, names);
-		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv");
+		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE");
 		names.sort();
 		if (new Set(names).size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
 		const content = new Map<string, Buffer>();
 		for (const name of names) {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
+			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
 			else if (name === "extensions/fleet-guard.ts") {
 				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
 				if (!bundled.success || bundled.outputs.length !== 1) fail("FLEET_GUARD_BUNDLE_FAILED");
 				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
-			} else content.set(name, safeSource(name));
+			} else if (name === "package.json") content.set(name, stampPackageVersion(safeSource(name), version));
+			else content.set(name, safeSource(name));
 		}
 		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);

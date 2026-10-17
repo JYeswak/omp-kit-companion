@@ -3,28 +3,47 @@
 # G1-G3 harness gate, harness selftest (plants must go RED), checker selftests under /bin/sh,
 # manifest check, G4 live suite, G4 plant (must go RED). Prints each complete producer log and rc.
 set -u
-stage_start() {
-  stage_name=$1
-  stage_started_at_ms=$(date +%s%3N 2>/dev/null) || stage_started_at_ms=
-  case "$stage_started_at_ms" in ''|*[!0-9]*) stage_started_at_ms= ;; esac
-  case "$stage_started_at_ms" in
-    ?????????????) ;;
-    *)
-      if command -v python3 >/dev/null 2>&1; then
-        stage_started_at_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)' 2>/dev/null) || return 1
-      else
-        echo "ladder: cannot obtain millisecond stage timestamp" >&2
-        return 1
-      fi
-      ;;
-  esac
-  case "$stage_started_at_ms" in ?????????????) ;; *) echo "ladder: invalid stage timestamp" >&2; return 1 ;; esac
-  printf 'OMP_KIT_STAGE_START name=%s started_at_ms=%s\n' "$stage_name" "$stage_started_at_ms" >&2
+run_stage() { # run_stage <label> <log> <cmd...>
+  stage_label=$1; stage_log=$2; shift 2
+  printf 'OMP_KIT_STAGE_START name=%s\n' "$stage_label"
+  stage_pipe="$stage_log.pipe"
+  mkfifo "$stage_pipe" || return 125
+  tee "$stage_log" < "$stage_pipe" &
+  stage_tee_pid=$!
+  command time -p /bin/sh -c "exec \"\$@\" 2>&1" sh "$@" > "$stage_pipe" 2> "$stage_log.time"
+  stage_rc=$?
+  wait "$stage_tee_pid"
+  stage_tee_rc=$?
+  rm -f "$stage_pipe"
+  if [ "$stage_rc" -eq 0 ] && [ "$stage_tee_rc" -ne 0 ]; then stage_rc=125; fi
+  stage_duration_ms=$(LC_ALL=C awk '$1 == "real" { printf "%.0f", $2 * 1000; found=1; exit } END { if (!found) exit 1 }' "$stage_log.time") || {
+    stage_duration_ms=0
+    [ "$stage_rc" -ne 0 ] || stage_rc=125
+  }
+  if [ "$stage_rc" -eq 0 ]; then
+    printf '\nGREEN %s producer_rc=%s duration_ms=%s\n' "$stage_label" "$stage_rc" "$stage_duration_ms"
+  else
+    printf '\nRED   %s producer_rc=%s duration_ms=%s\n' "$stage_label" "$stage_rc" "$stage_duration_ms"
+  fi
+  return "$stage_rc"
 }
-if [ "$#" -eq 2 ] && [ "$1" = "--selftest-interruption" ]; then
-  case "$2" in ''|*[!A-Za-z0-9_-]*) echo "ladder: invalid selftest stage" >&2; exit 2 ;; esac
-  stage_start "$2" || exit 125
-  exec /bin/sleep 30
+if [ "$#" -ge 2 ] && [ "$1" = "--selftest-timing" ]; then
+  selftest_dir=$2
+  shift 2
+  if [ "$#" -eq 0 ]; then set -- /bin/sh -c 'sleep 0.12'; fi
+  run_stage manifest "$selftest_dir/ladder-manifest.txt" "$@"
+  exit $?
+fi
+REGEX_BUDGET_RUNS=1
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != "--regex-budget-runs" ]; then
+    echo "ladder: usage: --regex-budget-runs 1|5" >&2
+    exit 2
+  fi
+  case "$2" in
+    1|5) REGEX_BUDGET_RUNS=$2 ;;
+    *) echo "ladder: regex-budget run count must be 1 or 5" >&2; exit 2 ;;
+  esac
 fi
 HERE=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 cd "$HERE" || exit 1
@@ -49,26 +68,19 @@ cleanup() {
 }
 trap cleanup EXIT
 export OMP_KIT_WORK_DIR="$WORK"
-run_heavy() {
-  heavy_label=$1; shift
-  if [ -e "$HERE/.git" ]; then
-    bun run --no-env-file --config=/dev/null "$HERE/src/cli.ts" heavy --label "$heavy_label" -- "$@"
-  else
-    "$HERE/bin/omp-kit" heavy --label "$heavy_label" -- "$@"
-  fi
-}
 step() { # step <label> <cmd...>
-  label=$1; shift
-  stage_start "$label" || { echo "ladder: cannot mark stage $label" >&2; KEEP_WORK=1; exit 125; }
-  log="$WORK/ladder-$label.txt"
-  if [ "$label" = "manifest" ]; then
-    "$@" > "$log" 2>&1
-  else
-    run_heavy "$label" "$@" > "$log" 2>&1
+  step_label=$1; shift
+  log="$WORK/ladder-$step_label.txt"
+  if [ "$step_label" != "manifest" ]; then
+    if [ -e "$HERE/.git" ]; then
+      set -- bun run --no-env-file --config=/dev/null "$HERE/src/cli.ts" heavy --label "$step_label" -- "$@"
+    else
+      set -- "$HERE/bin/omp-kit" heavy --label "$step_label" -- "$@"
+    fi
   fi
-  rc=$?
-  cat "$log"
-  if [ "$rc" -eq 0 ]; then echo "GREEN $label producer_rc=$rc"; else echo "RED   $label producer_rc=$rc (private log $log)"; KEEP_WORK=1; exit 1; fi
+  run_stage "$step_label" "$log" "$@"
+  step_rc=$?
+  if [ "$step_rc" -ne 0 ]; then KEEP_WORK=1; exit 1; fi
 }
 if [ -e "$HERE/.git" ]; then
   step manifest /bin/sh scripts/build-manifest.sh
@@ -89,8 +101,13 @@ else
 fi
 # Regex cost gate: every rule condition timed in Bun on near-miss shapes and a
 # realistic live stream (RX1). Red names the rule, shape and encoding.
-# The gate judges five interleaved samples and reports load1 without a load gate.
-step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
+if [ "$REGEX_BUDGET_RUNS" = "5" ]; then
+  set -- --runs 5
+else
+  set --
+fi
+if [ -n "${GITHUB_ACTIONS:-}" ]; then set -- "$@" --judge-regardless-of-load; fi
+step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" "$@"
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8

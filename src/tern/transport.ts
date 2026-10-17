@@ -156,8 +156,11 @@ export function parseNativeResult(p: ProcessResult): {
     value: unknown;
     warnings: string[];
 } {
+    if (p.code === null || p.signal !== null)
+        throw new TernError('OUTCOME_UNKNOWN', 'Native CLI ended without a definitive exit status; native work may continue', 4,
+            { code: p.code, signal: p.signal, stderr: p.stderr });
     if (p.code !== 0)
-        throw new TernError('NATIVE_CLI_FAILED', `Native CLI exited ${p.code ?? p.signal}`, p.code === 124 ? 4 : 1, { code: p.code, stderr: p.stderr });
+        throw new TernError('NATIVE_CLI_FAILED', `Native CLI exited ${p.code}`, p.code === 124 ? 4 : 1, { code: p.code, stderr: p.stderr });
     let value: unknown;
     try {
         value = JSON.parse(p.stdout);

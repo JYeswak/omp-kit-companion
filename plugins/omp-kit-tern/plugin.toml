@@ -1,0 +1,14 @@
+schema = 1
+id = "omp-kit-tern"
+name = "OMP Kit Tern"
+version = "0.1.0"
+host = "host.luau"
+window = "window.luau"
+
+[[blocks]]
+id = "runtime"
+title = "OMP Kit Runtime Inventory"
+
+[[lenses]]
+id = "result"
+match = ["omp-kit status --json", "omp-kit tern doctor --json"]

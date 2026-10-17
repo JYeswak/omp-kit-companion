@@ -172,27 +172,61 @@ def verify_manifest(members, manifest, version):
             refuse("unlisted empty release directory")
 
 
-def verify_attestation(archive):
-    """Refuse archives whose Sigstore bundle fails `gh attestation verify`.
-    The bundle is the release-published sibling <archive>.sigstore.json. A
-    missing bundle warns and falls back to hash-only (offline installs keep
-    working; hashes prove integrity against the index, not origin). A present
-    bundle that does not verify refuses. Test seams: GH_BIN overrides the gh
-    binary, OMP_KIT_ATTEST_OWNER overrides the expected owner."""
-    bundle = Path(archive).parent / (Path(archive).name + ".sigstore.json")
-    if not bundle.is_file():
-        print("warning: no attestation bundle; hash-only verification", file=sys.stderr)
-        return
-    owner = os.environ.get("OMP_KIT_ATTEST_OWNER", "JYeswak")
-    gh = os.environ.get("GH_BIN", "gh")
+def download_attestation(archive):
+    digest = sha(Path(archive).read_bytes())
+    result = subprocess.run(
+        ["gh", "api", "--hostname", "github.com",
+         "repos/JYeswak/omp-kit-companion/attestations/sha256:" + digest,
+         "--jq", ".attestations[].bundle | tojson"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if result.returncode != 0 or not result.stdout.strip() or len(result.stdout) > 16 * 1024 * 1024:
+        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + result.stderr.decode(errors="replace").strip()[-1000:])
+    with open(str(archive) + ".sigstore.json", "xb") as output:
+        output.write(result.stdout)
+
+
+def verify_attestation(archive, version):
+    """The installer and compiled updater share this fail-closed authority policy."""
+    if not valid_version(version):
+        refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED")
+    bundle = Path(str(archive) + ".sigstore.json")
+    if bundle.is_symlink() or not bundle.is_file():
+        refuse("KIT_ATTESTATION_BUNDLE_MISSING")
+    if bundle.stat().st_size > 16 * 1024 * 1024:
+        refuse("KIT_ATTESTATION_BUNDLE_INVALID")
     try:
-        result = subprocess.run([gh, "attestation", "verify", str(archive),
-                                 "--owner", owner, "--bundle", str(bundle)],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        source = subprocess.run(
+            ["gh", "api", "--hostname", "github.com",
+             "repos/JYeswak/omp-kit-companion/commits/v" + version, "--jq", ".sha"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        digest = source.stdout.decode(errors="replace").strip()
+        if source.returncode != 0 or len(digest) != 40 or any(c not in "0123456789abcdef" for c in digest):
+            refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: " + source.stderr.decode(errors="replace").strip()[-1000:])
+        # gh selects JSON-lines decoding by extension. Release siblings retain
+        # .sigstore.json even when the authority returns both SBOM and SLSA bundles.
+        raw = bundle.read_bytes()
+        try:
+            bundles = [parse_json(raw)]
+        except json.JSONDecodeError:
+            bundles = [parse_json(line) for line in raw.splitlines() if line.strip()]
+        if not bundles or any(not isinstance(item, dict) for item in bundles):
+            refuse("KIT_ATTESTATION_BUNDLE_INVALID")
+        with tempfile.TemporaryDirectory(prefix="omp-kit-attestation-") as work:
+            normalized = Path(work) / "bundle.jsonl"
+            normalized.write_text("".join(json.dumps(item) + "\n" for item in bundles))
+            result = subprocess.run(
+                ["gh", "attestation", "verify", str(archive),
+                 "--hostname", "github.com", "--repo", "JYeswak/omp-kit-companion",
+                 "--bundle", str(normalized),
+                 "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
+                 "--signer-workflow", "JYeswak/omp-kit-companion/.github/workflows/release.yml",
+                 "--source-digest", digest,
+                 "--predicate-type", "https://slsa.dev/provenance/v1"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
-        refuse("attestation verifier unavailable: " + str(exc))
+        refuse("KIT_ATTESTATION_VERIFIER_UNAVAILABLE: " + str(exc))
     if result.returncode != 0:
-        refuse("attestation verification failed: " + result.stderr.decode(errors="replace").strip()[-200:])
+        refuse("KIT_ATTESTATION_UNVERIFIED: " + result.stderr.decode(errors="replace").strip()[-1000:])
 
 
 def safe_directory(path):
@@ -207,9 +241,26 @@ def install(index_path, version, platform, archive, prefix, dry_run):
     asset = index_asset(index_path, version, platform)
     if Path(archive).name != asset["filename"]:
         refuse("archive filename differs from selected index asset")
-    members, manifest = archive_members(archive, asset)
-    verify_manifest(members, manifest, version)
-    verify_attestation(archive)
+    # Retain one private byte snapshot across inspection and external authority
+    # verification; the caller's pathname is not a stable archive identity.
+    with tempfile.TemporaryDirectory(prefix="omp-kit-archive-") as work:
+        snapshot = Path(work) / asset["filename"]
+        with open(archive, "rb") as source:
+            data = source.read(MAX_ARCHIVE + 1)
+        if len(data) > MAX_ARCHIVE:
+            refuse("archive exceeds size limit")
+        snapshot.write_bytes(data)
+        bundle = Path(str(archive) + ".sigstore.json")
+        if bundle.is_symlink() or not bundle.is_file():
+            refuse("KIT_ATTESTATION_BUNDLE_MISSING")
+        with bundle.open("rb") as source:
+            bundle_data = source.read(16 * 1024 * 1024 + 1)
+        if len(bundle_data) > 16 * 1024 * 1024:
+            refuse("KIT_ATTESTATION_BUNDLE_INVALID")
+        Path(str(snapshot) + ".sigstore.json").write_bytes(bundle_data)
+        members, manifest = archive_members(snapshot, asset)
+        verify_manifest(members, manifest, version)
+        verify_attestation(snapshot, version)
     if not os.path.isabs(prefix) or os.path.normpath(prefix) != prefix:
         refuse("installation prefix must be canonical and absolute")
     prefix = Path(prefix)
@@ -267,9 +318,19 @@ def install(index_path, version, platform, archive, prefix, dry_run):
                     output.write(data)
                     output.flush()
                     os.fsync(output.fileno())
-                dest.chmod(0o755 if name == "bin/omp-kit" or name.endswith(".sh") else 0o644)
-            info = subprocess.run([str(staging / "bin/omp-kit"), "--info", "--json"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=True)
+                dest.chmod(0o755 if name in ("bin/omp-kit", "scripts/receipt.py") or name.endswith(".sh") else 0o644)
+            with tempfile.TemporaryDirectory(prefix="omp-kit-probe-") as work:
+                private = Path(work)
+                env = {"PATH": os.defpath, "HOME": work, "TMPDIR": work,
+                       "TMP": work, "TEMP": work}
+                for key, directory in (("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"),
+                                       ("XDG_STATE_HOME", "state"), ("XDG_DATA_HOME", "data")):
+                    location = private / directory
+                    location.mkdir(mode=0o700)
+                    env[key] = str(location)
+                info = subprocess.run([str(staging / "bin/omp-kit"), "--info", "--json"],
+                                      cwd=work, env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, timeout=30, check=True)
             observed = parse_json(info.stdout)["data"]
             if observed["version"] != version or observed["release"]["source_tag"] != "v" + version:
                 refuse("staged binary identity mismatch")
@@ -295,6 +356,10 @@ if __name__ == "__main__":
         mode, index, version, platform, *rest = sys.argv[1:]
         if mode == "inspect" and not rest:
             print(index_asset(index, version, platform)["filename"])
+        elif mode == "bundle" and not rest:
+            download_attestation(index)
+        elif mode == "attestation" and not rest:
+            verify_attestation(index, version)
         elif mode == "install" and len(rest) == 3:
             install(index, version, platform, rest[0], rest[1], rest[2] == "1")
         else:
