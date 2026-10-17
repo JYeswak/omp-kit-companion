@@ -543,8 +543,10 @@ step audit kit_env "$KIT" audit --json || upgrade_steps_ok=0
 if [ "$upgrade_steps_ok" -eq 1 ]; then
   COMPILED_UPGRADE_OK=1
 fi
-if step candidate_source gh api "repos/JYeswak/omp-kit-companion/commits/v$CAND" --jq .sha; then
-  CANDIDATE_SOURCE_OK=1
+if [ "$SIGNED_MODE" -eq 1 ]; then
+  if step candidate_source gh api "repos/JYeswak/omp-kit-companion/commits/v$CAND" --jq .sha; then
+    CANDIDATE_SOURCE_OK=1
+  fi
 fi
 step background_writer check_writer
 stop_writer
