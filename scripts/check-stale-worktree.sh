@@ -8,9 +8,9 @@
 #       declared with a `Revert: <sha>` or `Supersedes: <sha>` trailer line.
 # Not judged: lines re-added byte-identically in the same commit at least as
 # often as removed (moves, count-aware; rule (b) only — rule (a) still fires
-# on stale mtimes, so re-adding elsewhere launders nothing), and any removal
-# inside .beads/issues.jsonl (tracker export records belong to beads; rule
-# (a) still applies to it).
+# on stale mtimes, so re-adding elsewhere launders nothing), and tracker
+# export regenerations that lose no issue row (every removed row's issue id
+# still present in the staged file; any lost id falls through, fail closed).
 # Same-bead rework passes silently. Pure additions pass. Unborn HEAD passes.
 # Reads the effective tree through the index (GIT_INDEX_FILE is respected, so
 # `git commit --only` temporary indexes are judged). Renames are read as
@@ -93,10 +93,24 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	diffout=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null) || continue
 	case "$diffout" in *Binary\ files\ *differ*) continue ;; esac
 	[ -n "$(removed_lines "$path")" ] || continue
-	# Tracker export records belong to beads, not to the serializing commit:
-	# .beads/issues.jsonl is outside rule (b). Rule (a) still applies to it.
-	exempt_b=0
-	case "$path" in .beads/issues.jsonl|*/.beads/issues.jsonl) exempt_b=1 ;; esac
+	# Tracker export records belong to beads, not to the serializing commit.
+	# A regeneration that loses no issue row is not a revert: when every
+	# removed row's issue id still has a row in the staged file, rule (b)
+	# skips this path. Any lost id, or no ids at all, falls through to the
+	# normal rules (fail closed). Rule (a) always still applies to it.
+	export_ok=0
+	case "$path" in .beads/issues.jsonl|*/.beads/issues.jsonl)
+		removed_ids=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null | awk '/^@@ /{inat=1;next} !inat{next} /^-/{print substr($0,2)}' | grep -o '"id":"[^"]*"' | sort -u)
+		if [ -n "$removed_ids" ]; then
+			new_ids=$(git show "$tree:$path" 2>/dev/null | grep -o '"id":"[^"]*"' | sort -u)
+			lost=0
+			for id in $removed_ids; do
+				printf '%s\n' "$new_ids" | grep -qxF -- "$id" || lost=1
+			done
+		[ "$lost" -eq 0 ] && export_ok=1
+		fi
+		;;
+	esac
 	# Moved lines (same-commit re-adds, count-aware) skip rule (b) only.
 	# Rule (a) judges them on mtime: a stale deletion re-added elsewhere
 	# still refuses, so no text-bag launders a real stale revert.
@@ -121,12 +135,12 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 			continue
 		fi
 		# Rule (b): foreign bead reverted without declaration. Skipped for
-		# tracker-export paths and for moved lines (re-added in this same
-		# commit, count-aware); rule (a) above already judged those lines.
-		# Each removed line is evaluated (multiset); the report names each
-		# sha once.
+		# loss-free export regenerations and for moved lines (re-added in
+		# this same commit, count-aware); rule (a) above already judged
+		# those lines. Each removed line is evaluated (multiset); the
+		# report names each sha once.
 		skip_b=0
-		[ "$exempt_b" -eq 1 ] && skip_b=1
+		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
 			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$root/.git/stale-worktree-report.$$" ;; esac

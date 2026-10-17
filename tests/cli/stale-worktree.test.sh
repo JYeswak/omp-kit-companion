@@ -130,6 +130,19 @@ out=$(git -C "$R" commit --message "[test] export drops t-2 on stale file" --mes
 check "$?" "1" "export-loss-stale-refused" "$out" "STALE_WORKTREE .beads/issues.jsonl reverts $S"
 check "$(git -C "$R" rev-list --count HEAD)" "1" "export-loss-stale-unmoved" "$out" "STALE_WORKTREE"
 
+# 8b. export loss with a FRESH worktree is refused via rule (b): the record
+# preservation predicate, not filename-as-authority (native 60087 case).
+R=$(new_export_repo export-loss-fresh)
+printf '%s\n' '{"id":"t-owner","title":"one"}' '{"id":"t-current","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
+S=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' '{"id":"t-current","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+out=$(git -C "$R" commit --message "[test] export drops t-owner" --message "Bead: t-other" 2>&1)
+check "$?" "1" "export-loss-fresh-refused" "$out" "STALE_WORKTREE .beads/issues.jsonl reverts $S"
+check "$(git -C "$R" rev-list --count HEAD)" "1" "export-loss-fresh-unmoved" "$out" "STALE_WORKTREE"
+
 # 9. in-file reorder of foreign-bead lines passes (move, not revert)
 R=$(new_repo reorder)
 A=$(git -C "$R" rev-parse HEAD)
