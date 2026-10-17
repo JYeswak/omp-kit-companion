@@ -14,7 +14,7 @@ function fixture(): string {
 	return dir;
 }
 
-function configure(root: string, values: { slots?: number; max_wait_s?: number }): void {
+function configure(root: string, values: { slots?: number; max_wait_s?: number; disk_observer?: "sbh" | "statfs" | "auto"; disk_floor_pct?: number | null }): void {
 	const directory = join(root, "config", "omp-kit");
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
 	writeFileSync(join(directory, "load.json"), JSON.stringify(values), { mode: 0o600 });
@@ -320,7 +320,7 @@ test("HEAVYDISK1: healthy disk runs the command", async () => {
 
 test("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, queueing and starting nothing", async () => {
 	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 20 });
+	configure(root, { slots: 8, max_wait_s: 20, disk_observer: "sbh" });
 	const noSbhPath = "/usr/bin:/bin";
 	// Positive control for the planted state: this PATH must really lack sbh.
 	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: noSbhPath } }).exitCode).not.toBe(0);
@@ -351,7 +351,7 @@ test("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), neve
 
 test("HEAVYCI1: --no-wait with a missing sbh also returns 69, not 75", async () => {
 	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1 });
+	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "sbh" });
 	const result = await invoke(root, ["heavy", "--no-wait", "--label", "nosbh-nowait", "--", "sh", "-c", "exit 0"], { PATH: "/usr/bin:/bin" });
 	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
 	expect(result.stderr).toContain("sbh unavailable");
@@ -429,3 +429,86 @@ test("HEAVYDISK1: waiting status names the disk reason", async () => {
 	expect(result.stderr).toContain("heavy: queue position 1;");
 	expect(result.stderr).toContain("disk low");
 });
+const GIB = 1024 ** 3;
+function fakeStatfsEnv(freeBytes: number, freePct: number): Record<string, string> {
+	return { OMP_KIT_HEAVY_FAKE_STATFS: JSON.stringify({ free_bytes: freeBytes, free_pct: freePct }) };
+}
+function expectNoSbhOnPath(path: string): void {
+	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: path } }).exitCode).not.toBe(0);
+}
+
+test("oq1h.1: auto disk admission runs on healthy statfs with no sbh on PATH", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const noSbhPath = "/usr/bin:/bin";
+	expectNoSbhOnPath(noSbhPath);
+	const marker = join(root, "ran-marker");
+	const result = await invoke(root, ["heavy", "--label", "statfs-ok", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: noSbhPath });
+	expect(result.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+});
+
+test("oq1h.1 planted: 5 GiB free statfs defers with 75 naming statfs", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const noSbhPath = "/usr/bin:/bin";
+	expectNoSbhOnPath(noSbhPath);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-low", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ ...fakeStatfsEnv(5 * GIB, 50), PATH: noSbhPath });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("disk low (statfs)");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("oq1h.1 planted: free percent below disk_floor_pct defers with 75", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "statfs", disk_floor_pct: 40 });
+	const noSbhPath = "/usr/bin:/bin";
+	expectNoSbhOnPath(noSbhPath);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-floor", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ ...fakeStatfsEnv(100 * GIB, 30), PATH: noSbhPath });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("disk low (statfs)");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("oq1h.1 planted: statfs failure is 69, never healthy", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const noSbhPath = "/usr/bin:/bin";
+	expectNoSbhOnPath(noSbhPath);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-dead", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_STATFS: "failure", PATH: noSbhPath });
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("no disk observer available");
+	expect(existsSync(marker)).toBe(false);
+	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
+});
+
+test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const bin = fakeSbh(root, 1);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "sbh-wins", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("disk low: sbh check");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 20 });
+	const bin = fakeSbh(root, 2);
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--label", "sbh-err-auto", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
+	expect(result.stderr).toContain("disk_observer");
+	expect(existsSync(marker)).toBe(false);
+}, 40_000);

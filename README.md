@@ -299,7 +299,7 @@ never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
 unreachable vault makes the secrets scan `UNVERIFIED`; a stale CI cache is
 `UNAVAILABLE`. Exit codes are fixed: 0 success, 1 finding, 2 usage or blocked,
 3 unavailable, 4 retryable (and for `heavy`: 75 when a job is deferred, 69 when
-its disk observer `sbh` is missing).
+no disk observer is available — strict `sbh` missing, or OS `statfs` unreadable).
 
 **Native OMP first.** Rule tests run through OMP's matcher, settings go through
 `omp config get/set`, and rules load through OMP's plugin loader. The
@@ -497,7 +497,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes (`VALID`, `UNREGISTERED`, `INVALID`); `anchor` reports the live-doc Mission statement against the record per repo (`AGREE` or `DRIFT` with reasons) | `omp-kit mission anchor --project ~/Developer/omp-kit --json` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Read-only reports for landed-but-open beads and stale in-progress claims (--project DIR reads DIR/.beads/beads.db; refused with --db) | `omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
-| `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when `sbh` is missing | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
+| `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit exact actively reserved paths to shared main, then converge and publish; distinguish saved-but-unpublished and uncertain saves | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
@@ -634,7 +634,7 @@ report without writing.
 | `XDG_STATE_HOME` | State root for receipts, census, logs; must be absolute | `~/.local/state` → `omp-kit/` |
 | `$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` | Profiles `apply policy` manages | absent: every named profile |
 | `~/.config/omp-kit/fleet-watch.json`, `OMP_KIT_FLEET_WATCH_CONFIG` | Fleet Watch sessions | none; the service refuses without it |
-| `$XDG_CONFIG_HOME/omp-kit/load.json` | `heavy` slots and maximum wait | 2 slots |
+| `$XDG_CONFIG_HOME/omp-kit/load.json` | `heavy` slots, maximum wait, disk observer (`sbh` strict, `statfs` OS-only, `auto` default) and optional floor percent | 2 slots, auto observer, bytes-need only |
 | `config/planning-score.toml`, `<repo>/.omp/planning-score.toml` | Planning score tuning and fleet list | kit defaults |
 | `config/lessons.toml` | fleet-lessons job | kit defaults |
 | `config/beads-policy.template.yaml` | Strict `.beads/policy.yaml` template, copied by hand | n/a |
@@ -667,8 +667,10 @@ Example files:
 ```
 
 ```jsonc
-// $XDG_CONFIG_HOME/omp-kit/load.json: slots 1..64, max_wait_s in seconds
-{ "slots": 2, "max_wait_s": 600 }
+// $XDG_CONFIG_HOME/omp-kit/load.json: slots 1..64, max_wait_s in seconds,
+// disk_observer "sbh"|"statfs"|"auto" (default "auto": sbh when on PATH else statfs),
+// disk_floor_pct 0..50 or absent (pressure below the floor percent).
+{ "slots": 2, "max_wait_s": 600, "disk_observer": "auto" }
 ```
 
 ```jsonc

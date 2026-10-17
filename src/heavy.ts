@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, cpus, loadavg } from "node:os";
-import { basename, join } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { defaultLiveness, probeOwner, type LivenessDeps } from "./scratch.ts";
@@ -14,7 +14,8 @@ const QUEUE_POLL_MS = 1_000;
 const MAX_WAIT_SECONDS = 900;
 
 type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string };
-type HeavyConfig = { slots: number; max_wait_s: number };
+type DiskObserver = "sbh" | "statfs" | "auto";
+type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null };
 type MachineLoad = { load1: number; ncpu: number };
 type HeavySignal = "SIGINT" | "SIGTERM";
 type HeavyChild = { exited: Promise<number>; kill(signal: HeavySignal): void };
@@ -43,17 +44,22 @@ function loadConfig(): HeavyConfig {
 	let raw: string;
 	try { raw = readFileSync(path, "utf8"); }
 	catch (error) {
-		if (errorCode(error) === "ENOENT") return { slots: 2, max_wait_s: MAX_WAIT_SECONDS };
+		if (errorCode(error) === "ENOENT") return { slots: 2, max_wait_s: MAX_WAIT_SECONDS, disk_observer: "auto", disk_floor_pct: null };
 		throw error;
 	}
 	const value: unknown = JSON.parse(raw);
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`invalid heavy-work config: ${path}`);
 	const slots = "slots" in value ? value.slots : 2;
 	const maxWait = "max_wait_s" in value ? value.max_wait_s : MAX_WAIT_SECONDS;
+	const observer: unknown = "disk_observer" in value ? value.disk_observer : "auto";
+	const floor: unknown = "disk_floor_pct" in value ? value.disk_floor_pct : null;
 	if (typeof slots !== "number" || !Number.isInteger(slots) || slots < 1 || slots > 64 ||
 		typeof maxWait !== "number" || !Number.isFinite(maxWait) || maxWait < 0 || maxWait > MAX_WAIT_SECONDS)
 		throw new Error(`invalid heavy-work config: slots must be 1..64 and max_wait_s must be 0..${MAX_WAIT_SECONDS}`);
-	return { slots, max_wait_s: maxWait };
+	if (observer !== "sbh" && observer !== "statfs" && observer !== "auto")
+		throw new Error(`invalid heavy-work config: disk_observer must be "sbh", "statfs" or "auto": ${path}`);
+	if (floor !== null && (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 50))
+		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
+	return { slots, max_wait_s: maxWait, disk_observer: observer, disk_floor_pct: floor };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -81,26 +87,96 @@ function testFakeLoad(): number | undefined {
  * that contract, is a missing prerequisite rather than pressure. Waiting cannot
  * fix it, so admission fails fast with HEAVY_PREREQ_MISSING instead of
  * deferring 75; the disk check is never skipped.
+ * oq1h.1 (portable default): admission prefers OS-native statfs on the cwd,
+ * with sbh as an auto-detected adapter. disk_observer "sbh" keeps the strict
+ * contract above byte-for-byte; "statfs" never touches sbh; "auto" (default)
+ * takes sbh's 0/1 verdict when sbh resolves on PATH and falls back to statfs
+ * when it does not. A statfs failure is unavailable, never healthy.
  */
 export const HEAVY_DISK_NEED = "10G";
+/** Bytes side of HEAVY_DISK_NEED; keep consistent with the sbh --need flag above. */
+export const HEAVY_DISK_NEED_BYTES = 10 * 1024 ** 3;
 /** EX_UNAVAILABLE (sysexits.h): a required observer is missing; distinct from the 75 deferral. */
 export const HEAVY_PREREQ_MISSING = 69;
-export type DiskVerdict = { kind: "ok" } | { kind: "pressure"; text: string } | { kind: "unavailable"; text: string };
-export async function diskVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
+export type DiskVerdict = { kind: "ok"; observer: DiskObserver } | { kind: "pressure"; text: string; observer: DiskObserver } | { kind: "unavailable"; text: string; observer: DiskObserver };
+async function sbhVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
 	let code: number;
 	try {
 		const proc = Bun.spawn([sbhBin, "check", "--need", HEAVY_DISK_NEED], { stdout: "ignore", stderr: "ignore" });
 		code = await proc.exited;
 	} catch {
-		return { kind: "unavailable", text: "sbh binary not runnable" };
+		return { kind: "unavailable", text: "sbh binary not runnable", observer: "sbh" };
 	}
-	if (code === 0) return { kind: "ok" };
-	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure` };
-	return { kind: "unavailable", text: `sbh check exited ${code}` };
+	if (code === 0) return { kind: "ok", observer: "sbh" };
+	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure`, observer: "sbh" };
+	return { kind: "unavailable", text: `sbh check exited ${code}`, observer: "sbh" };
 }
-
-function prerequisiteMissing(text: string): number {
-	process.stderr.write(`heavy: sbh unavailable: ${text}; disk admission requires sbh; no command was run\n`);
+/** Test-only statfs injection for planted disk states. Production never sets
+ * OMP_KIT_HEAVY_FAKE_STATFS; the real statfs of the cwd applies. */
+function testFakeStatfs(): { freeBytes: number; freePct: number } | { failure: true } | undefined {
+	const raw = process.env.OMP_KIT_HEAVY_FAKE_STATFS;
+	if (raw === undefined || raw === "") return undefined;
+	if (raw === "failure") return { failure: true };
+	try {
+		const value: unknown = JSON.parse(raw);
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+			const record = value as Record<string, unknown>;
+			if (typeof record.free_bytes === "number" && Number.isFinite(record.free_bytes) && record.free_bytes >= 0 &&
+				typeof record.free_pct === "number" && Number.isFinite(record.free_pct) && record.free_pct >= 0 && record.free_pct <= 100)
+				return { freeBytes: record.free_bytes, freePct: record.free_pct };
+		}
+	} catch { /* fall through to fail-closed below */ }
+	return { failure: true };
+}
+function statfsCapacity(cwd: string): { freeBytes: number; freePct: number } | null {
+	const fake = testFakeStatfs();
+	if (fake !== undefined) return "failure" in fake ? null : { freeBytes: fake.freeBytes, freePct: fake.freePct };
+	let stats: { bavail: number; blocks: number; bsize: number };
+	try {
+		const observed = statfsSync(cwd);
+		stats = { bavail: Number(observed.bavail), blocks: Number(observed.blocks), bsize: Number(observed.bsize) };
+	} catch {
+		return null;
+	}
+	if (!Number.isFinite(stats.bavail) || !Number.isFinite(stats.blocks) || !Number.isFinite(stats.bsize) ||
+		stats.blocks <= 0 || stats.bavail < 0 || stats.bsize <= 0) return null;
+	return { freeBytes: stats.bavail * stats.bsize, freePct: Math.min(100, (stats.bavail / stats.blocks) * 100) };
+}
+function statfsVerdict(cwd: string, floorPct: number | null): DiskVerdict {
+	const capacity = statfsCapacity(cwd);
+	if (capacity === null) return { kind: "unavailable", text: "no disk observer available", observer: "statfs" };
+	if (capacity.freeBytes < HEAVY_DISK_NEED_BYTES) return { kind: "pressure", text: "disk low (statfs)", observer: "statfs" };
+	if (floorPct !== null && capacity.freePct < floorPct)
+		return { kind: "pressure", text: `disk low (statfs): ${capacity.freePct.toFixed(1)}% free below floor ${floorPct}%`, observer: "statfs" };
+	return { kind: "ok", observer: "statfs" };
+}
+function sbhResolvable(): boolean {
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+		const candidate = resolve(directory || ".", "sbh");
+		try {
+			const stat = statSync(candidate);
+			if (stat.isFile() && (stat.mode & 0o111) !== 0) return true;
+		} catch { /* not here; keep looking */ }
+	}
+	return false;
+}
+export async function diskVerdict(input?: { config?: HeavyConfig; cwd?: string; sbhBin?: string }): Promise<DiskVerdict> {
+	const observer = input?.config?.disk_observer ?? "auto";
+	const floor = input?.config?.disk_floor_pct ?? null;
+	const cwd = input?.cwd ?? process.cwd();
+	const sbhBin = input?.sbhBin ?? "sbh";
+	if (observer === "sbh") return sbhVerdict(sbhBin);
+	if (observer === "statfs") return statfsVerdict(cwd, floor);
+	if (sbhResolvable()) {
+		const verdict = await sbhVerdict(sbhBin);
+		if (verdict.kind === "unavailable")
+			return { kind: "unavailable", text: `${verdict.text} (set disk_observer to "statfs" for OS-native admission)`, observer: "sbh" };
+		return verdict;
+	}
+	return statfsVerdict(cwd, floor);
+}
+function prerequisiteMissing(observer: "sbh" | "statfs", text: string): number {
+	process.stderr.write(`heavy: ${observer} unavailable: ${text}; disk admission requires ${observer === "sbh" ? "sbh" : "an observer"}; no command was run\n`);
 	return HEAVY_PREREQ_MISSING;
 }
 
@@ -260,8 +336,8 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	// state mutex, whatever load and slots say. This reading only decides that;
 	// admission below observes the disk again inside the mutex, because a
 	// reading taken before a lock wait can be stale (QuietBadger AM57798).
-	const precheck = await diskVerdict();
-	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.text);
+	const precheck = await diskVerdict({ config, cwd });
+	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.observer, precheck.text);
 	const deadline = Date.now() + config.max_wait_s * 1000;
 	let nextStatus = 0;
 	let signal: HeavySignal | null = null;
@@ -296,7 +372,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			}
 			let waitingJobs: HeavyJob[] = [];
 			let reason: string | null = null;
-			let missing: string | null = null;
+			let missing: { observer: "sbh" | "statfs"; text: string } | null = null;
 			try {
 				waitingJobs = readJobs(storage.jobs, liveness);
 				if (!waitingJobs.some((entry) => entry.id === id)) {
@@ -306,11 +382,11 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				}
 				reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
 				if (!reason) {
-					const disk = await diskVerdict();
+					const disk = await diskVerdict({ config, cwd: job.cwd });
 					if (disk.kind === "unavailable") {
 						removeJob(storage.jobs, id);
 						rowCreated = false;
-						missing = disk.text;
+						missing = disk;
 					} else if (disk.kind === "pressure") reason = disk.text;
 				}
 				if (!reason && missing === null) {
@@ -331,7 +407,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			} finally {
 				releaseLock(storage.lock, owner);
 			}
-			if (missing !== null) return prerequisiteMissing(missing);
+			if (missing !== null) return prerequisiteMissing(missing.observer, missing.text);
 			if (child) {
 				const code = await child.exited;
 				await removeQueuedJob(storage, id, owner, liveness);
