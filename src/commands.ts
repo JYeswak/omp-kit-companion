@@ -1,5 +1,6 @@
 import { UNOWNED_ACTIVE_RULE } from "./scratch.ts";
 import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
+import { TERN_COMMAND } from "./tern/registry.ts";
 
 export type Flag = {
 	readonly aliases?: readonly string[];
@@ -379,6 +380,7 @@ const missionData: DataSchema = { type: "object", required: ["overall", "mission
 
 const lessonData: DataSchema = { type: "object", required: ["overall", "entry", "commit"], properties: {
 	overall: { enum: ["OK"] }, entry: { type: "object" }, commit: { type: ["object", "null"] },
+	lesson_id: { type: "string" },
 } };
 
 export const COMMANDS: readonly Command[] = [
@@ -401,17 +403,27 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
-	{ name: "lessons", description: "Append evidence-backed lessons to this repository", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE] [--project PATH] [--commit --bead ID]", flags: [], subcommands: [
-		{ name: "add", description: "Append a validated lesson; --commit saves and publishes its clean path on shared main", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE] [--project PATH] [--commit --bead ID]", flags: [
+	{ name: "lessons", description: "Append evidence-backed lessons or corrections without rewriting history", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE|CORRECTION] [--superseded-by ID|DOC] [--corrects ID] [--applies-to repo|fleet] [--project PATH] [--commit --bead ID]", flags: [], subcommands: [
+		{ name: "add", description: "Append a validated lesson; CORRECTION retires an earlier record by stable id", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE|CORRECTION] [--superseded-by ID|DOC] [--corrects ID] [--applies-to repo|fleet] [--project PATH] [--commit --bead ID]", flags: [
 			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-			{ name: "--kind", value: "KIND", description: "LESSON, GAP or NEGATIVE; defaults to LESSON" },
+			{ name: "--kind", value: "KIND", description: "LESSON, GAP, NEGATIVE or CORRECTION; defaults to LESSON" },
 			{ name: "--class", value: "CLASS", description: "Canonical lesson class or OTHER:name" },
 			{ name: "--what", value: "TEXT", description: "Concrete lesson or observed defect" },
 			{ name: "--evidence", value: "TEXT", description: "Evidence supporting the lesson; required" },
+			{ name: "--superseded-by", value: "ID|DOC", description: "Replacement lesson id or repo-relative path#anchor/path:line; never treats a missing target as current advice" },
+			{ name: "--corrects", value: "ID", description: "Earlier lesson id retired by this CORRECTION; existing log rows are never rewritten" },
+			{ name: "--applies-to", value: "repo|fleet", description: "Lesson applicability; new records default to repo, missing legacy scope remains unresolved" },
 			{ name: "--bead", value: "ID", description: "Related bead and normal commit trailer; required with --commit" },
 			{ name: "--commit", description: "Commit only the clean lesson path on main and publish main; refuses existing path dirt" },
 		], example: "omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --bead br-123 --commit --json", mutation: true, runnable: true, dataSchema: lessonData },
 	], example: "omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --json", runnable: true, dataSchema: textData },
+	{ name: "fleet-lessons", description: "Read current lesson advice, preserved history and unresolved references; never runs intake, classification or services", usage: "fleet-lessons [--project PATH]... [--json]", flags: [
+		{ name: "--project", value: "PATH", repeatable: true, description: "Repository to read; repeat for cross-repo grouping, defaults to the current directory" },
+	], example: "omp-kit fleet-lessons --project . --json", runnable: false, dataSchema: {
+		type: "object", required: ["overall", "report"], properties: {
+			overall: { enum: ["OK", "UNVERIFIED"] }, report: { type: "object" },
+		},
+	} },
 	{ name: "checkin", description: "Record verified own activity or explicit completed, blocked and next items", usage: "checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]", flags: [
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--done", value: "TEXT", repeatable: true, description: "Explicit completed item; omit to derive activity, refusing unavailable sources" },
@@ -503,6 +515,7 @@ export const COMMANDS: readonly Command[] = [
 			], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json",
 			runnable: true, dataSchema: memoryAuditData },
 	], example: "omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json", runnable: true },
+	TERN_COMMAND,
 	{ name: "tern-ref", description: "Build, query, validate, or drift-check the version-pinned local Tern Plugin SDK reference", usage: "tern-ref build|query|validate|drift", flags: [], example: "omp-kit tern-ref build --json", subcommands: [
 		{ name: "build", description: "Crawl docs, chunk tern.d.luau per member, index nomic+qwen, and write the version-keyed manifest", usage: "tern-ref build [--root DIR] [--site URL] [--force]", flags: [
 			{ name: "--root", value: "DIR", description: "State root holding version dirs; defaults to the platform state dir" },

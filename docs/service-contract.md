@@ -51,6 +51,61 @@ produce a `BLOCKED` report and failed job receipt, not a healthy planning claim.
 Fixture evidence does not qualify an installed release or authorize activation;
 the broader learning and skill-admission criteria remain separate.
 
+### Advice currency and read-only replay
+
+`omp-kit fleet-lessons [--project PATH]... --json` reads selected repositories
+without running a service, classifier request or tracker intake. The managed
+job and this read-only path share the same currency resolver. Only `active`
+rows feed advice groups, intake plans and failure-class remediation; raw
+`logged_since_last_report` remains an audit stream, not current advice.
+
+Each repository exposes `active`, full-row `history`, `unresolved` with
+reasons, invalid-line diagnostics and document-anchor notes. `entries_total`
+counts parsed input rows, including check-ins; invalid rows remain in the
+separate diagnostics. `history_count` counts retired advice and correction
+audit rows. Check-in activity/doctor consumers continue
+to use check-ins, not advice currency.
+
+`lessonIdentity` identifies an actor. A record reference is instead
+`lesson_<sha256>` of the fixed `omp-kit.lesson/v1` string/null tuple:
+timestamp, repository, agent, pane, model, kind, class, what, evidence,
+applicability, proposed fix and bead. Correction records append their
+`corrects` target to that tuple, so same-time corrections for different
+originals retain distinct audit identities. Property order,
+`superseded_by` and numeric telemetry are not identity. Changing that protocol
+would break persisted references.
+
+`superseded_by` points to a replacement record id or a repo-relative
+`path#anchor`/`path:line`. The referenced old row becomes history only when its
+replacement chain resolves. Missing targets or applicability and cycles stay
+unresolved, never current advice. Document checks establish file existence
+inside the repository only, including symlink containment; line/anchor
+content remains explicitly unverified.
+
+To retire an existing row without rewriting its bytes, use the public
+append path:
+
+```sh
+omp-kit lessons add --kind CORRECTION --class STALE_TEXT \
+  --what "Retire the earlier advice in favor of the current policy" \
+  --evidence "path/to/policy.md:61" --applies-to fleet \
+  --corrects lesson_RECORD_ID --superseded-by path/to/policy.md:61 --json
+```
+
+The correction must target an earlier advice row. The original record stays
+intact in history; correction records never become advice themselves. New
+records default to repository applicability; a missing legacy scope is not
+silently filled in.
+
+`tests/e2e/lessons-supersede.e2e.sh` exercises the real public report and
+append paths with healthy, unresolved, document and correction fixtures. It
+prints fixture hashes, exact argv, exits, dispositions and assertion totals.
+Set `OMP_KIT_BINARY` for an executable or `OMP_KIT_CLI` for a source
+entrypoint. `--mutants` builds an unchanged compiled control and three
+in-memory source mutations before replay; run that build slice only under
+normal heavy-work admission. Neither source fixtures nor those probes
+qualify an installed release.
+
 ## Single-flight state and upgrade boundary
 
 Each job keeps its claim in `<job>.lock/pid` under the private jobs directory.

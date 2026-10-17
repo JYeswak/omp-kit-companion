@@ -63,6 +63,7 @@ import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from 
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
+import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
@@ -77,8 +78,8 @@ import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
-import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
-import { runFleetLessonsOnce } from "./fleet-lessons.ts";
+import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
+import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -3453,6 +3454,7 @@ function planningScoreCommand(request: ParsedCommand): CliResult {
 	const kitRoot = kitIdentity().release.root ?? resolve(import.meta.dir, "..");
 	return runPlanningScore({ kitRoot, ...(typeof repoFlag === "string" ? { repoPath: repoFlag } : {}), fleet: request.flags.has("--fleet"), cwd: process.cwd(), home: process.env.HOME });
 }
+registerTernHandlers(registerCommandHandler);
 for (const subcommand of ["build", "query", "validate", "drift"]) registerCommandHandler(`tern-ref ${subcommand}`, ternRefCommand);
 registerCommandHandler("planning score", planningScoreCommand);
 function planningConvertCommand(request: ParsedCommand): CliResult {
@@ -3592,17 +3594,26 @@ function lessonRecordCommand(request: ParsedCommand): CliResult {
 		}
 		const kind = String(flags.get("--kind") ?? "LESSON");
 		const classification = String(flags.get("--class") ?? "");
-		if ((kind !== "LESSON" && kind !== "GAP" && kind !== "NEGATIVE") || !isLessonClass(classification))
+		if ((kind !== "LESSON" && kind !== "GAP" && kind !== "NEGATIVE" && kind !== "CORRECTION") || !isLessonClass(classification))
 			return refusal("LESSON_KIND_OR_CLASS_INVALID", "Name a supported lesson kind and class", "Run omp-kit help lessons add.");
+		const scope = flags.get("--applies-to");
+		if (scope !== undefined && scope !== "repo" && scope !== "fleet")
+			return refusal("LESSON_APPLIES_TO_INVALID", "--applies-to must be repo or fleet", "Run omp-kit help lessons add.");
+		const supersededBy = flags.get("--superseded-by");
+		const corrects = flags.get("--corrects");
 		const input: AddLessonInput = {
 			kind, class: classification, what: String(flags.get("--what") ?? ""), evidence: String(flags.get("--evidence") ?? ""),
 			...(typeof bead === "string" ? { bead } : {}),
+			...(scope !== undefined ? { applies_to: scope } : {}),
+			...(typeof supersededBy === "string" ? { superseded_by: supersededBy } : {}),
+			...(typeof corrects === "string" ? { corrects } : {}),
 		};
 		if (flags.has("--commit")) {
 			const result = appendLessonAndCommit(root, input);
-			return { code: 0, data: { overall: "OK", ...result }, verification: "PERFORMED" };
+			return { code: 0, data: { overall: "OK", ...result, lesson_id: lessonRecordId(result.entry) }, verification: "PERFORMED" };
 		}
-		return { code: 0, data: { overall: "OK", entry: appendLesson(root, input), commit: null }, verification: "PERFORMED" };
+		const entry = appendLesson(root, input);
+		return { code: 0, data: { overall: "OK", entry, lesson_id: lessonRecordId(entry), commit: null }, verification: "PERFORMED" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const code = message.split(":")[0] ?? "LESSONS_FAILED";
@@ -3615,6 +3626,24 @@ function lessonRecordCommand(request: ParsedCommand): CliResult {
 			message, "Preserve local rows and peer changes; resolve the named path, hook or publication refusal before retrying.");
 	}
 }
+
+registerCommandHandler("fleet-lessons", request => {
+	const project = request.flags.get("--project");
+	const projects = typeof project === "string" ? project.split("\n") : [process.cwd()];
+	const paths = new Set<string>();
+	const repos: FleetRepoSnapshot[] = [];
+	for (const project of projects) {
+		const path = resolve(project);
+		if (paths.has(path)) continue;
+		paths.add(path);
+		repos.push(readFleetRepoSnapshot(path, path));
+	}
+	const report = buildFleetLessonsReport({ generatedAt: new Date(), previousReportAt: null, repos, scoreChanges: [] });
+	return {
+		code: 0, data: { overall: repos.every(repo => repo.status === "OK") && report.unresolved.length === 0 ? "OK" : "UNVERIFIED", report },
+		verification: "PERFORMED",
+	};
+});
 
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
 	const { command, parent, flags } = request;

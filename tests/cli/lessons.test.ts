@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, LESSONS_RELATIVE_PATH, readLessonsLog, writeCheckin, writeCheckinAndCommit, type LessonEntry } from "../../src/lessons.ts";
+import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, LESSONS_RELATIVE_PATH, lessonDocumentAnchors, lessonRecordId, readLessonsLog, resolveLessonCurrency, writeCheckin, writeCheckinAndCommit, type LessonEntry } from "../../src/lessons.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -227,6 +227,145 @@ test("lesson add appends one schema-valid JSONL record with the captured identit
 		evidence: "command `omp-kit lesson add` exited 1", applies_to: "repo",
 	});
 	expect(readLessonsLog(root)).toMatchObject({ status: "OK", entries: [entry] });
+});
+
+test("a lesson supersession reference survives the real append and read boundary", () => {
+	const root = fixture();
+	appendLesson(root, {
+		kind: "LESSON", class: "STALE_TEXT", what: "Old advice is retained only as history.",
+		evidence: "supersession fixture", applies_to: "fleet", superseded_by: "lesson-current-replacement",
+	}, { identity, now });
+	expect(readLessonsLog(root)).toMatchObject({
+		status: "OK", entries: [{ superseded_by: "lesson-current-replacement" }],
+	});
+});
+
+test.each([null, 17, [], {}, "", "   "].map(value => [value]))("a malformed supersession reference is reported instead of typed as advice: %j", (superseded_by) => {
+	const root = fixture();
+	const entry = appendLesson(root, {
+		kind: "LESSON", class: "STALE_TEXT", what: "Malformed metadata cannot become current advice.",
+		evidence: "invalid supersession fixture",
+	}, { identity, now });
+	writeFileSync(join(root, LESSONS_RELATIVE_PATH), JSON.stringify({ ...entry, superseded_by }) + "\n");
+	const log = readLessonsLog(root);
+	expect(log.status).toBe("INVALID");
+	expect(log.invalid_lines.map(({ line, code }) => ({ line, code }))).toEqual([{
+		line: 1, code: "LESSON_SUPERSEDED_BY_INVALID",
+	}]);
+	expect(log.entries).toEqual([]);
+});
+
+test("currency keeps replacement A and unrelated C active, with B preserved as history", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "currency fixture", applies_to: "fleet" } as const;
+	const a = appendLesson(root, { ...input, what: "A: current replacement" }, { identity, now });
+	const b = appendLesson(root, { ...input, what: "B: retired advice", superseded_by: lessonRecordId(a) }, { identity, now });
+	const c = appendLesson(root, { ...input, what: "C: unrelated useful advice" }, { identity, now });
+	const result = resolveLessonCurrency(readLessonsLog(root).entries);
+	expect(result.active.map(row => row.entry)).toEqual([a, c]);
+	expect(result.history.map(row => row.entry)).toEqual([b]);
+	expect(result.unresolved).toEqual([]);
+});
+
+test("stable record references survive reordered persisted properties and an append-only correction", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "correction fixture", applies_to: "fleet" } as const;
+	const b = appendLesson(root, { ...input, what: "B: original advice" }, { identity, now });
+	const originalId = lessonRecordId(b);
+	const original = JSON.stringify(Object.fromEntries(Object.entries(b).reverse())) + "\n";
+	writeFileSync(join(root, LESSONS_RELATIVE_PATH), original);
+	const a = appendLesson(root, { ...input, what: "A: replacement" }, { identity, now });
+	const before = readFileSync(join(root, LESSONS_RELATIVE_PATH), "utf8");
+	const correction = appendLesson(root, { ...input, kind: "CORRECTION", what: "Retire B in favor of A.",
+		corrects: originalId, superseded_by: lessonRecordId(a) }, { identity, now: new Date(now.getTime() + 1) });
+	expect(readFileSync(join(root, LESSONS_RELATIVE_PATH), "utf8")).toBe(before + JSON.stringify(correction) + "\n");
+	const result = resolveLessonCurrency(readLessonsLog(root).entries);
+	expect(result.active.map(row => row.entry)).toEqual([a]);
+	expect(result.history.map(row => row.entry)).toEqual([b, correction]);
+	expect(result.unresolved).toEqual([]);
+});
+
+test("missing replacement and applicability remain visible as unresolved, never advice", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "unresolved fixture" } as const;
+	const missing = appendLesson(root, { ...input, what: "Missing replacement", superseded_by: "lesson_absent" }, { identity, now });
+	const incomplete = appendLesson(root, { ...input, what: "Missing applicability" }, { identity, now });
+	const { applies_to: _scope, ...withoutScope } = incomplete;
+	writeFileSync(join(root, LESSONS_RELATIVE_PATH), [missing, withoutScope].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	const log = readLessonsLog(root);
+	expect(log.status).toBe("OK");
+	const result = resolveLessonCurrency(log.entries);
+	expect(result.active).toEqual([]);
+	expect(result.history).toEqual([]);
+	expect(result.unresolved.map(row => ({ what: row.entry.what, reason: row.reason }))).toEqual([
+		{ what: "Missing replacement", reason: "SUPERSESSION_TARGET_MISSING" },
+		{ what: "Missing applicability", reason: "LESSON_APPLICABILITY_MISSING" },
+	]);
+});
+
+test("supersession cycles are unresolved without hiding an unrelated healthy lesson", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "cycle fixture" } as const;
+	const a = appendLesson(root, { ...input, what: "Cycle A" }, { identity, now });
+	const b = appendLesson(root, { ...input, what: "Cycle B" }, { identity, now });
+	const c = appendLesson(root, { ...input, what: "Healthy C" }, { identity, now });
+	const rows = [{ ...a, superseded_by: lessonRecordId(b) }, { ...b, superseded_by: lessonRecordId(a) }, c];
+	const result = resolveLessonCurrency(rows);
+	expect(result.active.map(row => row.entry.what)).toEqual(["Healthy C"]);
+	expect(result.history).toEqual([]);
+	expect(result.unresolved.map(row => ({ what: row.entry.what, reason: row.reason }))).toEqual([
+		{ what: "Cycle A", reason: "SUPERSESSION_CYCLE" }, { what: "Cycle B", reason: "SUPERSESSION_CYCLE" },
+	]);
+});
+
+test("document retirement proves existence only and refuses a missing file or a symlink escaping the repo", () => {
+	const root = fixture();
+	const outside = fixture();
+	writeFileSync(join(root, "replacement.md"), "# A different heading\n");
+	writeFileSync(join(outside, "outside.md"), "outside the selected repo\n");
+	symlinkSync(join(outside, "outside.md"), join(root, "escape.md"));
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "document fixture" } as const;
+	const present = appendLesson(root, { ...input, what: "Replaced by an existing document", superseded_by: "replacement.md:999" }, { identity, now });
+	const missing = appendLesson(root, { ...input, what: "Missing document", superseded_by: "absent.md#policy" }, { identity, now });
+	const escape = appendLesson(root, { ...input, what: "Escaping document", superseded_by: "escape.md#policy" }, { identity, now });
+	const entries = readLessonsLog(root).entries;
+	const result = resolveLessonCurrency(entries, lessonDocumentAnchors(root, entries));
+	expect(result.active).toEqual([]);
+	expect(result.history.map(row => row.entry)).toEqual([present]);
+	expect(result.unresolved.map(row => row.entry)).toEqual([missing, escape]);
+	expect(result.anchor_notes.map(({ target, verification }) => ({ target, verification }))).toEqual([{ target: "replacement.md:999", verification: "FILE_EXISTS_ONLY" }]);
+});
+
+test("a later complete correction recovers its target without hiding an incomplete correction", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "append-only recovery", applies_to: "fleet" } as const;
+	const old = appendLesson(root, { ...input, what: "Old advice needing correction" }, { identity, now });
+	const current = appendLesson(root, { ...input, what: "Valid replacement" }, { identity, now });
+	const incomplete = appendLesson(root, { ...input, kind: "CORRECTION", what: "Legacy correction with missing scope",
+		corrects: lessonRecordId(old), superseded_by: lessonRecordId(current) }, { identity, now: new Date(now.getTime() + 1) });
+	const { applies_to: _scope, ...withoutScope } = incomplete;
+	writeFileSync(join(root, LESSONS_RELATIVE_PATH), [old, current, withoutScope].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	const complete = appendLesson(root, { ...input, kind: "CORRECTION", what: "Complete correction after the legacy row",
+		corrects: lessonRecordId(old), superseded_by: lessonRecordId(current) }, { identity, now: new Date(now.getTime() + 2) });
+	const result = resolveLessonCurrency(readLessonsLog(root).entries);
+	expect(result.active.map(row => row.entry)).toEqual([current]);
+	expect(result.history.map(row => row.entry)).toEqual([old, complete]);
+	expect(result.unresolved).toEqual([{ id: lessonRecordId(withoutScope), entry: withoutScope, reason: "LESSON_APPLICABILITY_MISSING" }]);
+});
+
+test("same-time corrections for different targets retain their own resolved and unresolved history", () => {
+	const root = fixture();
+	const input = { kind: "LESSON", class: "STALE_TEXT", evidence: "distinct correction targets", applies_to: "fleet" } as const;
+	const oldA = appendLesson(root, { ...input, what: "Original A" }, { identity, now });
+	const oldB = appendLesson(root, { ...input, what: "Original B" }, { identity, now });
+	const current = appendLesson(root, { ...input, what: "Current replacement" }, { identity, now });
+	const correction = { ...input, kind: "CORRECTION", what: "Replace the original advice" } as const;
+	const resolved = appendLesson(root, { ...correction, corrects: lessonRecordId(oldA), superseded_by: lessonRecordId(current) }, { identity, now });
+	const unresolved = appendLesson(root, { ...correction, corrects: lessonRecordId(oldB), superseded_by: "lesson_absent" }, { identity, now });
+	const result = resolveLessonCurrency(readLessonsLog(root).entries);
+	expect(result.active.map(row => row.entry)).toEqual([current]);
+	expect(result.history.map(row => row.entry)).toEqual([oldA, resolved]);
+	expect(result.unresolved.map(row => row.entry)).toEqual([oldB, unresolved]);
 });
 
 test("lesson add refuses missing evidence without changing an existing append-only log", () => {

@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync, closeSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync, closeSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const LESSONS_RELATIVE_PATH = ".omp/lessons.jsonl";
 
-export type LessonKind = "NEGATIVE" | "GAP" | "LESSON" | "CHECKIN";
+export type LessonKind = "NEGATIVE" | "GAP" | "LESSON" | "CHECKIN" | "CORRECTION";
 export const LESSON_CLASS_DESCRIPTIONS = {
 	SCOPE_GAP: "Description promises behavior that acceptance does not test",
 	FALSE_CLAIM: "Notes or state contradict code or the tracker",
@@ -60,9 +61,11 @@ export interface LessonEntry {
 	what: string;
 	evidence: string | null;
 	cost_minutes: number | null;
-	applies_to: LessonAppliesTo;
+	applies_to?: LessonAppliesTo | null;
 	proposed_fix: string | null;
 	bead: string | null;
+	superseded_by?: string;
+	corrects?: string;
 	done?: string[];
 	blocked?: string[];
 	next?: string[];
@@ -79,6 +82,8 @@ export interface AddLessonInput {
 	applies_to?: LessonAppliesTo;
 	proposed_fix?: string | null;
 	bead?: string | null;
+	superseded_by?: string;
+	corrects?: string;
 }
 
 export interface CheckinInput {
@@ -140,7 +145,7 @@ export interface LessonsDoctorReport {
 	close_followup: { closed: number | null; followed_by_checkin: number | null; share: number | null };
 }
 
-const LESSON_KINDS: Record<LessonKind, true> = { NEGATIVE: true, GAP: true, LESSON: true, CHECKIN: true };
+const LESSON_KINDS: Record<LessonKind, true> = { NEGATIVE: true, GAP: true, LESSON: true, CHECKIN: true, CORRECTION: true };
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const OPEN_READ = constants.O_RDONLY | NOFOLLOW;
 const OPEN_APPEND = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NOFOLLOW;
@@ -173,9 +178,11 @@ function parseLessonEntry(value: unknown): LessonEntry | null {
 		!Object.prototype.hasOwnProperty.call(LESSON_KINDS, row.kind) || !validNonblank(row.what) ||
 		!(row.evidence === null || typeof row.evidence === "string") ||
 		!(row.cost_minutes === null || finiteNonnegative(row.cost_minutes)) ||
-		!(row.applies_to === "repo" || row.applies_to === "fleet") ||
+		!(row.applies_to === undefined || row.applies_to === null || row.applies_to === "repo" || row.applies_to === "fleet") ||
 		!(row.proposed_fix === null || typeof row.proposed_fix === "string") ||
 		!(row.bead === null || typeof row.bead === "string")) return null;
+	if (row.superseded_by !== undefined && !validNonblank(row.superseded_by)) return null;
+	if (row.kind === "CORRECTION" ? !validNonblank(row.corrects) || !validNonblank(row.superseded_by) : row.corrects !== undefined) return null;
 	if (row.kind === "CHECKIN") {
 		if (row.class !== null || !Array.isArray(row.done) || !row.done.every(validNonblank) ||
 			!Array.isArray(row.blocked) || !row.blocked.every(validNonblank) ||
@@ -246,11 +253,177 @@ export function readLessonsLog(repoRoot: string): LessonsReadResult {
 		if (entry) { entries.push(entry); continue; }
 		const negativeMissingEvidence = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) &&
 			"kind" in parsed && parsed.kind === "NEGATIVE" && !("evidence" in parsed && validNonblank(parsed.evidence));
+		const invalidSupersession = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) &&
+			"superseded_by" in parsed && !validNonblank(parsed.superseded_by);
 		invalid_lines.push({ line: index + 1,
-			reason: negativeMissingEvidence ? "negative lesson has no evidence" : "schema validation failed",
-			code: negativeMissingEvidence ? "NEGATIVE_EVIDENCE_MISSING" : "LESSONS_LOG_SCHEMA_INVALID" });
+			reason: invalidSupersession ? "superseded_by must be a non-empty string" :
+				negativeMissingEvidence ? "negative lesson has no evidence" : "schema validation failed",
+			code: invalidSupersession ? "LESSON_SUPERSEDED_BY_INVALID" :
+				negativeMissingEvidence ? "NEGATIVE_EVIDENCE_MISSING" : "LESSONS_LOG_SCHEMA_INVALID" });
 	}
 	return { status: invalid_lines.length ? "INVALID" : "OK", path, entries, invalid_lines };
+}
+
+export interface LessonCurrencyRow {
+	id: string;
+	entry: LessonEntry;
+}
+
+export interface LessonCurrency {
+	active: (LessonCurrencyRow & { entry: LessonEntry & { applies_to: LessonAppliesTo } })[];
+	history: LessonCurrencyRow[];
+	unresolved: (LessonCurrencyRow & { reason: string })[];
+	anchor_notes: { target: string; verification: "FILE_EXISTS_ONLY"; note: string }[];
+}
+
+/** Record identity, not actor identity. Correction targets disambiguate audit rows; replacements and numeric telemetry do not. */
+export function lessonRecordId(entry: LessonEntry): string {
+	const fields = [
+		"omp-kit.lesson/v1", entry.ts, entry.repo, entry.agent, entry.pane, entry.model,
+		entry.kind, entry.class, entry.what, entry.evidence, entry.applies_to ?? null,
+		entry.proposed_fix, entry.bead,
+	];
+	if (entry.kind === "CORRECTION") fields.push(entry.corrects ?? null);
+	return "lesson_" + createHash("sha256").update(JSON.stringify(fields)).digest("hex");
+}
+
+function lessonDocumentPath(target: string): string | null {
+	const hash = target.lastIndexOf("#");
+	if (hash > 0 && target.slice(hash + 1).trim()) return target.slice(0, hash);
+	const colon = target.lastIndexOf(":");
+	if (colon <= 0) return null;
+	const line = target.slice(colon + 1);
+	if (!line || !Number.isSafeInteger(Number(line)) || Number(line) <= 0) return null;
+	for (let index = 0; index < line.length; index++) {
+		const code = line.charCodeAt(index);
+		if (code < 48 || code > 57) return null;
+	}
+	return target.slice(0, colon);
+}
+
+function insideRoot(root: string, path: string): boolean {
+	const local = relative(root, path);
+	return local !== ".." && !local.startsWith(".." + sep) && !isAbsolute(local);
+}
+
+/** Existence only: neither heading names nor line contents are certified by this filesystem read. */
+export function lessonDocumentAnchors(repoRoot: string, entries: readonly LessonEntry[]): ReadonlySet<string> {
+	const found = new Set<string>();
+	let root: string;
+	try { root = realpathSync(repoRoot); } catch { return found; }
+	for (const entry of entries) {
+		if (!entry.superseded_by) continue;
+		const target = entry.superseded_by.trim();
+		if (found.has(target)) continue;
+		const path = lessonDocumentPath(target);
+		if (path === null || isAbsolute(path)) continue;
+		const candidate = resolve(root, path);
+		if (!insideRoot(root, candidate)) continue;
+		try {
+			const actual = realpathSync(candidate);
+			if (insideRoot(root, actual) && lstatSync(actual).isFile()) found.add(target);
+		} catch { /* Missing or inaccessible documents remain unresolved. */ }
+	}
+	return found;
+}
+
+function applicableLesson(entry: LessonEntry): entry is LessonEntry & { applies_to: LessonAppliesTo } {
+	return entry.applies_to === "repo" || entry.applies_to === "fleet";
+}
+
+/** Pure, iterative functional-graph walk. Original rows remain intact; unresolved edges never become advice. */
+export function resolveLessonCurrency(entries: readonly LessonEntry[], documentAnchors?: ReadonlySet<string>): LessonCurrency {
+	type Resolution = { status: "active" | "history" } | { status: "unresolved"; reason: string };
+	type Node = { row: LessonCurrencyRow; index: number; target?: string; error?: string };
+	const result: LessonCurrency = { active: [], history: [], unresolved: [], anchor_notes: [] };
+	const rows: { row: LessonCurrencyRow; index: number }[] = [];
+	const nodes = new Map<string, Node>();
+	const resolutions = new Map<string, Resolution>();
+	const corrections = new Map<string, string>();
+	const notedAnchors = new Set<string>();
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index]!;
+		if (entry.kind === "CHECKIN") continue;
+		const row = { id: lessonRecordId(entry), entry };
+		rows.push({ row, index });
+		if (entry.kind !== "CORRECTION") nodes.set(row.id, { row, index, target: entry.superseded_by?.trim() });
+	}
+	for (const { row, index } of rows) {
+		if (row.entry.kind !== "CORRECTION") continue;
+		const target = row.entry.corrects ? nodes.get(row.entry.corrects.trim()) : undefined;
+		if (!target || target.index >= index) {
+			resolutions.set(row.id, { status: "unresolved", reason: "CORRECTION_TARGET_NOT_EARLIER" });
+			continue;
+		}
+		corrections.set(row.id, target.row.id);
+		if (!applicableLesson(row.entry)) {
+			resolutions.set(row.id, { status: "unresolved", reason: "LESSON_APPLICABILITY_MISSING" });
+			target.error = "CORRECTION_APPLICABILITY_MISSING";
+		} else if (!validNonblank(row.entry.superseded_by)) {
+			resolutions.set(row.id, { status: "unresolved", reason: "CORRECTION_REPLACEMENT_MISSING" });
+			target.error = "CORRECTION_REPLACEMENT_MISSING";
+		} else {
+			target.error = undefined;
+			target.target = row.entry.superseded_by.trim();
+		}
+	}
+	for (const start of nodes.keys()) {
+		if (resolutions.has(start)) continue;
+		const path: string[] = [];
+		const visiting = new Set<string>();
+		let current = start;
+		let terminal: Resolution;
+		for (;;) {
+			const known = resolutions.get(current);
+			if (known) { terminal = known; break; }
+			if (visiting.has(current)) { terminal = { status: "unresolved", reason: "SUPERSESSION_CYCLE" }; break; }
+			visiting.add(current);
+			path.push(current);
+			const node = nodes.get(current)!;
+			if (node.error) {
+				terminal = { status: "unresolved", reason: node.error };
+			} else if (!applicableLesson(node.row.entry)) {
+				terminal = { status: "unresolved", reason: "LESSON_APPLICABILITY_MISSING" };
+			} else if (!node.target) {
+				terminal = { status: "active" };
+			} else if (lessonDocumentPath(node.target) !== null) {
+				if (!documentAnchors?.has(node.target)) {
+					terminal = { status: "unresolved", reason: "SUPERSESSION_DOCUMENT_MISSING" };
+				} else {
+					terminal = { status: "history" };
+					if (!notedAnchors.has(node.target)) {
+						notedAnchors.add(node.target);
+						result.anchor_notes.push({ target: node.target, verification: "FILE_EXISTS_ONLY", note: "Line or anchor content is unverified." });
+					}
+				}
+			} else if (!nodes.has(node.target)) {
+				terminal = { status: "unresolved", reason: "SUPERSESSION_TARGET_MISSING" };
+			} else {
+				current = node.target;
+				continue;
+			}
+			resolutions.set(current, terminal);
+			break;
+		}
+		for (let index = path.length - 1; index >= 0; index--) {
+			const id = path[index]!;
+			const known = resolutions.get(id);
+			if (known) { terminal = known; continue; }
+			if (terminal.status !== "unresolved") terminal = { status: "history" };
+			resolutions.set(id, terminal);
+		}
+	}
+	for (const { row } of rows) {
+		const resolution = resolutions.get(row.id) ?? resolutions.get(corrections.get(row.id) ?? "");
+		if (!resolution || resolution.status === "unresolved") {
+			result.unresolved.push({ ...row, reason: resolution?.reason ?? "CORRECTION_TARGET_NOT_EARLIER" });
+		} else if (resolution.status === "history" || row.entry.kind === "CORRECTION") {
+			result.history.push(row);
+		} else if (applicableLesson(row.entry)) {
+			result.active.push({ id: row.id, entry: row.entry });
+		}
+	}
+	return result;
 }
 
 function lessonEntry(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions): LessonEntry {
@@ -260,16 +433,21 @@ function lessonEntry(repoRoot: string, input: AddLessonInput, options: LessonEnt
 	if (!validNonblank(input.evidence)) throw new Error("LESSON_EVIDENCE_REQUIRED");
 	if (input.applies_to !== undefined && input.applies_to !== "repo" && input.applies_to !== "fleet") throw new Error("LESSON_APPLIES_TO_INVALID");
 	if (input.cost_minutes !== undefined && input.cost_minutes !== null && !finiteNonnegative(input.cost_minutes)) throw new Error("LESSON_COST_INVALID");
+	if (input.superseded_by !== undefined && !validNonblank(input.superseded_by)) throw new Error("LESSON_SUPERSEDED_BY_INVALID");
+	if (input.kind === "CORRECTION" ? !validNonblank(input.corrects) || !validNonblank(input.superseded_by) : input.corrects !== undefined) throw new Error("LESSON_CORRECTION_INVALID");
 	const now = options.now ?? new Date();
 	if (!Number.isFinite(now.getTime())) throw new Error("LESSON_TIMESTAMP_INVALID");
 	const identity = options.identity ?? lessonIdentity(repoRoot);
 	if (!validNonblank(identity.repo)) throw new Error("LESSON_REPO_INVALID");
-	return {
+	const entry: LessonEntry = {
 		ts: now.toISOString(), repo: identity.repo, agent: identity.agent, pane: identity.pane, model: identity.model,
 		kind: input.kind, class: input.class, what: input.what.trim(), evidence: input.evidence.trim(),
 		cost_minutes: input.cost_minutes ?? null, applies_to: input.applies_to ?? "repo",
 		proposed_fix: optionalLessonField(input.proposed_fix, "PROPOSED_FIX"), bead: optionalLessonField(input.bead, "BEAD"),
 	};
+	if (input.superseded_by !== undefined) entry.superseded_by = input.superseded_by.trim();
+	if (input.corrects !== undefined) entry.corrects = input.corrects.trim();
+	return entry;
 }
 
 function appendLessonText(repoRoot: string, text: string): void {

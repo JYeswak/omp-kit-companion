@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { LessonEntry } from "../../src/lessons.ts";
+import { lessonRecordId, type LessonEntry } from "../../src/lessons.ts";
 import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, readLessonsConfig, runClefShadow, runFleetLessonsOnce, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -33,6 +33,25 @@ function report(existingExternalRefs: readonly string[] = [], shadow?: {
 		...(shadow ? { shadow } : {}),
 	});
 }
+
+test("currency report retains B as history while A and C still reach real cross-repo intake", () => {
+	const a = lesson("repo-one", "A: current replacement");
+	const b = { ...lesson("repo-one", "B: retired advice"), superseded_by: lessonRecordId(a) };
+	const c = lesson("repo-one", "C: unrelated useful advice");
+	const result = buildFleetLessonsReport({
+		generatedAt: new Date("2026-10-05T12:00:00.000Z"), previousReportAt: null,
+		repos: [
+			{ name: "repo-one", status: "OK", entries: [a, b, c] },
+			{ name: "repo-two", status: "OK", entries: [lesson("repo-two", a.what), lesson("repo-two", c.what)] },
+		], scoreChanges: [],
+	});
+	expect(result.rule_groups.map(group => group.what).sort()).toEqual([a.what, c.what]);
+	expect(result.intake_plan.map(item => item.what).sort()).toEqual([a.what, c.what]);
+	expect(result.history_count).toBe(1);
+	expect(result.entries_total).toBe(5);
+	expect(result.repos[0]?.history.map(row => row.entry)).toEqual([b]);
+	expect(result.unresolved).toEqual([]);
+});
 
 const configText = `[checkins]
 interval_minutes = 120

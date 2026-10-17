@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { existsSync, mkdirSync, lstatSync, renameSync, writeFileSync } from "node:fs";
-import { appendLesson, collectCheckinActivity, lessonIdentity, readLessonsLog } from "./lessons.ts";
+import { appendLesson, collectCheckinActivity, lessonDocumentAnchors, lessonIdentity, readLessonsLog, resolveLessonCurrency, type LessonCurrency } from "./lessons.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { LESSON_CLASS_DESCRIPTIONS, type LessonEntry } from "./lessons.ts";
 
@@ -34,6 +34,17 @@ export interface FleetRepoSnapshot {
 	name: string;
 	status: "OK" | "MISSING" | "INVALID" | "UNAVAILABLE";
 	entries: readonly LessonEntry[];
+	invalid_lines?: { line: number; reason: string; code?: string }[];
+	currency?: LessonCurrency;
+}
+
+export function readFleetRepoSnapshot(name: string, repoRoot: string): FleetRepoSnapshot & { currency: LessonCurrency } {
+	const log = readLessonsLog(repoRoot);
+	return {
+		invalid_lines: log.invalid_lines,
+		name, status: log.status, entries: log.entries,
+		currency: resolveLessonCurrency(log.entries, lessonDocumentAnchors(repoRoot, log.entries)),
+	};
 }
 
 export interface ClefShadowResult {
@@ -127,7 +138,10 @@ export interface FleetLessonsReport {
 	schema: "omp-kit.fleet-lessons/v1";
 	generated_at: string;
 	previous_report_at: string | null;
-	repos: { name: string; status: FleetRepoSnapshot["status"]; logged_since_last_report: LessonEntry[] }[];
+	entries_total: number;
+	history_count: number;
+	unresolved: { repo: string; id: string; reason: string }[];
+	repos: ({ name: string; status: FleetRepoSnapshot["status"]; entries_total: number; invalid_lines: NonNullable<FleetRepoSnapshot["invalid_lines"]>; logged_since_last_report: LessonEntry[] } & LessonCurrency)[];
 	rule_groups: FleetRuleGroup[];
 	intake_plan: FleetIntakeItem[];
 	score_changes: unknown[];
@@ -351,13 +365,23 @@ export function buildFleetLessonsReport(input: FleetLessonsReportInput): FleetLe
 	if (!Number.isFinite(input.generatedAt.getTime())) throw new Error("FLEET_REPORT_TIMESTAMP_INVALID");
 	const previousTime = input.previousReportAt === null ? Number.NEGATIVE_INFINITY : Date.parse(input.previousReportAt);
 	if (!Number.isFinite(previousTime) && previousTime !== Number.NEGATIVE_INFINITY) throw new Error("FLEET_REPORT_PREVIOUS_TIMESTAMP_INVALID");
-	const repos = input.repos.map(repo => ({
-		name: repo.name,
-		status: repo.status,
-		logged_since_last_report: repo.entries.filter(entry => Date.parse(entry.ts) > previousTime),
-	}));
+	let entriesTotal = 0;
+	let historyCount = 0;
+	const unresolved: FleetLessonsReport["unresolved"] = [];
+	const repos = input.repos.map(repo => {
+		const currency = repo.currency ?? resolveLessonCurrency(repo.entries);
+		entriesTotal += repo.entries.length;
+		historyCount += currency.history.length;
+		for (const row of currency.unresolved) unresolved.push({ repo: repo.name, id: row.id, reason: row.reason });
+		return {
+			name: repo.name, status: repo.status, entries_total: repo.entries.length,
+			invalid_lines: repo.invalid_lines ?? [],
+			logged_since_last_report: repo.entries.filter(entry => Date.parse(entry.ts) > previousTime),
+			...currency,
+		};
+	});
 	const grouped = new Map<string, FleetRuleGroup>();
-	for (const repo of input.repos) for (const entry of repo.entries) {
+	for (const repo of repos) for (const { entry } of repo.active) {
 		if (entry.kind === "CHECKIN" || entry.class === null) continue;
 		const normalized = normalizeLessonWhat(entry.what);
 		const normalizedHash = lessonDigest(normalized);
@@ -398,6 +422,9 @@ const annotatedRuleGroups = ruleGroups.map(group => {
 		schema: "omp-kit.fleet-lessons/v1",
 		generated_at: input.generatedAt.toISOString(),
 		previous_report_at: input.previousReportAt,
+		entries_total: entriesTotal,
+		history_count: historyCount,
+		unresolved,
 		repos,
 		rule_groups: annotatedRuleGroups,
 		intake_plan: intakePlan,
@@ -589,16 +616,13 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 	}
 	const previousAt = typeof previousReport.generated_at === "string" && Number.isFinite(Date.parse(previousReport.generated_at)) ? previousReport.generated_at : null;
 	const previousScores = Array.isArray(previousReport.score_snapshot) ? previousReport.score_snapshot : [];
-	const repos: FleetRepoSnapshot[] = config.repos.map(repo => {
-		const log = readLessonsLog(repo.path);
-		return { name: repo.name, status: log.status === "MISSING" ? "MISSING" : log.status === "INVALID" ? "INVALID" : "OK", entries: log.entries };
-	});
+	const repos = config.repos.map(repo => readFleetRepoSnapshot(repo.name, repo.path));
 	const scoreResult = (dependencies.planningScore ?? runPlanningScore)({ kitRoot: options.kitRoot, home: options.home, fleet: true });
 	const scoreRows = Array.isArray(scoreResult.jsonl) ? scoreResult.jsonl : [];
 	const currentScoreChanges = scoreChanges(previousScores, scoreRows);
 	const surveyTargets = targetStageSurvey(scoreRows);
 	const classGroups = new Map<string, { count: number; repos: Set<string>; beads: Set<string>; fixes: Set<string> }>();
-	for (const repo of repos) for (const entry of repo.entries) {
+	for (const repo of repos) for (const { entry } of repo.currency.active) {
 		if (entry.kind === "CHECKIN" || entry.class === null) continue;
 		let group = classGroups.get(entry.class);
 		if (!group) { group = { count: 0, repos: new Set<string>(), beads: new Set<string>(), fixes: new Set<string>() }; classGroups.set(entry.class, group); }

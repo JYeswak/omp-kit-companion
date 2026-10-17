@@ -1,0 +1,3 @@
+- Add stable lesson record references and append-only `CORRECTION` records. Preserve superseded advice as history; dangling targets, missing applicability and cycles remain unresolved.
+- Connect currency to the managed lesson report, remediation survey and read-only `fleet-lessons` CLI. Keep parsed-row/history counts, full history and invalid-line diagnostics visible; document anchors prove file existence only.
+- Retire the obsolete acceptance-in-the-body lesson through the public append path without rewriting earlier log bytes. Source-path verification is not installed-release qualification; compiled mutation and normal full-gate acceptance remain pending disk admission.
