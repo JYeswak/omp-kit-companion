@@ -1,42 +1,11 @@
 name: Release train
+run-name: ${{ inputs.candidate_run_id != '' && format('Promote run {0}', inputs.candidate_run_id) || (github.event.workflow_run.display_title && format('Publish {0}', github.event.workflow_run.display_title)) || format('Train {0}', github.run_id) }}
 
-# RELTRAIN1 (ompkit-v66l): every green main commit that has release notes
-# becomes the next patch release, newest green wins, with no human cut. The
-# manual cut in docs/release-procedure.md remains the documented fallback.
-#
-# How it works:
-# - A CI push run completing on main -> train job decides
-#   (scripts/release-train.sh): red CI is never tagged, and a SHA that is no
-#   longer main's head is left to the newer train. One train at a time
-#   (concurrency group, cancel-in-progress false); each train waits for the
-#   release lane to go idle and re-decides after the wait, so three greens
-#   during one release produce exactly one queued train: the newest.
-# - The winning SHA gets the upstream oh-my-pi release commit
-#   (scripts/release.ts): `release-train.sh bump` folds changelog.d/ into
-#   CHANGELOG.md [Unreleased], promotes it to `## [X.Y.Z] - DATE`, sets both
-#   package.json versions, and commits `chore: bump version to X.Y.Z` on the
-#   SHA. Nothing to release (no entries, no fragments) skips: no tag, never an
-#   empty release.
-# - No circularity (ompkit-fp72.49, fp72.65): the train pushes the bump commit
-#   to main UNTAGGED. GITHUB_TOKEN pushes start no push workflow, so the bump
-#   is certified by calling CI on it inside this run (full native set), and a
-#   tag job verifies every native receipt records the bump SHA before creating
-#   the tag ON that exact SHA and dispatching the candidate, which recertifies
-#   the final release-version artifacts.
-# - release.yml is dispatched from main head with the bump SHA (a tag-head run
-#   completion would never fire the publish job); it reuses the green CI of the
-#   parent (`release-train.sh evidence-sha`) and refuses a tag whose
-#   package.json or CHANGELOG section does not match.
-# - The candidate release completing green -> publish job reads the version
-#   and SHA back out of the verified candidate proof (never out of branch
-#   names), verifies the unpublished candidate index for exactly that version
-#   and SHA, and creates the GitHub release with the tag's CHANGELOG section
-#   as its body (upstream ci-release-notes.ts). Rehearsal runs publish nothing.
-#   A train finishing late publishes without taking Latest from a newer
-#   release.
-# - Red main never releases: decide refuses anything but a green head, and
-#   scheduled (non-push) CI runs never enter the train.
-
+# One active release, newest qualified pending. The job lock includes the
+# publication outcome; running/red descendants never invalidate its pinned Q,V.
+# Qualification builds final-version archives before any tag exists. Only the
+# separately running publisher may tag, request tag-ref signing of those SAME
+# archives, and publish after the signing workflow succeeds.
 on:
   workflow_run:
     workflows: ["CI", "Unpublished release candidate"]
@@ -44,308 +13,233 @@ on:
   workflow_dispatch:
     inputs:
       sha:
-        description: Green main SHA to release (must still be main head)
-        required: true
+        description: Optional qualified main source (must be the newest qualified unreleased source)
+        required: false
         type: string
       version:
-        description: Patch version override (default next after max tag)
+        description: Optional version at or above the next tag/changelog floor
         required: false
         type: string
       rehearsal:
-        description: Rehearse the release without tagging or publishing
-        required: false
+        description: Certify without tagging, signing or publishing
         default: false
         type: boolean
-
+      candidate_run_id:
+        description: Recover promotion from an existing successful qualification; never rebuild it
+        required: false
+        type: string
 permissions:
   contents: read
-
+  actions: read
 
 jobs:
   train:
     if: >-
       github.event.repository.private == false &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.name == 'CI' &&
-        github.event.workflow_run.event == 'push'))
+      ((github.event_name == 'workflow_dispatch' && inputs.candidate_run_id == '') ||
+       (github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'))
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    concurrency:
+      group: release-train-active
+      cancel-in-progress: false
     permissions:
-      contents: write
+      contents: read
       actions: write
-    outputs:
-      go: ${{ steps.redecide.outputs.go }}
-      version: ${{ steps.version.outputs.version }}
-      bump_sha: ${{ steps.bump.outputs.bump_sha }}
-      release: ${{ steps.bump.outputs.release }}
     steps:
-      - name: Resolve the candidate SHA and its CI verdict
-        id: event
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          {
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            sha="${{ inputs.sha }}"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a 40-hex commit" >&2; exit 2; }
-            echo "sha=$sha"
-            echo "conclusion=success"
-            echo "status=completed"
-          else
-            echo "sha=${{ github.event.workflow_run.head_sha }}"
-            echo "conclusion=${{ github.event.workflow_run.conclusion }}"
-            # A completed workflow_run event carries only finished runs.
-            echo "status=completed"
-          fi
-          echo "head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)"
-          } >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ steps.event.outputs.sha }}
-          # promote reads changelog.d/ and CHANGELOG.md; the bump commit needs the SHA's parentage.
-          fetch-depth: 0
-      # The train's scripts come from the same commit as this workflow file, not from the candidate:
-      # a candidate older than the workflow (the first train after a train change) would otherwise
-      # run a release-train.sh that lacks the subcommands this file calls.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          path: .train-tools
-          persist-credentials: false
-      - name: Decide whether this SHA may tag
-        id: decide
-        run: |
-          set -euo pipefail
-          set +e
-          sh .train-tools/scripts/release-train.sh decide \
-            --conclusion "${{ steps.event.outputs.conclusion }}" \
-            --run-status "${{ steps.event.outputs.status }}" \
-            --sha "${{ steps.event.outputs.sha }}" \
-            --head "${{ steps.event.outputs.head }}" | tee decide.out
-          rc=${PIPESTATUS[0]}
-          set -e
-          # A step's `exit 0` does not stop the job: later steps gate on this output.
-          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat decide.out)"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          [[ "$rc" -eq 0 ]] || exit "$rc"
-          grep -q '^DECIDE=tag' decide.out
-          echo "go=true" >> "$GITHUB_OUTPUT"
-      - name: Wait for the release lane to go idle
-        if: steps.decide.outputs.go == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          sh .train-tools/scripts/release-train.sh wait-release-idle \
-            --repo "${{ github.repository }}" --timeout 7200 --poll 60
-      - name: Re-decide after the wait (latest green still wins)
-        id: redecide
-        if: steps.decide.outputs.go == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          head="$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)"
-          set +e
-          sh .train-tools/scripts/release-train.sh decide \
-            --conclusion "${{ steps.event.outputs.conclusion }}" \
-            --run-status "${{ steps.event.outputs.status }}" \
-            --sha "${{ steps.event.outputs.sha }}" \
-            --head "$head" | tee redecide.out
-          rc=${PIPESTATUS[0]}
-          set -e
-          if [[ "$rc" -eq 4 ]]; then echo "train skips this SHA: $(cat redecide.out)"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          [[ "$rc" -eq 0 ]] || exit "$rc"
-          grep -q '^DECIDE=tag' redecide.out
-          echo "go=true" >> "$GITHUB_OUTPUT"
-      - name: Select the next patch version
-        id: version
-        if: steps.redecide.outputs.go == 'true'
-        env:
-          VERSION_OVERRIDE: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$VERSION_OVERRIDE" ]]; then
-            [[ "$VERSION_OVERRIDE" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "version override must be X.Y.Z" >&2; exit 2; }
-            git ls-remote --tags origin | grep -q "refs/tags/v$VERSION_OVERRIDE$" && { echo "v$VERSION_OVERRIDE is already tagged" >&2; exit 4; }
-            version="$VERSION_OVERRIDE"
-          else
-            version="$(git ls-remote --tags origin | sh .train-tools/scripts/release-train.sh next-version)"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "selected $version"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        if: steps.redecide.outputs.go == 'true'
-      - name: Fold the changelog and commit the release bump (upstream oh-my-pi scripts/release.ts shape)
-        id: bump
-        if: steps.redecide.outputs.go == 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          set +e
-          sh .train-tools/scripts/release-train.sh bump --version "$VERSION" --date "$(date -u +%F)" | tee bump.out
-          rc=${PIPESTATUS[0]}
-          set -e
-          if [[ "$rc" -eq 4 ]]; then
-            # No CHANGELOG entries and no fragments: never tag a release with an empty body.
-            echo "train skips this SHA: $(grep '^BUMP=' bump.out)"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          [[ "$rc" -eq 0 ]] || exit "$rc"
-          sh .train-tools/scripts/release-notes.sh notes --version "$VERSION" --output "$RUNNER_TEMP/release-notes.md"
-          cat "$RUNNER_TEMP/release-notes.md"
-          echo "release=true" >> "$GITHUB_OUTPUT"
-          echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Push the bump commit untagged (certified inline below)
-        if: steps.bump.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.event.outputs.sha }}
-          BUMP_SHA: ${{ steps.bump.outputs.bump_sha }}
-          VERSION: ${{ steps.version.outputs.version }}
-          REHEARSAL: ${{ inputs.rehearsal }}
-        run: |
-          set -euo pipefail
-          if [[ "$REHEARSAL" == "true" ]]; then
-            # Tagless rehearsal from main: the bump above stays local; the version must still be unspent.
-            git ls-remote --tags origin | grep -q "refs/tags/v$VERSION$" && { echo "v$VERSION is already tagged; a rehearsal needs an unspent version" >&2; exit 4; }
-            gh workflow run release.yml --ref main -f version="$VERSION" -f rehearsal=true
-            exit 0
-          fi
-          remote_main="$(git ls-remote origin refs/heads/main | cut -f1)"
-          if [[ "$remote_main" != "$SHA" ]]; then echo "train skips this SHA: main moved to $remote_main; the newer train releases it"; exit 0; fi
-          # The bump lands on main WITHOUT a tag (fp72.65: a token push starts
-          # no push workflow). The certify-bump job below calls CI on this exact
-          # SHA; the tag job tags it only on green receipts, then dispatches.
-          git push origin "$BUMP_SHA:refs/heads/main"
-
-  certify-bump:
-    # fp72.65: GITHUB_TOKEN pushes start no push workflow, so the bump is
-    # certified by calling CI on it inside this run (full native set; a fresh
-    # bump sha has nothing reusable, so reuse_fast_ci is false). Cost per
-    # bump is one candidate-class run (~16 min macOS critical path).
-    needs: [train]
-    if: ${{ github.event.repository.private == false && inputs.rehearsal != 'true' && needs.train.outputs.release == 'true' }}
-    uses: ./.github/workflows/ci.yml
-    with:
-      version: ${{ needs.train.outputs.version }}
-      source_sha: ${{ needs.train.outputs.bump_sha }}
-      reuse_fast_ci: false
-    permissions:
-      contents: read
-
-  tag-certified-bump:
-    needs: [train, certify-bump]
-    if: ${{ github.event.repository.private == false && inputs.rehearsal != 'true' && needs.train.outputs.release == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      actions: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
           fetch-depth: 0
-      - name: Download the native receipts this run recorded
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: native-receipt-*
-          path: receipts/
-          merge-multiple: true
-          run-id: ${{ github.run_id }}
-          github-token: ${{ github.token }}
-      - name: Prove the receipts certify this bump, then tag it and dispatch
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Wait for the candidate lane, then reconcile the qualified frontier
+        id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.train.outputs.version }}
-          BUMP_SHA: ${{ needs.train.outputs.bump_sha }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+          REHEARSAL: ${{ inputs.rehearsal || 'false' }}
         run: |
           set -euo pipefail
-          sh scripts/verify-bump-cert.sh --version "$VERSION" --sha "$BUMP_SHA" --receipts receipts/
-          # Tag the exact certified SHA and retire its pending ref together or not at all.
-          git push --atomic origin "$BUMP_SHA:refs/tags/v$VERSION" ":refs/train/pending-v$VERSION"
-          # Dispatch from main head (ompkit-dj7d): a tag-head run completion is never delivered,
-          # so the publish job would never fire. The sha input pins the exact bump commit; the
-          # candidate identity refuses unless the tag names it and the run started on it.
-          gh workflow run release.yml --ref main -f version="$VERSION" -f sha="$BUMP_SHA"
+          sh scripts/release-train.sh wait-release-idle --repo "$GITHUB_REPOSITORY" --timeout 1200 --poll 15
+          # Keep this job's lock through certification AND the independent
+          # publisher's terminal outcome. No next train may reuse an in-flight V.
+          git fetch origin main --tags
+          python3 scripts/release_reuse.py drive --stage prepare --repository "$GITHUB_REPOSITORY" \
+            --train-id "$GITHUB_RUN_ID" --train-attempt "$GITHUB_RUN_ATTEMPT" --requested "$REQUESTED_SHA" \
+            --version "$VERSION_OVERRIDE" --rehearsal "$REHEARSAL" --plan "$RUNNER_TEMP/rolling-release-plan.json"
+      - name: Persist immutable owner allocation before dispatch
+        id: allocation
+        if: steps.prepare.outputs.allocate == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-allocation-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-allocation/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Dispatch exactly the owner allocation and retain the native run ID
+        if: steps.prepare.outputs.allocate == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALLOCATION_ID: ${{ steps.allocation.outputs.artifact-id }}
+        run: |
+          python3 scripts/release_reuse.py drive --stage dispatch --repository "$GITHUB_REPOSITORY" \
+            --train-id "$GITHUB_RUN_ID" --train-attempt "$GITHUB_RUN_ATTEMPT" \
+            --allocation-artifact-id "$ALLOCATION_ID" --plan "$RUNNER_TEMP/rolling-release-plan.json"
+      - name: Bind the canonical qualification in immutable owner authority
+        if: ${{ always() && steps.prepare.outputs.allocate == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-qualification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-qualification/qualification.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain allocation custody until the independently verified publication outcome
+        if: steps.prepare.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_reuse.py drive --stage watch --repository "$GITHUB_REPOSITORY" \
+            --train-id "$GITHUB_RUN_ID" --train-attempt "$GITHUB_RUN_ATTEMPT" \
+            --plan "$RUNNER_TEMP/rolling-release-plan.json" --timeout 7200
 
   publish:
+    # ABRPRIVATE1 authorizes certified companion publication, not a global
+    # private-repository billing exception. Artifact authority is checked below.
     if: >-
-      github.event.repository.private == false &&
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.name == 'Unpublished release candidate' &&
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.repository.private == false ||
+       github.repository == 'JYeswak/omp-kit-companion') &&
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.name == 'Unpublished release candidate' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        startsWith(github.event.workflow_run.display_title, 'qualify ')) ||
+       (github.event_name == 'workflow_dispatch' && inputs.candidate_run_id != ''))
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
     concurrency:
       group: release-train-publish
       cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+      attestations: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Fetch the candidate proof and read back its version and SHA
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Verify the producer and exact final candidate before promotion
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
         run: |
           set -euo pipefail
-          mkdir -p candidate-index archives
-          gh run download "$RUN_ID" --repo "${{ github.repository }}" \
-            -n unpublished-candidate-index -D candidate-index/
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > producer-run.json
+          # Rehearsals are intentionally tagless and carry no production selection.
+          if [[ "$(jq -r '.display_title | (startswith("qualify ") or startswith("sign "))' producer-run.json)" != true ]]; then
+            echo 'not an authorized rolling production candidate; refusing promotion' >&2
+            exit 4
+          fi
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            | jq '{artifacts: [.[].artifacts[]]}' > producer-artifacts.json
+          mkdir -p candidate-index selection archives sboms
+          attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' producer-run.json)"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "unpublished-candidate-index-attempt-$attempt" -D candidate-index/
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "release-selection-attempt-$attempt" -D selection/
           version="$(jq -er .version candidate-index/candidate-proof.json)"
           sha="$(jq -er .source_sha candidate-index/candidate-proof.json)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          if [[ "$version" == *-rehearsal.* ]]; then echo "rehearsal=true" >> "$GITHUB_OUTPUT"; else echo "rehearsal=false" >> "$GITHUB_OUTPUT"; fi
-          for platform in $(jq -r '.certified_platforms[]' candidate-index/candidate-proof.json); do
-            gh run download "$RUN_ID" --repo "${{ github.repository }}" \
-              -n "candidate-$platform" -D "archives/$platform/"
+          train_id="$(jq -er .train_run_id selection/selection.json)"
+          train_attempt="$(jq -er .train_attempt selection/selection.json)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$train_id" =~ ^[0-9]+$ && "$train_attempt" =~ ^[0-9]+$ ]]
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          phase="$(jq -er '.display_title | split(" ")[0]' producer-run.json)"
+          git show "$sha:scripts/omp-compat.json" > omp-config.json
+          git merge-base --is-ancestor "$sha" origin/main
+          if [[ "$phase" == qualify ]]; then
+            git merge-base --is-ancestor "$sha" "$(jq -er .head_sha producer-run.json)"
+          fi
+          python3 scripts/release_reuse.py verify-final --proof candidate-index/candidate-proof.json \
+            --index candidate-index/release-index.json --omp-config omp-config.json \
+            --source-sha "$sha" --version "$version" --run producer-run.json --artifacts producer-artifacts.json \
+            --binding selection/selection.json --notes selection/release-notes.md --repository "$GITHUB_REPOSITORY" \
+            --train-id "$train_id" --run-id "$RUN_ID" --phase "$phase"
+          base_tag="$(jq -er .base_tag selection/selection.json)"
+          sh scripts/release-notes.sh source --base-tag "$base_tag" --head "$sha" --version "$version" --output expected-notes.md
+          cmp selection/release-notes.md expected-notes.md
+          for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
+            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "candidate-$platform-attempt-$attempt" -D "archives/$platform/"
+            python3 scripts/release_reuse.py verify-archive --index candidate-index/release-index.json \
+              --platform "$platform" --archive-dir "archives/$platform/"
+            if [[ "$phase" == sign ]]; then
+              gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "sbom-$platform-attempt-$attempt" -D "sboms/$platform/"
+            fi
           done
-      - name: Publish nothing for a rehearsal run
-        if: steps.candidate.outputs.rehearsal == 'true'
+          printf 'promote=true\nversion=%s\nsha=%s\nphase=%s\ntrain_id=%s\ntrain_attempt=%s\nbase_tag=%s\n' \
+            "$version" "$sha" "$phase" "$train_id" "$train_attempt" "$base_tag" >> "$GITHUB_OUTPUT"
+      - name: Tag only the fully qualified source, then sign the same bytes at the tag ref
+        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+          TRAIN_ID: ${{ steps.candidate.outputs.train_id }}
+          TRAIN_ATTEMPT: ${{ steps.candidate.outputs.train_attempt }}
+          BASE_TAG: ${{ steps.candidate.outputs.base_tag }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
         run: |
-          echo "rehearsal ${{ steps.candidate.outputs.version }} verified and skipped: nothing published"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        if: steps.candidate.outputs.rehearsal != 'true'
-      - name: Verify the candidate, then create the GitHub release
-        if: steps.candidate.outputs.rehearsal != 'true'
+          set -euo pipefail
+          git fetch origin main --tags
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=100" \
+            | jq '{workflow_runs: [.[].workflow_runs[]]}' > source-ci.json
+          python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
+          python3 scripts/release_reuse.py promotion --source-sha "$SHA" --version "$VERSION"
+          python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
+          if git rev-parse -q --verify "refs/tags/v$VERSION"; then
+            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+          else
+            git tag "v$VERSION" "$SHA"
+            git push origin "refs/tags/v$VERSION"
+          fi
+          # The unchanged installer/updater policy binds source-digest to Q.
+          # Only tag-ref release.yml has that execution identity. It downloads
+          # certified archives by run ID and cannot enter a build job.
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
+            -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"
+      - name: Publish the same signed and certified artifacts, without regressive Latest
+        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'sign'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.candidate.outputs.version }}
           SHA: ${{ steps.candidate.outputs.sha }}
         run: |
           set -euo pipefail
-          # The tag the train created must name exactly this SHA, or nothing publishes.
-          [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]] || { echo "v$VERSION does not name $SHA" >&2; exit 4; }
-          sh scripts/release-train.sh verify-candidate \
-            --proof candidate-index/candidate-proof.json \
-            --index candidate-index/release-index.json \
-            --version "$VERSION" --sha "$SHA"
-          max="$(git ls-remote --tags origin | grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's#refs/tags/v##' | sort -V | tail -1)"
-          latest_flag="$(sh scripts/release-train.sh latest-flag --version "$VERSION" --max-version "$max")"
-          # Release body = the tag's CHANGELOG section(s), as upstream ci-release-notes.ts does:
-          # (newest published release below VERSION, VERSION], so a tag that never got a GitHub
-          # release is not stranded. An absent or empty section refuses (exit 4): nothing publishes.
-          floor="$(gh release list --repo "${{ github.repository }}" --limit 200 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' \
-            | sed -n 's/^v\([0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' | { cat; printf '%s\n' "$VERSION"; } | sort -uV \
-            | awk -v v="$VERSION" '$0 == v { print prev; exit } { prev = $0 }')"
-          floor_args=()
-          if [[ -n "$floor" ]]; then floor_args=(--floor "$floor"); fi
-          sh scripts/release-notes.sh notes --version "$VERSION" --ref "v$VERSION" "${floor_args[@]}" --output release-notes.md
-          if [[ -n "$floor" ]]; then
-            printf '\n**Full Changelog**: https://github.com/%s/compare/v%s...v%s\n' "${{ github.repository }}" "$floor" "$VERSION" >> release-notes.md
-          fi
+          git fetch origin main --tags
+          [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+          max="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          latest_flag="$(sh scripts/release-train.sh latest-flag --version "$VERSION" --max-version "${max#v}")"
           files=(candidate-index/release-index.json)
-          for tar in archives/*/*.tar; do files+=("$tar"); done
+          for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
+            archive="archives/$platform/$(jq -er --arg p "$platform" '.assets[$p].filename' candidate-index/release-index.json)"
+            files+=("$archive")
+            sbom="sboms/$platform/sbom-$platform.spdx.json"
+            test -s "$sbom"
+            files+=("$sbom")
+          done
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          if ! jq -e --arg tag "v$VERSION" 'any(.[][]; .tag_name == $tag)' releases.json; then
+            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$SHA" --draft \
+              --title "v$VERSION" --notes-file selection/release-notes.md "${files[@]}"
+          fi
+          # Native authority and ALL remote archive/SBOM/index bytes verify
+          # before idempotent success. Missing exact assets can be uploaded;
+          # mismatches are never clobbered or hidden by a matching index.
+          python3 scripts/release_reuse.py repair-release --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" --source-sha "$SHA" --index candidate-index/release-index.json \
+            --archives archives --sboms sboms --notes selection/release-notes.md \
+            --producer-run producer-run.json --binding selection/selection.json
           # shellcheck disable=SC2086
-          gh release create "v$VERSION" --repo "${{ github.repository }}" \
-            --target "$SHA" --title "v$VERSION" --notes-file release-notes.md $latest_flag \
-            "${files[@]}"
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false $latest_flag

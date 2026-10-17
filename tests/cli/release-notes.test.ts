@@ -467,3 +467,45 @@ function release(...args: string[]): { exitCode: number | null; output: string }
 	});
 	return { exitCode: child.exitCode, output: `${child.stdout.toString()}${child.stderr.toString()}` };
 }
+
+test("rolling source notes release a green ancestor without consuming newer main notes", () => {
+	const dir = changelogFixture("rolling-source", releasedChangelog, { "old.md": "- Already present at the release floor.\n" });
+	const localGit = (...args: string[]) => {
+		const child = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
+		expect(child.exitCode, child.stderr.toString()).toBe(0);
+		return child.stdout.toString().trim();
+	};
+	localGit("config", "user.name", "Rolling Notes Fixture");
+	localGit("config", "user.email", "rolling@example.invalid");
+	localGit("config", "commit.gpgsign", "false");
+	localGit("config", "core.hooksPath", "/dev/null");
+	localGit("add", ".");
+	localGit("commit", "-qm", "published baseline [test]");
+	localGit("tag", "v0.2.2");
+	writeFileSync(join(dir, "changelog.d", "green.md"), "### Fixed\n- Qualified source fix.\n");
+	localGit("add", ".");
+	localGit("commit", "-qm", "qualified green [test]");
+	const green = localGit("rev-parse", "HEAD");
+	localGit("tag", "v0.2.3", green);
+	writeFileSync(join(dir, "changelog.d", "running.md"), "### Added\n- Newer main is still running.\n");
+	localGit("add", ".");
+	localGit("commit", "-qm", "newer running source [test]");
+	const output = join(workspace, "green-notes.md");
+	const before = localGit("rev-parse", "HEAD");
+	const rendered = releaseIn(dir, "source", "--base-tag", "v0.2.2", "--head", green, "--version", "0.2.3", "--output", output);
+	expect(rendered.exitCode, rendered.output).toBe(0);
+	expect(readFileSync(output, "utf8")).toBe("### Fixed\n\n- Qualified source fix.\n");
+	expect(localGit("rev-parse", "HEAD")).toBe(before);
+	expect(localGit("status", "--porcelain")).toBe("");
+	expect(existsSync(join(dir, "changelog.d", "green.md"))).toBe(true);
+	expect(existsSync(join(dir, "changelog.d", "running.md"))).toBe(true);
+	// The next source release includes only the delta, even though the prior
+	// source tag contains unpromoted fragments and package.json stayed unchanged.
+	const next = releaseIn(dir, "source", "--base-tag", "v0.2.3", "--head", before, "--version", "0.2.4", "--output", output);
+	expect(next.exitCode, next.output).toBe(0);
+	expect(readFileSync(output, "utf8")).toBe("### Added\n\n- Newer main is still running.\n");
+	expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version).toBe("0.2.2");
+	const empty = releaseIn(dir, "source", "--base-tag", "v0.2.3", "--head", green, "--version", "0.2.4", "--output", output);
+	expect(empty.exitCode).toBe(4);
+	expect(empty.output).toContain("nothing to release");
+});

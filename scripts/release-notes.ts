@@ -11,6 +11,7 @@ type Options =
 	| { mode: "check"; baseTag: string; head: string }
 	| { mode: "fold"; write: boolean }
 	| { mode: "promote"; version: string; date: string; write: boolean }
+	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
 	| { mode: "notes"; version: string; floor?: string; ref?: string; output?: string };
 type Fragment = { path: string; content: string; pr?: string };
 type UnreleasedLine = { lineNumber: number; text: string; pr?: string };
@@ -78,6 +79,7 @@ function run(): void {
 	if (options.mode === "fold") return runFold(root, options.write);
 	if (options.mode === "promote") return runPromote(root, options);
 	if (options.mode === "notes") return runNotes(root, options, gitRaw);
+	if (options.mode === "source") return runSourceNotes(root, options, git, gitRaw, gitOk);
 
 	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseTag}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
@@ -105,7 +107,7 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check --base-tag vX.Y.Z --head REF | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH]";
+	const usage = "Usage: release-notes.sh check --base-tag vX.Y.Z --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH]";
 	const mode = args[0];
 	if (mode === "check") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value" }, usage);
@@ -113,6 +115,16 @@ function parseArguments(args: string[]): Options {
 		const head = requiredValue(values, "--head", usage);
 		validateBaseTag(baseTag, usage);
 		return { mode, baseTag, head };
+	}
+	if (mode === "source") {
+		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value", "--version": "value", "--output": "value" }, usage);
+		const baseTag = requiredValue(values, "--base-tag", usage);
+		const head = requiredValue(values, "--head", usage);
+		const version = requiredValue(values, "--version", usage);
+		const output = requiredValue(values, "--output", usage);
+		validateBaseTag(baseTag, usage);
+		if (!isStableVersion(version)) fail(usage);
+		return { mode, baseTag, head, version, output };
 	}
 	if (mode === "fold") {
 		const values = parseFlags(args.slice(1), { "--write": "boolean" }, usage);
@@ -223,12 +235,15 @@ function collectHistory(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolea
 	}
 
 	const unreleased = readUnreleasedSection(gitRaw(["show", `${head}:CHANGELOG.md`]));
+	const baseReleaseSection = readUnreleasedSection(gitRaw(["show", `${base}:CHANGELOG.md`]));
+	const priorUnreleased = new Set(baseReleaseSection.entries.map(line => line.text));
 	const unreleasedByPr = new Map<string, UnreleasedLine>();
 	for (const line of unreleased.entries) {
 		const references = [...line.text.matchAll(/\(PR #(\d+)\)/g)].map(match => match[1]!);
 		if (references.length > 1) fail(`CHANGELOG.md:${line.lineNumber} names multiple PRs`);
 		const pr = references[0];
 		if (!pr) continue;
+		if (!seenPrs.has(pr) && priorUnreleased.has(line.text)) continue;
 		if (unreleasedByPr.has(pr)) fail(`CHANGELOG.md ## [Unreleased] has multiple lines naming PR #${pr}`);
 		if (!seenPrs.has(pr)) fail(`CHANGELOG.md:${line.lineNumber} references PR #${pr}, absent from ${baseTag}..${headRef}`);
 		unreleasedByPr.set(pr, { ...line, pr });
@@ -251,9 +266,8 @@ function collectHistory(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolea
 			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## [Unreleased]`);
 	}
 	// Allow cleanup of fragments whose PRs are recorded in the base tag; unknown references still fail.
-	const baseReleaseSection = readUnreleasedSection(gitRaw(["show", `${base}:CHANGELOG.md`]));
 	const baseReleasedPrs = new Set<string>();
-	for (const line of baseReleaseSection.lines.slice(baseReleaseSection.nextHeadingIndex + 1)) {
+	for (const line of baseReleaseSection.lines.slice(baseReleaseSection.unreleasedIndex + 1)) {
 		for (const match of line.matchAll(/\(PR #(\d+)\)/g)) baseReleasedPrs.add(match[1]!);
 	}
 
@@ -621,4 +635,54 @@ function runNotes(root: string, options: Extract<Options, { mode: "notes" }>, gi
 		return;
 	}
 	process.stdout.write(notes);
+}
+
+/** Render an immutable source range without promoting or rewriting the source tree. */
+function runSourceNotes(root: string, options: Extract<Options, { mode: "source" }>, git: Git, gitRaw: Git, gitOk: (args: string[]) => boolean): void {
+	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseTag}^{commit}`]);
+	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
+	if (git(["merge-base", base, head]) !== base) fail("release source must descend from the published notes floor");
+	collectHistory(git, gitRaw, gitOk, base, head, options.baseTag, options.head);
+	const bodies = (ref: string): SectionBody[] => {
+		const text = gitRaw(["show", `${ref}:CHANGELOG.md`]);
+		const section = locateUnreleased(text);
+		const result = [parseBody(section.lines.slice(section.unreleasedStart + 1, section.unreleasedEnd), `${ref}:Unreleased`)];
+		for (const path of git(["ls-tree", "-r", "--name-only", ref, "--", "changelog.d"]).split("\n").filter(Boolean)) {
+			if (!FRAGMENT_PATH.test(path)) fail(`invalid release fragment: ${path}`);
+			const fragment = parseFragment(path, gitRaw(["show", `${ref}:${path}`]));
+			result.push({ comments: [], leading: [], categories: new Map([[fragment.category, fragment.entries]]) });
+		}
+		// Manual release bumps may have promoted notes in this range. Include new
+		// sections too; pre-existing section entries remain in the baseline set.
+		let start = section.unreleasedEnd;
+		while (start < section.lines.length) {
+			const next = section.lines.findIndex((line, index) => index > start && line.startsWith("## "));
+			const end = next < 0 ? section.lines.length : next;
+			if (VERSION_HEADING.test(section.lines[start]!)) result.push(parseBody(section.lines.slice(start + 1, end), `${ref}:${section.lines[start]}`));
+			start = end;
+		}
+		return result;
+	};
+	const seen = new Set(bodies(base).flatMap(body => bodyEntries(body).map(entryKey)));
+	const merged: SectionBody = { comments: [], leading: [], categories: new Map() };
+	for (const body of bodies(head)) {
+		const take = (entries: Entry[], target: Entry[]) => {
+			for (const entry of entries) {
+				if (seen.has(entryKey(entry))) continue;
+				seen.add(entryKey(entry));
+				target.push(entry);
+			}
+		};
+		take(body.leading, merged.leading);
+		for (const [category, entries] of body.categories) {
+			const target = merged.categories.get(category) ?? [];
+			merged.categories.set(category, target);
+			take(entries, target);
+		}
+	}
+	if (!bodyEntries(merged).length) refuse("nothing to release in the selected source range");
+	const output = resolve(root, options.output);
+	if (output === join(root, "CHANGELOG.md")) fail("source notes never overwrite CHANGELOG.md");
+	writeFileSync(output, `${renderEntries(merged).join("\n").replace(/\n+$/, "")}\n`);
+	console.log(`SOURCE_NOTES version=${options.version} source_sha=${head} base_sha=${base}`);
 }

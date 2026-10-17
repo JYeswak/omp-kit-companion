@@ -5,18 +5,22 @@
 # exit codes and stdout; next-version logs its selection basis on stderr.
 # Refusals exit 4 (fail closed, same convention as check-commit-imports.sh).
 #
-#   decide --conclusion C --run-status S --sha SHA --head HEAD
-#     Green CI on main's head may tag. Anything else skips with a reason:
-#     red CI is never tagged, a still-running CI is never tagged, and a
-#     superseded SHA (HEAD moved on) is left to the newer train (latest wins).
-#   next-version
-#     Reads `vX.Y.Z` tags on stdin and advances past both the newest tag and
-#     any newer CHANGELOG.md release section; --tags-only disables that
-#     section floor for isolated tag-parser checks. The decision is logged.
+#   decide --conclusion C --run-status S --sha SHA --qualified-sha QUALIFIED
+#     Eligibility only: QUALIFIED is the ancestry-selected successful CI
+#     frontier from release_reuse.py, NOT main head. This never authorizes a
+#     tag; final exact-artifact certification and signing still gate promotion.
+#   next-version [--changelog-ref SHA]
+#     Reads tags on stdin and advances past both the newest tag and the
+#     CHANGELOG.md section floor. A ref reads immutable admission-main metadata
+#     rather than the controller checkout; --tags-only disables the section floor.
 #   verify-candidate --proof PROOF --index INDEX --version V --sha SHA
 #     Publish gate: the unpublished candidate index for exactly this version
 #     and source SHA must carry the full certified ship set, and the asset
 #     map must match it. Mirrors release.yml attest-platforms; fails closed.
+#   publish-lag --version V --sha SHA --repo R [--gh-repo SLUG]
+#     Q-001 pilot (ompkit-kdbz.2.9): exits 4 when tag vV names exactly SHA but
+#     no GitHub release exists (certified tag stuck unpublished); tag mismatch
+#     also exits 4, no tag exits 0. GH_BIN overrides the gh binary (test seam).
 #   latest-flag --version V --max-version M
 #     Prints `--latest` when V is still the maximum tag (it takes the Latest
 #     pointer) and `--latest=false` when a newer tag already exists, so a
@@ -39,7 +43,7 @@
 #     version fields (anything more gets no inherited evidence).
 set -u
 
-usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|latest-flag|wait-release-idle|bump|evidence-sha ..." >&2; exit 2; }
+usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|publish-lag|latest-flag|wait-release-idle|bump|evidence-sha ..." >&2; exit 2; }
 
 cmd=${1:-}; [ -n "$cmd" ] || usage; shift
 
@@ -51,13 +55,13 @@ decide)
 			--conclusion) conclusion=${2:-}; shift 2 ;;
 			--run-status) status=${2:-}; shift 2 ;;
 			--sha) sha=${2:-}; shift 2 ;;
-			--head) head=${2:-}; shift 2 ;;
+			--qualified-sha) head=${2:-}; shift 2 ;;
 			*) echo "decide: unknown argument: $1" >&2; exit 2 ;;
 		esac
 	done
-	if ! { [ -n "$conclusion" ] && [ -n "$status" ] && [ -n "$sha" ] && [ -n "$head" ]; }; then echo "decide: --conclusion, --run-status, --sha and --head are required" >&2; exit 2; fi
+	if ! { [ -n "$conclusion" ] && [ -n "$status" ] && [ -n "$sha" ] && [ -n "$head" ]; }; then echo "decide: --conclusion, --run-status, --sha and --qualified-sha are required" >&2; exit 2; fi
 	case "$sha" in *[!0-9a-f]*|"" ) echo "decide: --sha must be a hex commit" >&2; exit 2 ;; esac
-	case "$head" in *[!0-9a-f]*|"" ) echo "decide: --head must be a hex commit" >&2; exit 2 ;; esac
+	case "$head" in *[!0-9a-f]*|"" ) echo "decide: --qualified-sha must be a hex commit" >&2; exit 2 ;; esac
 	if [ "$conclusion" != "success" ]; then
 		printf 'DECIDE=skip REASON=red-ci-never-tagged conclusion=%s\n' "$conclusion"; exit 4
 	fi
@@ -65,15 +69,16 @@ decide)
 		printf 'DECIDE=skip REASON=running-ci-never-tagged status=%s\n' "$status"; exit 4
 	fi
 	if [ "$sha" != "$head" ]; then
-		printf 'DECIDE=skip REASON=superseded-by-newer-green sha=%s head=%s\n' "$sha" "$head"; exit 4
+		printf 'DECIDE=skip REASON=superseded-by-newer-green sha=%s qualified=%s\n' "$sha" "$head"; exit 4
 	fi
-	printf 'DECIDE=tag REASON=green-head sha=%s\n' "$sha"; exit 0
+	printf 'DECIDE=qualify REASON=newest-qualified-source sha=%s\n' "$sha"; exit 0
 	;;
 next-version)
-	use_changelog=1
+	use_changelog=1; changelog_ref=""
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--tags-only) use_changelog=0; shift ;;
+			--changelog-ref) changelog_ref=${2:-}; shift 2 ;;
 			*) echo "next-version: unknown argument: $1" >&2; exit 2 ;;
 		esac
 	done
@@ -106,7 +111,15 @@ next-version)
 		fi
 	done
 	changelog_major=""; changelog_minor=""; changelog_patch=""
-	if [ "$use_changelog" -eq 1 ] && [ -f CHANGELOG.md ]; then
+	changelog=""
+	if [ "$use_changelog" -eq 1 ]; then
+		if [ -n "$changelog_ref" ]; then
+			case "$changelog_ref" in *[!0-9a-f]* ) echo "next-version: changelog ref must be a full SHA" >&2; exit 2 ;; esac
+			[ "${#changelog_ref}" -eq 40 ] || { echo "next-version: changelog ref must be a full SHA" >&2; exit 2; }
+			changelog=$(git show "$changelog_ref:CHANGELOG.md") || { echo "next-version: source changelog is unavailable" >&2; exit 4; }
+		elif [ -f CHANGELOG.md ]; then
+			changelog=$(cat CHANGELOG.md)
+		fi
 		while IFS= read -r line; do
 			case "$line" in
 				'## ['*']'*) section=${line#'## ['}; section=${section%%]*} ;;
@@ -129,7 +142,9 @@ next-version)
 				|| { [ "$major" -eq "$changelog_major" ] && [ "$minor" -eq "$changelog_minor" ] && [ "$patch" -gt "$changelog_patch" ]; }; then
 				changelog_major=$major; changelog_minor=$minor; changelog_patch=$patch
 			fi
-		done < CHANGELOG.md
+		done <<NEXT_VERSION_CHANGELOG
+$changelog
+NEXT_VERSION_CHANGELOG
 	fi
 	if [ -z "$max_major" ] && [ -z "$changelog_major" ]; then
 		echo "next-version: no parseable vX.Y.Z tag or CHANGELOG.md release section" >&2
@@ -142,7 +157,7 @@ next-version)
 		|| { [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] && [ "$changelog_minor" -gt "$max_minor" ]; } \
 		|| { [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] && [ "$changelog_minor" -eq "$max_minor" ] && [ "$changelog_patch" -gt "$max_patch" ]; }; then
 		selected_major=$changelog_major; selected_minor=$changelog_minor; selected_patch=$changelog_patch
-		basis=changelog-section
+		basis='changelog-section'
 	elif [ -n "$changelog_major" ] && [ "$changelog_major" -eq "$max_major" ] \
 		&& [ "$changelog_minor" -eq "$max_minor" ] && [ "$changelog_patch" -eq "$max_patch" ]; then
 		basis='tag-and-changelog'
@@ -180,6 +195,29 @@ verify-candidate)
 	if ! [ "$check" = "true" ]; then echo "verify-candidate: index tag or asset map does not match the ship set" >&2; exit 4; fi
 	printf 'CANDIDATE=verified version=%s sha=%s\n' "$version" "$sha"; exit 0
 	;;
+publish-lag)
+	version=""; sha=""; repo=""; ghrepo=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--version) version=${2:-}; shift 2 ;;
+			--sha) sha=${2:-}; shift 2 ;;
+			--repo) repo=${2:-}; shift 2 ;;
+			--gh-repo) ghrepo=${2:-}; shift 2 ;;
+			*) echo "publish-lag: unknown argument: $1" >&2; exit 2 ;;
+		esac
+	done
+	if ! { [ -n "$version" ] && [ -n "$sha" ] && [ -n "$repo" ]; }; then echo "publish-lag: --version, --sha and --repo are required" >&2; exit 2; fi
+	case "$sha" in *[!0-9a-f]*|"" ) echo "publish-lag: --sha must be a hex commit" >&2; exit 2 ;; esac
+	tagline=$(git ls-remote "$repo" "refs/tags/v$version" 2>/dev/null) || { echo "publish-lag: tag lookup failed" >&2; exit 3; }
+	tagsha=$(printf '%s' "$tagline" | cut -f1)
+	if [ -z "$tagsha" ]; then printf 'PUBLISH_LAG=no-tag version=%s\n' "$version"; exit 0; fi
+	if [ "$tagsha" != "$sha" ]; then printf 'PUBLISH_LAG=tag-mismatch version=%s tag=%s want=%s\n' "$version" "$tagsha" "$sha" >&2; exit 4; fi
+	relout=$("${GH_BIN:-gh}" release view "v$version" --repo "${ghrepo:-$repo}" --json tagName 2>&1) && {
+		printf 'PUBLISH_LAG=published version=%s sha=%s\n' "$version" "$sha"; exit 0; }
+	case "$relout" in *"not found"*|*"Not Found"*|*" 404 "*|*" Could not resolve"*)
+		printf 'PUBLISH_LAG=certified-tag-without-release version=%s sha=%s\n' "$version" "$sha" >&2; exit 4 ;; esac
+	echo "publish-lag: release lookup failed" >&2; exit 3
+	;;
 latest-flag)
 	version=""; max=""
 	while [ $# -gt 0 ]; do
@@ -208,9 +246,13 @@ wait-release-idle)
 	GH_BIN=${GH_BIN:-gh}
 	deadline=$(($(date +%s) + timeout))
 	while :; do
-		busy=$("$GH_BIN" run list --repo "$repo" --workflow "$workflow" --status in_progress --status queued --json databaseId --jq 'length' 2>/dev/null) \
+		in_progress=$("$GH_BIN" run list --repo "$repo" --workflow "$workflow" --status in_progress --json databaseId --jq 'length') \
 			|| { echo "wait-release-idle: gh run list failed" >&2; exit 1; }
-		case "$busy" in ''|*[!0-9]* ) echo "wait-release-idle: unparseable gh output" >&2; exit 1 ;; esac
+		queued=$("$GH_BIN" run list --repo "$repo" --workflow "$workflow" --status queued --json databaseId --jq 'length') \
+			|| { echo "wait-release-idle: gh run list failed" >&2; exit 1; }
+		case "$in_progress" in ''|*[!0-9]* ) echo "wait-release-idle: unparseable gh output" >&2; exit 1 ;; esac
+		case "$queued" in ''|*[!0-9]* ) echo "wait-release-idle: unparseable gh output" >&2; exit 1 ;; esac
+		busy=$((in_progress + queued))
 		if [ "$busy" -eq 0 ]; then printf 'RELEASE=idle\n'; exit 0; fi
 		[ "$(date +%s)" -ge "$deadline" ] && { echo "wait-release-idle: timed out with $busy release run(s) still active" >&2; exit 4; }
 		sleep "$poll"

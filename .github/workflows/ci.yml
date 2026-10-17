@@ -259,7 +259,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
-          name: ladder-reports-${{ matrix.os }}
+          name: ladder-reports-${{ matrix.os }}-attempt-${{ github.run_attempt }}
           path: reports/
           if-no-files-found: warn
           retention-days: 2
@@ -294,7 +294,7 @@ jobs:
             --out "$RUNNER_TEMP/candidate/$TARGET" > "$RUNNER_TEMP/candidate/$TARGET/asset.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: candidate-${{ matrix.platform }}
+          name: candidate-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate/${{ matrix.platform }}/
           if-no-files-found: error
           retention-days: ${{ inputs.version && 7 || 2 }}
@@ -329,7 +329,7 @@ jobs:
         run: sh scripts/ci-install-sbh.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: candidate-${{ matrix.platform }}
+          name: candidate-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/journey/candidate
       - name: Build the previous archive and both release indexes
         run: |
@@ -356,7 +356,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: real-home-journey-${{ matrix.platform }}
+          name: real-home-journey-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/journey/run/log/
           if-no-files-found: warn
           retention-days: 2
@@ -393,7 +393,7 @@ jobs:
         run: sh scripts/ci-install-sbh.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: candidate-${{ matrix.platform }}
+          name: candidate-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native/${{ matrix.platform }}
       - name: Certify downloaded archive on OMP ${{ matrix.omp.track }}
         env:
@@ -410,7 +410,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-receipt-${{ matrix.platform }}-${{ matrix.omp.track }}
+          name: native-receipt-${{ matrix.platform }}-${{ matrix.omp.track }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-receipt/receipt.json
           if-no-files-found: warn
           retention-days: ${{ inputs.version && 7 || 2 }}
@@ -429,12 +429,26 @@ jobs:
           ref: ${{ inputs.source_sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: candidate-*
+          pattern: candidate-*-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidates
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: native-receipt-*
+          pattern: native-receipt-*-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/receipts
+      - name: Normalize current-attempt artifact containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Native validation expects canonical directory basenames. Only
+          # attempt-filtered immutable containers are admitted to those names.
+          for root in "$RUNNER_TEMP/candidates" "$RUNNER_TEMP/receipts"; do
+            for directory in "$root"/*"-attempt-$GITHUB_RUN_ATTEMPT"; do
+              [[ -d "$directory" ]] || continue
+              canonical="${directory%"-attempt-$GITHUB_RUN_ATTEMPT"}"
+              [[ ! -e "$canonical" ]] || { echo "ambiguous native artifact directory: $canonical" >&2; exit 4; }
+              mv -- "$directory" "$canonical"
+            done
+          done
       - name: Build the provisional index; release mode requires all ship targets
         env:
           SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
@@ -450,7 +464,7 @@ jobs:
       - name: Retain private provisional index, never publish or update latest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: unpublished-candidate-index
+          name: unpublished-candidate-index-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate-index/
           if-no-files-found: error
           retention-days: ${{ inputs.version && 7 || 2 }}

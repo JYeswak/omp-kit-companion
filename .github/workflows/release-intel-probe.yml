@@ -18,10 +18,16 @@ jobs:
       source_sha: ${{ steps.candidate.outputs.source_sha }}
       version: ${{ steps.candidate.outputs.version }}
       has_probe: ${{ steps.candidate.outputs.has_probe }}
+      producer_attempt: ${{ steps.candidate.outputs.producer_attempt }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: unpublished-candidate-index
+          name: unpublished-candidate-index-attempt-${{ github.event.workflow_run.run_attempt }}
           path: candidate-index/
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
@@ -31,19 +37,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           proof=candidate-index/candidate-proof.json
           source_sha="$(jq -er '.source_sha' "$proof")"
-          test "$source_sha" = "$EVENT_SHA"
-          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$(jq -er '.version' "$proof")" >> "$GITHUB_OUTPUT"
-          has_probe="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" -f per_page=100 \
-            --jq 'any(.artifacts[]; .name == "candidate-darwin-x64-none" and (.expired | not))')"
-          echo "has_probe=$has_probe" >> "$GITHUB_OUTPUT"
-          if [[ "$has_probe" == "false" ]]; then
-            echo "No Intel candidate artifact in run $RUN_ID; probe skipped (non-shipping)."
-          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > producer-run.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            | jq '{artifacts: [.[].artifacts[]]}' > producer-artifacts.json
+          git show "$source_sha:scripts/omp-compat.json" > omp-config.json
+          # Workflow execution H and selected source Q are different identities.
+          # The native event/attempt plus the bound proof choose Q; no Q == H assumption.
+          python3 scripts/release_reuse.py probe-source --repository "$GITHUB_REPOSITORY" \
+            --event-run-id "$RUN_ID" --event-sha "$EVENT_SHA" --event-attempt "$EVENT_ATTEMPT" \
+            --run producer-run.json --artifacts producer-artifacts.json \
+            --proof "$proof" --index candidate-index/release-index.json --omp-config omp-config.json >> "$GITHUB_OUTPUT"
 
   intel-probe:
     needs: resolve-candidate
@@ -74,7 +83,7 @@ jobs:
         run: npm install --global typescript-language-server@5.1.3 typescript@5.9.3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: candidate-darwin-x64-none
+          name: candidate-darwin-x64-none-attempt-${{ needs['resolve-candidate'].outputs.producer_attempt }}
           path: ${{ runner.temp }}/native/darwin-x64-none
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
@@ -90,7 +99,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: probe-receipt-darwin-x64-none-${{ matrix.track }}
+          name: probe-receipt-darwin-x64-none-${{ matrix.track }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-receipt/receipt.json
           if-no-files-found: warn
           retention-days: 7

@@ -30,24 +30,24 @@ check() { # name expected_rc actual_rc output [pattern...]
 SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
-# 1. green head tags
-out=$(sh "$TRAIN" decide --conclusion success --run-status completed --sha "$HEAD" --head "$HEAD" 2>&1); rc=$?
-check "decide: green head tags" 0 "$rc" "$out" "DECIDE=tag" "$HEAD"
+# 1. the qualified frontier may enter final-artifact qualification
+out=$(sh "$TRAIN" decide --conclusion success --run-status completed --sha "$HEAD" --qualified-sha "$HEAD" 2>&1); rc=$?
+check "decide: qualified source proceeds" 0 "$rc" "$out" "DECIDE=qualify" "$HEAD"
 
 # 2. planted: red CI is never tagged
-out=$(sh "$TRAIN" decide --conclusion failure --run-status completed --sha "$HEAD" --head "$HEAD" 2>&1); rc=$?
+out=$(sh "$TRAIN" decide --conclusion failure --run-status completed --sha "$HEAD" --qualified-sha "$HEAD" 2>&1); rc=$?
 check "decide: red CI never tagged" 4 "$rc" "$out" "DECIDE=skip" "red-ci-never-tagged"
 
 # 3. planted: cancelled CI is never tagged
-out=$(sh "$TRAIN" decide --conclusion cancelled --run-status completed --sha "$HEAD" --head "$HEAD" 2>&1); rc=$?
+out=$(sh "$TRAIN" decide --conclusion cancelled --run-status completed --sha "$HEAD" --qualified-sha "$HEAD" 2>&1); rc=$?
 check "decide: cancelled CI never tagged" 4 "$rc" "$out" "DECIDE=skip" "red-ci-never-tagged"
 
 # 4. planted: a still-running CI is never tagged
-out=$(sh "$TRAIN" decide --conclusion success --run-status in_progress --sha "$HEAD" --head "$HEAD" 2>&1); rc=$?
+out=$(sh "$TRAIN" decide --conclusion success --run-status in_progress --sha "$HEAD" --qualified-sha "$HEAD" 2>&1); rc=$?
 check "decide: running CI never tagged" 4 "$rc" "$out" "DECIDE=skip" "running-ci-never-tagged"
 
-# 5. planted: a superseded SHA is left to the newer train
-out=$(sh "$TRAIN" decide --conclusion success --run-status completed --sha "$SHA" --head "$HEAD" 2>&1); rc=$?
+# 5. only a genuinely newer qualified source supersedes the earlier source
+out=$(sh "$TRAIN" decide --conclusion success --run-status completed --sha "$SHA" --qualified-sha "$HEAD" 2>&1); rc=$?
 check "decide: superseded SHA skipped" 4 "$rc" "$out" "DECIDE=skip" "superseded-by-newer-green"
 
 # 6. next patch after the max tag
@@ -199,6 +199,39 @@ printf '#!/bin/sh\necho 2\n' > "$TMP/bin/gh"; chmod +x "$TMP/bin/gh"
 out=$(GH_BIN="$TMP/bin/gh" sh "$TRAIN" wait-release-idle --repo R --poll 1 --timeout 2 2>&1); rc=$?
 check "wait-release-idle: busy blocks" 4 "$rc" "$out" "timed out"
 
+# 17b. argv-aware stub: busy via in_progress alone blocks, and the stub models
+# gh last-wins (a combined --status pair answers the queued count, here 0).
+cat > "$TMP/bin/gh" <<'STUB'
+#!/bin/sh
+echo "$@" >> "$0.argv"
+case "$*" in
+	*--status\ in_progress*\ --status\ queued*|*--status\ queued*\ --status\ in_progress*) echo 0 ;;
+	*--status\ in_progress*) echo 1 ;;
+	*) echo 0 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+rm -f "$TMP/bin/gh.argv"
+out=$(GH_BIN="$TMP/bin/gh" sh "$TRAIN" wait-release-idle --repo R --poll 1 --timeout 2 2>&1); rc=$?
+check "wait-release-idle: in_progress-only busy blocks" 4 "$rc" "$out" "timed out"
+grep -q -- '--status in_progress' "$TMP/bin/gh.argv" || { echo "FAIL: no single in_progress query" >&2; exit 1; }
+grep -q -- '--status queued' "$TMP/bin/gh.argv" || { echo "FAIL: no single queued query" >&2; exit 1; }
+if grep -q -- '--status in_progress --status queued' "$TMP/bin/gh.argv"; then echo "FAIL: combined statuses query" >&2; exit 1; fi
+
+# 17c. planted: busy via queued alone blocks
+cat > "$TMP/bin/gh" <<'STUB'
+#!/bin/sh
+echo "$@" >> "$0.argv"
+case "$*" in
+	*--status\ queued*) echo 1 ;;
+	*) echo 0 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+rm -f "$TMP/bin/gh.argv"
+out=$(GH_BIN="$TMP/bin/gh" sh "$TRAIN" wait-release-idle --repo R --poll 1 --timeout 2 2>&1); rc=$?
+check "wait-release-idle: queued-only busy blocks" 4 "$rc" "$out" "timed out"
+
 # Release bump fixture: CHANGELOG [Unreleased] + one fragment + package.json at the old version.
 R="$TMP/bump-repo"
 mkdir -p "$R/changelog.d" "$R/src"
@@ -247,6 +280,33 @@ before=$(git -C "$R" rev-parse HEAD)
 out=$(sh "$TRAIN" bump --version 0.2.24 --date 2026-10-12 --repo "$R" 2>&1); rc=$?
 check "bump: planted nothing-to-release refused" 4 "$rc" "$out" "BUMP=skip REASON=nothing-to-release" "REFUSED: nothing to release"
 check "bump: refusal left HEAD and package.json alone" 0 0 "$(git -C "$R" rev-parse HEAD) $(jq -r .version "$R/package.json")" "$before 0.2.23"
+# 26. publish-lag: certified tag with a release is published
+LAG_FIXTURE="$TMP/lag-repo"
+mkdir -p "$LAG_FIXTURE"
+git -C "$LAG_FIXTURE" init -q
+git -C "$LAG_FIXTURE" config user.name "Lag Fixture"
+git -C "$LAG_FIXTURE" config user.email "lag@example.invalid"
+printf 'lag\n' > "$LAG_FIXTURE/file.txt"
+git -C "$LAG_FIXTURE" add file.txt
+git -C "$LAG_FIXTURE" commit -qm "fixture [test]"
+LAGSHA=$(git -C "$LAG_FIXTURE" rev-parse HEAD)
+git -C "$LAG_FIXTURE" tag v9.9.99
+mkdir -p "$TMP/lagbin-ok"
+printf '#!/bin/sh\necho {"tagName":"v9.9.99"}\n' > "$TMP/lagbin-ok/gh"; chmod +x "$TMP/lagbin-ok/gh"
+out=$(GH_BIN="$TMP/lagbin-ok/gh" sh "$TRAIN" publish-lag --version 9.9.99 --sha "$LAGSHA" --repo "$LAG_FIXTURE" 2>&1); rc=$?
+check "publish-lag: certified tag with release is published" 0 "$rc" "$out" "PUBLISH_LAG=published"
+# 27. planted: certified tag with no release exits 4
+mkdir -p "$TMP/lagbin-missing"
+printf '#!/bin/sh\necho "release not found" >&2\nexit 1\n' > "$TMP/lagbin-missing/gh"; chmod +x "$TMP/lagbin-missing/gh"
+out=$(GH_BIN="$TMP/lagbin-missing/gh" sh "$TRAIN" publish-lag --version 9.9.99 --sha "$LAGSHA" --repo "$LAG_FIXTURE" 2>&1); rc=$?
+check "publish-lag: certified tag without release exits 4" 4 "$rc" "$out" "PUBLISH_LAG=certified-tag-without-release"
+# 28. planted: tag naming another SHA exits 4 without calling gh
+out=$(GH_BIN=/nonexistent-gh-binary sh "$TRAIN" publish-lag --version 9.9.99 --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --repo "$LAG_FIXTURE" 2>&1); rc=$?
+check "publish-lag: tag mismatch exits 4" 4 "$rc" "$out" "PUBLISH_LAG=tag-mismatch"
+# 29. untagged version exits 0
+out=$(GH_BIN=/nonexistent-gh-binary sh "$TRAIN" publish-lag --version 9.9.98 --sha "$LAGSHA" --repo "$LAG_FIXTURE" 2>&1); rc=$?
+check "publish-lag: no tag exits 0" 0 "$rc" "$out" "PUBLISH_LAG=no-tag"
+
 
 printf '%s pass, %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
