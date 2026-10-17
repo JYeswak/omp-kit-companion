@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck disable=SC2317,SC2329 # step functions (build_fixture, kit_env, ...) run indirectly via step "$@" (0.9 says SC2317, 0.10+ SC2329).
-# Real-HOME journey: the README path (install -> status -> doctor -> state-root repair -> test ->
-# test --full -> update --apply -> audit) against a realistic HOME instead of a tiny synthetic one.
+# Real-HOME journey: the README path (install -> status -> doctor -> state-root repair -> update --apply ->
+# version readback -> test -> test --full -> audit) against a realistic HOME instead of a tiny synthetic one.
 #
 # Usage:
 #   sh tests/e2e/real-home-journey.sh \
@@ -119,20 +119,32 @@ if [ "$SIGNED_MODE" -eq 1 ]; then
   [ "$(basename "$(dirname "$RECEIPT_OUT")")" = "$expected_receipt_dir" ] || {
     echo "journey: signed receipt directory must be $expected_receipt_dir" >&2; usage;
   }
-  [ ! -e "$RECEIPT_OUT" ] && [ ! -L "$RECEIPT_OUT" ] || { echo "journey: receipt path already exists" >&2; exit 2; }
+  if [ -e "$RECEIPT_OUT" ] || [ -L "$RECEIPT_OUT" ]; then
+    echo "journey: receipt path already exists" >&2
+    exit 2
+  fi
   case "$SOURCE_SHA" in *[!0123456789abcdef]*) echo "journey: --source-sha must be lowercase hexadecimal" >&2; usage ;; esac
   case "${#SOURCE_SHA}" in 40|64) ;; *) echo "journey: --source-sha must be a Git object hash" >&2; usage ;; esac
   case "$RUN_ATTEMPT" in ''|*[!0123456789]*) echo "journey: --run-attempt must be a positive integer" >&2; usage ;; esac
   [ "$RUN_ATTEMPT" -gt 0 ] || { echo "journey: --run-attempt must be a positive integer" >&2; usage; }
   for index in "$PREV_INDEX" "$CAND_INDEX"; do
-    [ -f "$index" ] && [ ! -L "$index" ] || { echo "journey: signed index must be a regular file: $index" >&2; exit 2; }
+    if [ ! -f "$index" ] || [ -L "$index" ]; then
+      echo "journey: signed index must be a regular file: $index" >&2
+      exit 2
+    fi
   done
   command -v gh >/dev/null 2>&1 || { echo "journey: gh is required for signed consumer verification" >&2; exit 2; }
   command -v shasum >/dev/null 2>&1 || { echo "journey: shasum is required for signed consumer receipts" >&2; exit 2; }
   for archive in "$PREV_ARCHIVE" "$CAND_ARCHIVE"; do
-    [ -f "$archive" ] && [ ! -L "$archive" ] || { echo "journey: signed archive must be a regular file: $archive" >&2; exit 2; }
+    if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+      echo "journey: signed archive must be a regular file: $archive" >&2
+      exit 2
+    fi
     bundle="$archive.sigstore.json"
-    [ -f "$bundle" ] && [ ! -L "$bundle" ] || { echo "journey: signed archive bundle is missing or unsafe: $bundle" >&2; exit 2; }
+    if [ ! -f "$bundle" ] || [ -L "$bundle" ]; then
+      echo "journey: signed archive bundle is missing or unsafe: $bundle" >&2
+      exit 2
+    fi
   done
   jq -e --arg platform "$PLATFORM" '.assets | has($platform)' "$PREV_INDEX" >/dev/null ||
     { echo "journey: previous index has no asset for platform $PLATFORM" >&2; exit 2; }
@@ -332,10 +344,13 @@ same_sha256() {
 }
 
 write_signed_receipt() {
-  [ "$SIGNED_MODE" -eq 1 ] && [ "$SIGNED_INPUTS_OK" -eq 1 ] &&
-    [ "$PREVIOUS_RELEASE_OK" -eq 1 ] && [ "$PREVIOUS_SIGNATURE_OK" -eq 1 ] &&
-    [ "$CANDIDATE_SOURCE_OK" -eq 1 ] && [ "$PUBLIC_INSTALLER_OK" -eq 1 ] &&
-    [ "$COMPILED_UPGRADE_OK" -eq 1 ] || { echo "receipt=precondition-failed"; return 1; }
+  if [ "$SIGNED_MODE" -ne 1 ] || [ "$SIGNED_INPUTS_OK" -ne 1 ] ||
+    [ "$PREVIOUS_RELEASE_OK" -ne 1 ] || [ "$PREVIOUS_SIGNATURE_OK" -ne 1 ] ||
+    [ "$CANDIDATE_SOURCE_OK" -ne 1 ] || [ "$PUBLIC_INSTALLER_OK" -ne 1 ] ||
+    [ "$COMPILED_UPGRADE_OK" -ne 1 ]; then
+    echo "receipt=precondition-failed"
+    return 1
+  fi
   if ! same_sha256 "$PREV_ARCHIVE" "$PREV_ARCHIVE_SHA" ||
     ! same_sha256 "$PREV_INDEX" "$PREV_INDEX_SHA" ||
     ! same_sha256 "$PREV_ARCHIVE.sigstore.json" "$PREV_BUNDLE_SHA" ||
@@ -347,9 +362,15 @@ write_signed_receipt() {
   fi
   receipt_dir=$(dirname "$RECEIPT_OUT")
   mkdir -p "$receipt_dir" || return 1
-  [ ! -e "$RECEIPT_OUT" ] && [ ! -L "$RECEIPT_OUT" ] || { echo "receipt=already-exists"; return 1; }
+  if [ -e "$RECEIPT_OUT" ] || [ -L "$RECEIPT_OUT" ]; then
+    echo "receipt=already-exists"
+    return 1
+  fi
   receipt_tmp="$receipt_dir/.receipt.json.$$"
-  [ ! -e "$receipt_tmp" ] && [ ! -L "$receipt_tmp" ] || { echo "receipt=temp-exists"; return 1; }
+  if [ -e "$receipt_tmp" ] || [ -L "$receipt_tmp" ]; then
+    echo "receipt=temp-exists"
+    return 1
+  fi
   jq -n --arg platform "$PLATFORM" --arg version "$CAND" --arg source_sha "$SOURCE_SHA" \
     --arg archive_sha256 "$CAND_ARCHIVE_SHA" --arg index_sha256 "$CAND_INDEX_SHA" \
     --arg run_id "$RUN_ID" --argjson run_attempt "$RUN_ATTEMPT" --arg previous_version "$PREV" \
@@ -384,22 +405,33 @@ verdict() {
     verify_previous_signature) head -n 1 "$out" ;;
     candidate_source)
       source_sha_value=$(head -n 1 "$out")
-      [ "$source_sha_value" = "$SOURCE_SHA" ] && echo "source_sha=$source_sha_value" || echo "source_sha=mismatch" ;;
+      if [ "$source_sha_value" = "$SOURCE_SHA" ]; then
+        echo "source_sha=$source_sha_value"
+      else
+        echo "source_sha=mismatch"
+      fi ;;
     signed_receipt)
-      jq -e --arg platform "$PLATFORM" --arg version "$CAND" --arg source_sha "$SOURCE_SHA" \
+      if jq -e --arg platform "$PLATFORM" --arg version "$CAND" --arg source_sha "$SOURCE_SHA" \
         --arg archive_sha "$CAND_ARCHIVE_SHA" --arg index_sha "$CAND_INDEX_SHA" \
         --arg run_id "$RUN_ID" --argjson run_attempt "$RUN_ATTEMPT" --arg previous "$PREV" \
         '.schema_version == 1 and .kind == "signed-native-consumer" and .platform == $platform and
          .version == $version and .source_sha == $source_sha and .archive_sha256 == $archive_sha and
          .index_sha256 == $index_sha and .run_id == $run_id and .run_attempt == $run_attempt and
          .previous_version == $previous and .installed_version == $version and
-         .checks.public_installer == true and .checks.compiled_upgrade == true' "$RECEIPT_OUT" >/dev/null 2>&1 &&
-        head -n 1 "$out" || echo "receipt=invalid" ;;
+         .checks.public_installer == true and .checks.compiled_upgrade == true' "$RECEIPT_OUT" >/dev/null 2>&1; then
+        head -n 1 "$out"
+      else
+        echo "receipt=invalid"
+      fi ;;
     install_previous|install_candidate_public)
       v=$(sed -n 's/^installed: version=\([^ ]*\).*/\1/p' "$out")
       install_binary=$KIT
-      [ "$2" != install_candidate_public ] || install_binary=$CAND_KIT
-      [ -x "$install_binary" ] && [ -n "$v" ] && echo "installed=$v" || echo "not-installed" ;;
+      if [ "$2" = install_candidate_public ]; then install_binary=$CAND_KIT; fi
+      if [ -x "$install_binary" ] && [ -n "$v" ]; then
+        echo "installed=$v"
+      else
+        echo "not-installed"
+      fi ;;
     version|version_after_update|candidate_public_version) head -n 1 "$out" ;;
     status) envelope_verdict "$out" '"ok=\(.ok) " + ([.data.findings[]? | select(.component == "state_root") | "state_root=\(.status):\(.evidence.mode)"][0] // "state_root=absent") + " " + ([.data.findings[]? | select(.component == "installed_rules") | "installed_rules=\(.status)"][0] // "installed_rules=absent")' ;;
     doctor) envelope_verdict "$out" "$DOCTOR_FILTER" ;;
@@ -501,17 +533,19 @@ step repair_state_plan kit_env "$KIT" repair --scope state --plan --json
 step repair_state_apply kit_env "$KIT" repair --scope state --apply --yes --json
 step legacy_state_after_repair check_legacy_state
 step doctor_after_repair kit_env "$KIT" doctor --json
-step test kit_env "$KIT" test --json
-step test_full kit_env "$KIT" test --full --json
 upgrade_steps_ok=1
 step update_apply kit_env "$KIT" update --apply --yes --version "$CAND" --index "$CAND_INDEX" --archive "$CAND_ARCHIVE" --json ||
   upgrade_steps_ok=0
 step version_after_update kit_env "$KIT" --version || upgrade_steps_ok=0
+step test kit_env "$KIT" test --json || upgrade_steps_ok=0
+step test_full kit_env "$KIT" test --full --json || upgrade_steps_ok=0
 step audit kit_env "$KIT" audit --json || upgrade_steps_ok=0
-[ "$upgrade_steps_ok" -eq 1 ] && COMPILED_UPGRADE_OK=1
-  if step candidate_source gh api "repos/JYeswak/omp-kit-companion/commits/v$CAND" --jq .sha; then
-    CANDIDATE_SOURCE_OK=1
-  fi
+if [ "$upgrade_steps_ok" -eq 1 ]; then
+  COMPILED_UPGRADE_OK=1
+fi
+if step candidate_source gh api "repos/JYeswak/omp-kit-companion/commits/v$CAND" --jq .sha; then
+  CANDIDATE_SOURCE_OK=1
+fi
 step background_writer check_writer
 stop_writer
 step no_leaked_processes check_leaked_processes
