@@ -314,7 +314,7 @@ jobs:
 
   attest:
     needs: [validate-tag, attest-platforms]
-    if: github.event.repository.private == false
+    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -377,7 +377,7 @@ jobs:
   attest-index:
     # Preserve the index-signing rider as well as per-platform archive signing.
     needs: [validate-tag, attest-platforms]
-    if: github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal
+    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -400,7 +400,7 @@ jobs:
     # Public installation needs the real tag and Sigstore authority. It is
     # mandatory after signing, never faked during tagless qualification.
     needs: [validate-tag, attest, attest-index]
-    if: github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal
+    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest'].result == 'success' && needs['attest-index'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -485,8 +485,32 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  signing-complete:
+    # Reuse intentionally skips native-candidate. Its skipped ancestor must not
+    # suppress signing, or turn a run with no signatures/consumers green.
+    needs: [validate-tag, attest-platforms, attest, attest-index, signed-consumers]
+    if: ${{ always() && !cancelled() && github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every signing and real-consumer gate to have executed successfully
+        env:
+          VALIDATE_RESULT: ${{ needs['validate-tag'].result }}
+          PLATFORMS_RESULT: ${{ needs['attest-platforms'].result }}
+          ATTEST_RESULT: ${{ needs['attest'].result }}
+          INDEX_RESULT: ${{ needs['attest-index'].result }}
+          CONSUMERS_RESULT: ${{ needs['signed-consumers'].result }}
+        run: |
+          set -euo pipefail
+          for result in "$VALIDATE_RESULT" "$PLATFORMS_RESULT" "$ATTEST_RESULT" "$INDEX_RESULT" "$CONSUMERS_RESULT"; do
+            if [[ "$result" != success ]]; then
+              echo "required signing gate did not succeed: $result" >&2
+              exit 1
+            fi
+          done
+
   open-p0-on-post-cert-failure:
-    needs: [validate-tag, reuse-evidence, attest-platforms, attest, attest-index, signed-consumers]
+    needs: [validate-tag, reuse-evidence, attest-platforms, attest, attest-index, signed-consumers, signing-complete]
     if: ${{ always() && github.event.repository.private == false && failure() && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
