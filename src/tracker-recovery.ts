@@ -16,6 +16,93 @@ const RATE_RECEIPT = ".omp-kit-last-recover.json";
  * coexist with our dotfiles in this directory.
  */
 export const RECOVER_RATE_WINDOW_MS = 60 * 60_000;
+/**
+ * One native recovery output family is retained per tracker. A second run
+ * would duplicate the database family in quarantine; the later reaper owns
+ * removing completed artifacts before another recovery is admitted.
+ */
+export const RECOVERY_ARTIFACT_BOUND = 1;
+
+export interface TrackerQuarantineReceipt {
+	schema_version: 1;
+	cycle_count: number;
+	wal_index_artifact_count: number;
+	artifact_count: number;
+	artifact_bound: number;
+	growth: number;
+	upstream: { issue: "beads_rust#532"; br_version: string; disposition: "UNCONFIRMED; mitigation only" };
+}
+
+type QuarantineInventory = { migrationRuns: number; walIndexArtifacts: number; artifactCount: number; error?: string };
+
+function quarantineInventory(repo: string): QuarantineInventory {
+	const beads = resolve(repo, ".beads");
+	let beadsEntries: Dirent[];
+	try {
+		const info = lstatSync(beads);
+		if (info.isSymbolicLink() || !info.isDirectory()) return { migrationRuns: 0, walIndexArtifacts: 0, artifactCount: 0, error: ".beads is not a real directory" };
+		beadsEntries = readdirSync(beads, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { migrationRuns: 0, walIndexArtifacts: 0, artifactCount: 0 };
+		return { migrationRuns: 0, walIndexArtifacts: 0, artifactCount: 0, error: errorMessage(error) };
+	}
+	let walIndexArtifacts = 0;
+	for (const entry of beadsEntries) if (entry.name.startsWith(".br-wal-index-")) walIndexArtifacts++;
+
+	const migrationRoot = resolve(repo, ...RECOVERY_ROOT);
+	let migrationEntries: Dirent[];
+	try {
+		const info = lstatSync(migrationRoot);
+		if (info.isSymbolicLink() || !info.isDirectory()) return { migrationRuns: 0, walIndexArtifacts, artifactCount: walIndexArtifacts, error: "migration root is not a real directory" };
+		migrationEntries = readdirSync(migrationRoot, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") migrationEntries = [];
+		else return { migrationRuns: 0, walIndexArtifacts, artifactCount: walIndexArtifacts, error: errorMessage(error) };
+	}
+	let migrationRuns = 0;
+	for (const entry of migrationEntries) {
+		if (!entry.isDirectory()) continue;
+		const runDir = join(migrationRoot, entry.name);
+		try {
+			if (lstatSync(runDir).isSymbolicLink()) return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration run ${entry.name} is a symbolic link` };
+			let artifact = false;
+			for (const name of ["recovery-before", "recovery-prepared.json", COMPLETE_MARKER]) {
+				try {
+					const info = lstatSync(join(runDir, name));
+					if (info.isSymbolicLink()) return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration artifact ${entry.name}/${name} is a symbolic link` };
+					if (name === "recovery-before" ? info.isDirectory() : info.isFile()) artifact = true;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: errorMessage(error) };
+				}
+			}
+			if (artifact) migrationRuns++;
+		} catch (error) {
+			return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: errorMessage(error) };
+		}
+	}
+	return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts };
+}
+
+function quarantineReceipt(inventory: QuarantineInventory, growth: number, run: (args: readonly string[], cwd: string) => TrackerRecoveryCommandResult, repo: string): TrackerQuarantineReceipt {
+	let brVersion = "UNKNOWN";
+	if (inventory.artifactCount > 0 || growth > 0) {
+		try {
+			const result = run(["br", "--version"], repo);
+			const fields = result.stdout.trim().split(" ").filter(Boolean);
+			if (result.code === 0 && fields.length > 0) brVersion = fields[fields.length - 1] ?? "UNKNOWN";
+		} catch { /* Version absence does not upgrade the upstream cause claim. */ }
+	}
+	return {
+		schema_version: 1,
+		cycle_count: inventory.migrationRuns,
+		wal_index_artifact_count: inventory.walIndexArtifacts,
+		artifact_count: inventory.artifactCount,
+		artifact_bound: RECOVERY_ARTIFACT_BOUND,
+		growth: Math.max(0, growth),
+		upstream: { issue: "beads_rust#532", br_version: brVersion, disposition: "UNCONFIRMED; mitigation only" },
+	};
+}
+
 
 function rateReceiptPath(repo: string): string {
 	return join(resolve(repo, ...RECOVERY_ROOT), RATE_RECEIPT);
@@ -62,8 +149,8 @@ export function recoveryFlagDirs(repo: string): string[] | null {
 	if (scan.error) return null;
 	return scan.flags.map((flag) => flag.runDirectory);
 }
-export type TrackerRecoveryKind = "RECOVERY_PROCEEDED" | "RECOVERY_BLOCKED" | "RECOVERY_FAILED";
-export interface TrackerRecoveryResult { kind: TrackerRecoveryKind; text: string }
+export type TrackerRecoveryKind = "RECOVERY_PROCEEDED" | "RECOVERY_BLOCKED" | "RECOVERY_FAILED" | "RECOVERY_QUARANTINE_GROWTH";
+export interface TrackerRecoveryResult { kind: TrackerRecoveryKind; text: string; receipt?: TrackerQuarantineReceipt }
 export interface TrackerRecoveryCommandResult { code: number | null; stdout: string; stderr: string }
 export interface TrackerRecoveryDeps {
 	pid?: number;
@@ -110,9 +197,18 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 	const root = resolve(repo, ...RECOVERY_ROOT);
 	const scan = findBusyFlags(root);
 	if (scan.error) return { kind: "RECOVERY_BLOCKED", text: `Fleet Watch: tracker recovery blocked; recovery flags could not be safely inspected: ${scan.error}` };
-	if (scan.flags.length === 0) return null;
-
 	const run = deps.run ?? defaultRun;
+	const before = quarantineInventory(repo);
+	if (before.error) return { kind: "RECOVERY_BLOCKED", text: `Fleet Watch: tracker recovery blocked; quarantine artifact inventory is unknown: ${before.error}` };
+	if (before.walIndexArtifacts > 0) {
+		const receipt = quarantineReceipt(before, 0, run, repo);
+		return {
+			kind: "RECOVERY_QUARANTINE_GROWTH",
+			text: `Fleet Watch: WAL_QUARANTINE_GROWTH; ${before.walIndexArtifacts} .br-wal-index-* artifact(s) remain; write readiness is latched and no recovery ran.`,
+			receipt,
+		};
+	}
+	if (scan.flags.length === 0) return null;
 	const liveness = deps.liveness ?? defaultLiveness();
 	const now = deps.now ?? Date.now;
 	const ownerPid = deps.pid ?? process.pid;
@@ -128,6 +224,16 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 		const waitMin = Math.ceil((windowMs - (attemptAt - lastRecover)) / 60_000);
 		return blocked(`recovery attempt rate-limited (last attempt ${Math.max(0, Math.floor((attemptAt - lastRecover) / 1000))}s ago, window ${Math.round(windowMs / 60_000)}m, next eligible in ~${waitMin}m); no recover command ran`);
 	}
+	if (before.artifactCount >= RECOVERY_ARTIFACT_BOUND) {
+		const receipt = quarantineReceipt(before, 0, run, repo);
+		return {
+			kind: "RECOVERY_QUARANTINE_GROWTH",
+			text: `Fleet Watch: WAL_QUARANTINE_GROWTH; recovery refused before intervention because ${before.artifactCount} artifact family/families meet the bound ${RECOVERY_ARTIFACT_BOUND}; no recover command ran.`,
+			receipt,
+		};
+	}
+	const beforeArtifactCount = before.artifactCount;
+
 	(deps.writeRateReceipt ?? defaultWriteRateReceipt)(repo, attemptAt, "attempted");
 	const owner: RecoveryLease = {
 		schema_version: 1,
@@ -154,7 +260,7 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 	const holders = databaseHolders(join(repo, ".beads", "beads.db"), repo, run, liveness);
 	if (holders.state !== "clear") {
 		releaseLeases(acquired, owner.lease_id);
-		return blocked(holders.state === "held" ? `database holder PID ${holders.pid} is live` : `database holder liveness is unknown: ${holders.reason}`);
+		return blocked(holders.state === "held" ? `DATABASE_HOLDER_LATCH: database holder PID ${holders.pid} is live` : `DATABASE_HOLDER_LATCH: database holder liveness is unknown: ${holders.reason}`);
 	}
 
 	let result: TrackerRecoveryResult;
@@ -169,6 +275,22 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 		}
 	} catch (error) {
 		result = { kind: "RECOVERY_FAILED", text: `Fleet Watch: tracker recovery command failed: ${error instanceof Error ? error.message : String(error)}` };
+	}
+	const after = quarantineInventory(repo);
+	if (after.error) {
+		result = { kind: "RECOVERY_FAILED", text: `${result.text} Quarantine artifact readback is UNKNOWN: ${after.error}.` };
+	} else {
+		const growth = after.artifactCount - beforeArtifactCount;
+		const receipt = quarantineReceipt(after, growth, run, repo);
+		if (after.artifactCount > RECOVERY_ARTIFACT_BOUND) {
+			result = {
+				kind: "RECOVERY_QUARANTINE_GROWTH",
+				text: `Fleet Watch: WAL_QUARANTINE_GROWTH; native recovery produced ${after.artifactCount} artifact families beyond the bound ${RECOVERY_ARTIFACT_BOUND}.`,
+				receipt,
+			};
+		} else {
+			result = { ...result, receipt };
+		}
 	}
 	const releaseErrors = releaseLeases(acquired, owner.lease_id);
 	if (releaseErrors.length) {

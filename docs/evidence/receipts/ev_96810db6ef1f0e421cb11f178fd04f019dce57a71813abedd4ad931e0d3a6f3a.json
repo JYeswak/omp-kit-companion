@@ -1,0 +1,20 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_96810db6ef1f0e421cb11f178fd04f019dce57a71813abedd4ad931e0d3a6f3a",
+ "limitations": [
+  "final full CLI suite not run; Bun launcher missing and sbh threshold is red",
+  "independent non-author verification and bead close pending",
+  "beads_rust#532 remains unconfirmed; this is mitigation only"
+ ],
+ "operation": "ompkit-rhy9.14-native-quarantine-acceptance",
+ "parameters": {
+  "bead": "ompkit-rhy9.14",
+  "subject_sha256": "9f3ba2ec81a567d99096819a98390e0df959818b3fc6c4dd076bf8377395c30a"
+ },
+ "producer": "JadeThrush",
+ "result_ref": {
+  "bytes": 5092,
+  "sha256": "14f3a6d1ebcf68b013b6647f37d3ac38097f50b71d85081219be6948e011dbab"
+ }
+}

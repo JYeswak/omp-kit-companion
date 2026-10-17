@@ -85,6 +85,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Finite Bash admissions reject disabled deadlines and known finite suites cannot be labeled as services; owner/job/proc cancellation verification remains blocked on native lifecycle evidence | ompkit-xa5s.22 (BLOCKED) |
 | Scratch plan/apply expose row sizes, malformed-owner counts, per-root/per-verdict totals, policy, and receipt through the public CLI | ompkit-rhy9.17 (OPEN: policy-drift negative remains) |
 | Beads doctor and planning score report configured acceptance breadth with component-aware split suggestions | ompkit-rhy9.21 (BLOCKED: dirty overlap on CHANGELOG.md and package.json) |
+| Tracker recovery bounds quarantine growth, emits native health receipts, and refuses intervention while database holders are live | ompkit-rhy9.14 (IN REVIEW; independent verification pending) |
 
 ## In progress
 

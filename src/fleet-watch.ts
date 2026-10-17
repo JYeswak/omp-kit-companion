@@ -1,5 +1,5 @@
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { recoverBusyTracker, recoveryFlagDirs, type TrackerRecoveryResult } from "./tracker-recovery.ts";
+import { recoverBusyTracker, recoveryFlagDirs, type TrackerQuarantineReceipt, type TrackerRecoveryResult } from "./tracker-recovery.ts";
 import { YAML } from "bun";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -28,7 +28,7 @@ export type FleetWatchSession = {
 export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[] };
 
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
-export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string };
+export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
@@ -205,9 +205,10 @@ export function writeGate(sessionName: string, flags: string[] | null, recoveryK
 		return { ready: false, kind: "UNKNOWN", text: `Fleet watch (UNKNOWN): no nudge for ${sessionName} workers: write readiness UNKNOWN (recovery flags unreadable); nudges resume when probes answer.`,
 			refusals: [{ class: "tool_read_failure", bead: null, actor: `UNKNOWN director for ${sessionName}`, next: "director restores a readable native write-readiness probe before any claim" }] };
 	}
-	if (flags.length > 0 && recoveryKind !== "RECOVERY_PROCEEDED") {
-		const names = flags.map((flag) => basename(flag)).join(", ");
-		return { ready: false, kind: "WRITE_LATCHED", text: `Fleet watch (WRITE_LATCHED): no nudge for ${sessionName} workers while the tracker write path is latched (${names}); recovery ${recoveryKind ?? "did not proceed"}; nudges resume when flags clear.`,
+	if (recoveryKind === "RECOVERY_QUARANTINE_GROWTH" || (flags.length > 0 && recoveryKind !== "RECOVERY_PROCEEDED")) {
+		const names = flags.length > 0 ? flags.map((flag) => basename(flag)).join(", ") : "quarantine artifacts";
+		const reason = recoveryKind === "RECOVERY_QUARANTINE_GROWTH" ? "WAL_QUARANTINE_GROWTH; " : "";
+		return { ready: false, kind: "WRITE_LATCHED", text: `Fleet watch (WRITE_LATCHED): no nudge for ${sessionName} workers while the tracker write path is latched (${names}); ${reason}recovery ${recoveryKind ?? "did not proceed"}; nudges resume when flags clear.`,
 			refusals: [{ class: "unsafe_custody", bead: null, actor: `UNKNOWN director for ${sessionName}`, next: `director qualifies recovery and verifies that the native write latch clears: ${names}` }] };
 	}
 	return { ready: true };
@@ -1116,7 +1117,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const recovery = (deps.recoverTracker ?? recoverBusyTracker)(session.repo, session.session);
 		recoveryKinds.set(session.repo, recovery?.kind ?? null);
 		if (!recovery) continue;
-		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text };
+		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }) };
 		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
 		actions.push(action);
 	}
