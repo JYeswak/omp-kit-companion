@@ -25,7 +25,7 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 		writeFileSync(join(scratch, "bin/gh"), `#!/bin/sh\ncase "$1 $2" in\n"api "*) printf '%s\\n' '[]';;\n"release create") printf '%s\\n' DRAFT_FIXTURE_ONLY;;\n"release edit") printf '%s\\n' PUBLICATION_FIXTURE_ONLY;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
 		// The repair helper has independent native-shaped asset/authority tests.
 		// This executable workflow test isolates only the SBOM/finalization seam.
-		writeFileSync(join(scratch, "bin/python3"), `#!/bin/sh\ncase "$1 $2" in\n"scripts/release_reuse.py repair-release") test "\${REPAIR_FAIL:-0}" != 1;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
+		writeFileSync(join(scratch, "bin/python3"), `#!/bin/sh\ncase "$1 $2" in\n"scripts/release_reuse.py repair-release") test "\${REPAIR_FAIL:-0}" != 1;;\n"scripts/release_reuse.py latest-flag") printf '%s\\n' --latest;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
 		const platforms = ["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"];
 		const assets: Record<string, { filename: string }> = {};
 		for (const platform of platforms) {
