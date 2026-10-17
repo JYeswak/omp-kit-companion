@@ -8,7 +8,9 @@
  * and bounded.
  */
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
 
 export interface SaveGuardExecResult {
 	stdout: string;
@@ -84,15 +86,27 @@ interface PatchDelta {
 	removed: string[];
 	known: boolean;
 }
+interface NativeBead {
+	id: string;
+	actor: string;
+	db: string;
+	cwd: string;
+}
+
 interface FileSnapshot {
 	known: boolean;
 	contents: string | null;
+	digest?: string;
+	bead?: NativeBead;
 }
 
 interface SessionFileContents {
 	baseline: string | null;
 	current: string | null;
 	known: boolean;
+	digest?: string;
+	bead?: NativeBead;
+	beadConflict?: boolean;
 }
 
 interface OwnedRepository {
@@ -112,6 +126,9 @@ interface SessionState {
 	pendingToolPathSnapshots: Map<string, Map<string, FileSnapshot>>;
 	rePrompts: number;
 	warningEmitted: boolean;
+	lastOmissions: string;
+	activeBead?: NativeBead;
+	pendingClaims: Map<string, TrackerRequest[]>;
 }
 
 interface ToolPathChange {
@@ -124,7 +141,11 @@ export interface SaveGuardFinding {
 	paths: string[];
 	aheadCount: number | null;
 	sharedPaths?: string[];
-
+	retiredPaths?: string[];
+	omittedPaths?: { path: string; reason: string }[];
+	beadPaths?: { bead: string; paths: string[] }[];
+	untrackedPaths?: string[];
+	publication?: string;
 }
 
 function addLocalPath(paths: ToolPathChange[], value: unknown): void {
@@ -268,9 +289,13 @@ function parsePatch(diff: string): PatchDelta {
 function snapshotFile(filePath: string): FileSnapshot {
 	try {
 		const stat = lstatSync(filePath);
-		if (stat.isSymbolicLink()) return { known: true, contents: readlinkSync(filePath) };
+		if (stat.isSymbolicLink()) {
+			const contents = readlinkSync(filePath);
+			return { known: true, contents, digest: `link:${contents}` };
+		}
 		if (!stat.isFile()) return { known: false, contents: null };
-		return { known: true, contents: readFileSync(filePath, "utf8") };
+		const bytes = readFileSync(filePath);
+		return { known: true, contents: bytes.toString("utf8"), digest: createHash("sha256").update(bytes).digest("hex") };
 	} catch (error) {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
 			return { known: true, contents: null };
@@ -318,15 +343,18 @@ function recordSessionDelta(
 	}
 	let contents = repository.sessionFileContents.get(repoPath);
 	if (!contents) {
-		contents = { baseline: before.contents, current: after.contents, known: true };
+		contents = { baseline: before.contents, current: after.contents, digest: after.digest, known: true, bead: before.bead };
 		repository.sessionFileContents.set(repoPath, contents);
 	} else {
-		if (!contents.known || contents.current !== before.contents) {
+		if (!contents.known || contents.current !== before.contents || contents.digest !== before.digest) {
 			contents.known = false;
 			repository.sessionDeltas.set(repoPath, { added: [], removed: [], known: false });
 			return;
 		}
 		contents.current = after.contents;
+		contents.digest = after.digest;
+		if (contents.bead?.id !== before.bead?.id || contents.bead?.db !== before.bead?.db ||
+			contents.bead?.actor !== before.bead?.actor) contents.beadConflict = true;
 	}
 	repository.sessionDeltas.set(repoPath, diffContents(contents.baseline, contents.current));
 }
@@ -358,6 +386,8 @@ function sessionStateFor(states: Map<string, SessionState>, sessionId: string): 
 			pendingToolPathSnapshots: new Map(),
 			rePrompts: 0,
 			warningEmitted: false,
+			lastOmissions: "",
+			pendingClaims: new Map(),
 		};
 		states.set(sessionId, state);
 	}
@@ -410,6 +440,7 @@ async function recordToolPaths(
 	cwd: string,
 	toolPaths: ToolPathChange[],
 	snapshots: Map<string, FileSnapshot> | undefined,
+	completedSnapshots: Map<string, FileSnapshot>,
 ): Promise<void> {
 	for (const change of toolPaths) {
 		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
@@ -443,8 +474,12 @@ async function recordToolPaths(
 			);
 			state.repositories.set(root, repository);
 		}
+		const before = snapshots?.get(absolutePath);
+		const after = completedSnapshots.get(absolutePath) ?? { known: false, contents: null };
+		// A successful tool result is not evidence of a write without a before/after byte change.
+		if (before?.known && after.known && before.contents === after.contents && before.digest === after.digest) continue;
 		repository.paths.add(repoPath);
-		recordSessionDelta(repository, repoPath, snapshots?.get(absolutePath), snapshotFile(absolutePath));
+		recordSessionDelta(repository, repoPath, before, after);
 	}
 }
 
@@ -553,7 +588,7 @@ async function upstreamHoldsSessionDelta(
 	if (!expected?.known || !repository.baselineHead || upstreamHead.length === 0) return false;
 	const contents = repository.sessionFileContents.get(repoPath);
 	const now = snapshotFile(path.join(repository.root, repoPath));
-	if (!contents?.known || !now.known || now.contents !== contents.current) return false;
+	if (!contents?.known || !now.known || now.contents !== contents.current || now.digest !== contents.digest) return false;
 	const diff = await runGit(exec, repository.root, [
 		"--literal-pathspecs", "diff", "--no-ext-diff", "--unified=0",
 		repository.baselineHead, upstreamHead, "--", repoPath,
@@ -577,21 +612,176 @@ async function upstreamRevision(exec: SaveGuardApi["exec"], root: string): Promi
 	}
 	return "";
 }
+/** An absent upstream path is retired only if upstream history actually deleted it. */
+async function retiredUpstream(
+	exec: SaveGuardApi["exec"],
+	repository: OwnedRepository,
+	upstreamHead: string,
+	repoPath: string,
+): Promise<boolean> {
+	if (!upstreamHead) return false;
+	const tree = await runGit(exec, repository.root, ["--literal-pathspecs", "ls-tree", "-z", upstreamHead, "--", repoPath]);
+	if (tree.code !== 0 || tree.stdout.length > 0) return false;
+	const deletion = await runGit(exec, repository.root, [
+		"--literal-pathspecs", "log", "-1", "--format=%H", "--diff-filter=D",
+		upstreamHead, "--", repoPath,
+	]);
+	return deletion.code === 0 && gitLine(deletion.stdout).length > 0;
+}
+
+function nativeTrackerDb(cwd: string, explicit?: string): string | undefined {
+	const localDb = path.join(cwd, ".beads", "beads.db");
+	let db = explicit;
+	if (!db) {
+		try { if (lstatSync(localDb).isFile()) db = localDb; } catch { /* use native BEADS_DB below */ }
+		db ??= process.env.BEADS_DB;
+	}
+	return db ? path.resolve(cwd, db) : undefined;
+}
+
+function nativeClaim(request: TrackerRequest): NativeBead | undefined {
+	const actor = request.actor ?? process.env.BR_ACTOR;
+	if (path.basename(request.bin) !== "br" || request.operation !== "claim" || request.ids.length !== 1 ||
+		!actor?.trim() || request.force || request.assignee !== null) return;
+	const db = nativeTrackerDb(request.cwd, request.db);
+	if (!db) return;
+	return { id: request.ids[0]!, actor: actor.trim(), db, cwd: request.cwd };
+}
+
+async function beadProblem(exec: SaveGuardApi["exec"], bead: NativeBead): Promise<string | undefined> {
+	try {
+		const result = await exec("br", ["--db", bead.db, "--no-auto-import", "--no-auto-flush",
+			"--lock-timeout", "100", "show", bead.id, "--json"], { cwd: bead.cwd, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
+		if (result.code !== 0 || result.stdout.length > 1024 * 1024) return `native bead ${bead.id} could not be read`;
+		const parsed: unknown = JSON.parse(result.stdout);
+		const row: unknown = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed;
+		if (typeof row !== "object" || row === null || !("id" in row) || row.id !== bead.id ||
+			!("status" in row) || typeof row.status !== "string" || !("assignee" in row)) return `native bead ${bead.id} response is incomplete`;
+		if (row.assignee !== bead.actor) return `native bead ${bead.id} is no longer assigned to ${bead.actor}`;
+		if (row.status !== "open" && row.status !== "in_progress" && row.status !== "blocked") return `native bead ${bead.id} is ${row.status}, not open`;
+	} catch { return `native bead ${bead.id} lookup is unavailable`; }
+}
+
+/** A resumed session may bind only the native actor's single active bead, never a guessed last-touched issue. */
+async function restoreNativeBead(exec: SaveGuardApi["exec"], cwd: string): Promise<NativeBead | undefined> {
+	const actor = process.env.BR_ACTOR?.trim();
+	const db = nativeTrackerDb(cwd);
+	if (!actor || !db) return;
+	try {
+		const result = await exec("br", ["--db", db, "--no-auto-import", "--no-auto-flush", "--lock-timeout", "100",
+			"list", "--status", "in_progress", "--assignee", actor, "--limit", "2", "--json"],
+			{ cwd, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
+		if (result.code !== 0 || result.stdout.length > 1024 * 1024) return;
+		const parsed: unknown = JSON.parse(result.stdout);
+		let rows: unknown;
+		// Older native builds return an array; current br returns an explicitly bounded page.
+		if (Array.isArray(parsed)) rows = parsed;
+		else if (typeof parsed === "object" && parsed !== null && "issues" in parsed && Array.isArray(parsed.issues) &&
+			"has_more" in parsed && parsed.has_more === false && "offset" in parsed && parsed.offset === 0 &&
+			(!("total" in parsed) || parsed.total === parsed.issues.length)) rows = parsed.issues;
+		else return;
+		if (!Array.isArray(rows) || rows.length !== 1) return;
+		const row: unknown = rows[0];
+		if (typeof row !== "object" || row === null || !("id" in row) || typeof row.id !== "string") return;
+		const bead = { id: row.id, actor, db, cwd };
+		if (!await beadProblem(exec, bead)) return bead;
+	} catch { /* ambiguous or unreadable native state is not an ownership claim */ }
+}
+
+/** Read the same current, server-matching native reservation view used by land. */
+async function foreignReservations(exec: SaveGuardApi["exec"], root: string, actor?: string): Promise<Map<string, string>> {
+	const foreign = new Map<string, string>();
+	try {
+		const result = await exec("am", ["robot", "reservations", "--all", "--project", root, "--json"],
+			{ cwd: root, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
+		if (result.code !== 0) return foreign;
+		const parsed: unknown = JSON.parse(result.stdout);
+		if (typeof parsed !== "object" || parsed === null || !("reservation_read_attestation" in parsed) ||
+			!("all_active" in parsed) || !Array.isArray(parsed.all_active)) return foreign;
+		const attestation = parsed.reservation_read_attestation;
+		if (typeof attestation !== "object" || attestation === null ||
+			!("state" in attestation) || attestation.state !== "current" ||
+			!("database_matches_server" in attestation) || attestation.database_matches_server !== true ||
+			!("storage_root_matches_server" in attestation) || attestation.storage_root_matches_server !== true) return foreign;
+		for (const row of parsed.all_active) {
+			if (typeof row !== "object" || row === null || !("exclusive" in row) || row.exclusive !== true ||
+				!("remaining_seconds" in row) || typeof row.remaining_seconds !== "number" || row.remaining_seconds <= 0 ||
+				!("agent" in row) || typeof row.agent !== "string" || !("path" in row) ||
+				typeof row.path !== "string" || row.agent === actor) continue;
+			if (path.isAbsolute(row.path) || row.path.split("/").includes("..")) continue;
+			foreign.set(row.path, row.agent);
+		}
+	} catch { /* unavailable native authority never becomes publication permission */ }
+	return foreign;
+}
+
+
+
+/** Consult the existing cache-only native CI consumer; a CI row alone never authorizes publication. */
+async function publicationStatus(exec: SaveGuardApi["exec"], root: string): Promise<string> {
+	const unknown = "CI UNKNOWN; publication evidence unqualified";
+	try {
+		const remote = await runGit(exec, root, ["remote", "get-url", "origin"]);
+		if (remote.code !== 0) return unknown;
+		const url = gitLine(remote.stdout);
+		let slug: string;
+		if (url.startsWith("git@github.com:")) slug = url.slice("git@github.com:".length);
+		else {
+			const parsedUrl = new URL(url);
+			if (parsedUrl.hostname !== "github.com") return unknown;
+			slug = parsedUrl.pathname.slice(1);
+		}
+		if (slug.endsWith(".git")) slug = slug.slice(0, -4);
+		if (slug.split("/").length !== 2) return unknown;
+		const head = await runGit(exec, root, ["rev-parse", "--verify", "HEAD"]);
+		if (head.code !== 0) return unknown;
+		const status = await exec("omp-kit", ["ci", "status", "--json"], { cwd: root, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
+		if (status.code !== 0 || status.stdout.length > 1024 * 1024) return unknown;
+		const envelope: unknown = JSON.parse(status.stdout);
+		if (typeof envelope !== "object" || envelope === null || !("ok" in envelope) || envelope.ok !== true ||
+			!("data" in envelope) || typeof envelope.data !== "object" || envelope.data === null ||
+			!("repos" in envelope.data) || typeof envelope.data.repos !== "object" || envelope.data.repos === null) return unknown;
+		const cache: unknown = (envelope.data.repos as Record<string, unknown>)[slug];
+		if (typeof cache !== "object" || cache === null || !("runs" in cache) || !Array.isArray(cache.runs)) return unknown;
+		let latest: Record<string, unknown> | undefined;
+		for (const value of cache.runs) {
+			if (typeof value !== "object" || value === null) continue;
+			const row = value as Record<string, unknown>;
+			if (row.sha !== gitLine(head.stdout) || typeof row.id !== "number" || !Number.isSafeInteger(row.id)) continue;
+			if (!latest || row.id > Number(latest.id)) latest = row;
+		}
+		if (!latest) return unknown;
+		const run = `run ${latest.id}`;
+		if (latest.stale !== false || ("stale" in cache && cache.stale === true) ||
+			("status" in cache && cache.status === "UNAVAILABLE")) return `CI UNKNOWN/stale ${run}; publication evidence unqualified`;
+		if (latest.status === "completed" && latest.conclusion !== "success") return `CI RED ${run}; no push authorized`;
+		return `CI ${latest.status === "completed" ? "observed success" : "UNKNOWN/pending"} ${run}; publication evidence unqualified`;
+	} catch { return unknown; }
+}
 
 export async function checkSaveState(
 	exec: SaveGuardApi["exec"],
 	repository: OwnedRepository,
 ): Promise<SaveGuardFinding | null> {
+	const actors = new Set(Array.from(repository.sessionFileContents.values()).flatMap(contents => contents.bead ? [contents.bead.actor] : []));
+	const actor = actors.size === 1 ? actors.values().next().value : process.env.BR_ACTOR?.trim();
+	const reservations = await foreignReservations(exec, repository.root, actor);
 	const ownedPaths = Array.from(repository.paths).filter(path => !isAgentTempPath(path)).sort();
-	if (ownedPaths.length === 0) return null;
+	if (ownedPaths.length === 0 && reservations.size === 0) return null;
 
 	const status = await runGit(exec, repository.root, [
 		"--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
-		"--", ...ownedPaths,
 	]);
 	if (status.code !== 0) return null;
 
 	const statuses = statusEntries(status.stdout);
+	const foreign = new Map<string, string>();
+	const relevantPaths = new Set([...statuses.keys(), ...ownedPaths]);
+	for (const [pattern, holder] of reservations) {
+		for (const repoPath of relevantPaths) {
+			if (repoPath === pattern || repoPath.startsWith(`${pattern}/`) || path.matchesGlob(repoPath, pattern)) foreign.set(repoPath, holder);
+		}
+	}
 	const ownedPathSet = new Set(ownedPaths);
 	const dirtyPaths = Array.from(statuses.keys()).filter(path => ownedPathSet.has(path)).sort();
 	const upstreamHead = await upstreamRevision(exec, repository.root);
@@ -611,57 +801,80 @@ export async function checkSaveState(
 
 	const pendingPaths = new Set<string>();
 	const sharedPaths = new Set<string>();
-	const savedPaths = new Set<string>();
-	for (const repoPath of dirtyPaths) {
-		// Published means the current content is byte-identical to the upstream copy, or the upstream
-		// already carries this session's patch while the shared worktree still holds a peer's hunks.
+	const retiredPaths: string[] = [];
+	const omittedPaths: { path: string; reason: string }[] = [];
+	const beadPaths = new Map<string, { bead: string; paths: string[] }>();
+	const untrackedPaths: string[] = [];
+	const beadProblems = new Map<string, string | undefined>();
+	// Peer-accounted dirty paths never become save demands, even without local write events.
+	for (const [repoPath, holder] of foreign) {
+		if (statuses.has(repoPath)) omittedPaths.push({ path: repoPath, reason: `held by ${holder}; no save demand for this session` });
+	}
+	for (const repoPath of ownedPaths) {
+		if (foreign.has(repoPath)) continue;
+		const contents = repository.sessionFileContents.get(repoPath);
+		const now = snapshotFile(path.join(repository.root, repoPath));
+		if (await retiredUpstream(exec, repository, upstreamHead, repoPath)) {
+			retiredPaths.push(repoPath);
+			continue;
+		}
+		if (!dirtyPaths.includes(repoPath) && aheadCount === 0) continue;
+		if (!contents?.known || !now.known) {
+			omittedPaths.push({ path: repoPath, reason: "write attribution unavailable: missing or unreadable before/after bytes" });
+			continue;
+		}
+		if (now.contents !== contents.current || now.digest !== contents.digest) {
+			omittedPaths.push({ path: repoPath, reason: "current bytes differ from this session's last write; later writer or unknown custody" });
+			continue;
+		}
 		const current = await workingBlob(exec, repository.root, repoPath);
-		if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current)) {
-			savedPaths.add(repoPath);
+		if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current) ||
+			await upstreamHoldsSessionDelta(exec, repository, upstreamHead, repoPath)) continue;
+		if (!contents.bead || contents.beadConflict) {
+			omittedPaths.push({ path: repoPath, reason: contents.beadConflict
+				? "writes span native beads; whole-file owner handoff required, never split hunks"
+				: "no native open-bead association was observed for this write; route to the owner" });
+			continue;
+		}
+		const beadKey = `${contents.bead.db}\0${contents.bead.id}`;
+		if (!beadProblems.has(beadKey)) beadProblems.set(beadKey, await beadProblem(exec, contents.bead));
+		const problem = beadProblems.get(beadKey);
+		if (problem) {
+			omittedPaths.push({ path: repoPath, reason: problem });
 			continue;
 		}
 		const actual = await diffFromBaseline(exec, repository, repoPath);
 		const expected = repository.sessionDeltas.get(repoPath);
+		const dirty = dirtyPaths.includes(repoPath);
+		// A repository-wide ahead count cannot attribute a peer's commit to every old path.
+		if (!dirty && !(aheadCount !== null && aheadCount > 0 && actual?.known)) continue;
 		const untracked = statuses.get(repoPath) === "??" && !repository.baselineDirtyPaths.has(repoPath);
 		const mixed = repository.baselineDirtyPaths.has(repoPath) ||
 			(!repository.baselineStatusKnown && !untracked) ||
 			(!untracked && (!actual || !expected?.known || !samePatch(actual, expected)));
-		if (await upstreamHoldsSessionDelta(exec, repository, upstreamHead, repoPath)) {
-			savedPaths.add(repoPath);
-			continue;
-		}
 		pendingPaths.add(repoPath);
+		if (!mixed) {
+			let group = beadPaths.get(beadKey);
+			if (!group) {
+				group = { bead: contents.bead.id, paths: [] };
+				beadPaths.set(beadKey, group);
+			}
+			group.paths.push(repoPath);
+			if (untracked) untrackedPaths.push(repoPath);
+		}
 		if (mixed) sharedPaths.add(repoPath);
 	}
-	if (aheadCount !== null && aheadCount > 0) {
-		for (const repoPath of ownedPaths) {
-			if (savedPaths.has(repoPath)) continue;
-			// Current content already on the upstream (for example a local commit that landed there under
-			// a different sha) is published, not unsaved.
-			const current = await workingBlob(exec, repository.root, repoPath);
-			if (await revisionHoldsContent(exec, repository.root, upstreamHead, repoPath, current)) {
-				savedPaths.add(repoPath);
-				continue;
-			}
-			const actual = await diffFromBaseline(exec, repository, repoPath);
-			const expected = repository.sessionDeltas.get(repoPath);
-			const mixed = repository.baselineDirtyPaths.has(repoPath) ||
-				(!repository.baselineStatusKnown && actual !== null) ||
-				(actual !== null && (!expected?.known || !samePatch(actual, expected)));
-			if (await upstreamHoldsSessionDelta(exec, repository, upstreamHead, repoPath)) {
-				savedPaths.add(repoPath);
-				continue;
-			}
-			pendingPaths.add(repoPath);
-			if (mixed) sharedPaths.add(repoPath);
-		}
-	}
-	if (pendingPaths.size === 0) return null;
+	if (pendingPaths.size === 0 && retiredPaths.length === 0 && omittedPaths.length === 0) return null;
 	return {
 		root: repository.root,
 		paths: Array.from(pendingPaths).sort(),
 		aheadCount,
 		sharedPaths: Array.from(sharedPaths).sort(),
+		retiredPaths,
+		omittedPaths,
+		beadPaths: Array.from(beadPaths.values()),
+		untrackedPaths,
+		publication: pendingPaths.size > 0 ? await publicationStatus(exec, repository.root) : undefined,
 	};
 }
 
@@ -676,7 +889,9 @@ function formatFinding(finding: SaveGuardFinding): string {
 	const saveMode = sharedPaths.length > 0
 		? ` shared-with-peers=[${sharedPaths.map(path => JSON.stringify(path)).join(", ")}]`
 		: "";
-	return `repo ${JSON.stringify(finding.root)} paths [${paths}] ahead=${ahead}${saveMode}`;
+	const retired = (finding.retiredPaths ?? []).map(path => `${JSON.stringify(path)}: retired upstream: archive (refs/preserve) or drop; never commit`).join(", ");
+	const omitted = (finding.omittedPaths ?? []).map(item => `${JSON.stringify(item.path)}: ${item.reason}`).join(", ");
+	return `repo ${JSON.stringify(finding.root)} paths [${paths}] ahead=${ahead}${saveMode}${retired ? ` retired=[${retired}]` : ""}${omitted ? ` omitted=[${omitted}]` : ""}${finding.publication ? ` ${finding.publication}` : ""}`;
 }
 
 function formatSavePrompt(findings: SaveGuardFinding[]): string {
@@ -684,18 +899,19 @@ function formatSavePrompt(findings: SaveGuardFinding[]): string {
 	const steps: string[] = [];
 	for (const finding of findings) {
 		const sharedPaths = new Set(finding.sharedPaths ?? []);
-		const plainPaths = finding.paths.filter(path => !sharedPaths.has(path));
-		if (plainPaths.length > 0) {
-			const paths = plainPaths.map(path => JSON.stringify(path)).join(", ");
-			const commandPaths = plainPaths.map(shellQuote).join(" ");
-			steps.push(`repo ${JSON.stringify(finding.root)}: reserve ${paths}; run git commit --only -m "<msg> [level]" -- ${commandPaths}; git push origin main (if origin moved: python3 ~/Developer/omp-kit/scripts/git_converge.py --repo ${shellQuote(finding.root)} --push); release the reservation`);
+		const untrackedPaths = new Set(finding.untrackedPaths ?? []);
+		for (const group of finding.beadPaths ?? []) {
+			const paths = group.paths.map(path => JSON.stringify(path)).join(", ");
+			const addPaths = group.paths.filter(path => untrackedPaths.has(path));
+			const addStep = addPaths.length > 0 ? `git --literal-pathspecs add -- ${addPaths.map(shellQuote).join(" ")}; ` : "";
+			steps.push(`repo ${JSON.stringify(finding.root)}, native bead ${JSON.stringify(group.bead)}: confirm native lease custody and a coherent whole-file source/test unit for ${paths}; reserve ${paths}; ${addStep}git --literal-pathspecs commit --only -m "<msg> [level]" -- ${group.paths.map(shellQuote).join(" ")}; release the reservation; keep publication with its qualified owner`);
 		}
 		if (sharedPaths.size > 0) {
 			const paths = Array.from(sharedPaths).map(path => JSON.stringify(path)).join(", ");
 			steps.push(`repo ${JSON.stringify(finding.root)}: ${paths} also hold another session's uncommitted hunks: message each path's holder (Agent Mail) to commit the whole file on main or hand it back; never build or push a private-index candidate (one history per repo)`);
 		}
 	}
-	return `Unsaved session-owned work remains (${details}). Save before ending: ${steps.join("; ")}.`;
+	return `Unsaved byte-attributed work remains (${details}). Save before ending: ${steps.join("; ")}. Attribution is not lease, open-bead, or publication authorization. Do not combine beads. Publication qualification is UNKNOWN here: no push is authorized; source/test completeness and qualifying evidence must be checked by the native publication owner.`;
 }
 
 function formatWarning(findings: SaveGuardFinding[]): string {
@@ -710,6 +926,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const state = sessionStateFor(sessions, sessionId);
 		state.pendingToolPathWork = state.pendingToolPathWork
 			.then(() => recordSessionStart(pi.exec.bind(pi), state, ctx.cwd))
+			.then(async () => { state.activeBead ??= await restoreNativeBead(pi.exec.bind(pi), ctx.cwd); })
 			.catch(() => undefined);
 		await state.pendingToolPathWork;
 	});
@@ -718,9 +935,15 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		if (event.toolCallId.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
+		const state = sessionStateFor(sessions, sessionId);
+		if (event.toolName === "bash" && typeof event.input === "object" && event.input !== null &&
+			"command" in event.input && typeof event.input.command === "string") {
+			const cwd = "cwd" in event.input && typeof event.input.cwd === "string" ? path.resolve(ctx.cwd, event.input.cwd) : ctx.cwd;
+			state.pendingClaims.set(event.toolCallId, trackerRequests(event.input.command, cwd, process.env.HOME ?? ctx.cwd));
+		}
 		const snapshots = pathsFromToolCall(event, ctx.cwd);
 		if (snapshots.size === 0) return;
-		const state = sessionStateFor(sessions, sessionId);
+		for (const snapshot of snapshots.values()) snapshot.bead = state.activeBead;
 		state.pendingToolPathSnapshots.set(event.toolCallId, snapshots);
 	});
 
@@ -729,12 +952,36 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
 		const pathSnapshots = state?.pendingToolPathSnapshots.get(event.toolCallId);
 		if (state) state.pendingToolPathSnapshots.delete(event.toolCallId);
+		const claims = state?.pendingClaims.get(event.toolCallId);
+		state?.pendingClaims.delete(event.toolCallId);
+		if (state && claims?.length) state.activeBead = undefined;
+		let claimSucceeded = !event.isError;
+		const envelope = event.result;
+		const details = typeof envelope === "object" && envelope !== null && "details" in envelope ? envelope.details : undefined;
+		for (const result of [envelope, details]) {
+			if (typeof result !== "object" || result === null) continue;
+			if (("exitCode" in result && typeof result.exitCode === "number" && result.exitCode !== 0) ||
+				("code" in result && typeof result.code === "number" && result.code !== 0) ||
+				("truncated" in result && result.truncated === true) || ("partial" in result && result.partial === true)) claimSucceeded = false;
+		}
+		if (state && claims && claimSucceeded) {
+			for (const request of claims) {
+				const bead = nativeClaim(request);
+				if (bead && !await beadProblem(pi.exec.bind(pi), bead)) state.activeBead = bead;
+			}
+		}
 		if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") return;
 		const paths = pathsFromToolEvent(event, ctx.cwd);
 		if (paths.length === 0 || sessionId.length === 0) return;
 		const currentState = state ?? sessionStateFor(sessions, sessionId);
+		// Freeze the result bytes before asynchronous repository discovery can observe a peer's next write.
+		const completedSnapshots = new Map<string, FileSnapshot>();
+		for (const change of paths) {
+			const absolutePath = path.resolve(ctx.cwd, change.path);
+			completedSnapshots.set(absolutePath, snapshotFile(absolutePath));
+		}
 		currentState.pendingToolPathWork = currentState.pendingToolPathWork
-			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots))
+			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots, completedSnapshots))
 			.catch(() => undefined);
 		await currentState.pendingToolPathWork;
 	});
@@ -756,6 +1003,14 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 			if (finding) findings.push(finding);
 		}
 		if (findings.length === 0) return;
+		if (findings.every(finding => finding.paths.length === 0)) {
+			const omissions = findings.map(formatFinding).join("; ");
+			if (omissions !== state.lastOmissions) {
+				state.lastOmissions = omissions;
+				ctx.ui.notify(`kit-save-guard: no save demand; ${omissions}`, "info");
+			}
+			return;
+		}
 		if (state.rePrompts < MAX_REPROMPTS_PER_TURN) {
 			state.rePrompts += 1;
 			return { decision: "block", reason: formatSavePrompt(findings) };

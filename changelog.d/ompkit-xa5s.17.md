@@ -1,0 +1,3 @@
+- Restrict save reminders to current byte-attributed writes on freshly checked native open beads, keep whole-file saves separate by bead, route foreign reservations and later-writer omissions without commit demands, report upstream-retired files as archive-or-drop, and name cached CI blockers without authorizing publication.
+- Restore native bead attribution from complete tracker pagination envelopes as well as older array responses; incomplete, shifted, inconsistent, or ambiguous pages never authorize a save.
+- Save recipes use literal Git pathspecs for both exact-path add and per-bead commit, introducing only eligible untracked files without adding tracked or foreign paths.
