@@ -338,11 +338,9 @@ class ScopedRunTests(unittest.TestCase):
         self.assertIn(b"ok", result.stdout)
 
     def test_timeout_receipt_names_interrupted_ladder_stage_and_elapsed_ms(self) -> None:
-        work = Path(tempfile.mkdtemp(prefix="interrupted-ladder-", dir=ROOT / "var" / "agent-tmp"))
-        self.addCleanup(shutil.rmtree, work, True)
         with self.assertRaises(subprocess.TimeoutExpired) as timeout:
             native_candidate.run_scoped(
-                ["/bin/sh", str(ROOT / "scripts" / "ladder.sh"), "--selftest-interruption", "e2e-live", str(work)],
+                ["/bin/sh", str(ROOT / "scripts" / "ladder.sh"), "--selftest-interruption", "e2e-live"],
                 cwd=str(ROOT), env=os.environ.copy(), timeout=0.15)
 
         detail = native_candidate.timeout_detail("full", timeout.exception, 0.15)

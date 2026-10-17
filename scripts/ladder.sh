@@ -6,10 +6,6 @@ set -u
 run_stage() { # run_stage <label> <log> <cmd...>
   stage_label=$1; stage_log=$2; shift 2
   printf 'OMP_KIT_STAGE_START name=%s\n' "$stage_label"
-  # Timeout receipts parse timestamped markers on supervisor stderr; the
-  # runtime bridge and logs consume the name-only stdout marker. Neither
-  # consumer reads both streams, so this is one event, not a duplicate.
-  printf 'OMP_KIT_STAGE_START name=%s started_at_ms=%s000\n' "$stage_label" "$(date +%s)" >&2
   stage_pipe="$stage_log.pipe"
   mkfifo "$stage_pipe" || return 125
   tee "$stage_log" < "$stage_pipe" &
@@ -38,8 +34,10 @@ if [ "$#" -ge 2 ] && [ "$1" = "--selftest-timing" ]; then
   run_stage manifest "$selftest_dir/ladder-manifest.txt" "$@"
   exit $?
 fi
-if [ "$#" -eq 3 ] && [ "$1" = "--selftest-interruption" ]; then
-  run_stage "$2" "$3/ladder-interruption.txt" sleep 300
+if [ "$#" -ge 2 ] && [ "$1" = "--selftest-interruption" ]; then
+  selftest_stage=$2
+  printf 'OMP_KIT_STAGE_START name=%s started_at_ms=%s000\n' "$selftest_stage" "$(date +%s)" >&2
+  sleep 300
   exit $?
 fi
 REGEX_BUDGET_RUNS=1
