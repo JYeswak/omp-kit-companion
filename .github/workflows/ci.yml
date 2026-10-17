@@ -98,6 +98,16 @@ jobs:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Install bubblewrap for Linux integration containment
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+          smoke="$RUNNER_TEMP/bwrap-containment"
+          mkdir -p "$smoke"
+          bwrap --ro-bind / / --bind "$smoke" "$smoke" --proc /proc --dev /dev --share-net --die-with-parent -- /usr/bin/true
       - name: Install certified OMP and TypeScript LSP for CLI contracts
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
