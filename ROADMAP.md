@@ -6,6 +6,8 @@ status: current
 
 omp-kit is built in public. This file is the plan of record: what is done, what is in review, and what is next. Every pull request that changes the status of an item updates this file in the same change.
 
+The rolling-release section below defines current delivery priorities. Older cut and review entries are historical references, not version pins or prerequisites for the next release.
+
 ## Mission (approved by the maintainer, 2026-10-04)
 
 omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintainer's own fleet is the proving ground.
@@ -95,13 +97,31 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
 | Memory doctor reports read-only CASS status and static LaunchAgent declarations separately from retrieval qualification | ompkit-bj08.10 (IN PROGRESS) |
 
-## Next
+## Rolling releases (reviewed 2026-10-17)
 
-1. **Latest-OMP certification.** #25 found that memory inspection gates on the OMP version string (18.4.2) rather than on the reviewed source bytes, which are identical in 18.4.9. Gate on content instead.
-2. **`omp-kit service`:** install/status/doctor for the kit's own background jobs, following the launchd pattern of established CLIs. Then a scratch reaper that runs as one of those jobs, so agent scratch is reclaimed without anyone deleting by hand.
-3. **Rules that enforce the save/store/push procedures** every session loads (no scratch in `/tmp`, no pattern kills, no force-push).
-4. **OMP late-interrupt fix upstream:** reported as can1357/oh-my-pi#14018, fixed in PR #14020 (not yet released). When a release contains it, the report-only probe becomes a gate again.
-5. **After the plugin route has users:** remove `apply rules`/`apply extensions`.
+Requested by the maintainer: group the actual backlog into releases that improve the running system. Version numbers are allocated by the train, not assigned to phases. A wave may ship several small releases; completing an entire epic is never a release gate.
+
+**Current cut:** source `2269d7169bfbddba12ef95e1d9adf741e38f0d46` passed [main CI](https://github.com/JYeswak/omp-kit-companion/actions/runs/39071018537). The [automatic train](https://github.com/JYeswak/omp-kit-companion/actions/runs/39071796183) started [native qualification](https://github.com/JYeswak/omp-kit-companion/actions/runs/39071814591). This is not yet a published release or an installed upgrade.
+
+| Order | Delivered outcome | First tracked scope | Deployment criterion |
+|---|---|---|---|
+| 1. Restore delivery | Green source becomes a certified, signed release without a human cutting a version | `ompkit-v66l`, `.12` native staging, `.13` signed-upgrade runner; source-bound notes and signer admission | All shipping platforms and supported OMP tracks certify; signed final bytes pass real installation and compiled-upgrade checks; publication and an actual installed upgrade are verified |
+| 2. Routine upgrades | Releases reach running consumers without manual rescue | `ompkit-774u.4`, `ompkit-v66l`: update/relink/restart and installed-versus-loaded proof; correct the publication/working-tree custody boundary exposed by the current cut | A real previous-to-new upgrade reaches the running consumer; failed postchecks and recovery are exercised; unrelated edits or editing leases do not veto publication of an admitted committed snapshot |
+| 3. Continuous native Tern work | Workers receive work, finish it, and continue safely | `ompkit-kdbz.2.5`, `.2.6`, `.2.14`, `ompkit-rhy9.6`: native delivery, watcher qualification, goal restoration and restart reconciliation | Actual conversation delivery leads to useful work; paused/ambiguous targets remain protected; retries do not duplicate input; an active-goal flag alone earns no credit |
+| 4. Portable and resilient defaults | Fresh installations work without our private fleet machinery | `ompkit-oq1h.2`, `.3`, `.4`, `.5`: optional fleet guards, safe compaction behavior, stock extension CI and truthful optional-tool health; bounded storage/recovery follows | Stock macOS/Linux consumers operate without private paths or mandatory fleet tools; invalid or unavailable dependencies remain explicit; recovery preserves live work |
+| 5. Verified capability and ecosystem adoption | The broader native SDK and consumers genuinely use the released kit | Remaining `ompkit-kdbz.2.13` native SDK acceptance, `ompkit-oq1h.6` capability discovery, and broader `ompkit-774u.4` rollout | Native behavior is verified by API family and context; gaps remain explicit; each admitted consumer shows the new running code rather than just a new binary on disk |
+
+### Cut selection and operating cadence
+
+- **Current / next / later:** the director maintains one executing cut, one dependency-ready following cut, and the later waves above. Existing bead acceptance remains authoritative; this table neither closes beads nor weakens their checks.
+- **Choose by effect:** unblock reliable delivery first, automatic consumer upgrades second, sustained worker throughput third. A dashboard or a larger planning document is not a substitute for those outcomes.
+- **Per cut:** select a substantive, independently verifiable fix; save it to shared main; let CI and the train qualify its immutable SHA; publish; install and verify the running result; then advance the next cut. No empty bumps or rehearsal releases count.
+- **Keep development moving:** unfinished working-tree edits stay untouched. Editing custody protects mutation of those files; publication judges the admitted committed snapshot. One failed cut is repaired forward without canceling unrelated healthy work.
+- **Daily:** reorder the following cut using actual failures, upgrade lag, user impact and ready dependencies. Record the exact source, published result and installed/loaded result separately.
+- **Weekly:** review commit-to-publish latency, publish-to-running latency, upgrade failures/recovery and reopened work. Change the order when those measurements expose a stronger bottleneck; do not wait for a weekly release day.
+- **Five-cycle proof:** five consecutive substantive releases must each complete certification, signed publication and a real previous-to-new upgrade. Five tags, source-only saves or forwarding fixtures do not satisfy it.
+
+Retire or replace each wave row when its outcome is delivered or superseded at the next roadmap review. The roadmap is not an additional approval loop and never delays a ready hotfix.
 
 ### Decided 2026-10-04 (maintainer), in the tracker, not yet built
 
