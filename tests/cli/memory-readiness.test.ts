@@ -4,11 +4,15 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const fixtures: string[] = [];
-const INSTALLED_OMP_PATH = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
+const EXPLICIT_OMP_SOURCE = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH;
+const INSTALLED_OMP_PATH = EXPLICIT_OMP_SOURCE ?? Bun.which("omp");
 if (!INSTALLED_OMP_PATH) throw new Error("memory-readiness tests require an installed OMP on PATH");
-const INSTALLED_OMP_ROOT = dirname(dirname(realpathSync(INSTALLED_OMP_PATH)));
+const INSTALLED_OMP_ROOT = EXPLICIT_OMP_SOURCE
+	? dirname(dirname(realpathSync(EXPLICIT_OMP_SOURCE)))
+	: resolveOmpIdentity().packageRoot;
 const INSTALLED_OMP_VERSION = JSON.parse(readFileSync(join(INSTALLED_OMP_ROOT, "package.json"), "utf8")).version as string;
 const OMP_SOURCE_FILES = [
 	"src/memory-backend/redact.ts",
@@ -195,7 +199,7 @@ test("synthetic redactor canaries report source-pinned limits without exposing c
 	const f = fixture(INSTALLED_OMP_VERSION);
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  llmMode: none\n  noEmbeddings: true\n");
 	const before = [snapshot(f.home), snapshot(f.project)];
-	const report = await f.inspect(INSTALLED_OMP_PATH);
+	const report = await f.inspect();
 	expect(report.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
 	expect(report.redactor.missed).toContain("pem_private_key");
 	expect(report.backend).toBe("mnemopi");
