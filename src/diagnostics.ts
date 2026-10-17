@@ -884,7 +884,7 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 		status === "OK" ? "Every live pane resolves to exactly one registered identity" :
 		shared.length ? `One identity resolves on multiple live panes: ${shared.map((row) => `${row.name} (${row.panes.join(", ")})`).join("; ")}` :
 		`Pane identity gaps: ${noFile.length ? `${noFile.length} live pane(s) without an identity file` : ""}${noFile.length && stale.length ? "; " : ""}${stale.length ? `idle registration(s) with no live pane: ${stale.map((row) => row.name).join(", ")}` : ""}`,
-		"Register each pane at spawn (agent-spawn-env.sh) and give every pane its own identity; resolve collisions before trusting that pane's writes.",
+		"Register each pane with native Agent Mail, then project its verified own-caller identity with agent-spawn-env.sh; resolve collisions before trusting writes.",
 		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
 }
 
