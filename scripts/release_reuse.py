@@ -612,6 +612,70 @@ def _authorize_selection(repository: str, binding: dict[str, Any], notes: bytes,
     return qualified
 
 
+def _require_native_staging(repository: str, run: dict[str, Any], artifacts: dict[str, Any],
+                            index: dict[str, Any], source_sha: str, omp_versions: dict[str, str]) -> None:
+    producer = {"repository": repository,
+                "workflow_ref": f"{repository}/{RELEASE_WORKFLOW}@refs/heads/main",
+                "run_id": str(run["id"]), "run_attempt": str(run["run_attempt"])}
+    for platform in SHIPPING_PLATFORMS:
+        for track in NATIVE_TRACKS:
+            name = f"native-receipt-{platform}-{track}-attempt-{run['run_attempt']}"
+            artifact = next(row for row in artifacts["artifacts"] if row.get("name") == name)
+            receipt = json.loads(_artifact_files(repository, artifact, {"receipt.json"})["receipt.json"])
+            expected_native = {"source_sha": source_sha, "version": index["version"], "platform": platform,
+                               "omp_track": track, "requested_omp_version": omp_versions[track],
+                               "omp_version": omp_versions[track]}
+            if (not isinstance(receipt, dict) or receipt.get("certified") is not True
+                    or any(receipt.get(key) != value for key, value in expected_native.items())):
+                raise ValueError(f"native candidate source/platform/OMP outcome differs: {platform}/{track}")
+            staging = receipt.get("archive_staging")
+            expected = {
+                "schema_version": 1, "scope": "source-workflow-integrity", "source_sha": source_sha,
+                "archive_sha256": index["assets"][platform]["sha256"],
+                "manifest_sha256": index["assets"][platform]["manifest_sha256"],
+                "producer": producer, "public_installation": "NOT_VERIFIED",
+            }
+            if (not isinstance(staging, dict) or staging != expected
+                    or type(staging.get("schema_version")) is not int
+                    or not isinstance(staging.get("producer"), dict)
+                    or type(staging["producer"].get("run_attempt")) is not str):
+                raise ValueError(f"candidate staging is not bound to the authorized native producer: {platform}/{track}")
+    _current_attempt(repository, run)
+
+
+def _require_signed_consumers(repository: str, run: dict[str, Any], artifacts: dict[str, Any],
+                              index: dict[str, Any], index_bytes: bytes, source_sha: str) -> None:
+    attempt = run["run_attempt"]
+    names = {f"signed-consumer-{platform}-attempt-{attempt}" for platform in SHIPPING_PLATFORMS}
+    _require_snapshot(run, artifacts, names)
+    published = _published(repository)
+    version = index["version"]
+    index_hash = hashlib.sha256(index_bytes).hexdigest()
+    for platform in SHIPPING_PLATFORMS:
+        name = f"signed-consumer-{platform}-attempt-{attempt}"
+        artifact = next(row for row in artifacts["artifacts"] if row.get("name") == name)
+        receipt = json.loads(_artifact_files(repository, artifact, {"receipt.json"})["receipt.json"])
+        expected = {
+            "schema_version": 1, "kind": "signed-native-consumer", "platform": platform,
+            "version": version, "source_sha": source_sha,
+            "archive_sha256": index["assets"][platform]["sha256"], "index_sha256": index_hash,
+            "run_id": str(run["id"]), "run_attempt": attempt, "installed_version": version,
+        }
+        if (not isinstance(receipt, dict) or set(receipt) != set(expected) | {"previous_version", "checks"}
+                or any(receipt.get(key) != value for key, value in expected.items())
+                or type(receipt.get("schema_version")) is not int or type(receipt.get("run_attempt")) is not int):
+            raise ValueError(f"signed native consumer identity or installed bytes differ: {platform}")
+        checks = receipt.get("checks")
+        if (not isinstance(checks, dict) or set(checks) != {"public_installer", "compiled_upgrade"}
+                or any(value is not True for value in checks.values())):
+            raise ValueError(f"signed native public installer and compiled upgrade did not both pass: {platform}")
+        previous = receipt.get("previous_version")
+        if (not isinstance(previous, str) or not stable_version(previous) or f"v{previous}" not in published
+                or tuple(map(int, previous.split("."))) >= tuple(map(int, version.split(".")))):
+            raise ValueError(f"signed native consumer did not upgrade a genuine older published release: {platform}")
+    _current_attempt(repository, run)
+
+
 def _verify_final(args: argparse.Namespace) -> int:
     proof, index = _read_json(args.proof), _read_json(args.index)
     run, artifacts = _read_json(args.run), _read_json(args.artifacts)
@@ -642,12 +706,17 @@ def _verify_final(args: argparse.Namespace) -> int:
             or selected_files["selection.json"] != Path(args.binding).read_bytes()
             or selected_files["release-notes.md"] != Path(args.notes).read_bytes()):
         raise ValueError("downloaded proof/index/selection is not the exact native attempt snapshot")
+    omp_versions = _read_json(args.omp_config)
     if not candidate_index_matches(proof, index, source_sha=args.source_sha, base_version=args.version,
-                                   run_id=args.run_id, omp_versions=_read_json(args.omp_config),
+                                   run_id=args.run_id, omp_versions=omp_versions,
                                    final_version=args.version):
         raise ValueError("final source/version/platforms/both pinned OMP tracks do not match")
     _authorize_selection(args.repository, binding, Path(args.notes).read_bytes(), args.source_sha, args.version,
                          args.train_id, run if args.phase == "qualify" else None)
+    if args.phase == "qualify":
+        _require_native_staging(args.repository, run, artifacts, index, args.source_sha, omp_versions)
+    if args.phase == "sign":
+        _require_signed_consumers(args.repository, run, artifacts, index, Path(args.index).read_bytes(), args.source_sha)
     print(f"FINAL=verified source_sha={args.source_sha} version={args.version} phase={args.phase}")
     return 0
 
@@ -948,8 +1017,8 @@ def _drive(args: argparse.Namespace) -> int:
             print("TRAIN=skip REASON=no-qualified-unreleased-source")
             return _store_plan(args, {"kind": "skip"})
         protocol = _command(["git", "show", f"{sha}:{RELEASE_WORKFLOW}"])
-        if "# ROLLING-RELEASE-V2" not in protocol:
-            print(f"TRAIN=skip REASON=source-predates-certified-reuse-protocol source_sha={sha}")
+        if "# ROLLING-RELEASE-V3:" not in protocol:
+            print(f"TRAIN=skip REASON=source-predates-signed-consumer-protocol source_sha={sha}")
             return _store_plan(args, {"kind": "skip"})
         # Do not automatically repeat a failed qualification with identical inputs.
         if any(row.get("status") == "completed" and row.get("conclusion") != "success"
@@ -1186,6 +1255,13 @@ def _repair_release(args: argparse.Namespace) -> int:
     expected: dict[str, Path] = {"release-index.json": Path(args.index)}
     if set(index.get("assets", {})) != set(SHIPPING_PLATFORMS):
         raise ValueError("repair requires the exact certified ship set")
+    if not final_run_matches(producer, repository=args.repository, source_sha=args.source_sha,
+                             version=args.version, train_id=binding["train_run_id"], phase="sign"):
+        raise ValueError("repair requires the successful exact tag-ref signing producer")
+    pages = _api(args.repository, f"actions/runs/{producer['id']}/artifacts?per_page=100", paginate=True)
+    _require_signed_consumers(args.repository, producer,
+                              {"artifacts": [row for page in pages for row in page["artifacts"]]},
+                              index, Path(args.index).read_bytes(), args.source_sha)
     for platform in SHIPPING_PLATFORMS:
         archive_dir = Path(args.archives) / platform
         if not archive_matches_index(index, platform, archive_dir):

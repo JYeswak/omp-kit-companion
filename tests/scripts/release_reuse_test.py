@@ -136,8 +136,31 @@ def final_authority(values: dict[str, Any], latest: dict[str, Any] | None = None
                    "release-index.json": json.dumps(values["index"]).encode()}
     selection_files = {"selection.json": json.dumps(values["binding"]).encode(), "release-notes.md": notes}
     def artifacts(repository, row, expected):
+        if row["name"].startswith("signed-consumer-"):
+            platform = row["name"].removeprefix("signed-consumer-").rsplit("-attempt-", 1)[0]
+            return {"receipt.json": json.dumps(values["signed_consumers"][platform]).encode()}
+        if row["name"].startswith("native-receipt-"):
+            identity = row["name"].removeprefix("native-receipt-").rsplit("-attempt-", 1)[0]
+            platform, track = identity.rsplit("-", 1)
+            stage = {
+                "schema_version": 1, "scope": "source-workflow-integrity",
+                "source_sha": SOURCE_SHA, "archive_sha256": values["index"]["assets"][platform]["sha256"],
+                "manifest_sha256": values["index"]["assets"][platform]["manifest_sha256"],
+                "public_installation": "NOT_VERIFIED",
+                "producer": {"repository": REPOSITORY,
+                             "workflow_ref": f"{REPOSITORY}/{release_reuse.RELEASE_WORKFLOW}@refs/heads/main",
+                             "run_id": str(values["run"]["id"]), "run_attempt": str(values["run"]["run_attempt"])},
+            }
+            stage.update(values.get("staging_overrides", {}).get(identity, {}))
+            receipt = {"source_sha": SOURCE_SHA, "version": BASE_VERSION, "platform": platform,
+                       "omp_track": track, "requested_omp_version": OMP_VERSIONS[track],
+                       "omp_version": OMP_VERSIONS[track], "certified": True, "archive_staging": stage}
+            return {"receipt.json": json.dumps(receipt).encode()}
         return index_files if row["name"].startswith("unpublished-candidate-index") else selection_files
     def api(repository, endpoint, **kwargs):
+        if endpoint == "releases?per_page=100":
+            return [[{"tag_name": tag, "draft": False, "prerelease": False}
+                     for tag in values.get("published", ["v0.2.19"])]]
         return qualified if qualified is not None and endpoint == f"actions/runs/{RUN_ID}" else (latest or values["run"])
     with patch.object(release_reuse, "_load_owner_authority", return_value=(allocation, bound, notes)), \
          patch.object(release_reuse, "_api", side_effect=api), \
@@ -376,6 +399,37 @@ class RollingReleaseTest(unittest.TestCase):
                  "--version", BASE_VERSION, "--train-id", "810", "--run-id", RUN_ID, "--phase", "qualify"]
         return args, values
 
+    def signed_fixture(self, root: Path) -> tuple[list[str], dict[str, Any]]:
+        args, values = self.final_fixture(root)
+        values["qualified_run"] = copy.deepcopy(values["run"])
+        run = values["run"]
+        run.update(id=67890, head_sha=SOURCE_SHA, head_branch="v" + BASE_VERSION,
+                   display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"))
+        rows = values["artifacts"]["artifacts"]
+        rows[:] = [row for row in rows if not row["name"].startswith("native-receipt-")]
+        index_hash = hashlib.sha256((root / "index.json").read_bytes()).hexdigest()
+        consumers = {}
+        for number, platform in enumerate(release_reuse.SHIPPING_PLATFORMS):
+            for offset, name in enumerate((f"sbom-{platform}-attempt-1", f"signed-consumer-{platform}-attempt-1")):
+                rows.append({"id": 2000 + number * 2 + offset, "name": name, "expired": False,
+                             "created_at": "2026-10-17T01:05:00Z"})
+            consumers[platform] = {
+                "schema_version": 1, "kind": "signed-native-consumer", "platform": platform,
+                "version": BASE_VERSION, "source_sha": SOURCE_SHA,
+                "archive_sha256": values["index"]["assets"][platform]["sha256"],
+                "index_sha256": index_hash, "run_id": "67890", "run_attempt": 1,
+                "previous_version": "0.2.19", "installed_version": BASE_VERSION,
+                "checks": {"public_installer": True, "compiled_upgrade": True},
+            }
+        for row in rows:
+            row["workflow_run"] = {"id": 67890, "head_sha": SOURCE_SHA}
+        values["signed_consumers"] = consumers
+        for name in ("run", "artifacts"):
+            (root / f"{name}.json").write_text(json.dumps(values[name]))
+        args[args.index("--phase") + 1] = "sign"
+        args[args.index("--run-id") + 1] = "67890"
+        return args, values
+
     def test_final_certification_accepts_historical_source_but_not_partial_or_foreign_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -413,6 +467,29 @@ class RollingReleaseTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release_reuse.main(args)
 
+    def test_qualification_refuses_foreign_staging_context_or_public_installation_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args, values = self.final_fixture(root)
+            key = release_reuse.SHIPPING_PLATFORMS[0] + "-minimum"
+            producer = {"repository": REPOSITORY,
+                        "workflow_ref": f"{REPOSITORY}/{release_reuse.RELEASE_WORKFLOW}@refs/heads/main",
+                        "run_id": RUN_ID, "run_attempt": "1"}
+            changes = [
+                {"source_sha": "e" * 40}, {"archive_sha256": "f" * 64}, {"manifest_sha256": "f" * 64},
+                {"scope": "published-installation"}, {"public_installation": "VERIFIED"},
+                {"producer": dict(producer, run_id="999")}, {"producer": dict(producer, run_attempt=2)},
+                {"producer": dict(producer, run_attempt="2")},
+                {"producer": dict(producer, workflow_ref="another/repository/workflow@refs/heads/main")},
+            ]
+            with final_authority(values), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(release_reuse.main(args), 0)
+                for change in changes:
+                    with self.subTest(change=change):
+                        values["staging_overrides"] = {key: change}
+                        with self.assertRaises(ValueError):
+                            release_reuse.main(args)
+
     def test_tag_ref_signing_cannot_claim_main_execution_identity(self) -> None:
         run = dict(candidate_run(), head_branch="v" + BASE_VERSION,
                    display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"))
@@ -422,6 +499,38 @@ class RollingReleaseTest(unittest.TestCase):
                         dict(run, display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"))):
             self.assertFalse(release_reuse.final_run_matches(changed, repository=REPOSITORY, source_sha=SOURCE_SHA,
                                                             version=BASE_VERSION, train_id="810", phase="sign"))
+
+    def test_signed_final_requires_actual_installer_and_upgrade_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args, values = self.signed_fixture(root)
+            with final_authority(values, qualified=values["qualified_run"]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(release_reuse.main(args), 0)
+                rows = values["artifacts"]["artifacts"]
+                rows[:] = [row for row in rows if not row["name"].startswith("signed-consumer-")]
+                (root / "artifacts.json").write_text(json.dumps(values["artifacts"]))
+                with self.assertRaises(ValueError):
+                    release_reuse.main(args)
+
+    def test_signed_consumer_refuses_noop_wrong_bytes_foreign_attempt_and_unpublished_previous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args, values = self.signed_fixture(root)
+            platform = release_reuse.SHIPPING_PLATFORMS[0]
+            original = copy.deepcopy(values["signed_consumers"][platform])
+            mutations = [
+                {"checks": {"public_installer": True, "compiled_upgrade": False}},
+                {"installed_version": "0.2.19"}, {"archive_sha256": "f" * 64},
+                {"index_sha256": "f" * 64}, {"run_id": RUN_ID}, {"run_attempt": 2},
+                {"previous_version": "0.0.0-ci.0"}, {"previous_version": BASE_VERSION},
+                {"previous_version": "0.2.18"},
+            ]
+            with final_authority(values, qualified=values["qualified_run"]), contextlib.redirect_stdout(io.StringIO()):
+                for mutation in mutations:
+                    with self.subTest(mutation=mutation):
+                        values["signed_consumers"][platform] = dict(original, **mutation)
+                        with self.assertRaises(ValueError):
+                            release_reuse.main(args)
 
     def test_active_q_and_version_wait_for_exact_publisher_not_release_existence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -600,17 +709,20 @@ class RollingReleaseTest(unittest.TestCase):
     def test_signing_rerun_requires_fresh_sbom_snapshot_and_current_qualification_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            args, values = self.final_fixture(root)
+            args, values = self.signed_fixture(root)
             values["run"] = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}", run_attempt=2,
                                  run_started_at="2026-10-17T02:00:00Z", updated_at="2026-10-17T02:10:00Z",
                                  display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"))
             names = release_reuse.required_candidate_artifacts(2)
             names -= {f"native-receipt-{platform}-{track}-attempt-2" for platform in release_reuse.SHIPPING_PLATFORMS for track in release_reuse.NATIVE_TRACKS}
-            names |= {"release-selection-attempt-2", *(f"sbom-{platform}-attempt-2" for platform in release_reuse.SHIPPING_PLATFORMS)}
+            names |= {"release-selection-attempt-2", *(f"sbom-{platform}-attempt-2" for platform in release_reuse.SHIPPING_PLATFORMS),
+                      *(f"signed-consumer-{platform}-attempt-2" for platform in release_reuse.SHIPPING_PLATFORMS)}
             values["artifacts"] = {"artifacts": [{"id": 3000 + index, "name": name, "expired": False,
                                                  "created_at": "2026-10-17T02:05:00Z",
                                                  "workflow_run": {"id": 67890, "head_sha": SOURCE_SHA}}
                                                 for index, name in enumerate(sorted(names))]}
+            for receipt in values["signed_consumers"].values():
+                receipt["run_attempt"] = 2
             for name, value in values.items():
                 (root / f"{name}.json").write_text(json.dumps(value))
             args[args.index("--run-id") + 1] = "67890"
@@ -620,6 +732,11 @@ class RollingReleaseTest(unittest.TestCase):
                 self.assertEqual(release_reuse.main(args), 0)
                 mixed = copy.deepcopy(values["artifacts"])
                 next(row for row in mixed["artifacts"] if row["name"].startswith("sbom-"))["created_at"] = "2026-10-17T01:05:00Z"
+                (root / "artifacts.json").write_text(json.dumps(mixed))
+                with self.assertRaises(ValueError):
+                    release_reuse.main(args)
+                mixed = copy.deepcopy(values["artifacts"])
+                next(row for row in mixed["artifacts"] if row["name"].startswith("signed-consumer-"))["created_at"] = "2026-10-17T01:05:00Z"
                 (root / "artifacts.json").write_text(json.dumps(mixed))
                 with self.assertRaises(ValueError):
                     release_reuse.main(args)
@@ -968,7 +1085,8 @@ class RollingReleaseTest(unittest.TestCase):
 
     @contextlib.contextmanager
     def published_floor_case(self, *, orphan=False, with_published_tag=False,
-                             unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False):
+                             unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False,
+                             legacy_protocol=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
@@ -986,7 +1104,8 @@ class RollingReleaseTest(unittest.TestCase):
             git("config", "core.hooksPath", "/dev/null")
             git("config", "commit.gpgsign", "false")
             (root / ".github/workflows").mkdir(parents=True)
-            (root / ".github/workflows/release.yml").write_text("# ROLLING-RELEASE-V2: fixture protocol\n")
+            protocol = "ROLLING-RELEASE-V2" if legacy_protocol else "ROLLING-RELEASE-V3"
+            (root / ".github/workflows/release.yml").write_text(f"# {protocol}: fixture protocol\n")
             (root / "package.json").write_text(json.dumps({"name": "admission-fixture", "version": "0.2.19", "omp": {"version": "0.2.19"}}))
             (root / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n## [0.2.19] - 2026-10-17\n\n- Earlier note.\n")
             git("add", ".")
@@ -1039,6 +1158,12 @@ class RollingReleaseTest(unittest.TestCase):
                  patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(io.StringIO()), \
                  contextlib.redirect_stderr(io.StringIO()):
                 yield args, root, source, dispatch
+
+    def test_legacy_green_source_without_signed_consumers_cannot_allocate_a_final_tag(self) -> None:
+        with self.published_floor_case(legacy_protocol=True) as (args, root, _, dispatch):
+            self.assertEqual(release_reuse._drive(args), 0)
+            self.assertEqual(json.loads((root / "plan.json").read_text()), {"kind": "skip"})
+            dispatch.assert_not_called()
 
     def test_missing_published_tag_reserves_its_version_without_blocking_allocation(self) -> None:
         with self.published_floor_case(orphan=True) as (args, root, source, dispatch):
@@ -1312,7 +1437,7 @@ class ExecutionCodeTrustTest(unittest.TestCase):
 
 class PublishedAssetsTest(unittest.TestCase):
     @contextlib.contextmanager
-    def release_fixture(self, *, only_index=False, corrupt=None, race=None, deny_signature=False):
+    def release_fixture(self, *, only_index=False, corrupt=None, race=None, deny_signature=False, consumer_failure=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = {}
@@ -1337,7 +1462,8 @@ class PublishedAssetsTest(unittest.TestCase):
             (root / "notes.md").write_bytes(owner_notes)
             (root / "binding.json").write_text(json.dumps(selected_owner()))
             qualified = dict(candidate_run("f" * 40), display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"))
-            producer = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}")
+            producer = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}",
+                            display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"))
             (root / "producer.json").write_text(json.dumps(producer))
             remote = {name: {"id": 1000 + number, "name": name, "bytes": content}
                       for number, (name, content) in enumerate(files.items()) if not only_index or name == "release-index.json"}
@@ -1345,14 +1471,42 @@ class PublishedAssetsTest(unittest.TestCase):
                 remote[corrupt]["bytes"] = b"!" * len(remote[corrupt]["bytes"])
             uploads = []
             attestations = []
+            consumer_rows = []
+            consumer_files = {}
+            for number, platform in enumerate(release_reuse.SHIPPING_PLATFORMS):
+                name = f"signed-consumer-{platform}-attempt-1"
+                consumer_rows.append({"id": 3000 + number, "name": name, "expired": False,
+                                      "created_at": "2026-10-17T01:05:00Z",
+                                      "workflow_run": {"id": 67890, "head_sha": SOURCE_SHA}})
+                receipt = {
+                    "schema_version": 1, "kind": "signed-native-consumer", "platform": platform,
+                    "version": BASE_VERSION, "source_sha": SOURCE_SHA,
+                    "archive_sha256": assets[platform]["sha256"],
+                    "index_sha256": hashlib.sha256(files["release-index.json"]).hexdigest(),
+                    "run_id": "67890", "run_attempt": 1, "previous_version": "0.2.19",
+                    "installed_version": BASE_VERSION, "checks": {"public_installer": True, "compiled_upgrade": True},
+                }
+                if consumer_failure == "noop":
+                    receipt["checks"]["compiled_upgrade"] = False
+                if consumer_failure == "foreign":
+                    receipt["run_id"] = RUN_ID
+                consumer_files[name] = {"receipt.json": json.dumps(receipt).encode()}
+            if consumer_failure == "missing":
+                consumer_rows.pop()
+            def artifact_files(repository: str, artifact: dict[str, Any], expected: set[str]) -> dict[str, bytes]:
+                self.assertEqual(expected, {"receipt.json"})
+                return consumer_files[artifact["name"]]
             def api(repository, endpoint, **kwargs):
                 if endpoint == "actions/runs/67890":
                     return producer
+                if endpoint == "actions/runs/67890/artifacts?per_page=100":
+                    return [{"artifacts": consumer_rows}]
                 if endpoint == f"actions/runs/{RUN_ID}":
                     return qualified
                 if endpoint == "releases?per_page=100":
                     return [[{"id": 55, "tag_name": f"v{BASE_VERSION}", "draft": False, "prerelease": False,
-                              "body": owner_notes.decode()}]]
+                              "body": owner_notes.decode()},
+                             {"id": 54, "tag_name": "v0.2.19", "draft": False, "prerelease": False, "body": "previous"}]]
                 if endpoint == f"commits/v{BASE_VERSION}":
                     return {"sha": SOURCE_SHA}
                 if endpoint == "releases/55/assets?per_page=100":
@@ -1383,9 +1537,17 @@ class PublishedAssetsTest(unittest.TestCase):
                                       binding=str(root / "binding.json"))
             with patch.object(release_reuse, "_api", side_effect=api), \
                  patch.object(release_reuse, "_load_owner_authority", return_value=owner_fixture()), \
+                 patch.object(release_reuse, "_artifact_files", side_effect=artifact_files), \
                  patch.object(release_reuse.subprocess, "run", side_effect=process), contextlib.redirect_stdout(io.StringIO()), \
                  contextlib.redirect_stderr(io.StringIO()):
                 yield args, files, remote, uploads, attestations
+
+    def test_missing_failed_or_foreign_signed_consumer_refuses_even_complete_release_assets(self) -> None:
+        for failure in ("missing", "noop", "foreign"):
+            with self.subTest(failure=failure), self.release_fixture(consumer_failure=failure) as (args, _, _, uploads, _):
+                with self.assertRaises(ValueError):
+                    release_reuse._repair_release(args)
+                self.assertEqual(uploads, [])
 
     def test_matching_index_alone_repairs_all_missing_certified_assets(self) -> None:
         with self.release_fixture(only_index=True) as (args, files, remote, uploads, attestations):

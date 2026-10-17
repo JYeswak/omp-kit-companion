@@ -1,5 +1,5 @@
 name: Unpublished release candidate
-# ROLLING-RELEASE-V2: immutable owner allocation binds qualification to its native run ID.
+# ROLLING-RELEASE-V3: owner-bound qualification and mandatory native signed-consumer publication.
 run-name: ${{ inputs.rehearsal && 'rehearse' || (inputs.certified_run_id != '' && 'sign' || 'qualify') }} ${{ inputs.version }} ${{ inputs.sha || github.sha }} train-${{ inputs.train_run_id || github.run_id }}
 on:
   workflow_dispatch:
@@ -110,7 +110,7 @@ jobs:
                 --output selection --timeout 180
               # Bootstrap only from a qualified source carrying this protocol.
               protocol="$(git show "$SOURCE_SHA:.github/workflows/release.yml")"
-              [[ "$protocol" == *'# ROLLING-RELEASE-V2:'* ]]
+              [[ "$protocol" == *'# ROLLING-RELEASE-V3:'* ]]
             fi
             gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SOURCE_SHA&branch=main&event=push&per_page=100" \
               | jq '{workflow_runs: [.[].workflow_runs[]]}' > ci-runs.json
@@ -224,6 +224,7 @@ jobs:
       version: ${{ needs.validate-tag.outputs.version }}
       source_sha: ${{ needs.validate-tag.outputs.source_sha }}
       reuse_fast_ci: ${{ needs.validate-tag.outputs.reuse_fast_ci == 'true' }}
+      defer_signed_consumers: true
     permissions:
       contents: read
 
@@ -395,8 +396,97 @@ jobs:
         with:
           subject-path: candidate-index/release-index.json
 
+  signed-consumers:
+    # Public installation needs the real tag and Sigstore authority. It is
+    # mandatory after signing, never faked during tagless qualification.
+    needs: [validate-tag, attest, attest-index]
+    if: github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64-none, runner: macos-15 }
+          - { platform: linux-arm64-gnu, runner: ubuntu-24.04-arm }
+          - { platform: linux-x64-gnu, runner: ubuntu-24.04 }
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate-tag.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Install the source-pinned certified OMP and TypeScript LSP
+        run: |
+          set -euo pipefail
+          omp_version="$(jq -er .certified scripts/omp-compat.json)"
+          npm install --global "@oh-my-pi/pi-coding-agent@$omp_version" typescript-language-server@5.1.3 typescript@5.9.3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-journey/candidate/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unpublished-candidate-index-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-journey/candidate-index/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-selection-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-journey/selection/
+      - name: Exercise the signed public installer and compiled upgrade on the same final bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate-tag.outputs.source_sha }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          J="$RUNNER_TEMP/signed-journey"
+          index="$J/candidate-index/release-index.json"
+          gh attestation verify "$index" --repo "$GITHUB_REPOSITORY" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$SOURCE_SHA" --predicate-type https://slsa.dev/provenance/v1
+          previous_tag="$(jq -er .base_tag "$J/selection/selection.json")"
+          previous_version="${previous_tag#v}"
+          gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern release-index.json --dir "$J/previous"
+          previous_archive="$(python3 installer/install.py inspect "$J/previous/release-index.json" "$previous_version" "$PLATFORM")"
+          gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$previous_archive" --dir "$J/previous"
+          candidate_archive="$(python3 installer/install.py inspect "$index" "$VERSION" "$PLATFORM")"
+          python3 installer/install.py bundle "$J/previous/$previous_archive" "$previous_version" "$PLATFORM"
+          python3 installer/install.py bundle "$J/candidate/$candidate_archive" "$VERSION" "$PLATFORM"
+          sh installer/install.sh --version "$VERSION" --index "$index" \
+            --offline "$J/candidate/$candidate_archive" --prefix "$J/public-candidate"
+          observed_candidate_version="$("$J/public-candidate/bin/omp-kit" --version)"
+          [[ "$observed_candidate_version" == "omp-kit $VERSION" ]] || {
+            echo 'signed public candidate installation reported the wrong version' >&2
+            exit 4
+          }
+          sh tests/e2e/real-home-journey.sh \
+            --previous-archive "$J/previous/$previous_archive" \
+            --previous-index "$J/previous/release-index.json" \
+            --candidate-archive "$J/candidate/$candidate_archive" \
+            --candidate-index "$index" --work-dir "$J/run" \
+            --receipt-out "$RUNNER_TEMP/signed-consumer-$PLATFORM-attempt-$GITHUB_RUN_ATTEMPT/receipt.json" --source-sha "$SOURCE_SHA" \
+            --platform "$PLATFORM" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Retain the actual signed-consumer result, never raw private logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: signed-consumer-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-consumer-${{ matrix.platform }}-attempt-${{ github.run_attempt }}/receipt.json
+          if-no-files-found: error
+          retention-days: 7
+
   open-p0-on-post-cert-failure:
-    needs: [validate-tag, reuse-evidence, attest-platforms, attest, attest-index]
+    needs: [validate-tag, reuse-evidence, attest-platforms, attest, attest-index, signed-consumers]
     if: ${{ always() && github.event.repository.private == false && failure() && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

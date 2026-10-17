@@ -33,6 +33,11 @@ on:
         type: boolean
         required: false
         default: false
+      defer_signed_consumers:
+        description: Defer the public real-home journey to the post-sign signed-consumer job
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -365,7 +370,7 @@ jobs:
           retention-days: ${{ inputs.version && 7 || 2 }}
 
   real-home-journey:
-    if: github.event.repository.private == false && github.event_name != 'push'
+    if: github.event.repository.private == false && github.event_name != 'push' && !inputs.defer_signed_consumers
     needs: [build-candidates, resolve-omp-versions]
     strategy:
       fail-fast: false
