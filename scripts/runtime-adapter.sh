@@ -72,13 +72,17 @@ validate_work_root() {
   case "$caller_work_root" in "$caller_repo/var/agent-tmp"/*) ;; *) die "OMP_KIT_TEST_WORK_ROOT must resolve under $caller_repo/var/agent-tmp" ;; esac
   same_uid "$caller_work_root" || die "OMP_KIT_TEST_WORK_ROOT must be owned by this user"
   marker="$caller_work_root/.owner"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || die "OMP_KIT_TEST_WORK_ROOT needs a regular nonsymlink .owner marker"
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    die "OMP_KIT_TEST_WORK_ROOT needs a regular nonsymlink .owner marker"
+  fi
   same_uid "$marker" || die "OMP_KIT_TEST_WORK_ROOT .owner must be owned by this user"
   marker_repo=; repo_count=0
   while IFS= read -r owner_line || [ -n "$owner_line" ]; do
     case "$owner_line" in repo=*) marker_repo=${owner_line#repo=}; repo_count=$((repo_count + 1)) ;; esac
   done < "$marker"
-  [ "$repo_count" = 1 ] && [ "$marker_repo" = "$caller_repo" ] || die "OMP_KIT_TEST_WORK_ROOT .owner repo must match the caller workspace"
+  if [ "$repo_count" != 1 ] || [ "$marker_repo" != "$caller_repo" ]; then
+    die "OMP_KIT_TEST_WORK_ROOT .owner repo must match the caller workspace"
+  fi
 }
 
 caller_work_root=; caller_repo=
