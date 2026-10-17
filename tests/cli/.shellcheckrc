@@ -1,0 +1,3 @@
+# Analyze repository-owned test helpers, including in read-only archive mounts.
+external-sources=true
+source-path=SCRIPTDIR/../..
