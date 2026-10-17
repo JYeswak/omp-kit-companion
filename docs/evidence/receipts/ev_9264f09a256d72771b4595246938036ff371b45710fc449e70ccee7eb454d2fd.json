@@ -1,0 +1,17 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_9264f09a256d72771b4595246938036ff371b45710fc449e70ccee7eb454d2fd",
+ "limitations": [
+  "Next real origin/main train bump AC4 remains unobserved; normal publication blocked by missing configured public gh executable. No activation or full release credit."
+ ],
+ "operation": "release-bump-attribution-repair",
+ "parameters": {
+  "bead": "ompkit-zrk1"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 9202,
+  "sha256": "63c37a84aaa25974d0bf0a1829cd5d29523f2e5b47b091df66108ca41616f3e0"
+ }
+}

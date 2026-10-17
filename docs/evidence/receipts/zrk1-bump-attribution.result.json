@@ -1,0 +1,180 @@
+{
+  "bead": "ompkit-zrk1",
+  "red": {
+    "exit": 1,
+    "stdout": "ok decide: qualified source proceeds\nok decide: red CI never tagged\nok decide: cancelled CI never tagged\nok decide: running CI never tagged\nok decide: superseded SHA skipped\nok next-version: max plus one\nok next-version: legacy tags ignored\nok next-version: ls-remote ref lines\nok next-version: no tag refuses\nok next-version: untagged changelog section advances\nok next-version: exact release version\nok bump: untagged changelog section promotes next version\nok bump: release section and package versions\nok next-version: higher tag beats changelog section\nok next-version: exact higher-tag version\nok verify-candidate: exact match verifies\nok verify-candidate: wrong SHA refused\nok verify-candidate: wrong ship set refused\nok verify-candidate: short asset map refused\nok verify-candidate: wrong version refused\nok latest-flag: newest takes Latest\nok latest-flag: superseded keeps Latest\nok wait-release-idle: idle proceeds\nok wait-release-idle: busy blocks\nok wait-release-idle: in_progress-only busy blocks\nok wait-release-idle: queued-only busy blocks\nok bump: commits the release\nok bump: subject, parent, versions, section, drained inbox\nok bump: notes are the promoted section\nok notes: planted missing section refused\nFAIL bump: generated commit passes bead-existence hook (rc=4 want=0 out=commit-msg-bead: refusing commit: none of the named tokens exists in /Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/release-train-test.5kdDgn/hook-beads.db)\nok evidence-sha: bump inherits parent\nok evidence-sha: ordinary commit exact\nok evidence-sha: planted source change refused inheritance\nok evidence-sha: planted extra package.json field refused inheritance\nok bump: planted nothing-to-release refused\nok bump: refusal left HEAD and package.json alone\nok publish-lag: certified tag with release is published\nok publish-lag: certified tag without release exits 4\nok publish-lag: tag mismatch exits 4\nok publish-lag: no tag exits 0\n40 pass, 1 fail\n",
+    "stderr": "verification-level PASS level=test\n"
+  },
+  "green": {
+    "exit": 0,
+    "stdout": "ok decide: qualified source proceeds\nok decide: red CI never tagged\nok decide: cancelled CI never tagged\nok decide: running CI never tagged\nok decide: superseded SHA skipped\nok next-version: max plus one\nok next-version: legacy tags ignored\nok next-version: ls-remote ref lines\nok next-version: no tag refuses\nok next-version: untagged changelog section advances\nok next-version: exact release version\nok bump: untagged changelog section promotes next version\nok bump: release section and package versions\nok next-version: higher tag beats changelog section\nok next-version: exact higher-tag version\nok verify-candidate: exact match verifies\nok verify-candidate: wrong SHA refused\nok verify-candidate: wrong ship set refused\nok verify-candidate: short asset map refused\nok verify-candidate: wrong version refused\nok latest-flag: newest takes Latest\nok latest-flag: superseded keeps Latest\nok wait-release-idle: idle proceeds\nok wait-release-idle: busy blocks\nok wait-release-idle: in_progress-only busy blocks\nok wait-release-idle: queued-only busy blocks\nok bump: commits the release\nok bump: subject, parent, versions, section, drained inbox\nok bump: notes are the promoted section\nok notes: planted missing section refused\nok bump: generated commit passes bead-existence hook\nok evidence-sha: bump inherits parent\nok evidence-sha: ordinary commit exact\nok evidence-sha: planted source change refused inheritance\nok evidence-sha: planted extra package.json field refused inheritance\nok bump: planted nothing-to-release refused\nok bump: refusal left HEAD and package.json alone\nok publish-lag: certified tag with release is published\nok publish-lag: certified tag without release exits 4\nok publish-lag: tag mismatch exits 4\nok publish-lag: no tag exits 0\n41 pass, 0 fail\n",
+    "stderr": "verification-level PASS level=test\n"
+  },
+  "smoke": {
+    "steps": [
+      {
+        "argv": [
+          "git",
+          "init",
+          "-q"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "config",
+          "core.hooksPath",
+          "/dev/null"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "config",
+          "user.name",
+          "Release Fixture"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "config",
+          "user.email",
+          "release@example.invalid"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "add",
+          "--",
+          "package.json",
+          "CHANGELOG.md",
+          "changelog.d/fixture.md"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "commit",
+          "-qm",
+          "fixture baseline [test]"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "sh",
+          "/Users/josh/Developer/omp-kit-companion/scripts/release-train.sh",
+          "bump",
+          "--version",
+          "0.2.1",
+          "--date",
+          "2026-10-17",
+          "--repo",
+          "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/bump-native-consumer-smoke"
+        ],
+        "exit": 0,
+        "stdout": "PROMOTED version=0.2.1 date=2026-10-17 entries=1 fragments=1 package_version=0.2.0->0.2.1\nBUMP=committed version=0.2.1 sha=8acd8f895b11240f7f99c6ecd21bd0d69f3edcfe\n",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "git",
+          "log",
+          "-1",
+          "--format=%B"
+        ],
+        "exit": 0,
+        "stdout": "chore: bump version to 0.2.1\n\nRelease train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to 0.2.1, package.json version set.\n\nBead: ompkit-v66l\n\n[no-changelog] release bump commit; its notes are the promoted CHANGELOG section\n\n",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "sh",
+          "/Users/josh/Developer/omp-kit-companion/scripts/commit-msg-bead.sh",
+          "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/bump-native-consumer-smoke/message.txt"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "sh",
+          "/Users/josh/Developer/omp-kit-companion/scripts/release-train.sh",
+          "evidence-sha",
+          "--sha",
+          "HEAD",
+          "--repo",
+          "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/bump-native-consumer-smoke"
+        ],
+        "exit": 2,
+        "stdout": "",
+        "stderr": "evidence-sha: --sha must be a hex commit\n"
+      },
+      {
+        "argv": [
+          "git",
+          "rev-parse",
+          "HEAD"
+        ],
+        "exit": 0,
+        "stdout": "8acd8f895b11240f7f99c6ecd21bd0d69f3edcfe\n",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "sh",
+          "/Users/josh/Developer/omp-kit-companion/scripts/release-train.sh",
+          "evidence-sha",
+          "--sha",
+          "8acd8f895b11240f7f99c6ecd21bd0d69f3edcfe",
+          "--repo",
+          "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/bump-native-consumer-smoke"
+        ],
+        "exit": 0,
+        "stdout": "EVIDENCE_SHA=9d16dd83aa0a29f37f9754c49ee0bb69cf4488f1 REASON=release-bump-parent bump=8acd8f895b11240f7f99c6ecd21bd0d69f3edcfe\n",
+        "stderr": ""
+      }
+    ],
+    "message": "chore: bump version to 0.2.1\n\nRelease train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to 0.2.1, package.json version set.\n\nBead: ompkit-v66l\n\n[no-changelog] release bump commit; its notes are the promoted CHANGELOG section\n\n",
+    "scope": "isolated generated repository; actual canonical br read-only lookup, no network/auth/tag/activation"
+  },
+  "static": {
+    "command": "sh -n scripts/release-train.sh && sh -n tests/cli/release-train.test.sh && shellcheck scripts/release-train.sh tests/cli/release-train.test.sh",
+    "exit": 0
+  },
+  "quality": {
+    "exit": 0,
+    "gating": 0,
+    "at": "94d81fe6e+dirty+shallow",
+    "scope": [
+      "scripts/release-train.sh",
+      "tests/cli/release-train.test.sh"
+    ],
+    "contract_model": "UNAVAILABLE: edit-check exit1, bump is a top-level shell case, not a defined symbol"
+  },
+  "limitations": [
+    "Actual next train bump on origin/main not observed; original AC4 remains open.",
+    "No tag, release, helper/auth/token probe, activation or live shared credential/config mutation.",
+    "Isolated fixture hook policy is disabled only in its own generated repository, matching existing test convention; real generated message then passes canonical hook using actual read-only authoritative tracker."
+  ]
+}

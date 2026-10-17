@@ -280,6 +280,7 @@ bump)
 	git -C "$repo" add -u -- .
 	git -C "$repo" commit -q -m "chore: bump version to $version" \
 		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set." \
+		-m "Bead: ompkit-v66l" \
 		-m "[no-changelog] release bump commit; its notes are the promoted CHANGELOG section" || { echo "bump: commit failed" >&2; exit 1; }
 	printf 'BUMP=committed version=%s sha=%s\n' "$version" "$(git -C "$repo" rev-parse HEAD)"; exit 0
 	;;

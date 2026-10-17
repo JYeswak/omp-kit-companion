@@ -256,6 +256,22 @@ check "bump: subject, parent, versions, section, drained inbox" 0 0 "$meta" "cho
 check "bump: notes are the promoted section" 0 0 "$(cd "$R" && sh "$(dirname "$TRAIN")/release-notes.sh" notes --version 0.2.21 2>&1)" "### Added" "- A shipped feature."
 out=$(cd "$R" && sh "$(dirname "$TRAIN")/release-notes.sh" notes --version 0.2.22 2>&1); rc=$?
 check "notes: planted missing section refused" 4 "$rc" "$out" "REFUSED: CHANGELOG.md has no ## \[0.2.22\] section"
+# The CI-created bump must pass the same bead-existence consumer as local commits.
+git -C "$R" log -1 --format=%B "$bump" > "$TMP/bump-message"
+: > "$TMP/hook-beads.db"
+cat > "$TMP/hook-br" <<'BR'
+#!/bin/sh
+id=""
+for arg in "$@"; do id=$arg; done
+case "$id" in
+	ompkit-v66l) exit 0 ;;
+	*) exit 3 ;;
+esac
+BR
+chmod +x "$TMP/hook-br"
+out=$(BEADS_DB="$TMP/hook-beads.db" BR_BIN="$TMP/hook-br" \
+	sh "$(dirname "$TRAIN")/commit-msg-bead.sh" "$TMP/bump-message" 2>&1); rc=$?
+check "bump: generated commit passes bead-existence hook" 0 "$rc" "$out"
 # 19. a pure bump commit inherits its parent's CI evidence
 out=$(sh "$TRAIN" evidence-sha --sha "$bump" --repo "$R" 2>&1); rc=$?
 check "evidence-sha: bump inherits parent" 0 "$rc" "$out" "EVIDENCE_SHA=$green REASON=release-bump-parent"
