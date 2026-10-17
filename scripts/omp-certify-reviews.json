@@ -1,4 +1,17 @@
 {
   "schema_version": 1,
-  "reviews": []
+  "reviews": [
+    {
+      "hash": "d520c9b04db462c9",
+      "verdict": "not-affected",
+      "evidence": "OMP 18.10.2 pi-tui entry adds parksAsBackground(toolName, details), asyncJobState, isSettledJobFrame and settleWithJobFrame(component, frame, toolCallId) in chat/tool-execution: TUI card rendering helpers the kit never imports. The kit's hits are field names on other APIs, unchanged in 18.11.3: extensions/kit-flywheel-guard.ts reads event.toolName/event.toolCallId from the extension tool_call event (ToolCallEventBase still declares toolCallId and toolName, src/extensibility/extensions/types.ts:1306-1342), and src/mcp-probe.ts matches rpc tool_execution_start/tool_execution_end by toolCallId (still emitted, src/modes/rpc/rpc-client.ts:153-156). Live: the guard's tool_call handler fired COMPACTION_REREAD under Tern omp 18.11.3 on 2026-10-17.",
+      "reviewer": "PeachLeopard (ompkit-3zhf)"
+    },
+    {
+      "hash": "3a275f1af14c7fe2",
+      "verdict": "not-affected",
+      "evidence": "OMP 18.11.3 changes extension ui.approve() to answer once|session|deny instead of a boolean. The kit never calls ui.approve: extensions/kit-flywheel-guard.ts types ui as { notify(message, type?) } and only calls ctx.ui?.notify (lines 868, 872, 889). notify keeps the signature notify(message: string, type?: info|warning|error): void in 18.11.3 (src/extensibility/extensions/types.ts:318), same as 18.9.2 (:295).",
+      "reviewer": "PeachLeopard (ompkit-3zhf)"
+    }
+  ]
 }

@@ -135,6 +135,26 @@ const REVIEWED_SOURCE_PIN_SETS: readonly (readonly SourcePin[])[] = [
 		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
 		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
 	],
+	[
+		// OMP and pi-mnemopi 18.11.3 source tuple (the Tern-managed fleet version), hand-reviewed for omp-certify
+		// PR #105 / issue #91 (ompkit-3zhf) from the npm packs. Only the two agent files changed since 18.9.2.
+		// mnemopi/config.ts: the read-only legacy-bank probe disposes its statement with `using` (same SELECT on
+		// working_memory, readonly handle). mnemopi/state.ts: an error message and a doc comment name the shared
+		// embedding server; recall-query composition moves inside withLoopPhase; the retention-cursor read
+		// disposes its statement with `using` (same SELECT). No store file, bank path, table, DDL, or
+		// working/episodic content change. All nine pi-mnemopi pins are byte-equal to 18.9.2.
+		["agent", "src/mnemopi/config.ts", "82470ce9f844b1101969b131c1f45c19fe13eee1788dd56a77e66629572f912f"],
+		["agent", "src/mnemopi/state.ts", "63abe1fbde6297dbf3313f1d509ff06d7875c8de73e55288f6201f1e22008887"],
+		["mnemopi", "src/core/banks.ts", "8368a0b90565969abbf7d8af108589fd40ff6926ee4b7a1c087ef9f3a02c23c2"],
+		["mnemopi", "src/core/beam/schema.ts", "95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0"],
+		["mnemopi", "src/db.ts", "1780a8bd61abca6d7a7c56699bd3e0e8ead638fb7b74b11c508b189008dddc91"],
+		["mnemopi", "src/core/episodic-graph.ts", "96f425b25e3b5576ac6e295444e332a1270f30ebcf183251287b1b7fff7f2aca"],
+		["mnemopi", "src/core/query-cache.ts", "df46d468b2ba5dca9fe475702baf2d9511f9e9e2a5f86e108eb291261e091c22"],
+		["mnemopi", "src/core/shmr.ts", "dfc705b023e5516f83f725385b16aba249b830a018528406e241ee97f1afc180"],
+		["mnemopi", "src/core/veracity-consolidation.ts", "6aad4bc4a847879a612a34a3f7768326a873c979b2d0ad5616c2d61aca49e088"],
+		["mnemopi", "src/core/binary-vectors.ts", "e153448eb784e9d7ded5ee6107c790831011cbe50563eb5d133c3506502b220f"],
+		["mnemopi", "src/core/cost-log.ts", "8de00ca9309093999f6ec733140c255660de94b16af93d5bbb90af4d6061606e"],
+	],
 ];
 const CONTENT_FIELDS = ["working_memory.content", "episodic_memory.content"] as const;
 const SQLITE_HEADER = Buffer.from("SQLite format 3\0");
