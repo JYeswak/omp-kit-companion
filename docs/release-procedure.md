@@ -148,12 +148,12 @@ ancestor; an actually newer green supersedes pending older sources.
 - Qualified source `Q` is in main history and has real completed successful push
   CI from `ci.yml`; OMP-certification, schedules, failed/cancelled/latest-running
   attempts and fabricated manual verdicts do not qualify it.
-- Final artifact version `V` is allocated above both stable tags and changelog
-  floors. The changelog floor comes from the immutable fetched admission-main
-  SHA (`next-version --changelog-ref`), not a stale controller checkout. A stable
-  GitHub release above the fetched tag floor refuses allocation rather than
-  reusing a deleted/unfetched published version. No main bookkeeping bump is
-  required. Empty source-range notes skip
+- Final artifact version `V` is allocated above stable tag reservations,
+  actual stable GitHub publications and changelog floors. The changelog floor
+  comes from the immutable fetched admission-main SHA
+  (`next-version --changelog-ref`), not a stale controller checkout. A missing
+  tag cannot make an already-published version reusable or globally block
+  native recovery. No main bookkeeping bump is required. Empty source-range notes skip
   before dispatch. The owning train first uploads immutable `release-allocation-N`
   (native owner run/attempt, `Q,V`, notes floor/digest and retry policy), then uses
   the native dispatch response to upload `release-qualification-N` binding the

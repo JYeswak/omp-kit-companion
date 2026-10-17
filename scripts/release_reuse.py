@@ -840,14 +840,7 @@ def _drive(args: argparse.Namespace) -> int:
     tools = Path(__file__).resolve().parent
     published = _published(repository)
     tags = [tag for tag in _command(["git", "tag", "--list", "v*"]).splitlines() if tag.startswith("v") and stable_version(tag[1:])]
-    if not tags:
-        raise ValueError("no stable release floor exists")
-    max_tag = max(tags, key=lambda tag: tuple(map(int, tag[1:].split("."))))
     released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
-    if released:
-        latest_released = max(released, key=lambda tag: tuple(map(int, tag[1:].split("."))))
-        if tuple(map(int, latest_released[1:].split("."))) > tuple(map(int, max_tag[1:].split("."))):
-            raise ValueError(f"published stable release {latest_released} exceeds fetched tag floor {max_tag}; restore/fetch its authenticated tag before allocation")
     head = _command(["git", "rev-parse", "origin/main"])
     published_floors = [tag for tag in tags if tag in published and _is_ancestor(tag, head)]
     recovery_floor = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))[1:] if published_floors else None
@@ -947,7 +940,8 @@ def _drive(args: argparse.Namespace) -> int:
                and row.get("display_title", "").startswith("qualify ") and row.get("display_title", "").split()[2:3] == [sha]
                and _owned_failure(repository, row, sha) for row in rows):
             raise ValueError("selected source already failed qualification; diagnose forward, do not rerun it")
-        tag_input = "\n".join(tags) + "\n"
+        # Published versions remain spent even if their tag was removed or not fetched.
+        tag_input = "\n".join(sorted(set(tags).union(released))) + "\n"
         result = subprocess.run(["sh", str(tools / "release-train.sh"), "next-version", "--changelog-ref", head], input=tag_input, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=root, timeout=30)
         print(result.stderr, end="", file=sys.stderr)

@@ -1040,11 +1040,15 @@ class RollingReleaseTest(unittest.TestCase):
                  contextlib.redirect_stderr(io.StringIO()):
                 yield args, root, source, dispatch
 
-    def test_missing_published_tag_cannot_reuse_the_stable_release_version(self) -> None:
-        with self.published_floor_case(orphan=True) as (args, root, _, dispatch):
-            with self.assertRaisesRegex(ValueError, "published stable release"):
-                release_reuse._drive(args)
-            self.assertFalse((root / "plan.json").exists())
+    def test_missing_published_tag_reserves_its_version_without_blocking_allocation(self) -> None:
+        with self.published_floor_case(orphan=True) as (args, root, source, dispatch):
+            self.assertEqual(release_reuse._drive(args), 0)
+            plan = json.loads((root / "plan.json").read_text())
+            self.assertEqual(plan["kind"], "allocate")
+            self.assertEqual(plan["version"], "0.2.23")
+            self.assertEqual(plan["source_sha"], source)
+            self.assertEqual(plan["base_tag"], "v0.2.19")
+            self.assertNotIn("v0.2.22", release_reuse._command(["git", "tag", "--list"]).splitlines())
             dispatch.assert_not_called()
 
     def test_published_version_floor_allows_new_allocation_once_its_tag_is_present(self) -> None:
