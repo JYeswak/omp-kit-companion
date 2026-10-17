@@ -1,0 +1,1 @@
+- `omp-kit land` reports candidate construction, remote publication, and local catch-up separately as applied, not applied, or unknown, so interrupted or ambiguous runs do not become false no-effect or retry claims. (ompkit-rhy9.11)

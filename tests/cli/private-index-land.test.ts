@@ -790,10 +790,16 @@ test("refuses a deleted directory that expands to unreserved tracked deletions",
 	expect(git(work, ["diff", "--name-only"]).trim().split("\n")).toEqual(["owned-dir/a.txt", "owned-dir/b.txt"]);
 });
 
-test("reports a saved commit after a post-commit hook interrupts its Git parent", () => {
+test("reports commit-only phase evidence and preserves foreign state after a post-commit interruption", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "saved before hook interruption\n");
+	unlinkSync(join(work, "peer.txt"));
+	git(work, ["add", "-u", "--", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "foreign unstaged postimage\n");
 	const before = remoteHead(work);
+	const stagedPeer = git(work, ["ls-files", "-s", "--", "peer.txt"]);
+	const stagedPeerDiff = git(work, ["diff", "--cached", "--name-status", "--", "peer.txt"]);
+	const foreignWorktree = readFileSync(join(work, "untouched.txt"));
 	const hook = join(work, ".git", "hooks", "post-commit");
 	writeFileSync(hook, '#!/bin/sh\nkill -TERM "$PPID"\nexit 0\n');
 	chmodSync(hook, 0o755);
@@ -801,13 +807,99 @@ test("reports a saved commit after a post-commit hook interrupts its Git parent"
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(run.status).toBe(2);
 	expect(responseCode(run.body)).toBe("LAND_COMMIT_INTERRUPTED");
-	const data = run.body.data as { overall: string; commit: string; base: string };
+	const data = run.body.data as {
+		overall: string; commit: string; base: string;
+		phases: {
+			candidate_sha: string; actual_parents: string[]; publication_ref: string;
+			construction: string; publication: string; local_catch_up: string;
+			observed_local_main: string; observed_publication_head: string;
+		};
+	};
 	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
 	expect(data.base).toBe(before);
+	expect(data.phases).toEqual({
+		candidate_sha: data.commit,
+		actual_parents: [before],
+		publication_ref: "refs/heads/main",
+		construction: "APPLIED",
+		publication: "NOT_APPLIED",
+		local_catch_up: "NOT_APPLIED",
+		observed_local_main: data.commit,
+		observed_publication_head: before,
+	});
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.commit);
 	expect(git(work, ["show", `${data.commit}:owned.txt`])).toBe("saved before hook interruption\n");
 	expect(git(work, ["show", ":owned.txt"])).toBe("saved before hook interruption\n");
+	expect(git(work, ["ls-files", "-s", "--", "peer.txt"])).toBe(stagedPeer);
+	expect(git(work, ["diff", "--cached", "--name-status", "--", "peer.txt"])).toBe(stagedPeerDiff);
+	expect(existsSync(join(work, "peer.txt"))).toBe(false);
+	expect(readFileSync(join(work, "untouched.txt"))).toEqual(foreignWorktree);
+	expect(git(work, ["diff", "--name-only", "--", "untouched.txt"]).trim()).toBe("untouched.txt");
 	expect(remoteHead(work)).toBe(before);
+});
+
+test("reports local catch-up without claiming publication or retrying", () => {
+	const { work, fakeBin } = fixture();
+	const peerWork = join(scratch, `peer-${fixtureNumber++}`);
+	const origin = git(work, ["remote", "get-url", "origin"]).trim();
+	git(scratch, ["clone", origin, peerWork]);
+	git(peerWork, ["config", "user.name", "LAND1 peer"]);
+	git(peerWork, ["config", "user.email", "land1-peer@example.invalid"]);
+	writeFileSync(join(peerWork, "remote.txt"), "peer origin advance\n");
+	git(peerWork, ["add", "remote.txt"]);
+	git(peerWork, ["commit", "-m", "peer origin advance [test]"]);
+	const peerTip = git(peerWork, ["rev-parse", "HEAD"]).trim();
+
+	writeFileSync(join(work, "owned.txt"), "owned before catch-up\n");
+	unlinkSync(join(work, "peer.txt"));
+	git(work, ["add", "-u", "--", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "foreign unstaged postimage\n");
+	const before = remoteHead(work);
+	const stagedPeer = git(work, ["ls-files", "-s", "--", "peer.txt"]);
+	const stagedPeerDiff = git(work, ["diff", "--cached", "--name-status", "--", "peer.txt"]);
+	const foreignWorktree = readFileSync(join(work, "untouched.txt"));
+	const postCommit = join(work, ".git", "hooks", "post-commit");
+	writeFileSync(postCommit, `#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\ngit -C '${peerWork}' push origin main\n`);
+	chmodSync(postCommit, 0o755);
+	const attempts = join(work, "pre-push-count.txt");
+	const prePush = join(work, ".git", "hooks", "pre-push");
+	writeFileSync(prePush, `#!/bin/sh\nprintf 'attempt\\n' >> '${attempts}'\nexit 1\n`);
+	chmodSync(prePush, 0o755);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(2);
+	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
+	const data = run.body.data as {
+		overall: string; commit: string; base: string; localMain: string;
+		phases: {
+			candidate_sha: string; actual_parents: string[]; publication_ref: string;
+			construction: string; publication: string; local_catch_up: string;
+			observed_local_main: string; observed_publication_head: string;
+		};
+	};
+	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
+	expect(data.base).toBe(before);
+	expect(data.phases).toEqual({
+		candidate_sha: data.commit,
+		actual_parents: [before],
+		publication_ref: "refs/heads/main",
+		construction: "APPLIED",
+		publication: "NOT_APPLIED",
+		local_catch_up: "APPLIED",
+		observed_local_main: data.localMain,
+		observed_publication_head: peerTip,
+	});
+	expect(git(work, ["merge-base", "--is-ancestor", data.commit, data.localMain]).length).toBe(0);
+	expect(git(work, ["merge-base", "--is-ancestor", peerTip, data.localMain]).length).toBe(0);
+	expect(remoteHead(work)).toBe(peerTip);
+	expect(git(work, ["ls-files", "-s", "--", "peer.txt"])).toBe(stagedPeer);
+	expect(git(work, ["diff", "--cached", "--name-status", "--", "peer.txt"])).toBe(stagedPeerDiff);
+	expect(existsSync(join(work, "peer.txt"))).toBe(false);
+	expect(readFileSync(join(work, "untouched.txt"))).toEqual(foreignWorktree);
+	expect(git(work, ["diff", "--name-only", "--", "untouched.txt"]).trim()).toBe("untouched.txt");
+	expect(readFileSync(attempts, "utf8").trim().split("\n")).toEqual(["attempt"]);
+
 });
 
 test("attributes the actual owned commit when a peer advances HEAD before Git returns", () => {

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { CliResult, ParsedCommand } from "./cli.ts";
-import { convergeRepository } from "./converge.ts";
+import { convergeRepository, type ConvergeResult } from "./converge.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
@@ -19,6 +19,86 @@ function git(repo: string, args: string[], reflogAction?: string): GitResult {
 	if (reflogAction) env.GIT_REFLOG_ACTION = reflogAction;
 	const run = spawnSync("git", args, { cwd: repo, env, encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
 	return { code: run.status ?? 1, out: String(run.stdout ?? ""), err: String(run.stderr ?? ""), interrupted: run.signal !== null || run.error !== undefined };
+}
+
+type PhaseState = "APPLIED" | "NOT_APPLIED" | "UNKNOWN";
+type LandPhaseEvidence = {
+	candidate_sha: string | null;
+	actual_parents: string[] | null;
+	publication_ref: "refs/heads/main";
+	construction: PhaseState;
+	publication: PhaseState;
+	local_catch_up: PhaseState;
+	observed_local_main: string | null;
+	observed_publication_head: string | null;
+};
+
+function observedRemoteMain(repo: string): string | null {
+	const result = git(repo, ["ls-remote", "--refs", "origin", "refs/heads/main"]);
+	if (result.code !== 0) return null;
+	const lines = result.out.trim().split("\n").filter((line) => line.length > 0);
+	if (lines.length !== 1) return null;
+	const fields = lines[0]?.split("\t") ?? [];
+	return fields.length === 2 && fields[1] === "refs/heads/main" && fields[0] ? fields[0] : null;
+}
+
+function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
+	const result = git(repo, ["merge-base", "--is-ancestor", ancestor, descendant]);
+	return result.code === 0 ? true : result.code === 1 ? false : null;
+}
+
+function landPhaseEvidence(
+	repo: string,
+	candidate: string | null,
+	convergenceStarted: boolean,
+	convergence?: ConvergeResult,
+	constructionWithoutCandidate: PhaseState = "UNKNOWN",
+): LandPhaseEvidence {
+	let actualParents: string[] | null = null;
+	let construction = constructionWithoutCandidate;
+	if (candidate) {
+		const parentResult = git(repo, ["show", "-s", "--format=%P", candidate]);
+		if (parentResult.code === 0) {
+			const parents = parentResult.out.trim();
+			actualParents = parents ? parents.split(" ").filter((parent) => parent.length > 0) : [];
+			construction = "APPLIED";
+		} else construction = "UNKNOWN";
+	}
+
+	const localResult = git(repo, ["rev-parse", "--verify", "refs/heads/main"]);
+	const localMain = localResult.code === 0 ? localResult.out.trim() : null;
+	const publicationHead = observedRemoteMain(repo);
+	const candidateOnRemote = candidate && publicationHead ? isAncestor(repo, candidate, publicationHead) : null;
+	let publication: PhaseState;
+	if (candidateOnRemote === true) publication = "APPLIED";
+	else if (!candidate || publicationHead === null) publication = "UNKNOWN";
+	else if (!convergenceStarted) publication = "NOT_APPLIED";
+	else if (convergence?.reason === "PUSH_FAILED" && convergence.up === publicationHead && candidateOnRemote === false) publication = "NOT_APPLIED";
+	else if (convergence?.state === "REFUSED" && !convergence.applied && candidateOnRemote === false)
+		publication = "NOT_APPLIED";
+	else publication = "UNKNOWN";
+
+	let localCatchUp: PhaseState;
+	if (!convergenceStarted) localCatchUp = "NOT_APPLIED";
+	else if (!convergence) localCatchUp = "UNKNOWN";
+	else if (convergence.state === "AHEAD") localCatchUp = "NOT_APPLIED";
+	else if (convergence.state === "REFUSED" || !convergence.applied)
+		localCatchUp = localMain === candidate ? "NOT_APPLIED" : "UNKNOWN";
+	else if (convergence.new_head && localMain) {
+		const includesCatchUp = isAncestor(repo, convergence.new_head, localMain);
+		localCatchUp = includesCatchUp === true ? "APPLIED" : "UNKNOWN";
+	} else localCatchUp = "UNKNOWN";
+
+	return {
+		candidate_sha: candidate,
+		actual_parents: actualParents,
+		publication_ref: "refs/heads/main",
+		construction,
+		publication,
+		local_catch_up: localCatchUp,
+		observed_local_main: localMain,
+		observed_publication_head: publicationHead,
+	};
 }
 
 function trackedPaths(repo: string, path: string): string[] | null {
@@ -181,26 +261,43 @@ export function landCommand(request: ParsedCommand): CliResult {
 	const matches = reflog.out.split("\n").map((line) => line.split("\0"))
 		.filter((fields) => fields[1]?.startsWith(`${action}: `)).map((fields) => fields[0]);
 	const sha = matches.length === 1 ? matches[0] : null;
+	const constructionWithoutCandidate: PhaseState =
+		commit.code !== 0 && !commit.interrupted && reflog.code === 0 && matches.length === 0 ? "NOT_APPLIED" : "UNKNOWN";
 	if (!sha) {
-		if (commit.code !== 0 && !commit.interrupted && reflog.code === 0 && matches.length === 0)
-			return refused("COMMIT_CREATION_FAILED", `Git did not save the owned paths: ${commit.err.trim()}`, "Inspect the worktree and owned index entries; nothing was published.");
-		return { code: 2, data: { overall: "SAVE_UNCERTAIN", commit: null, owner: owner.owner, paths, base: head.out.trim() }, errors: [{ code: "LAND_COMMIT_UNVERIFIED", message: "The commit operation ended without unambiguous native save attribution; work may already be saved", remediation: "Inspect shared main and its reflog before attempting publication; no rollback or publication was attempted." }], verification: "PERFORMED" };
+		const phases = landPhaseEvidence(repo, null, false, undefined, constructionWithoutCandidate);
+		if (constructionWithoutCandidate === "NOT_APPLIED") {
+			return {
+				code: 2,
+				data: { overall: "NOT_RUN", phases },
+				errors: [{ code: "COMMIT_CREATION_FAILED", message: `Git did not save the owned paths: ${commit.err.trim()}`, remediation: "Inspect the worktree and owned index entries; nothing was published." }],
+				verification: "NOT_RUN",
+			};
+		}
+		return { code: 2, data: { overall: "SAVE_UNCERTAIN", commit: null, owner: owner.owner, paths, base: head.out.trim(), phases }, errors: [{ code: "LAND_COMMIT_UNVERIFIED", message: "The commit operation ended without unambiguous native save attribution; work may already be saved", remediation: "Inspect shared main and its reflog before attempting publication; no rollback or publication was attempted." }], verification: "PERFORMED" };
 	}
-	if (commit.code !== 0 || commit.interrupted)
-		return { code: 2, data: { overall: "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim() }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "PERFORMED" };
+	if (commit.code !== 0 || commit.interrupted) {
+		const phases = landPhaseEvidence(repo, sha, false);
+		return { code: 2, data: { overall: "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim(), phases }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "PERFORMED" };
+	}
+	let convergenceStarted = false;
+	let convergenceResult: ConvergeResult | undefined;
 	try {
+		convergenceStarted = true;
 		const convergence = convergeRepository({ repo, apply: true, push: true });
+		convergenceResult = convergence;
 		const fetched = convergence.pushed ? git(repo, ["fetch", "--no-tags", "origin", "refs/heads/main"]) : null;
 		const remote = git(repo, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
 		const reachable = fetched?.code === 0 && remote.code === 0 && git(repo, ["merge-base", "--is-ancestor", sha, remote.out.trim()]).code === 0;
 		const published = convergence.pushed && reachable;
+		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergence);
 		return {
 			code: published ? 0 : 2,
-			data: { overall: published ? "PUSHED" : "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim(), localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence },
+			data: { overall: published ? "PUSHED" : "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim(), localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence, phases },
 			...(published ? {} : { errors: [{ code: "LAND_PUBLICATION_REFUSED", message: `Owned commit is saved on shared main; publication was not verified: ${convergence.reason ?? "landed commit not reachable from fetched origin/main"}`, remediation: "Preserve the saved commit and resolve the convergence refusal before publishing." }] }),
 			verification: "PERFORMED",
 		};
 	} catch (error) {
-		return { code: 2, data: { overall: "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim() }, errors: [{ code: "LAND_PUBLICATION_FAILED", message: `Owned commit is saved; convergence failed: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect shared main and origin before publishing; no rollback of saved work was attempted." }], verification: "PERFORMED" };
+		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergenceResult);
+		return { code: 2, data: { overall: "SAVED_NOT_PUBLISHED", commit: sha, owner: owner.owner, paths, base: head.out.trim(), phases }, errors: [{ code: "LAND_PUBLICATION_FAILED", message: `Owned commit is saved; convergence failed: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect shared main and origin before publishing; no rollback of saved work was attempted." }], verification: "PERFORMED" };
 	}
 }
