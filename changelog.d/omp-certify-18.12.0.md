@@ -1,0 +1,1 @@
+- Main CI and native certification install OMP 18.12.0, certified by omp-certify. (PR #110)
