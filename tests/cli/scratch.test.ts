@@ -590,7 +590,7 @@ test("apply kills only selected harness orphans and logs JSONL", () => {
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home, ...extraEnv }, stdout: "pipe", stderr: "pipe",
+    cwd: home, env: { ...process.env, HOME: home, ...extraEnv, BUN_OPTIONS: `--preload=${join(home, "browser-inventory.ts")}` }, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }
@@ -604,6 +604,18 @@ function cliHome(): { home: string; state: string } {
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   chmodSync(join(bin, "omp-kit"), 0o755);
+  // PATH's fake ps does not intercept the browser collector's absolute /bin/ps.
+  // Keep that inventory empty in both the keeper and its inherited worker;
+  // real owner-PID/start and lsof probes remain unchanged.
+  writeFileSync(join(home, "browser-inventory.ts"), `
+const spawnSync = Bun.spawnSync.bind(Bun);
+Bun.spawnSync = ((command, options) => {
+  if (Array.isArray(command) && command[0] === "/bin/ps" && command[1] === "-axo") {
+    return spawnSync(["/usr/bin/true"], options);
+  }
+  return spawnSync(command, options);
+});
+`);
   return { home, state };
 }
 
