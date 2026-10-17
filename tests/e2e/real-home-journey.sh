@@ -149,11 +149,15 @@ mkdir -p "$LOG" "$WORK/tmp" "$WORK/release" || exit 2
 EXPECTED=$(printf '%s\n' "$EXPECTED" | sed -e "s/@PREV@/$PREV/g" -e "s/@CAND@/$CAND/g")
 PREFIX="$FIXTURE_HOME/.local/opt/omp-kit"
 KIT="$PREFIX/bin/omp-kit"
+CAND_PREFIX="$FIXTURE_HOME/.local/opt/omp-kit-candidate"
+CAND_KIT="$CAND_PREFIX/bin/omp-kit"
 if [ "$SIGNED_MODE" -eq 1 ]; then
-  EXPECTED=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$EXPECTED" \
+  EXPECTED=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$EXPECTED" \
     "signed_inputs|0|inputs=valid" \
     "previous_release|0|published=true stable=true version=$PREV" \
     "verify_previous_signature|0|verified dry-run: version=$PREV platform=$PLATFORM prefix=$PREFIX" \
+    "install_candidate_public|0|installed=$CAND" \
+    "candidate_public_version|0|omp-kit $CAND" \
     "candidate_source|0|source_sha=$SOURCE_SHA" \
     "signed_receipt|0|receipt=written platform=$PLATFORM version=$CAND previous=$PREV")
 fi
@@ -168,6 +172,7 @@ PREVIOUS_RELEASE_OK=0
 PREVIOUS_SIGNATURE_OK=0
 CANDIDATE_SOURCE_OK=0
 PUBLIC_INSTALLER_OK=0
+PREVIOUS_PUBLIC_INSTALL_OK=0
 COMPILED_UPGRADE_OK=0
 
 stop_writer() {
@@ -389,9 +394,12 @@ verdict() {
          .previous_version == $previous and .installed_version == $version and
          .checks.public_installer == true and .checks.compiled_upgrade == true' "$RECEIPT_OUT" >/dev/null 2>&1 &&
         head -n 1 "$out" || echo "receipt=invalid" ;;
-    install_previous) v=$(sed -n 's/^installed: version=\([^ ]*\).*/\1/p' "$out")
-      [ -x "$KIT" ] && [ -n "$v" ] && echo "installed=$v" || echo "not-installed" ;;
-    version|version_after_update) head -n 1 "$out" ;;
+    install_previous|install_candidate_public)
+      v=$(sed -n 's/^installed: version=\([^ ]*\).*/\1/p' "$out")
+      install_binary=$KIT
+      [ "$2" != install_candidate_public ] || install_binary=$CAND_KIT
+      [ -x "$install_binary" ] && [ -n "$v" ] && echo "installed=$v" || echo "not-installed" ;;
+    version|version_after_update|candidate_public_version) head -n 1 "$out" ;;
     status) envelope_verdict "$out" '"ok=\(.ok) " + ([.data.findings[]? | select(.component == "state_root") | "state_root=\(.status):\(.evidence.mode)"][0] // "state_root=absent") + " " + ([.data.findings[]? | select(.component == "installed_rules") | "installed_rules=\(.status)"][0] // "installed_rules=absent")' ;;
     doctor) envelope_verdict "$out" "$DOCTOR_FILTER" ;;
     doctor_after_repair) envelope_verdict "$out" '"ok=\(.ok) " + ([.data.findings[]? | select(.component == "state_root") | "state_root=\(.status)"][0] // "state_root=absent")' ;;
@@ -475,7 +483,16 @@ step fixture build_fixture || { echo "journey: ABORT: fixture failed; nothing be
 WRITER_PID=$!
 step install_previous kit_env sh "$INSTALLER" --version "$PREV" --index "$PREV_INDEX" --offline "$PREV_ARCHIVE" --prefix "$PREFIX" ||
   { echo "journey: ABORT: previous kit is not installed; nothing below can run" >&2; finish abort; }
-PUBLIC_INSTALLER_OK=1
+PREVIOUS_PUBLIC_INSTALL_OK=1
+if [ "$SIGNED_MODE" -eq 1 ]; then
+  candidate_public_steps_ok=1
+  step install_candidate_public kit_env sh "$INSTALLER" --version "$CAND" --index "$CAND_INDEX" \
+    --offline "$CAND_ARCHIVE" --prefix "$CAND_PREFIX" || candidate_public_steps_ok=0
+  step candidate_public_version kit_env "$CAND_KIT" --version || candidate_public_steps_ok=0
+  if [ "$PREVIOUS_PUBLIC_INSTALL_OK" -eq 1 ] && [ "$candidate_public_steps_ok" -eq 1 ]; then
+    PUBLIC_INSTALLER_OK=1
+  fi
+fi
 step version kit_env "$KIT" --version
 step status kit_env "$KIT" status --json
 step doctor kit_env "$KIT" doctor --json
