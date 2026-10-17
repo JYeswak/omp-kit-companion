@@ -196,7 +196,7 @@ jobs:
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=100" \
             | jq '{workflow_runs: [.[].workflow_runs[]]}' > source-ci.json
           python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
-          python3 scripts/release_reuse.py promotion --source-sha "$SHA" --version "$VERSION"
+          python3 scripts/release_reuse.py promotion --repository "$GITHUB_REPOSITORY" --source-sha "$SHA" --version "$VERSION"
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
@@ -219,8 +219,6 @@ jobs:
           set -euo pipefail
           git fetch origin main --tags
           [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
-          max="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
-          latest_flag="$(sh scripts/release-train.sh latest-flag --version "$VERSION" --max-version "${max#v}")"
           files=(candidate-index/release-index.json)
           for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
             archive="archives/$platform/$(jq -er --arg p "$platform" '.assets[$p].filename' candidate-index/release-index.json)"
@@ -241,5 +239,6 @@ jobs:
             --version "$VERSION" --source-sha "$SHA" --index candidate-index/release-index.json \
             --archives archives --sboms sboms --notes selection/release-notes.md \
             --producer-run producer-run.json --binding selection/selection.json
+          latest_flag="$(python3 scripts/release_reuse.py latest-flag --repository "$GITHUB_REPOSITORY" --version "$VERSION")"
           # shellcheck disable=SC2086
           gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false $latest_flag

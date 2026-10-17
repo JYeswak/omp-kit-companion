@@ -554,16 +554,19 @@ class RollingReleaseTest(unittest.TestCase):
                 sources.append(git("rev-parse", "HEAD"))
                 if number < 2:
                     git("tag", f"v0.2.{19 + number}")
-            with patch.dict(os.environ, {"GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root)}), contextlib.redirect_stdout(io.StringIO()):
+            git("update-ref", "refs/remotes/origin/main", sources[-1])
+            with patch.dict(os.environ, {"GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root)}), \
+                 patch.object(release_reuse, "_published", return_value={"v0.2.19", "v0.2.20"}), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(ValueError):
-                    release_reuse.main(["promotion", "--source-sha", sources[0], "--version", "9.9.9"])
+                    release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[0], "--version", "9.9.9"])
                 with self.assertRaises(ValueError):
-                    release_reuse.main(["promotion", "--source-sha", sources[1], "--version", "0.2.21"])
-                self.assertEqual(release_reuse.main(["promotion", "--source-sha", sources[2], "--version", "0.2.21"]), 0)
+                    release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[1], "--version", "0.2.21"])
+                self.assertEqual(release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[2], "--version", "0.2.21"]), 0)
                 git("tag", "v0.2.21", sources[2])
-                self.assertEqual(release_reuse.main(["promotion", "--source-sha", sources[2], "--version", "0.2.21"]), 0)
+                self.assertEqual(release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[2], "--version", "0.2.21"]), 0)
                 with self.assertRaises(ValueError):
-                    release_reuse.main(["promotion", "--source-sha", sources[1], "--version", "0.2.21"])
+                    release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[1], "--version", "0.2.21"])
     def test_authorized_latest_rerun_requires_its_complete_fresh_artifact_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -915,6 +918,8 @@ class RollingReleaseTest(unittest.TestCase):
                     return str(root)
                 if argv[:3] == ["git", "tag", "--list"]:
                     return "v0.2.19"
+                if argv == ["git", "rev-parse", "origin/main"]:
+                    return SOURCE_SHA
                 raise AssertionError(argv)
             _, canonical, _ = owner_fixture()
             args = argparse.Namespace(repository=REPOSITORY, train_id="900", train_attempt="1", stage="prepare",
@@ -922,6 +927,7 @@ class RollingReleaseTest(unittest.TestCase):
             with patch.object(release_reuse, "_api", side_effect=api), \
                  patch.object(release_reuse, "_command", side_effect=command), \
                  patch.object(release_reuse, "_published", return_value={"v0.2.19"}), \
+                 patch.object(release_reuse, "_is_ancestor", return_value=True), \
                  patch.object(release_reuse, "_run_rows", return_value=[unbound, bound]), \
                  patch.object(release_reuse, "_artifact_files", return_value={"qualification.json": json.dumps(canonical).encode()}), \
                  patch.object(release_reuse, "_load_owner_authority", return_value=owner_fixture()), \
@@ -962,7 +968,7 @@ class RollingReleaseTest(unittest.TestCase):
 
     @contextlib.contextmanager
     def published_floor_case(self, *, orphan=False, with_published_tag=False,
-                             unpublished_tag: str | None = None, tag_on_source=False):
+                             unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
@@ -987,7 +993,12 @@ class RollingReleaseTest(unittest.TestCase):
             git("commit", "-qm", "published baseline")
             git("tag", "v0.2.19")
             if with_published_tag:
-                git("tag", "v0.2.22")
+                if published_off_main:
+                    tree = git("rev-parse", "HEAD^{tree}")
+                    detached = git("commit-tree", tree, "-m", "off-main published fixture")
+                    git("tag", "v0.2.22", detached)
+                else:
+                    git("tag", "v0.2.22")
             if unpublished_tag and not tag_on_source:
                 git("tag", unpublished_tag)
             (root / "changelog.d").mkdir()
@@ -1108,6 +1119,48 @@ class RollingReleaseTest(unittest.TestCase):
                 self.assertEqual(plan["version"], "0.2.23")
                 self.assertEqual(plan["source_sha"], source)
                 dispatch.assert_not_called()
+
+    def test_off_main_published_tag_does_not_hide_or_block_authenticated_recovery(self) -> None:
+        for status in ("in_progress", "completed"):
+            with self.subTest(status=status), \
+                 self.published_floor_case(with_published_tag=True, published_off_main=True) as (args, root, source, dispatch):
+                allocation, binding, notes = owner_fixture()
+                allocation["source_sha"] = source
+                binding["allocation_sha256"] = hashlib.sha256((json.dumps(allocation, sort_keys=True) + "\n").encode()).hexdigest()
+                pending = dict(candidate_run(source), status=status, conclusion="success" if status == "completed" else None,
+                               display_title=release_reuse.release_title("qualify", BASE_VERSION, source, "810"))
+                dispatch.return_value = "67890"
+                def runs(repository, workflow, event="workflow_dispatch"):
+                    return [pending] if workflow == "release.yml" else []
+                with patch.object(release_reuse, "_run_rows", side_effect=runs), \
+                     patch.object(release_reuse, "_find_owner_for_qualification", return_value=(allocation, binding, notes)):
+                    self.assertEqual(release_reuse._drive(args), 0)
+                plan = json.loads((root / "plan.json").read_text())
+                self.assertEqual(plan["kind"], "resume")
+                self.assertEqual(plan["qualification_run_id"], RUN_ID)
+                self.assertEqual(plan["version"], BASE_VERSION)
+                self.assertEqual(release_reuse._promotion(argparse.Namespace(repository=REPOSITORY, source_sha=source, version=BASE_VERSION)), 0)
+
+    def test_unpublished_reservation_cannot_block_qualified_promotion_or_latest(self) -> None:
+        with self.published_floor_case(unpublished_tag="v0.2.47", tag_on_source=True) as (_, _, source, dispatch):
+            args = argparse.Namespace(repository=REPOSITORY, source_sha=source, version=BASE_VERSION)
+            self.assertEqual(release_reuse._promotion(args), 0)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(release_reuse._latest_flag(args), 0)
+            self.assertEqual(output.getvalue().strip(), "--latest")
+            dispatch.assert_not_called()
+
+    def test_actual_newer_publication_still_prevents_version_and_latest_regression(self) -> None:
+        with self.published_floor_case(with_published_tag=True) as (_, _, source, dispatch):
+            args = argparse.Namespace(repository=REPOSITORY, source_sha=source, version=BASE_VERSION)
+            with self.assertRaises(ValueError):
+                release_reuse._promotion(args)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(release_reuse._latest_flag(args), 0)
+            self.assertEqual(output.getvalue().strip(), "--latest=false")
+            dispatch.assert_not_called()
 
 
 class ExecutionCodeTrustTest(unittest.TestCase):

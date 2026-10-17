@@ -844,12 +844,13 @@ def _drive(args: argparse.Namespace) -> int:
         raise ValueError("no stable release floor exists")
     max_tag = max(tags, key=lambda tag: tuple(map(int, tag[1:].split("."))))
     released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
-    recovery_floor: str | None = None
     if released:
         latest_released = max(released, key=lambda tag: tuple(map(int, tag[1:].split("."))))
-        recovery_floor = latest_released[1:]
         if tuple(map(int, latest_released[1:].split("."))) > tuple(map(int, max_tag[1:].split("."))):
             raise ValueError(f"published stable release {latest_released} exceeds fetched tag floor {max_tag}; restore/fetch its authenticated tag before allocation")
+    head = _command(["git", "rev-parse", "origin/main"])
+    published_floors = [tag for tag in tags if tag in published and _is_ancestor(tag, head)]
+    recovery_floor = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))[1:] if published_floors else None
     rows = _run_rows(repository, "release.yml")
     # A stable release left by a failed publisher is not a completed outcome.
     # Drafts already stay out of `published`; this also recovers pre-existing
@@ -924,8 +925,6 @@ def _drive(args: argparse.Namespace) -> int:
         # Unknown active runs still require reconciliation, never a competing allocation.
         if any(row.get("status") != "completed" for row in rows):
             raise ValueError("native release work is still active or unresolved; wait before allocation")
-        head = _command(["git", "rev-parse", "origin/main"])
-        published_floors = [tag for tag in tags if tag in published and _is_ancestor(tag, head)]
         if not published_floors:
             raise ValueError("no authenticated published ancestor release floor exists")
         published_tag = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))
@@ -1107,6 +1106,8 @@ def _promotion(args: argparse.Namespace) -> int:
     if not _git_sha(args.source_sha) or not stable_version(args.version):
         raise ValueError("invalid promotion identity")
     tags = _command(["git", "tag", "--list", "v*"]).splitlines()
+    published = _published(args.repository)
+    head = _command(["git", "rev-parse", "origin/main"])
     selected_tag = f"v{args.version}"
     if selected_tag in tags:
         if _command(["git", "rev-parse", f"{selected_tag}^{{commit}}"]) != args.source_sha:
@@ -1114,9 +1115,11 @@ def _promotion(args: argparse.Namespace) -> int:
         print(f"PROMOTION=recover-matching-tag source_sha={args.source_sha} version={args.version}")
         return 0
     for tag in tags:
-        if not tag.startswith("v") or not stable_version(tag[1:]):
+        if tag not in published or not tag.startswith("v") or not stable_version(tag[1:]):
             continue
         tagged = _command(["git", "rev-parse", f"{tag}^{{commit}}"])
+        if not _is_ancestor(tagged, head):
+            continue
         # A newer/equal promoted source is never displaced by an older
         # snapshot, even when someone supplies a larger version override.
         if not _is_ancestor(tagged, args.source_sha) or tagged == args.source_sha:
@@ -1125,6 +1128,18 @@ def _promotion(args: argparse.Namespace) -> int:
             raise ValueError("version would regress an already-promoted version")
     print(f"PROMOTION=allowed source_sha={args.source_sha} version={args.version}")
     return 0
+
+def _latest_flag(args: argparse.Namespace) -> int:
+    if not stable_version(args.version):
+        raise ValueError("invalid publication version")
+    selected = tuple(map(int, args.version.split(".")))
+    newer_published = any(
+        tag.startswith("v") and stable_version(tag[1:]) and tuple(map(int, tag[1:].split("."))) > selected
+        for tag in _published(args.repository)
+    )
+    print("--latest=false" if newer_published else "--latest")
+    return 0
+
 
 
 def _release_asset_rows(repository: str, release_id: int) -> list[dict[str, Any]]:
@@ -1334,9 +1349,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
     promotion = commands.add_parser("promotion")
+    promotion.add_argument("--repository", required=True)
     promotion.add_argument("--source-sha", required=True)
     promotion.add_argument("--version", required=True)
     promotion.set_defaults(func=_promotion)
+    latest = commands.add_parser("latest-flag")
+    latest.add_argument("--repository", required=True)
+    latest.add_argument("--version", required=True)
+    latest.set_defaults(func=_latest_flag)
+
 
     index = commands.add_parser("verify-index")
     for flag in ("proof", "index", "omp-config", "source-sha", "version"):

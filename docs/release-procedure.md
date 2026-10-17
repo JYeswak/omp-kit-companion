@@ -167,8 +167,9 @@ ancestor; an actually newer green supersedes pending older sources.
   repository/workflow/ref/attempt, all three ship targets, both pinned OMP tracks,
   archive hashes and notes before tagging. A second, tag-ref run signs **those
   same bytes**, and publication verifies real Sigstore authority before creating
-  the release. A recovered older release cannot take Latest from a newer tag.
-- Successful unfinished candidates are resumed rather than allocating their
+  the release. A recovered older release cannot take Latest from a newer
+  published version; an unrelated unpublished tag is not a publication outcome.
+- Non-superseded successful unfinished candidates are resumed rather than allocating their
   untagged in-flight version again. Failed exact-source qualification requires
   diagnosis forward, not an automatic rerun or a weakened gate. Unpublished tags
   reserve their version numbers without locking the scheduler or hiding an
