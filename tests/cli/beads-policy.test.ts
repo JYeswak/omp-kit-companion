@@ -197,3 +197,36 @@ test("MP3 bypass: every status->closed edge refuses --bypass-policy", () => {
 		expect(bypassed.out).toMatch(/allow_bypass: false|bypass-policy is disabled/);
 	}
 }, 60000);
+
+test("review accepts an unfinished contract but closure still requires completion", () => {
+	const project = scratchTracker(template);
+	const create = () => {
+		const result = br(project, ["create", "--title", "review completion probe", "--actor", "RusticPine"]);
+		expect(result.rc).toBe(0);
+		const parsed: unknown = JSON.parse(result.out);
+		if (!parsed || typeof parsed !== "object" || !("id" in parsed) || typeof parsed.id !== "string")
+			throw new Error("br create returned no string id");
+		return parsed.id;
+	};
+	const id = create();
+	const unfinished = "- [ ] Exercise the consumer and obtain independent verification.";
+	expect(br(project, ["update", id, "--status", "in_progress", "--assignee", "RusticPine", "--acceptance-criteria", unfinished, "--transition-comment", "implementation started", "--actor", "RusticPine"]).rc).toBe(0);
+	const submitted = br(project, ["update", id, "--status", "in_review", "--transition-comment", "implementation ready for independent verification", "--actor", "RusticPine"]);
+	expect(submitted, "unchecked acceptance must not prevent its independent review").toMatchObject({ rc: 0 });
+	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "RusticPine"]).rc).toBe(0);
+	const premature = br(project, ["close", id, "--reason", "fixture attempts incomplete closure", "--transition-comment", "review report alone is insufficient", "--actor", "RusticPine"]);
+	expect(premature.rc, "a reviewer report must not bypass incomplete acceptance").not.toBe(0);
+	expect(br(project, ["update", id, "--acceptance-criteria", unfinished.replace("[ ]", "[x]"), "--actor", "RusticPine"]).rc).toBe(0);
+	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "RusticPine"]).rc).toBe(0);
+	for (const { agent, expected } of [{ agent: "RusticPine", expected: 4 }, { agent: "FixtureIndependentReviewer", expected: 0 }]) {
+		const verdict = spawnSync("sh", [join(repoRoot, "scripts", "close-guard.sh"), id, "--db", join(project, ".beads", "probe.db")], {
+			cwd: project, encoding: "utf8", env: { ...process.env, RUST_LOG: "warn", AGENT_NAME: agent },
+		});
+		expect(verdict.status, "complete acceptance must preserve the implementer/reviewer distinction").toBe(expected);
+		if (expected === 4) expect(verdict.stderr).toContain("holds the claim");
+	}
+
+	const empty = create();
+	expect(br(project, ["update", empty, "--status", "in_progress", "--transition-comment", "empty contract control", "--actor", "RusticPine"]).rc).toBe(0);
+	expect(br(project, ["update", empty, "--status", "in_review", "--transition-comment", "must refuse missing contract", "--actor", "RusticPine"]).rc).not.toBe(0);
+}, 60000);

@@ -18,8 +18,8 @@ workflow:
   status_groups:
     ready: [open, rework]
   required_fields:
-    in_review: [acceptance_criteria, transition_comment]
-    closed: [transition_comment]
+    in_review: [acceptance_criteria_present, transition_comment]
+    closed: [acceptance_criteria, transition_comment]
   gates:
     "in_review -> closed":
       require_all:
