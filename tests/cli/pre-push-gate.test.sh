@@ -9,7 +9,8 @@
 set -u
 
 ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/pre-push-gate.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)/var/agent-tmp
+mkdir -p "$REPO_TMP"
 TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/pre-push-gate-test.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
