@@ -19,7 +19,17 @@ message. The release workflow enforces it:
 sh scripts/release-notes.sh check --base-tag vX.Y.Z --head REF
 ```
 
-A commit touching shipped paths with neither fails the check. The pre-push gate runs the same coverage for the pushed range first (`scripts/check-pushed-notes.sh` via `fresh-gate.sh`), so a missing trailer, reason or naming fragment refuses the push, not the release. A fragment folded into `CHANGELOG.md` later in the range still covers its commit.
+A commit touching shipped paths without coverage fails the check. The pre-push gate
+(`scripts/check-pushed-notes.sh` via `fresh-gate.sh`) calls this same checker with
+`--base-ref` for its exact pushed range; it does not maintain a second parser.
+A fragment folded into source-owned `CHANGELOG.md` entries still covers its commit.
+
+When a remote push base is absent, the gate checks from the newest available stable
+published ancestor of the immutable source. Main-push CI checks the full unreleased
+range from that published ancestor before it can become green. Both use the release
+controller's published-ancestor selection: draft, prerelease, unpublished reservation
+tags and publications after the checked source cannot narrow its coverage. A missing
+published floor or unavailable metadata refuses validation; neither silently skips it.
 
 ## 2. Optional changelog bookkeeping (not a release prerequisite)
 

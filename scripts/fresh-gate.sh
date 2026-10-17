@@ -171,10 +171,6 @@ PY
 }
 
 gate_notes() {
-	if [ -z "$BASE" ]; then
-		echo "notes coverage: SKIP (no base to range against)"
-		return 0
-	fi
 	sh "$SCRIPT_DIR/check-pushed-notes.sh" --repo "$ROOT" --base "$BASE" --tip "$COMMIT" --archive-dir "$ARCHIVE_DIR"
 }
 

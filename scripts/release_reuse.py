@@ -830,6 +830,22 @@ def _dispatch_allocation(args: argparse.Namespace) -> int:
     return _store_plan(args, plan)
 
 
+def _published_ancestor_tags(tags: list[str], published: set[str], head: str) -> list[str]:
+    return [tag for tag in tags if tag.startswith("v") and stable_version(tag[1:])
+            and tag in published and _is_ancestor(tag, head)]
+
+
+def _notes_floor(args: argparse.Namespace) -> int:
+    if not _git_sha(args.source_sha):
+        raise ValueError("notes-floor requires a full source commit SHA")
+    tags = _command(["git", "tag", "--list", "v*"]).splitlines()
+    floors = _published_ancestor_tags(tags, _published(args.repository), args.source_sha)
+    if not floors:
+        raise ValueError("no published ancestor notes floor exists for the selected source")
+    print(max(floors, key=lambda tag: tuple(map(int, tag[1:].split(".")))))
+    return 0
+
+
 def _drive(args: argparse.Namespace) -> int:
     if args.stage == "dispatch":
         return _dispatch_allocation(args)
@@ -842,7 +858,7 @@ def _drive(args: argparse.Namespace) -> int:
     tags = [tag for tag in _command(["git", "tag", "--list", "v*"]).splitlines() if tag.startswith("v") and stable_version(tag[1:])]
     released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
     head = _command(["git", "rev-parse", "origin/main"])
-    published_floors = [tag for tag in tags if tag in published and _is_ancestor(tag, head)]
+    published_floors = _published_ancestor_tags(tags, published, head)
     recovery_floor = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))[1:] if published_floors else None
     rows = _run_rows(repository, "release.yml")
     # A stable release left by a failed publisher is not a completed outcome.
@@ -953,7 +969,7 @@ def _drive(args: argparse.Namespace) -> int:
                 raise ValueError("version override is below the tag/changelog allocation floor")
             version = args.version
         train_id = args.train_id
-        base_tags = [tag for tag in published if tag in tags and _is_ancestor(tag, sha)]
+        base_tags = _published_ancestor_tags(tags, published, sha)
         if not base_tags:
             raise ValueError("selected source has no published ancestor notes floor")
         base_tag = max(base_tags, key=lambda tag: tuple(map(int, tag[1:].split("."))))
@@ -1378,6 +1394,11 @@ def main(argv: list[str] | None = None) -> int:
         probe.add_argument(f"--{flag}", required=True)
     probe.add_argument("--event-attempt", type=int, required=True)
     probe.set_defaults(func=_probe_source)
+
+    notes_floor = commands.add_parser("notes-floor")
+    notes_floor.add_argument("--repository", required=True)
+    notes_floor.add_argument("--source-sha", required=True)
+    notes_floor.set_defaults(func=_notes_floor)
 
     drive = commands.add_parser("drive")
     drive.add_argument("--repository", required=True)

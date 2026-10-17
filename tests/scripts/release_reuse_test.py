@@ -1061,6 +1061,22 @@ class RollingReleaseTest(unittest.TestCase):
                 self.assertEqual(plan["kind"], "allocate")
                 dispatch.assert_not_called()
 
+    def test_notes_floor_stays_bound_to_ci_source_after_main_publishes_a_descendant(self) -> None:
+        with self.published_floor_case(with_published_tag=True, unpublished_tag="v0.2.47",
+                                       tag_on_source=True) as (_, _, source, dispatch):
+            tree = release_reuse._command(["git", "rev-parse", f"{source}^{{tree}}"])
+            later = release_reuse._command(["git", "commit-tree", tree, "-p", source, "-m", "later publication"])
+            release_reuse._command(["git", "update-ref", "refs/tags/v0.2.22", later])
+            release_reuse._command(["git", "update-ref", "refs/remotes/origin/main", later])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(release_reuse.main(["notes-floor", "--repository", REPOSITORY,
+                                                    "--source-sha", source]), 0)
+            self.assertEqual(output.getvalue().strip(), "v0.2.19")
+            self.assertEqual(release_reuse._command(["git", "rev-parse", "HEAD"]), source)
+            self.assertEqual(release_reuse._command(["git", "rev-parse", "v0.2.22"]), later)
+            dispatch.assert_not_called()
+
     def test_unpublished_tags_reserve_versions_without_starving_qualified_source(self) -> None:
         for patch_number in (22, 47):
             for tag_on_source in (False, True):

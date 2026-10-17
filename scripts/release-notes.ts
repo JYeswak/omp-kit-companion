@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 // from those sections. changelog.d/<bead>.md fragments are this fleet's merge-safe inbox for
 // [Unreleased] (concurrent agents never conflict on one file): `fold` drains them into it.
 type Options =
-	| { mode: "check"; baseTag: string; head: string }
+	| { mode: "check"; baseRef: string; head: string }
 	| { mode: "fold"; write: boolean }
 	| { mode: "promote"; version: string; date: string; write: boolean }
 	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
@@ -81,11 +81,11 @@ function run(): void {
 	if (options.mode === "notes") return runNotes(root, options, gitRaw);
 	if (options.mode === "source") return runSourceNotes(root, options, git, gitRaw, gitOk);
 
-	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseTag}^{commit}`]);
+	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseRef}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
-	if (git(["merge-base", base, head]) !== base) fail(`base tag ${options.baseTag} is not an ancestor of ${options.head}`);
-	const history = collectHistory(git, gitRaw, gitOk, base, head, options.baseTag, options.head);
-	console.log(`OK: ${history.mergedPrs.length} merged PRs and ${history.directCommits.length} direct commits have release-note coverage in ${options.baseTag}..${options.head}`);
+	if (git(["merge-base", base, head]) !== base) fail(`base tag ${options.baseRef} is not an ancestor of ${options.head}`);
+	const history = collectHistory(git, gitRaw, gitOk, base, head, options.baseRef, options.head);
+	console.log(`OK: ${history.mergedPrs.length} merged PRs and ${history.directCommits.length} direct commits have release-note coverage in ${options.baseRef}..${options.head}`);
 	for (const pr of history.mergedPrs) {
 		const fragment = history.byPr.get(pr);
 		if (fragment) {
@@ -107,14 +107,16 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check --base-tag vX.Y.Z --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH]";
+	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH]";
 	const mode = args[0];
 	if (mode === "check") {
-		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value" }, usage);
-		const baseTag = requiredValue(values, "--base-tag", usage);
+		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--base-ref": "value", "--head": "value" }, usage);
+		const tagged = values.has("--base-tag");
+		if (tagged === values.has("--base-ref")) fail(usage);
+		const baseRef = requiredValue(values, tagged ? "--base-tag" : "--base-ref", usage);
 		const head = requiredValue(values, "--head", usage);
-		validateBaseTag(baseTag, usage);
-		return { mode, baseTag, head };
+		if (tagged) validateBaseTag(baseRef, usage);
+		return { mode, baseRef, head };
 	}
 	if (mode === "source") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value", "--version": "value", "--output": "value" }, usage);

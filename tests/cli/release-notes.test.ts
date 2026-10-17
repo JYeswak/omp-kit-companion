@@ -218,7 +218,6 @@ test("pre-push notes coverage rejects unknown fragment categories before release
 	expect(invalid.output).toContain('unknown category "Security"');
 	const valid = checkFragment("valid-category", "Fixed");
 	expect(valid.exitCode, valid.output).toBe(0);
-	expect(valid.output).toContain("covered by Bead");
 });
 
 
@@ -517,6 +516,14 @@ test("source notes retain direct-commit coverage after notes are folded into an 
 		expect(child.exitCode, child.stderr.toString()).toBe(0);
 		return child.stdout.toString().trim();
 	};
+	const pushCheck = () => {
+		const checked = Bun.spawnSync(["sh", join(repo, "scripts", "check-pushed-notes.sh"),
+			"--repo", dir, "--base", localGit("rev-parse", "v0.2.2"),
+			"--tip", localGit("rev-parse", "HEAD"), "--archive-dir", dir], {
+			stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch },
+		});
+		return { exitCode: checked.exitCode, output: `${checked.stdout.toString()}${checked.stderr.toString()}` };
+	};
 	localGit("config", "user.name", "Folded Source Fixture");
 	localGit("config", "user.email", "folded-source@example.invalid");
 	localGit("config", "commit.gpgsign", "false");
@@ -538,6 +545,9 @@ test("source notes retain direct-commit coverage after notes are folded into an 
 	const wrong = releaseIn(dir, "source", "--base-tag", "v0.2.2", "--head", "HEAD", "--version", "0.2.4", "--output", output);
 	expect(wrong.exitCode).toBe(1);
 	expect(existsSync(output)).toBe(false);
+	const wrongPush = pushCheck();
+	expect(wrongPush.exitCode).toBe(1);
+	expect(wrongPush.output).toContain(direct.slice(0, 7));
 	writeFileSync(join(dir, "CHANGELOG.md"), folded.replace("(commit 0000000)", `(commit ${direct.slice(0, 7)})`));
 	localGit("add", ".");
 	localGit("commit", "-qm", "folded note names the actual commit [test]");
@@ -545,6 +555,8 @@ test("source notes retain direct-commit coverage after notes are folded into an 
 	const covered = releaseIn(dir, "source", "--base-tag", "v0.2.2", "--head", qualified, "--version", "0.2.4", "--output", output);
 	expect(covered.exitCode, covered.output).toBe(0);
 	expect(readFileSync(output, "utf8")).toBe(`### Fixed\n\n- The guard is documented. (commit ${direct.slice(0, 7)})\n`);
+	const coveredPush = pushCheck();
+	expect(coveredPush.exitCode, coveredPush.output).toBe(0);
 	expect(localGit("rev-parse", "HEAD")).toBe(qualified);
 	expect(localGit("status", "--porcelain")).toBe("");
 });
@@ -559,4 +571,9 @@ test("release check identifies all uncovered direct commits in one pass", () => 
 	expect(uncovered.output).toContain(first.slice(0, 7));
 	expect(uncovered.output).toContain(second.slice(0, 7));
 	git("update-ref", "refs/heads/main", releaseHead);
+});
+
+test("release range refuses competing floor selectors", () => {
+	const ambiguous = release("check", "--base-tag", "v0.2.2", "--base-ref", releaseHead, "--head", "HEAD");
+	expect(ambiguous.exitCode).toBe(1);
 });
