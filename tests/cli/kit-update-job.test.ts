@@ -5,7 +5,7 @@ import { pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type Ki
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 const dirs: string[] = [];
 function config(enabled = true): KitUpdateJobConfig {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/l8-job-")); dirs.push(root);
+	const root = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "l8-job-")); dirs.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=ompkit-fp72.22-test\nrepo=${join(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return { enabled, prefix: root, stateRoot: join(root, "state"), home: root, platform: { os: "darwin", arch: "arm64", libc: "none" }, project: root, pollRelease: async () => ({ indexPath: join(root, "index.json"), archivePath: join(root, "kit.tar"), version: "1.2.4", sourceTag: "v1.2.4" }) };
 }
@@ -110,6 +110,7 @@ esac
 				OMP: "",
 				OMP_BIN: "",
 				OMP_PATH: "",
+				OMP_SRC: "",
 				NO_COLOR: "1",
 				OMP_FAKE_SKIP_LINK: skipLinkProfile,
 			},
@@ -160,12 +161,11 @@ test("service update applies a receipt-backed plugin relink to covered profiles 
 			reconcile: async () => ({ ok: true, detail: "" }),
 			notify: message => { notes.push(message); },
 		});
-		expect(result).toMatchObject({ status: "UPDATED", receiptId: "kit-r7", relink: "APPLIED", service: "APPLIED" });
-		expect(typeof result.pluginReceiptId).toBe("string");
-		expect(typeof result.pluginUndoCommand).toBe("string");
-		if (!result.pluginReceiptId || !result.pluginUndoCommand) throw new Error("plugin receipt recovery data is missing");
+		// Bun's asymmetric matcher can rewrite fields; retain real recovery values first.
 		const pluginReceiptId = result.pluginReceiptId;
 		const pluginUndoCommand = result.pluginUndoCommand;
+		expect(result).toMatchObject({ status: "UPDATED", receiptId: "kit-r7", pluginReceiptId: expect.any(String), pluginUndoCommand: expect.any(String), relink: "APPLIED", service: "APPLIED" });
+		if (!pluginReceiptId || !pluginUndoCommand) throw new Error("plugin receipt recovery data is missing");
 		const pluginReceiptPath = join(value.prefix, "xdg-state", "omp-kit", `plugin-${pluginReceiptId}.json`);
 		const receipt = JSON.parse(readFileSync(pluginReceiptPath, "utf8")) as PluginReceipt;
 		expect(receipt.rows.map(row => row.profile).sort()).toEqual(["claude", "codex", "default", "muse"]);
@@ -199,14 +199,14 @@ test("planted: an OMP no-op cannot claim a complete update when a profile remain
 			exec,
 			reconcile: async () => ({ ok: true, detail: "" }),
 		});
-		expect(result).toMatchObject({ status: "UPDATED", reason: "PLUGIN_RELINK_FAILED", relink: "FAILED" });
-		expect(typeof result.pluginReceiptId).toBe("string");
-		expect(typeof result.pluginUndoCommand).toBe("string");
+		// Retain the receipt before the asymmetric matcher rewrites result fields.
+		const pluginReceiptId = result.pluginReceiptId;
+		expect(result).toMatchObject({ status: "UPDATED", reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", pluginReceiptId: expect.any(String), pluginUndoCommand: expect.any(String) });
 		expect(readlinkSync(pluginLink(value.home, "default"))).toBe(newStore);
 		expect(readlinkSync(pluginLink(value.home, "claude"))).toBe(oldStore);
 		expect(readlinkSync(uncoveredLink)).toBe(join(value.prefix, "uncovered-store"));
-		if (!result.pluginReceiptId) throw new Error("partial plugin receipt is missing");
-		const undone = await exec([stableLink, "undo", result.pluginReceiptId, "--yes", "--json"]);
+		if (!pluginReceiptId) throw new Error("partial plugin receipt is missing");
+		const undone = await exec([stableLink, "undo", pluginReceiptId, "--yes", "--json"]);
 		expect(undone.exit).toBe(0);
 		for (const profile of ["default", "claude", "codex", "muse"]) expect(readlinkSync(pluginLink(value.home, profile))).toBe(oldStore);
 	});
@@ -287,6 +287,7 @@ test("poll downloads a newer published release into one directory", async () => 
 		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: async argv => {
 			calls.push([...argv]);
 			if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+			if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 			const dir = argv[argv.indexOf("--dir") + 1]!;
 			mkdirSync(dir, { recursive: true });
 			writeFileSync(join(dir, "release-index.json"), "{}");
@@ -296,7 +297,24 @@ test("poll downloads a newer published release into one directory", async () => 
 		expect(tuple).toMatchObject({ version: "1.2.4", sourceTag: "v1.2.4" });
 		expect(tuple!.indexPath).toBe(join(value.stateRoot, "poll-1.2.4", "release-index.json"));
 		expect(tuple!.archivePath).toBe(join(value.stateRoot, "poll-1.2.4", "omp-kit-v1.2.4-darwin-arm64-none.tar"));
+		expect(readFileSync(`${tuple!.archivePath}.sigstore.json`, "utf8")).toBe('{"fixture":true}\n');
+		expect(calls[2]).toContain("api");
 		expect(calls[0]).toContain("view");
+	});
+});
+
+test("published archive without retrievable provenance refuses before planning or activation", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		await expect(pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: async argv => {
+			if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+			if (argv[1] === "api") return { exit: 1, stdout: "", stderr: "attestation unavailable" };
+			const dir = argv[argv.indexOf("--dir") + 1]!;
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "release-index.json"), "{}");
+			writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
+			return { exit: 0, stdout: "", stderr: "" };
+		} })).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
 	});
 });
 
@@ -357,6 +375,7 @@ test("poll-only install uses the published tuple when the static fallback is nul
 		const result = await runKitUpdateJob(value, {
 			exec: async argv => {
 				if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+				if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 				const dir = argv[argv.indexOf("--dir") + 1]!;
 				mkdirSync(dir, { recursive: true });
 				writeFileSync(join(dir, "release-index.json"), "{}");

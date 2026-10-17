@@ -1,7 +1,8 @@
-import { lstatSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { applyKitUpdate, planKitUpdate, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 
 export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag"> & {
@@ -161,6 +162,13 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 		const stat = lstatSync(path, { throwIfNoEntry: false });
 		if (!stat || !stat.isFile() || resolve(path) !== path || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
 	}
+	// Bundles are published in GitHub's attestation store, not necessarily release assets.
+	// Fetch by the downloaded bytes' digest; applyKitUpdate authenticates the bundle before extraction.
+	const digest = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
+	const bundle = await exec(["gh", "api", "--hostname", "github.com", `repos/${repo}/attestations/sha256:${digest}`, "--jq", ".attestations[].bundle | tojson"]);
+	if (bundle.exit !== 0 || !bundle.stdout.trim() || Buffer.byteLength(bundle.stdout) > 16 * 1024 * 1024)
+		throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + bundle.stderr.trim().slice(0, 1000));
+	writeFileSync(`${archivePath}.sigstore.json`, bundle.stdout, { mode: 0o600, flag: "wx" });
 	return { indexPath, archivePath, version, sourceTag: `v${version}` };
 }
 

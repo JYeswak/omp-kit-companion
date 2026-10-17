@@ -1,0 +1,18 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_43fd19c87b8cc919eaaf8e7d3c9f23898ee521cfdb3f6be7843d5135378ab316",
+ "limitations": [
+  "Focused15/0 and strict-refusal smoke pass; scoped quality exit2/gating1 is retained, not green; no activation/authentic-signature or broad closure"
+ ],
+ "operation": "known-candidate-update-poller-integration",
+ "parameters": {
+  "candidate": "b78bfeaeebd054f07f75a00ad52e32181416d7a1",
+  "fixture_sha256": "a48556f4455a8dfaaae32cd3245ed0d29b026fb7b8e54217b3833837c5a66923"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 10006,
+  "sha256": "775e6505bfd74274d8f2c5b3ca95bc6c74618e5d27b737769a9ab7123c64246f"
+ }
+}
