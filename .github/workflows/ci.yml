@@ -99,11 +99,14 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
       - name: Install bubblewrap for Linux integration containment
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (matrix.suite == 'package-release' || matrix.suite == 'all')
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 AppArmor denied bwrap's user namespace with EPERM on run 39040382320.
+          # This is a runtime-only change on the ephemeral runner; containment stays enabled.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --version
           smoke="$RUNNER_TEMP/bwrap-containment"
           mkdir -p "$smoke"
