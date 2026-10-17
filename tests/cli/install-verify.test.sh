@@ -1,9 +1,8 @@
 #!/bin/sh
 # install-verify.test.sh — RT1 installer attestation contract (rz5.59.3).
-# Builds one real archive via package-release.sh, then proves through
-# install.sh --offline --dry-run: a tampered archive is refused (hash), a
-# present bundle verified by stub gh passes, a failing stub gh refuses, and a
-# missing bundle warns hash-only (offline installs keep working).
+# Builds one real archive via package-release.sh. The shared gh subprocess double
+# tests installer authority-policy orchestration, not real cryptography.
+# Public release signature controls are a separate real-gh smoke.
 set -eu
 : "${TMPDIR:?set a private test scratch directory}"
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P)
@@ -37,32 +36,33 @@ expect_refuse() {
 	if "$@" > "$WORK/out.log" 2> "$WORK/err.log"; then fail=$((fail + 1)); printf 'FAIL %s: passed, want refusal\n' "$name";
 	else pass=$((pass + 1)); fi
 }
-# Stub gh: passes iff $GH_MODE is "ok".
-mkdir -p "$WORK/bin"
-cat > "$WORK/bin/gh" <<'EOF'
-#!/bin/sh
-[ "${GH_MODE:-}" = "ok" ] && exit 0
-echo "stub gh: attestation INVALID" >&2
-exit 1
-EOF
-chmod +x "$WORK/bin/gh"
-export GH_BIN="$WORK/bin/gh"
+# Shared policy-enforcing test double: never claim this as live signature proof.
+export PATH="$ROOT/tests/fixtures/kit-release:$PATH"
 # 1. tampered archive (one byte, correct filename) is refused by the hash check (planted)
 mkdir -p "$WORK/t2"
 TAMPERED="$WORK/t2/$(basename "$ARCHIVE")"
 cp "$ARCHIVE" "$TAMPERED"
 printf '\001' | dd of="$TAMPERED" bs=1 seek=100 conv=notrunc 2>/dev/null
+printf '{"fixture":true}' > "$TAMPERED.sigstore.json"
 expect_refuse tampered-refused env HOME="$WORK/home" "$INSTALL" --offline "$TAMPERED" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx1" --dry-run
-# 2. valid archive, bundle present, stub gh ok: passes (planted)
-printf '{"bundle":"stub"}' > "$ARCHIVE.sigstore.json"
-expect_pass bundle-ok env GH_MODE=ok HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx2" --dry-run
+# 2. valid archive plus synthetic accepted bundle reaches the installer dry-run.
+printf '{"fixture":true}' > "$ARCHIVE.sigstore.json"
+expect_pass bundle-policy-control env HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx2" --dry-run
+# 3. checksum-correct archive, nonverifying bundle: refuse.
+printf '{"fixture":false}' > "$ARCHIVE.sigstore.json"
+expect_refuse bundle-bad-refused env HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx3" --dry-run
+grep -q 'KIT_ATTESTATION_UNVERIFIED' "$WORK/err.log" || { cat "$WORK/err.log" >&2; exit 1; }
 rm -f "$ARCHIVE.sigstore.json"
-# 3. valid archive, bundle present, stub gh fails: refused (planted)
-printf '{"bundle":"stub"}' > "$ARCHIVE.sigstore.json"
-expect_refuse bundle-bad-refused env GH_MODE=bad HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx3" --dry-run
-rm -f "$ARCHIVE.sigstore.json"
-# 4. no bundle, verifier absent: hash-only warning, passes (planted)
-expect_pass no-bundle-warns env GH_BIN="$WORK/bin/absent-gh" HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx4" --dry-run
-grep -q "hash-only" "$WORK/err.log" || { fail=$((fail + 1)); printf 'FAIL no-bundle-warns: warning missing\n'; }
+# 4. missing bundle must refuse, even if historical weakening variables are set.
+expect_refuse no-bundle-refused env OMP_KIT_ATTEST_OWNER=attacker GH_BIN=/usr/bin/true HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx4" --dry-run
+grep -q 'KIT_ATTESTATION_BUNDLE_MISSING' "$WORK/err.log" || { cat "$WORK/err.log" >&2; exit 1; }
+# 5. no verifier must refuse an otherwise accepted bundle.
+printf '{"fixture":true}' > "$ARCHIVE.sigstore.json"
+mkdir -m 700 "$WORK/no-verifier-bin"
+for utility in python3 dirname uname getconf; do
+  ln -s "$(command -v "$utility")" "$WORK/no-verifier-bin/$utility"
+done
+expect_refuse absent-verifier-refused env PATH="$WORK/no-verifier-bin" HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx5" --dry-run
+grep -q 'KIT_ATTESTATION_VERIFIER_UNAVAILABLE' "$WORK/err.log" || { cat "$WORK/err.log" >&2; exit 1; }
 printf 'install-verify: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
