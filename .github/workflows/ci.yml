@@ -343,6 +343,23 @@ jobs:
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Prove no fleet disk observer is installed (stock runner)
         run: if command -v sbh; then exit 1; fi
+      - name: Plant a strict sbh observer on the stock runner (heavy must refuse with 69, auto must run)
+        run: |
+          set -eu
+          plant="$RUNNER_TEMP/heavy-plant"
+          mkdir -p "$plant/strict/config/omp-kit" "$plant/strict/state" "$plant/auto/config/omp-kit" "$plant/auto/state"
+          printf '{"slots":2,"max_wait_s":60,"disk_observer":"sbh"}\n' > "$plant/strict/config/omp-kit/load.json"
+          printf '{"slots":2,"max_wait_s":60,"disk_observer":"auto"}\n' > "$plant/auto/config/omp-kit/load.json"
+          rc=0
+          XDG_CONFIG_HOME="$plant/strict/config" XDG_STATE_HOME="$plant/strict/state" \
+            bun run --no-env-file --config=/dev/null src/cli.ts heavy --label planted-strict-sbh -- sh -c 'echo ran' \
+            > "$plant/strict.out" 2> "$plant/strict.err" || rc=$?
+          if [ "$rc" -ne 69 ]; then echo "planted strict sbh exited $rc, expected 69" >&2; cat "$plant/strict.err" >&2; exit 1; fi
+          grep -q 'no command was run' "$plant/strict.err"
+          if [ -s "$plant/strict.out" ]; then echo "planted strict sbh still ran the command" >&2; exit 1; fi
+          XDG_CONFIG_HOME="$plant/auto/config" XDG_STATE_HOME="$plant/auto/state" \
+            bun run --no-env-file --config=/dev/null src/cli.ts heavy --label stock-auto -- sh -c 'echo ran' > "$plant/auto.out"
+          test "$(cat "$plant/auto.out")" = ran
       - name: Check manifest and rule behavior
         run: sh scripts/ladder.sh
       - name: Check versioned installer against native archive
