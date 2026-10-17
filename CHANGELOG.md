@@ -4,6 +4,33 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.42] - 2026-10-17
+
+### Breaking Changes
+
+- Service single-flight claims now carry a random per-acquisition token. Old, malformed or unreadable claims fail closed until their owner reconciles them; age alone no longer authorizes takeover. A failed PID probe proves death only for `ESRCH`, never `EPERM`.
+- Serialize claim-file mutations with a persistent per-job SQLite kernel-lock inode, using Bun's built-in driver without an additional dependency. Never unlink the gate during routine cleanup. Release verifies the acquired nonce and directory identity before removing a claim.
+- Bind gate/body and delegated-child admission to the new claim token, including same-PID acquisitions in one clock tick. Remove the production-only fixture constructor; test fixtures construct their own metadata.
+- Source and owned-consumer regressions do not qualify installed binaries, activate services, or authorize production scratch reclamation. Original SVC1 installed-source and controlled actual-body acceptance remains separate.
+- Manual scratch BUSY coverage acquires a real scheduled keeper through the production lock API instead of planting obsolete claim metadata; it still requires the actual holder PID in the CLI result.
+- Scratch CLI fixtures keep the absolute-path browser process inventory empty in keeper and worker processes. This prevents the affected test suite from selecting real OMP browsers while preserving real owner-PID/start, open-file, quarantine and reap controls.
+
+### Changed
+
+- Native tracker-export regeneration of .beads/issues.jsonl is no longer refused as a foreign-bead revert: when every removed row's issue id still has a row in the staged file, rule (b) skips it; any lost issue row is still refused.
+- The stale-worktree guard no longer judges moved lines as reverts: a removed line re-added in the same commit at least as often is a move (rule (b) only; stale mtimes still refuse). A `Supersedes: <sha>` trailer declares rewrites at Revert strength. Tracker-export `.beads/issues.jsonl` regenerations that lose no issue row skip rule (b); any lost row still refuses.
+- Fix service-run claim contention so a blocked acquisition leaves no unreported live claim and can acquire normally once a reader releases the gate.
+- Shared-checkout reminders now cover bare `git pull` and route reserved-path publication through owner-bound `omp-kit land` instead of hand-built private-index candidates.
+- The reservation cache honors only covered results on read: a cached negative can never allow an edit, so a refusal followed by a grant inside the cache window is allowed on re-query.
+
+### Fixed
+
+- The private memory audit now recognises OMP 18.11.3, the version Tern installs for the fleet. It previously refused 18.11.3 sources as unsupported. The 18.11.3 source tuple was reviewed against 18.9.2: only `mnemopi/config.ts` and `mnemopi/state.ts` changed, with no change to any store, bank, table or row. The two OMP 18.10.2 and 18.11.3 changelog entries that blocked certification are recorded as not affecting the kit, which never calls `ui.approve`. (ompkit-3zhf)
+- `kit-no-double-quoted-substitution` now stops the bash call before it runs instead of reminding afterwards. A backtick or `$(` inside a double-quoted argument to `br comments add`, `br create`, `br update` or `git commit -m` is a tripwire (`interruptMode: tool-only`). The shell runs the substitution before the command sees it. It leaked an environment into a tracker comment on 2026-10-10, and on 2026-10-16 it ran a sync script with `--apply` against shared records. Single quotes, `-f <file>`, escaped backticks and plain `$VAR` still pass. (ompkit-3zi7)
+- Release certification on macOS runners no longer stalls for 900 s per harness. The runner image ships with about 13% of its disk free, under sbh's 14% pressure floor, so `omp-kit heavy` correctly deferred every native-certification and real-home-journey leg. `scripts/ci-install-sbh.sh` now frees preinstalled SDKs the kit never uses (Android, .NET, inactive Xcode versions), one at a time, until sbh admits. The floor itself is unchanged, and the script only acts on Actions macOS runners. (ompkit-fp72.117)
+- The staged-imports commit guard and the push gate's import check accept TypeScript NodeNext imports. A `.ts` file that imports `./registry.js` is backed by `registry.ts` (likewise `.jsx` by `.tsx`, `.mjs` by `.mts`, `.cjs` by `.cts`, and declaration files). Valid commits in NodeNext repositories were refused with "imports missing ./registry.js". An import with no source behind it is still refused. (ompkit-fp72.122)
+- Align substitution live scenarios with the pre-execution tripwire rule: the unsafe double-quoted substitution must not create its action marker; the single-quoted near miss still executes. Preserve the production matcher and coverage checks.
+
 ## [0.2.41] - 2026-10-16
 
 ### Added
