@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -25,22 +25,147 @@ function gitDirWithLock(ageMs: number, bytes: string): { gitDir: string; lock: s
 }
 
 
-test("empty holder-less lock older than configured age is moved and logged once", () => {
+test("dry-run reports a stale holder-less empty lock without moving it", () => {
 	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
 	try {
-		const seen: string[] = [];
+		const before = statSync(lock);
 		const first = maybeMoveStaleIndexLock(gitDir, {
-			run: clearRun, staleAfterMs: AGE,
+			run: clearRun, staleAfterMs: AGE, dryRun: true,
 			nowMs: () => Date.now(),
 		});
-		expect(first.verdict).toBe("MOVED");
+		expect(first.verdict).toBe("WOULD_MOVE");
 		expect(first.receipt?.lock).toBe(lock);
 		expect(first.receipt?.sizeBytes).toBe(0);
 		expect(first.receipt?.staleAfterMs).toBe(AGE);
-		seen.push(JSON.stringify(first.receipt));
-		const second = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE });
-		expect(second.verdict).toBe("NOT_FOUND");
-		expect(seen.length).toBe(1);
+		expect(first.receipt?.dev).toBe(before.dev);
+		expect(first.receipt?.ino).toBe(before.ino);
+		expect(first.receipt?.sizeBytes).toBe(before.size);
+		expect(first.receipt?.mtimeMs).toBe(before.mtimeMs);
+		expect(existsSync(lock)).toBe(true);
+		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(false);
+		const second = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE, dryRun: true });
+		expect(second.verdict).toBe("WOULD_MOVE");
+		expect(statSync(lock).ino).toBe(before.ino);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+test("only literal dryRun true is allowed; every other value refuses without probing or changing the lock", () => {
+	const modes: Array<{ includeDryRun: boolean; value?: unknown }> = [
+		{ includeDryRun: false },
+		{ includeDryRun: true, value: false },
+		{ includeDryRun: true, value: null },
+		{ includeDryRun: true, value: "yes" },
+	];
+	for (const mode of modes) {
+		const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+		try {
+			const before = statSync(lock);
+			let probes = 0;
+			const deps = {
+				run: () => { probes++; return clearRun(); },
+				staleAfterMs: AGE,
+				...(mode.includeDryRun ? { dryRun: mode.value as boolean } : {}),
+			};
+			const result = maybeMoveStaleIndexLock(gitDir, deps);
+			expect(result.verdict).toBe("APPLY_REFUSED");
+			expect(probes).toBe(0);
+			expect(existsSync(lock)).toBe(true);
+			const after = statSync(lock);
+			expect(after.ino).toBe(before.ino);
+			expect(after.mtimeMs).toBe(before.mtimeMs);
+			expect(existsSync(join(gitDir, ".omp-kit-index-lock-mover"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+	const { gitDir, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		expect(maybeMoveStaleIndexLock(join(gitDir, "missing"), { run: clearRun }).verdict).toBe("APPLY_REFUSED");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+
+});
+
+test("lock replacement during lsof probe is not renamed", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const result = maybeMoveStaleIndexLock(gitDir, {
+			run: () => {
+				rmSync(lock);
+				writeFileSync(lock, "live index writer");
+				return clearRun();
+			},
+			staleAfterMs: AGE,
+			dryRun: true,
+		});
+		expect(["CHANGED", "UNKNOWN"]).toContain(result.verdict);
+		expect(existsSync(lock)).toBe(true);
+		expect(statSync(lock).size).toBeGreaterThan(0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("lock removed during lsof probe is not renamed", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const result = maybeMoveStaleIndexLock(gitDir, {
+			run: () => {
+				rmSync(lock);
+				return clearRun();
+			},
+			staleAfterMs: AGE,
+			dryRun: true,
+		});
+		expect(["CHANGED", "UNKNOWN"]).toContain(result.verdict);
+		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+
+test("scratch index-lock --apply is refused without moving the lock", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const result = Bun.spawnSync([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
+			"scratch", "index-lock", "--repo", root, "--apply", "--yes", "--json"], {
+			cwd: root,
+			env: { ...process.env, HOME: root, OMP_KIT_INDEX_LOCK_STALE_MS: "1" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const envelope = JSON.parse(result.stdout.toString()) as { data?: { verdict?: string; receipt?: unknown } };
+		expect(result.exitCode).toBe(1);
+		expect(envelope.data?.verdict).toBe("APPLY_REFUSED");
+		expect(envelope.data?.receipt).toBeNull();
+		expect(existsSync(lock)).toBe(true);
+		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a second mover for the same repository reports BUSY", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	let secondVerdict: string | undefined;
+	const guardPath = join(gitDir, ".omp-kit-index-lock-mover");
+	try {
+		const first = maybeMoveStaleIndexLock(gitDir, {
+			run: () => {
+				secondVerdict = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE, dryRun: true }).verdict;
+				return clearRun();
+			},
+			staleAfterMs: AGE,
+			dryRun: true,
+		});
+		expect(first.verdict).toBe("WOULD_MOVE");
+		expect(secondVerdict).toBe("BUSY");
+		expect(first.receipt?.guardPath).toBe(guardPath);
+		expect(existsSync(guardPath)).toBe(false);
+		expect(existsSync(lock)).toBe(true);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -50,7 +175,7 @@ test("empty holder-less lock younger than configured age is untouched (removing 
 	const { gitDir, lock, root } = gitDirWithLock(1000, "");
 	try {
 		const before = Bun.file(lock);
-		const result = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE });
+		const result = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE, dryRun: true });
 		expect(result.verdict).toBe("TOO_YOUNG");
 		expect(result.receipt).toBeUndefined();
 		expect(Bun.file(lock)).toBeTruthy();
@@ -63,7 +188,7 @@ test("empty holder-less lock younger than configured age is untouched (removing 
 test("non-empty lock is never moved", async () => {
 	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "DIRC-partial-bytes");
 	try {
-		const result = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE });
+		const result = maybeMoveStaleIndexLock(gitDir, { run: clearRun, staleAfterMs: AGE, dryRun: true });
 		expect(result.verdict).toBe("NON_EMPTY");
 		expect(statSync(lock).size).toBeGreaterThan(0);
 	} finally {
@@ -75,7 +200,7 @@ test("held lock is never moved", () => {
 	const { gitDir, root } = gitDirWithLock(AGE + 1000, "");
 	try {
 		const held: ScratchRunner = () => ({ code: 0, stdout: "git 12345 lock", stderr: "" });
-		const result = maybeMoveStaleIndexLock(gitDir, { run: held, staleAfterMs: AGE });
+		const result = maybeMoveStaleIndexLock(gitDir, { run: held, staleAfterMs: AGE, dryRun: true });
 		expect(result.verdict).toBe("HELD");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -91,7 +216,7 @@ test("lsof tri-state: rc 2, timeout, and signal leave the lock untouched", () =>
 		const { gitDir, root } = mk();
 		try {
 			expect(lsofFileClear(join(gitDir, "index.lock"), run)).toBeNull();
-			expect(maybeMoveStaleIndexLock(gitDir, { run, staleAfterMs: AGE }).verdict).toBe("UNKNOWN");
+			expect(maybeMoveStaleIndexLock(gitDir, { run, staleAfterMs: AGE, dryRun: true }).verdict).toBe("UNKNOWN");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -110,7 +235,7 @@ test("age threshold reads configuration with documented default", () => {
 	expect(indexLockStaleAfterMs({ OMP_KIT_INDEX_LOCK_STALE_MS: "junk" })).toBe(DEFAULT_INDEX_LOCK_STALE_MS);
 });
 
-test("real repo: git holding index.lock blocks; kill -9 leaves a stale lock the mover takes", async () => {
+test("real repo: git holding index.lock blocks; after kill, dry-run reports without moving it", async () => {
 	// Integration test: exercises a real git lock-holder against the platform
 	// clock. Fake timers cannot work: the holder is a live git process and
 	// the lock file appears on its schedule, not in-process timers.
@@ -139,15 +264,18 @@ test("real repo: git holding index.lock blocks; kill -9 leaves a stale lock the 
 			const out = Bun.spawnSync(args as [string, ...string[]], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
 			return { code: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
 		};
-		expect(maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0 }).verdict).toBe("HELD");
+		expect(maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0, dryRun: true }).verdict).toBe("HELD");
 		holder.kill(9);
 		await holder.exited;
 		expect(existsSync(lockPath)).toBe(true);
 		expect(statSync(lockPath).size).toBe(0);
-		const moved = maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0 });
-		expect(moved.verdict).toBe("MOVED");
-		expect(moved.receipt?.lock).toBe(lockPath);
-		expect(existsSync(lockPath)).toBe(false);
+		const before = statSync(lockPath);
+		const report = maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0, dryRun: true });
+		expect(report.verdict).toBe("WOULD_MOVE");
+		expect(report.receipt?.lock).toBe(lockPath);
+		expect(existsSync(lockPath)).toBe(true);
+		expect(statSync(lockPath).ino).toBe(before.ino);
+		expect(statSync(lockPath).mtimeMs).toBe(before.mtimeMs);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

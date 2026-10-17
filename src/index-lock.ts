@@ -1,16 +1,16 @@
-import { renameSync, statSync } from "node:fs";
+import { closeSync, openSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { ScratchRunner } from "./scratch.ts";
 
 /**
- * Guarded stale index.lock mover (ompkit-rz5.101).
+ * Guarded stale index.lock dry-run reporter (ompkit-rz5.101).
  *
  * Predicate (all three, in order): the lock is EMPTY (a non-empty lock is
  * never touched — e.g. localbench's 71 KB interrupted write is a director
  * one-off, not kit-mover work); older than the configured age; lsof shows
- * no holder. Each move writes one receipt (returned; callers log it).
+ * no holder. A dry-run returns a receipt and never renames the lock.
  *
- * Age threshold: read from configuration, never pinned. The mover reads
+ * Age threshold: read from configuration, never pinned. The reporter reads
  * OMP_KIT_INDEX_LOCK_STALE_MS (positive integer milliseconds); the default
  * is 600000 (10 min). Derivation: legitimate index writes take seconds, so
  * 10 min sits orders above any single write; a queued commit hook can hold
@@ -32,13 +32,19 @@ export type LockVerdict =
 	| "NON_EMPTY"
 	| "TOO_YOUNG"
 	| "UNKNOWN"
+	| "APPLY_REFUSED"
 	| "HELD"
 	| "WOULD_MOVE"
-	| "MOVED";
+	| "CHANGED"
+	| "BUSY";
 export interface LockMoveReceipt {
 	lock: string;
 	movedTo: string;
+	guardPath: string;
+	dev: number;
+	ino: number;
 	sizeBytes: number;
+	mtimeMs: number;
 	ageMs: number;
 	staleAfterMs: number;
 	atMs: string;
@@ -78,38 +84,81 @@ export interface MoveDeps {
 	dryRun?: boolean;
 }
 
-/** Move a stale holder-less empty index.lock aside; never touches anything else. */
+/**
+ * Stale Git index-lock handling is dry-run-only. The final-stat-to-rename
+ * syscall window is nonzero; a link-back cannot restore writer exclusion if
+ * another process takes the lock name, so no apply path exists.
+ */
 export function maybeMoveStaleIndexLock(
 	gitDir: string,
 	deps: MoveDeps,
 ): { verdict: LockVerdict; receipt?: LockMoveReceipt } {
-	const lock = join(gitDir, "index.lock");
-	let stat;
+	if (deps.dryRun !== true) return { verdict: "APPLY_REFUSED" };
+	let repoGitDir: string;
 	try {
-		stat = statSync(lock);
+		repoGitDir = realpathSync(gitDir);
 	} catch {
-		return { verdict: "NOT_FOUND" };
+		return { verdict: "UNKNOWN" };
 	}
-	if (!stat.isFile() || stat.size !== 0) return { verdict: "NON_EMPTY" };
-	const now = deps.nowMs ? deps.nowMs() : Date.now();
-	const staleAfter = deps.staleAfterMs ?? DEFAULT_INDEX_LOCK_STALE_MS;
-	if (now - stat.mtimeMs < staleAfter) return { verdict: "TOO_YOUNG" };
-	const clear = lsofFileClear(lock, deps.run, deps.lsofTimeoutMs ?? 15000);
-	if (clear === null) return { verdict: "UNKNOWN" };
-	if (!clear) return { verdict: "HELD" };
-	const movedTo = `${lock}.stale-${new Date(now).toISOString().replace(/[:.]/g, "-")}`;
-	if (deps.dryRun === true) return { verdict: "WOULD_MOVE", receipt: { lock, movedTo, sizeBytes: 0,
-		ageMs: now - stat.mtimeMs, staleAfterMs: staleAfter, atMs: new Date(now).toISOString() } };
-	renameSync(lock, movedTo);
-	return {
-		verdict: "MOVED",
-		receipt: {
-			lock,
-			movedTo,
-			sizeBytes: 0,
-			ageMs: now - stat.mtimeMs,
-			staleAfterMs: staleAfter,
-			atMs: new Date(now).toISOString(),
-		},
-	};
+	const lock = join(repoGitDir, "index.lock");
+	const guardPath = join(repoGitDir, ".omp-kit-index-lock-mover");
+	let guardFd: number;
+	try {
+		guardFd = openSync(guardPath, "wx", 0o600);
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
+			return { verdict: "BUSY" };
+		}
+		return { verdict: "UNKNOWN" };
+	}
+
+	let result: { verdict: LockVerdict; receipt?: LockMoveReceipt };
+	try {
+		result = (() => {
+			let stat;
+			try {
+				stat = statSync(lock);
+			} catch {
+				return { verdict: "NOT_FOUND" as const };
+			}
+			if (!stat.isFile() || stat.size !== 0) return { verdict: "NON_EMPTY" as const };
+			const now = deps.nowMs ? deps.nowMs() : Date.now();
+			const staleAfter = deps.staleAfterMs ?? DEFAULT_INDEX_LOCK_STALE_MS;
+			if (now - stat.mtimeMs < staleAfter) return { verdict: "TOO_YOUNG" as const };
+			const clear = lsofFileClear(lock, deps.run, deps.lsofTimeoutMs ?? 15000);
+			if (clear === null) return { verdict: "UNKNOWN" as const };
+			if (!clear) return { verdict: "HELD" as const };
+			let current;
+			try {
+				current = statSync(lock);
+			} catch {
+				return { verdict: "CHANGED" as const };
+			}
+			if (!current.isFile() || current.dev !== stat.dev || current.ino !== stat.ino
+				|| current.size !== stat.size || current.mtimeMs !== stat.mtimeMs) return { verdict: "CHANGED" as const };
+			const movedTo = `${lock}.stale-${new Date(now).toISOString().replace(/[:.]/g, "-")}`;
+			const observation: LockMoveReceipt = {
+				lock, movedTo, guardPath, dev: stat.dev, ino: stat.ino, sizeBytes: stat.size,
+				mtimeMs: stat.mtimeMs, ageMs: now - stat.mtimeMs, staleAfterMs: staleAfter,
+				atMs: new Date(now).toISOString(),
+			};
+			return { verdict: "WOULD_MOVE" as const, receipt: observation };
+		})();
+	} catch {
+		result = { verdict: "UNKNOWN" };
+	}
+
+	let cleanupFailed = false;
+	try {
+		closeSync(guardFd);
+	} catch {
+		cleanupFailed = true;
+	}
+	try {
+		unlinkSync(guardPath);
+	} catch {
+		cleanupFailed = true;
+	}
+	if (cleanupFailed) return result.receipt ? { verdict: "UNKNOWN", receipt: result.receipt } : { verdict: "UNKNOWN" };
+	return result;
 }
