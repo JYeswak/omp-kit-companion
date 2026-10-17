@@ -55,7 +55,7 @@ function readClaim(dir: string): RunClaim | null {
 
 /**
  * A persistent SQLite inode supplies the kernel's cross-process writer lock.
- * No SQL state or schema: BEGIN IMMEDIATE serializes claim-file mutations.
+ * No SQL state or schema: BEGIN EXCLUSIVE excludes readers before claim-file mutations.
  * Never unlink the gate, which would split existing and incoming waiters.
  */
 function mutateClaim<T>(jobsDir: string, job: string, mutation: () => T): T | null {
@@ -72,7 +72,7 @@ function mutateClaim<T>(jobsDir: string, job: string, mutation: () => T): T | nu
 		const current = lstatSync(path);
 		if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isFile()) return null;
 		db.exec("PRAGMA busy_timeout = 0");
-		db.exec("BEGIN IMMEDIATE");
+		db.exec("BEGIN EXCLUSIVE");
 		const result = mutation();
 		db.exec("COMMIT");
 		return result;

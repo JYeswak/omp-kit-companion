@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
@@ -37,6 +38,31 @@ test("SVC1: an unreadable liveness probe cannot authorize stealing a claim", () 
 	} finally {
 		probe.mockRestore();
 	}
+});
+
+test("SVC1: read contention leaves no unreported claim and permits the next run", () => {
+	const dir = jobsDir();
+	const gate = join(dir, "load-watch.gate.sqlite");
+	writeFileSync(gate, "", { mode: 0o600, flag: "wx" });
+	const reader = new Database(gate);
+	reader.exec("PRAGMA user_version = 1");
+	reader.exec("BEGIN");
+	reader.query("SELECT name FROM sqlite_master").all();
+	try {
+		expect(acquireRunLock(dir, "load-watch").status).toBe("OVERLAP");
+		expect(readRunClaim(dir, "load-watch")).toBeNull();
+	} finally {
+		reader.exec("ROLLBACK");
+		reader.close();
+	}
+	const next = acquireRunLock(dir, "load-watch");
+	if (next.status !== "ACQUIRED") throw new Error("expected acquisition after the reader released");
+	try {
+		expect(readRunClaim(dir, "load-watch")?.pid).toBe(process.pid);
+	} finally {
+		next.lock.release();
+	}
+	expect(readRunClaim(dir, "load-watch")).toBeNull();
 });
 
 test("SVC1: simultaneous stale-claim contenders admit only one owned process", async () => {

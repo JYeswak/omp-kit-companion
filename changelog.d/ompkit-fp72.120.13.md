@@ -1,0 +1,1 @@
+- Fix service-run claim contention so a blocked acquisition leaves no unreported live claim and can acquire normally once a reader releases the gate.
