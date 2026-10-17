@@ -4,6 +4,22 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.43] - 2026-10-17
+
+### Changed
+
+- Main CI and native certification install OMP 18.11.3, certified by omp-certify. (PR #106)
+
+### Fixed
+
+- Run the existing fleet lessons report producer through a keeper-bound, capped child for `service run fleet-lessons`, instead of the matcher fallback; producer failure records a failed job receipt.
+- Refuse intake trackers not registered by configured repositories before producer writes, and refuse registered services without an implemented body instead of running the matcher.
+- Preserve a fleet lessons OFF transition before child execution as no-run without a success receipt, and refuse zero-exit child results that do not confirm the report producer.
+- Keep fleet lessons subprocess descendants in the producer's owned group so timeout and cancellation stop nested work; the `omp-watch` matcher retains its existing execution mode.
+- Hold learning intake writes when native tracker inventory is malformed or incomplete, and read all intake and grade-marker results rather than silently accepting a partial page. (commit 007ede74ea)
+- Exercise managed-job matcher retention from packaged runtime assets without requiring a Git HEAD, and honor the caller's logical case directory in archive-based verification. (commit 2e72be6dab)
+- The push gate now runs CI's shellcheck version on changed shell files instead of whatever is installed locally (ompkit-f2e4). Local shellcheck 0.11.0 stays silent on SC2015-info while CI's apt 0.9.0 exits 1, which turned main red for 4 commits on release-train.sh guards. The focused stage prefers `koalaman/shellcheck:v0.9.0` via docker (pulling once when missing) and falls back to the local binary with an explicit version-skew warning naming both versions. Shell findings now refuse the push: previously a finding inside the focused stage was swallowed because the step runner's condition context disables errexit, so the gate printed the finding and reported GREEN.
+
 ## [0.2.42] - 2026-10-17
 
 ### Breaking Changes
