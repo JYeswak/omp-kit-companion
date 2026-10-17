@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 function fixtureRoot(): string {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-runtime-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-runtime-")));
 	fixtures.push(root);
 	return root;
 }

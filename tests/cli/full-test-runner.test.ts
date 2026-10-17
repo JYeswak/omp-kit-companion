@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -219,7 +219,7 @@ test("cause fields remain bounded on a long credential near-miss", () => {
 
 
 test("producer streams are retained in owned scratch and their paths are reported", () => {
- const repo = mkdtempSync(join(tmpdir(), "omp-kit-full-test-output-"));
+ const repo = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-full-test-output-")));
  try {
   const output = { stdout: "full stage stdout\n", stderr: "full stage stderr\n" };
   const artifacts = retainProducerOutput(repo, output);
