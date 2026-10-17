@@ -1016,9 +1016,14 @@ def _drive(args: argparse.Namespace) -> int:
         if not sha:
             print("TRAIN=skip REASON=no-qualified-unreleased-source")
             return _store_plan(args, {"kind": "skip"})
-        protocol = _command(["git", "show", f"{sha}:{RELEASE_WORKFLOW}"])
-        if "# ROLLING-RELEASE-V3:" not in protocol:
-            print(f"TRAIN=skip REASON=source-predates-signed-consumer-protocol source_sha={sha}")
+        # Signing runs from the eventual source tag, not this owner's main
+        # checkout. Compare its implementation, never a manually bumped label.
+        signer_inputs = [RELEASE_WORKFLOW, ".github/workflows/ci.yml", "scripts/release_reuse.py",
+                         "scripts/native-candidate.py", "tests/e2e/real-home-journey.sh"]
+        source_signer = _command(["git", "ls-tree", sha, "--", *signer_inputs])
+        owner_signer = _command(["git", "ls-tree", head, "--", *signer_inputs])
+        if len(source_signer.splitlines()) != len(signer_inputs) or source_signer != owner_signer:
+            print(f"TRAIN=skip REASON=source-signer-inputs-differ source_sha={sha}")
             return _store_plan(args, {"kind": "skip"})
         # Do not automatically repeat a failed qualification with identical inputs.
         if any(row.get("status") == "completed" and row.get("conclusion") != "success"

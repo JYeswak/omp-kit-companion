@@ -1086,7 +1086,7 @@ class RollingReleaseTest(unittest.TestCase):
     @contextlib.contextmanager
     def published_floor_case(self, *, orphan=False, with_published_tag=False,
                              unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False,
-                             legacy_protocol=False):
+                             signer_drift: str | None = None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
@@ -1104,8 +1104,12 @@ class RollingReleaseTest(unittest.TestCase):
             git("config", "core.hooksPath", "/dev/null")
             git("config", "commit.gpgsign", "false")
             (root / ".github/workflows").mkdir(parents=True)
-            protocol = "ROLLING-RELEASE-V2" if legacy_protocol else "ROLLING-RELEASE-V3"
-            (root / ".github/workflows/release.yml").write_text(f"# {protocol}: fixture protocol\n")
+            for name in (".github/workflows/release.yml", ".github/workflows/ci.yml",
+                         "scripts/release_reuse.py", "scripts/native-candidate.py",
+                         "tests/e2e/real-home-journey.sh"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# ROLLING-RELEASE-V3: fixture protocol\n")
             (root / "package.json").write_text(json.dumps({"name": "admission-fixture", "version": "0.2.19", "omp": {"version": "0.2.19"}}))
             (root / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n## [0.2.19] - 2026-10-17\n\n- Earlier note.\n")
             git("add", ".")
@@ -1125,10 +1129,15 @@ class RollingReleaseTest(unittest.TestCase):
             git("add", ".")
             git("commit", "-qm", "eligible source")
             source = git("rev-parse", "HEAD")
+            if signer_drift is not None:
+                (root / signer_drift).write_text("# ROLLING-RELEASE-V3: changed signer, unchanged label\n")
+                git("add", signer_drift)
+                git("commit", "-qm", "signing implementation advanced beyond green source")
+            owner = git("rev-parse", "HEAD")
             if unpublished_tag and tag_on_source:
                 git("tag", unpublished_tag)
-            git("update-ref", "refs/remotes/origin/main", source)
-            environment["GITHUB_SHA"] = source
+            git("update-ref", "refs/remotes/origin/main", owner)
+            environment["GITHUB_SHA"] = owner
             stable = [{"tag_name": "v0.2.19", "draft": False, "prerelease": False}]
             if orphan or with_published_tag:
                 stable.append({"tag_name": "v0.2.22", "draft": False, "prerelease": False})
@@ -1159,10 +1168,21 @@ class RollingReleaseTest(unittest.TestCase):
                  contextlib.redirect_stderr(io.StringIO()):
                 yield args, root, source, dispatch
 
-    def test_legacy_green_source_without_signed_consumers_cannot_allocate_a_final_tag(self) -> None:
-        with self.published_floor_case(legacy_protocol=True) as (args, root, _, dispatch):
+    def test_green_source_with_stale_signer_bytes_cannot_allocate_despite_unchanged_label(self) -> None:
+        for path in (".github/workflows/release.yml", ".github/workflows/ci.yml",
+                     "scripts/release_reuse.py", "scripts/native-candidate.py",
+                     "tests/e2e/real-home-journey.sh"):
+            with self.subTest(path=path), self.published_floor_case(signer_drift=path) as (args, root, _, dispatch):
+                self.assertEqual(release_reuse._drive(args), 0)
+                self.assertEqual(json.loads((root / "plan.json").read_text()), {"kind": "skip"})
+                dispatch.assert_not_called()
+
+    def test_unrelated_new_main_bytes_do_not_starve_the_latest_green_source(self) -> None:
+        with self.published_floor_case(signer_drift="application.ts") as (args, root, source, dispatch):
             self.assertEqual(release_reuse._drive(args), 0)
-            self.assertEqual(json.loads((root / "plan.json").read_text()), {"kind": "skip"})
+            plan = json.loads((root / "plan.json").read_text())
+            self.assertEqual(plan["kind"], "allocate")
+            self.assertEqual(plan["source_sha"], source)
             dispatch.assert_not_called()
 
     def test_missing_published_tag_reserves_its_version_without_blocking_allocation(self) -> None:
