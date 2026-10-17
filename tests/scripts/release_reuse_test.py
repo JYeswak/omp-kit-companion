@@ -538,7 +538,9 @@ class RollingReleaseTest(unittest.TestCase):
                     "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": []}
             path = Path(directory) / "plan.json"
             path.write_text(json.dumps(plan))
-            qualified = dict(candidate_run("f" * 40), display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"))
+            # The signer appears on the next poll, i.e. inside the publisher-delivery grace window this test is about.
+            qualified = dict(candidate_run("f" * 40), updated_at="2999-01-01T00:00:00Z",
+                             display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"))
             signed = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}",
                           display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"))
             calls = {"cycle": 0, "publisher": 0}
@@ -572,6 +574,66 @@ class RollingReleaseTest(unittest.TestCase):
                 dispatch.assert_called_once_with(REPOSITORY, "release-train.yml", "main", {"candidate_run_id": "67890"})
                 self.assertEqual(calls["publisher"], 2)
                 published.assert_called_once()
+
+    def _watch_qualification(self, *, qualified_overrides: dict[str, Any] | None = None,
+                             publisher_rows: list[dict[str, Any]] | None = None,
+                             sign_rows: list[dict[str, Any]] | None = None) -> tuple[Any, Exception | None]:
+        """Drive the real watch loop for a finished qualification; returns the dispatch mock and the terminal error."""
+        with tempfile.TemporaryDirectory() as directory:
+            plan = {"kind": "resume", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "train_id": "810", "train_attempt": "1",
+                    "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": []}
+            path = Path(directory) / "plan.json"
+            path.write_text(json.dumps(plan))
+            qualified = dict(candidate_run("f" * 40), display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810"),
+                             **(qualified_overrides or {}))
+            def rows(repository, workflow, event="workflow_dispatch", **kwargs):
+                if workflow == "release.yml":
+                    return list(sign_rows or [])
+                return list(publisher_rows or [])
+            def api(repository, endpoint, **kwargs):
+                if endpoint == f"actions/runs/{RUN_ID}":
+                    return qualified
+                if endpoint == "actions/runs/9001":
+                    return dict(candidate_run(), id=9001, path=release_reuse.OWNER_WORKFLOW, status="in_progress", conclusion=None)
+                raise AssertionError(endpoint)
+            clock = iter([0, 1, 2, 3, 10_000])
+            args = argparse.Namespace(repository=REPOSITORY, plan=str(path), stage="watch", timeout=60)
+            error: Exception | None = None
+            with patch.object(release_reuse, "_load_owner_authority", return_value=owner_fixture()), \
+                 patch.object(release_reuse, "_run_rows", side_effect=rows), \
+                 patch.object(release_reuse, "_api", side_effect=api), \
+                 patch.object(release_reuse, "_native_dispatch", return_value="9001") as dispatch, \
+                 patch.object(release_reuse.time, "monotonic", side_effect=lambda: next(clock)), \
+                 patch.object(release_reuse.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    release_reuse._drive(args)
+                except ValueError as caught:
+                    error = caught
+            return dispatch, error
+
+    def test_qualified_run_without_workflow_run_delivery_wakes_its_publisher_exactly_once(self) -> None:
+        dispatch, error = self._watch_qualification()
+        dispatch.assert_called_once_with(REPOSITORY, "release-train.yml", "main", {"candidate_run_id": RUN_ID})
+        self.assertRegex(str(error), "deadline expired")
+
+    def test_qualification_publisher_wake_refuses_failed_fresh_delivered_or_already_signing_runs(self) -> None:
+        title = release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810")
+        sign = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}",
+                    display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"), status="in_progress", conclusion=None,
+                    run_started_at="2026-10-17T01:11:00Z")
+        cases = {
+            "failed qualification": dict(qualified_overrides={"conclusion": "failure"}),
+            "delivery still inside its grace": dict(qualified_overrides={"updated_at": "2999-01-01T00:00:00Z"}),
+            "completion time unknown": dict(qualified_overrides={"updated_at": None}),
+            "natural workflow_run delivery exists": dict(publisher_rows=[
+                dict(candidate_run(), id=9100, display_title=f"Publish {title}", status="in_progress", conclusion=None)]),
+            "signing already requested": dict(sign_rows=[sign]),
+        }
+        for name, options in cases.items():
+            with self.subTest(name):
+                dispatch, error = self._watch_qualification(**options)
+                dispatch.assert_not_called()
+                self.assertIsNotNone(error)
 
     def test_completed_qualification_recovers_without_building_a_new_candidate(self) -> None:
         row = dict(candidate_run(), display_title=release_reuse.release_title("qualify", "0.2.21", SOURCE_SHA, "810"))

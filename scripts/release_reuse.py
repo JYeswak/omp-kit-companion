@@ -154,6 +154,18 @@ def _timestamp(value: Any) -> datetime:
     return parsed
 
 
+QUALIFICATION_DELIVERY_GRACE_SECONDS = 120
+
+
+def _delivery_overdue(run: dict[str, Any]) -> bool:
+    """True only when a completed run's own timestamp proves its workflow_run delivery had its grace. Unknown is not overdue."""
+    try:
+        finished = _timestamp(run.get("updated_at"))
+    except ValueError:
+        return False
+    return (datetime.now(finished.tzinfo) - finished).total_seconds() >= QUALIFICATION_DELIVERY_GRACE_SECONDS
+
+
 def _attempt_order(run: dict[str, Any]) -> tuple[datetime, int]:
     started = run.get("run_started_at")
     if run.get("status") == "completed" and not started:
@@ -1154,6 +1166,16 @@ def _watch_plan(args: argparse.Namespace) -> int:
         if any(row.get("display_title") in (f"Publish {qualify_title}", f"Publish {sign_title}")
                and int(row["id"]) > publisher_floor and row.get("status") == "completed" and row.get("conclusion") != "success" for row in publishers):
             raise ValueError("independent candidate publisher failed; preserve its artifacts for recovery")
+        if (not signs and "qualify" not in publisher_runs.values() and _delivery_overdue(qualified)
+                and not any(row.get("display_title") == f"Publish {qualify_title}" for row in publishers)):
+            # A dispatch made with the workflow token produces no workflow_run delivery (fp72.25, dj7d), so the
+            # publisher that tags and requests tag-ref signing never starts. Wake the same publisher with the
+            # verified successful qualification once, only after delivery had its grace and no signing run or
+            # Publish row exists; it neither rebuilds the candidate nor skips any publisher check.
+            publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(qualification_id)})
+            publisher_runs[publisher_id] = "qualify"
+            plan["publisher_runs"] = publisher_runs
+            _store_plan(args, plan)
         time.sleep(15)
     raise ValueError("publication outcome deadline expired; no next version allocated")
 
