@@ -492,3 +492,5 @@ kit-rea-heavy-summary	quiet	text	-	-	Analyzing with detail: summary, then readin
 kit-rea-heavy-summary	quiet	text	-	-	Raised analysis_timeout_ms: 600000 for the 280 MB target.	fp72.8 quiet: timeout above default
 kit-rea-heavy-summary	quiet	text	-	-	Kept max_heap_mb: 2048 and waited the extra two minutes.	fp72.8 quiet: heap above default, waiting
 kit-rea-heavy-summary	quiet	text	-	-	Analyzing app.asar with defaults and reading the returned evidence.	fp72.8 quiet: defaults apply, no shrinking
+kit-close-needs-evidence	quiet	tool	bash	-	br create "doc fix" -d "close with br close abc123 --reason ok"	xa5s.8 quiet: issue creation quoting a close example is metadata, not a close
+kit-close-needs-evidence	quiet	tool	bash	-	br create doc -d 'example: br close abc123 --reason ok'	xa5s.8 quiet: single-quoted variant stays quiet
