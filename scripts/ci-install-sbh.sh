@@ -46,8 +46,8 @@ verdict=0
 if [ "$verdict" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ] && [ "$(uname -s)" = Darwin ]; then
 	active_xcode=$(cd -P "$(xcode-select -p)/../.." 2>/dev/null && pwd) || active_xcode=""
 	for dir in "${ANDROID_HOME:-}" "$HOME/.dotnet" /Applications/Xcode_*.app; do
-		[ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || continue
-		[ "$(cd -P "$dir" && pwd)" != "$active_xcode" ] || continue
+		if [ -z "$dir" ] || [ ! -d "$dir" ] || [ -L "$dir" ]; then continue; fi
+		if [ "$(cd -P "$dir" && pwd)" = "$active_xcode" ]; then continue; fi
 		sudo rm -rf "$dir"
 		echo "ci-install-sbh: reclaimed unused runner image dir $dir"
 		verdict=0
