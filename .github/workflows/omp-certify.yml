@@ -142,8 +142,6 @@ jobs:
           actual="$(omp --version)"
           test "$actual" = "omp/$OMP_VERSION"
           echo "### OMP $OMP_VERSION ($actual) on $(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Install the fleet disk observer (sbh) that heavy admission requires
-        run: sh scripts/ci-install-sbh.sh
       - name: Full rule ladder (G1-G4, planted negative) against this OMP
         run: |
           set -o pipefail
