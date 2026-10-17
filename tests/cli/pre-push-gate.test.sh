@@ -391,5 +391,42 @@ if [ -s "$TMP/gate.pid" ] && [ "$verdicts" = " REAP REAP" ]; then
 else
 	fail=$((fail + 1)); printf 'FAIL killed-gate-extract-reapable: verdicts=%s plan-stderr<<<%s>>> out<<<%s>>>\n' "$verdicts" "$(cat "$TMP/plan.err" 2>/dev/null)" "$(cat "$TMP/killed.out" 2>/dev/null)"
 fi
+# RX5: a real local Git push must run the archive gate and refuse a planted vulnerable regex.
+realrepo="$TMP/real-regexploit-push"
+remote="$TMP/real-regexploit-origin.git"
+mkdir -p "$realrepo/scripts" "$realrepo/src" "$realrepo/var/agent-tmp"
+git -C "$realrepo" init -q --initial-branch=main
+git -C "$realrepo" config user.email "test@example.invalid"
+git -C "$realrepo" config user.name "worker-1"
+git -C "$realrepo" config core.hooksPath "$realrepo/.git/hooks"
+cp "$ADAPTER" "$realrepo/scripts/pre-push-gate.sh"
+cp "$KITREPO/scripts/regexploit-gate.py" "$realrepo/scripts/regexploit-gate.py"
+git -C "$realrepo" add -- scripts/pre-push-gate.sh scripts/regexploit-gate.py
+git -C "$realrepo" commit -qm "[test] ompkit-xade baseline"
+git init -q --bare "$remote"
+git -C "$realrepo" remote add origin "$remote"
+git -C "$realrepo" push -q origin main >"$TMP/real-regexploit-baseline.out" 2>&1
+base_push_rc=$?
+base=$(git -C "$realrepo" rev-parse HEAD)
+printf 'export const vulnerable = /(a+)+b/;\n' > "$realrepo/src/xade-vuln.ts"
+git -C "$realrepo" add -- src/xade-vuln.ts
+git -C "$realrepo" commit -qm "[test] ompkit-xade planted regex"
+head=$(git -C "$realrepo" rev-parse HEAD)
+origin_before=$(git --git-dir="$remote" rev-parse refs/heads/main)
+printf '#!/bin/sh\nexec sh "%s/scripts/pre-push-gate.sh"\n' "$realrepo" > "$realrepo/.git/hooks/pre-push"
+chmod +x "$realrepo/.git/hooks/pre-push"
+git -C "$realrepo" push origin main >"$TMP/real-regexploit-push.out" 2>&1
+push_rc=$?
+origin_after=$(git --git-dir="$remote" rev-parse refs/heads/main)
+out=$(cat "$TMP/real-regexploit-push.out")
+if [ "$base_push_rc" = "0" ] && [ "$head" != "$base" ] && [ "$push_rc" = "1" ] \
+	&& [ "$origin_before" = "$base" ] && [ "$origin_after" = "$base" ] \
+	&& printf '%s' "$out" | grep -Fq 'src/xade-vuln.ts:1: regexploit found a vulnerable regular expression'; then
+	pass=$((pass + 1))
+	printf 'PASS real-git-regexploit-refused: push exit 1; origin main unchanged at %s\n' "$origin_after"
+else
+	fail=$((fail + 1)); printf 'FAIL real-git-regexploit-refused: base_push_rc=%s push_rc=%s before=%s after=%s out<<<%s>>>\n' "$base_push_rc" "$push_rc" "$origin_before" "$origin_after" "$out"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
