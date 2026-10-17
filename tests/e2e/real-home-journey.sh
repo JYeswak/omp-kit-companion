@@ -7,11 +7,16 @@
 #   sh tests/e2e/real-home-journey.sh \
 #     --candidate-archive ABS --candidate-index ABS \
 #     --previous-archive ABS --previous-index ABS --work-dir ABS
-# Each flag may instead come from the environment: JOURNEY_CANDIDATE_ARCHIVE, JOURNEY_CANDIDATE_INDEX,
-# JOURNEY_PREVIOUS_ARCHIVE, JOURNEY_PREVIOUS_INDEX, JOURNEY_WORK_DIR. All paths must be absolute.
-# The archives/indexes are local release candidates (installer index format, schema_version 1); the
-# version of each comes from its index's "version". The previous one is installed first and then
-# updated to the candidate. The work dir is created if absent; WORK/home must not exist yet.
+# Post-sign mode (all five additional flags are required together):
+#     --platform INDEX_ASSET_KEY --source-sha SIGNED_SOURCE_SHA --run-id SIGN_RUN_ID \
+#     --run-attempt SIGN_RUN_ATTEMPT --receipt-out ABS/signed-consumer-PLATFORM-attempt-N/receipt.json
+# Signed metadata env equivalents: JOURNEY_PLATFORM, JOURNEY_SOURCE_SHA, JOURNEY_RUN_ID,
+# JOURNEY_RUN_ATTEMPT, JOURNEY_RECEIPT_OUT.
+# Existing flags may instead come from the matching JOURNEY_* environment variables; every path is absolute.
+# The archives/indexes use the installer index schema and their exact signed bytes; each archive must
+# have its sibling .sigstore.json bundle. Versions come from the index files. In signed mode, the
+# previous must be a published stable release; no receipt is emitted unless the public installer and
+# compiled candidate update both pass. The work dir is created if absent; WORK/home must not exist yet.
 #
 # Environment for every kit step: HOME=WORK/home (the fixture), XDG_STATE_HOME/XDG_CONFIG_HOME/
 # XDG_CACHE_HOME/XDG_DATA_HOME unset (the kit state root is therefore the legacy ~/.local/state/omp-kit),
@@ -61,6 +66,12 @@ CAND_INDEX=${JOURNEY_CANDIDATE_INDEX:-}
 PREV_ARCHIVE=${JOURNEY_PREVIOUS_ARCHIVE:-}
 PREV_INDEX=${JOURNEY_PREVIOUS_INDEX:-}
 WORK=${JOURNEY_WORK_DIR:-}
+RECEIPT_OUT=${JOURNEY_RECEIPT_OUT:-}
+PLATFORM=${JOURNEY_PLATFORM:-}
+SOURCE_SHA=${JOURNEY_SOURCE_SHA:-}
+RUN_ID=${JOURNEY_RUN_ID:-}
+RUN_ATTEMPT=${JOURNEY_RUN_ATTEMPT:-}
+SIGNED_MODE=0
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] || usage
   case "$1" in
@@ -69,10 +80,24 @@ while [ "$#" -gt 0 ]; do
     --previous-archive) PREV_ARCHIVE=$2 ;;
     --previous-index) PREV_INDEX=$2 ;;
     --work-dir) WORK=$2 ;;
+    --receipt-out) RECEIPT_OUT=$2 ;;
+    --platform) PLATFORM=$2 ;;
+    --source-sha) SOURCE_SHA=$2 ;;
+    --run-id) RUN_ID=$2 ;;
+    --run-attempt) RUN_ATTEMPT=$2 ;;
     *) usage ;;
   esac
   shift 2
 done
+signed_fields=0
+for value in "$RECEIPT_OUT" "$PLATFORM" "$SOURCE_SHA" "$RUN_ID" "$RUN_ATTEMPT"; do
+  [ -z "$value" ] || signed_fields=$((signed_fields + 1))
+done
+if [ "$signed_fields" -ne 0 ]; then
+  [ "$signed_fields" -eq 5 ] || usage
+  SIGNED_MODE=1
+fi
+
 for path in "$CAND_ARCHIVE" "$CAND_INDEX" "$PREV_ARCHIVE" "$PREV_INDEX" "$WORK"; do
   case "$path" in /*) ;; *) echo "journey: every path must be given and absolute: '$path'" >&2; usage ;; esac
 done
@@ -86,6 +111,35 @@ ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P) || exit 2
 INSTALLER="$ROOT/installer/install.sh"
 PREV=$(jq -er .version "$PREV_INDEX") || { echo "journey: no .version in $PREV_INDEX" >&2; exit 2; }
 CAND=$(jq -er .version "$CAND_INDEX") || { echo "journey: no .version in $CAND_INDEX" >&2; exit 2; }
+if [ "$SIGNED_MODE" -eq 1 ]; then
+  case "$RECEIPT_OUT" in /*) ;; *) echo "journey: --receipt-out must be absolute" >&2; usage ;; esac
+  [ "$(basename "$RECEIPT_OUT")" = receipt.json ] || { echo "journey: --receipt-out must end in receipt.json" >&2; usage; }
+  case "$PLATFORM" in ''|*[!A-Za-z0-9._-]*) echo "journey: --platform must be an index asset key" >&2; usage ;; esac
+  expected_receipt_dir="signed-consumer-$PLATFORM-attempt-$RUN_ATTEMPT"
+  [ "$(basename "$(dirname "$RECEIPT_OUT")")" = "$expected_receipt_dir" ] || {
+    echo "journey: signed receipt directory must be $expected_receipt_dir" >&2; usage;
+  }
+  [ ! -e "$RECEIPT_OUT" ] && [ ! -L "$RECEIPT_OUT" ] || { echo "journey: receipt path already exists" >&2; exit 2; }
+  case "$SOURCE_SHA" in *[!0123456789abcdef]*) echo "journey: --source-sha must be lowercase hexadecimal" >&2; usage ;; esac
+  case "${#SOURCE_SHA}" in 40|64) ;; *) echo "journey: --source-sha must be a Git object hash" >&2; usage ;; esac
+  case "$RUN_ATTEMPT" in ''|*[!0123456789]*) echo "journey: --run-attempt must be a positive integer" >&2; usage ;; esac
+  [ "$RUN_ATTEMPT" -gt 0 ] || { echo "journey: --run-attempt must be a positive integer" >&2; usage; }
+  for index in "$PREV_INDEX" "$CAND_INDEX"; do
+    [ -f "$index" ] && [ ! -L "$index" ] || { echo "journey: signed index must be a regular file: $index" >&2; exit 2; }
+  done
+  command -v gh >/dev/null 2>&1 || { echo "journey: gh is required for signed consumer verification" >&2; exit 2; }
+  command -v shasum >/dev/null 2>&1 || { echo "journey: shasum is required for signed consumer receipts" >&2; exit 2; }
+  for archive in "$PREV_ARCHIVE" "$CAND_ARCHIVE"; do
+    [ -f "$archive" ] && [ ! -L "$archive" ] || { echo "journey: signed archive must be a regular file: $archive" >&2; exit 2; }
+    bundle="$archive.sigstore.json"
+    [ -f "$bundle" ] && [ ! -L "$bundle" ] || { echo "journey: signed archive bundle is missing or unsafe: $bundle" >&2; exit 2; }
+  done
+  jq -e --arg platform "$PLATFORM" '.assets | has($platform)' "$PREV_INDEX" >/dev/null ||
+    { echo "journey: previous index has no asset for platform $PLATFORM" >&2; exit 2; }
+  jq -e --arg platform "$PLATFORM" '.assets | has($platform)' "$CAND_INDEX" >/dev/null ||
+    { echo "journey: candidate index has no asset for platform $PLATFORM" >&2; exit 2; }
+fi
+
 FIXTURE_HOME="$WORK/home"
 [ ! -e "$FIXTURE_HOME" ] || { echo "journey: $FIXTURE_HOME already exists; use a fresh work dir" >&2; exit 2; }
 LOG="$WORK/log"
@@ -95,12 +149,26 @@ mkdir -p "$LOG" "$WORK/tmp" "$WORK/release" || exit 2
 EXPECTED=$(printf '%s\n' "$EXPECTED" | sed -e "s/@PREV@/$PREV/g" -e "s/@CAND@/$CAND/g")
 PREFIX="$FIXTURE_HOME/.local/opt/omp-kit"
 KIT="$PREFIX/bin/omp-kit"
+if [ "$SIGNED_MODE" -eq 1 ]; then
+  EXPECTED=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$EXPECTED" \
+    "signed_inputs|0|inputs=valid" \
+    "previous_release|0|published=true stable=true version=$PREV" \
+    "verify_previous_signature|0|verified dry-run: version=$PREV platform=$PLATFORM prefix=$PREFIX" \
+    "candidate_source|0|source_sha=$SOURCE_SHA" \
+    "signed_receipt|0|receipt=written platform=$PLATFORM version=$CAND previous=$PREV")
+fi
 STATE_ROOT="$FIXTURE_HOME/.local/state/omp-kit"
 WRITER_DIR="$FIXTURE_HOME/Library/Caches/com.example.journey-writer"
 WRITER_FILE="$WRITER_DIR/heartbeat.log"
 WRITER_PID=''
 STEP_NO=0
 MISMATCHES=0
+SIGNED_INPUTS_OK=0
+PREVIOUS_RELEASE_OK=0
+PREVIOUS_SIGNATURE_OK=0
+CANDIDATE_SOURCE_OK=0
+PUBLIC_INSTALLER_OK=0
+COMPILED_UPGRADE_OK=0
 
 stop_writer() {
   if [ -n "$WRITER_PID" ]; then
@@ -229,10 +297,98 @@ envelope_verdict() {
 # shellcheck disable=SC2016 # $home is a jq variable (envelope_verdict passes --arg home).
 DOCTOR_FILTER='"ok=\(.ok) " + ([.data.findings[]? | select(.component == "state_root") | "state_root=\(.status) mode=\(.evidence.mode) path=\(.evidence.path | if startswith($home + "/") then "~" + ltrimstr($home) else . end)"][0] // "state_root=absent")'
 
+sha256_file() {
+  checksum_output=$(shasum -a 256 "$1") || return 1
+  printf '%s\n' "$checksum_output" | awk 'NR == 1 { print $1 }'
+}
+
+capture_signed_inputs() {
+  PREV_ARCHIVE_SHA=$(sha256_file "$PREV_ARCHIVE") || return 1
+  PREV_INDEX_SHA=$(sha256_file "$PREV_INDEX") || return 1
+  PREV_BUNDLE_SHA=$(sha256_file "$PREV_ARCHIVE.sigstore.json") || return 1
+  CAND_ARCHIVE_SHA=$(sha256_file "$CAND_ARCHIVE") || return 1
+  CAND_INDEX_SHA=$(sha256_file "$CAND_INDEX") || return 1
+  CAND_BUNDLE_SHA=$(sha256_file "$CAND_ARCHIVE.sigstore.json") || return 1
+  candidate_invocation="https://github.com/JYeswak/omp-kit-companion/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT"
+  if ! jq -es --arg invocation "$candidate_invocation" \
+    'any(.[]; (.dsseEnvelope.payload | @base64d | fromjson | .predicate.runDetails.metadata.invocationId) == $invocation)' \
+    "$CAND_ARCHIVE.sigstore.json" >/dev/null; then
+    echo "inputs=candidate-signing-run-mismatch"
+    return 1
+  fi
+  SIGNED_INPUTS_OK=1
+  echo "inputs=valid"
+}
+
+same_sha256() {
+  actual_sha=$(sha256_file "$1") || return 1
+  [ "$actual_sha" = "$2" ]
+}
+
+write_signed_receipt() {
+  [ "$SIGNED_MODE" -eq 1 ] && [ "$SIGNED_INPUTS_OK" -eq 1 ] &&
+    [ "$PREVIOUS_RELEASE_OK" -eq 1 ] && [ "$PREVIOUS_SIGNATURE_OK" -eq 1 ] &&
+    [ "$CANDIDATE_SOURCE_OK" -eq 1 ] && [ "$PUBLIC_INSTALLER_OK" -eq 1 ] &&
+    [ "$COMPILED_UPGRADE_OK" -eq 1 ] || { echo "receipt=precondition-failed"; return 1; }
+  if ! same_sha256 "$PREV_ARCHIVE" "$PREV_ARCHIVE_SHA" ||
+    ! same_sha256 "$PREV_INDEX" "$PREV_INDEX_SHA" ||
+    ! same_sha256 "$PREV_ARCHIVE.sigstore.json" "$PREV_BUNDLE_SHA" ||
+    ! same_sha256 "$CAND_ARCHIVE" "$CAND_ARCHIVE_SHA" ||
+    ! same_sha256 "$CAND_INDEX" "$CAND_INDEX_SHA" ||
+    ! same_sha256 "$CAND_ARCHIVE.sigstore.json" "$CAND_BUNDLE_SHA"; then
+    echo "receipt=input-mutated"
+    return 1
+  fi
+  receipt_dir=$(dirname "$RECEIPT_OUT")
+  mkdir -p "$receipt_dir" || return 1
+  [ ! -e "$RECEIPT_OUT" ] && [ ! -L "$RECEIPT_OUT" ] || { echo "receipt=already-exists"; return 1; }
+  receipt_tmp="$receipt_dir/.receipt.json.$$"
+  [ ! -e "$receipt_tmp" ] && [ ! -L "$receipt_tmp" ] || { echo "receipt=temp-exists"; return 1; }
+  jq -n --arg platform "$PLATFORM" --arg version "$CAND" --arg source_sha "$SOURCE_SHA" \
+    --arg archive_sha256 "$CAND_ARCHIVE_SHA" --arg index_sha256 "$CAND_INDEX_SHA" \
+    --arg run_id "$RUN_ID" --argjson run_attempt "$RUN_ATTEMPT" --arg previous_version "$PREV" \
+    '{schema_version:1, kind:"signed-native-consumer", platform:$platform, version:$version,
+      source_sha:$source_sha, archive_sha256:$archive_sha256, index_sha256:$index_sha256,
+      run_id:$run_id, run_attempt:$run_attempt, previous_version:$previous_version,
+      installed_version:$version, checks:{public_installer:true, compiled_upgrade:true}}' > "$receipt_tmp" || {
+      rm -f "$receipt_tmp"
+      return 1
+    }
+  chmod 600 "$receipt_tmp" || { rm -f "$receipt_tmp"; return 1; }
+  ln "$receipt_tmp" "$RECEIPT_OUT" || { rm -f "$receipt_tmp"; return 1; }
+  rm "$receipt_tmp" || return 1
+  echo "receipt=written platform=$PLATFORM version=$CAND previous=$PREV"
+}
+
+previous_release_verdict() {
+  if jq -e --arg tag "v$PREV" \
+    '.tagName == $tag and .isDraft == false and .isPrerelease == false' "$1" >/dev/null 2>&1; then
+    echo "published=true stable=true version=$PREV"
+  else
+    echo "published=false stable=false"
+  fi
+}
+
 verdict() {
   out=$1
   case "$2" in
     fixture) cat "$WORK/fixture.verdict" 2>/dev/null || echo "fixture-incomplete" ;;
+    signed_inputs) head -n 1 "$out" ;;
+    previous_release) previous_release_verdict "$out" ;;
+    verify_previous_signature) head -n 1 "$out" ;;
+    candidate_source)
+      source_sha_value=$(head -n 1 "$out")
+      [ "$source_sha_value" = "$SOURCE_SHA" ] && echo "source_sha=$source_sha_value" || echo "source_sha=mismatch" ;;
+    signed_receipt)
+      jq -e --arg platform "$PLATFORM" --arg version "$CAND" --arg source_sha "$SOURCE_SHA" \
+        --arg archive_sha "$CAND_ARCHIVE_SHA" --arg index_sha "$CAND_INDEX_SHA" \
+        --arg run_id "$RUN_ID" --argjson run_attempt "$RUN_ATTEMPT" --arg previous "$PREV" \
+        '.schema_version == 1 and .kind == "signed-native-consumer" and .platform == $platform and
+         .version == $version and .source_sha == $source_sha and .archive_sha256 == $archive_sha and
+         .index_sha256 == $index_sha and .run_id == $run_id and .run_attempt == $run_attempt and
+         .previous_version == $previous and .installed_version == $version and
+         .checks.public_installer == true and .checks.compiled_upgrade == true' "$RECEIPT_OUT" >/dev/null 2>&1 &&
+        head -n 1 "$out" || echo "receipt=invalid" ;;
     install_previous) v=$(sed -n 's/^installed: version=\([^ ]*\).*/\1/p' "$out")
       [ -x "$KIT" ] && [ -n "$v" ] && echo "installed=$v" || echo "not-installed" ;;
     version|version_after_update) head -n 1 "$out" ;;
@@ -294,6 +450,9 @@ step() {
 }
 
 finish() {
+  if [ "$SIGNED_MODE" -eq 1 ] && [ "$MISMATCHES" -eq 0 ] && [ "${1:-}" != abort ]; then
+    step signed_receipt write_signed_receipt || :
+  fi
   steps=$(wc -l < "$JSONL" | tr -d ' ')
   echo "journey: $steps steps, $MISMATCHES mismatch(es); log $JSONL"
   [ "$MISMATCHES" -eq 0 ] && [ "${1:-}" != abort ] && exit 0
@@ -301,11 +460,22 @@ finish() {
 }
 
 echo "journey: previous=$PREV candidate=$CAND home=$FIXTURE_HOME"
+if [ "$SIGNED_MODE" -eq 1 ]; then
+  if step signed_inputs capture_signed_inputs; then SIGNED_INPUTS_OK=1; fi
+  if step previous_release gh release view "v$PREV" --repo JYeswak/omp-kit-companion --json tagName,isDraft,isPrerelease; then
+    PREVIOUS_RELEASE_OK=1
+  fi
+  if step verify_previous_signature sh "$INSTALLER" --version "$PREV" --index "$PREV_INDEX" \
+    --offline "$PREV_ARCHIVE" --prefix "$PREFIX" --dry-run; then
+    PREVIOUS_SIGNATURE_OK=1
+  fi
+fi
 step fixture build_fixture || { echo "journey: ABORT: fixture failed; nothing below can run" >&2; finish abort; }
 ( while :; do date +%s >> "$WRITER_FILE"; sleep 1; done ) &
 WRITER_PID=$!
 step install_previous kit_env sh "$INSTALLER" --version "$PREV" --index "$PREV_INDEX" --offline "$PREV_ARCHIVE" --prefix "$PREFIX" ||
   { echo "journey: ABORT: previous kit is not installed; nothing below can run" >&2; finish abort; }
+PUBLIC_INSTALLER_OK=1
 step version kit_env "$KIT" --version
 step status kit_env "$KIT" status --json
 step doctor kit_env "$KIT" doctor --json
@@ -315,9 +485,15 @@ step legacy_state_after_repair check_legacy_state
 step doctor_after_repair kit_env "$KIT" doctor --json
 step test kit_env "$KIT" test --json
 step test_full kit_env "$KIT" test --full --json
-step update_apply kit_env "$KIT" update --apply --yes --version "$CAND" --index "$CAND_INDEX" --archive "$CAND_ARCHIVE" --json
-step version_after_update kit_env "$KIT" --version
-step audit kit_env "$KIT" audit --json
+upgrade_steps_ok=1
+step update_apply kit_env "$KIT" update --apply --yes --version "$CAND" --index "$CAND_INDEX" --archive "$CAND_ARCHIVE" --json ||
+  upgrade_steps_ok=0
+step version_after_update kit_env "$KIT" --version || upgrade_steps_ok=0
+step audit kit_env "$KIT" audit --json || upgrade_steps_ok=0
+[ "$upgrade_steps_ok" -eq 1 ] && COMPILED_UPGRADE_OK=1
+  if step candidate_source gh api "repos/JYeswak/omp-kit-companion/commits/v$CAND" --jq .sha; then
+    CANDIDATE_SOURCE_OK=1
+  fi
 step background_writer check_writer
 stop_writer
 step no_leaked_processes check_leaked_processes
