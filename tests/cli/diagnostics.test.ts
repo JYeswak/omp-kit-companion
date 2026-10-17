@@ -143,7 +143,7 @@ test("scoped diagnostics retain the corresponding full findings and uncertainty"
 	const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath };
 	const full = await diagnose(input);
 	const scopes: Record<string, string[]> = {
-		kit: ["kit", "manifest", "planning_skill"], omp: ["omp"], profile: ["effective_profile"],
+		kit: ["kit", "manifest", "planning_skill"], profile: ["effective_profile"],
 		settings: ["policy"], extensions: ["extensions", "extension_imports"], router: ["router"], state_root: ["state_root"],
 	};
 	for (const [scope, components] of Object.entries(scopes)) {
@@ -153,6 +153,20 @@ test("scoped diagnostics retain the corresponding full findings and uncertainty"
 			.toEqual(full.filter(row => components.includes(row.component) && row.component !== "planning_skill"));
 		expect(scoped.every(row => components.includes(row.component))).toBe(true);
 	}
+	// Explicit omp scope performs the launcher execution cross-check; unscoped
+	// inventory never executes the launcher, so only the probe fields differ.
+	const scopedOmp = await diagnose({ ...input, scope: "omp" });
+	expect(scopedOmp.map(row => row.component)).toEqual(["omp"]);
+	const fullOmp = finding(full, "omp");
+	const scopedOmpFinding = finding(scopedOmp, "omp");
+	expect(fullOmp.status).toBe(scopedOmpFinding.status);
+	expect(fullOmp.evidence?.launcher_version).toBe(null);
+	expect(fullOmp.evidence?.launcher_version_proof).toBe("NOT_RUN");
+	expect(scopedOmpFinding.evidence?.launcher_version).toBe("18.4.0");
+	expect(scopedOmpFinding.evidence?.launcher_version_proof).toBe("OMP_LAUNCHER");
+	const maskProbe = (row: Finding) => ({ ...row, reason: "MASKED", recommended_action: "MASKED",
+		evidence: { ...row.evidence, launcher_version: "MASKED", launcher_version_proof: "MASKED" } });
+	expect(maskProbe(scopedOmpFinding)).toEqual(maskProbe(fullOmp));
 	expect(finding(await diagnose({ ...input, scope: "kit" }), "planning_skill").status).toBe("UNVERIFIED");
 	expect(finding(await diagnose({ ...input, scope: "omp", ompPath: join(f.base, "missing") }), "omp").status).toBe("FAIL");
 	const unknown = await diagnose({ ...input, scope: "not-implemented" });

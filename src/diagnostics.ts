@@ -210,7 +210,11 @@ function legacyRecord(home: string, rules: readonly ManifestRule[]): "LEGACY_REC
 		return expected.size ? "UNVERIFIED" : "LEGACY_RECORD_ONLY";
 	} catch { return "UNVERIFIED"; }
 }
-function inspectOmp(path?: string, env: Record<string, string | undefined> = process.env): Finding {
+/** Unscoped inventory never executes the OMP launcher. The launcher-version
+ * cross-check (a subprocess execution) runs only under the explicit omp scope;
+ * every other inventory reports presence from package metadata with the
+ * launcher check NOT_RUN. */
+function inspectOmp(path?: string, env: Record<string, string | undefined> = process.env, probeLauncher = false): Finding {
 	const managers = observeOmpManagers(env);
 	const managerEvidence = {
 		manager_source: managers.source,
@@ -243,8 +247,24 @@ function inspectOmp(path?: string, env: Record<string, string | undefined> = pro
 		if (identity.launcher !== managers.launcher) throw new Error("PATH-selected OMP launcher changed during inspection");
 		const metadata: unknown = JSON.parse(fileBytes(join(identity.packageRoot, "package.json")).toString("utf8"));
 		const version = metadata && typeof metadata === "object" && "version" in metadata && typeof metadata.version === "string" && metadata.version.trim() ? metadata.version : null;
-		const launcherVersion = observeOmpLauncherVersion(identity.launcher, env);
 		const managerVersion = managers.source === "tern" ? managers.versions.tern : managers.source === "bun" ? managers.versions.bun : null;
+		if (!probeLauncher) {
+			return finding("omp", version ? "OK" : "UNVERIFIED",
+				version ? "OMP launcher and package version resolved from metadata" : "OMP launcher resolved but package version is not verifiable",
+				version ? "No action required." : "Inspect the installed OMP package metadata before relying on its version.", {
+					availability: "PRESENT",
+					location: identity.launcher,
+					package_root: identity.packageRoot,
+					manager_version: managerVersion?.version ?? null,
+					manager_version_provenance: managerVersion?.provenance ?? "UNVERIFIED",
+					version,
+					version_proof: version ? "PACKAGE_METADATA" : "UNVERIFIED",
+					launcher_version: null,
+					launcher_version_proof: "NOT_RUN",
+					...managerEvidence,
+				});
+		}
+		const launcherVersion = observeOmpLauncherVersion(identity.launcher, env);
 		const mismatches: string[] = [];
 		if (managers.source === "unknown") mismatches.push("manager source is unknown");
 		else if (!managerVersion || managerVersion.status !== "PRESENT") mismatches.push(managerVersion?.reason ?? "manager version is unverified");
@@ -276,8 +296,8 @@ function inspectOmp(path?: string, env: Record<string, string | undefined> = pro
 			requested_location: path,
 			version: null,
 			version_proof: "UNVERIFIED",
-			launcher_version: managers.launcher ? observeOmpLauncherVersion(managers.launcher, env) : null,
-			launcher_version_proof: "UNVERIFIED",
+			launcher_version: probeLauncher && managers.launcher ? observeOmpLauncherVersion(managers.launcher, env) : null,
+			launcher_version_proof: probeLauncher ? "UNVERIFIED" : "NOT_RUN",
 			...managerEvidence,
 		});
 	}
@@ -1486,7 +1506,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const selected = input.scope ? DIAGNOSTIC_SCOPE_COMPONENTS[input.scope] ?? [input.scope] : undefined;
 	const wants = (...components: string[]) => !selected || components.some(component => selected.includes(component));
 	const rows: Finding[] = [];
-	if (wants("omp", "effective_rules", "omp_drift")) rows.push(inspectOmp(input.ompPath, input.ompEnvironment ?? process.env));
+	if (wants("omp", "effective_rules", "omp_drift")) rows.push(inspectOmp(input.ompPath, input.ompEnvironment ?? process.env, input.scope === "omp"));
 	const root = resolve(input.root);
 	const home = resolve(input.home);
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
