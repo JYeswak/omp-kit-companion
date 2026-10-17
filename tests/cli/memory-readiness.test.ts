@@ -31,7 +31,7 @@ function fixture(version: string = INSTALLED_OMP_VERSION) {
 		writeFileSync(target, readFileSync(join(INSTALLED_OMP_ROOT, relativePath)));
 	}
 	const config = join(agent, "config.yml");
-	const inspect = (installedPath = ompPath) => inspectMemoryReadiness({ home, project, ompPath: installedPath });
+	const inspect = (installedPath = ompPath) => inspectMemoryReadiness({ home, project, ompPath: installedPath, cassPath: null });
 	return { root, home, project, agent, config, ompPath, ompRoot: pkg, inspect };
 }
 function snapshot(dir: string, prefix = ""): string[] {
@@ -93,6 +93,9 @@ test("one changed memory settings source byte names the exact path and hash", as
 		expect(report.backend).toBe("UNVERIFIED");
 		expect(report.status).toBe("UNVERIFIED");
 		expect(report.reason).toContain(`${source} sha256=${sha256}`);
+		expect(report.source_refs).toContain(`${source} sha256=${sha256}`);
+		expect(report.cass).toMatchObject({ configured: false, observed: "UNAVAILABLE", retrieval_qualified: false });
+		expect(report.scheduler).toMatchObject({ state: "UNAVAILABLE", scheduler: "UNKNOWN", owner: "UNKNOWN", actual_state: "NOT_PROBED" });
 	}
 });
 
@@ -107,6 +110,11 @@ test("OFF and configured Mnemopi do not turn into runtime OK", async () => {
 	expect(on.auto_retain).toBe(false); expect(on.auto_recall).toBe(true);
 	expect(on.scoping).toBe("per-project-tagged"); expect(on.embedding).toBe("DISABLED_FTS_ONLY");
 	expect(on.store).toBe("NOT_CREATED"); expect(on.status).not.toBe("OK");
+	expect(on.retrieval_qualified).toBe(false);
+	expect(on.cass).toMatchObject({ configured: false, observed: "UNAVAILABLE", retrieval_qualified: false });
+	expect(on.scheduler).toMatchObject({ state: "UNAVAILABLE", scheduler: "UNKNOWN", owner: "UNKNOWN", actual_state: "NOT_PROBED" });
+	expect(on.source_refs).toContain("~/Library/LaunchAgents");
+	expect(on.source_refs).toContain("profile config: .omp/agent/config.yml");
 });
 
 test("empty-not-created store and observed local SQLite store remain distinct without reading rows", async () => {
@@ -195,4 +203,120 @@ test("synthetic redactor canaries report source-pinned limits without exposing c
 	expect(JSON.stringify(report)).not.toContain("PRIVATE KEY-----");
 	expect(JSON.stringify(report)).not.toContain("syntheticbearerletters");
 	expect([snapshot(f.home), snapshot(f.project)]).toEqual(before);
+});
+test("maintenance-required CASS status stays unqualified and reports its static scheduler source", async () => {
+	const f = fixture();
+	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  noEmbeddings: true\n  llmMode: none\n");
+	const cassPath = join(f.root, "tools", "cass");
+	mkdirSync(dirname(cassPath), { recursive: true });
+	writeFileSync(cassPath, [
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$0.calls\"",
+		"if [ \"$*\" = \"status --json\" ]; then",
+		"  printf '%s\\n' '{\"healthy\":true,\"database\":{\"exists\":true},\"index\":{\"stale\":false}}'",
+		"  exit 5",
+		"fi",
+		"exit 99",
+		"",
+	].join("\n"));
+	chmodSync(cassPath, 0o755);
+	const schedulerRoot = join(f.home, "Library", "LaunchAgents");
+	mkdirSync(schedulerRoot, { recursive: true });
+	writeFileSync(join(schedulerRoot, "com.dicklesworthstone.cass.incremental.plist"), [
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+		"<plist version=\"1.0\"><dict>",
+		"<key>Label</key><string>com.dicklesworthstone.cass.incremental</string>",
+		"<key>ProgramArguments</key><array><string>/example/cass</string><string>schedule</string>",
+		"<string>run</string><string>--job</string><string>incremental</string></array>",
+		"<key>StartInterval</key><integer>900</integer>",
+		"</dict></plist>",
+	].join("\n"));
+	const configBefore = readFileSync(f.config, "utf8");
+	const projectNamesBefore = readdirSync(f.project).sort();
+	const storePath = join(f.agent, "memories", "mnemopi", "mnemopi.db");
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	expect(report.cass).toMatchObject({ configured: true, observed: "MAINTENANCE_REQUIRED", retrieval_qualified: false, exit_code: 5 });
+	expect(report.cass.first_required_command).toBe("cass status --json");
+	expect(report.cass.authorization_boundary).toContain("No search, memory rows");
+	expect(report.scheduler).toMatchObject({
+		state: "OBSERVED", scheduler: "launchd", owner: "UNKNOWN",
+		entries: [{ job: "incremental", source_ref: "~/Library/LaunchAgents/com.dicklesworthstone.cass.incremental.plist" }],
+	});
+	expect(report.scheduler.source_ref).toBe("~/Library/LaunchAgents");
+	expect(report.retrieval_qualified).toBe(false);
+	expect(report.source_refs).toContain("~/Library/LaunchAgents/com.dicklesworthstone.cass.incremental.plist");
+	expect(report.source_refs.some(reference => reference.includes(cassPath))).toBe(true);
+	expect(readFileSync(f.config, "utf8")).toBe(configBefore);
+	expect(readdirSync(f.project).sort()).toEqual(projectNamesBefore);
+	expect(() => lstatSync(storePath)).toThrow();
+	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
+});
+test("successful CASS status metadata never qualifies actual retrieval", async () => {
+	const f = fixture();
+	const cassPath = join(f.root, "tools", "cass");
+	mkdirSync(dirname(cassPath), { recursive: true });
+	writeFileSync(cassPath, [
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$0.calls\"",
+		"if [ \"$*\" = \"status --json\" ]; then",
+		"  printf '%s\\n' '{\"healthy\":true,\"database\":{\"exists\":true},\"index\":{\"stale\":false}}'",
+		"  exit 0",
+		"fi",
+		"exit 99",
+		"",
+	].join("\n"));
+	chmodSync(cassPath, 0o755);
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	expect(report.cass).toMatchObject({ configured: true, observed: "AVAILABLE", retrieval_qualified: false, database_exists: true, index_stale: false });
+	expect(report.retrieval_qualified).toBe(false);
+	expect(report.source_refs.some(reference => reference.includes(cassPath))).toBe(true);
+	expect(report.status).not.toBe("OK");
+	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
+});
+test("malformed CASS and scheduler inputs remain unverified", async () => {
+	const f = fixture();
+	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  noEmbeddings: true\n  llmMode: none\n");
+	const cassPath = join(f.root, "tools", "cass");
+	mkdirSync(dirname(cassPath), { recursive: true });
+	writeFileSync(cassPath, [
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$0.calls\"",
+		"printf '%s\\n' 'not-json'",
+		"exit 0",
+		"",
+	].join("\n"));
+	chmodSync(cassPath, 0o755);
+	const schedulerRoot = join(f.home, "Library", "LaunchAgents");
+	mkdirSync(schedulerRoot, { recursive: true });
+	writeFileSync(join(schedulerRoot, "com.dicklesworthstone.cass.incremental.plist"), "not a property list");
+	const oversizedPath = join(schedulerRoot, "com.dicklesworthstone.cass.oversized.plist");
+	writeFileSync(oversizedPath, Buffer.alloc(64 * 1024 + 1, 0x20));
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	expect(report.cass).toMatchObject({ configured: true, observed: "UNVERIFIED", retrieval_qualified: false, database_exists: null, index_stale: null });
+	expect(report.scheduler).toMatchObject({ state: "UNVERIFIED", scheduler: "UNKNOWN", owner: "UNKNOWN", actual_state: "NOT_PROBED", entries: [] });
+	expect(report.source_refs).toContain("~/Library/LaunchAgents/com.dicklesworthstone.cass.incremental.plist");
+	expect(report.scheduler.source_refs).toContain("~/Library/LaunchAgents/com.dicklesworthstone.cass.oversized.plist");
+	expect(report.retrieval_qualified).toBe(false);
+	expect(() => lstatSync(join(f.agent, "memories", "mnemopi", "mnemopi.db"))).toThrow();
+	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
+});
+test("CASS unhealthy metadata overrides a successful status exit", async () => {
+	const f = fixture();
+	const cassPath = join(f.root, "tools", "cass");
+	mkdirSync(dirname(cassPath), { recursive: true });
+	writeFileSync(cassPath, [
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$0.calls\"",
+		"if [ \"$*\" = \"status --json\" ]; then",
+		"  printf '%s\\n' '{\"healthy\":false,\"database\":{\"exists\":true},\"index\":{\"stale\":false}}'",
+		"  exit 0",
+		"fi",
+		"exit 97",
+		"",
+	].join("\n"));
+	chmodSync(cassPath, 0o755);
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	expect(report.cass).toMatchObject({ observed: "MAINTENANCE_REQUIRED", retrieval_qualified: false, database_exists: true, index_stale: false, exit_code: 0 });
+	expect(report.retrieval_qualified).toBe(false);
+	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
 });

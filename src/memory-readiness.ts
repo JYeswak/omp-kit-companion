@@ -1,6 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readPlistProgram } from "./services.ts";
+import { readSafeFile } from "./safe-file.ts";
 import { YAML } from "bun";
 
 export interface MemoryReadinessInput {
@@ -8,6 +11,8 @@ export interface MemoryReadinessInput {
 	project?: string;
 	profile?: string;
 	ompPath?: string;
+	/** Resolved CASS executable for read-only status metadata; null means unavailable. */
+	cassPath?: string | null;
 	/** Explicit OMP XDG state root, if the caller has verified its environment. */
 	xdgStateHome?: string;
 }
@@ -18,6 +23,34 @@ export interface MemoryRedactorReport {
 	coverage: "SYNTHETIC_ONLY" | "NOT_PROBED";
 	missed: string[];
 	reason: string;
+}
+export interface MemoryCassReadiness {
+	configured: boolean;
+	observed: "AVAILABLE" | "MAINTENANCE_REQUIRED" | "UNAVAILABLE" | "UNVERIFIED";
+	retrieval_qualified: false;
+	first_required_command: "cass status --json";
+	source_ref: string | null;
+	exit_code: number | null;
+	database_exists: boolean | null;
+	index_stale: boolean | null;
+	reason: string;
+	authorization_boundary: string;
+}
+export interface MemorySchedulerEntry {
+	job: string;
+	label: string;
+	frequency: "INTERVAL" | "CALENDAR";
+	source_ref: string;
+}
+export interface MemorySchedulerReadiness {
+	state: "OBSERVED" | "UNAVAILABLE" | "UNVERIFIED";
+	scheduler: "launchd" | "UNKNOWN";
+	owner: "UNKNOWN";
+	actual_state: "NOT_PROBED";
+	source_ref: string;
+	source_refs: string[];
+	entries: MemorySchedulerEntry[];
+	authorization_boundary: string;
 }
 export interface MemoryReadinessReport {
 	status: MemoryReadinessStatus;
@@ -30,6 +63,10 @@ export interface MemoryReadinessReport {
 	model: "NOT_APPLICABLE" | "DISABLED" | "UNRESOLVED_ROLE" | "UNVERIFIED_LOCAL" | "UNVERIFIED_REMOTE" | "UNVERIFIED";
 	embedding: "NOT_APPLICABLE" | "DISABLED_FTS_ONLY" | "UNVERIFIED_LOCAL" | "UNVERIFIED_REMOTE" | "UNVERIFIED";
 	runtime: "NOT_PROBED";
+	retrieval_qualified: false;
+	source_refs: string[];
+	cass: MemoryCassReadiness;
+	scheduler: MemorySchedulerReadiness;
 	reason: string;
 	recommended_action: string;
 	redactor: MemoryRedactorReport;
@@ -79,23 +116,119 @@ function safeDirectories(base: string, segments: readonly string[]): boolean {
 	for (const segment of segments) { current = join(current, segment); if (state(current) !== "directory") return false; }
 	return true;
 }
-function fileBytes(path: string): Buffer {
-	const fd = openSync(path, NOFOLLOW);
-	try { if (!fstatSync(fd).isFile()) throw new Error("unsafe file"); return readFileSync(fd); }
-	finally { closeSync(fd); }
+const CASS_STATUS_COMMAND = "cass status --json";
+const CASS_STATUS_TIMEOUT_MS = 2_000;
+const MAX_CASS_STATUS_BYTES = 64 * 1024;
+const MAX_LAUNCH_AGENT_BYTES = 64 * 1024;
+const MAX_LAUNCH_AGENT_ENTRIES = 20;
+const CASS_LAUNCH_AGENT_PREFIX = "com.dicklesworthstone.cass.";
+
+function inspectCassStatus(requestedPath?: string | null): MemoryCassReadiness {
+	const path = requestedPath === undefined ? Bun.which("cass") : requestedPath;
+	const unavailable = (configured: boolean, source_ref: string | null, exit_code: number | null, reason: string): MemoryCassReadiness => ({
+		configured, observed: configured ? "UNVERIFIED" : "UNAVAILABLE", retrieval_qualified: false,
+		first_required_command: CASS_STATUS_COMMAND, source_ref, exit_code, database_exists: null, index_stale: null, reason,
+		authorization_boundary: "Read-only CASS status metadata only; no searches, memory rows, repairs, indexing, or retrieval qualification.",
+	});
+	if (!path || !isAbsolute(path)) return unavailable(false, null, null, "CASS executable is unavailable on PATH");
+	let executable: string;
+	try { executable = realpathSync(path); if (state(executable) !== "file") return unavailable(false, path, null, "CASS executable path is not a regular file"); }
+	catch { return unavailable(false, path, null, "CASS executable path could not be resolved"); }
+	let resultStatus: number | null;
+	let output: string;
+	let commandError = false;
+	try {
+		const result = spawnSync(executable, ["status", "--json"], { encoding: "utf8", timeout: CASS_STATUS_TIMEOUT_MS, maxBuffer: MAX_CASS_STATUS_BYTES });
+		resultStatus = result.status;
+		output = typeof result.stdout === "string" ? result.stdout : "";
+		commandError = result.error !== undefined;
+	} catch { return unavailable(true, executable, null, "CASS status command failed to start"); }
+	let summary: Record<string, unknown> | null = null;
+	let parseFailed = false;
+	try { const parsed: unknown = JSON.parse(output); if (record(parsed)) summary = parsed; else parseFailed = true; }
+	catch { parseFailed = true; }
+	const database = summary && record(summary.database) ? summary.database : null;
+	const index = summary && record(summary.index) ? summary.index : null;
+	const databaseExists = database && typeof database.exists === "boolean" ? database.exists : null;
+	const indexStale = index && typeof index.stale === "boolean" ? index.stale : null;
+	const observed: MemoryCassReadiness["observed"] = resultStatus === 5 || summary?.healthy === false ? "MAINTENANCE_REQUIRED" :
+		!commandError && resultStatus === 0 && summary?.healthy === true ? "AVAILABLE" : "UNVERIFIED";
+	const reason = observed === "MAINTENANCE_REQUIRED" ? "CASS status reports maintenance required; retrieval remains unqualified" :
+		observed === "AVAILABLE" ? "CASS status metadata responded; retrieval remains unqualified" :
+		commandError || resultStatus === null ? "CASS status command failed or timed out" :
+		parseFailed ? "CASS status returned malformed JSON" : `CASS status exit ${resultStatus} lacks qualified health evidence`;
+	return {
+		configured: true, observed, retrieval_qualified: false, first_required_command: CASS_STATUS_COMMAND,
+		source_ref: executable, exit_code: resultStatus, database_exists: databaseExists, index_stale: indexStale, reason,
+		authorization_boundary: "Only `cass status --json` metadata was read; a successful status, database, or schedule never proves retrieval. No search, memory rows, repairs, or indexing were run.",
+	};
 }
-function configAt(dir: string): { data?: Record<string, unknown>; issue?: string; present: boolean } {
+
+
+function inspectMemoryScheduler(home: string): MemorySchedulerReadiness {
+	const source_ref = "~/Library/LaunchAgents";
+	const source_refs = [source_ref];
+	const authorization_boundary = "Static LaunchAgent declarations only; loaded state, logs, job execution, memory rows, and maintainer identity are not inspected.";
+	const unavailable = {
+		scheduler: "UNKNOWN" as const, owner: "UNKNOWN" as const, actual_state: "NOT_PROBED" as const,
+		source_ref, source_refs, entries: [] as MemorySchedulerEntry[], authorization_boundary,
+	};
+	const directory = join(home, "Library", "LaunchAgents");
+	if (state(directory) === "missing") return { state: "UNAVAILABLE", ...unavailable };
+	if (!safeDirectories(home, ["Library", "LaunchAgents"])) return { state: "UNVERIFIED", ...unavailable };
+	let names: string[];
+	try {
+		names = readdirSync(directory).filter(name => name.startsWith(CASS_LAUNCH_AGENT_PREFIX) && name.endsWith(".plist")).sort();
+	} catch { return { state: "UNVERIFIED", ...unavailable }; }
+	if (!names.length) return { state: "UNAVAILABLE", ...unavailable };
+	const truncated = names.length > MAX_LAUNCH_AGENT_ENTRIES;
+	const entries: MemorySchedulerEntry[] = [];
+	let unverified = truncated;
+	for (const name of names.slice(0, MAX_LAUNCH_AGENT_ENTRIES)) {
+		const fileRef = `${source_ref}/${name}`;
+		source_refs.push(fileRef);
+		const path = join(directory, name);
+		let bytes: Buffer | null = null;
+		if (state(path) === "file") {
+			try { bytes = readSafeFile(path, MAX_LAUNCH_AGENT_BYTES); }
+			catch { /* Keep its source reference; malformed or oversized input remains unverified. */ }
+		}
+		if (!bytes) { unverified = true; continue; }
+		const parsed = readPlistProgram(bytes.toString("utf8"));
+		const program = parsed?.program;
+		const args = program?.arguments;
+		const triggers = (program?.trigger ?? "").split(",");
+		const interval = triggers.some(trigger => trigger.startsWith("every"));
+		const calendar = triggers.includes("calendar");
+		if (!parsed || parsed.label !== name.slice(0, -".plist".length) || !program || !args || basename(program.program) !== "cass" ||
+			!args.includes("schedule") || !args.includes("run") || interval === calendar) {
+			unverified = true;
+			continue;
+		}
+		const jobFlag = args.indexOf("--job"), job = jobFlag >= 0 ? args[jobFlag + 1] : undefined;
+		if (!job) { unverified = true; continue; }
+		entries.push({ job, label: parsed.label, frequency: interval ? "INTERVAL" : "CALENDAR", source_ref: fileRef });
+	}
+	return {
+		state: unverified ? "UNVERIFIED" : "OBSERVED",
+		scheduler: entries.length ? "launchd" : "UNKNOWN", owner: "UNKNOWN", actual_state: "NOT_PROBED",
+		source_ref, source_refs, entries, authorization_boundary,
+	};
+}
+function configAt(dir: string): { data?: Record<string, unknown>; issue?: string; present: boolean; source?: string } {
 	const names = ["config.yml", "config.yaml", "config.json", "settings.json"];
 	const found = names.filter(name => state(join(dir, name)) !== "missing");
 	if (!found.length) return { present: false };
-	if (found.length !== 1 || !["config.yml", "config.yaml"].includes(found[0]!)) return { present: true, issue: "Ambiguous or legacy profile format" };
+	if (found.length !== 1 || !["config.yml", "config.yaml"].includes(found[0]!))
+		return { present: true, issue: "Ambiguous or legacy profile format" };
+	const source = found[0]!;
 	try {
-		const file = join(dir, found[0]!);
+		const file = join(dir, source);
 		if (state(file) !== "file") throw new Error("unsafe config");
-		const parsed: unknown = YAML.parse(fileBytes(file).toString("utf8"));
+		const parsed: unknown = YAML.parse(readSafeFile(file).toString("utf8"));
 		if (!record(parsed)) throw new Error("invalid config root");
-		return { present: true, data: parsed };
-	} catch { return { present: true, issue: "Unreadable or unrecognized config" }; }
+		return { present: true, data: parsed, source };
+	} catch { return { present: true, issue: "Unreadable or unrecognized config", source }; }
 }
 function setting(root: Record<string, unknown>, group: string, key: string): unknown {
 	const block = root[group];
@@ -140,30 +273,37 @@ function installedPackage(ompPath?: string): { root: string; version: string } |
 		const launcher = realpathSync(ompPath);
 		if (state(launcher) !== "file") return null;
 		const root = dirname(dirname(launcher));
-		const manifest: unknown = JSON.parse(fileBytes(join(root, "package.json")).toString("utf8"));
+		const manifest: unknown = JSON.parse(readSafeFile(join(root, "package.json")).toString("utf8"));
 		return record(manifest) && manifest.name === PACKAGE_NAME && typeof manifest.version === "string" ? { root, version: manifest.version } : null;
 	} catch { return null; }
 }
-type MemoryConfigSourceReview = { reviewed: true } | { reviewed: false; reason: string };
+type MemoryConfigSourceReview = { reviewed: true; source_refs: string[] } | { reviewed: false; reason: string; source_refs: string[] };
 function memoryConfigSourcesReviewed(root: string, version: string): MemoryConfigSourceReview {
+	const source_refs: string[] = [];
 	for (const directory of ["src/memory-backend", "src/config"] as const) {
 		if (!safeDirectories(root, directory.split("/")))
-			return { reviewed: false, reason: `OMP ${version} memory source directory ${directory} is missing or unsafe` };
+			return { reviewed: false, reason: `OMP ${version} memory source directory ${directory} is missing or unsafe`, source_refs };
 	}
 	const hashes: string[] = [];
 	for (const source of MEMORY_CONFIG_SOURCE_FILES) {
-		try { hashes.push(createHash("sha256").update(fileBytes(join(root, source))).digest("hex")); }
-		catch { return { reviewed: false, reason: `OMP ${version} memory config source hash unavailable: ${source}` }; }
+		try {
+			const hash = createHash("sha256").update(readSafeFile(join(root, source))).digest("hex");
+			hashes.push(hash);
+			source_refs.push(`${source} sha256=${hash}`);
+		} catch {
+			source_refs.push(`${source} sha256=UNAVAILABLE`);
+			return { reviewed: false, reason: `OMP ${version} memory config source hash unavailable: ${source}`, source_refs };
+		}
 	}
 	const fingerprint = hashes.join(":");
-	if (MEMORY_CONFIG_SOURCE_FINGERPRINTS.has(fingerprint)) return { reviewed: true };
+	if (MEMORY_CONFIG_SOURCE_FINGERPRINTS.has(fingerprint)) return { reviewed: true, source_refs };
 	const reviewedTuples = Array.from(MEMORY_CONFIG_SOURCE_FINGERPRINTS, value => value.split(":"));
 	const unknown = hashes.flatMap((sha, index) => reviewedTuples.some(tuple => tuple[index] === sha)
 		? [] : [`${MEMORY_CONFIG_SOURCE_FILES[index]} sha256=${sha}`]);
 	const detail = unknown.length
 		? `unreviewed file hash: ${unknown.join(", ")}`
 		: `unreviewed source fingerprint combination: ${MEMORY_CONFIG_SOURCE_FILES.map((source, index) => `${source} sha256=${hashes[index]}`).join(", ")}`;
-	return { reviewed: false, reason: `OMP ${version} memory config ${detail}` };
+	return { reviewed: false, reason: `OMP ${version} memory config ${detail}`, source_refs };
 }
 function installedRedactor(ompPath?: string): { bytes: Buffer; version: string; source: string; sha256: string } | null {
 	const pkg = installedPackage(ompPath);
@@ -171,7 +311,7 @@ function installedRedactor(ompPath?: string): { bytes: Buffer; version: string; 
 	try {
 		const source = join(pkg.root, "src", "memory-backend", "redact.ts");
 		if (!safeDirectories(pkg.root, ["src", "memory-backend"]) || state(source) !== "file") return null;
-		const bytes = fileBytes(source);
+		const bytes = readSafeFile(source);
 		const sha = createHash("sha256").update(bytes).digest("hex");
 		return { bytes, version: pkg.version, source: "src/memory-backend/redact.ts", sha256: sha };
 	} catch { return null; }
@@ -206,24 +346,32 @@ async function probeRedactor(ompPath?: string): Promise<MemoryRedactorReport> {
 	} catch { return { status: "UNVERIFIED", version: pinned.version, coverage: "NOT_PROBED", missed: [], reason: "Pinned OMP redactor could not be safely exercised" }; }
 }
 
-/** Inspect selected on-disk settings and store metadata only; never open a memory row or invoke OMP/models. */
+/** Inspect memory configuration, CASS status metadata, and static scheduler declarations only; never open memory rows or invoke OMP/models/jobs. */
 export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promise<MemoryReadinessReport> {
+	const home = resolve(input.home);
+	const cass = inspectCassStatus(input.cassPath);
+	const scheduler = inspectMemoryScheduler(home);
+	const sourceRefs = [
+		`CASS status: ${cass.source_ref ?? "unavailable"} (${cass.first_required_command})`,
+		...scheduler.source_refs,
+	];
 	const redactor = await probeRedactor(input.ompPath);
 	const base = { auto_retain: null, auto_recall: null, scoping: null, model: "UNVERIFIED" as const,
-		embedding: "UNVERIFIED" as const, runtime: "NOT_PROBED" as const, redactor };
+		embedding: "UNVERIFIED" as const, runtime: "NOT_PROBED" as const, retrieval_qualified: false as const, source_refs: sourceRefs, cass, scheduler, redactor };
 	const unknown = (reason: string, action: string): MemoryReadinessReport => ({ ...base, status: "UNVERIFIED", backend: "UNVERIFIED", configured: false,
-		store: "UNVERIFIED", reason, recommended_action: action });
+		store: "UNVERIFIED", source_refs: [...sourceRefs], reason, recommended_action: action });
 	const ompPackage = installedPackage(input.ompPath);
 	if (!ompPackage) return unknown("Installed OMP package is unavailable", "Verify the installed OMP package path before relying on this report.");
 	const sourceReview = memoryConfigSourcesReviewed(ompPackage.root, ompPackage.version);
+	sourceRefs.push(...sourceReview.source_refs);
 	if (!sourceReview.reviewed) return unknown(sourceReview.reason, "Review the exact OMP source path and SHA-256 named in this report.");
-	const home = resolve(input.home);
 	const name = input.profile ?? "default";
 	if (name !== "default" && (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) || name.endsWith("."))) return unknown("Profile name is unsupported", "Select an existing safe named profile.");
 	const parts = name === "default" ? [".omp", "agent"] : [".omp", "profiles", name, "agent"];
 	if (!safeDirectories(home, parts)) return unknown("Selected profile directory is absent or unsafe", "Inspect the selected on-disk profile without starting OMP.");
 	const agentDir = join(home, ...parts);
 	const profile = configAt(agentDir);
+	if (profile.source) sourceRefs.push(`profile config: ${relative(home, join(agentDir, profile.source)).split(sep).join("/")}`);
 	if (!profile.data || profile.issue) return unknown(profile.issue ?? "No on-disk profile configuration", "Inspect the selected YAML profile; do not run migratory omp config get.");
 	if (invalidConfig(profile.data)) return unknown("Profile setting group has an unsupported shape", "Inspect memory/modelRoles YAML without running OMP.");
 	let data = profile.data;
@@ -236,6 +384,7 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 		}
 		if (state(join(project, ".omp")) === "directory") {
 			const override = configAt(join(project, ".omp"));
+			if (override.source) sourceRefs.push(`project config: ${relative(project, join(project, ".omp", override.source)).split(sep).join("/")}`);
 			if (override.issue) return unknown("Project config is unreadable or unsupported", "Inspect project YAML and rerun without executing OMP.");
 			if (override.data) {
 				if (invalidConfig(override.data)) return unknown("Project setting group has an unsupported shape", "Inspect project memory/modelRoles YAML.");
@@ -280,8 +429,10 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 	const stateRoot = xdgRoot && state(xdgRoot) === "directory" ? xdgRoot : agentDir;
 	const dbPath = typeof m.dbPath === "string" && m.dbPath.trim() ? resolve(input.project!, m.dbPath) : join(stateRoot, "memories", "mnemopi", "mnemopi.db");
 	const store = inspectStore(dbPath, [home, resolve(input.project!), ...(xdgRoot ? [xdgRoot] : [])]);
-	const degraded = redactor.status === "MISSES" || store === "INACCESSIBLE" || store === "UNKNOWN_SCHEMA";
+	const degraded = redactor.status === "MISSES" || store === "INACCESSIBLE" || store === "UNKNOWN_SCHEMA" ||
+		cass.observed === "MAINTENANCE_REQUIRED";
 	const reason = redactor.status === "MISSES" ? "Synthetic redactor misses make private retention risky" :
+		cass.observed === "MAINTENANCE_REQUIRED" ? "CASS status reports maintenance required; retrieval remains unqualified" :
 		store === "NOT_CREATED" ? "Mnemopi configured; no local store has been created; runtime not probed" :
 		store === "OBSERVED_SCHEMA_UNVERIFIED" ? "Local SQLite header observed, schema and memory rows not inspected" :
 		store === "INACCESSIBLE" || store === "UNKNOWN_SCHEMA" ? "Local store cannot be safely verified" : "Mnemopi configured; runtime availability not proved";
@@ -290,8 +441,8 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 	if (store === "INACCESSIBLE" || store === "UNKNOWN_SCHEMA") actions.push("Inspect the local store path, access and schema privately without reading memory rows by default.");
 	if (model === "UNVERIFIED_LOCAL") actions.push("Verify the local model is installed and runnable out of band; a configured role can be deliberately parked.");
 	else if (model === "UNRESOLVED_ROLE") actions.push("Review the memory model role and fallbacks; config alone does not prove model availability.");
-	if (!actions.length) actions.push("Check embeddings and backend at runtime only with explicit consent; configuration and store metadata never certify readiness.");
-	return { status: degraded ? "DEGRADED" : "UNVERIFIED", backend: "mnemopi", configured: true, store,
-		auto_retain: autoRetain, auto_recall: autoRecall, scoping, model, embedding, runtime: "NOT_PROBED", redactor, reason,
-		recommended_action: actions.join(" ") };
+	actions.push("Actual retrieval remains unqualified; where CASS is available, the first read-only command is `cass status --json`. No repair or indexing was run, and the scheduler maintainer is UNKNOWN.");
+	return { ...base, status: degraded ? "DEGRADED" : "UNVERIFIED", backend: "mnemopi", configured: true, store,
+		auto_retain: autoRetain, auto_recall: autoRecall, scoping, model, embedding, runtime: "NOT_PROBED", redactor,
+		retrieval_qualified: false, source_refs: [...sourceRefs], cass, scheduler, reason, recommended_action: actions.join(" ") };
 }

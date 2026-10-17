@@ -92,6 +92,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 |---|---|
 | Native `omp-kit tern` SDK/control integration: command family wired, context-aware bindings and owned native plugin probes; compiled release assets and independent full acceptance remain pending | #102 / ompkit-kdbz.2.13 |
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
+| Memory doctor reports read-only CASS status and static LaunchAgent declarations separately from retrieval qualification | ompkit-bj08.10 (IN PROGRESS) |
 
 ## Next
 

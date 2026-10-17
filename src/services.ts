@@ -98,18 +98,20 @@ export class ServicesInputError extends Error {
 	}
 }
 
-interface PlistProgram {
+export interface LaunchdProgram {
 	program: string;
 	args: string;
 	trigger: string;
+	arguments: string[];
 }
+export interface ParsedLaunchdProgram { label: string; program: LaunchdProgram }
 
 function decodeEntities(value: string): string {
 	return value.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'");
 }
 
 /** Minimal Info.plist reader for the keys launchd inventory needs; anything else is BROKEN. */
-function readPlistProgram(text: string): { label: string; program: PlistProgram } | null {
+export function readPlistProgram(text: string): ParsedLaunchdProgram | null {
 	const dict = text.match(/<dict>([\s\S]*)<\/dict>/);
 	if (!dict) return null;
 	const body = dict[1] ?? "";
@@ -152,7 +154,7 @@ function readPlistProgram(text: string): { label: string; program: PlistProgram 
 	if (interval !== null) triggers.push(`every${interval}s`);
 	if (entries.has("StartCalendarInterval")) triggers.push("calendar");
 	if (entries.has("WatchPaths")) triggers.push("watch");
-	return { label: labelText, program: { program: resolvedProgram, args: arrayItems.join(" "), trigger: triggers.join(",") } };
+	return { label: labelText, program: { program: resolvedProgram, args: arrayItems.join(" "), arguments: arrayItems, trigger: triggers.join(",") } };
 }
 
 export function parseLaunchdList(text: string): Map<string, { pid: number | null; exit: number | null }> {

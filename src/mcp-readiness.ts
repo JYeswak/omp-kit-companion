@@ -1,5 +1,6 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { readSafeFile } from "./safe-file.ts";
 import { YAML } from "bun";
 
 export interface McpReadinessInput {
@@ -45,7 +46,6 @@ export interface McpReadinessReport {
 const PROFILE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const SERVER_NAME = /^[a-zA-Z0-9_.-]{1,100}$/;
 const MAX_CONFIG_BYTES = 1024 * 1024;
-const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function state(path: string): "missing" | "file" | "directory" | "unsafe" {
  try { const s = lstatSync(path); return s.isDirectory() ? "directory" : s.isFile() ? "file" : "unsafe"; }
@@ -58,12 +58,7 @@ function safeDirectory(root: string, segments: readonly string[]): boolean {
  return true;
 }
 function readConfig(path: string): string {
- const fd = openSync(path, NOFOLLOW);
- try {
-  const s = fstatSync(fd);
-  if (!s.isFile() || s.size > MAX_CONFIG_BYTES) throw new Error("unsafe or oversized config");
-  return readFileSync(fd, "utf8");
- } finally { closeSync(fd); }
+	return readSafeFile(path, MAX_CONFIG_BYTES, "unsafe or oversized config").toString("utf8");
 }
 function report(profile: string, status: "DEGRADED" | "UNVERIFIED", reason: string, action: string, servers: McpServerReadiness[] = []): McpReadinessReport {
  return { status, profile, servers, reason, recommended_action: action, proof: "ON_DISK_INVENTORY_ONLY" };
