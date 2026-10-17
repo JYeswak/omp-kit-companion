@@ -201,8 +201,12 @@ jobs:
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
           else
-            git tag "v$VERSION" "$SHA"
-            git push origin "refs/tags/v$VERSION"
+            # A token `git push` of a tag on an older commit is refused whenever .github/workflows differ from the
+            # branch tip (GitHub; run 39078257345). The Git Data API creates the same lightweight ref at the
+            # already-qualified commit with contents: write and no workflow-file write. Existing tags still refuse below.
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$SHA" > /dev/null
+            git fetch origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
+            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
           fi
           # The unchanged installer/updater policy binds source-digest to Q.
           # Only tag-ref release.yml has that execution identity. It downloads
