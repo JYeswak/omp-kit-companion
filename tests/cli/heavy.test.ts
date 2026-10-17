@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import { HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
+import { decideDiskPressure, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -430,63 +430,17 @@ test("HEAVYDISK1: waiting status names the disk reason", async () => {
 	expect(result.stderr).toContain("disk low");
 });
 const GIB = 1024 ** 3;
-function fakeStatfsEnv(freeBytes: number, freePct: number): Record<string, string> {
-	return { OMP_KIT_HEAVY_FAKE_STATFS: JSON.stringify({ free_bytes: freeBytes, free_pct: freePct }) };
-}
-function expectNoSbhOnPath(path: string): void {
-	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: path } }).exitCode).not.toBe(0);
-}
 
-test("oq1h.1: auto disk admission runs on healthy statfs with no sbh on PATH", async () => {
-	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1 });
-	const noSbhPath = "/usr/bin:/bin";
-	expectNoSbhOnPath(noSbhPath);
-	const marker = join(root, "ran-marker");
-	const result = await invoke(root, ["heavy", "--label", "statfs-ok", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: noSbhPath });
-	expect(result.code).toBe(0);
-	expect(readFileSync(marker, "utf8")).toBe("ran");
-});
-
-test("oq1h.1 planted: 5 GiB free statfs defers with 75 naming statfs", async () => {
-	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1 });
-	const noSbhPath = "/usr/bin:/bin";
-	expectNoSbhOnPath(noSbhPath);
-	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-low", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ ...fakeStatfsEnv(5 * GIB, 50), PATH: noSbhPath });
-	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("disk low (statfs)");
-	expect(existsSync(marker)).toBe(false);
-});
-
-test("oq1h.1 planted: free percent below disk_floor_pct defers with 75", async () => {
-	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "statfs", disk_floor_pct: 40 });
-	const noSbhPath = "/usr/bin:/bin";
-	expectNoSbhOnPath(noSbhPath);
-	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-floor", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ ...fakeStatfsEnv(100 * GIB, 30), PATH: noSbhPath });
-	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("disk low (statfs)");
-	expect(existsSync(marker)).toBe(false);
-});
-
-test("oq1h.1 planted: statfs failure is 69, never healthy", async () => {
-	const root = fixture();
-	configure(root, { slots: 8, max_wait_s: 1 });
-	const noSbhPath = "/usr/bin:/bin";
-	expectNoSbhOnPath(noSbhPath);
-	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--no-wait", "--label", "statfs-dead", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ OMP_KIT_HEAVY_FAKE_STATFS: "failure", PATH: noSbhPath });
-	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
-	expect(result.stderr).toContain("no disk observer available");
-	expect(existsSync(marker)).toBe(false);
-	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
+test("oq1h.1 unit: statfs decision matrix without environment", () => {
+	expect(decideDiskPressure({ freeBytes: 100 * GIB, freePct: 50 }, null))
+		.toEqual({ kind: "ok", observer: "statfs" });
+	expect(decideDiskPressure({ freeBytes: 5 * GIB, freePct: 50 }, null))
+		.toEqual({ kind: "pressure", text: "disk low (statfs)", observer: "statfs" });
+	const floor = decideDiskPressure({ freeBytes: 100 * GIB, freePct: 30 }, 40);
+	expect(floor.kind).toBe("pressure");
+	if (floor.kind === "pressure") expect(floor.text).toContain("disk low (statfs)");
+	expect(decideDiskPressure(null, null))
+		.toEqual({ kind: "unavailable", text: "no disk observer available", observer: "statfs" });
 });
 
 test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", async () => {
@@ -495,7 +449,7 @@ test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", 
 	const bin = fakeSbh(root, 1);
 	const marker = join(root, "should-not-run");
 	const result = await invoke(root, ["heavy", "--no-wait", "--label", "sbh-wins", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
 	expect(result.code).toBe(75);
 	expect(result.stderr).toContain("disk low: sbh check");
 	expect(existsSync(marker)).toBe(false);
@@ -507,7 +461,7 @@ test("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", a
 	const bin = fakeSbh(root, 2);
 	const marker = join(root, "should-not-run");
 	const result = await invoke(root, ["heavy", "--label", "sbh-err-auto", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ ...fakeStatfsEnv(100 * GIB, 50), PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
 	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
 	expect(result.stderr).toContain("disk_observer");
 	expect(existsSync(marker)).toBe(false);

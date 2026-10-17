@@ -111,26 +111,8 @@ async function sbhVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
 	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure`, observer: "sbh" };
 	return { kind: "unavailable", text: `sbh check exited ${code}`, observer: "sbh" };
 }
-/** Test-only statfs injection for planted disk states. Production never sets
- * OMP_KIT_HEAVY_FAKE_STATFS; the real statfs of the cwd applies. */
-function testFakeStatfs(): { freeBytes: number; freePct: number } | { failure: true } | undefined {
-	const raw = process.env.OMP_KIT_HEAVY_FAKE_STATFS;
-	if (raw === undefined || raw === "") return undefined;
-	if (raw === "failure") return { failure: true };
-	try {
-		const value: unknown = JSON.parse(raw);
-		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-			const record = value as Record<string, unknown>;
-			if (typeof record.free_bytes === "number" && Number.isFinite(record.free_bytes) && record.free_bytes >= 0 &&
-				typeof record.free_pct === "number" && Number.isFinite(record.free_pct) && record.free_pct >= 0 && record.free_pct <= 100)
-				return { freeBytes: record.free_bytes, freePct: record.free_pct };
-		}
-	} catch { /* fall through to fail-closed below */ }
-	return { failure: true };
-}
-function statfsCapacity(cwd: string): { freeBytes: number; freePct: number } | null {
-	const fake = testFakeStatfs();
-	if (fake !== undefined) return "failure" in fake ? null : { freeBytes: fake.freeBytes, freePct: fake.freePct };
+export type DiskCapacity = { freeBytes: number; freePct: number };
+function statfsCapacity(cwd: string): DiskCapacity | null {
 	let stats: { bavail: number; blocks: number; bsize: number };
 	try {
 		const observed = statfsSync(cwd);
@@ -142,8 +124,10 @@ function statfsCapacity(cwd: string): { freeBytes: number; freePct: number } | n
 		stats.blocks <= 0 || stats.bavail < 0 || stats.bsize <= 0) return null;
 	return { freeBytes: stats.bavail * stats.bsize, freePct: Math.min(100, (stats.bavail / stats.blocks) * 100) };
 }
-function statfsVerdict(cwd: string, floorPct: number | null): DiskVerdict {
-	const capacity = statfsCapacity(cwd);
+/** Pure statfs verdict: capacity in, judgment out. Unit-tested directly with
+ * fabricated capacities; production always passes the real statfs reading,
+ * so no environment variable can forge a healthy disk. */
+export function decideDiskPressure(capacity: DiskCapacity | null, floorPct: number | null): DiskVerdict {
 	if (capacity === null) return { kind: "unavailable", text: "no disk observer available", observer: "statfs" };
 	if (capacity.freeBytes < HEAVY_DISK_NEED_BYTES) return { kind: "pressure", text: "disk low (statfs)", observer: "statfs" };
 	if (floorPct !== null && capacity.freePct < floorPct)
@@ -166,14 +150,14 @@ export async function diskVerdict(input?: { config?: HeavyConfig; cwd?: string; 
 	const cwd = input?.cwd ?? process.cwd();
 	const sbhBin = input?.sbhBin ?? "sbh";
 	if (observer === "sbh") return sbhVerdict(sbhBin);
-	if (observer === "statfs") return statfsVerdict(cwd, floor);
+	if (observer === "statfs") return decideDiskPressure(statfsCapacity(cwd), floor);
 	if (sbhResolvable()) {
 		const verdict = await sbhVerdict(sbhBin);
 		if (verdict.kind === "unavailable")
 			return { kind: "unavailable", text: `${verdict.text} (set disk_observer to "statfs" for OS-native admission)`, observer: "sbh" };
 		return verdict;
 	}
-	return statfsVerdict(cwd, floor);
+	return decideDiskPressure(statfsCapacity(cwd), floor);
 }
 function prerequisiteMissing(observer: "sbh" | "statfs", text: string): number {
 	process.stderr.write(`heavy: ${observer} unavailable: ${text}; disk admission requires ${observer === "sbh" ? "sbh" : "an observer"}; no command was run\n`);
