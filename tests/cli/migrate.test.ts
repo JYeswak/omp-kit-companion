@@ -1,11 +1,38 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
+import { ensureOmpSource } from "../../src/omp-source-cache.ts";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const repoRules = resolve(import.meta.dir, "../../rules");
 const fixtures: string[] = [];
+let OMP_BIN_DIR = "";
+let OMP_SOURCE_CACHE = "";
+
+function certifiedOmpVersion(): string {
+	const value: unknown = JSON.parse(readFileSync(join(resolve(import.meta.dir, "../.."), "scripts/omp-compat.json"), "utf8"));
+	if (!value || typeof value !== "object" || !("certified" in value) || typeof value.certified !== "string") {
+		throw new Error("scripts/omp-compat.json must contain a certified OMP version");
+	}
+	return value.certified;
+}
+
+beforeAll(() => {
+	const runtimeRoot = join(tmpdir(), `omp-kit-migrate-omp-${process.pid}`);
+	OMP_SOURCE_CACHE = join(runtimeRoot, "source-cache");
+	const installerHome = join(runtimeRoot, "home");
+	const installerTmp = join(runtimeRoot, "tmp");
+	mkdirSync(installerHome, { recursive: true });
+	mkdirSync(installerTmp, { recursive: true });
+	const packageRoot = ensureOmpSource(certifiedOmpVersion(), {
+		HOME: installerHome, TMPDIR: installerTmp, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+		OMP_KIT_OMP_SRC_CACHE: OMP_SOURCE_CACHE,
+	});
+	OMP_BIN_DIR = join(dirname(dirname(packageRoot)), ".bin");
+	if (!existsSync(join(OMP_BIN_DIR, "omp"))) throw new Error("certified OMP package did not install its launcher");
+}, 120_000);
 afterEach(() => {
 	for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });
 });
@@ -28,18 +55,18 @@ function workspace(): string {
 }
 
 function realOmpDir(): string {
-	const launcher = Bun.which("omp");
-	if (!launcher) throw new Error("real OMP is required for migrate tests");
-	return dirname(launcher);
+	if (!OMP_BIN_DIR) throw new Error("certified OMP runtime is not initialized");
+	return OMP_BIN_DIR;
 }
 
 function childEnv(home: string, ompDir: string): Record<string, string | undefined> {
-	// dirname(process.execPath): the omp launcher is a bun shim; CI minimal PATH lacks it.
+	// Select the pinned launcher before Bun's bin directory, which can also contain a host omp.
 	const bunDir = dirname(process.execPath);
 	const env: Record<string, string | undefined> = { ...process.env, HOME: home,
 		XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_STATE_HOME: join(home, "xdg-state"),
-		XDG_DATA_HOME: join(home, "xdg-data"), XDG_CACHE_HOME: join(home, "xdg-cache"), TMPDIR: join(home, "tmp"),
-		PATH: `${bunDir}:${ompDir}:/usr/bin:/bin:/usr/sbin:/sbin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" };
+		PATH: `${ompDir}:${bunDir}:/usr/bin:/bin:/usr/sbin:/sbin`, BUN_INSTALL: join(home, ".bun"),
+		OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_OMP_SRC_CACHE: OMP_SOURCE_CACHE,
+		OMP_KIT_OMP_SRC_FETCH: "0", NO_COLOR: "" };
 	// An inherited profile makes OMP read that profile's config and rules instead of
 	// the fixture HOME's (native dir especially); the lifecycle script unsets these too.
 	delete env.OMP_PROFILE;
@@ -48,9 +75,9 @@ function childEnv(home: string, ompDir: string): Record<string, string | undefin
 	return env;
 }
 
-test("child PATH carries the bun binary dir for the omp launcher shim", () => {
-	const path = childEnv("/tmp/fake-home", "/tmp/fake-omp").PATH ?? "";
-	expect(path.split(":")[0]).toBe(dirname(process.execPath));
+test("child PATH selects pinned OMP before Bun and retains Bun for the launcher shim", () => {
+	const path = childEnv("/tmp/fake-home", "/tmp/fake-omp").PATH?.split(":") ?? [];
+	expect(path.slice(0, 2)).toEqual(["/tmp/fake-omp", dirname(process.execPath)]);
 });
 
 
@@ -274,7 +301,11 @@ test("applyMigration refuses without a plugin even when called directly", () => 
 	const home = join(root, "home");
 	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
 	writeFileSync(join(home, ".agents", "rules", "kit-test-skip.md"), readFileSync(join(repoRules, "kit-test-skip.md")));
-	const input = { root: resolve(import.meta.dir, "../.."), home };
+	const input = { root: resolve(import.meta.dir, "../.."), home, ompLauncher: "/fixture/omp",
+		run: (args: readonly string[]) => {
+			expect(args).toEqual(["/fixture/omp", "ttsr", "list", "--json"]);
+			return { code: 0, stdout: JSON.stringify({ rules: [] }), stderr: "" };
+		} };
 	const plan = planMigration(input);
 	expect(plan.pluginAbsent).toBe(true);
 	expect(() => applyMigration(plan, input, { confirmed: true })).toThrow("PLUGIN_ABSENT");

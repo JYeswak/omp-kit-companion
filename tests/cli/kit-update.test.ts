@@ -1,20 +1,26 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { runFullTest } from "../../src/full-test-runner.ts";
 import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate } from "../../src/kit-update.ts";
+import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
 
+test("unknown update failure preserves its code and original message", () => {
+ expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
+  cause_code: "Error", cause_name: "Error", cause_message: "boom lower",
+ });
+});
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const platform: ReleasePlatform = { os: "darwin", arch: "arm64", libc: "none" };
 
 const hostPlatform: ReleasePlatform = process.platform === "darwin"
 	? { os: "darwin", arch: process.arch === "arm64" ? "arm64" : "x64", libc: "none" }
 	: { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", libc: "gnu" };
-const scratch = join(import.meta.dir, "../../var/agent-tmp");
+const scratch = process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp");
 type FixtureFile = { name: string; bytes: Buffer };
 type FixtureContext = { root: string; prefix: string; stateRoot: string; home: string; source: string;
 	indexPath: string; archivePath: string; oldBinary: Buffer; contractFiles: FixtureFile[];
@@ -81,12 +87,18 @@ async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: Fix
 	const filename = "omp-kit-v" + nextVersion + "-" + key + ".tar";
 	const archivePath = join(source, filename), indexPath = join(source, "release-index.json");
 	writeFileSync(archivePath, archive);
+	writeFileSync(`${archivePath}.sigstore.json`, JSON.stringify({ fixture: true }));
 	writeFileSync(indexPath, JSON.stringify({ schema_version: 1, version: nextVersion, source_tag: "v" + nextVersion, assets: {
 		[key]: { ...selectedPlatform, filename, sha256: sha(archive), manifest_sha256: sha(releaseManifest) },
 	} }));
+	const previousPath = process.env.PATH;
+	process.env.PATH = join(import.meta.dir, "../fixtures/kit-release") + ":" + previousPath;
 	try { return await run({ root, prefix, stateRoot, home, source, indexPath, archivePath, oldBinary, contractFiles,
 		platform: selectedPlatform, currentVersion, nextVersion }); }
-	finally { rmSync(root, { recursive: true, force: true }); }
+	finally {
+		if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+		rmSync(root, { recursive: true, force: true });
+	}
 }
 const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, home: ctx.home,
 	indexPath: ctx.indexPath, archivePath: ctx.archivePath, platform: ctx.platform,
@@ -94,13 +106,14 @@ const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.sta
 
 function copyReleaseSource(sourceRoot: string, destination: string): void {
 	mkdirSync(destination, { recursive: true });
-	for (const directory of ["src", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live"]) {
+	for (const directory of ["src", "installer", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live", "plugins/omp-kit-tern"]) {
 		const target = join(destination, directory);
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
 	mkdirSync(join(destination, "docs"), { recursive: true });
-	copyFileSync(join(sourceRoot, "docs", "flywheel-invariants.tsv"), join(destination, "docs", "flywheel-invariants.tsv"));
+	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv"])
+		copyFileSync(join(sourceRoot, "docs", file), join(destination, "docs", file));
 	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
@@ -108,7 +121,10 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 	}
 }
 
-function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable: string; baseCases: number; baseQuiet: number; targetCases: number; targetQuiet: number } {
+function buildNPlusTwoCandidate(ctx: FixtureContext): {
+	root: string; executable: string; baseCases: number; baseQuiet: number;
+	targetCases: number; targetQuiet: number; packageBuildDurationMs: number;
+} {
 	const sourceRoot = join(ctx.root, "candidate-source");
 	copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
 	const casesPath = join(sourceRoot, "cases", "cases.tsv");
@@ -140,8 +156,10 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable
 	const output = join(ctx.root, "candidate-package");
 	mkdirSync(output);
 	const key = [ctx.platform.os, ctx.platform.arch, ctx.platform.libc].join("-");
+	const packageBuildStarted = performance.now();
 	const build = Bun.spawnSync(["sh", join(sourceRoot, "scripts", "package-release.sh"), "--version", ctx.nextVersion,
 		"--platform", key, "--out", output], { cwd: sourceRoot, env: { ...process.env, TMPDIR: ctx.root }, stdout: "pipe", stderr: "pipe" });
+	const packageBuildDurationMs = Math.round(performance.now() - packageBuildStarted);
 	if (build.exitCode !== 0) throw new Error("N+2 candidate package build failed: " + build.stdout.toString() + build.stderr.toString());
 	const asset = JSON.parse(build.stdout.toString()) as { os: string; arch: string; libc: string; filename: string; sha256: string; manifest_sha256: string };
 	const packagedArchive = join(output, asset.filename), archive = readFileSync(packagedArchive);
@@ -151,8 +169,39 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): { root: string; executable
 	mkdirSync(root);
 	const extract = Bun.spawnSync(["tar", "xf", packagedArchive, "-C", root], { cwd: ctx.root, env: { ...process.env, TMPDIR: ctx.root }, stdout: "pipe", stderr: "pipe" });
 	if (extract.exitCode !== 0) throw new Error("N+2 candidate extraction failed: " + extract.stdout.toString() + extract.stderr.toString());
-	return { root, executable: join(root, "bin", "omp-kit"), baseCases, baseQuiet, targetCases, targetQuiet };
+	return { root, executable: join(root, "bin", "omp-kit"), baseCases, baseQuiet, targetCases, targetQuiet, packageBuildDurationMs };
 }
+
+test("checksum-correct archive without its attestation refuses before extraction or activation", async () => fixture(async ctx => {
+ const plan = await planKitUpdate(input(ctx));
+ if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ rmSync(`${ctx.archivePath}.sigstore.json`);
+ await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_BUNDLE_MISSING");
+ expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
+ expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}));
+
+test("checksum-correct archive with a rejected attestation refuses without a candidate receipt", async () => fixture(async ctx => {
+ const plan = await planKitUpdate(input(ctx));
+ if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ writeFileSync(`${ctx.archivePath}.sigstore.json`, JSON.stringify({ fixture: false }));
+ await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_UNVERIFIED");
+ expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
+ expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}));
+
+test("unavailable authority verifier never becomes integrity-only activation", async () => fixture(async ctx => {
+ const plan = await planKitUpdate(input(ctx));
+ if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ const previousPath = process.env.PATH;
+ process.env.PATH = "/usr/bin:/bin";
+ try { await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
+ finally { process.env.PATH = previousPath; }
+ expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}));
 
 // A version/hash/source drift must be rejected under the same lock that owns activation.
 test("stale plan and competing writer refuse without touching the stable link", async () => fixture(async ctx => {
@@ -228,12 +277,35 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  const realDetail = real.data.postcheck_detail as { failures: string[] } | null;
  expect(realDetail?.failures.length ?? 0, JSON.stringify(real.data)).toBeGreaterThan(0);
  expect(real.errors?.[0]?.message, JSON.stringify(real.errors)).toContain(realDetail!.failures[0]!);
+ const interrupted = kitUpdateEnvelope(planned, { ...result,
+  postcheck: { ...result.postcheck, cause: updateFailureCause(new Error("boom lower")) } });
+ expect(interrupted.data.postcheck_detail, JSON.stringify(interrupted.data)).toMatchObject({
+  cause: { cause_code: "Error", cause_message: "boom lower" },
+ });
+
+ // A receipt can exist before a full-test report does; recovery must still be usable.
+ const causeOnly = kitUpdateEnvelope(planned, { ...result, postcheck: {
+  status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN", reason: "KIT_UPDATE_INTERRUPTED",
+  cause: updateFailureCause(new Error(`interrupted at ${ctx.home}/private-context`)),
+ } });
+ expect(causeOnly.commands).toEqual([undoCommand]);
+ expect(causeOnly.data.postcheck_detail).toMatchObject({
+  current_stage: null, failures: [], cause: { cause_message: "interrupted at <private-path>/private-context" },
+ });
+ expect(causeOnly.errors?.[0]?.remediation).toContain(undoCommand);
+
+ // The report's original cause must not be hidden behind a generic postcheck wrapper.
+ const rootCause = updateFailureCause(new Error("native interruption before completion"));
+ const wrapped = kitUpdateEnvelope(planned, { ...result, postcheck: { ...result.postcheck,
+  cause: updateFailureCause(new Error("KIT_POSTCHECK_FAILED")), report: { ...report, cause: rootCause },
+ } });
+ expect(wrapped.data.postcheck_detail).toMatchObject({ cause: rootCause });
 
  // Named stages, both home and project changed paths, and a capped failure list.
- const stages = Object.fromEntries(Object.keys(report.stages).map(name => [name, { status: "PASS", producer_rc: 0 }])) as typeof report.stages;
- stages["harness-gate"] = { status: "FAIL", producer_rc: 1, reason: "gate refused" };
- stages["e2e-live"] = { status: "FAIL", producer_rc: 1, reason: "scenario missing" };
- stages["e2e-plant"] = { status: "NOT_RUN", producer_rc: null };
+ const stages = Object.fromEntries(Object.entries(report.stages).map(([name, stage]) => [name, { ...stage, status: "PASS", producer_rc: 0 }])) as typeof report.stages;
+ stages["harness-gate"] = { status: "FAIL", producer_rc: 1, duration_ms: 1, reason: "gate refused" };
+ stages["e2e-live"] = { status: "FAIL", producer_rc: 1, duration_ms: 1, reason: "scenario missing" };
+ stages["e2e-plant"] = { status: "NOT_RUN", producer_rc: null, duration_ms: null };
  const homePath = join(ctx.home, ".omp", "agent", "config.yml"), projectPath = join(ctx.home, "project", ".omp", "settings.json");
  const failures = Array.from({ length: 25 }, (_, index) => `failure ${index + 1}`);
  const failedReport = { ...report, stages, failures, snapshots: { ...report.snapshots,
@@ -312,6 +384,12 @@ test("a selected OMP package replaced after kit planning cannot certify the kit 
  writeFileSync(ctx.archivePath, archive);
  writeFileSync(ctx.indexPath, JSON.stringify(index));
  const previousPath = process.env.PATH;
+ const previousOmp = { OMP: process.env.OMP, OMP_BIN: process.env.OMP_BIN,
+  OMP_PATH: process.env.OMP_PATH, OMP_SRC: process.env.OMP_SRC };
+ delete process.env.OMP;
+ delete process.env.OMP_BIN;
+ delete process.env.OMP_PATH;
+ delete process.env.OMP_SRC;
  process.env.PATH = `${ompBin}:${previousPath ?? ""}`;
  try {
   const plan = await planKitUpdate(input(ctx));
@@ -322,7 +400,12 @@ test("a selected OMP package replaced after kit planning cannot certify the kit 
   expect(result.receiptId).toBeTruthy();
   expect(inspectPendingKitUpdate(ctx.stateRoot)?.id).toBe(result.receiptId);
   expect(JSON.parse(readFileSync(manifestPath, "utf8")).version).toBe("18.4.3");
- } finally { process.env.PATH = previousPath; }
+ } finally {
+  if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+  for (const [key, value] of Object.entries(previousOmp)) {
+   if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+ }
 }));
 
 test("a null full-test OMP version is a named postcheck failure, not an OMP change", async () => fixture(async ctx => {
@@ -385,7 +468,9 @@ test("update derives the N+2 fast denominator from the manifest-bound case corpu
 	const plan = await planKitUpdate(input(ctx));
 	if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
 
+	const baselineFastStarted = performance.now();
 	const baseline = await runFastTest({ root: candidate.root, executablePath: candidate.executable, home: ctx.home });
+	const baselineFastDurationMs = Math.round(performance.now() - baselineFastStarted);
 	expect(baseline.status).toBe("PASS");
 	expect(baseline.proofs.G2_payload).toMatchObject({ status: "PASS",
 		expected_cases: candidate.targetCases, observed_cases: candidate.targetCases });
@@ -395,6 +480,16 @@ test("update derives the N+2 fast denominator from the manifest-bound case corpu
 
 	const updated = await applyKitUpdate(plan);
 	const report = updated.postcheck.report;
+	const stageTimings = [
+		{ stage: "package-build", duration_ms: candidate.packageBuildDurationMs },
+		{ stage: "baseline-fast", duration_ms: baselineFastDurationMs },
+		{ stage: "fast", duration_ms: report?.fast_duration_ms ?? null },
+		{ stage: "matcher", source: "harness-gate", duration_ms: report?.stages["harness-gate"].duration_ms ?? null },
+		{ stage: "ratchet", source: "metamorphic-ratchet", duration_ms: report?.stages["metamorphic-ratchet"].duration_ms ?? null },
+		{ stage: "cli-crosscheck", duration_ms: report?.stages["cli-crosscheck"].duration_ms ?? null },
+		{ stage: "e2e-live", duration_ms: report?.stages["e2e-live"].duration_ms ?? null },
+	];
+	console.log("N+2 journey stage timings " + JSON.stringify(stageTimings));
 	const liveLines = [report?.producer.stdout, report?.producer.stderr]
 		.flatMap(output => output?.split("\n") ?? []);
 	const scenarioStart = liveLines.findIndex(line => line.includes("started scenario=settings-no-checkout-remedy"));
@@ -409,18 +504,13 @@ test("update derives the N+2 fast denominator from the manifest-bound case corpu
 		.slice(readinessStageEnd + 1, liveStageEnd < 0 ? liveLines.length : liveStageEnd).join("\n");
 	const policyFailure = liveLines.filter(line => line.includes("POLICY_PLAN_FAILED") ||
 		line.includes("cause_code") || line.includes("cause_message")).join("\n").slice(0, 400);
-	let diagnosticArtifact: string | null = null;
-	if (report && updated.postcheck.status !== "PASS") {
-		diagnosticArtifact = mkdtempSync(join(scratch, `fp72-41-nplus2.${process.pid}.`));
-		writeFileSync(join(diagnosticArtifact, ".owner"), `pid=${process.pid}\nlabel=fp72-41-nplus2\n` +
-			`repo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`);
-		writeFileSync(join(diagnosticArtifact, "producer.stdout"), report.producer.stdout);
-		writeFileSync(join(diagnosticArtifact, "producer.stderr"), report.producer.stderr);
-	}
+	const diagnosticArtifact = report?.producer.artifacts?.directory ?? null;
 	expect(updated.status, JSON.stringify({ reason: updated.postcheck.reason, matcher: updated.postcheck.matcher,
 		live: updated.postcheck.live, failures: report?.failures,
 		fastFailures: report?.fast.failures, stages: report?.stages,
 		e2eLiveOutput: { stdout: stageStdout.slice(0, 400), producerStderr: report?.producer.stderr.slice(0, 400) ?? "" },
+		producerArtifacts: report?.producer.artifacts, artifactError: report?.producer.artifact_error,
+		stageTimings,
 		policyFailure, diagnosticArtifact })).toBe("UPDATED");
 	expect(updated.postcheck.status).toBe("PASS");
 	expect(updated.postcheck.report?.fast.proofs.G2_payload).toMatchObject({ status: "PASS",

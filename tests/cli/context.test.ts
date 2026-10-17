@@ -1,11 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { ensureOmpSource } from "../../src/omp-source-cache.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
+function certifiedOmpVersion(): string {
+	const value: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/omp-compat.json"), "utf8"));
+	if (!value || typeof value !== "object" || !("certified" in value) || typeof value.certified !== "string") {
+		throw new Error("scripts/omp-compat.json must contain a certified OMP version");
+	}
+	return value.certified;
+}
+const OMP_VERSION = certifiedOmpVersion();
 
 let base = "";
 let binary = "";
@@ -26,15 +35,33 @@ function writeSkill(root: string, dir: string, name: string, body: string): void
 }
 
 beforeAll(() => {
-	const omp = resolveOmpIdentity(process.env);
 	base = mkdtempSync(join(tmpdir(), "omp-kit-context-"));
+	home = join(base, "home");
+	mkdirSync(home, { recursive: true });
+	mkdirSync(join(base, "tmp"), { recursive: true });
+	const toolBin = join(base, "tools");
+	mkdirSync(toolBin, { recursive: true });
+	symlinkSync(process.execPath, join(toolBin, "bun"));
+	const tsServer = join(toolBin, "typescript-language-server");
+	writeFileSync(tsServer, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'typescript-language-server 0.0.0-test\\n'; exit 0; fi\nexit 64\n");
+	chmodSync(tsServer, 0o755);
+	const sourceCache = join(tmpdir(), `omp-kit-context-omp-source-${process.pid}`);
+	const ompPackage = ensureOmpSource(OMP_VERSION, {
+		HOME: home, TMPDIR: join(base, "tmp"), PATH: `${toolBin}:/usr/bin:/bin`,
+		OMP_KIT_OMP_SRC_CACHE: sourceCache,
+	});
+	const ompDir = join(dirname(dirname(ompPackage)), ".bin");
+	const omp = resolveOmpIdentity({
+		PATH: `${ompDir}:${toolBin}:/usr/bin:/bin`, HOME: home, BUN_INSTALL: join(base, "no-bun"),
+		OMP_KIT_OMP_SRC_CACHE: sourceCache, OMP_KIT_OMP_SRC_FETCH: "0",
+	});
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
-	home = join(base, "home");
 	project = join(base, "project");
 	tsProject = join(base, "tsproject");
 	const profileAgent = join(home, ".omp", "profiles", "ctxprobe", "agent");
-	for (const directory of [join(release, "bin"), join(release, "scripts"), home, project, tsProject,
+	for (const directory of [join(release, "bin"), join(release, "scripts"), project, tsProject,
+		join(project, ".git"), join(tsProject, ".git"),
 		join(home, ".omp", "agent", "rules"), profileAgent,
 		...(["tmp", "config", "cache", "data", "state"] as const).map(name => join(home, name))]) {
 		mkdirSync(directory, { recursive: true });
@@ -65,8 +92,9 @@ beforeAll(() => {
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),
-		PATH: process.env.PATH ?? "/usr/bin:/bin", OMP: omp.launcher, OMP_BIN: omp.launcher,
-		OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+		PATH: `${ompDir}:${toolBin}:/usr/bin:/bin`, BUN_INSTALL: join(base, "no-bun"),
+		OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+		OMP_KIT_OMP_SRC_CACHE: sourceCache, OMP_KIT_OMP_SRC_FETCH: "0",
 	};
 }, 120_000);
 
