@@ -1,0 +1,18 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_183b46f77c10936095cc6f48b30727eaea6d712cacb98cd36c7bf1e5ec8d8ccc",
+ "limitations": [
+  "Exact saved health4pass; full updater N+2/live remains RED95pass15fail; no installed/authentic-signature claim"
+ ],
+ "operation": "release-fixture-qualification",
+ "parameters": {
+  "health_subject": "35fac6257a089aa84911b4adc36ebd9258c4c20f",
+  "updater_subject": "27f5466e837a04b5d685368acd4878b079b6372f"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 42298,
+  "sha256": "4b5803f29f2f182e3fc27faee662176959d5b314ef97d2dc2756f1a52ff92ccb"
+ }
+}
