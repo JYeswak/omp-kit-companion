@@ -179,6 +179,21 @@ out=$(git -C "$R" commit --message "[test] drop one same" --message "Bead: t-oth
 check "$?" "1" "overremove-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts"
 check "$(git -C "$R" rev-list --count HEAD)" "2" "overremove-unmoved" "$out" "STALE_WORKTREE"
 
+# 11b. cross-file multiplicity (native 60092): the same line removed in two
+# files but re-added once still refuses; consumption is global, not per-path
+R=$(new_repo xmulti)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+printf 'other\nlanded line L\n' > "$R/pkg/g.txt"
+git -C "$R" add pkg/f.txt pkg/g.txt
+git -C "$R" commit -q --message "[test] land L twice" --message "Bead: t-land"
+printf 'base line\n' > "$R/pkg/f.txt"
+printf 'other\n' > "$R/pkg/g.txt"
+printf 'landed line L\n' > "$R/pkg/h.txt"
+git -C "$R" add pkg/f.txt pkg/g.txt pkg/h.txt
+out=$(git -C "$R" commit --message "[test] drop one L" --message "Bead: t-other" 2>&1)
+check "$?" "1" "xmulti-refused" "$out" "STALE_WORKTREE"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "xmulti-unmoved" "$out" "STALE_WORKTREE"
+
 # 12. a Supersedes trailer declares a foreign rewrite truthfully
 R=$(new_repo supersede)
 printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"

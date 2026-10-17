@@ -46,6 +46,7 @@ removed_lines() {
 	# Only hunks count: a removed "-- x" line renders as "--- x" and must
 	# not be eaten as the file header, or every later number shifts.
 	git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$1" 2>/dev/null | awk '
+		/^diff --git / { inat = 0; next }
 		/^@@ / {
 			old = substr($2, 2);
 			split(old, r, ",");
@@ -67,26 +68,36 @@ blame_sha() {
 }
 
 moved_lines() {
-	# $1 = path; prints removed HEAD line numbers whose exact text is
-	# re-added elsewhere in the same staged diff at least as many times
-	# (multiset moves, cross-file). Each added line cancels one removal.
-	# Requires $mvadd (all added texts, one per line). Empty means none.
-	[ -s "$mvadd" ] || return 0
+	# $1 = path; prints removed HEAD line numbers cancelled by same-commit
+	# re-adds, consuming from the GLOBAL $mvavail multiset (built from
+	# $mvadd_sorted minus already-consumed $mvused). Consumption persists
+	# across paths: one add excuses exactly one removal, wherever they sit.
+	# Appends each consumed text to $mvused and re-sorts it.
+	[ -s "$mvavail" ] || return 0
 	git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$1" 2>/dev/null | awk '
+		/^diff --git / { inat = 0; next }
 		/^@@ / { old = substr($2, 2); split(old, r, ","); old = r[1] + 0; inat = 1; next }
 		!inat { next }
 		/^-/ { print old "\t" substr($0, 2); old++ }' > "$mvrm"
-	awk -F'\t' 'NR == FNR { add[$0]++; next } { text = substr($0, index($0, "\t") + 1); if (add[text] > 0) { print $1; add[text]-- } }' "$mvadd" "$mvrm"
+	awk -F'\t' 'NR == FNR { add[$0]++; next } { text = substr($0, index($0, "\t") + 1); if (add[text] > 0) { print; add[text]-- } }' "$mvavail" "$mvrm" > "$mvhit"
+	cut -f2- "$mvhit" >> "$mvused"
+	sort -o "$mvused" "$mvused"
+	cut -f1 "$mvhit"
 }
 
 HEAD=$(git rev-parse --verify 'HEAD^{commit}')
 nl=$(printf '\nX'); nl=${nl%X}
 # Moved-text multiset over the whole staged diff: every added line's exact
 # text, one per line. A removed line whose text is re-added at least as many
-# times is a move, not a revert (count-aware: each add cancels one removal).
-mvadd="$root/.git/stale-worktree-added.$$"
+# times is a move, not a revert (count-aware: each add cancels one removal,
+# globally across paths).
+mvadd_sorted="$root/.git/stale-worktree-added.$$"
+mvused="$root/.git/stale-worktree-used.$$"
+mvavail="$root/.git/stale-worktree-avail.$$"
 mvrm="$root/.git/stale-worktree-removed.$$"
-git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" 2>/dev/null | awk '/^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' | sort > "$mvadd"
+mvhit="$root/.git/stale-worktree-hit.$$"
+git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" 2>/dev/null | awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' | sort > "$mvadd_sorted"
+: > "$mvused"
 git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r path; do
 	[ -n "$path" ] || continue
 	case "$path" in */*..*|..*|*"$nl"*) continue ;; esac
@@ -111,9 +122,11 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 		fi
 		;;
 	esac
-	# Moved lines (same-commit re-adds, count-aware) skip rule (b) only.
-	# Rule (a) judges them on mtime: a stale deletion re-added elsewhere
-	# still refuses, so no text-bag launders a real stale revert.
+	# Moved lines (same-commit re-adds, count-aware across the whole commit)
+	# skip rule (b) only. Rule (a) judges them on mtime: a stale deletion
+	# re-added elsewhere still refuses, so no text-bag launders a real
+	# stale revert.
+	comm -23 "$mvadd_sorted" "$mvused" > "$mvavail"
 	moved=" $(moved_lines "$path" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
 	seen=""
@@ -151,10 +164,10 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
  done
  if [ -s "$root/.git/stale-worktree-refused.$$" ]; then
  	report=$(cat "$root/.git/stale-worktree-report.$$" 2>/dev/null)
-	rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd" "$mvrm"
+	rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
  	exit 1
  fi
- rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd" "$mvrm"
+ rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"
  exit 0
