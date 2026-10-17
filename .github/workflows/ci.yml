@@ -3,6 +3,8 @@ name: CI
 # Every push to main runs the fast Linux gate (CLI contracts, ladder) to completion, one run per commit, so
 # every landed commit gets its own verdict (agents push after every commit). Pull requests into main run the
 # same fast gate; on any ref other than main a newer push cancels the older run.
+# Push/PR CLI contracts run as three parallel suites; cli-contracts aggregates them
+# under the stable required check name. Non-push workflows keep the full test matrix.
 # The full native set (macOS, four archives, real-HOME journey, native certification) runs on release
 # (workflow_call from release.yml), on OMP certification (workflow_call from omp-certify.yml) and daily.
 # There is no manual dispatch: 99 manual full-native runs in Oct 1-4 were most of the macOS minutes;
@@ -78,13 +80,14 @@ jobs:
             printf 'certified=%s\n' "$certified"
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
-  cli-contracts:
+  cli-contracts-suites:
     if: github.event.repository.private == false
     needs: resolve-omp-versions
     strategy:
       fail-fast: false
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
+        suite: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["core", "package-release", "kit-update"]') || fromJSON('["all"]') }}
     runs-on: ${{ matrix.os }}
     # macOS release run 39016349469 attempt 2: suite 25m41s + sbh install 4m03s, so 30 min cancelled a healthy
     # job twice. Finite bound with ~50% headroom; every check still runs (no speedup or skip).
@@ -139,28 +142,49 @@ jobs:
             package/src/config/settings.ts
       - name: Install the fleet disk observer (sbh) that heavy admission requires
         run: sh scripts/ci-install-sbh.sh
-      - name: Exercise self-contained CLI and native matcher consumer contracts
+      - name: Exercise the core CLI and native matcher contracts
+        if: matrix.suite == 'core'
+        env:
+          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
+        run: bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts'
+      - name: Exercise package release contracts
+        if: matrix.suite == 'package-release'
+        env:
+          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
+        run: bun test ./tests/cli/package-release.test.ts
+      - name: Exercise kit update contracts
+        if: matrix.suite == 'kit-update'
+        env:
+          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
+        run: bun test ./tests/cli/kit-update.test.ts
+      - name: Exercise complete CLI and native matcher contracts outside push/PR
+        if: matrix.suite == 'all'
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test tests/cli tests/fleet-guard
       - name: Exercise memory readiness against the installed certified OMP source
+        if: matrix.suite == 'core' || matrix.suite == 'all'
         run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/certified detached native receipts
+        if: matrix.suite == 'core' || matrix.suite == 'all'
         run: python3 tests/cli/native_candidate_test.py
       - name: Test exact-SHA release reuse validation
+        if: matrix.suite == 'core' || matrix.suite == 'all'
         run: python3 tests/scripts/release_reuse_test.py
       - name: Check README currency (every command and doctor scope documented, no pinned release version)
+        if: matrix.suite == 'core' || matrix.suite == 'all'
         run: bun scripts/readme-check.ts
       - name: Exercise the release train, release-bump and doc-drift contracts
+        if: matrix.suite == 'core' || matrix.suite == 'all'
         run: |
           mkdir -p var/agent-tmp
           sh tests/cli/release-train.test.sh
           sh tests/cli/doc-drift.test.sh
       - name: Run differential native-vs-kit oracle
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'all')
         run: bun scripts/differential-oracle.ts
       - name: Verify differential oracle rejects a planted mismatch
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'all')
         shell: bash
         run: |
           set -euo pipefail
@@ -184,6 +208,25 @@ jobs:
           if bun scripts/differential-oracle.ts "$planted"; then
               echo "differential oracle accepted planted mismatch" >&2
               exit 1
+          fi
+  cli-contracts:
+    name: cli-contracts (${{ matrix.os }})
+    if: ${{ always() && github.event.repository.private == false && needs.resolve-omp-versions.result == 'success' }}
+    needs: [resolve-omp-versions, cli-contracts-suites]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Require all CLI contract suites to pass
+        env:
+          SUITES_RESULT: ${{ needs.cli-contracts-suites.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$SUITES_RESULT" != "success" ]]; then
+            echo "CLI contract suites result: $SUITES_RESULT" >&2
+            exit 1
           fi
   ladder:
     if: github.event.repository.private == false
