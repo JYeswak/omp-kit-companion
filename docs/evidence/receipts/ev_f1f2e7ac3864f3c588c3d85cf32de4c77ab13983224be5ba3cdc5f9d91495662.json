@@ -1,0 +1,17 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_f1f2e7ac3864f3c588c3d85cf32de4c77ab13983224be5ba3cdc5f9d91495662",
+ "limitations": [
+  "Local code/fixture proofs only; actual authenticated owning CI, signed public installer/upgrade, release and unattended installed cycles remain unverified. Quality22 RED/contract model unavailable retained."
+ ],
+ "operation": "native-source-workflow-integrity-staging",
+ "parameters": {
+  "bead": "ompkit-v66l.12"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 20823,
+  "sha256": "41cd95442e1f3161d3d69b37d877ccbca0d65b3816d35054f2d6cc88d2032abf"
+ }
+}

@@ -237,6 +237,30 @@ def safe_directory(path):
             refuse("symlinked installation ancestor: " + str(parent))
 
 
+def _extract_members(members, parent):
+    """Extract already validated bytes into a fresh child of a caller-owned directory."""
+    safe_directory(parent)
+    staging = Path(tempfile.mkdtemp(prefix=".omp-kit-stage-", dir=parent))
+    try:
+        for name in sorted((name for name, (kind, _) in members.items() if kind == "directory"), key=lambda n: (n.count("/"), n)):
+            (staging / name).mkdir(mode=0o755)
+        for name, (kind, data) in members.items():
+            if kind != "file":
+                continue
+            dest = staging / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            dest.chmod(0o755 if name in ("bin/omp-kit", "scripts/receipt.py") or name.endswith(".sh") else 0o644)
+    except BaseException:
+        shutil.rmtree(staging)
+        raise
+    return staging
+
+
 def install(index_path, version, platform, archive, prefix, dry_run):
     asset = index_asset(index_path, version, platform)
     if Path(archive).name != asset["filename"]:
@@ -304,21 +328,8 @@ def install(index_path, version, platform, archive, prefix, dry_run):
         path.mkdir(mode=0o700, exist_ok=True)
         safe_directory(path)
     if not existing:
-        staging = Path(tempfile.mkdtemp(prefix=".omp-kit-stage-", dir=releases))
+        staging = _extract_members(members, releases)
         try:
-            for name in sorted((name for name, (kind, _) in members.items() if kind == "directory"), key=lambda n: (n.count("/"), n)):
-                (staging / name).mkdir(mode=0o755)
-            for name, (kind, data) in members.items():
-                if kind != "file":
-                    continue
-                dest = staging / name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-                with os.fdopen(fd, "wb") as output:
-                    output.write(data)
-                    output.flush()
-                    os.fsync(output.fileno())
-                dest.chmod(0o755 if name in ("bin/omp-kit", "scripts/receipt.py") or name.endswith(".sh") else 0o644)
             with tempfile.TemporaryDirectory(prefix="omp-kit-probe-") as work:
                 private = Path(work)
                 env = {"PATH": os.defpath, "HOME": work, "TMPDIR": work,

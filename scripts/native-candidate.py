@@ -3,6 +3,7 @@
 # canonical-cli-scoping-allow-large: native acceptance stays in this assigned runner; scope excludes helper modules.
 import argparse
 import hashlib
+import runpy
 import json
 import os
 import shutil
@@ -364,6 +365,54 @@ def cert_env(home, root):
     return env
 
 
+def _workflow_producer(env):
+    """Correlate the admitted workflow; these fields are not publication authority."""
+    repository = "JYeswak/omp-kit-companion"
+    workflow_ref = env.get("GITHUB_WORKFLOW_REF", "")
+    workflow, _, ref = workflow_ref.partition("@")
+    allowed = {repository + "/.github/workflows/" + name
+               for name in ("ci.yml", "release.yml", "omp-certify.yml", "release-intel-probe.yml")}
+    ids = (env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", ""))
+    if (env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != repository
+            or workflow not in allowed or not ref.startswith(("refs/heads/", "refs/pull/", "refs/tags/"))
+            or any(not value or len(value) > 20 or not value.isascii()
+                   or not value.isdigit() or value.startswith("0") for value in ids)):
+        raise ValueError("native staging requires the admitted owning workflow context")
+    return {"repository": repository, "workflow_ref": workflow_ref,
+            "run_id": ids[0], "run_attempt": ids[1]}
+
+
+def _archive_staging_record(source_sha, asset, producer):
+    return {"schema_version": 1, "scope": "source-workflow-integrity", "source_sha": source_sha,
+            "archive_sha256": asset["sha256"], "manifest_sha256": asset["manifest_sha256"],
+            "producer": producer, "public_installation": "NOT_VERIFIED"}
+
+
+def _stage_native_archive(archive, asset, version, source_sha, root):
+    # The owning workflow admits source and artifact delivery before this internal
+    # call. Publication separately authenticates that producer and signed consumers.
+    producer = _workflow_producer(os.environ)
+    verifier_path = Path(__file__).resolve().parent.parent / "installer" / "install.py"
+    # Load trusted source directly, without creating __pycache__ in the checkout.
+    verifier = runpy.run_path(str(verifier_path), run_name="native_archive_verifier")
+    verifier["safe_directory"](root)
+    with open(archive, "rb") as source:
+        data = source.read(verifier["MAX_ARCHIVE"] + 1)
+    if len(data) > verifier["MAX_ARCHIVE"]:
+        raise ValueError("native archive exceeds size limit")
+    snapshot = root / asset["filename"]
+    with open(snapshot, "xb") as output:
+        output.write(data)
+    try:
+        members, manifest = verifier["archive_members"](snapshot, asset)
+        verifier["verify_manifest"](members, manifest, version)
+        staging = verifier["_extract_members"](members, root)
+    except (ValueError, OSError, KeyError, TypeError):
+        # Never turn an untrusted archive pathname or diagnostic into receipt text.
+        raise ValueError("native archive integrity staging refused") from None
+    return staging, _archive_staging_record(source_sha, asset, producer)
+
+
 def native(args):
     if args.platform not in PLATFORMS or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", args.version):
         raise ValueError("unsupported native candidate")
@@ -400,20 +449,13 @@ def native(args):
             if omp.returncode != 0 or not re.search(r"(?<!\d)" + re.escape(omp_version) + r"(?!\d)", observed):
                 raise ValueError(f"stock OMP version does not match requested {args.omp_track} version {omp_version}")
             receipt["omp_version"] = omp_version
-            index = root / "release-index.json"
-            save(index, {"schema_version": 1, "version": args.version, "source_tag": "v" + args.version,
-                         "assets": {args.platform: asset}})
-            prefix = root / "installed"
-            installer = Path(__file__).resolve().parent.parent / "installer" / "install.sh"
-            installed = run_scoped(["sh", str(installer), "--version", args.version,
-                                        "--index", str(index), "--offline", str(Path(args.archive_dir) / asset["filename"]),
-                                        "--prefix", str(prefix)], cwd=root, env=env, timeout=180)
-            if installed.returncode != 0:
-                raise ValueError("verified archive installation refused; inspect native runner logs privately")
-            binary = prefix / "bin" / "omp-kit"
-            release_root = prefix / "releases" / args.version
-            if not binary.is_file() or binary.resolve() != (release_root / "bin" / "omp-kit").resolve():
-                raise ValueError("native installer did not activate the selected release binary")
+            release_root, receipt["archive_staging"] = _stage_native_archive(
+                Path(args.archive_dir) / asset["filename"], asset, args.version, args.source_sha, root)
+            binary = release_root / "bin" / "omp-kit"
+            if not binary.is_file() or binary.is_symlink():
+                raise ValueError("native staged archive has no regular selected binary")
+            # No stable launcher is activated here. The signed public installer and
+            # upgrade consumer must prove that separate boundary before promotion.
             expected_cases, expected_quiet_cases = case_counts(release_root)
             expected_rules = rule_count(release_root)
             expected_live_ids = live_scenario_ids(release_root)
@@ -1020,6 +1062,7 @@ for (const [name, working, episodic] of banks) {
 
 def certified_omp_versions(args, platform, asset, required_omp_versions, required_proofs):
     versions = {}
+    producer = _workflow_producer(os.environ)
     for track, expected_omp_version in required_omp_versions.items():
         receipt_path = Path(args.receipts) / (f"native-receipt-{platform}-{track}") / "receipt.json"
         if not receipt_path.is_file():
@@ -1037,6 +1080,8 @@ def certified_omp_versions(args, platform, asset, required_omp_versions, require
             return None
         if (not identity_matches or proof.get("certified") is not True
                 or proof.get("omp_version") != expected_omp_version or "failure" in proof
+                or proof.get("archive_staging") != _archive_staging_record(args.source_sha, asset, producer)
+                or type(proof.get("archive_staging", {}).get("schema_version")) is not int
                 or set(proof.get("proofs", {})) != required_proofs
                 or any(not valid_proof_record(name, item)
                        for name, item in proof["proofs"].items())):
@@ -1073,6 +1118,7 @@ def candidate(args):
     minimum = required_omp_versions["minimum"]
     certified_omp = required_omp_versions["certified"]
     verified_source(source)
+    producer = _workflow_producer(os.environ)
     release_mode = getattr(args, "release", False)
     platforms = RELEASE_PLATFORMS if release_mode else PLATFORMS
     assets, certified, platform_omp_versions = {}, [], {}
@@ -1106,6 +1152,9 @@ def candidate(args):
                                                     "version": version, "certified_platforms": certified,
                                                     "omp_versions": required_omp_versions,
                                                     "platform_omp_versions": platform_omp_versions,
+                                                    "archive_staging": {
+                                                        "schema_version": 1, "scope": "source-workflow-integrity",
+                                                        "producer": producer, "public_installation": "NOT_VERIFIED"},
                                                     "publication": "NOT_AUTHORIZED"})
     print(
         f"unpublished candidate index (OMP minimum={minimum}, certified={certified_omp}): " + ", ".join(certified)

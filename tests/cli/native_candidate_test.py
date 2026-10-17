@@ -12,6 +12,7 @@ import tempfile
 import time
 import types
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "native-candidate.py"
@@ -58,6 +59,21 @@ class CandidateReceiptTests(unittest.TestCase):
         self.version = "1.2.3"
         self.source_sha = "a" * 40
         self.asset_by_platform = {}
+        self.producer = {
+            "repository": "JYeswak/omp-kit-companion",
+            "workflow_ref": "JYeswak/omp-kit-companion/.github/workflows/release.yml@refs/heads/main",
+            "run_id": "1234",
+            "run_attempt": "1",
+        }
+        environment = unittest.mock.patch.dict(os.environ, {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REPOSITORY": self.producer["repository"],
+            "GITHUB_WORKFLOW_REF": self.producer["workflow_ref"],
+            "GITHUB_RUN_ID": self.producer["run_id"],
+            "GITHUB_RUN_ATTEMPT": self.producer["run_attempt"],
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         self._write_assets()
 
     def tearDown(self) -> None:
@@ -96,6 +112,15 @@ class CandidateReceiptTests(unittest.TestCase):
                     "omp_track": track,
                     "requested_omp_version": MINIMUM if track == "minimum" else CERTIFIED,
                     "omp_version": MINIMUM if track == "minimum" else CERTIFIED,
+                    "archive_staging": {
+                        "schema_version": 1,
+                        "scope": "source-workflow-integrity",
+                        "source_sha": self.source_sha,
+                        "archive_sha256": self.asset_by_platform[platform]["sha256"],
+                        "manifest_sha256": self.asset_by_platform[platform]["manifest_sha256"],
+                        "producer": self.producer,
+                        "public_installation": "NOT_VERIFIED",
+                    },
                     "proofs": {
                         name: {
                             "status": "PASS", "stdout_sha256": "c" * 64,
@@ -133,6 +158,26 @@ class CandidateReceiptTests(unittest.TestCase):
             proof["platform_omp_versions"],
             {platform: {"minimum": MINIMUM, "certified": CERTIFIED} for platform in PLATFORMS},
         )
+
+    def test_staging_cannot_claim_public_installation(self) -> None:
+        self._write_receipts()
+        path = self.receipts / f"native-receipt-{PLATFORMS[0]}-minimum" / "receipt.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["archive_staging"]["public_installation"] = "VERIFIED"
+        write_json(path, receipt)
+        with self.assertRaises(ValueError):
+            native_candidate.candidate(self._args())
+        self.assertFalse((self.root / "out" / "release-index.json").exists())
+
+    def test_staging_from_another_native_run_is_rejected(self) -> None:
+        self._write_receipts()
+        path = self.receipts / f"native-receipt-{PLATFORMS[0]}-minimum" / "receipt.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["archive_staging"]["producer"]["run_id"] = "9999"
+        write_json(path, receipt)
+        with self.assertRaises(ValueError):
+            native_candidate.candidate(self._args())
+        self.assertFalse((self.root / "out" / "release-index.json").exists())
 
     def test_candidate_refuses_when_minimum_receipts_are_missing(self) -> None:
         self._write_receipts(tracks=("certified",))
