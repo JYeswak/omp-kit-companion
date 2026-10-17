@@ -34,6 +34,12 @@ if [ "$#" -ge 2 ] && [ "$1" = "--selftest-timing" ]; then
   run_stage manifest "$selftest_dir/ladder-manifest.txt" "$@"
   exit $?
 fi
+if [ "$#" -ge 2 ] && [ "$1" = "--selftest-interruption" ]; then
+  selftest_stage=$2
+  printf 'OMP_KIT_STAGE_START name=%s started_at_ms=%s000\n' "$selftest_stage" "$(date +%s)" >&2
+  sleep 300
+  exit $?
+fi
 REGEX_BUDGET_RUNS=1
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != "--regex-budget-runs" ]; then

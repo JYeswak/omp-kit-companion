@@ -232,6 +232,33 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertIn("G4 live scenario planted-fail", detail["failures"])
         self.assertEqual(detail["missing_scenarios"], ["planted-fail"])
 
+    def test_refusal_detail_attaches_probe_tail_on_failing_deep_probe(self) -> None:
+        payload = {
+            "data": {"deep_probe": {
+                "checks": {"lsp_ok": True, "hover": False, "references": False},
+                "timeout_observation": "hover exceeded 5000 ms",
+                "json_rpc_trace": [{"id": n} for n in range(12)],
+            }},
+            "errors": [{"code": "LSP_INCOMPLETE", "message": "planted probe failure"}],
+        }
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(payload).encode(), stderr=b"tail")
+        detail = native_candidate.refusal_detail("lsp-deep", child)
+        self.assertEqual(detail["probe_tail"]["failed_checks"], ["hover", "references"])
+        self.assertEqual(detail["probe_tail"]["timeout_observation"], "hover exceeded 5000 ms")
+        self.assertEqual(detail["probe_tail"]["json_rpc_trace"], [{"id": n} for n in range(4, 12)])
+
+    def test_refusal_detail_omits_probe_tail_when_probe_clean_or_absent(self) -> None:
+        clean = {
+            "data": {"deep_probe": {"checks": {"lsp_ok": True}, "json_rpc_trace": []}},
+            "errors": [{"code": "OTHER", "message": "planted"}],
+        }
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(clean).encode(), stderr=b"tail")
+        self.assertNotIn("probe_tail", native_candidate.refusal_detail("lsp-deep", child))
+        absent = {"data": {}, "errors": [{"code": "OTHER", "message": "planted"}]}
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(absent).encode(), stderr=b"tail")
+        self.assertNotIn("probe_tail", native_candidate.refusal_detail("lsp-deep", child))
+
+
 
 
 class CertEnvTests(unittest.TestCase):

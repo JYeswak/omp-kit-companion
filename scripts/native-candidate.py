@@ -207,6 +207,18 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
         detail["stdout_tail"] = child.stdout.decode(errors="replace")[-2000:]
         return detail
     detail["errors"] = [{"code": error.get("code"), "message": error.get("message")} for error in (result.get("errors") or [])[:5]]
+    probe = (result.get("data") or {}).get("deep_probe") or {}
+    if isinstance(probe, dict):
+        checks = probe.get("checks") if isinstance(probe.get("checks"), dict) else {}
+        failed = sorted(key for key, value in checks.items() if value is not True)
+        tail = {"failed_checks": failed}
+        if probe.get("timeout_observation") is not None:
+            tail["timeout_observation"] = probe["timeout_observation"]
+        trace = probe.get("json_rpc_trace")
+        if isinstance(trace, list):
+            tail["json_rpc_trace"] = trace[-8:]
+        if failed or "timeout_observation" in tail:
+            detail["probe_tail"] = tail
     test = (result.get("data") or {}).get("test") or {}
     if test:
         scenarios = test.get("live_scenarios") or {}
@@ -996,6 +1008,9 @@ for (const [name, working, episodic] of banks) {
     save(out, receipt)
     print(f"native candidate {args.platform}: {'CERTIFIED' if receipt['certified'] else 'REFUSED'}")
     if not receipt["certified"]:
+        probe_failed = ((receipt.get("refusal_detail") or {}).get("probe_tail") or {}).get("failed_checks") or []
+        if probe_failed:
+            print(f"verdict: failing checks: {chr(44).join(probe_failed)}")
         print(receipt["failure"], file=sys.stderr)
         if "refusal_detail" in receipt:
             print(json.dumps(receipt["refusal_detail"], indent=1), file=sys.stderr)
