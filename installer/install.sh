@@ -4,9 +4,9 @@ set -eu
 usage() {
   cat <<'USAGE'
 Usage: install.sh --version X.Y.Z --index FILE_OR_URL [--offline ARCHIVE] [--prefix ABSOLUTE_DIR] [--dry-run] [--no-color] [--help]
-The index supplies integrity hashes, not publisher authentication. No OMP, Bun, profile, or shell startup file is installed or modified.
+The index supplies integrity hashes; GitHub CLI verifies required Sigstore/SLSA provenance before activation.
 An online index must use HTTPS (or loopback HTTP for a local fixture); no network request occurs without --index.
-Python 3 and, for online installs, curl are required.
+Python 3, GitHub CLI (gh), and, for online installs, curl are required. Offline archives require a sibling .sigstore.json bundle and online tag authority.
 USAGE
 }
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
@@ -65,5 +65,6 @@ if [ -z "$archive" ]; then
   archive="$work/$filename"
   curl --fail --location --silent --show-error --proto '=https,http' --proto-redir '=https,http' \
     --connect-timeout 10 --max-time 600 --max-filesize 268435456 --output "$archive" "$url"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/install.py" bundle "$archive" "$version" "$platform"
 fi
 PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/install.py" install "$index" "$version" "$platform" "$archive" "$prefix" "$dry_run"

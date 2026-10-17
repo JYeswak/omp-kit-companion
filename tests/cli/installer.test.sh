@@ -24,6 +24,9 @@ import json,os,sys
 print(os.path.join(sys.argv[2],json.load(open(sys.argv[1]))['filename']))
 PY
 )
+# Synthetic verifier policy double for installer mechanics; not live signature proof.
+export PATH="$ROOT/tests/fixtures/kit-release:$PATH"
+printf '{"fixture":true}' > "$ARCHIVE.sigstore.json"
 INSTALL="$ROOT/installer/install.sh"
 HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/prefix" --dry-run > "$WORK/dry.log"
 [ ! -e "$WORK/prefix/bin/omp-kit" ]
@@ -67,6 +70,7 @@ import sys
 buf=bytearray(open(sys.argv[1],'rb').read()); buf[0]^=1
 with open(sys.argv[2],'wb') as out: out.write(buf)
 PY
+cp "$ARCHIVE.sigstore.json" "$WORK/bad/$(basename "$ARCHIVE").sigstore.json"
 if HOME="$WORK/home" "$INSTALL" --offline "$WORK/bad/$(basename "$ARCHIVE")" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/prefix" > "$WORK/bad.log" 2>&1; then
   printf 'tampered archive accepted\n' >&2; exit 1
 fi
@@ -101,6 +105,7 @@ index=json.load(open(sys.argv[3])); asset=next(iter(index['assets'].values()))
 asset['sha256']=hashlib.sha256(content).hexdigest()
 with open(sys.argv[4],'w') as out: json.dump(index,out)
 PY
+cp "$ARCHIVE.sigstore.json" "$WORK/badmanifest/$(basename "$ARCHIVE").sigstore.json"
 if HOME="$WORK/home" "$INSTALL" --offline "$WORK/badmanifest/$(basename "$ARCHIVE")" --index "$WORK/badmanifest/index.json" --version 1.2.3 --prefix "$WORK/badmanifest-prefix" > "$WORK/badmanifest.log" 2>&1; then
   printf 'archive with a rehashed but stale MANIFEST.tsv accepted\n' >&2; exit 1
 fi
@@ -121,6 +126,7 @@ index=json.load(open(sys.argv[3])); asset=next(iter(index['assets'].values()))
 asset['sha256']=hashlib.sha256(content).hexdigest()
 with open(sys.argv[4],'w') as out: json.dump(index,out)
 PY
+cp "$ARCHIVE.sigstore.json" "$WORK/badlink/$(basename "$ARCHIVE").sigstore.json"
 if HOME="$WORK/home" "$INSTALL" --offline "$WORK/badlink/$(basename "$ARCHIVE")" --index "$WORK/badlink/index.json" --version 1.2.3 --prefix "$WORK/prefix" > "$WORK/badlink.log" 2>&1; then
   printf 'rehashed symlink archive accepted\n' >&2; exit 1
 fi
@@ -149,6 +155,7 @@ import json,os,sys
 print(os.path.join(sys.argv[2],json.load(open(sys.argv[1]))['filename']))
 PY
 )
+printf '{"fixture":true}' > "$ARCHIVE2.sigstore.json"
 HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE2" --index "$WORK/assets/release-index2.json" --version 1.2.4 --prefix "$WORK/prefix" > "$WORK/switched.log"
 [ "$(readlink "$WORK/prefix/bin/omp-kit")" = "../releases/1.2.4/bin/omp-kit" ]
 [ -x "$WORK/prefix/releases/1.2.3/bin/omp-kit" ]

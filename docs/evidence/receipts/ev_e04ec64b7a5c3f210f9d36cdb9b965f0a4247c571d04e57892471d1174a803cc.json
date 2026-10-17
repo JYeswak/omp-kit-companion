@@ -1,0 +1,18 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e04ec64b7a5c3f210f9d36cdb9b965f0a4247c571d04e57892471d1174a803cc",
+ "limitations": [
+  "Full original local installer and five authority controls pass; synthetic authority only, non-author saved-source qualification remains"
+ ],
+ "operation": "known-candidate-installer-unit-integration",
+ "parameters": {
+  "candidate": "b78bfeaeebd054f07f75a00ad52e32181416d7a1",
+  "installer_test_sha256": "cb8c903e79106c84118af1e2d5b800e3077bbba779c847d628867c2ac4cd1c52"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 2655,
+  "sha256": "3a729492a768ca84078b06b00613727bda9e3fc5c0be2bb9d02f54e66dcfa856"
+ }
+}
