@@ -1,0 +1,3 @@
+- Check native CASS freshness in the existing managed fleet-lessons report by comparing its index watermark with a post-status session metadata scan instead of trusting `fresh=true`.
+- Require database-fingerprint binding and retain unavailable, partial and busy coverage explicitly. Report the declared lexical rebuild PID and age, with a bounded last-24-hour filenames-only ripgrep fallback.
+- Preserve the read-only report path and registered intake/planning failure semantics. This source change does not rebuild indexes, activate the learning service or qualify a skill promotion.

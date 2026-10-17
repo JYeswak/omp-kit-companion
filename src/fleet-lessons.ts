@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, lstatSync, renameSync, writeFileSync } from "nod
 import { appendLesson, collectCheckinActivity, lessonDocumentAnchors, lessonIdentity, readLessonsLog, resolveLessonCurrency, type LessonCurrency } from "./lessons.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { LESSON_CLASS_DESCRIPTIONS, type LessonEntry } from "./lessons.ts";
+import { readCassFreshness, type CassFreshness } from "./cass-freshness.ts";
 
 export interface FleetRepoConfig {
 	name: string;
@@ -151,6 +152,7 @@ export interface FleetLessonsReport {
 	classifier: ClefShadowResult;
 	run_status?: "OK" | "BLOCKED";
 	blockers?: string[];
+	cass_freshness?: CassFreshness;
 }
 
 function configuredPath(value: unknown, home: string, kitRoot: string, name: string): string {
@@ -512,7 +514,7 @@ export interface FleetLessonsRunDependencies {
 
 export interface FleetLessonsRunResult {
 	status: "OK" | "BLOCKED";
-	report: FleetLessonsReport;
+	report: FleetLessonsReport & { cass_freshness: CassFreshness };
 	report_path: string;
 	archive_path: string;
 	blockers: string[];
@@ -614,6 +616,7 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 		if (!info.isFile() || info.isSymbolicLink() || !loaded) throw new Error("FLEET_LESSONS_REPORT_STATE_INVALID");
 		previousRun = loaded;
 	}
+	const cassFreshness = readCassFreshness(options.home);
 	const previousAt = typeof previousReport.generated_at === "string" && Number.isFinite(Date.parse(previousReport.generated_at)) ? previousReport.generated_at : null;
 	const previousScores = Array.isArray(previousReport.score_snapshot) ? previousReport.score_snapshot : [];
 	const repos = config.repos.map(repo => readFleetRepoSnapshot(repo.name, repo.path));
@@ -707,7 +710,8 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 			what: "Fleet survey table: " + classTable + "; planning targets covered: " + surveyTargets.length,
 			evidence: "fleet report " + archivePath, applies_to: "fleet", proposed_fix: "This record is the generated survey table, not an unresolved operational failure." }, { identity: lessonIdentity(targetRepo.path), now });
 	} catch { blockers.push("survey-lesson-append-failed"); }
-	const report: FleetLessonsReport = { ...reportBase, survey: { target_stages: surveyTargets, hourly_samples: hourlySamples,
+	const report: FleetLessonsReport & { cass_freshness: CassFreshness } = { ...reportBase,
+		cass_freshness: cassFreshness, survey: { target_stages: surveyTargets, hourly_samples: hourlySamples,
 		failure_classes: surveyClasses, intake_beads: intakeBeads, escalations }, triggers,
 		run_status: blockers.length ? "BLOCKED" : "OK", blockers: [...new Set(blockers)].sort() };
 	writeFleetJson(archivePath, report);

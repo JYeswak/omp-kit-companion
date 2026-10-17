@@ -51,6 +51,30 @@ produce a `BLOCKED` report and failed job receipt, not a healthy planning claim.
 Fixture evidence does not qualify an installed release or authorize activation;
 the broader learning and skill-admission criteria remain separate.
 
+The managed report also records `cass_freshness` before surveying lessons.
+Freshness compares `index.last_indexed_at` with the newest organic OMP,
+Claude Code or Codex session file mtime, not `fresh=true` or an age counter
+alone. Session metadata is observed after the status command, so files arriving
+during that command are not hidden by an earlier scan. A missing database
+fingerprint binding, partial/hollow/incompatible index, malformed status,
+incomplete source scan or exhausted status budget stays `UNAVAILABLE`;
+a stale checkpoint, mismatched fingerprint or active lexical rebuild stays
+`STALE`. Its `FRESHNESS` warning includes both timestamps and the declared
+rebuild PID/start-age when available. A reported PID is not an independently
+verified live lock holder, and missing ownership remains unknown.
+
+The metadata scan has a two-second budget; `cass status --json` and the
+entire lexical fallback each have ten-second budgets. On stale/unavailable
+status, fixed-string `rg` searches only session files modified in the last
+24 hours, in batches of at most 128 paths to bound argument size. The report
+retains matching filenames, scope and exits, never transcript text. A failed
+or partial fallback is not an empty successful census. This preflight never
+indexes, repairs, starts a daemon or promotes a skill. Report generation's
+`run_status` still describes the existing registered lesson/planning producer;
+it does not certify CASS freshness, corpus coverage, skill use or learning.
+The read-only `fleet-lessons --project` path does not run this source scan.
+
+
 ### Advice currency and read-only replay
 
 `omp-kit fleet-lessons [--project PATH]... --json` reads selected repositories
