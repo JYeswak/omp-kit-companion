@@ -1,0 +1,63 @@
+{
+  "bead": "ompkit-v66l.12",
+  "failed_consumer": {
+    "run_id": "39061124857",
+    "job_id": "117479218931",
+    "source": "82e58fdad0b67b18f8dfd291407865032c559771",
+    "symptom": "kit-update-job.test.ts167 PLUGIN_RELINK_FAILED"
+  },
+  "diagnosis": "Fixture mkdtemp path retained symlinked TMPDIR alias; production apply receipt normalizes store. Canonical fixture input repairs exact unchanged relink/undo assertion; no production guard change.",
+  "before": {
+    "exit": 1,
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "stderr": "\ntests/cli/kit-update-job.test.ts:\n162 | \t\t\tnotify: message => { notes.push(message); },\n163 | \t\t});\n164 | \t\t// Bun's asymmetric matcher can rewrite fields; retain real recovery values first.\n165 | \t\tconst pluginReceiptId = result.pluginReceiptId;\n166 | \t\tconst pluginUndoCommand = result.pluginUndoCommand;\n167 | \t\texpect(result).toMatchObject({ status: \"UPDATED\", receiptId: \"kit-r7\", pluginReceiptId: expect.any(String), pluginUndoCommand: expect.any(String), relink: \"APPLIED\", service: \"APPLIED\" });\n                       ^\nerror: expect(received).toMatchObject(expected)\n\n  {\n+   \"activeVersion\": \"1.2.4\",\n+   \"notification\": true,\n    \"pluginReceiptId\": Any<String>,\n    \"pluginUndoCommand\": Any<String>,\n+   \"reason\": \"PLUGIN_RELINK_FAILED\",\n    \"receiptId\": \"kit-r7\",\n-   \"relink\": \"APPLIED\",\n-   \"service\": \"APPLIED\",\n+   \"relink\": \"FAILED\",\n    \"status\": \"UPDATED\",\n  }\n\n- Expected  - 2\n+ Received  + 4\n\n      at <anonymous> (/Users/josh/Developer/omp-kit-companion/tests/cli/kit-update-job.test.ts:167:18)\n      at async <anonymous> (/Users/josh/Developer/omp-kit-companion/tests/cli/kit-update-job.test.ts:147:8)\n(fail) service update applies a receipt-backed plugin relink to covered profiles and undo restores them [815.67ms]\n\n 0 pass\n 14 filtered out\n 1 fail\n 1 expect() calls\nRan 1 test across 1 file. [832.00ms]\n"
+  },
+  "after": {
+    "exit": 0,
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "stderr": "\ntests/cli/kit-update-job.test.ts:\n(pass) kit-update job is disabled by default and does not poll [1.15ms]\n(pass) fake newer certified release becomes UPDATED, relinks the plugin and notifies one line [1.00ms]\n(pass) service update applies a receipt-backed plugin relink to covered profiles and undo restores them [833.76ms]\n(pass) planted: an OMP no-op cannot claim a complete update when a profile remains on the old release [835.04ms]\n(pass) postcheck failure reports UNDONE, notifies and never relinks [0.80ms]\n(pass) planted: relink failure keeps the update, reports BLOCKED and keeps the receipt [0.54ms]\n(pass) planted: reconcile failure keeps the update, reports BLOCKED and keeps the receipt [0.52ms]\n(pass) poll is inert without OMP_KIT_UPDATE_POLL: the static tuple still flows [0.50ms]\n(pass) poll downloads a newer published release into one directory [1.48ms]\n(pass) published archive without retrievable provenance refuses before planning or activation [1.28ms]\n(pass) planted: poll returns null when the published release is not newer (no downgrade, no download) [1.54ms]\n(pass) planted: poll refuses a non-semver latest tag instead of installing it [0.90ms]\n(pass) planted: poll refuses a missing repo slug instead of querying blindly [0.29ms]\n(pass) planted: poll-only with the published tag equal to installed returns CURRENT with no download [1.01ms]\n(pass) poll-only install uses the published tuple when the static fallback is null [1.54ms]\n\n 15 pass\n 0 fail\n 76 expect() calls\nRan 15 tests across 1 file. [1.70s]\n"
+  },
+  "quality": {
+    "exit": 0,
+    "stderr": "ripwire: no ./.ripwire_quality_baseline — auto-comparing the working tree vs git HEAD (commit the baseline with --quality-baseline to pin it)\n",
+    "header": "<quality-delta schema=\"ripwire.quality-delta/v1\" baseline=\"git-HEAD\" regressions=\"1\" minor=\"1\" acked=\"0\" stale=\"0\" preexisting-worse=\"1\" new-symbol=\"0\" gating=\"0\" register-macro-excluded=\"0\" api-new-surface=\"0\" at=\"7cd522a36+dirty+shallow\" scope=\"tests/cli/kit-update-job.test.ts\" scoped-out=\"984\" scoped-out-gating=\"121\">"
+  },
+  "contract_model": "UNAVAILABLE: exact suggested config site remains ambiguous against archive-980c1a31; no API/signature change",
+  "changed_source_sha256": {
+    "tests/cli/kit-update-job.test.ts": "fb0497f9a9909b1c71565ce8bada5159b1864b2f23052c5082f708c655939df5"
+  },
+  "actual_native_observation": {
+    "run_id": "39061124857",
+    "artifact": "native-receipt-darwin-arm64-none-minimum-attempt-1",
+    "certified": false,
+    "archive_staging": {
+      "archive_sha256": "53d8fa9002ab63dfaa4735fdc1d02e6e236887759a76244e2af10648e958c7e0",
+      "manifest_sha256": "15b5ce056ed6056f36e3016ca046e59ff93137d58ae1437274ffa8b9be084926",
+      "producer": {
+        "repository": "JYeswak/omp-kit-companion",
+        "run_attempt": "1",
+        "run_id": "39061124857",
+        "workflow_ref": "JYeswak/omp-kit-companion/.github/workflows/release.yml@refs/heads/main"
+      },
+      "public_installation": "NOT_VERIFIED",
+      "schema_version": 1,
+      "scope": "source-workflow-integrity",
+      "source_sha": "82e58fdad0b67b18f8dfd291407865032c559771"
+    },
+    "proofs": {
+      "doctor": "PASS",
+      "fast": "PASS",
+      "status": "PASS"
+    },
+    "failure": "native full refused rc=1",
+    "full_failed_stages": [
+      "e2e-live"
+    ],
+    "full_rc": 1
+  },
+  "limitations": [
+    "No rerun of failed CI, no local real gh/auth/helper/token diagnostic; only ordinary existing artifact retrieval.",
+    "Actual native staged source path progressed through status/doctor/fast, but full e2e and complete qualification FAILED; not a release or public installation pass.",
+    "Save only; Root is sole coherent product cohort publisher. No assertion/authority/timeout weakening or public activation change."
+  ]
+}

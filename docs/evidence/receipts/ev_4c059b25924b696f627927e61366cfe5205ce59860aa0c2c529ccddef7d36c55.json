@@ -1,0 +1,17 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_4c059b25924b696f627927e61366cfe5205ce59860aa0c2c529ccddef7d36c55",
+ "limitations": [
+  "Synthetic updater fixture relink/undo proof only; original assertions unchanged. Actual owning qualification39061124857 failed later full e2e, not release/public install proof. Save-only until Root coherent cohort publish."
+ ],
+ "operation": "canonical-relink-fixture-under-aliased-tmpdir",
+ "parameters": {
+  "bead": "ompkit-v66l.12"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 5918,
+  "sha256": "abd76ebb5d95dd4d9acb588201f4f817aba6c3987e481fd5c0bebf979e6b29ae"
+ }
+}

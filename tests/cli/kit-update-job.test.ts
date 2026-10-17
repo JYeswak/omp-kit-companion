@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies } from "../../src/kit-update-job.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 const dirs: string[] = [];
 function config(enabled = true): KitUpdateJobConfig {
-	const root = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "l8-job-")); dirs.push(root);
+	const root = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "l8-job-"))); dirs.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=ompkit-fp72.22-test\nrepo=${join(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return { enabled, prefix: root, stateRoot: join(root, "state"), home: root, platform: { os: "darwin", arch: "arm64", libc: "none" }, project: root, pollRelease: async () => ({ indexPath: join(root, "index.json"), archivePath: join(root, "kit.tar"), version: "1.2.4", sourceTag: "v1.2.4" }) };
 }
