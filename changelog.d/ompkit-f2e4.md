@@ -1,0 +1,3 @@
+### Fixed
+
+- The push gate now runs CI's shellcheck version on changed shell files instead of whatever is installed locally (ompkit-f2e4). Local shellcheck 0.11.0 stays silent on SC2015-info while CI's apt 0.9.0 exits 1, which turned main red for 4 commits on release-train.sh guards. The focused stage prefers `koalaman/shellcheck:v0.9.0` via docker (pulling once when missing) and falls back to the local binary with an explicit version-skew warning naming both versions. Shell findings now refuse the push: previously a finding inside the focused stage was swallowed because the step runner's condition context disables errexit, so the gate printed the finding and reported GREEN.

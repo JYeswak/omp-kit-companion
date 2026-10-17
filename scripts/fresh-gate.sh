@@ -224,22 +224,61 @@ gate_focused() {
 				focus_tests="$focus_tests tests/cli/send-consumed.test.ts" ;;
 			esac
 	done
-	if [ "$needs_shell" = 1 ]; then
-		if command -v shellcheck >/dev/null 2>&1; then
-			for file in $CHANGED; do
-				case "$file" in
-					scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
-						if [ -e "$ARCHIVE_DIR/$file" ]; then
-							shellcheck "$ARCHIVE_DIR/$file"
-						else
-							echo "focused: $file deleted in range; not shellchecked"
-						fi ;;
-				esac
-			done
+# CI installs apt shellcheck (currently v0.9.0) while developers run newer
+# local builds (0.11.0 stays silent on SC2015-info and exits 0). Run the
+# pinned CI version via docker so the push gate refuses what CI refuses
+# (ompkit-f2e4 gap: release-train.sh SC2015 turned main red for 4 commits).
+PINNED_SHELLCHECK_IMAGE="koalaman/shellcheck:v0.9.0"
+if [ "$needs_shell" = 1 ]; then
+	shellcheck_runner=""
+	if command -v docker >/dev/null 2>&1; then
+		if docker image inspect "$PINNED_SHELLCHECK_IMAGE" >/dev/null 2>&1; then
+			shellcheck_runner="pinned"
 		else
-			echo "focused shellcheck: unavailable; no shell files were executed"
+			if docker pull "$PINNED_SHELLCHECK_IMAGE" >/dev/null 2>&1; then
+				shellcheck_runner="pinned"
+			fi
 		fi
 	fi
+	if [ -z "$shellcheck_runner" ]; then
+		if command -v shellcheck >/dev/null 2>&1; then
+			shellcheck_runner="local"
+			local_version="$(shellcheck -V | awk '/^version:/ {print $2}')"
+			echo "focused shellcheck: pinned $PINNED_SHELLCHECK_IMAGE unavailable (no docker image); local ${local_version:-unknown} may miss CI findings"
+		fi
+	fi
+	if [ -n "$shellcheck_runner" ]; then
+		shell_rc=0
+		for file in $CHANGED; do
+			case "$file" in
+				scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
+					if [ -e "$ARCHIVE_DIR/$file" ]; then
+						if [ "$shellcheck_runner" = "pinned" ]; then
+							if docker run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" "/archive/$file"; then
+								:
+							else
+								shell_rc=1
+							fi
+						else
+							if shellcheck "$ARCHIVE_DIR/$file"; then
+								:
+							else
+								shell_rc=1
+							fi
+						fi
+					else
+						echo "focused: $file deleted in range; not shellchecked"
+					fi ;;
+			esac
+		done
+		if [ "$shell_rc" -ne 0 ]; then
+			echo "focused shellcheck: findings refuse the push" >&2
+			return 1
+		fi
+	else
+		echo "focused shellcheck: unavailable; no shell files were executed"
+	fi
+fi
 	if [ "$needs_actionlint" = 1 ]; then
 		if command -v actionlint >/dev/null 2>&1; then
 			actionlint "$ARCHIVE_DIR/.github/workflows"/*.yml "$ARCHIVE_DIR/.github/workflows"/*.yaml

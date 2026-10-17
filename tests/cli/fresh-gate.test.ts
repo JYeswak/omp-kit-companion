@@ -113,10 +113,12 @@ test("focused selection skips suites and shell files the range deleted, and stil
 		writeFileSync(join(dir, "tests/cli/kept.test.ts"), "");
 		writeFileSync(join(dir, "scripts/kept.sh"), "#!/bin/sh\n");
 		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
-		const fakeBin = join(dir, "bin");
-		mkdirSync(fakeBin);
-		writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\n[ -e \"$1\" ] || { echo \"shellcheck: missing $1\" >&2; exit 2; }\necho \"SHELLCHECK $1\"\n");
-		chmodSync(join(fakeBin, "shellcheck"), 0o755);
+	const fakeBin = join(dir, "bin");
+	mkdirSync(fakeBin);
+	writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\n[ -e \"$1\" ] || { echo \"shellcheck: missing $1\" >&2; exit 2; }\necho \"SHELLCHECK $1\"\n");
+	chmodSync(join(fakeBin, "shellcheck"), 0o755);
+	writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate the pinned shellcheck image by delegating to the fake shellcheck.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  echo \"DOCKER-SHELLCHECK $file\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
+	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		writeFileSync(probe, `run_bun_suite() { [ -e "$ARCHIVE_DIR/$1" ] || { echo "bun test: missing $1" >&2; return 1; }; echo "RAN $1"; }\n${script.slice(start, end + 3)}\ngate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
@@ -133,9 +135,44 @@ test("focused selection skips suites and shell files the range deleted, and stil
 		const mixedOut = mixed.stdout.toString() + mixed.stderr.toString();
 		expect(mixed.exitCode).toBe(0);
 		expect(mixedOut).toContain("RAN tests/cli/kept.test.ts");
-		expect(mixedOut).toContain(`SHELLCHECK ${join(dir, "scripts/kept.sh")}`);
+	expect(mixedOut).toContain("DOCKER-SHELLCHECK /archive/scripts/kept.sh");
 		expect(mixedOut).not.toContain("RAN tests/cli/gone.test.ts");
 		expect(mixedOut).not.toContain("missing");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("focused shellcheck refuses an A && B || C guard through the pinned runner", () => {
+	const script = readFileSync(gate, "utf8");
+	const start = script.indexOf("gate_focused() {");
+	expect(start).toBeGreaterThan(-1);
+	const end = script.indexOf("\n}\n", start);
+	expect(end).toBeGreaterThan(start);
+	const dir = fixture();
+	try {
+		writeFileSync(join(dir, "scripts/bad.sh"), "#!/bin/sh\nset -u\nx=\"${1:-}\"\ny=\"${2:-}\"\n[ -n \"$x\" ] && [ -n \"$y\" ] || { echo \"need x and y\" >&2; exit 2; }\n");
+		writeFileSync(join(dir, "scripts/good.sh"), "#!/bin/sh\nexit 0\n");
+		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
+		const fakeBin = join(dir, "bin");
+		mkdirSync(fakeBin);
+		writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\necho \"SHELLCHECK $1\"\n");
+		chmodSync(join(fakeBin, "shellcheck"), 0o755);
+		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
+		chmodSync(join(fakeBin, "docker"), 0o755);
+		const probe = join(dir, "focused-probe.sh");
+		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_bun_suite() { [ -e "$ARCHIVE_DIR/$1" ] || { echo "bun test: missing $1" >&2; return 1; }; echo "RAN $1"; }\n${script.slice(start, end + 3)}\ngate_focused\n`);
+		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, CHANGED: changed },
+			stdout: "pipe", stderr: "pipe",
+		});
+		const bad = focused("scripts/bad.sh");
+		const badOut = bad.stdout.toString() + bad.stderr.toString();
+		expect(bad.exitCode).not.toBe(0);
+		expect(badOut).toContain("SC2015");
+		const good = focused("scripts/good.sh");
+		expect(good.exitCode).toBe(0);
+		expect(good.stdout.toString()).toContain("DOCKER-SHELLCHECK /archive/scripts/good.sh: clean");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
