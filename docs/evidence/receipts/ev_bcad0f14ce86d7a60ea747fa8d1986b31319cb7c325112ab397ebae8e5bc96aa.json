@@ -1,0 +1,17 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_bcad0f14ce86d7a60ea747fa8d1986b31319cb7c325112ab397ebae8e5bc96aa",
+ "limitations": [
+  "Startup layout probe only, no scenarios/model execution or full-native/public authority qualification; original actual CI stderr did not retain the exact startup cause. Root-only coherent cohort publication."
+ ],
+ "operation": "g4-selected-packaged-executable-layout",
+ "parameters": {
+  "bead": "ompkit-v66l.12"
+ },
+ "producer": "SilverCondor",
+ "result_ref": {
+  "bytes": 3309,
+  "sha256": "6867668df038755f626cf5eb619eebbcdb477062e8d93df2e926189b54e88d46"
+ }
+}

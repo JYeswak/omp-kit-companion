@@ -1,0 +1,51 @@
+{
+  "bead": "ompkit-v66l.12",
+  "actual_failure": {
+    "run": "39061124857",
+    "source": "82e58fdad0b67b18f8dfd291407865032c559771",
+    "native_staging": "present; status/doctor/fast PASS",
+    "full": "FAIL",
+    "failed_stage": "e2e-live",
+    "producer_rc": 2,
+    "actual_stderr_cause": "not retained beyond stage markers; do not retroactively claim exact CI stderr"
+  },
+  "diagnosis": "e2e-live.sh treated every packaged root as prefix/releases/version and required HERE/../../bin/omp-kit. Source-admitted native private staging intentionally has no public stable prefix. G4 must execute the selected packaged binary; mandatory signed public installer/upgrade owns stable activation proof.",
+  "incomplete_probe": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "process-tree limiter missing: /Users/josh/Developer/omp-kit-companion/var/agent-tmp/installer-publish.86589/g4-staged-layout/candidate/scripts/limit-process-tree.sh\n",
+    "scope": "Real canonical producer reached via symlinks in controlled staged layout; opaque executable sentinel is never executed, deliberate invalid-rules barrier prevents all scenarios; not real native qualification"
+  },
+  "faithful_before": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "installed omp-kit stable executable is missing\n",
+    "scope": "Real canonical producer reached via symlinks in controlled staged layout; opaque executable sentinel is never executed, deliberate invalid-rules barrier prevents all scenarios; not real native qualification"
+  },
+  "after": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "OMP_KIT_RULES_VIA must be agents or plugin\n",
+    "scope": "Real canonical producer reached via symlinks in controlled staged layout; opaque executable sentinel is never executed, deliberate invalid-rules barrier prevents all scenarios; not real native qualification"
+  },
+  "static_checks": {
+    "command": "sh -n scripts/e2e-live.sh && shellcheck scripts/e2e-live.sh",
+    "exit": 0
+  },
+  "quality": {
+    "exit": 0,
+    "stderr": "ripwire: no ./.ripwire_quality_baseline — auto-comparing the working tree vs git HEAD (commit the baseline with --quality-baseline to pin it)\n",
+    "header": "<quality-delta schema=\"ripwire.quality-delta/v1\" baseline=\"git-HEAD\" regressions=\"0\" minor=\"0\" acked=\"0\" stale=\"0\" preexisting-worse=\"0\" new-symbol=\"0\" gating=\"0\" register-macro-excluded=\"0\" api-new-surface=\"0\" at=\"3b2b2802d+dirty+shallow\" scope=\"scripts/e2e-live.sh\" scoped-out=\"984\" scoped-out-gating=\"121\">"
+  },
+  "contract": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ripwire: --edit-check symbol not found: ./scripts/e2e-live.sh:KIT_EXECUTABLE\n"
+  },
+  "source_sha256": "99f45f4a99a7b462342f1e6613b91e020188352f2041cc5a44687549aac54150",
+  "limits": [
+    "Controlled layout uses symlinks to real canonical producer/helpers and an opaque executable sentinel; it does not certify a real candidate.",
+    "Deliberate existing invalid-rules input stops after executable selection, before all scenarios/model work; after exit2 is next-guard progress, not G4 PASS.",
+    "Original rule/model/fire/quiet/plant verdict assertions and public installer source/manifest/Sigstore/activation checks are unchanged. Root must join mandatory signed consumer before publishing; save-only here."
+  ]
+}

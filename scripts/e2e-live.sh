@@ -145,8 +145,9 @@ isolation_snapshot >"$ISOLATION_BEFORE" 2>&1
 KIT_PATH=
 if [ "$MODE" = full ]; then
   if [ -x "$HERE/bin/omp-kit" ]; then
-    KIT_STABLE=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)/bin/omp-kit
-    [ -x "$KIT_STABLE" ] || { KEEP_WORK=1; echo "installed omp-kit stable executable is missing" >&2; exit 2; }
+    # G4 tests the selected archive, including private pre-publication staging.
+    # Signed public install/upgrade separately proves stable-link activation.
+    KIT_EXECUTABLE="$HERE/bin/omp-kit"
   else
     case "$(/usr/bin/uname -s)-$(/usr/bin/uname -m)" in
       Darwin-arm64) KIT_PLATFORM=darwin-arm64-none ;;
@@ -162,9 +163,9 @@ if [ "$MODE" = full ]; then
     sh "$HERE/scripts/package-release.sh" --version "$KIT_VERSION" --platform "$KIT_PLATFORM" --out "$WORK_ROOT" || { package_rc=$?; KEEP_WORK=1; echo "live candidate package producer_rc=$package_rc" >&2; exit "$package_rc"; }
     tar -xf "$WORK_ROOT/omp-kit-v$KIT_VERSION-$KIT_PLATFORM.tar" -C "$KIT_RELEASE" || { tar_rc=$?; KEEP_WORK=1; echo "live candidate extract producer_rc=$tar_rc" >&2; exit "$tar_rc"; }
     ln -s "../releases/v$KIT_VERSION/bin/omp-kit" "$KIT_PREFIX/bin/omp-kit"
-    KIT_STABLE="$KIT_PREFIX/bin/omp-kit"
+    KIT_EXECUTABLE="$KIT_PREFIX/bin/omp-kit"
   fi
-  KIT_PATH="$(dirname "$KIT_STABLE"):"
+  KIT_PATH="$(dirname "$KIT_EXECUTABLE"):"
 fi
 case "${OMP_KIT_RULES_VIA:-agents}" in
   agents) RULES_DIR="$H/.agents/rules"; PLUGIN_SOURCE="" ;;
