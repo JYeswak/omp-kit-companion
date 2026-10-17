@@ -4,6 +4,7 @@ import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
+import { acquireRunLock } from "../../src/service-run.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
@@ -850,14 +851,19 @@ test("manual scratch apply returns BUSY with the scheduled reaper holder PID", (
   const { home, state } = cliHome();
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
   roots.push(root);
-  const lockDir = join(state, "omp-kit", "jobs", "scratch-reaper.lock");
-  mkdirSync(lockDir, { recursive: true });
-  writeFileSync(join(lockDir, "pid"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
-  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
-  const run = cli(["scratch", "apply", "--apply", "--yes"], home, env);
-  expect(run.code).toBe(4);
-  expect(run.envelope.data.overall).toBe("BUSY");
-  expect(run.envelope.data.holder_pid).toBe(process.pid);
+  const jobsDir = join(state, "omp-kit", "jobs");
+  mkdirSync(jobsDir, { recursive: true });
+  const holder = acquireRunLock(jobsDir, "scratch-reaper");
+  if (holder.status !== "ACQUIRED") throw new Error("Scheduled reaper fixture could not acquire its keeper");
+  try {
+    const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+    const run = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+    expect(run.code).toBe(4);
+    expect(run.envelope.data.overall).toBe("BUSY");
+    expect(run.envelope.data.holder_pid).toBe(process.pid);
+  } finally {
+    holder.lock.release();
+  }
 });
 
 test("scratch-reaper reports invalid quarantine TTL configuration", () => {
