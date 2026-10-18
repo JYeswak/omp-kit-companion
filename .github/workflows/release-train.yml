@@ -10,6 +10,10 @@ on:
   workflow_run:
     workflows: ["CI", "Unpublished release candidate"]
     types: [completed]
+  # UTC fallback for missed completions and newly provisioned release identity.
+  # CI and candidate events remain the primary wakeups.
+  schedule:
+    - cron: '3-58/5 * * * *'
   workflow_dispatch:
     inputs:
       sha:
@@ -36,7 +40,8 @@ jobs:
   train:
     if: >-
       github.event.repository.private == false &&
-      ((github.event_name == 'workflow_dispatch' && inputs.candidate_run_id == '') ||
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.candidate_run_id == '') ||
        (github.event.workflow_run.path == '.github/workflows/ci.yml' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') ||
        (github.event.workflow_run.path == '.github/workflows/release.yml' &&
         github.event.workflow_run.event == 'workflow_dispatch' &&
@@ -66,8 +71,13 @@ jobs:
           REQUESTED_SHA: ${{ inputs.sha }}
           VERSION_OVERRIDE: ${{ inputs.version }}
           REHEARSAL: ${{ inputs.rehearsal || 'false' }}
+          RELEASE_IDENTITY_CONFIGURED: ${{ vars.RELEASE_APP_CLIENT_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$RELEASE_IDENTITY_CONFIGURED" != true ]]; then
+            echo 'TRAIN=deferred REASON=release-identity-unconfigured'
+            exit 0
+          fi
           # Keep this job's lock through certification AND the independent
           # publisher's terminal outcome. No next train may reuse an in-flight V.
           git fetch origin main --tags
