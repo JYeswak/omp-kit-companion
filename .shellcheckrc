@@ -1,0 +1,3 @@
+# Resolve real sourced helpers from checked scripts, including immutable Git archives.
+external-sources=true
+source-path=SCRIPTDIR/..
