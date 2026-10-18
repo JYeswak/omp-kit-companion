@@ -269,9 +269,19 @@ async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): 
   writeFileSync(`${artifact}.sigstore.json`, bundle, { mode: 0o600, flag: "wx" });
   let child;
   try {
+   // Preserve caller GitHub authentication without forwarding unrelated process secrets.
+   const verifierEnv: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: plan.home,
+    TMPDIR: snapshot,
+    XDG_CACHE_HOME: join(snapshot, "cache"),
+   };
+   for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
+    const value = process.env[key];
+    if (value) verifierEnv[key] = value;
+   }
    child = Bun.spawn(["python3", "-I", "-c", readFileSync(installerVerifierPath, "utf8"), "attestation", artifact, plan.version, "unused"], {
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: plan.home, TMPDIR: snapshot, XDG_CACHE_HOME: join(snapshot, "cache"),
-     ...(process.env.GH_CONFIG_DIR ? { GH_CONFIG_DIR: process.env.GH_CONFIG_DIR } : {}) },
+    env: verifierEnv,
     stdout: "pipe", stderr: "pipe",
    });
   } catch { throw new Error("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }

@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, re
 import { dirname, join, resolve } from "node:path";
 import { runFullTest } from "../../src/full-test-runner.ts";
 import { runFastTest } from "../../src/test-runner.ts";
-import type { ReleasePlatform } from "../../src/kit-release.ts";
+import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
 
@@ -543,3 +543,237 @@ test("unsupported source and dangling stable link refuse without creating state"
  expect(refused.status).toBe("REFUSED");
  expect(existsSync(ctx.stateRoot)).toBe(false);
 }));
+
+type CompiledReleaseFixture = { version: string; archivePath: string; indexPath: string };
+
+function createOwnedCompiledUpdateScratch(repoRoot: string): string {
+	const base = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(base, { recursive: true, mode: 0o700 });
+	const label = `kit-update-compiled-${Date.now()}`;
+	const root = join(base, `${label}.${process.pid}`);
+	mkdirSync(root, { mode: 0o700 });
+	writeFileSync(join(root, ".owner"),
+		`pid=${process.pid}\nlabel=${label}\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`,
+		{ mode: 0o600, flag: "wx" });
+	return root;
+}
+
+function buildCompiledReleaseFixture(
+	scratchRoot: string, repoRoot: string, home: string, version: string, selectedPlatform: ReleasePlatform,
+): CompiledReleaseFixture {
+	const output = join(scratchRoot, `package-${version}`);
+	mkdirSync(output, { mode: 0o700 });
+	const platformKey = [selectedPlatform.os, selectedPlatform.arch, selectedPlatform.libc].join("-");
+	const path = [dirname(process.execPath), process.env.PATH ?? "", "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+		.filter(Boolean).join(":");
+	const build = Bun.spawnSync(["/bin/sh", join(repoRoot, "scripts/package-release.sh"), "--version", version,
+		"--platform", platformKey, "--out", output], {
+		cwd: repoRoot,
+		env: { PATH: path, HOME: home, TMPDIR: scratchRoot, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (build.exitCode !== 0) {
+		throw new Error(`compiled fixture release ${version} failed (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
+	}
+	const asset = JSON.parse(build.stdout.toString()) as ReleaseAsset;
+	const archivePath = join(output, asset.filename);
+	const indexPath = join(output, "release-index.json");
+	writeFileSync(indexPath, `${JSON.stringify({
+		schema_version: 1, version, source_tag: `v${version}`, assets: { [platformKey]: asset },
+	})}\n`, { mode: 0o600, flag: "wx" });
+	writeFileSync(`${archivePath}.sigstore.json`, `${JSON.stringify({ fixture: true })}\n`, { mode: 0o600, flag: "wx" });
+	return { version, archivePath, indexPath };
+}
+
+function writeSyntheticGhVerifier(root: string, repoRoot: string): string {
+	const bin = join(root, "synthetic-gh-bin");
+	mkdirSync(bin, { mode: 0o700 });
+	const executable = join(bin, "gh");
+	const fixture = join(repoRoot, "tests/fixtures/kit-release/gh");
+	const source = `#!/usr/bin/env python3
+import json, os, sys
+
+ROOT = ${JSON.stringify(root)}
+FIXTURE = ${JSON.stringify(fixture)}
+GH_TOKEN = "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL"
+GITHUB_TOKEN = "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL"
+args = sys.argv[1:]
+source_lookup = args[:1] == ["api"] and any("/commits/v" in arg for arg in args)
+bundle_verify = args[:2] == ["attestation", "verify"]
+if not source_lookup and not bundle_verify:
+    os.execv(sys.executable, [sys.executable, FIXTURE, *args])
+
+config = os.environ.get("GH_CONFIG_DIR", "")
+try:
+    config_root = os.path.realpath(ROOT)
+    config_real = os.path.realpath(config)
+    config_scoped = bool(config) and os.path.isdir(config_real) and os.path.commonpath([config_root, config_real]) == config_root
+except (OSError, ValueError):
+    config_scoped = False
+token_auth = os.environ.get("GH_TOKEN") == GH_TOKEN and os.environ.get("GITHUB_TOKEN") == GITHUB_TOKEN
+config_auth = "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ and os.path.isfile(os.path.join(config, "synthetic-gh-auth"))
+report = {
+    "auth_mode": "tokens" if token_auth else "config-only" if config_auth else "invalid",
+    "source_lookup": source_lookup,
+    "bundle_verify": bundle_verify,
+    "gh_config_dir_scoped": config_scoped,
+    "unrelated_context_absent": all(key not in os.environ for key in (
+        "PI_BRIDGE_SENTINEL", "MCP_PROVIDER_SENTINEL", "GH_ENTERPRISE_TOKEN")),
+}
+if config_scoped:
+    with open(os.path.join(config, "observed.ndjson"), "a", encoding="utf-8") as output:
+        output.write(json.dumps(report) + "\\n")
+if not config_scoped or report["auth_mode"] == "invalid" or not report["unrelated_context_absent"]:
+    print("synthetic GitHub verifier context refused", file=sys.stderr)
+    sys.exit(1)
+if source_lookup and os.path.isfile(os.path.join(config, "reject-source")):
+    print("synthetic source authority refused", file=sys.stderr)
+    sys.exit(1)
+os.execv(sys.executable, [sys.executable, FIXTURE, *args])
+`;
+	writeFileSync(executable, source, { mode: 0o700, flag: "wx" });
+	chmodSync(executable, 0o755);
+	return bin;
+}
+
+test("compiled synthetic predecessor authenticates, activates, and leaves unavailable postcheck pending", async () => {
+	const repoRoot = realpathSync(resolve(import.meta.dir, "../.."));
+	const scratchRoot = createOwnedCompiledUpdateScratch(repoRoot);
+	// Retain owned scratch for the canonical reaper, including on failure.
+		const home = join(scratchRoot, "home");
+		const buildHome = join(scratchRoot, "build-home");
+		const prefix = join(scratchRoot, "positive-prefix");
+		const negativeHome = join(scratchRoot, "negative-home");
+		const negativePrefix = join(scratchRoot, "negative-prefix");
+		for (const directory of [home, buildHome, negativeHome]) mkdirSync(directory, { mode: 0o700 });
+		const previous = buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.2", hostPlatform);
+		const candidate = buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.3", hostPlatform);
+		const tokenConfig = join(scratchRoot, "gh-config-token");
+		const configOnly = join(scratchRoot, "gh-config-only");
+		mkdirSync(tokenConfig, { mode: 0o700 });
+		mkdirSync(configOnly, { mode: 0o700 });
+		writeFileSync(join(configOnly, "synthetic-gh-auth"), "test fixture only\n", { mode: 0o600, flag: "wx" });
+		const ghBin = writeSyntheticGhVerifier(scratchRoot, repoRoot);
+		const toolBin = join(scratchRoot, "test-tools");
+		mkdirSync(toolBin, { mode: 0o700 });
+		const python = Bun.which("python3");
+		if (!python) throw new Error("python3 is required for the compiled updater regression");
+		symlinkSync(python, join(toolBin, "python3"));
+		symlinkSync(process.execPath, join(toolBin, "bun"));
+		const path = [ghBin, toolBin, "/usr/bin", "/bin"].join(":");
+		const installerEnv = {
+			PATH: path, HOME: home, TMPDIR: scratchRoot,
+			GH_TOKEN: "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
+			GITHUB_TOKEN: "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL",
+			GH_CONFIG_DIR: tokenConfig,
+		};
+		const installer = Bun.spawnSync(["/bin/sh", join(repoRoot, "installer/install.sh"),
+			"--version", previous.version, "--index", previous.indexPath, "--offline", previous.archivePath, "--prefix", prefix], {
+			cwd: repoRoot, env: installerEnv, stdout: "pipe", stderr: "pipe",
+		});
+		if (installer.exitCode !== 0) {
+			throw new Error(`synthetic previous install failed (${installer.exitCode}): ${installer.stdout.toString()} ${installer.stderr.toString()}`);
+		}
+
+		const configOnlyEnv = { PATH: path, HOME: home, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly };
+		const configOnlyVerifier = Bun.spawnSync([python, "-I", "-c", readFileSync(join(repoRoot, "installer/install.py"), "utf8"),
+			"attestation", candidate.archivePath, candidate.version, "unused"], {
+			cwd: repoRoot, env: configOnlyEnv, stdout: "pipe", stderr: "pipe",
+		});
+		expect(configOnlyVerifier.exitCode, configOnlyVerifier.stderr.toString()).toBe(0);
+		const configOnlyReports = readFileSync(join(configOnly, "observed.ndjson"), "utf8").trim()
+			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+		expect(configOnlyReports.length).toBeGreaterThan(0);
+		expect(configOnlyReports.every(report => report.auth_mode === "config-only" &&
+			report.gh_config_dir_scoped === true && report.unrelated_context_absent === true)).toBe(true);
+
+		const updaterEnv = {
+			PATH: path, HOME: home, TMPDIR: scratchRoot, CI: "1",
+			GH_TOKEN: "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
+			GITHUB_TOKEN: "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL",
+			GH_CONFIG_DIR: tokenConfig,
+			GH_ENTERPRISE_TOKEN: "SYNTHETIC_UNRELATED_GH_TOKEN",
+			PI_BRIDGE_SENTINEL: "SYNTHETIC_PI_BRIDGE_CONTEXT",
+			MCP_PROVIDER_SENTINEL: "SYNTHETIC_MCP_PROVIDER_CONTEXT",
+			OMP_KIT_TEST_WORK_ROOT: scratchRoot, OMP_KIT_CASE_CWD: repoRoot,
+		};
+		const stable = join(prefix, "bin", "omp-kit");
+		const update = Bun.spawnSync([stable, "update", "--apply", "--yes", "--version", candidate.version,
+			"--index", candidate.indexPath, "--archive", candidate.archivePath, "--json"], {
+			cwd: home, env: updaterEnv, stdout: "pipe", stderr: "pipe",
+		});
+		const updateStdout = update.stdout.toString();
+		const updateStderr = update.stderr.toString();
+		// OMP is deliberately absent: auth must pass through activation, while the unchanged full postcheck remains blocked.
+		expect(update.exitCode).toBe(1);
+		const updateEnvelope = JSON.parse(updateStdout) as {
+			data: {
+				action: string; active_version: string | null; postcheck: string; reason: string | null; receipt_id: string | null;
+				postcheck_detail: { failed_stages: string[]; failures: string[] };
+			};
+			errors?: { code?: string }[];
+		};
+		expect(updateEnvelope.data).toMatchObject({
+			action: "PARTIAL", active_version: candidate.version, postcheck: "FAIL", reason: "KIT_POSTCHECK_FAILED",
+		});
+		expect(updateEnvelope.data.postcheck_detail.failed_stages).toContain("fast-test");
+		expect(updateEnvelope.data.postcheck_detail.failures.join(" ")).toContain("omp executable not found on PATH");
+		expect(updateEnvelope.errors?.[0]?.code).toBe("KIT_POSTCHECK_FAILED");
+		expect(updateEnvelope.data.receipt_id).toBeTruthy();
+		expect(readlinkSync(stable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
+		const version = Bun.spawnSync([stable, "--version"], { cwd: home, env: updaterEnv, stdout: "pipe", stderr: "pipe" });
+		expect(version.exitCode).toBe(0);
+		expect(version.stdout.toString().trim()).toBe(`omp-kit ${candidate.version}`);
+		const stateRoot = join(home, ".local", "state", "omp-kit");
+		const pending = inspectPendingKitUpdate(stateRoot);
+		expect(pending?.id).toBe(updateEnvelope.data.receipt_id);
+		expect(auditMutations(stateRoot)).toEqual(expect.arrayContaining([
+			expect.objectContaining({ scope: "kit", status: "PENDING" }),
+		]));
+		const tokenReports = readFileSync(join(tokenConfig, "observed.ndjson"), "utf8").trim()
+			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+		expect(tokenReports.some(report => report.source_lookup === true && report.auth_mode === "tokens")).toBe(true);
+		expect(tokenReports.some(report => report.bundle_verify === true && report.auth_mode === "tokens")).toBe(true);
+		expect(tokenReports.every(report => report.gh_config_dir_scoped === true &&
+			report.unrelated_context_absent === true)).toBe(true);
+
+		const negativeInstall = Bun.spawnSync(["/bin/sh", join(repoRoot, "installer/install.sh"),
+			"--version", previous.version, "--index", previous.indexPath, "--offline", previous.archivePath, "--prefix", negativePrefix], {
+			cwd: repoRoot, env: installerEnv, stdout: "pipe", stderr: "pipe",
+		});
+		if (negativeInstall.exitCode !== 0) {
+			throw new Error(`synthetic negative previous install failed (${negativeInstall.exitCode}): ${negativeInstall.stdout.toString()} ${negativeInstall.stderr.toString()}`);
+		}
+		writeFileSync(join(configOnly, "reject-source"), "synthetic invalid authority\n", { mode: 0o600, flag: "wx" });
+		const noTokenUpdaterEnv = {
+			PATH: path, HOME: negativeHome, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly,
+			OMP_KIT_TEST_WORK_ROOT: scratchRoot, OMP_KIT_CASE_CWD: repoRoot,
+		};
+		const negativeStable = join(negativePrefix, "bin", "omp-kit");
+		const refused = Bun.spawnSync([negativeStable, "update", "--apply", "--yes", "--version", candidate.version,
+			"--index", candidate.indexPath, "--archive", candidate.archivePath, "--json"], {
+			cwd: negativeHome, env: noTokenUpdaterEnv, stdout: "pipe", stderr: "pipe",
+		});
+		expect(refused.exitCode).not.toBe(0);
+		const refusal = JSON.parse(refused.stdout.toString()) as { errors?: { code?: string }[] };
+		expect(refusal.errors?.[0]?.code).toBe("KIT_ATTESTATION_SOURCE_UNVERIFIED");
+		expect(readlinkSync(negativeStable)).toBe(`../releases/${previous.version}/bin/omp-kit`);
+		expect(existsSync(join(negativePrefix, "releases", candidate.version))).toBe(false);
+		expect(inspectPendingKitUpdate(join(negativeHome, ".local", "state", "omp-kit"))).toBeNull();
+		const configOnlyAfterRefusal = readFileSync(join(configOnly, "observed.ndjson"), "utf8").trim()
+			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+		expect(configOnlyAfterRefusal.some(report => report.source_lookup === true &&
+			report.auth_mode === "config-only" && report.gh_config_dir_scoped === true)).toBe(true);
+
+		const visible = [installer.stdout.toString(), installer.stderr.toString(), configOnlyVerifier.stdout.toString(),
+			configOnlyVerifier.stderr.toString(), updateStdout, updateStderr, version.stdout.toString(), version.stderr.toString(),
+			negativeInstall.stdout.toString(), negativeInstall.stderr.toString(), refused.stdout.toString(), refused.stderr.toString(),
+			JSON.stringify(auditMutations(stateRoot)), readFileSync(join(tokenConfig, "observed.ndjson"), "utf8"),
+			readFileSync(join(configOnly, "observed.ndjson"), "utf8")].join("\n");
+		for (const sentinel of ["SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
+			"SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL", "SYNTHETIC_UNRELATED_GH_TOKEN",
+			"SYNTHETIC_PI_BRIDGE_CONTEXT", "SYNTHETIC_MCP_PROVIDER_CONTEXT"])
+			expect(visible).not.toContain(sentinel);
+}, 900_000);
+
