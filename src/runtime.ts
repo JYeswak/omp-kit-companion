@@ -8,6 +8,7 @@ import { finished } from "node:stream/promises";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { parseOwnerFile } from "./scratch.ts";
 import { ompSourceCacheRoot } from "./omp-source-cache.ts";
+import { readTestCaseReports, type TestCaseReportCapture } from "./test-case-report.ts";
 
 export type BundledRunExecution = {
 	argv: readonly string[];
@@ -30,6 +31,7 @@ export interface BundledRunResult {
 	stderr: string;
 	in_flight_stage?: { name: string; started_at: number; started_at_ms: number } | null;
 	execution?: BundledRunExecution;
+	case_reports?: TestCaseReportCapture;
 }
 export class BundledRunInterruptedError extends Error {
 	constructor(readonly originalCause: unknown, readonly partialResult: BundledRunResult) {
@@ -167,11 +169,15 @@ async function runIsolated(
 	let cleanupPrivateRoot = true;
 	try {
 		for (const directory of PRIVATE_DIRS) mkdirSync(join(privateRoot, directory), { mode: 0o700 });
+		const caseReportDirectory = shell && script === "scripts/ladder.sh" ? join(privateRoot, "case-reports") : null;
+		if (caseReportDirectory) mkdirSync(caseReportDirectory, { mode: 0o700 });
+		const startedScopes: string[] = [];
 		const ownsGroup = process.platform === "darwin" || process.platform === "linux";
 		const argv = shell ? ["/bin/sh", absoluteScript, ...args] : [realExecutable, absoluteScript, ...args];
 		const child = Bun.spawn(argv, {
 			cwd: realRoot,
-			env: { ...sanitizedEnv(identity, process.env, privateRoot), ...(shell ? {} : { BUN_BE_BUN: "1" }) },
+			env: { ...sanitizedEnv(identity, process.env, privateRoot), ...(shell ? {} : { BUN_BE_BUN: "1" }),
+				...(caseReportDirectory ? { OMP_KIT_TEST_CASE_REPORT_DIR: caseReportDirectory } : {}) },
 			stdout: "pipe",
 			stderr: "pipe",
 			detached: ownsGroup,
@@ -209,6 +215,7 @@ async function runIsolated(
 			if (line.startsWith(prefix)) {
 				const name = line.slice(prefix.length);
 				if (!name || name.includes(" ")) return;
+				if (caseReportDirectory) startedScopes.push(name);
 				inFlight = { name, started_at: performance.now(), started_at_ms: Date.now() };
 				if (process.env.OMP_KIT_NATIVE_STAGE_PROGRESS === "1") {
 					process.stderr.write(`OMP_KIT_STAGE_START name=${name} started_at_ms=${inFlight.started_at_ms}\n`);
@@ -275,12 +282,14 @@ async function runIsolated(
 				if (groupAlive) await stop();
 			}
 			await Promise.race([drained, interrupted]);
-			return { code, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(false) };
+			return { code, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(false),
+				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}) };
 		} catch (error) {
 			await stop();
 			if (!cleanupPrivateRoot) partialStderr += "\nIsolated child exit unconfirmed; private runtime scratch retained.\n";
 			throw new BundledRunInterruptedError(error, {
 				code: 3, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(true),
+				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}),
 			});
 		} finally {
 			process.off("SIGTERM", onTerm);

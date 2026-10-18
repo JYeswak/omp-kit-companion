@@ -25,16 +25,15 @@ members = {"bin/omp-kit": ("file", binary), "release-manifest.json": ("file", b"
 legacy = {"schema_version": 1, "version": "1.2.3", "source_tag": "v1.2.3",
           "files": [{"path": "bin/omp-kit", "sha256": hashlib.sha256(binary).hexdigest()}]}
 installer.verify_manifest(members, legacy, "1.2.3")
-for revision in (None, "a" * 40, "b" * 64):
-    installer.verify_manifest(members, dict(legacy, source_revision=revision), "1.2.3")
-for revision in (False, 123, "", "main", "abc1234", "a" * 39, "b" * 65,
-                 "A" * 40, "a" * 40 + "\n", "a" * 63 + "\n", "x" * 1_000_000):
+for revision in (None, "a" * 40, "b" * 64, False, 123, "", "main", "abc1234",
+                 "a" * 39, "b" * 65, "A" * 40, "a" * 40 + "\n",
+                 "a" * 63 + "\n", "x" * 1_000_000):
     try:
         installer.verify_manifest(members, dict(legacy, source_revision=revision), "1.2.3")
     except ValueError as error:
-        assert str(error) == "release manifest source revision invalid", error
+        assert str(error) == "release manifest identity mismatch", error
     else:
-        raise AssertionError("invalid source revision accepted")
+        raise AssertionError("extra source revision manifest field accepted")
 for manifest in (dict(legacy, extra=True), dict(legacy, source_revision="a" * 40, extra=True)):
     try:
         installer.verify_manifest(members, manifest, "1.2.3")
@@ -44,11 +43,11 @@ for manifest in (dict(legacy, extra=True), dict(legacy, source_revision="a" * 40
         raise AssertionError("unknown manifest field accepted")
 try:
     installer.verify_manifest(dict(members, **{"bin/omp-kit": ("file", b"changed")}),
-                              dict(legacy, source_revision="a" * 40), "1.2.3")
+                              legacy, "1.2.3")
 except ValueError as error:
     assert str(error) == "internal file SHA-256 mismatch: bin/omp-kit", error
 else:
-    raise AssertionError("source revision bypassed byte verification")
+    raise AssertionError("manifest bypassed byte verification")
 PY
 ASSET=$(TMPDIR="$WORK" "$ROOT/scripts/package-release.sh" --version 1.2.3 --platform "$(/usr/bin/uname -s | tr '[:upper:]' '[:lower:]')-$(/usr/bin/uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')-$(if [ "$(/usr/bin/uname -s)" = Darwin ]; then printf none; else printf gnu; fi)" --out "$WORK/assets")
 printf '%s\n' "$ASSET" > "$WORK/asset.json"

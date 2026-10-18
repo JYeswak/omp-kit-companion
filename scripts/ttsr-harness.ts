@@ -31,6 +31,7 @@ import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
 import { writeScratchOwner } from "../src/fleet-guard/scratch.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
+import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
@@ -172,7 +173,7 @@ interface G1Result {
 	detail: string;
 }
 
-function g1(lr: LoadedRule): G1Result {
+function g1(lr: LoadedRule, onUnavailable?: () => void): G1Result {
 	const problems: string[] = [];
 	// omp parses per-rule repeat keys as frontmatter and ignores them; only the profile policy
 	// applies. Read them from omp's own parse, so a quoted or kebab-case key is still caught.
@@ -203,6 +204,7 @@ function g1(lr: LoadedRule): G1Result {
 	} else {
 		const registered = new TtsrManager(SETTINGS).addRule(lr.rule);
 		if (!registered) problems.push("TtsrManager.addRule refused it: loads and never fires");
+		if (!registered) onUnavailable?.();
 		how = registered
 			? `registers (${lr.rule.condition?.length ?? 0} condition(s), ${lr.rule.astCondition?.length ?? 0} astCondition(s))`
 			: "does not register";
@@ -367,11 +369,14 @@ async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undef
  * For edit/write, omp also runs `astCondition` rules once at toolcall_end
  * (ttsr-coordinator.ts: `toolcall_end` -> #checkAstStream), so the verdict includes them.
  */
-async function g2Fires(rule: PayloadTarget, c: Case): Promise<boolean> {
+async function g2Fires(rule: PayloadTarget, c: Case, onUnavailable?: () => void): Promise<boolean> {
 	if (isAdmissionTarget(rule)) return (await mechanicalVerdicts(c))[0]!;
 	if (!scopeApplies(rule, c)) return false;
 	const m = new TtsrManager(SETTINGS);
-	if (!m.addRule(rule)) return false;
+	if (!m.addRule(rule)) {
+		onUnavailable?.();
+		return false;
+	}
 	const ctx = contextFor(c);
 	const wire = wirePayload(c);
 	if (c.source === "tool" && c.tool === "bash") {
@@ -406,13 +411,16 @@ async function admissionEvidence(c: Case): Promise<{ g2: boolean; fired: number[
  * snapshot). astCondition rules are not swept: omp evaluates them only on the finished edit/write
  * call, so they can fire only at the final snapshot.
  */
-async function g3Fires(rule: PayloadTarget, c: Case): Promise<{ fired: number[]; length: number }> {
+async function g3Fires(rule: PayloadTarget, c: Case, onUnavailable?: () => void): Promise<{ fired: number[]; length: number }> {
 	if (isAdmissionTarget(rule)) return admissionPrefixSweep(c);
 	if (!scopeApplies(rule, c)) return { fired: [], length: 0 };
 	const m = new TtsrManager(SETTINGS);
 	const fired: number[] = [];
 	const wire = wirePayload(c);
-	if (!m.addRule(rule)) return { fired, length: wire.length };
+	if (!m.addRule(rule)) {
+		onUnavailable?.();
+		return { fired, length: wire.length };
+	}
 	const ctx = contextFor(c);
 	const bash = c.source === "tool" && c.tool === "bash";
 	for (let i = 1; i <= wire.length; i++) {
@@ -471,7 +479,7 @@ function admissionGateChecks(admissions: AdmissionTarget[], cases: Case[], lines
 	return { registered, covered };
 }
 
-async function runGate(rulesDir: string, casesFile: string): Promise<GateReport> {
+async function runGate(rulesDir: string, casesFile: string, caseReporter: TestCaseReporter | null = null): Promise<GateReport> {
 	const lines: string[] = [];
 	const failures: string[] = [];
 	let registrationPassed = 0;
@@ -479,13 +487,14 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	let payloadPassed = 0;
 	let prefixPassed = 0;
 	let quietPassed = 0;
+	const unavailableRules = caseReporter ? new Set<string>() : null;
 	const { rules, admissions, byName, legacyStaticPresent } = evaluationTargets(rulesDir);
 	if (rules.length === 0) failures.push(`G1 ${rulesDir}: no rules — an empty scan set is not a pass`);
 	if (legacyStaticPresent) failures.push(`G1 ${SCRATCH_ADMISSION.name}: legacy static enforcement still present; qualified retirement is required`);
 
 	lines.push(`== G1 selected SDK rules (${rules.length}; ${admissions.length} separate tool-admission modules; omp ${OMP_SRC})`);
 	for (const lr of rules) {
-		const r = g1(lr);
+		const r = g1(lr, unavailableRules ? () => { unavailableRules.add(lr.name); } : undefined);
 		lines.push(`${r.ok ? "PASS" : "FAIL"} G1 ${lr.name} [${lr.cls}] ${r.detail}`);
 		if (r.ok) registrationPassed++;
 		if (!r.ok) failures.push(`G1 ${lr.name}: ${r.detail}`);
@@ -494,6 +503,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	const { cases, errors } = loadCases(casesFile);
 	for (const e of errors) failures.push(`CASES ${e}`);
 	if (cases.length === 0) failures.push(`CASES ${casesFile}: no cases — an empty case set is not a pass`);
+	let caseReportComplete = errors.length === 0 && cases.length > 0;
 
 	lines.push("== coverage");
 	for (const lr of rules) {
@@ -521,11 +531,18 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	const firstFires: GateReport["firstFires"] = [];
 	for (const c of cases) {
 		const target = byName.get(c.rule);
-		if (!target || (!isAdmissionTarget(target) && target.cls === "always")) continue;
+		if (!target || (!isAdmissionTarget(target) && target.cls === "always")) {
+			caseReportComplete = false;
+			continue;
+		}
 		const admission = isAdmissionTarget(target);
 		const rule = admission ? target : target.rule;
+		// A refused registration is a setup error, not a quiet case verdict.
+		let evaluated = !unavailableRules?.has(c.rule);
+		if (!evaluated) caseReportComplete = false;
+		const onUnavailable = caseReporter ? () => { evaluated = false; caseReportComplete = false; } : undefined;
 		const { g2, fired, length } = admission ? await admissionEvidence(c)
-			: { g2: await g2Fires(rule, c), ...await g3Fires(rule, c) };
+			: { g2: await g2Fires(rule, c, onUnavailable), ...await g3Fires(rule, c, onUnavailable) };
 		const g2ok = g2 === (c.expect === "fire");
 		const wire = wirePayload(c);
 		let g3ok = true;
@@ -550,6 +567,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 			if (c.expect === "quiet") quietPassed++;
 		}
 		const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
+		if (evaluated) caseReporter?.record(tag, ok ? "PASS" : "FAIL");
 		lines.push(
 			`${ok ? "PASS" : "FAIL"} ${tag} | G2 ${g2 ? "fire" : "quiet"}${g2ok ? "" : " (WRONG)"} | G3 ${g3note} | ${show(c.snippet)}`,
 		);
@@ -558,6 +576,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		firstFires.push({ rule: c.rule, line: c.line, expect: c.expect, g2: g2 ? "fire" : "quiet",
 			first_fire: fired.length > 0 ? (admission ? fired[0] : Math.min(fired[0] ?? length, length)) : null, wire_length: length });
 	}
+	if (caseReportComplete) caseReporter?.finish();
 	return {
 		failures,
 		lines,
@@ -742,7 +761,7 @@ function loadBaseline(file: string): { ids: Set<string>; reasons: Record<string,
 	return { ids, reasons };
 }
 
-async function runMetamorphic(rulesDir: string, casesFile: string): Promise<MetamorphicReport> {
+async function runMetamorphic(rulesDir: string, casesFile: string, caseReporter: TestCaseReporter | null = null): Promise<MetamorphicReport> {
 	const { byName, legacyStaticPresent } = evaluationTargets(rulesDir);
 	if (legacyStaticPresent) throw new Error("legacy scratch matcher must be qualified for retirement before final metamorphic acceptance");
 	const { cases, errors } = loadCases(casesFile);
@@ -751,12 +770,15 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 	let evaluated = 0;
 	let variants = 0;
 	let skipped = 0;
+	let caseReportComplete = cases.length > 0;
 	for (const c of cases) {
 		const target = byName.get(c.rule);
 		if (!target) throw new Error(`metamorphic evaluator/rule missing: ${c.rule}`);
 		const admission = isAdmissionTarget(target);
 		const rule = admission ? target : target.rule;
 		const generated = variantsFor(c, admission);
+		const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
+		for (const skip of generated.skipped) caseReporter?.record(`${tag} ${skip.relation}`, "SKIP");
 		skipped += generated.skipped.length;
 		if (generated.variants.length === 0) continue;
 		evaluated += 1;
@@ -765,13 +787,17 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 			// Each variant is an independent hypothetical stream: sharing the
 			// case's streamKey across different wires would let OMP's
 			// per-stream state leak between evaluations.
-			const observed = await g2Fires(rule, { ...c, snippet: v.snippet, path: v.path ?? c.path, argumentSpace: v.argumentSpace, line: c.line * 1000 + vi }) ? "fire" as const : "quiet" as const;
+			let variantEvaluated = true;
+			const onUnavailable = caseReporter ? () => { variantEvaluated = false; caseReportComplete = false; } : undefined;
+			const observed = await g2Fires(rule, { ...c, snippet: v.snippet, path: v.path ?? c.path, argumentSpace: v.argumentSpace, line: c.line * 1000 + vi }, onUnavailable) ? "fire" as const : "quiet" as const;
 			const expected = v.relation === "quoting" ? "quiet" as const : c.expect;
+			if (variantEvaluated) caseReporter?.record(`${tag} ${v.relation} variant ${vi + 1}`, observed === expected ? "PASS" : "FAIL");
 			if (observed !== expected) {
 				breaks.push({ rule: c.rule, line: c.line, relation: v.relation, variant: v.path ? `${v.path}: ${v.snippet}` : v.snippet, expected, observed });
 			}
 		}
 	}
+	if (caseReportComplete) caseReporter?.finish();
 	return { breaks, counts: { cases: evaluated, variants, breaks: breaks.length, skipped } };
 }
 
@@ -793,7 +819,7 @@ function writePlant(
 	);
 }
 
-async function selftest(): Promise<number> {
+async function selftest(caseReporter: TestCaseReporter | null = null): Promise<number> {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-selftest-"));
 	const header = `${CASE_HEADER}\n`;
 	interface Plant {
@@ -935,6 +961,7 @@ async function selftest(): Promise<number> {
 		const rep = await runGate(path.join(dir, "rules"), path.join(dir, "cases.tsv"));
 		if (p.control) {
 			const ok = rep.failures.length === 0;
+			caseReporter?.record(`control ${p.id}: ${p.rule}`, ok ? "PASS" : "FAIL");
 			console.log(`${ok ? "ok  " : "FAIL"} control: ${p.control}`);
 			for (const f of rep.failures) console.log(`       unexpected RED ${f}`);
 			if (!ok) bad++;
@@ -942,6 +969,7 @@ async function selftest(): Promise<number> {
 		}
 		const wantRed = p.wantRed ?? /$^/;
 		const named = rep.failures.filter(f => wantRed.test(f));
+		caseReporter?.record(`plant ${p.id}: ${p.rule}`, named.length > 0 ? "PASS" : "FAIL");
 		if (named.length > 0) {
 			console.log(`ok   plant (${p.id}) RED as intended: ${named[0]}`);
 		} else {
@@ -949,13 +977,14 @@ async function selftest(): Promise<number> {
 			console.log(`FAIL plant (${p.id}) ${p.rule} did NOT go RED the named way (${wantRed}); got: ${rep.failures.join(" || ") || "GREEN"}`);
 		}
 	}
-	bad += await admissionSelftest(tmp);
+	bad += await admissionSelftest(tmp, caseReporter);
 	fs.rmSync(tmp, { recursive: true, force: true });
 	console.log(bad === 0 ? "SELFTEST: all seven plants RED and named; controls GREEN" : `SELFTEST: ${bad} arm(s) failed`);
+	caseReporter?.finish();
 	return bad === 0 ? 0 : 1;
 }
 
-async function admissionSelftest(tmp: string): Promise<number> {
+async function admissionSelftest(tmp: string, caseReporter: TestCaseReporter | null = null): Promise<number> {
 	let bad = 0;
 	// Dedicated mechanical controls: identical event/path/content, only real
 	// index facts differ. The fixture never derives facts from `expect`.
@@ -978,6 +1007,7 @@ async function admissionSelftest(tmp: string): Promise<number> {
 		for (const variant of variantsFor(control, true).variants) {
 			if (await g2Fires(mechanicalRule, { ...control, ...variant, path: variant.path ?? control.path }) !== actual) ok = false;
 		}
+		caseReporter?.record(`mechanical control ${control.rule} line ${control.line}: ${control.note}`, ok ? "PASS" : "FAIL");
 		console.log(`${ok ? "ok  " : "FAIL"} mechanical control: ${control.note}; final-only admission and argument/path equivalents`);
 		if (!ok) bad++;
 	}
@@ -991,6 +1021,7 @@ async function admissionSelftest(tmp: string): Promise<number> {
 	if (parsed.errors.length) throw new Error(parsed.errors.join("; "));
 	const externalCase = parsed.cases[0];
 	const externalOk = externalCase !== undefined && externalTarget !== undefined && !isAdmissionTarget(externalTarget) && await g2Fires(externalTarget.rule, externalCase);
+	caseReporter?.record(`control external-admission-name: ${SCRATCH_ADMISSION.name}`, externalOk ? "PASS" : "FAIL");
 	console.log(`${externalOk ? "ok  " : "FAIL"} control: an external same-name rule retains its selected SDK evaluator`);
 	if (!externalOk) bad++;
 	return bad;
@@ -998,7 +1029,7 @@ async function admissionSelftest(tmp: string): Promise<number> {
 
 // ---------------------------------------------------------------- cli crosscheck
 
-async function cliCrosscheck(jobs: number): Promise<number> {
+async function cliCrosscheck(jobs: number, caseReporter: TestCaseReporter | null = null): Promise<number> {
 	const rules = loadRules(path.join(KIT, "rules"));
 	const byName = new Map(rules.map(r => [r.name, r]));
 	const { cases, errors: caseErrors } = loadCases(path.join(KIT, "cases/cases.tsv"));
@@ -1029,8 +1060,13 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 	let disagreements = 0;
 	let errors = 0;
 	const todo = cases.filter(c => byName.get(c.rule)?.cls !== "always" && byName.has(c.rule));
+	// The CLI producer covers SDK/non-always comparisons only: separate mechanical
+	// admission and alwaysApply rows are outside this mode, not fabricated skips.
+	// Any other unknown rule is a missing evaluator, so its inventory is incomplete.
+	const caseReportComplete = cases.every(c => byName.has(c.rule) || c.rule === SCRATCH_ADMISSION.name);
 	const results: string[] = new Array(todo.length);
 	let next = 0;
+	let completedCases = 0;
 	async function worker(): Promise<void> {
 		while (next < todo.length) {
 			const idx = next++;
@@ -1045,11 +1081,20 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 			const proc = Bun.spawn(args, { cwd: tmp, env, stdout: "pipe", stderr: "pipe" });
 			const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 			const code = await proc.exited;
-			const harness = await g2Fires(lr.rule, c);
+			let harnessEvaluated = true;
+			const harness = await g2Fires(lr.rule, c, caseReporter ? () => { harnessEvaluated = false; } : undefined);
 			let cli: boolean | undefined;
+			let cliEvaluated = false;
 			try {
 				const report = JSON.parse(out.trim().split("\n").pop() ?? "") as { triggered?: { name: string }[] };
 				cli = (report.triggered ?? []).some(t => t.name === c.rule);
+				// Keep the original CLI verdict policy above; only genuine successful
+				// checker results may contribute source-owned case counts.
+				cliEvaluated = code === 0 && proc.signalCode === null
+					&& typeof report === "object" && report !== null
+					&& Array.isArray(report.triggered)
+					&& report.triggered.every(t => typeof t === "object" && t !== null
+						&& typeof t.name === "string" && t.name === c.rule);
 			} catch {
 				cli = undefined;
 			}
@@ -1063,6 +1108,10 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 			} else {
 				results[idx] = `AGREE ${tag}: both ${cli ? "fire" : "quiet"}`;
 			}
+			if (cli !== undefined && cliEvaluated && harnessEvaluated) {
+				caseReporter?.record(tag, cli === harness ? "PASS" : "FAIL");
+				completedCases++;
+			}
 		}
 	}
 	await Promise.all(Array.from({ length: Math.max(1, jobs) }, worker));
@@ -1070,6 +1119,7 @@ async function cliCrosscheck(jobs: number): Promise<number> {
 	for (const r of results) console.log(r);
 	console.log(`== summary: ${version}, cases=${todo.length} agree=${todo.length - disagreements - errors} disagreements=${disagreements} errors=${errors}`);
 	console.log(disagreements === 0 && errors === 0 ? "CROSSCHECK: GREEN" : "CROSSCHECK: RED");
+	if (caseReportComplete && todo.length > 0 && completedCases === todo.length && errors === 0) caseReporter?.finish();
 	return disagreements === 0 && errors === 0 ? 0 : 1;
 }
 
@@ -1722,6 +1772,8 @@ function flagValue(name: string): string | undefined {
 }
 
 const mode = process.argv.find(a => ["--observe", "--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--corpus", "--mutants", "--metamorphic-json"].includes(a));
+const caseReporter = mode !== undefined && ["--gate", "--gate-json", "--selftest", "--cli-crosscheck", "--metamorphic-json"].includes(mode)
+	? createTestCaseReporter() : null;
 let code: number;
 switch (mode) {
 	case "--observe": {
@@ -1739,7 +1791,7 @@ switch (mode) {
 		// against the kit's cases, read-only.
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
-		const rep = await runGate(rulesDir, casesFile);
+		const rep = await runGate(rulesDir, casesFile, caseReporter);
 		printGate(rep, `${path.relative(KIT, rulesDir) || "."} + ${path.relative(KIT, casesFile)}`);
 		code = rep.failures.length === 0 ? 0 : 1;
 		break;
@@ -1747,16 +1799,16 @@ switch (mode) {
 	case "--gate-json": {
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
-		const rep = await runGate(rulesDir, casesFile);
+		const rep = await runGate(rulesDir, casesFile, caseReporter);
 		console.log(JSON.stringify(structuredGate(rep)));
 		code = rep.failures.length === 0 ? 0 : 1;
 		break;
 	}
 	case "--selftest":
-		code = await selftest();
+		code = await selftest(caseReporter);
 		break;
 	case "--cli-crosscheck":
-		code = await cliCrosscheck(Number(flagValue("--jobs") ?? 8));
+		code = await cliCrosscheck(Number(flagValue("--jobs") ?? 8), caseReporter);
 		break;
 	case "--corpus": {
 		const root = flagValue("--sessions-root");
@@ -1783,7 +1835,7 @@ switch (mode) {
 	case "--metamorphic-json": {
 		const rulesDir = path.resolve(flagValue("--rules") ?? path.join(KIT, "rules"));
 		const casesFile = path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv"));
-		const rep = await runMetamorphic(rulesDir, casesFile);
+		const rep = await runMetamorphic(rulesDir, casesFile, caseReporter);
 		const baselinePath = flagValue("--baseline");
 		if (baselinePath === undefined) {
 			console.log(JSON.stringify({ schema_version: 1, status: rep.breaks.length === 0 ? "PASS" : "FAIL", counts: rep.counts, breaks: rep.breaks }));

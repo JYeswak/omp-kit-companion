@@ -161,13 +161,46 @@ EOF
 }
 
 selftest() {
+  # Only the outer selftest owns cases; recursive check/parse runs do not report.
+  report_test_case() { :; }
+  start_case_report() { :; }
+  finish_case_report() { :; }
+  report_root=$(CDPATH='' cd -- "$(dirname "$SELF")/.." && pwd)
+  if [ -f "$report_root/scripts/test-case-report.sh" ]; then
+    . "$report_root/scripts/test-case-report.sh"
+  fi
+  start_case_report
+  report_case=
+  report_interrupted=0
+  selftest_reportable() {
+    [ "$report_interrupted" -eq 0 ]
+  }
+  report_selftest_case() {
+    if selftest_reportable; then report_test_case "$@"; fi
+  }
+  selftest_assertion_failed() {
+    if selftest_reportable; then
+      report_test_case "$report_case" FAIL
+      finish_case_report
+    fi
+    exit 1
+  }
   sh_bin=$(self_sh)
   d=$(mktemp -d "${TMPDIR:-/tmp}/kit-claim-selftest.XXXXXX") || {
     echo "SELFTEST_FAIL: cannot make temp dir"
     exit 1
   }
-  trap 'rm -rf "$d"' EXIT INT TERM
-  run() { "$sh_bin" "$SELF" "$@"; }
+  trap 'report_interrupted=1; rm -rf "$d"' INT TERM
+  trap 'rm -rf "$d"' EXIT
+  run() {
+    out=$("$sh_bin" "$SELF" "$@" 2>&1)
+    report_child_rc=$?
+    case "$report_child_rc" in
+      0|1) ;;
+      *) report_interrupted=1 ;;
+    esac
+    return "$report_child_rc"
+  }
   bash_v=${BASH_VERSION:-none}
   echo "selftest shell: $sh_bin (BASH_VERSION=$bash_v)"
 
@@ -178,90 +211,105 @@ selftest() {
   # Arm 1: enforce=yes, readme_pattern absent from README -> RED naming the label.
   printf '%b' "$header" > "$d/bad.tsv"
   printf 'planted-miss\tTHIS PATTERN IS NOT IN THE README\tcap\tnew TypeSafeClient\tproof.txt\tyes\tplant\n' >> "$d/bad.tsv"
-  if out=$(run bad.tsv readme.md "$d" 2>&1); then
+  report_case=unmatched-pattern
+  if run bad.tsv readme.md "$d"; then
     echo "SELFTEST_FAIL: planted unmatched enforce=yes row was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"FAIL  planted-miss"*) ;;
-    *) echo "SELFTEST_FAIL: RED did not name planted-miss"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: RED did not name planted-miss"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   case "$out" in
-    *"(0 enforced)"*) echo "SELFTEST_FAIL: blind to the enforce=yes row"; printf '%s\n' "$out"; exit 1 ;;
+    *"(0 enforced)"*) echo "SELFTEST_FAIL: blind to the enforce=yes row"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM unmatched-pattern: RED, names planted-miss: $(printf '%s\n' "$out" | grep 'planted-miss')"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 2: matching row with an existing proof -> PASS.
   printf '%b' "$header" > "$d/good.tsv"
   printf 'planted-hit\thello\tcap\tnew TypeSafeClient\tproof.txt\tyes\tok\n' >> "$d/good.tsv"
-  if ! out=$(run good.tsv readme.md "$d" 2>&1); then
+  report_case=matching-row
+  if ! run good.tsv readme.md "$d"; then
     echo "SELFTEST_FAIL: a matching enforce=yes row did not pass"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"PASS  planted-hit"*"(1 enforced)"*) ;;
-    *) echo "SELFTEST_FAIL: matching row not reported as PASS"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: matching row not reported as PASS"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM matching-row: PASS: $(printf '%s\n' "$out" | grep 'planted-hit')"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 2b: matching row whose proof is missing -> RED naming the label.
   printf '%b' "$header" > "$d/noproof.tsv"
   printf 'planted-noproof\thello\tcap\t\tno-such-proof.txt\tyes\t\n' >> "$d/noproof.tsv"
-  if out=$(run noproof.tsv readme.md "$d" 2>&1); then
+  report_case=missing-proof
+  if run noproof.tsv readme.md "$d"; then
     echo "SELFTEST_FAIL: enforce=yes row with a missing proof was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"FAIL  planted-noproof"*"no-such-proof.txt"*) ;;
-    *) echo "SELFTEST_FAIL: missing-proof RED did not name the row and path"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: missing-proof RED did not name the row and path"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM missing-proof: RED, names planted-noproof"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 3: missing claims file -> RED, not exit 0, names the resolved path.
-  if out=$(run no-such.tsv readme.md "$d" 2>&1); then
+  report_case=missing-claims-file
+  if run no-such.tsv readme.md "$d"; then
     echo "SELFTEST_FAIL: missing claims file exited 0"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"$d/no-such.tsv"*) ;;
-    *) echo "SELFTEST_FAIL: missing-file RED did not name the resolved path"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: missing-file RED did not name the resolved path"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM missing-claims-file: RED: $out"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 4: empty middle columns stay in their own fields.
   row=$(printf 'planted-sparse\t\t\t\tproof.txt\tyes\t')
   printf '%b' "$header" > "$d/sparse.tsv"
   printf '%s\n' "$row" >> "$d/sparse.tsv"
-  parsed=$(run --parse sparse.tsv "$d" 2>&1)
+  report_case=empty-middle-columns
+  if run --parse sparse.tsv "$d"; then :; else :; fi
+  parsed=$out
   if [ "$parsed" != "planted-sparse||||proof.txt|yes|" ]; then
     echo "SELFTEST_FAIL: empty middle columns misparsed: [$parsed]"
-    exit 1
+    selftest_assertion_failed
   fi
-  if ! out=$(run sparse.tsv readme.md "$d" 2>&1); then
+  if ! run sparse.tsv readme.md "$d"; then
     echo "SELFTEST_FAIL: sparse enforce=yes row did not pass"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"PASS  planted-sparse"*"(1 enforced)"*) ;;
-    *) echo "SELFTEST_FAIL: sparse row not enforced"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: sparse row not enforced"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM empty-middle-columns: parsed [$parsed], enforced and PASS"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 5: regression. The zip split on the same row, under this shell.
   old=$(zip_parse_enforce "$row")
+  case $? in 0|1) ;; *) report_interrupted=1 ;; esac
   new=$(printf '%s\n' "$parsed" | cut -d'|' -f6)
+  case $? in 0|1) ;; *) report_interrupted=1 ;; esac
   case "$bash_v" in
     3.*)
+      report_case=zip-split-regression
       if [ -n "$old" ]; then
         echo "SELFTEST_FAIL: expected the zip split to lose enforce under bash $bash_v, got [$old]"
-        exit 1
+        selftest_assertion_failed
       fi
       echo "ARM zip-split-regression (required, bash $bash_v): zip logic read enforce=[$old] (empty); this port read enforce=[$new]"
+      report_selftest_case "$report_case" PASS; report_case=
       ;;
     *)
       echo "ARM zip-split-regression (informational, BASH_VERSION=$bash_v): zip logic read enforce=[$old]; this port read enforce=[$new]"
@@ -269,6 +317,7 @@ selftest() {
   esac
 
   echo "SELFTEST_PASS: unmatched enforce=yes refused and named, matching row passed, missing proof refused, missing claims file refused, empty middle columns parsed, zip-split regression arm ran"
+  if selftest_reportable; then finish_case_report; fi
   exit 0
 }
 

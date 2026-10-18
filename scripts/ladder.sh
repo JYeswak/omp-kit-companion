@@ -76,6 +76,16 @@ trap cleanup EXIT
 export OMP_KIT_WORK_DIR="$WORK"
 step() { # step <label> <cmd...>
   step_label=$1; shift
+  if [ -n "${OMP_KIT_TEST_CASE_REPORT_DIR:-}" ]; then
+    case "$step_label" in
+      harness-gate|harness-selftest|claim-selftest|cli-crosscheck|metamorphic-ratchet|readiness-selftest|e2e-live|e2e-plant)
+        OMP_KIT_TEST_CASE_REPORT="$OMP_KIT_TEST_CASE_REPORT_DIR/$step_label.jsonl"
+        OMP_KIT_TEST_CASE_SCOPE="$step_label"
+        export OMP_KIT_TEST_CASE_REPORT OMP_KIT_TEST_CASE_SCOPE
+        ;;
+      *) unset OMP_KIT_TEST_CASE_REPORT OMP_KIT_TEST_CASE_SCOPE ;;
+    esac
+  fi
   log="$WORK/ladder-$step_label.txt"
   if [ "$step_label" != "manifest" ]; then
     if [ -e "$HERE/.git" ]; then

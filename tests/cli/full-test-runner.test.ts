@@ -5,6 +5,7 @@ import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BundledRunInterruptedError } from "../../src/runtime.ts";
 import { classifyLadder, currentStageReport, describeFullTestProducer, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
+import { readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
 const successful = names.map(name => `GREEN ${name} producer_rc=0 duration_ms=120`).join("\n");
@@ -477,4 +478,81 @@ test("a real Bun cwd operand cannot relabel nested test output as immediate prod
   expect(reference.missing_fields).toContain("counts");
   expect(reference.capture_complete).toBe(false);
  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("real checker case records reject missing, duplicated, corrupt and unfinished execution evidence", () => {
+ const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-source-cases-")));
+ try {
+  const path = join(root, "claim-selftest.jsonl");
+  const child = Bun.spawnSync(["/bin/sh", fileURLToPath(new URL("../../checkers/check-claim-discipline.sh", import.meta.url)), "--selftest"], {
+   env: { ...process.env, OMP_KIT_TEST_CASE_REPORT: path, OMP_KIT_TEST_CASE_SCOPE: "claim-selftest" }, stdout: "pipe", stderr: "pipe",
+  });
+  expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0);
+  const capture = readTestCaseReports(root, ["claim-selftest"]);
+  const baseline = summarizeTestCaseReports(capture);
+  expect(baseline.error).toBe(null);
+  expect(baseline.counts).toMatchObject({ protocol: "OMP_KIT_CASES", unit: "TEST_CASE_EXECUTION", fail: 0, skip: 0 });
+  expect(baseline.failing_names).toEqual([]);
+  const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+  const first = JSON.parse(lines[1]!);
+  const failed = { ...first, outcome: "FAIL" };
+  const failedBody = [lines[0], JSON.stringify(failed), ...lines.slice(2)].join("\n") + "\n";
+  const namedFailure = summarizeTestCaseReports({ ...capture, reports: [{ scope: "claim-selftest", body: failedBody }] });
+  expect(namedFailure.counts?.fail).toBe(1);
+  expect(namedFailure.failing_names).toEqual([`claim-selftest: ${first.name}`]);
+  const withoutName = { ...first };
+  Reflect.deleteProperty(withoutName, "name");
+  const end = JSON.parse(lines.at(-1)!);
+  const variants = [
+   lines.slice(0, -1).join("\n") + "\n",
+   [lines[0], ...lines.slice(2)].join("\n") + "\n",
+   [lines[0], lines[1], ...lines.slice(1)].join("\n") + "\n",
+   [lines[0], JSON.stringify(withoutName), ...lines.slice(2)].join("\n") + "\n",
+   [lines[0], JSON.stringify({ ...first, outcome: "NOT_RUN" }), ...lines.slice(2)].join("\n") + "\n",
+   [...lines.slice(0, -1), JSON.stringify({ ...end, cases: end.cases + 1 })].join("\n") + "\n",
+   readFileSync(path, "utf8").slice(0, -1),
+   [lines[0], lines[1]!.replace('\"event\":\"case\"', '\"event\":\"begin\",\"event\":\"case\"'), ...lines.slice(2)].join("\n") + "\n",
+  ];
+  for (const body of variants) {
+   const result = summarizeTestCaseReports({ ...capture, reports: [{ scope: "claim-selftest", body }] });
+   expect(result.counts).toBe(null);
+   expect(result.failing_names).toBe(null);
+  }
+  expect(summarizeTestCaseReports({ ...capture, expected_scopes: ["claim-selftest", "readiness-selftest"] }).counts).toBe(null);
+  expect(summarizeTestCaseReports({ ...capture, errors: ["interrupted case file"] }).counts).toBe(null);
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("deeply nested unexpected case payload remains incomplete rather than escaping the evidence path", () => {
+ const scope = "claim-selftest";
+ const begin = JSON.stringify({ schema_version: 1, scope, event: "begin" });
+ const deep = "[".repeat(20_000) + "0" + "]".repeat(20_000);
+ const body = begin + "\n" + '{"schema_version":1,"scope":"claim-selftest","event":"case","name":"declared","outcome":"PASS","unexpected":' + deep + "}\n"
+  + JSON.stringify({ schema_version: 1, scope, event: "end", cases: 1 }) + "\n";
+ const result = summarizeTestCaseReports({ expected_scopes: [scope], reports: [{ scope, body }], errors: [] });
+ expect(result.counts).toBe(null);
+ expect(result.failing_names).toBe(null);
+});
+
+test("a lost shell outcome write cannot shrink into a completed execution window", () => {
+ const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-case-write-loss-")));
+ try {
+  const path = join(root, "claim-selftest.jsonl");
+  const script = [
+   '. "$1"',
+   'loss_marker=$3',
+   'awk() { if [ ! -f "$loss_marker" ]; then : > "$loss_marker"; return 1; fi; command awk "$@"; }',
+   'start_case_report',
+   'report_test_case "first observed case" PASS',
+   'report_test_case "second observed case" PASS',
+   'finish_case_report',
+  ].join("\n");
+  const child = Bun.spawnSync(["/bin/sh", "-c", script, "sh", fileURLToPath(new URL("../../scripts/test-case-report.sh", import.meta.url)), path, join(root, "loss")], {
+   env: { ...process.env, OMP_KIT_TEST_CASE_REPORT: path, OMP_KIT_TEST_CASE_SCOPE: "claim-selftest" }, stdout: "pipe", stderr: "pipe",
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
+  const result = summarizeTestCaseReports(readTestCaseReports(root, ["claim-selftest"]));
+  expect(result.counts).toBe(null);
+  expect(result.failing_names).toBe(null);
+ } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -6,7 +6,7 @@ import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
-import { packageSourceRevision } from "../../scripts/package-release.ts";
+import { packageRuleManifest, packageSourceRevision } from "../../scripts/package-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
@@ -117,7 +117,7 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(stagedPackage.version).toBe("1.2.3");
 	expect(stagedPackage.omp?.version).toBe("1.2.3");
 	expect(staged.manifest.version).toBe("1.2.3");
-	expect(staged.manifest.source_revision).toBe(sourceRevision);
+	expect(Object.keys(staged.manifest).sort()).toEqual(["files", "schema_version", "source_tag", "version"]);
 	expect(JSON.parse(readFileSync(join(staged.root, "package.json"), "utf8")).source_revision).toBe(sourceRevision);
 	expect(staged.manifest.files.find(file => file.path === "package.json")?.sha256)
 		.toBe(createHash("sha256").update(readFileSync(join(staged.root, "package.json"))).digest("hex"));
@@ -147,6 +147,18 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(readdirSync(output).filter(name => name.startsWith("kit-stage-"))).toHaveLength(1);
 	expect(lstatSync(staged.executable).isFile()).toBe(true);
 	expect(existsSync(join(staged.root, "reports"))).toBe(false);
+});
+
+test("packaging's manifest producer supersedes stale input and changed rule bytes without editing archived source", () => {
+ const selected = join(output, "archived-source", "tests", "fixtures", "package-manifest-inputs");
+ const rule = readFileSync(join(selected, "rules", "fixture.md"));
+ const stale = readFileSync(join(selected, "MANIFEST.tsv"), "utf8");
+ const oldHash = stale.split("\n").find(row => row.startsWith("fixture\t"))!.split("\t")[1];
+ const changedHash = createHash("sha256").update(rule).digest("hex");
+ expect(changedHash).not.toBe(oldHash);
+ const generated = packageRuleManifest(selected, output).toString("utf8").split("\n").find(row => row.startsWith("fixture\t"))!;
+ expect(generated.split("\t").slice(0, 3)).toEqual(["fixture", changedHash, "always"]);
+ expect(readFileSync(join(selected, "MANIFEST.tsv"), "utf8")).toBe(stale);
 });
 
 test("SourceStamp uses the physical source checkout and refuses dirty, missing, or unexpanded identity", () => {
@@ -200,14 +212,11 @@ test("SourceStamp retains actual Git archive expansion without selecting an ance
 	}
 });
 
-test("SourceStamp manifest field is optional for legacy archives and strict when present", () => {
+test("SourceStamp stays outside the closed release manifest schema", () => {
 	const legacy = { schema_version: 1, version: "1.2.3", source_tag: "v1.2.3",
 		files: [{ path: "bin/omp-kit", sha256: "a".repeat(64) }] };
-	expect(Object.hasOwn(validateReleaseManifest(legacy), "source_revision")).toBe(false);
-	expect(validateReleaseManifest({ ...legacy, source_revision: null }).source_revision).toBe(null);
-	expect(validateReleaseManifest({ ...legacy, source_revision: sourceRevision }).source_revision).toBe(sourceRevision);
-	expect(validateReleaseManifest({ ...legacy, source_revision: "b".repeat(64) }).source_revision).toBe("b".repeat(64));
-	for (const source_revision of [undefined, 123, "", "main", "a".repeat(39), "a".repeat(41), "a".repeat(40) + "\n", "f".repeat(1_000_000)]) {
+	expect(validateReleaseManifest(legacy)).toEqual(legacy);
+	for (const source_revision of [undefined, null, sourceRevision, "b".repeat(64), 123, "", "main", "a".repeat(39), "a".repeat(41), "a".repeat(40) + "\n", "f".repeat(1_000_000)]) {
 		expect(() => validateReleaseManifest({ ...legacy, source_revision })).toThrow("INVALID_RELEASE_MANIFEST");
 	}
 	expect(() => validateReleaseManifest({ ...legacy, source_revision: sourceRevision, extra: true })).toThrow("INVALID_RELEASE_MANIFEST");

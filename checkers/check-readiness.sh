@@ -302,13 +302,50 @@ EOF
 }
 
 selftest() {
+  # Only the outer selftest owns cases; recursive packet checks do not report.
+  report_test_case() { :; }
+  start_case_report() { :; }
+  finish_case_report() { :; }
+  report_root=$(CDPATH='' cd -- "$(dirname "$SELF")/.." && pwd)
+  if [ -f "$report_root/scripts/test-case-report.sh" ]; then
+    . "$report_root/scripts/test-case-report.sh"
+  fi
+  start_case_report
+  report_case=
+  report_interrupted=0
+  selftest_reportable() {
+    [ "$report_interrupted" -eq 0 ]
+  }
+  report_selftest_case() {
+    if selftest_reportable; then report_test_case "$@"; fi
+  }
+  selftest_assertion_failed() {
+    if selftest_reportable; then
+      report_test_case "$report_case" FAIL
+      finish_case_report
+    fi
+    exit 1
+  }
   sh_bin=$(self_sh)
   d=$(mktemp -d "${TMPDIR:-/tmp}/kit-readiness-selftest.XXXXXX") || {
     echo "SELFTEST_FAIL: cannot make temp dir"
     exit 1
   }
-  trap 'rm -rf "$d"' EXIT INT TERM
-  run() { "$sh_bin" "$SELF" "$@"; }
+  trap 'report_interrupted=1; rm -rf "$d"' INT TERM
+  trap 'rm -rf "$d"' EXIT
+  run_cwd=
+  run() {
+    out=$(
+      if [ -n "$run_cwd" ]; then cd "$run_cwd" || exit $?; fi
+      "$sh_bin" "$SELF" "$@" 2>&1
+    )
+    report_child_rc=$?
+    case "$report_child_rc" in
+      0|1) ;;
+      *) report_interrupted=1 ;;
+    esac
+    return "$report_child_rc"
+  }
   echo "selftest shell: $sh_bin (BASH_VERSION=${BASH_VERSION:-none})"
   mkdir -p "$d/root/plans" "$d/elsewhere" "$d/decoy" "$d/emptyroot" "$d/root/noscan"
 
@@ -325,86 +362,105 @@ selftest() {
   cp "$d/root/plans/signed.md" "$d/decoy/packet.md"
 
   # Arm 1: relative packet, cwd elsewhere, resolved against <root>.
-  if ! out=$(cd "$d/elsewhere" && run plans/signed.md "$d/root" 2>&1); then
+  report_case=relative-path-uses-root
+  run_cwd="$d/elsewhere"
+  if ! run plans/signed.md "$d/root"; then
     echo "SELFTEST_FAIL: relative packet was not resolved against root from another cwd"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
+  run_cwd=
   case "$out" in
     *"READY: $d/root/plans/signed.md"*) ;;
-    *) echo "SELFTEST_FAIL: READY did not name the root-resolved path"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: READY did not name the root-resolved path"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM relative-path-uses-root: $out"
+  report_selftest_case "$report_case" PASS; report_case=
   # Arm 1b: a READY packet at the same relative path in cwd must not be used.
-  if out=$(cd "$d/decoy" && run packet.md "$d/emptyroot" 2>&1); then
+  report_case=cwd-decoy-ignored
+  run_cwd="$d/decoy"
+  if run packet.md "$d/emptyroot"; then
     echo "SELFTEST_FAIL: relative packet resolved against the caller cwd"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
+  run_cwd=
   case "$out" in
     *"$d/emptyroot/packet.md not found"*) ;;
-    *) echo "SELFTEST_FAIL: not-found RED did not name the root-resolved path"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: not-found RED did not name the root-resolved path"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM cwd-decoy-ignored: $(printf '%s\n' "$out" | sed -n 1p)"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 2: sign-off that only says "design" is RED and names the sign-off.
-  if out=$(run plans/design.md "$d/root" 2>&1); then
+  report_case=design-only-signoff
+  if run plans/design.md "$d/root"; then
     echo "SELFTEST_FAIL: design-only sign-off was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"execution sign-off: section vocabulary too thin"*) ;;
-    *) echo "SELFTEST_FAIL: RED did not name the sign-off"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: RED did not name the sign-off"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM design-only-signoff: RED: $(printf '%s\n' "$out" | grep 'execution sign-off')"
+  report_selftest_case "$report_case" PASS; report_case=
   # Arm 2b: "signed" and "sign-off" both pass.
   for f in signed signoff; do
-    if ! out=$(run "plans/$f.md" "$d/root" 2>&1); then
+    report_case="signoff-word-$f"
+    if ! run "plans/$f.md" "$d/root"; then
       echo "SELFTEST_FAIL: sign-off wording in $f.md was refused"
       printf '%s\n' "$out"
-      exit 1
+      selftest_assertion_failed
     fi
     echo "ARM signoff-word-$f: $out"
+    report_selftest_case "$report_case" PASS; report_case=
   done
 
   # Arm 3: a missing section is RED and names it.
-  if out=$(run plans/noreview.md "$d/root" 2>&1); then
+  report_case='missing-section'
+  if run plans/noreview.md "$d/root"; then
     echo "SELFTEST_FAIL: packet without the REVIEW section was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"independent review: marker <!-- CHECK: REVIEW --> not found"*) ;;
-    *) echo "SELFTEST_FAIL: missing-section RED did not name REVIEW"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: missing-section RED did not name REVIEW"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM missing-section: RED: $(printf '%s\n' "$out" | grep 'independent review')"
+  report_selftest_case "$report_case" PASS; report_case=
 
   # Arm 4: an empty scan set is RED, not a vacuous READY.
   printf '# notes\nno markers here\n' > "$d/root/noscan/notes.md"
-  if out=$(run noscan "$d/root" 2>&1); then
+  report_case=empty-scan-set
+  if run noscan "$d/root"; then
     echo "SELFTEST_FAIL: empty scan set was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"empty scan set"*"$d/root/noscan"*) ;;
-    *) echo "SELFTEST_FAIL: empty-scan RED did not say so"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: empty-scan RED did not say so"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM empty-scan-set: RED: $out"
+  report_selftest_case "$report_case" PASS; report_case=
   # Arm 4b: a non-empty scan set with one bad packet is RED and names it.
-  if out=$(run plans "$d/root" 2>&1); then
+  report_case=scan-set-names-bad-packet
+  if run plans "$d/root"; then
     echo "SELFTEST_FAIL: scan set containing bad packets was accepted"
     printf '%s\n' "$out"
-    exit 1
+    selftest_assertion_failed
   fi
   case "$out" in
     *"NOT READY: $d/root/plans/design.md"*"4 packet(s) scanned"*) ;;
-    *) echo "SELFTEST_FAIL: scan-set RED did not name design.md over 4 packets"; printf '%s\n' "$out"; exit 1 ;;
+    *) echo "SELFTEST_FAIL: scan-set RED did not name design.md over 4 packets"; printf '%s\n' "$out"; selftest_assertion_failed ;;
   esac
   echo "ARM scan-set-names-bad-packet: $(printf '%s\n' "$out" | grep 'packet(s) scanned')"
+  report_selftest_case "$report_case" PASS; report_case=
 
   echo "SELFTEST_PASS: relative path uses root not cwd, design-only sign-off refused, signed and sign-off passed, missing section refused, empty scan set refused"
+  if selftest_reportable; then finish_case_report; fi
   exit 0
 }
 

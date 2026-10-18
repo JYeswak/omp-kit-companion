@@ -224,6 +224,16 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
   else
     set -- BUN_BE_BUN=1 "$executable" "$script" "$@"
   fi
+  if [ "$script" = "$ROOT/scripts/ttsr-harness.ts" ] && \
+    { [ "${OMP_KIT_TEST_CASE_REPORT+x}" = x ] || [ "${OMP_KIT_TEST_CASE_SCOPE+x}" = x ]; }; then
+    case "${OMP_KIT_TEST_CASE_SCOPE:-}" in
+      harness-gate|harness-selftest|cli-crosscheck|metamorphic-ratchet) ;;
+      *) die "invalid native harness case-report scope" ;;
+    esac
+    [ "${OMP_KIT_TEST_CASE_REPORT:-}" = "$sandbox_real/case-reports/$OMP_KIT_TEST_CASE_SCOPE.jsonl" ] || \
+      die "native case report escaped its owned sandbox"
+    set -- "OMP_KIT_TEST_CASE_REPORT=$OMP_KIT_TEST_CASE_REPORT" "OMP_KIT_TEST_CASE_SCOPE=$OMP_KIT_TEST_CASE_SCOPE" "$@"
+  fi
   exec /usr/bin/env -i \
     PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \

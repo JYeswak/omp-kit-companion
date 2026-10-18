@@ -27,7 +27,7 @@ const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/bu
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
-	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
+	"scripts/ladder.sh", "scripts/test-case-report.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
@@ -170,6 +170,16 @@ function argumentsOf(args: string[]) {
 	if (!isAbsolute(out) || resolve(out) !== out || !lstatSync(out).isDirectory() || lstatSync(out).isSymbolicLink()) fail("UNSAFE_OUTPUT_DIRECTORY");
 	return { version, key, out };
 }
+/** Packaging always regenerates from the actual rule inputs; a stale source MANIFEST.tsv is never an input. */
+export function packageRuleManifest(sourceRoot: string, temporaryRoot: string): Buffer {
+ const built = Bun.spawnSync(["/bin/sh", join(sourceRoot, "scripts/build-manifest.sh"), "--stdout"], {
+  cwd: sourceRoot, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: process.env.TMPDIR ?? temporaryRoot },
+ });
+ if (built.exitCode !== 0) fail(`MANIFEST_GENERATION_FAILED (${built.exitCode}): ${built.stdout.toString()} ${built.stderr.toString()}`);
+ if (built.stdout.length === 0) fail("EMPTY_GENERATED_MANIFEST");
+ return built.stdout;
+}
+
 async function run(): Promise<void> {
 	const { version, key, out } = argumentsOf(process.argv.slice(2));
 	const sourcePackage = safeSource("package.json");
@@ -181,12 +191,7 @@ async function run(): Promise<void> {
 	}
 	const directory = mkdtempSync(join(out, "kit-package-"));
 	try {
-		const manifestBuild = Bun.spawnSync(["/bin/sh", join(root, "scripts/build-manifest.sh"), "--stdout"], {
-			cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: process.env.TMPDIR ?? out },
-		});
-		if (manifestBuild.exitCode !== 0) fail(`MANIFEST_GENERATION_FAILED (${manifestBuild.exitCode}): ${manifestBuild.stdout.toString()} ${manifestBuild.stderr.toString()}`);
-		const ruleManifest = manifestBuild.stdout;
-		if (ruleManifest.length === 0) fail("EMPTY_GENERATED_MANIFEST");
+		const ruleManifest = packageRuleManifest(root, out);
 		const binary = join(directory, RELEASE_BINARY_NAME);
 		mkdirSync(dirname(binary), { recursive: true, mode: 0o700 });
 		const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
@@ -218,7 +223,7 @@ async function run(): Promise<void> {
 		const source_revision = finalSourcePackage.equals(sourcePackage)
 			? packageSourceRevision(root, finalSourcePackage, initialSourceRevision) : null;
 		content.set("package.json", stampPackageVersion(sourcePackage, version, source_revision));
-		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`, source_revision,
+		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);
 		validateReleaseManifest(JSON.parse(manifest.toString("utf8")));
 		content.set(RELEASE_MANIFEST_NAME, manifest);

@@ -8,6 +8,7 @@ import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } f
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
 import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
+import { summarizeTestCaseReports, type NativeTestCaseCounts } from "./test-case-report.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
@@ -17,7 +18,7 @@ export type FullStage = {
 };
 export type FullTestProducerArtifacts = { directory: string; stdout_path: string; stderr_path: string };
 export type FullTestProducer = { producer_rc: number | null; stdout: string; stderr: string; artifacts: FullTestProducerArtifacts | null; artifact_error: string | null; result_ref: FullTestResultReference };
-export type FullTestCounts = { protocol: "BUN_TEST"; unit: "TEST_CASE"; pass: number; fail: number; skip: number; total: number };
+export type FullTestCounts = NativeTestCaseCounts | { protocol: "BUN_TEST"; unit: "TEST_CASE"; pass: number; fail: number; skip: number; total: number };
 export type FullTestCitation =
  | { kind: "git"; stream: "stdout" | "stderr"; repository: string; commit: string; path: string; bytes: number; sha256: string; bead?: string }
  | { kind: "agent-mail"; stream: "stdout" | "stderr"; project_key: string; message_id: number; attachment: string; bytes: number; sha256: string };
@@ -30,6 +31,7 @@ export type FullTestResultReference = {
  argv: string[] | null; argv_sha256: string | null; argv_sha256_representation: "CANONICAL_JSON_ORIGINAL_ARGV"; argv_representation: "PRIVACY_REDACTED"; cwd: string | null;
  execution: "NOT_OBSERVED" | "EXIT_NOT_OBSERVED" | "EXITED" | "INTERRUPTED"; producer_exit: number | null; runner_exit: number | null; signal: string | null;
  counts: FullTestCounts | null; failing_names: string[] | null;
+ case_report_error: string | null;
  stdout: FullTestStreamReference | null; stderr: FullTestStreamReference | null;
  capture_complete: boolean; missing_fields: string[];
  retention: { status: "UNRETAINED" | "CITED_UNVERIFIED"; durable: false; citations: FullTestCitation[]; errors: string[] };
@@ -279,7 +281,12 @@ export function describeFullTestProducer(result: BundledRunResult | null, option
   };
  };
  const streams = { stdout: stream("stdout", result?.stdout ?? "", stdout), stderr: stream("stderr", result?.stderr ?? "", stderr) };
- const summary = result ? fullTestCounts(result.stdout, result.stderr, argv) : { counts: null, failing_names: null };
+ const nativeSummary = result?.case_reports
+  ? argv?.[0] === "/bin/sh" && argv[1]?.endsWith("/scripts/ladder.sh")
+   ? summarizeTestCaseReports(result.case_reports)
+   : { counts: null, failing_names: null, error: "Case producer invocation was not observed" }
+  : null;
+ const summary = nativeSummary ?? (result ? fullTestCounts(result.stdout, result.stderr, argv) : { counts: null, failing_names: null });
  const retention = fullTestCitations(options.references, streams, redact);
  const missing: string[] = [];
  const source = referenceRevision(options.source_revision) ? options.source_revision : null;
@@ -309,14 +316,24 @@ export function describeFullTestProducer(result: BundledRunResult | null, option
     : producerExit !== null || signal !== null ? "EXITED" : "EXIT_NOT_OBSERVED",
    producer_exit: producerExit, runner_exit: result?.code ?? null, signal,
    counts: summary.counts, failing_names: summary.failing_names?.map(redact) ?? null, ...streams,
+   case_report_error: nativeSummary?.error ? redact(nativeSummary.error) : null,
    capture_complete: missing.length === 0, missing_fields: missing, retention,
   },
  };
 }
 
 function fullTestSourceRevision(root: string): string | null {
- try { return validateReleaseManifest(JSON.parse(readFileSync(join(root, RELEASE_MANIFEST_NAME), "utf8"))).source_revision ?? null; }
- catch { return null; }
+ try {
+  const manifest = validateReleaseManifest(JSON.parse(readFileSync(join(root, RELEASE_MANIFEST_NAME), "utf8")));
+  const entry = manifest.files.find(file => file.path === "package.json");
+  if (!entry) return null;
+  const path = join(root, "package.json"), info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink()) return null;
+  const bytes = readFileSync(path);
+  if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) return null;
+  const metadata: unknown = JSON.parse(bytes.toString("utf8"));
+  return referenceRecord(metadata) && referenceRevision(metadata.source_revision) ? metadata.source_revision : null;
+ } catch { return null; }
 }
 
 type Snapshot = { digest: string | null; complete: boolean };

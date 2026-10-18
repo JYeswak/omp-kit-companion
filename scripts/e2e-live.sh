@@ -35,6 +35,14 @@ case "${1:-}" in
 esac
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# Reporting is optional for standalone copies; never synthesize complete records.
+report_test_case() { :; }
+start_case_report() { :; }
+finish_case_report() { :; }
+if [ -f "$HERE/scripts/test-case-report.sh" ]; then
+  . "$HERE/scripts/test-case-report.sh"
+fi
+start_case_report
 LIB="$HERE/tests/live/lib.mjs"
 MOCK="$HERE/tests/live/mock-model.mjs"
 TIMEOUT="${TIMEOUT:-120}"
@@ -320,8 +328,10 @@ for i in $scenario_ids; do
   fi
   if [ "$verdict" = ok ]; then
     pass=$((pass+1)); echo "ok    $name"
+    if [ "$MODE" = full ]; then report_test_case "$name" PASS; fi
   else
     fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $LOG)"
+    if [ "$MODE" = full ]; then report_test_case "$name" FAIL; fi
   fi
 done
 ISOLATION_AFTER="$T/isolation-after.txt"
@@ -330,6 +340,9 @@ if ! cmp -s "$ISOLATION_BEFORE" "$ISOLATION_AFTER"; then
   echo "launchd isolation broken: com.omp-kit.omp-watch changed during the suite" >&2
   diff "$ISOLATION_BEFORE" "$ISOLATION_AFTER" >&2 || true
   fail=$((fail+1))
+  report_test_case launchd-isolation FAIL
+else
+  report_test_case launchd-isolation PASS
 fi
 if [ "$selected" -eq 0 ]; then
   KEEP_WORK=1
@@ -347,6 +360,9 @@ done
 if [ -n "$DEFIANT_MOCK_SCENARIOS" ] || [ -n "$mock_leaked" ]; then
   echo "leaked mock servers: defiant scenarios:$DEFIANT_MOCK_SCENARIOS still-alive:$mock_leaked" >&2
   fail=$((fail+1))
+  report_test_case mock-server-cleanup FAIL
+else
+  report_test_case mock-server-cleanup PASS
 fi
 echo "e2e-live ($MODE): $pass passed, $fail failed"
 plant_caught=0
@@ -364,9 +380,14 @@ if [ "$MODE" = plant ]; then
   # The plant is caught only if the evidenced close went RED and named this rule.
   if [ "$plant_caught" -eq 1 ]; then
     echo "plant RED as required: baseline kit-close-needs-evidence fires on the streamed prefix of an evidenced close"
+    report_test_case planted-control-kit-close-needs-evidence PASS
+    finish_case_report
     exit 0
   fi
   echo "plant NOT caught: the suite passed a baseline rule that fires on an evidenced close"
+  report_test_case planted-control-kit-close-needs-evidence FAIL
+  finish_case_report
   exit 1
 fi
+finish_case_report
 [ "$fail" -eq 0 ]
