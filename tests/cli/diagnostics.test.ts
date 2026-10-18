@@ -1332,9 +1332,13 @@ test("RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a nati
 	const stateHome = join(f.base, "caller-state");
 	const runtime = join(f.base, "caller-runtime");
 	const privateTmp = join(f.base, "private-tmp");
-	const ownedWork = join(f.project, "var", "agent-tmp", "rch-probe");
+	// The work root must be canonical (runtime.ts callerScratchRoot refuses a symlinked
+	// root). tmpdir() is /var/folders/... on a stock Mac, a symlink to /private/var, and
+	// a refused root makes the probe report rch unavailable, which drops the row.
+	const project = realpathSync(f.project);
+	const ownedWork = join(project, "var", "agent-tmp", "rch-probe");
 	mkdirSync(ownedWork, { recursive: true });
-	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${f.project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	for (const path of [bin, cacheHome, dataHome, stateHome, runtime, privateTmp, join(configHome, "rch")]) mkdirSync(path, { recursive: true });
 	const selected = join(runtime, "selected.sock");
 	writeFileSync(join(configHome, "rch", "config.toml"), `[general]\nsocket_path = ${JSON.stringify(selected)}\n`);
@@ -1359,14 +1363,14 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 	const before = snapshotWatched(watched);
 	expect(before.incomplete).toEqual([]);
 	const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "doctor", "--json"], {
-		cwd: f.project,
+		cwd: project,
 		env: {
 			PATH: `${bin}${delimiter}${dirname(f.ompPath)}${delimiter}/usr/bin:/bin`,
 			HOME: f.home, TMPDIR: privateTmp, BUN_INSTALL: f.bunRoot,
 			XDG_CONFIG_HOME: configHome, XDG_CACHE_HOME: cacheHome, XDG_DATA_HOME: dataHome,
 			XDG_STATE_HOME: stateHome, XDG_RUNTIME_DIR: runtime,
 			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(privateTmp, "bun-transpiler"),
-			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: f.project,
+			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: project,
 			OMP_KIT_OMP_SRC_FETCH: "0",
 		},
 		stdout: "pipe", stderr: "pipe", timeout: 10_000,
@@ -1382,9 +1386,11 @@ test("RCHRO1: unavailable probe leaves nested caller-HOME temp metadata untouche
 	const f = fixture();
 	const callerTmp = join(f.home, "tmp");
 	const emptyBin = join(f.base, "empty-bin");
-	const ownedWork = join(f.project, "var", "agent-tmp", "rch-probe");
+	// Canonical, as above: a refused symlinked work root would return before the probe runs.
+	const project = realpathSync(f.project);
+	const ownedWork = join(project, "var", "agent-tmp", "rch-probe");
 	for (const path of [callerTmp, emptyBin, ownedWork]) mkdirSync(path, { recursive: true });
-	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${f.project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	const script = `
 import { lstatSync } from "node:fs";
 import { defaultRchReachability } from ${JSON.stringify(join(import.meta.dir, "../../src/diagnostics.ts"))};
@@ -1398,11 +1404,11 @@ console.log(JSON.stringify({
 }));
 `;
 	const run = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], {
-		cwd: f.project,
+		cwd: project,
 		env: {
 			PATH: emptyBin, HOME: f.home, TMPDIR: callerTmp, TMP: callerTmp, TEMP: callerTmp,
 			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(f.base, "bun-transpiler"),
-			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: f.project,
+			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: project,
 		},
 		stdout: "pipe", stderr: "pipe", timeout: 5_000,
 	});
