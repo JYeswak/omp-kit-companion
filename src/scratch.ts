@@ -594,7 +594,7 @@ export function quarantineTimeOf(entryName: string): number | null {
 	return Number.isFinite(time) ? time : null;
 }
 
-function quarantineTtlMs(): number {
+export function quarantineTtlMs(): number {
 	const configPath = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "omp-kit", "scratch-reaper.json");
 	let raw: string;
 	try {
