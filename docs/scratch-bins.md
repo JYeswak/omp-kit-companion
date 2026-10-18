@@ -48,6 +48,20 @@ The release is the owner's act: the caller must be the owner (its process, a chi
 
 A release without `--bin` still works and is counted as unbinned.
 
+## A reap is a gap report
+
+`omp-kit scratch apply` (and the scheduled scratch-reaper) is the emergency path. Every dir it reaps or quarantines that its owner did not bin becomes one row, returned as `gapReport` and written to the reap log as a `gap` event:
+
+| Field | Meaning |
+|---|---|
+| `agent`, `session`, `label` | Who made the dir and what it was called (the name before quarantine). |
+| `role` | `chief` when the agent is the chief seat in the fleet-watch seat map; otherwise `UNKNOWN`. Never guessed from the name. |
+| `bin` | The bin the owner record named, or `unbinned`. |
+| `class` | `never-released` (a seat owner died without releasing), `pid-keyed-owner-never-released` (no agent or session in the owner record), `released-unbinned` (released without `--bin`), `unowned`, `mismatched-owner`. |
+| `guard` | The bead whose guard should stop that class, or `NO GUARD: file one` when none exists. |
+
+A dir the owner released into a bin is not a gap. The report also counts gaps per agent and per class, so the next reap names what to fix first.
+
 ## Scope of what exists today
 
-The owner keys, the hold rule and `scratch release --bin/--ref` are in. The reap gap report, the flag at the disposal points (the holder's close or `in_review`, and session end) and the measurement row are the remaining parts of ompkit-774u.15.
+The owner keys, the hold rule, `scratch release --bin/--ref` and the reap gap report are in. The flag at the disposal points (the holder's close or `in_review`, and session end) and the measurement row are the remaining parts of ompkit-774u.15; the `scratch apply` CLI output does not yet print the report (it is in the library result and the reap log).

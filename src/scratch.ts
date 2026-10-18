@@ -1779,11 +1779,84 @@ export interface ScratchRunReceipt {
 	refused_gb: number;
 }
 
+export type ScratchGapClass = "never-released" | "pid-keyed-owner-never-released" | "released-unbinned" | "unowned" | "mismatched-owner";
+
+/** One reclaimed dir that its owner failed to bin, with the seat that left it and the guard that should have stopped it (ompkit-774u.15 D). */
+export interface ScratchGap { dir: string; label: string; agent: string | null; session: string | null; role: string; bin: ScratchBin | "unbinned";
+	class: ScratchGapClass; reason: string; action: "REAP" | "QUARANTINE"; bytes: number; age_s: number | null; guard: string }
+
+export interface ScratchGapReport { rows: ScratchGap[]; by_agent: Record<string, number>; by_class: Record<string, { count: number; bytes: number; guard: string }> }
+
 export interface ScratchApplyResult extends ScratchPlan {
 	applied: ScratchVerdict[];
 	killed: { pid: number; command: string; ok: boolean }[];
 	expired: ScratchVerdict[];
 	receipt: ScratchRunReceipt;
+	gapReport: ScratchGapReport;
+}
+
+const NO_GUARD = "NO GUARD: file one";
+/** The bead whose guard stops each class; null when no guard exists yet, which the report says in words. */
+const GAP_GUARDS: Record<ScratchGapClass, string | null> = {
+	"never-released": "ompkit-774u.15",
+	"pid-keyed-owner-never-released": "ompkit-774u.9.3",
+	"released-unbinned": "ompkit-774u.15",
+	unowned: null,
+	"mismatched-owner": null,
+};
+
+/** The chief seat's agent name from the fleet-watch seat map; null when the map is absent or names none. */
+function chiefAgent(home: string): string | null {
+	try {
+		const config: unknown = JSON.parse(readFileSync(fleetWatchConfigPath(home), "utf8"));
+		if (typeof config !== "object" || config === null || !("chief" in config)) return null;
+		const chief = config.chief;
+		if (typeof chief !== "object" || chief === null || !("agent" in chief)) return null;
+		return typeof chief.agent === "string" && AGENT_PATTERN.test(chief.agent) ? chief.agent : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * What each reclaimed dir says about the systems that let it die unbinned. A dir the owner released into a bin is not a
+ * gap. Role comes from the seat map (the chief seat) and is UNKNOWN otherwise; it is never guessed.
+ */
+export function scratchGapReport(applied: readonly ScratchVerdict[], now: number, home: string): ScratchGapReport {
+	const chief = chiefAgent(home);
+	const rows: ScratchGap[] = [];
+	for (const verdict of applied) {
+		if (verdict.action !== "REAP" && verdict.action !== "QUARANTINE") continue;
+		const owner = verdict.owner;
+		let cls: ScratchGapClass;
+		let bin: ScratchBin | "unbinned" = owner?.bin ?? "unbinned";
+		if (verdict.reason.startsWith("owner-released")) {
+			if (readReleaseRecord(verdict.dir)?.bin) continue;
+			bin = "unbinned";
+			cls = "released-unbinned";
+		} else if (verdict.action === "REAP") {
+			cls = owner === null ? "unowned" : owner.agent === null ? "pid-keyed-owner-never-released" : "never-released";
+		} else {
+			cls = verdict.reason.includes("mismatched-owner") ? "mismatched-owner" : "unowned";
+		}
+		const created = owner === null ? Number.NaN : Date.parse(owner.createdAt);
+		const entry = basename(verdict.dir);
+		const original = quarantineTimeOf(entry) === null ? entry : entry.slice(0, entry.lastIndexOf(".q-"));
+		rows.push({ dir: verdict.dir, label: owner?.label ?? original, agent: owner?.agent ?? null, session: owner?.session ?? null,
+			role: owner?.agent != null && owner.agent === chief ? "chief" : "UNKNOWN", bin, class: cls, reason: verdict.reason,
+			action: verdict.action, bytes: verdict.sizeBytes, age_s: Number.isFinite(created) ? Math.max(0, Math.round((now - created) / 1000)) : null,
+			guard: GAP_GUARDS[cls] ?? NO_GUARD });
+	}
+	const by_agent: Record<string, number> = {};
+	const by_class: ScratchGapReport["by_class"] = {};
+	for (const row of rows) {
+		by_agent[row.agent ?? "UNKNOWN"] = (by_agent[row.agent ?? "UNKNOWN"] ?? 0) + 1;
+		const entry = by_class[row.class] ?? { count: 0, bytes: 0, guard: row.guard };
+		entry.count++;
+		entry.bytes += row.bytes;
+		by_class[row.class] = entry;
+	}
+	return { rows, by_agent, by_class };
 }
 
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
@@ -1889,6 +1962,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		refused_gb: refusedBytes / 1_000_000_000,
 	};
 	appendLog(home, { event: "run-receipt", dir: "", at: finishedAt, ...receipt });
+	const gapReport = scratchGapReport(applied, now, home);
+	for (const row of gapReport.rows) appendLog(home, { event: "gap", dir: row.dir, at: finishedAt, ...row });
 	return {
 		roots: allRoots,
 		sessions: planEcho,
@@ -1904,6 +1979,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		reapableBytes: reapedBytes,
 		quarantinableBytes: quarantinedBytes,
 		receipt,
+		gapReport,
 	};
 }
 
