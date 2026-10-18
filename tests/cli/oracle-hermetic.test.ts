@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { CASE_HEADER, parseCaseCorpus } from "../../src/case-corpus.ts";
 import { referenceAdmission } from "../../scripts/admission-reference.ts";
+import { check as productionAdmission } from "../../src/fleet-guard/durability.ts";
+import { fleetPolicyState } from "../../extensions/fleet-policy.ts";
 
 // fp72.58 ORACLEHERM1: the oracle must not depend on the checkout's location.
 // Rules and cases resolve against a synthetic root unless OMP_KIT_CASE_CWD
@@ -129,6 +131,55 @@ test("admission reference derives source identity from inputs, not an expected v
 	expect(referenceAdmission({ ...input, path: "var/agent-tmp/reference.1/run.sh", snippet: "#!/bin/sh" })).toBe(true);
 	expect(referenceAdmission({ ...input, path: "scripts/run.sh", snippet: "#!/bin/sh" })).toBe(false);
 	expect(() => referenceAdmission({ ...input, path: "local://unexamined/target" })).toThrow("ADMISSION_REFERENCE_UNSUPPORTED_PATH");
+});
+
+test("independent admission grammar preserves fixed directory and basename outcomes", async () => {
+	const base = scratchDir("oracle-reference-grammar");
+	const repo = join(base, "repo");
+	const session = `prompts.${process.pid}`;
+	const owned = join(repo, "var", "agent-tmp", session);
+	try {
+		mkdirSync(owned, { recursive: true, mode: 0o700 });
+		const env = cleanEnv();
+		for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+		env.GIT_CONFIG_NOSYSTEM = "1";
+		env.GIT_CONFIG_GLOBAL = "/dev/null";
+		const initialized = Bun.spawnSync(["git", "-C", repo, "init", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
+		if (initialized.exitCode !== 0) throw new Error(initialized.stderr.toString());
+		writeFileSync(join(owned, ".owner"), `pid=${process.pid}\nlabel=reference-grammar\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
+		mkdirSync(join(repo, ".omp"));
+		writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
+		expect((await fleetPolicyState(repo)).kind).toBe("on");
+		const specimens: Array<{ path: string; fire: boolean; reason?: string }> = [
+			{ path: "packet/job.json", fire: true, reason: "instruction or packet" },
+			{ path: "prompts/job.md", fire: true, reason: "instruction or packet" },
+			{ path: "rules/input.json", fire: false },
+			{ path: "rules/input.md", fire: true, reason: "instruction or packet" },
+			{ path: "rules/input.MD", fire: false },
+			{ path: "rules/nested/input.md", fire: false },
+			{ path: "data/job-prompted.json", fire: true, reason: "instruction or packet" },
+			{ path: "Packet-log/job.json", fire: true, reason: "instruction or packet" },
+			{ path: "skills/input.json", fire: true, reason: "instruction or packet" },
+			{ path: "data/job.bash", fire: false },
+			{ path: "data/job.SH", fire: true, reason: "rerunnable script" },
+			{ path: "data/input.json", fire: false },
+		];
+		for (const specimen of specimens) {
+			const target = join(owned, specimen.path);
+			mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
+			const input = { source: "tool", tool: "write", path: `var/agent-tmp/${session}/${specimen.path}`, snippet: "{}" };
+			const actual = await productionAdmission({ toolName: "write", input: { path: target, content: input.snippet } }, { cwd: repo });
+			if (specimen.fire) {
+				expect(actual?.block).toBe(true);
+				expect(actual?.reason).toContain(specimen.reason!);
+			} else {
+				expect(actual).toBeUndefined();
+			}
+			expect(referenceAdmission(input)).toBe(specimen.fire);
+		}
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
 });
 
 test("full differential oracle rejects falsified native-admission truth without dropping its rows", () => {

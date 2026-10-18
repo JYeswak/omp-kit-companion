@@ -23,13 +23,18 @@ export function referenceAdmission(input: {
 	const parts = posix.normalize(input.path).split("/");
 	const scratch = parts.findIndex((part, index) => part === "var" && parts[index + 1] === "agent-tmp");
 	if (scratch < 0) return false;
-	const target = parts.slice(scratch + 2).join("/");
-	const name = posix.basename(target).toLowerCase();
-	const words = name.replaceAll("-", ".").replaceAll("_", ".").split(".");
-	const instructionDirectory = parts.slice(scratch + 2).some(part => part === "skills" || part === "rules");
-	const instructionName = words.some(word => word === "prompt" || word === "prompts" || word === "packet" || word === "packets");
-	const shellArtifact = name.endsWith(".sh") || name.endsWith(".bash") || input.snippet.startsWith("#!");
-	if (instructionDirectory || instructionName || shellArtifact) return true;
+	// The first child names the owned session, not an instructional artifact.
+	const relativeParts = parts.slice(scratch + 3);
+	const target = relativeParts.join("/");
+	const name = posix.basename(target);
+	const instructionPath = relativeParts.some(segment => {
+		const word = segment.toLowerCase();
+		return word.indexOf("prompt") !== -1 || word.slice(0, 6) === "packet";
+	});
+	const skillArtifact = relativeParts.indexOf("skills") !== -1;
+	const ruleDocument = relativeParts[relativeParts.length - 2] === "rules" && name.slice(-3) === ".md";
+	const shellArtifact = name.toLowerCase().endsWith(".sh") || input.snippet.startsWith("#!");
+	if (instructionPath || skillArtifact || ruleDocument || shellArtifact) return true;
 	for (const [canonical, content] of Object.entries(input.reference?.tracked ?? {})) {
 		if (target === canonical || target.endsWith(`/${canonical}`) || input.snippet === content) return true;
 	}
