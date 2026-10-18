@@ -195,6 +195,16 @@ jobs:
           "$bin" --version
       - name: Generate ignored source manifest for CLI contracts
         run: sh scripts/build-manifest.sh
+      - name: Exercise real Git import and hook installer contracts
+        if: matrix.suite == 'core'
+        env:
+          TMPDIR: ${{ github.workspace }}/var/agent-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          sh tests/cli/commit-imports.test.sh
+          sh tests/cli/check-staged-imports.test.sh
+          sh tests/cli/install-commit-msg-bead.test.sh
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
         shell: bash
         run: |

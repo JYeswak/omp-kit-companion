@@ -69,3 +69,13 @@ a new reviewed declaration. A matching digest proves integrity, not the quality
 or authority of its review. Source support is not live activation; historical
 commits without a matching reviewed projection can still fail.
 
+## Regression execution
+
+The core CI matrix runs `tests/cli/commit-imports.test.sh`,
+`tests/cli/check-staged-imports.test.sh` and
+`tests/cli/install-commit-msg-bead.test.sh` with real isolated Git repositories.
+It uses the existing host TypeScript 5.9.3 installation and fails on the first
+refusing suite. These shell suites execute separately from Bun's TypeScript test
+discovery; a focused publication stage selecting no suites is not their proof.
+Local execution of the workflow's run body is not a hosted-run result.
+
