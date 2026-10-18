@@ -14,6 +14,15 @@ const trustedPath = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 
 function privateTempRoot() {
+	if (process.env.OMP_KIT_TEST_WORK_ROOT !== undefined) {
+		const result = Bun.spawnSync(["/bin/sh", join(dirname(fileURLToPath(import.meta.url)), "runtime-adapter.sh"), "--validate-work-root"], {
+			stdout: "pipe", stderr: "pipe", timeout: 5_000,
+			env: { PATH: trustedPath, OMP_KIT_TEST_WORK_ROOT: process.env.OMP_KIT_TEST_WORK_ROOT,
+				OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD ?? "" },
+		});
+		if (result.exitCode !== 0) fail("INVALID_PRIVATE_WORKSPACE");
+		return realpathSync(result.stdout.toString().trim());
+	}
 	if (process.platform === "darwin") {
 		const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], {
 			stdout: "pipe", stderr: "pipe", env: { PATH: trustedPath },
@@ -66,7 +75,8 @@ function safeEnv(workspace) {
 		XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? "", XDG_CACHE_HOME: process.env.XDG_CACHE_HOME ?? "",
 		XDG_DATA_HOME: process.env.XDG_DATA_HOME ?? "", XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? "",
 		BUN_INSTALL: process.env.BUN_INSTALL ?? "", OMP: process.env.OMP ?? "", OMP_BIN: process.env.OMP_BIN ?? "",
-		OMP_PATH: process.env.OMP_PATH ?? "", OMP_SRC: process.env.OMP_SRC ?? "", OMP_KIT_WORK_DIR: workspace };
+		OMP_PATH: process.env.OMP_PATH ?? "", OMP_SRC: process.env.OMP_SRC ?? "", OMP_KIT_WORK_DIR: workspace,
+		OMP_KIT_TEST_WORK_ROOT: process.env.OMP_KIT_TEST_WORK_ROOT ?? "", OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD ?? "" };
 	return Object.fromEntries(Object.entries(env).filter(([, value]) => value !== ""));
 }
 function runHelper(root, lib, args, workspace) {

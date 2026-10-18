@@ -145,6 +145,42 @@ test("custom G4 is data-only, selected G1-G3 gated once, and proves native marke
 	expect(existsSync(fixturePath)).toBe(true);
 }, 120_000);
 
+test("external live refuses unowned, escaped, aliased and nonprivate caller workspaces", () => {
+	const caller = join(scratch, "caller-admission");
+	const owned = join(caller, "var", "agent-tmp", "owned");
+	const workspace = join(owned, "workspace");
+	const home = join(scratch, "refusal-home");
+	const tmp = join(scratch, "refusal-tmp");
+	for (const directory of [workspace, home, tmp]) mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const refuse = (workRoot = owned, target = workspace) => {
+		const result = Bun.spawnSync([stableExecutable, join(releaseRoot, "scripts", "external-live.mjs"), target], {
+			cwd: releaseRoot,
+			env: { BUN_BE_BUN: "1", PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp,
+				OMP_KIT_TEST_WORK_ROOT: workRoot, OMP_KIT_CASE_CWD: caller },
+			stdout: "pipe", stderr: "pipe", timeout: 10_000,
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.toString()).toBe("INVALID_PRIVATE_WORKSPACE\n");
+	};
+	refuse();
+	const marker = join(owned, ".owner");
+	writeFileSync(marker, `pid=${process.pid}\nlabel=external-live-refusal\nrepo=${caller}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const outside = join(scratch, "outside-workspace");
+	mkdirSync(outside, { mode: 0o700 });
+	refuse(owned, outside);
+	const rootAlias = join(caller, "var", "agent-tmp", "root-alias");
+	symlinkSync(owned, rootAlias);
+	refuse(rootAlias);
+	const workspaceAlias = join(owned, "workspace-alias");
+	symlinkSync(workspace, workspaceAlias);
+	refuse(owned, workspaceAlias);
+	chmodSync(workspace, 0o755);
+	refuse();
+	chmodSync(workspace, 0o700);
+	writeFileSync(marker, `pid=${process.pid}\nlabel=external-live-refusal\nrepo=${scratch}\ncreated=${new Date().toISOString()}\n`);
+	refuse();
+});
+
 test("rejects executable and path-bearing fixture fields before any external pack or live stage", async () => {
 	for (const key of ["command", "shell", "extension", "project", "provider", "env", "tool", "path", "code"]) {
 		const hostile = structuredClone(fixture) as Record<string, unknown>;
