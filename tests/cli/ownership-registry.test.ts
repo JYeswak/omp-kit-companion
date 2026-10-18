@@ -89,3 +89,14 @@ test("files that only name a pid, or only write, are not pid-keyed writers; test
 	const root = fixtureRepo({ "src/claim.test.ts": PID_WRITER, "src/reader.ts": "export const own = process.pid;\n" });
 	expect(lintOwnership({ root, entries: [] })).toEqual([]);
 });
+
+test("in a git repository only tracked files are linted, so a working tree and an exact export agree", () => {
+	const root = fixtureRepo({ "src/claim.ts": PID_WRITER });
+	const git = (...args: string[]) => Bun.spawnSync(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
+	expect(git("init", "-q").exitCode).toBe(0);
+	expect(lintOwnership({ root, entries: [] })).toEqual([]);
+	expect(lintOwnership({ root, entries: [entryFor({})] }).map((violation) => violation.code)).toEqual(["WRITER_MISSING"]);
+	expect(git("add", "src/claim.ts").exitCode).toBe(0);
+	expect(lintOwnership({ root, entries: [] }).map((violation) => violation.code)).toEqual(["UNREGISTERED_PID_WRITER"]);
+	expect(lintOwnership({ root, entries: [entryFor({})] })).toEqual([]);
+});

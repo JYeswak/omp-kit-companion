@@ -3,6 +3,7 @@
 // Heuristic by design: a source file that reads its own pid (the process id and parent process id properties) AND calls
 // a file-writing function is a pid-keyed writer candidate. It catches a NEW writer file; it does not read what an
 // already registered file writes.
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { OWNERSHIP_REGISTRY, type OwnershipEntry } from "./ownership-registry.ts";
@@ -42,6 +43,16 @@ export function persistsPid(text: string): boolean {
 	return PID_TOKENS.some(token => text.includes(token)) && WRITE_TOKENS.some(token => text.includes(token));
 }
 
+/**
+ * Files git tracks under `root`, so a working tree with an untracked scratch file and an exact export of a commit
+ * lint the same way. Null when `root` is not a git repository (an export, a fixture): then every file counts.
+ */
+function trackedFiles(root: string): Set<string> | null {
+	if (!existsSync(join(root, ".git"))) return null;
+	const listed = spawnSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+	return listed.status === 0 ? new Set(listed.stdout.split("\0").filter(name => name !== "")) : null;
+}
+
 export interface OwnershipLintInput {
 	/** Repository root the registry's repo-relative writer paths are resolved against. */
 	root: string;
@@ -54,6 +65,7 @@ export interface OwnershipLintInput {
 export function lintOwnership(input: OwnershipLintInput): OwnershipLintViolation[] {
 	const entries = input.entries ?? OWNERSHIP_REGISTRY;
 	const violations: OwnershipLintViolation[] = [];
+	const tracked = trackedFiles(input.root);
 	const ids = new Set<string>();
 	for (const entry of entries) {
 		if (ids.has(entry.id)) violations.push({ code: "DUPLICATE_ENTRY", entry: entry.id, message: `registry entry id ${entry.id} appears twice` });
@@ -64,13 +76,15 @@ export function lintOwnership(input: OwnershipLintInput): OwnershipLintViolation
 			violations.push({ code: "CENSUS_SHAPE", entry: entry.id, message: `${entry.id} must name either a census or the reason it has none` });
 		for (const writer of entry.writers) {
 			if (writer.startsWith("external:")) continue;
-			if (!existsSync(join(input.root, writer))) violations.push({ code: "WRITER_MISSING", entry: entry.id, file: writer, message: `${entry.id} names writer ${writer}, which does not exist` });
+			if (!existsSync(join(input.root, writer)) || (tracked !== null && !tracked.has(writer)))
+				violations.push({ code: "WRITER_MISSING", entry: entry.id, file: writer, message: `${entry.id} names writer ${writer}, which does not exist${tracked === null ? "" : " in the repository"}` });
 		}
 	}
 	const registered = new Set(entries.flatMap(entry => entry.writers));
 	for (const dir of input.scanDirs ?? DEFAULT_SCAN_DIRS) {
 		for (const path of sourceFiles(join(input.root, dir))) {
 			const file = relative(input.root, path);
+			if (tracked !== null && !tracked.has(file)) continue;
 			let text: string;
 			try {
 				text = readFileSync(path, "utf8");
