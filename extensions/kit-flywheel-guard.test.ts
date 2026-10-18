@@ -641,3 +641,56 @@ test("trackerRequests: wrapped close and claim keep the caller's inline identity
 	expect(close?.identities).toContain("RedOwl");
 	expect(close?.actor).toBe("RedOwl");
 });
+
+// --- BLOCK_RELEASE_REQUIRED (ompkit-fp72.131 AC4) -------------------------------
+
+interface ReleaseFixture {
+	dependents?: Array<{ id: string; status: string; dependency_type: string }>;
+	edges?: Record<string, Array<{ type: string; depends_on_id: string; status: string }>>;
+}
+
+function releaseResponder(fixture: ReleaseFixture): Responder {
+	return call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.args[0] === "show") {
+			return { stdout: JSON.stringify([{ id: "kit-x", status: "in_progress", assignee: null, dependents: fixture.dependents ?? [] }]), stderr: "", code: 0 };
+		}
+		if (call.args[0] === "dep") return { stdout: JSON.stringify((fixture.edges ?? {})[call.args[2] ?? ""] ?? []), stderr: "", code: 0 };
+		return { stdout: "[]", stderr: "", code: 0 };
+	};
+}
+
+async function closeCall(fixture: ReleaseFixture, command: string): Promise<FlywheelToolCallResult | undefined> {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { respond: releaseResponder(fixture) });
+	return toolCall(h, project, command);
+}
+
+const ONLY_X = { edges: { "kit-d1": [{ type: "blocks", depends_on_id: "kit-x", status: "open" }] } };
+const D1_BLOCKED = [{ id: "kit-d1", status: "blocked", dependency_type: "blocks" }];
+
+test("BLOCK_RELEASE_REQUIRED: closing the only open blocker of a blocked bead is refused until it is released", async () => {
+	const refused = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, "br close kit-x --reason done");
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("BLOCK_RELEASE_REQUIRED");
+	expect(refused?.reason).toContain("kit-d1");
+	const released = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, "br update kit-d1 --status open && br close kit-x --reason done");
+	expect(released?.block).toBeUndefined();
+	expect((await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, `sh -c "br close kit-x"`))?.block).toBe(true);
+});
+
+test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a non-blocks edge allow the close", async () => {
+	const other = { dependents: D1_BLOCKED, edges: { "kit-d1": [
+		{ type: "blocks", depends_on_id: "kit-x", status: "open" },
+		{ type: "blocks", depends_on_id: "kit-y", status: "open" },
+	] } };
+	expect((await closeCall(other, "br close kit-x"))?.block).toBeUndefined();
+	const closedOther = { dependents: D1_BLOCKED, edges: { "kit-d1": [
+		{ type: "blocks", depends_on_id: "kit-x", status: "open" },
+		{ type: "blocks", depends_on_id: "kit-y", status: "closed" },
+	] } };
+	expect((await closeCall(closedOther, "br close kit-x"))?.block).toBe(true);
+	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "open", dependency_type: "blocks" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
+	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "blocked", dependency_type: "parent-child" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
+	expect((await closeCall({}, "br close kit-x"))?.block).toBeUndefined();
+});

@@ -538,7 +538,7 @@ export interface TrackerRequest {
 	db?: string;
 	/** Identities this command line itself claims (flags and inline env assignments). */
 	identities: string[];
-	operation: "close" | "claim" | "start" | "block";
+	operation: "close" | "claim" | "start" | "block" | "release";
 	/** Labels this command adds or sets (comma-split). */
 	addLabels: string[];
 	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
@@ -648,7 +648,8 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		const operation = subcommand === "close" ? "close"
 			: subcommand === "update" && nativeStatus === "blocked" ? "block"
 				: subcommand === "update" && claim ? "claim"
-					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start" : null;
+					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start"
+						: subcommand === "update" && nativeStatus === "open" ? "release" : null;
 		if (operation === null) continue;
 		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force, addLabels });
 	}
@@ -937,6 +938,41 @@ async function checkBlockedHasFix(request: TrackerRequest, deps: TrackerMutation
 	return undefined;
 }
 
+export const BLOCK_RELEASE_REQUIRED = "BLOCK_RELEASE_REQUIRED";
+const MAX_DEPENDENTS_CHECKED = 20;
+
+/**
+ * BLOCKEDADMIT1 AC4: closing a bead must not strand a blocked bead whose only open blocker it was. The same command
+ * must release that bead (`br update <id> --status open`) or the bead must keep another open blocks edge. Unreadable
+ * dependents are skipped (the close itself was already checked); at most MAX_DEPENDENTS_CHECKED are read.
+ */
+async function checkCloseOrphansDependents(request: TrackerRequest, id: string, released: ReadonlySet<string>, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	const shown = await execJson(deps.exec, request, ["show", id, "--json"]);
+	if (!shown.ok) return undefined;
+	const bead = Array.isArray(shown.value) ? shown.value[0] : shown.value;
+	const dependents = field(bead, "dependents");
+	if (!Array.isArray(dependents)) return undefined;
+	const waiting = dependents
+		.filter(row => field(row, "dependency_type") === "blocks" && field(row, "status") === "blocked")
+		.map(row => field(row, "id"))
+		.filter((dependent): dependent is string => typeof dependent === "string" && !released.has(dependent))
+		.slice(0, MAX_DEPENDENTS_CHECKED);
+	const orphaned: string[] = [];
+	for (const dependent of waiting) {
+		const edges = await execJson(deps.exec, request, ["dep", "list", dependent, "--json"]);
+		if (!edges.ok || !Array.isArray(edges.value)) continue;
+		const stillBlocked = edges.value.some(row => field(row, "type") === "blocks" && field(row, "depends_on_id") !== id
+			&& typeof field(row, "status") === "string" && field(row, "status") !== "closed" && field(row, "status") !== "tombstone");
+		if (!stillBlocked) orphaned.push(dependent);
+	}
+	if (orphaned.length === 0) return undefined;
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${BLOCK_RELEASE_REQUIRED}: closing ${id} would leave blocked ${orphaned.join(", ")} with no open blocker. `
+			+ `Release them in the same command first (${orphaned.map(bead => `br update ${bead} --status open`).join(" && ")} && br close ${id} ...) or add another open blocks edge. Nothing was closed.`,
+	};
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -951,7 +987,9 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const envIdentities = hasClose ? IDENTITY_ENV.map(name => deps.env[name]?.trim()).filter((value): value is string => Boolean(value)) : [];
 	const pane = hasClose ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
 	const warnings: string[] = [];
+	const released = new Set(requests.filter(request => request.operation === "release").flatMap(request => request.ids));
 	for (const request of requests) {
+		if (request.operation === "release") continue;
 		if (request.operation === "block") {
 			const refusal = await checkBlockedHasFix(request, deps);
 			if (refusal !== undefined) return refusal;
@@ -975,6 +1013,8 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 					reason: `kit-flywheel-guard LOOKUP_REFUSED: cannot verify authorship of ${id}: ${found.why}. Resolve the native lookup; no close was executed.`,
 				};
 			}
+			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
+			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
 			if (!assignee) {
 				warnings.push(`self-close check skipped: ${id} has no assignee`);
