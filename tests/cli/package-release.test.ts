@@ -6,7 +6,7 @@ import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
-import { packageRuleManifest, packageSourceRevision } from "../../scripts/package-release.ts";
+import { packageSourceRevision } from "../../scripts/package-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
@@ -61,11 +61,17 @@ function sourceTree(directory: string, mode: "freeze" | "digest" | "release"): s
 }
 
 beforeAll(() => {
-	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA;
-	sourceRevision = sourceGit(repo, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
+	const metadata: unknown = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
+	const exported = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+		&& "source_revision" in metadata && typeof metadata.source_revision === "string"
+		&& metadata.source_revision !== "$Format:%H$" ? metadata.source_revision : undefined;
+	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA ?? exported;
+	// An admitted archive has no HEAD; its expanded revision selects objects from the explicit caller.
+	const objectStore = exported === undefined ? repo : caseCwd;
+	sourceRevision = sourceGit(objectStore, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
 	if (selected !== undefined) expect(sourceRevision).toBe(selected);
 	const sourceArchive = join(output, "selected-source.tar");
-	sourceGit(repo, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
+	sourceGit(objectStore, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
 	const archived = join(output, "archived-source");
 	mkdirSync(archived);
 	const extracted = Bun.spawnSync(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe" });
@@ -149,8 +155,10 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(existsSync(join(staged.root, "reports"))).toBe(false);
 });
 
-test("packaging's manifest producer supersedes stale input and changed rule bytes without editing archived source", () => {
+test("packaging's manifest producer supersedes stale input and changed rule bytes without editing archived source", async () => {
  const selected = join(output, "archived-source", "tests", "fixtures", "package-manifest-inputs");
+ // Module bytes come from the runtime-selected Git revision, not this test harness's tree.
+ const { packageRuleManifest } = await import(join(output, "archived-source", "scripts", "package-release.ts"));
  const rule = readFileSync(join(selected, "rules", "fixture.md"));
  const stale = readFileSync(join(selected, "MANIFEST.tsv"), "utf8");
  const oldHash = stale.split("\n").find(row => row.startsWith("fixture\t"))!.split("\t")[1];
