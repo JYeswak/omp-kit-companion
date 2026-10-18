@@ -545,10 +545,13 @@ def native_failure_log() -> None:
         fault_bin = root / "fault-bin"
         fault_bin.mkdir()
         nice = fault_bin / "nice"
-        # Keep the actual child alive long enough for heavy's process-identity check.
-        nice.write_text("#!/bin/sh\n/bin/sleep 1\nprintf '%s\\n' "
-                        + repr(head) + " " + repr("x" * 8000) + " " + repr(tail)
-                        + "\nprintf '%s\\n' " + repr(error) + " >&2\nexit 1\n", encoding="utf-8")
+        # Preserve the real preceding stages: their long output must not hide this verdict.
+        # Sleep only in the failing child so heavy can establish its process identity.
+        nice.write_text(
+            "#!/bin/sh\nfor arg do\nif [ \"${arg##*/}\" = regex-budget.ts ]; then\n"
+            "/bin/sleep 1\nprintf '%s\\n' " + repr(head) + " " + repr("x" * 8000) + " " + repr(tail)
+            + "\nprintf '%s\\n' " + repr(error) + " >&2\nexit 1\nfi\ndone\n"
+            "exec /usr/bin/nice \"$@\"\n", encoding="utf-8")
         nice.chmod(0o700)
         return {**env, "PATH": str(fault_bin) + os.pathsep + env["PATH"]}
 
@@ -573,9 +576,9 @@ def native_failure_log() -> None:
         check.assertNotIn("full", receipt["proofs"])
         check.assertEqual(set(receipt["proofs"]), {"status", "doctor", "fast"})
         detail = receipt["refusal_detail"]
-        check.assertEqual(detail["failed_stages"], ["harness-gate"])
-        check.assertGreaterEqual(detail["failed_stage_durations_ms"]["harness-gate"], 1000)
-        check.assertIn("verdict: failing stage harness-gate after ", stdout.getvalue())
+        check.assertEqual(detail["failed_stages"], ["regex-budget"])
+        check.assertGreaterEqual(detail["failed_stage_durations_ms"]["regex-budget"], 1000)
+        check.assertIn("verdict: failing stage regex-budget after ", stdout.getvalue())
         check.assertIn(head, detail["producer_stdout_head"])
         check.assertIn(tail, detail["producer_stdout_tail"])
         check.assertIn(error, detail["producer_stdout_tail"])
