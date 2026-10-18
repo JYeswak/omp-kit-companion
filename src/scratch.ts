@@ -645,10 +645,67 @@ export function fleetTestTmpBase(): string {
 	return process.platform === "darwin" ? "/Users/Shared/omp-kit-tmp" : join("/tmp", "omp-kit-tmp");
 }
 
-export function resolveScratchRoots(home: string): string[] {
+export interface ScratchRootEntry {
+	root: string;
+	/** Where this root came from: override, developer, fleet-watch:<session>, herdr:<session>, chief, fleet-test-tmp or temp. */
+	sources: string[];
+}
+
+function fleetWatchConfigPath(home: string): string {
+	return process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+}
+
+/**
+ * The fleet's repos named by fleet-watch.json (every `sessions[].repo`, `herdr[].repo` and `chief.repo` that is an
+ * absolute path). Read leniently: a stock user without the file, or a file that does not parse, names none.
+ */
+export function fleetWatchRepos(home: string): { repo: string; source: string }[] {
+	let config: unknown;
+	try {
+		config = JSON.parse(readFileSync(fleetWatchConfigPath(home), "utf8"));
+	} catch {
+		return [];
+	}
+	if (typeof config !== "object" || config === null) return [];
+	const record = config as Record<string, unknown>;
+	const found: { repo: string; source: string }[] = [];
+	const take = (entry: unknown, source: string): void => {
+		if (typeof entry !== "object" || entry === null) return;
+		const repo = (entry as Record<string, unknown>).repo;
+		if (typeof repo === "string" && isAbsolute(repo)) found.push({ repo, source });
+	};
+	for (const key of ["sessions", "herdr"] as const) {
+		const rows = record[key];
+		if (!Array.isArray(rows)) continue;
+		for (const row of rows) {
+			const name = typeof row === "object" && row !== null ? (row as Record<string, unknown>).session : undefined;
+			take(row, `${key === "sessions" ? "fleet-watch" : "herdr"}:${typeof name === "string" ? name : "unnamed"}`);
+		}
+	}
+	take(record.chief, "chief");
+	return found;
+}
+
+/**
+ * Scratch roots with their sources, de-duplicated by real path so a symlink alias and its target are one root:
+ * the explicit override alone, else ~/Developer/*, every repo fleet-watch.json names (outside ~/Developer too),
+ * the fleet test base and the omp-* temp dirs. Without fleet-watch.json this is exactly the earlier list.
+ */
+export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 	const override = process.env.OMP_KIT_SCRATCH_ROOTS;
-	if (override !== undefined && override !== "") return override.split(delimiter).map(part => part.trim()).filter(part => part !== "");
-	const roots: string[] = [];
+	if (override !== undefined && override !== "") {
+		return override.split(delimiter).map(part => part.trim()).filter(part => part !== "").map(root => ({ root, sources: ["override"] }));
+	}
+	const byReal = new Map<string, ScratchRootEntry>();
+	const add = (root: string, source: string): void => {
+		let key = root;
+		try {
+			key = realpathSync(root);
+		} catch { /* keep the spelling */ }
+		const known = byReal.get(key);
+		if (known === undefined) byReal.set(key, { root, sources: [source] });
+		else if (!known.sources.includes(source)) known.sources.push(source);
+	};
 	const dev = join(home, "Developer");
 	let projects: string[] = [];
 	try {
@@ -661,14 +718,24 @@ export function resolveScratchRoots(home: string): string[] {
 		try {
 			const stat = statSync(candidate);
 			if (stat.isDirectory() && !isSymlink(candidate) && !isSymlink(join(dev, project, "var")) && !isSymlink(join(dev, project))) {
-				roots.push(candidate);
+				add(candidate, "developer");
 			}
 		} catch {
 			continue;
 		}
 	}
+	for (const { repo, source } of fleetWatchRepos(home)) {
+		try {
+			// A fleet repo may be named through an alias; its real path is the repo.
+			const real = realpathSync(repo);
+			const candidate = join(real, "var", "agent-tmp");
+			if (statSync(candidate).isDirectory() && !isSymlink(candidate) && !isSymlink(join(real, "var"))) add(candidate, source);
+		} catch {
+			continue;
+		}
+	}
 	try {
-		if (statSync(fleetTestTmpBase()).isDirectory() && !isSymlink(fleetTestTmpBase())) roots.push(fleetTestTmpBase());
+		if (statSync(fleetTestTmpBase()).isDirectory() && !isSymlink(fleetTestTmpBase())) add(fleetTestTmpBase(), "fleet-test-tmp");
 	} catch {
 		/* absent until a suite creates it */
 	}
@@ -684,13 +751,17 @@ export function resolveScratchRoots(home: string): string[] {
 			if (!entry.startsWith("omp-")) continue;
 			const candidate = join(base, entry);
 			try {
-				if (statSync(candidate).isDirectory() && !isSymlink(candidate)) roots.push(candidate);
+				if (statSync(candidate).isDirectory() && !isSymlink(candidate)) add(candidate, "temp");
 			} catch {
 				continue;
 			}
 		}
 	}
-	return [...new Set(roots)];
+	return [...byReal.values()];
+}
+
+export function resolveScratchRoots(home: string): string[] {
+	return resolveScratchRootEntries(home).map(entry => entry.root);
 }
 
 export interface OrphanProcess { pid: number; ppid: number; ageSeconds: number; command: string }
@@ -1372,7 +1443,8 @@ export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): S
 }
 
 export type ScratchPressure = "NORMAL" | "WARN" | "RECLAIM" | "UNKNOWN";
-export interface ScratchRootMetric { root: string; free_pct: number | null; scratch_gb: number }
+/** `sources` records where the root came from (override, developer, fleet-watch:<session>, herdr:<session>, chief, fleet-test-tmp, temp, system-work). */
+export interface ScratchRootMetric { root: string; free_pct: number | null; scratch_gb: number; sources: string[] }
 export interface QuarantineBucket { entries: number; bytes: number }
 export interface QuarantineBucketReport {
 	young: QuarantineBucket;
@@ -1403,16 +1475,28 @@ export function classifyScratchPressure(freePct: number | null): ScratchPressure
 }
 
 export function scratchRootMetrics(roots: string[], sizeByRoot: Record<string, number>,
-	readStats?: (path: string) => DiskCapacity | null): ScratchRootMetric[] {
+	readStats?: (path: string) => DiskCapacity | null, sources: ReadonlyMap<string, string[]> = new Map()): ScratchRootMetric[] {
 	const metrics: ScratchRootMetric[] = [];
 	for (const root of roots) {
 		metrics.push({
 			root,
 			free_pct: measureDiskFreePercent(root, readStats),
 			scratch_gb: (sizeByRoot[root] ?? 0) / 1_000_000_000,
+			sources: sources.get(root) ?? [],
 		});
 	}
 	return metrics;
+}
+
+/** Sources per root for the plan: the resolved roots keep theirs, system work parents are recorded as system-work. */
+function rootSourceMap(entries: readonly ScratchRootEntry[], systemWorkDirs: readonly string[]): Map<string, string[]> {
+	const sources = new Map<string, string[]>(entries.map(entry => [entry.root, entry.sources]));
+	for (const parent of systemWorkDirs.map(dirname)) {
+		const known = sources.get(parent);
+		if (known === undefined) sources.set(parent, ["system-work"]);
+		else if (!known.includes("system-work")) known.push("system-work");
+	}
+	return sources;
 }
 
 export function quarantineBuckets(home: string, now = Date.now(), ttlMs?: number,
@@ -1574,7 +1658,8 @@ export function dedupeNestedSizes(sessions: ScratchVerdict[]): ScratchVerdict[] 
 	});
 }
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
-	const roots = resolveScratchRoots(home);
+	const entries = resolveScratchRootEntries(home);
+	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs();
 	const sessions: ScratchVerdict[] = [];
 	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
@@ -1590,7 +1675,7 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	const sized = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(sized, allRoots);
-	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs);
+	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
 	return { roots: allRoots, sessions: sized, orphans, totals, rootMetrics,
 		pressure: pressureForRoots(rootMetrics), quarantineBuckets: quarantineBuckets(home, deps.now ?? Date.now()),
 		unownedActiveRule: UNOWNED_ACTIVE_RULE,
@@ -1623,7 +1708,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const now = deps.now ?? Date.now();
 	const startedAt = new Date(now).toISOString();
 	const freePctBefore = measureDiskFreePercent(home, deps.statfs);
-	const roots = resolveScratchRoots(home);
+	const entries = resolveScratchRootEntries(home);
+	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs();
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const planned: { verdict: ScratchVerdict; root: string }[] = [];
@@ -1669,7 +1755,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const expired = applyQuarantineExpiry(home, deps);
 	const planEcho = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(planEcho, allRoots);
-	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs);
+	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
 	const pressure = pressureForRoots(rootMetrics);
 	const failedPaths = new Set<string>();
 	for (const verdict of expired) if (verdict.reason === "delete-failed") failedPaths.add(verdict.dir);

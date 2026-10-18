@@ -1263,7 +1263,7 @@ test("scratch root report includes statfs free percent and usage GB", () => {
   writeFileSync(join(dir, "payload"), "x".repeat(100));
   const plan = planScratch(home, { ...depsFor(), statfs: () => ({ bavail: 195, blocks: 1000 }) });
   expect(plan.rootMetrics ?? null).toEqual([
-    { root, free_pct: 19.5, scratch_gb: plan.totals.sizeByRoot[root]! / 1_000_000_000 },
+    { root, free_pct: 19.5, scratch_gb: plan.totals.sizeByRoot[root]! / 1_000_000_000, sources: ["override"] },
   ]);
 });
 
