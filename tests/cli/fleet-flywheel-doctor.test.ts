@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { busyElapsedMs, flushPending, inspectCommunicationPurgatory, inspectDirectorDoingWork, inspectStuckPending, liveFleetIo, parseComposer, parseQueuedBand, tmuxSocketArgs, type FleetIo, type MailSends } from "../../src/fleet-flywheel-doctor.ts";
+import { describeFullTestProducer } from "../../src/full-test-runner.ts";
+import { busyElapsedMs, flushPending, inspectCommunicationPurgatory, inspectDirectorDoingWork, inspectFleetScope, inspectRetainedEvidence, inspectStuckPending, liveFleetIo, parseComposer, parseQueuedBand, tmuxSocketArgs, type FleetIo, type MailSends } from "../../src/fleet-flywheel-doctor.ts";
 
 const NOW = Date.parse("2026-10-09T18:00:00Z");
 const MIN = 60_000;
@@ -448,4 +449,129 @@ test("a pane that changed before the keys is skipped", () => {
 	io.tmux = (args) => { if (args[0] === "capture-pane" && ++captures === 2) panes[0]!.text = DRAFT("typing"); return tmux(args); };
 	expect(flushPending(io, true).panes).toMatchObject([{ result: "SKIPPED_CHANGED", keys_sent: [] }]);
 	expect(sent).toEqual([]);
+});
+
+// ompkit-fp72.102: doctor --scope fleet runs verifyEvidenceReference over DONE/close tracker comments that cite a
+// native full-test result_ref. Real producer, real disposable git repo with a tracker export, real liveFleetIo.
+const EVIDENCE_BEAD = "ompkit-fp72-ev";
+const EVIDENCE_MAIL = 64102;
+const evidenceRoots: string[] = [];
+afterAll(() => { for (const root of evidenceRoots) rmSync(root, { recursive: true, force: true }); });
+const evidenceBase = () => {
+	const dir = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "fleet-evidence-")));
+	evidenceRoots.push(dir);
+	return dir;
+};
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+function gitIn(dir: string, ...args: string[]): string {
+	const child = Bun.spawnSync(["git", "-C", dir, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", ...args], { env: gitEnv, stdout: "pipe", stderr: "pipe" });
+	if (child.exitCode !== 0) throw new Error(child.stderr.toString());
+	return child.stdout.toString().trim();
+}
+type EvidenceFlavor = "complete" | "mail-only" | "tampered" | "failures-no-log" | "unrelated";
+/** One disposable tracker repo whose DONE comment for EVIDENCE_BEAD is shaped by `flavor`. */
+function evidenceRepo(flavor: EvidenceFlavor): string {
+	const work = evidenceBase(), repo = evidenceBase();
+	writeFileSync(join(work, "cases.test.ts"), 'import { expect, test } from "bun:test";\ntest("passes", () => { console.log("ok"); expect(1).toBe(1); });\ntest("fails", () => { expect("a").toBe("b"); });\n');
+	gitIn(work, "init", "--quiet", "--initial-branch=main");
+	gitIn(work, "add", "--", "cases.test.ts");
+	gitIn(work, "commit", "-qm", "producer source");
+	const argv = [process.execPath, "--no-env-file", "test", "--config", "/dev/null", join(work, "cases.test.ts")];
+	const child = Bun.spawnSync(argv, { cwd: work, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+	const stdout = child.stdout.toString(), stderr = child.stderr.toString();
+	const identity = (text: string) => ({ bytes: Buffer.byteLength(text), sha256: new Bun.CryptoHasher("sha256").update(text).digest("hex") });
+	const result = { code: child.exitCode, stdout, stderr, execution: { argv, cwd: work, launched: true, exit_code: child.exitCode, signal: null, interrupted: false,
+		stdout_complete: true, stderr_complete: true, stdout_capture: identity(stdout), stderr_capture: identity(stderr) } };
+	const options = { source_revision: gitIn(work, "rev-parse", "HEAD"), roots: [work], artifact_root: work };
+	const producer = describeFullTestProducer(result, options);
+	gitIn(repo, "init", "--quiet", "--initial-branch=main");
+	mkdirSync(join(repo, "retained"));
+	writeFileSync(join(repo, "retained", "producer.stdout"), producer.stdout);
+	writeFileSync(join(repo, "retained", "producer.stderr"), producer.stderr);
+	gitIn(repo, "add", "--", "retained");
+	gitIn(repo, "commit", "-qm", "retain producer streams");
+	const logCommit = gitIn(repo, "rev-parse", "HEAD");
+	const ref = producer.result_ref;
+	const git = (stream: "stdout" | "stderr") => ({ kind: "git", stream, repository: repo, commit: logCommit, path: `retained/producer.${stream}`, bytes: ref[stream]!.bytes, sha256: ref[stream]!.sha256 });
+	const mail = (stream: "stdout" | "stderr") => ({ kind: "agent-mail", stream, project_key: repo, message_id: EVIDENCE_MAIL, attachment: `producer.${stream}`, bytes: ref[stream]!.bytes, sha256: ref[stream]!.sha256 });
+	const cited = describeFullTestProducer(result, { ...options, references: flavor === "mail-only" ? [mail("stdout"), mail("stderr")] : [git("stdout"), git("stderr"), mail("stdout"), mail("stderr")] }).result_ref;
+	const comments: string[] = [];
+	if (flavor === "failures-no-log") comments.push(`DONE ${EVIDENCE_BEAD}: suite finished, 20 fail and 5 pass; logs are in my pane scrollback`);
+	else if (flavor !== "unrelated") comments.push(`DONE ${EVIDENCE_BEAD}: stdout sha256 ${cited.stdout!.sha256}, stderr sha256 ${cited.stderr!.sha256}, Agent Mail AM${EVIDENCE_MAIL}\nresult_ref: ${JSON.stringify(cited)}`);
+	mkdirSync(join(repo, ".beads"));
+	writeFileSync(join(repo, ".beads", "issues.jsonl"), [
+		JSON.stringify({ id: "ompkit-unrelated", status: "closed", comments: [{ id: 1, text: "DONE refactor landed; 0 fail, 14 pass, no retained result claimed" }, { id: 2, text: "needs review, 3 failures noted by a human" }] }),
+		JSON.stringify({ id: EVIDENCE_BEAD, status: "closed", comments: comments.map((text, n) => ({ id: n + 3, text })) }),
+	].join("\n") + "\n");
+	gitIn(repo, "add", "--", ".beads/issues.jsonl");
+	gitIn(repo, "commit", "-qm", "tracker export");
+	if (flavor === "tampered") writeFileSync(cited.stdout!.path!, "tampered bytes\n");
+	return repo;
+}
+function evidenceIo(repos: string[]): FleetIo {
+	return { ...liveFleetIo(), nowMs: () => NOW, mailSends: () => repos.map((repo) => ({ repo, seat: "Seat", count: 1 })) };
+}
+const evidenceRows = (repo: string) => inspectRetainedEvidence(evidenceIo([repo]));
+
+test("retained evidence: a complete retained citation and unrelated or no-result DONEs are not flagged", () => {
+	const complete = evidenceRows(evidenceRepo("complete"));
+	expect(complete.map((row) => row.status)).toEqual(["OK"]);
+	expect(complete[0]!.evidence).toMatchObject({ cited_checked: 1, verified: 1 });
+	const unrelated = evidenceRows(evidenceRepo("unrelated"));
+	expect(unrelated.map((row) => row.status)).toEqual(["OK"]);
+	expect(unrelated[0]!.evidence).toMatchObject({ cited_checked: 0, verified: 0 });
+});
+
+test("retained evidence: 20 failures with no retained log, tampered bytes and a mail-only pointer are named incomplete, never green", () => {
+	const noLog = evidenceRows(evidenceRepo("failures-no-log"));
+	expect(noLog.map((row) => row.status)).toEqual(["DEGRADED"]);
+	expect(noLog[0]!.reason).toContain(`INCOMPLETE_EVIDENCE ${EVIDENCE_BEAD}`);
+	expect(noLog[0]!.reason).toContain("20 fail");
+	const tampered = evidenceRows(evidenceRepo("tampered"));
+	expect(tampered.map((row) => row.status)).toEqual(["FAIL"]);
+	expect(tampered[0]!.reason).toContain("LOG_HASH_MISMATCH");
+	const mailOnly = evidenceRows(evidenceRepo("mail-only"));
+	expect(mailOnly.map((row) => row.status)).toEqual(["FAIL"]);
+	expect(mailOnly[0]!.reason).toContain("MAIL_ONLY");
+	for (const row of [...noLog, ...tampered, ...mailOnly]) expect(row.evidence).toMatchObject({ bead: EVIDENCE_BEAD });
+});
+
+test("retained evidence: unreadable inputs are UNVERIFIED, never OK", () => {
+	expect(inspectRetainedEvidence({ ...evidenceIo([]), mailSends: () => "AGENT_MAIL_STORAGE_ROOT is unset" }).map((row) => row.status)).toEqual(["UNVERIFIED"]);
+	expect(inspectRetainedEvidence(evidenceIo(["/nonexistent/fleet-evidence-repo"])).map((row) => row.status)).toEqual(["UNVERIFIED"]);
+	const repo = evidenceRepo("complete");
+	const noLogs = { ...evidenceIo([repo]), readFile: (path: string) => path.endsWith(".beads/issues.jsonl") ? readFileSync(path, "utf8") : null };
+	const rows = inspectRetainedEvidence(noLogs);
+	expect(rows.map((row) => row.status)).toEqual(["UNVERIFIED"]);
+	expect(rows[0]!.reason).toContain("LOG_UNREADABLE");
+});
+
+test("doctor --scope fleet CLI names retained-evidence findings from an owned tracker and Agent Mail store", () => {
+	const store = evidenceBase();
+	const good = evidenceRepo("complete"), bad = evidenceRepo("tampered"), noLog = evidenceRepo("failures-no-log"), mail = evidenceRepo("mail-only"), other = evidenceRepo("unrelated");
+	const db = new Database(join(store, "storage.sqlite3"));
+	db.run("CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT, created_at INTEGER)");
+	db.run("CREATE TABLE agents (id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT)");
+	db.run("CREATE TABLE messages (id INTEGER PRIMARY KEY, project_id INTEGER, sender_id INTEGER, created_ts INTEGER)");
+	[good, bad, noLog, mail, other].forEach((repo, n) => {
+		db.run("INSERT INTO projects VALUES (?, 'p', ?, 0)", [n + 1, repo]);
+		db.run("INSERT INTO agents VALUES (?, ?, 'Seat')", [n + 1, n + 1]);
+		db.run("INSERT INTO messages (project_id, sender_id, created_ts) VALUES (?, ?, ?)", [n + 1, n + 1, Date.now() * 1000]);
+	});
+	db.close();
+	const env = { ...process.env, AGENT_MAIL_STORAGE_ROOT: store, TMUX_TMPDIR: store };
+	const child = Bun.spawnSync([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"), "doctor", "--scope", "fleet", "--json"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	const parsed = JSON.parse(child.stdout.toString());
+	expect(Array.isArray(parsed.data.findings), child.stdout.toString() + child.stderr.toString()).toBe(true);
+	const rows = (parsed.data.findings as { component: string; status: string; reason: string }[]).filter((row) => row.component === "RETAINED_EVIDENCE");
+	expect(rows.map((row) => row.status).sort()).toEqual(["DEGRADED", "FAIL", "FAIL"]);
+	expect(rows.some((row) => row.reason.includes(noLog) && row.reason.includes("20 fail"))).toBe(true);
+	expect(rows.some((row) => row.reason.includes(bad) && row.reason.includes("LOG_HASH_MISMATCH"))).toBe(true);
+	expect(rows.some((row) => row.reason.includes(mail) && row.reason.includes("MAIL_ONLY"))).toBe(true);
+	expect(rows.some((row) => row.reason.includes(good) || row.reason.includes(other))).toBe(false);
+});
+
+test("inspectFleetScope includes the retained-evidence inspector", () => {
+	const rows = inspectFleetScope({ ...evidenceIo([evidenceRepo("tampered")]), tmux: () => null });
+	expect(rows.some((row) => row.component === "RETAINED_EVIDENCE" && row.status === "FAIL")).toBe(true);
 });

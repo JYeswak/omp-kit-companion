@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Finding } from "./diagnostics.ts";
+import { verifyEvidenceReference } from "./evidence-reference.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 import { tmuxSocketArgs } from "./tmux-socket.ts";
@@ -370,7 +371,7 @@ export function logFlushReport(path: string, report: FlushReport, nowMs: number)
 	appendFileSync(path, `${JSON.stringify({ at: new Date(nowMs).toISOString(), ...report })}\n`, { mode: 0o600 });
 }
 
-type Issue = { id?: unknown; status?: unknown; assignee?: unknown; closed_at?: unknown };
+type Issue = { id?: unknown; status?: unknown; assignee?: unknown; closed_at?: unknown; comments?: unknown };
 
 function readIssues(io: FleetIo, repo: string): Issue[] | null {
 	const text = io.readFile(join(repo, ".beads", "issues.jsonl"));
@@ -438,8 +439,87 @@ export function inspectCommunicationPurgatory(io: FleetIo): Finding[] {
 	return rows;
 }
 
+export const EVIDENCE_WINDOW_MS = 24 * 60 * 60_000;
+export const EVIDENCE_MAX_REPOS = 20;
+export const EVIDENCE_MAX_REFS_PER_REPO = 20;
+const EVIDENCE_MAX_COMMENT_CHARS = 512 * 1024;
+const DONE_COMMENT = /^\s*(?:DONE|CLOSE|CLOSED|CLOSING)\b/i;
+const REPORTED_FAILURES = /\b([1-9]\d*)\s+(?:fail(?:s|ed|ures?)?)\b/i;
+
+/** The balanced JSON object that follows `result_ref` in a comment: the producer's own `result_ref` object, verbatim. */
+function extractResultRef(text: string): { found: boolean; value: unknown } {
+	const marker = text.indexOf("result_ref");
+	if (marker < 0) return { found: false, value: undefined };
+	const start = text.indexOf("{", marker);
+	if (start < 0) return { found: true, value: undefined };
+	let depth = 0, inString = false, escaped = false;
+	for (let i = start; i < text.length; i++) {
+		const ch = text[i]!;
+		if (inString) { if (escaped) escaped = false; else if (ch === "\\") escaped = true; else if (ch === "\"") inString = false; continue; }
+		if (ch === "\"") inString = true;
+		else if (ch === "{") depth++;
+		else if (ch === "}" && --depth === 0) {
+			try { return { found: true, value: JSON.parse(text.slice(start, i + 1)) }; } catch { return { found: true, value: undefined }; }
+		}
+	}
+	return { found: true, value: undefined };
+}
+
+/**
+ * Retained evidence: a DONE/close comment in a known repo's tracker that cites a native full-test `result_ref`
+ * (`result_ref: {json}`) is checked by verifyEvidenceReference against the retained bytes and the git-tracked
+ * tracker pointer. A DONE that reports failures but carries no citation is incomplete too. Repos are the ones
+ * that sent Agent Mail in the last 24 h; work is capped per repo and reads only readFile and git.
+ */
+export function inspectRetainedEvidence(io: FleetIo): Finding[] {
+	const sends = io.mailSends((io.nowMs() - EVIDENCE_WINDOW_MS) * 1000);
+	if (typeof sends === "string") return [{ component: "RETAINED_EVIDENCE", status: "UNVERIFIED", reason: `Agent Mail store unavailable, so no repository's DONE/close citations were checked: ${sends}`, recommended_action: "Point AGENT_MAIL_STORAGE_ROOT at the live Agent Mail root (it holds storage.sqlite3)." }];
+	const repos = [...new Set(sends.map((row) => row.repo))].slice(0, EVIDENCE_MAX_REPOS);
+	const rows: Finding[] = [];
+	let verified = 0, citedChecked = 0, unreadable = 0;
+	for (const repo of repos) {
+		const issues = readIssues(io, repo);
+		if (!issues) { unreadable++; continue; }
+		const candidates: { bead: string; text: string }[] = [];
+		for (const issue of issues) {
+			if (typeof issue.id !== "string" || !Array.isArray(issue.comments)) continue;
+			for (const comment of issue.comments) {
+				const text: unknown = comment !== null && typeof comment === "object" && "text" in comment ? comment.text : undefined;
+				if (typeof text === "string" && text.length <= EVIDENCE_MAX_COMMENT_CHARS && DONE_COMMENT.test(text)) candidates.push({ bead: issue.id, text });
+			}
+		}
+		for (const { bead, text } of candidates.slice(-EVIDENCE_MAX_REFS_PER_REPO)) {
+			const ref = extractResultRef(text);
+			if (!ref.found) {
+				const failures = REPORTED_FAILURES.exec(text);
+				if (failures) rows.push({ component: "RETAINED_EVIDENCE", status: "DEGRADED",
+					reason: `INCOMPLETE_EVIDENCE ${bead} in ${repo}: DONE reports ${failures[0]} but cites no retained result_ref (no retained log, citation or pointer)`,
+					recommended_action: `Attach the native full-test result_ref (retained stdout/stderr, git citation, Agent Mail id) to the ${bead} DONE comment, or retract the result claim.`,
+					evidence: { bead, repo, code: "NO_RESULT_REF", reported: failures[0] } });
+				continue;
+			}
+			citedChecked++;
+			const result = verifyEvidenceReference(io, { bead, reference: ref.value, pointers: [{ repository: repo, commit: "HEAD" }] });
+			if (result.evidence === "VERIFIED") { verified++; continue; }
+			const bad = result.checks.filter((check) => check.status !== "PASS");
+			rows.push({ component: "RETAINED_EVIDENCE", status: result.evidence === "FAIL" ? "FAIL" : "UNVERIFIED",
+				reason: `INCOMPLETE_EVIDENCE ${bead} in ${repo}: result_ref ${result.evidence}: ${bad.map((check) => `${check.code}${check.stream ? `(${check.stream})` : ""} ${check.detail}`).join("; ")}`,
+				recommended_action: `Retain the cited logs in git and fix the ${bead} result_ref citation and pointer (bead id, sha256 and Agent Mail id together) before treating the DONE as complete.`,
+				evidence: { bead, repo, evidence: result.evidence, suite: result.suite, checks: bad.map((check) => ({ name: check.name, stream: check.stream, status: check.status, code: check.code })) } });
+		}
+	}
+	const noTracker = repos.length > 0 && unreadable === repos.length;
+	if (!rows.length) rows.push({ component: "RETAINED_EVIDENCE", status: noTracker ? "UNVERIFIED" : "OK",
+		reason: noTracker
+			? `No tracker export could be read in ${repos.length} repo(s); DONE/close citations were not checked`
+			: `${verified} of ${citedChecked} cited result_ref(s) verified across ${repos.length - unreadable} repo(s); no DONE reporting failures lacks a citation`,
+		recommended_action: noTracker ? "Run on the host that holds the repos' .beads/issues.jsonl." : "No action required.",
+		evidence: { repos: repos.length, unreadable, cited_checked: citedChecked, verified } });
+	return rows;
+}
+
 export function inspectFleetScope(io: FleetIo): Finding[] {
-	return [...inspectDirectorDoingWork(io), ...inspectCommunicationPurgatory(io), ...inspectStuckPending(io)];
+	return [...inspectDirectorDoingWork(io), ...inspectCommunicationPurgatory(io), ...inspectStuckPending(io), ...inspectRetainedEvidence(io)];
 }
 
 function run(command: string, args: readonly string[], env?: NodeJS.ProcessEnv): string | null {
