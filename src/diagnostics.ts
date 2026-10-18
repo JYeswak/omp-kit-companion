@@ -1530,7 +1530,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const scoped = Boolean(input.scope);
 	if (wants("rch")) {
 		const rch = inspectRchReachability(defaultRchReachability());
-		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while --scope rch still reports it.
+		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while an explicit rch scope still reports it.
 		if (scoped || rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(rch);
 	}
 	// Unscoped, the planning skill is judged only when the user has a local copy to drift from; a scope names it explicitly.

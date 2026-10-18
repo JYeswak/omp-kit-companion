@@ -1247,7 +1247,7 @@ test("oq1h.5: an unscoped inventory does not judge a planning skill the user nev
 	expect(finding(await diagnose(input), "planning_skill").status).toBe("DRIFT");
 });
 
-test("oq1h.5: an unscoped inventory omits rch when it is not installed, and doctor --scope rch still says so", async () => {
+test("oq1h.5: an unscoped inventory omits rch when it is not installed, and the rch diagnostic scope still says so", async () => {
 	const f = fixture(); installOmp(f);
 	const input = { root: f.root, home: f.home, ompPath: f.ompPath };
 	// Positive control for the planted state: the diagnose PATH (only the omp bin directory) must lack rch.

@@ -574,7 +574,6 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope settings` | Per-key TTSR status for the selected profiles | `omp-kit doctor --scope settings` |
 | `--scope extensions` | Extension listing and imports that would fail to load | `omp-kit doctor --scope extensions` |
 | `--scope router` | Router skill tooling presence | `omp-kit doctor --scope router` |
-| `--scope rch` | rch daemon reachability (`RUNNING`, `NOT_RUNNING`, `SOCKET_UNLINKED`, or `RCH_UNAVAILABLE` when rch is not installed); an unscoped `doctor` includes this row only when rch is installed | `omp-kit doctor --scope rch` |
 | `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
 | `--scope lsp` | Language-server configuration layers; `--deep --yes` probes TypeScript in a private fixture | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |
