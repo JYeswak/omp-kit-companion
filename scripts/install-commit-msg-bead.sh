@@ -36,6 +36,9 @@
 # It only preserves an exact native snapshot; it grants no creator/grader role.
 # Existing bespoke pre-commit checks remain first. Their owner must retire a
 # replaced legacy snapshot checker; this installer never silently bypasses it.
+# Optional reviewed template projections: --template-import-map FILE
+# --template-import-map-sha256 SHA installs digest-bound data, never candidate
+# policy. With no options, existing reviewed data is retained.
 set -eu
 UNDO_MOVES=""
 UNDO_RM=""
@@ -47,11 +50,21 @@ NATIVE_PRESERVATION=0
 NATIVE_BR=""
 NATIVE_BR_SHA=""
 NATIVE_GUARD_SHA=""
+TEMPLATE_IMPORT_MAP=""
+TEMPLATE_IMPORT_MAP_SHA=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) MODE=check; shift ;;
 		--no-pushed-beads) PUSHED_BEADS=0; shift ;;
 		--native-preservation) NATIVE_PRESERVATION=1; shift ;;
+		--template-import-map|--template-import-map-sha256)
+			[ $# -ge 2 ] || { printf 'install-commit-msg-bead: %s needs a value\n' "$1" >&2; exit 2; }
+			case "$1" in
+				--template-import-map) TEMPLATE_IMPORT_MAP=$2 ;;
+				--template-import-map-sha256) TEMPLATE_IMPORT_MAP_SHA=$2 ;;
+			esac
+			[ -n "$2" ] || { printf 'install-commit-msg-bead: REFUSED empty template-import-map input\n' >&2; exit 2; }
+			shift 2 ;;
 		--native-br|--native-br-sha256|--native-guard-sha256)
 			[ $# -ge 2 ] || { printf 'install-commit-msg-bead: %s needs a value\n' "$1" >&2; exit 2; }
 			case "$1" in
@@ -71,6 +84,17 @@ case "$HOOKS" in
 	*) HOOKS="$TARGET/$HOOKS" ;;
 esac
 
+# The import gate requires a trusted host Node/TypeScript parser at runtime.
+# Admit that dependency before installing anything; never install project
+# modules or activate a hook that cannot parse. --check instead inspects the
+# installed checker below, even when this source checkout is incomplete.
+if [ "$MODE" = install ]; then
+	if ! sh "$KITROOT/scripts/check-commit-imports.sh" --parser-info --repo "$TARGET"; then
+		echo 'install-commit-msg-bead: REFUSED import parser unavailable; host Node and TypeScript are required' >&2
+		exit 2
+	fi
+fi
+
 # Both expected digests are explicit review inputs. No automatic PATH adoption
 # or environment override is copied into the installed authority boundary.
 if [ "$NATIVE_PRESERVATION" = 1 ]; then
@@ -87,6 +111,66 @@ if not os.access(native, os.X_OK):
     sys.exit("install-commit-msg-bead: REFUSED native executable unavailable")
 PY
 fi
+
+# One validator owns the declaration format and externally supplied digest.
+# Validate before any target mutation; validate the copied bytes again below.
+if [ -n "$TEMPLATE_IMPORT_MAP" ] || [ -n "$TEMPLATE_IMPORT_MAP_SHA" ]; then
+	[ -n "$TEMPLATE_IMPORT_MAP" ] && [ -n "$TEMPLATE_IMPORT_MAP_SHA" ] ||
+		{ echo 'install-commit-msg-bead: REFUSED template-import-map requires file and reviewed SHA256' >&2; exit 2; }
+	sh "$KITROOT/scripts/check-commit-imports.sh" --validate-template-import-map "$TEMPLATE_IMPORT_MAP" --sha256 "$TEMPLATE_IMPORT_MAP_SHA" || exit 2
+fi
+
+# These two authority files must never alias outside state. Inspect with
+# lstat before any installer effect, including dangling destination links.
+# Scope ownership checks to the managed hook-directory ancestry.
+if [ -n "$TEMPLATE_IMPORT_MAP" ] ||
+	[ -e "$HOOKS/hooks.d/pre-commit/template-import-map.json" ] ||
+	[ -L "$HOOKS/hooks.d/pre-commit/template-import-map.json" ] ||
+	[ -e "$HOOKS/hooks.d/pre-commit/template-import-map.sha256" ] ||
+	[ -L "$HOOKS/hooks.d/pre-commit/template-import-map.sha256" ]; then
+python3 - "$HOOKS" "$TEMPLATE_IMPORT_MAP" <<'PY' || exit 2
+import os, pathlib, stat, sys
+hooks = pathlib.Path(sys.argv[1])
+managed = hooks / "hooks.d" / "pre-commit"
+files = [managed / name for name in ("template-import-map.json", "template-import-map.sha256")]
+if not sys.argv[2] and not any(os.path.lexists(p) for p in files):
+    sys.exit(0)
+def refuse():
+    sys.exit("install-commit-msg-bead: REFUSED unsafe template-import-map destination")
+for directory in reversed([managed, *managed.parents]):
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        continue
+    except OSError:
+        refuse()
+    if not stat.S_ISDIR(info.st_mode):
+        refuse()
+    if directory in (hooks, hooks / "hooks.d", managed) and info.st_uid != os.geteuid():
+        refuse()
+for path in files:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        continue
+    except OSError:
+        refuse()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+        refuse()
+PY
+fi
+
+check_template_import_map() {
+	map_dir="$HOOKS/hooks.d/pre-commit"
+	if [ -n "$TEMPLATE_IMPORT_MAP" ] || [ -e "$map_dir/template-import-map.json" ] || [ -e "$map_dir/template-import-map.sha256" ]; then
+		[ -f "$map_dir/template-import-map.json" ] && [ -f "$map_dir/template-import-map.sha256" ] || return 1
+		installed_sha=$(cat "$map_dir/template-import-map.sha256") || return 1
+		# Require canonical pin bytes, not merely command-substitution equivalence.
+		printf '%s\n' "$installed_sha" | cmp -s "$map_dir/template-import-map.sha256" - || return 1
+		[ -z "$TEMPLATE_IMPORT_MAP_SHA" ] || [ "$installed_sha" = "$TEMPLATE_IMPORT_MAP_SHA" ] || return 1
+		sh "$KITROOT/scripts/check-commit-imports.sh" --validate-template-import-map "$map_dir/template-import-map.json" --sha256 "$installed_sha" || return 1
+	fi
+}
 
 native_member() {
 	native_arg=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$NATIVE_BR") || return 1
@@ -144,6 +228,11 @@ if [ "$MODE" = "check" ]; then
 			stale=1
 		fi
 	done
+	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
+	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
+		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
+		stale=1
+	fi
 	if [ "$NATIVE_PRESERVATION" = 1 ]; then
 		dir="$HOOKS/hooks.d/pre-commit"
 		if ! cmp -s "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" ||
@@ -151,6 +240,10 @@ if [ "$MODE" = "check" ]; then
 			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
 			stale=1
 		fi
+	fi
+	if ! check_template_import_map; then
+		printf 'install-commit-msg-bead: MISSING or STALE reviewed template-import-map in %s\n' "$TARGET" >&2
+		stale=1
 	fi
 	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
 	exit 3
@@ -319,6 +412,18 @@ install_staged_imports() {
 	member="$dir/45-omp-kit-staged-imports"
 	place "$KITROOT/scripts/check-commit-imports.sh" "$dir/check-commit-imports.sh" -x
 	place "$KITROOT/scripts/check-staged-imports.sh" "$member" +x
+	if [ -n "$TEMPLATE_IMPORT_MAP" ]; then
+		# The reviewed input may already be the managed declaration itself.
+		if ! cmp -s "$TEMPLATE_IMPORT_MAP" "$dir/template-import-map.json"; then
+			place "$TEMPLATE_IMPORT_MAP" "$dir/template-import-map.json" -x
+		fi
+		pin="$dir/template-import-map.sha256"
+		if [ -e "$pin" ]; then backup "$pin"; else UNDO_RM="$UNDO_RM $pin"; fi
+		printf '%s\n' "$TEMPLATE_IMPORT_MAP_SHA" > "$pin"
+		chmod 600 "$pin"
+		sh "$dir/check-commit-imports.sh" --validate-template-import-map "$dir/template-import-map.json" --sha256 "$TEMPLATE_IMPORT_MAP_SHA" ||
+			rollback "installed template-import-map differs from reviewed bytes"
+	fi
 	printf 'installed staged-imports member: %s\n' "$member"
 }
 

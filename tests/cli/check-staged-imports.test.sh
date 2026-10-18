@@ -10,8 +10,17 @@ set -u
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/staged-imports-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+TMP="${TMPDIR:-$REPO_TMP}/staged-imports-test.$$"
+(umask 077; mkdir "$TMP") || exit 1
+python3 - "$TMP" "$REPO_TMP" "$$" <<'PY' || exit 1
+import datetime, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+record = {"pid": int(sys.argv[3]), "label": "staged-imports-test",
+          "repo": str(pathlib.Path(sys.argv[2]).parents[1]),
+          "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+(root / ".owner").write_text(json.dumps(record) + "\n")
+PY
+trap 'printf "retained owned staged import fixtures: %s\n" "$TMP" >&2' EXIT
 
 pass=0
 fail=0
@@ -100,6 +109,172 @@ printf 'import { c } from "./c.js";\nconsole.log(c);\n' > "$R/d.ts"
 git -C "$R" add d.ts
 out=$(commit "$R" -m "[test] nodenext missing" -m "[no-changelog] fixture")
 check "$?" "1" "nodenext-missing-refused" "$out" "imports missing ./c.js (from d.ts)"
+
+# 7. Reviewed projection data is installed outside the candidate tree. The
+# importer is an explicit map source; its installed ../logical import maps back
+# to a regular committed source (including NodeNext .js -> .ts spelling).
+R=$(new_repo reviewed-projection)
+mkdir -p "$R/kit/templates" "$R/kit/src"
+printf 'export const y = 1;\n' > "$R/kit/src/y.ts"
+printf '{"hooks/x.ts":"templates/x.ts","logical/y.ts":"src/y.ts"}\n' > "$R/kit/install-files.json"
+git -C "$R" add kit
+commit "$R" -m "[test] projection sources" -m "[no-changelog] fixture" >/dev/null
+MAP="$TMP/reviewed-map.json"
+python3 - "$R" "$MAP" <<'PY'
+import hashlib, json, pathlib, sys
+repo, output = map(pathlib.Path, sys.argv[1:])
+digest = hashlib.sha256((repo / "kit/install-files.json").read_bytes()).hexdigest()
+output.write_text(json.dumps({"schema_version": 1, "projections": [{
+    "map_path": "kit/install-files.json", "map_sha256": digest,
+    "source_root": "kit", "install_root": ".omp"}]}) + "\n")
+PY
+SHA=$(shasum -a 256 "$MAP")
+SHA=${SHA%% *}
+# A linked pin must be refused before changing hooks or outside bytes.
+PIN="$R/.git/hooks/hooks.d/pre-commit/template-import-map.sha256"
+printf 'owned outside sentinel\n' > "$TMP/outside-pin"
+cp "$TMP/outside-pin" "$TMP/outside-pin.before"
+cp "$R/.git/hooks/pre-commit" "$TMP/link-hook.before"
+ln -s "$TMP/outside-pin" "$PIN"
+out=$(sh "$INSTALLER" --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "2" "symlink-pin-refused" "$out" "unsafe template-import-map destination"
+cmp "$TMP/outside-pin" "$TMP/outside-pin.before" >/dev/null
+check "$?" "0" "symlink-outside-unchanged" "x" "x"
+cmp "$R/.git/hooks/pre-commit" "$TMP/link-hook.before" >/dev/null
+check "$?" "0" "symlink-hook-unchanged" "x" "x"
+mv "$PIN" "$TMP/refused-pin-link"
+out=$(sh "$INSTALLER" --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "0" "reviewed-map-installed" "x" "x"
+printf 'import { y } from "../logical/y.js";\nconsole.log(y);\n' > "$R/kit/templates/x.ts"
+git -C "$R" add kit/templates/x.ts
+out=$(commit "$R" -m "[test] projected importer" -m "[no-changelog] fixture")
+check "$?" "0" "reviewed-projection-commit" "$out x" "x"
+
+# No-option reinstall retains the exact approval and check recognizes it.
+out=$(sh "$INSTALLER" "$R" 2>&1)
+check "$?" "0" "reviewed-reinstall" "x" "x"
+out=$(sh "$INSTALLER" --check --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "0" "reviewed-reinstall-check" "$out" "hooks fresh"
+out=$(cmp "$MAP" "$R/.git/hooks/hooks.d/pre-commit/template-import-map.json" 2>&1)
+check "$?" "0" "reviewed-bytes-retained" "x" "x"
+out=$(sh "$INSTALLER" --check "$R" 2>&1)
+check "$?" "0" "reviewed-no-options-check" "$out" "hooks fresh"
+
+# Reusing the already-installed reviewed declaration is idempotent, not a
+# same-file cp failure after earlier members have been replaced.
+LIVE_MAP="$R/.git/hooks/hooks.d/pre-commit/template-import-map.json"
+out=$(sh "$INSTALLER" --template-import-map "$LIVE_MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "0" "installed-declaration-reused" "$out" "installed staged-imports member"
+out=$(sh "$INSTALLER" --check --template-import-map "$LIVE_MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "0" "installed-declaration-recheck" "$out" "hooks fresh"
+
+# Refusal must precede changes even when a complete install already exists.
+cp "$R/.git/hooks/pre-commit" "$TMP/pre-commit.before"
+cp "$R/.git/hooks/hooks.d/pre-commit/template-import-map.json" "$TMP/map.before"
+out=$(sh "$INSTALLER" --template-import-map "$MAP" --template-import-map-sha256 "$(printf '%064d' 0)" "$R" 2>&1)
+rc=$?
+if [ "$rc" != 0 ]; then rc=1; fi
+check "$rc" "1" "bad-reviewed-hash-refused" "$out" "invalid template import map"
+cmp "$TMP/pre-commit.before" "$R/.git/hooks/pre-commit" >/dev/null
+check "$?" "0" "bad-hash-hook-unchanged" "x" "x"
+cmp "$TMP/map.before" "$R/.git/hooks/hooks.d/pre-commit/template-import-map.json" >/dev/null
+check "$?" "0" "bad-hash-data-unchanged" "x" "x"
+
+# Draft changes cannot activate an unreviewed mapping.
+printf '{"hooks/x.ts":"templates/x.ts","logical/z.ts":"src/z.ts"}\n' > "$R/kit/install-files.json"
+printf 'export const z = 1;\n' > "$R/kit/src/z.ts"
+printf 'import { z } from "../logical/z.js";\nconsole.log(z);\n' > "$R/kit/templates/x.ts"
+git -C "$R" add kit
+out=$(commit "$R" -m "[test] draft map" -m "[no-changelog] fixture")
+check "$?" "1" "draft-cannot-activate" "$out" "staged-imports: REFUSED"
+git -C "$R" reset -q HEAD -- kit
+git -C "$R" show HEAD:kit/install-files.json > "$R/kit/install-files.json"
+
+# Declared target absent from the map, missing mapped source, and ordinary
+# dangling imports all remain real commit refusals.
+printf 'import { z } from "../logical/z.js";\nconsole.log(z);\n' > "$R/kit/templates/x.ts"
+git -C "$R" add kit/templates/x.ts
+out=$(commit "$R" -m "[test] undeclared target" -m "[no-changelog] fixture")
+check "$?" "1" "undeclared-target-refused" "$out" "staged-imports: REFUSED"
+printf 'import { y } from "../logical/y.js";\nconsole.log(y); // mapped source removed\n' > "$R/kit/templates/x.ts"
+git -C "$R" rm -q kit/src/y.ts
+git -C "$R" add kit/templates/x.ts
+out=$(commit "$R" -m "[test] missing mapped source" -m "[no-changelog] fixture")
+check "$?" "1" "mapped-source-missing-refused" "$out" "staged-imports: REFUSED"
+git -C "$R" reset -q HEAD -- kit
+printf 'import "./absent.ts";\n' > "$R/ordinary.ts"
+git -C "$R" add ordinary.ts
+out=$(commit "$R" -m "[test] ordinary dangling" -m "[no-changelog] fixture")
+check "$?" "1" "ordinary-dangling-refused" "$out" "imports missing ./absent.ts"
+
+# --check is read-only and names missing/tampered requested configuration.
+PIN="$R/.git/hooks/hooks.d/pre-commit/template-import-map.sha256"
+printf '%064d\n' 0 > "$PIN"
+cp "$PIN" "$TMP/pin.tampered"
+out=$(sh "$INSTALLER" --check --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "3" "tampered-map-check" "$out" "MISSING or STALE reviewed template-import-map"
+cmp "$PIN" "$TMP/pin.tampered" >/dev/null
+check "$?" "0" "check-preserves-tampering" "x" "x"
+mv "$R/.git/hooks/hooks.d/pre-commit/template-import-map.json" "$TMP/map.removed"
+out=$(sh "$INSTALLER" --check --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
+check "$?" "3" "missing-map-check" "$out" "MISSING or STALE reviewed template-import-map"
+if [ ! -e "$R/.git/hooks/hooks.d/pre-commit/template-import-map.json" ]; then
+	map_absence_rc=0
+else
+	map_absence_rc=1
+fi
+check "$map_absence_rc" "0" "check-does-not-create-map" "x" "x"
+
+# 8. The installed ordinary-source parser must not interpret quoted examples,
+# comments, template text or regexp contents as actual import declarations.
+R=$(new_repo ordinary-quoted-examples)
+cat > "$R/examples.ts" <<'TS'
+export const examples = [
+  'import { absent } from "./quoted.ts";',
+  "export { absent } from './quoted-export.ts';",
+  'import("./quoted-dynamic.ts")',
+  `import { absent } from "./template-text.ts";`,
+];
+export const importPattern = /import \{ absent \} from "\.\/regexp-text.ts"/;
+// import { absent } from "./comment.ts";
+/*
+import { absent } from "./block-comment.ts";
+*/
+TS
+git -C "$R" add examples.ts
+out=$(commit "$R" -m "[test] quoted import examples")
+check "$?" "0" "ordinary-quoted-examples-pass" "$out x" "x"
+
+# Actual static, type-only, and literal dynamic imports remain obligations.
+for kind in static type dynamic; do
+	R=$(new_repo "ordinary-real-$kind")
+	case "$kind" in
+		static) printf 'import { absent } from "./real-static.ts";\nconsole.log(absent);\n' > "$R/actual.ts" ;;
+		type) printf 'import type { Absent } from "./real-type.ts";\nexport type Used = Absent;\n' > "$R/actual.ts" ;;
+		dynamic) printf 'export const pending = import("./real-dynamic.ts");\n' > "$R/actual.ts" ;;
+	esac
+	git -C "$R" add actual.ts
+	out=$(commit "$R" -m "[test] real $kind dangling import")
+	check "$?" "1" "ordinary-real-$kind-refused" "$out" "imports missing ./real-$kind.ts"
+done
+
+# Parser admission must precede changing an existing chain. A restricted
+# executable set supplies Git/path setup but deliberately no Node or tsc.
+R=$(new_repo parser-admission)
+mkdir "$TMP/no-parser"
+ln -s "$(command -v cmp)" "$TMP/no-parser/cmp"
+ln -s "$(command -v git)" "$TMP/no-parser/git"
+ln -s "$(command -v dirname)" "$TMP/no-parser/dirname"
+ln -s /bin/sh "$TMP/no-parser/sh"
+cp "$R/.git/hooks/pre-commit" "$TMP/parser-hook.before"
+out=$(PATH="$TMP/no-parser" /bin/sh "$INSTALLER" "$R" 2>&1)
+check "$?" "2" "missing-parser-install-refused" "$out" "REFUSED import parser unavailable"
+cmp "$R/.git/hooks/pre-commit" "$TMP/parser-hook.before" >/dev/null
+check "$?" "0" "missing-parser-hook-unchanged" "x" "x"
+out=$(PATH="$TMP/no-parser" /bin/sh "$INSTALLER" --check "$R" 2>&1)
+check "$?" "3" "missing-parser-check-stale" "$out" "MISSING or STALE installed import parser"
+cmp "$R/.git/hooks/pre-commit" "$TMP/parser-hook.before" >/dev/null
+check "$?" "0" "missing-parser-check-readonly" "x" "x"
 
 printf 'check-staged-imports: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

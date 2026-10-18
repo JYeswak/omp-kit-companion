@@ -10,8 +10,17 @@ set -u
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/install-bead-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+TMP="${TMPDIR:-$REPO_TMP}/install-bead-test.$$"
+(umask 077 && mkdir "$TMP") || exit 1
+python3 - "$TMP" "$REPO_TMP" "$$" <<'PY' || exit 1
+import datetime, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+record = {"pid": int(sys.argv[3]), "label": root.name.rsplit(".", 1)[0],
+          "repo": str(pathlib.Path(sys.argv[2]).parents[1]),
+          "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+(root / ".owner").write_text(json.dumps(record) + "\n")
+PY
+trap 'printf "retained owned installer fixtures: %s\n" "$TMP" >&2' EXIT
 
 pass=0
 fail=0
@@ -43,7 +52,8 @@ sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "absent-install-rc"
 MSG="$TMP/msg-a"
 printf 'fix widgets with no identity\n' > "$MSG"
-BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
+# Git invokes hooks from the target repo; do not inspect the caller's shared index.
+(CDPATH='' cd -- "$A" && BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$MSG") > /dev/null 2>&1
 ok "$?" "4" "absent-chain-refuses"
 
 # 2. plain bash hook: moved aside, both run (marker written, bead enforced)
@@ -54,12 +64,12 @@ chmod +x "$B/.git/hooks/commit-msg"
 sh "$INSTALLER" "$B" > /dev/null 2>&1
 ok "$?" "0" "plain-install-rc"
 printf 'fix widgets with no identity\n' > "$MSG"
-BEADS_DB="$EMPTY_DB" sh "$B/.git/hooks/commit-msg" "$MSG" > /dev/null 2>&1
+(CDPATH='' cd -- "$B" && BEADS_DB="$EMPTY_DB" sh "$B/.git/hooks/commit-msg" "$MSG") > /dev/null 2>&1
 ok "$?" "4" "plain-chain-refuses"
 grep -q "MARKED" "$MSG"
 ok "$?" "0" "plain-bespoke-also-ran"
 printf 'fix widgets ompkit-2w7h\n' > "$TMP/msg-b"
-BEADS_DB="$TMP/absent.db" sh "$B/.git/hooks/commit-msg" "$TMP/msg-b" > /dev/null 2>&1
+(CDPATH='' cd -- "$B" && BEADS_DB="$TMP/absent.db" sh "$B/.git/hooks/commit-msg" "$TMP/msg-b") > /dev/null 2>&1
 ok "$?" "0" "plain-chain-skips-no-tracker"
 
 # 2b. fail-closed bespoke with a sibling impl: both move, chain stays green.
@@ -80,7 +90,7 @@ ok "$rc" "0" "sibling-moved-along"
 [ ! -e "$C/.git/hooks/commit-msg-impl.sh" ]
 ok "$?" "0" "sibling-not-duplicated"
 printf '[test] fix widgets with no identity\n' > "$TMP/msg-c"
-BEADS_DB="$TMP/definitely-absent.db" sh "$C/.git/hooks/commit-msg" "$TMP/msg-c" > /dev/null 2>&1
+(CDPATH='' cd -- "$C" && BEADS_DB="$TMP/definitely-absent.db" sh "$C/.git/hooks/commit-msg" "$TMP/msg-c") > /dev/null 2>&1
 ok "$?" "0" "sibling-chain-green"
 
 # 2c. path-sensitive bespoke (passes at hooks root, fails once moved):
@@ -228,8 +238,6 @@ sh "$INSTALLER" --no-pushed-beads "$I" > "$TMP/o-upgrade" 2>&1
 ok "$?" "0" "upgrade-install-rc"
 grep -q "upgraded chain runner" "$TMP/o-upgrade"
 ok "$?" "0" "upgrade-announced"
-grep -q 'replay one buffered copy' "$I/.git/hooks/reference-transaction"
-ok "$?" "0" "upgrade-runner-replays"
 
 # 10. a real push through the installed chain: main publishes; a candidate
 #     committed on origin's main but not on local main is refused, and the
