@@ -200,10 +200,38 @@ jobs:
           attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' producer-run.json)"
           timeout 60s gh workflow run release-intel-probe.yml --repo "$GITHUB_REPOSITORY" --ref main \
             -f candidate_run_id="$RUN_ID" -f candidate_run_attempt="$attempt"
+      - name: Resolve the immutable qualified tag before acquiring write authority
+        id: qualified-tag
+        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          if git rev-parse -q --verify "refs/tags/v$VERSION"; then
+            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+            echo 'create=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'create=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Acquire repository-scoped historical-tag authority
+        id: release-identity
+        if: steps.qualified-tag.outputs.create == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
+          skip-token-revoke: false
       - name: Tag only the fully qualified source, then sign the same bytes at the tag ref
         if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG_TOKEN: ${{ steps.release-identity.outputs.token }}
           VERSION: ${{ steps.candidate.outputs.version }}
           SHA: ${{ steps.candidate.outputs.sha }}
           TRAIN_ID: ${{ steps.candidate.outputs.train_id }}
@@ -221,10 +249,10 @@ jobs:
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
           else
-            # A token `git push` of a tag on an older commit is refused whenever .github/workflows differ from the
-            # branch tip (GitHub; run 39078257345). The Git Data API creates the same lightweight ref at the
-            # already-qualified commit with contents: write and no workflow-file write. Existing tags still refuse below.
-            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$SHA" > /dev/null
+            # Historical workflow-bearing commits require workflows: write.
+            # Keep the short-lived, repository-scoped App token on this effect only.
+            [[ -n "$RELEASE_TAG_TOKEN" ]] || { echo 'release tag identity unavailable' >&2; exit 4; }
+            GH_TOKEN="$RELEASE_TAG_TOKEN" gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$SHA" > /dev/null
             git fetch origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
           fi
