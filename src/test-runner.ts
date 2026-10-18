@@ -72,6 +72,7 @@ export type FastTestBlockerKind =
 	| "OMP_UNAVAILABLE"
 	| "NATIVE_MATCHER_UNAVAILABLE"
 	| "OMP_IDENTITY_INVALID"
+	| "GIT_UNAVAILABLE"
 	| "BUNDLED_RUNTIME_UNAVAILABLE";
 
 export interface ProducerCapture {
@@ -333,7 +334,27 @@ function remedyFor(kind: FastTestBlockerKind): string {
 		case "OMP_UNAVAILABLE": return "Install a supported OMP package and put its omp launcher on PATH; omp-kit will not install it.";
 		case "NATIVE_MATCHER_UNAVAILABLE": return "Install or repair OMP's matching source and @oh-my-pi/pi-natives package; omp-kit will not install it.";
 		case "OMP_IDENTITY_INVALID": return "Resolve conflicting OMP, OMP_BIN, OMP_PATH, or OMP_SRC overrides, then rerun.";
+		case "GIT_UNAVAILABLE": return "Install Git and put it on PATH (on macOS, the Xcode Command Line Tools); omp-kit will not install it.";
 		case "BUNDLED_RUNTIME_UNAVAILABLE": return "Use an intact release executable with scripts/ttsr-harness.ts and its declared resources, then rerun.";
+	}
+}
+
+// The admission proof builds real Git fixtures with a 2 s deadline per Git call.
+// On macOS /usr/bin/git is an xcrun shim whose first lookup after a boot can take
+// several seconds, so that one-time discovery is paid here, outside those deadlines.
+const GIT_DISCOVERY_TIMEOUT_MS = 60_000;
+
+/** Null when `git --version` runs from the PATH the harness inherits; else why it cannot. */
+function gitUnavailable(env: NodeJS.ProcessEnv): string | null {
+	const probeEnv: Record<string, string> = {};
+	for (const key of ["PATH", "LANG", "LC_ALL"]) if (env[key]) probeEnv[key] = env[key]!;
+	try {
+		const probe = Bun.spawnSync(["git", "--version"], { env: probeEnv, stdout: "pipe", stderr: "pipe", timeout: GIT_DISCOVERY_TIMEOUT_MS });
+		if (probe.exitCode === 0) return null;
+		const ended = probe.exitCode === null ? `was stopped by ${probe.signalCode ?? "a signal"}` : `exited ${probe.exitCode}`;
+		return `git --version ${ended}: ${probe.stderr.toString().trim()}`;
+	} catch (error) {
+		return `git cannot run from PATH: ${errorText(error)}`;
 	}
 }
 
@@ -402,6 +423,11 @@ export async function runFastTest(input: FastTestInput, requestedExpected?: Fast
 		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected);
 	}
 	const redact = redactor(input, identity);
+	const gitFailure = gitUnavailable(process.env);
+	if (gitFailure) {
+		const kind: FastTestBlockerKind = "GIT_UNAVAILABLE";
+		return blockedReport(diagnostics, { kind, message: gitFailure, remedy: remedyFor(kind) }, redact, expected);
+	}
 	// The gate and the selftest are independent isolated runs (own private roots, no shared
 	// state), so the proof waits for the slower one, not their sum. Both settle before any
 	// return, and their results are consumed in the original order: gate first, then selftest.

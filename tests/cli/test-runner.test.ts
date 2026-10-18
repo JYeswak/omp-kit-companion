@@ -231,6 +231,10 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
 	mkdirSync(toolBin);
 	symlinkSync(process.execPath, join(toolBin, "bun"));
 	symlinkSync(installedOmp.launcher, join(toolBin, "omp"));
+	// The admission proof needs Git; provide the suite's own, as for bun and omp.
+	const git = Bun.which("git");
+	if (!git) throw new Error("fast-test fixtures need git on the suite PATH");
+	symlinkSync(git, join(toolBin, "git"));
 	// Baseline matcher fixtures do not inherit optional operator tools such as rch.
 	nativePath = [toolBin, "/usr/bin", "/bin"].join(delimiter);
 	// A real ambient native package makes both OS containment branches observable.
@@ -359,7 +363,7 @@ describe("runFastTest", () => {
 			const corpus = countCaseRows(readFileSync(join(releaseRoot, "cases", "cases.tsv"), "utf8"));
 			const ruleCounts = countRuleRows(releaseRoot);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, JSON.stringify(report.blocker ?? report.failures)).toBe(0);
 		expect(report.exitCode).toBe(0);
 		expect(report.status).toBe("PASS");
 		expect(report.proofs.G1_registration.status).toBe("PASS");
@@ -461,6 +465,26 @@ describe("runFastTest", () => {
 		expect(native.report.blocker?.kind).toBe("NATIVE_MATCHER_UNAVAILABLE");
 		expect(native.report.blocker?.remedy).toContain("@oh-my-pi/pi-natives");
 		expect(native.report.producers.gate.producer_rc).toBe(null);
+	});
+
+	test("returns exit 3 without launching the matcher when Git is not on PATH", () => {
+		const identity = resolveOmpIdentity(process.env);
+		const home = makeTestHome("missing-git-home");
+		const noGitBin = join(fixtureBase, "no-git-bin");
+		mkdirSync(noGitBin, { recursive: true });
+		symlinkSync(process.execPath, join(noGitBin, "bun"));
+		symlinkSync(identity.launcher, join(noGitBin, "omp"));
+		// Positive control for the planted state: this PATH has no git.
+		expect(Bun.which("git", { PATH: noGitBin })).toBeNull();
+		const env = withOmpIdentity(environment(home, noGitBin), identity.launcher, identity.source);
+		const missing = invoke({ root: releaseRoot, executablePath: stableExecutable, home }, env);
+		expect(missing.result.exitCode).toBe(3);
+		expect(missing.report.status).toBe("BLOCKED");
+		expect(missing.report.blocker?.kind).toBe("GIT_UNAVAILABLE");
+		expect(missing.report.blocker?.remedy).toContain("will not install it");
+		expect(missing.report.producers.gate.producer_rc).toBe(null);
+		expect(missing.report.producers.selftest.producer_rc).toBe(null);
+		expect(missing.report.proofs.G1_registration.status).toBe("NOT_RUN");
 	});
 
 	test("returns exit 1 and G3 evidence for a quiet-prefix plant in the unchanged case corpus", () => {
