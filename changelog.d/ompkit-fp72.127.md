@@ -1,0 +1,1 @@
+- Keep RCH diagnostic cache writes in a private temporary HOME/XDG tree while preserving the caller's selected configuration and daemon socket.

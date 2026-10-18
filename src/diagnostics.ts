@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
@@ -1449,11 +1449,42 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 }
 
 function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { code: number; out: string } | null {
+	let privateRoot: string | undefined;
 	try {
-		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env }, timeout: timeoutMs });
+		let env: NodeJS.ProcessEnv = process.env;
+		if (binary === "rch") {
+			const home = process.env.HOME || homedir();
+			const xdgConfig = join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "rch");
+			const nativeConfig = process.platform === "darwin" ? join(home, "Library", "Application Support", "com.rch.rch") : xdgConfig;
+			const configured = process.env.RCH_CONFIG_DIR;
+			const config = configured
+				? configured === "~" ? home : configured.startsWith("~/") ? join(home, configured.slice(2)) : configured
+				: [xdgConfig, nativeConfig].find(path => {
+					try { return statSync(path).isDirectory(); } catch { return false; }
+				}) ?? xdgConfig;
+			const cache = process.platform === "darwin" ? join(home, "Library", "Caches")
+				: process.env.XDG_CACHE_HOME && isAbsolute(process.env.XDG_CACHE_HOME) ? process.env.XDG_CACHE_HOME : join(home, ".cache");
+			// RCH's default socket constructor creates its cache directory unless
+			// XDG_RUNTIME_DIR is set. Pin the SAME read-only socket parent before
+			// redirecting HOME/cache; config and RCH_SOCKET_PATH still override it.
+			const runtime = process.env.XDG_RUNTIME_DIR?.trim() ? process.env.XDG_RUNTIME_DIR : join(cache, "rch");
+			privateRoot = mkdtempSync(join(tmpdir(), "omp-kit-rch-probe-"));
+			const privateHome = join(privateRoot, "home");
+			const privateTmp = join(privateRoot, "tmp");
+			for (const directory of ["home", "tmp", "config", "cache", "data", "state"]) mkdirSync(join(privateRoot, directory), { mode: 0o700 });
+			env = {
+				...env, HOME: privateHome, TMPDIR: privateTmp, TMP: privateTmp, TEMP: privateTmp,
+				XDG_CONFIG_HOME: join(privateRoot, "config"), XDG_CACHE_HOME: join(privateRoot, "cache"),
+				XDG_DATA_HOME: join(privateRoot, "data"), XDG_STATE_HOME: join(privateRoot, "state"),
+				RCH_CONFIG_DIR: config, XDG_RUNTIME_DIR: runtime,
+			};
+		}
+		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore", env, timeout: timeoutMs });
 		return { code: run.exitCode, out: run.stdout.toString() };
 	} catch {
 		return null;
+	} finally {
+		if (privateRoot) rmSync(privateRoot, { recursive: true, force: true });
 	}
 }
 

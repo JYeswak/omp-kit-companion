@@ -7,6 +7,7 @@ import { delimiter, dirname, join } from "node:path";
 import { defaultRchReachability, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchReachability, inspectRegexTools, type Finding, type RchReachabilityDeps } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { snapshotWatched } from "../../src/operator-snapshot.ts";
 
 const fixtures: string[] = [];
 interface Fixture { base: string; root: string; home: string; project: string; bunRoot: string; bytes: string; ompPath: string }
@@ -1321,3 +1322,54 @@ test("oq1h.5: a live rchd on Linux reaches RUNNING through the same checks, and 
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
 });
+
+test("RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a native-cache writer", () => {
+	const f = fixture(); installOmp(f);
+	const bin = join(f.base, "probe-bin");
+	const configHome = join(f.base, "caller-config");
+	const cacheHome = join(f.base, "caller-cache");
+	const dataHome = join(f.base, "caller-data");
+	const stateHome = join(f.base, "caller-state");
+	const runtime = join(f.base, "caller-runtime");
+	const privateTmp = join(f.base, "private-tmp");
+	for (const path of [bin, cacheHome, dataHome, stateHome, runtime, privateTmp, join(configHome, "rch")]) mkdirSync(path, { recursive: true });
+	const selected = join(runtime, "selected.sock");
+	writeFileSync(join(configHome, "rch", "config.toml"), `[general]\nsocket_path = ${JSON.stringify(selected)}\n`);
+	// A controlled external process, not an assertion that native RCH ran.
+	// It reads the selected config and writes the same native cache families
+	// that caused the real caller-HOME regression.
+	writeFileSync(join(bin, "rch"), `#!${process.execPath}
+const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+if (process.argv.slice(2).join(" ") !== "--json daemon status") process.exit(91);
+const home = process.env.HOME;
+const config = process.env.RCH_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "rch");
+const line = readFileSync(join(config, "config.toml"), "utf8").split("\\n").find(line => line.startsWith("socket_path = "));
+const socket = JSON.parse(line.slice("socket_path = ".length));
+for (const directory of [join(home, "Library/Caches/com.rch.rch"), join(home, "Library/Caches/rch"), join(process.env.XDG_CACHE_HOME || join(home, ".cache"), "rch")]) {
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "config.cache.json"), "native-cache-canary\\n");
+}
+console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
+`, { mode: 0o755 });
+	const watched = [f.home, configHome, cacheHome, dataHome, stateHome, runtime];
+	const before = snapshotWatched(watched);
+	expect(before.incomplete).toEqual([]);
+	const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "doctor", "--json"], {
+		cwd: f.project,
+		env: {
+			PATH: `${bin}${delimiter}${dirname(f.ompPath)}${delimiter}/usr/bin:/bin`,
+			HOME: f.home, TMPDIR: privateTmp, BUN_INSTALL: f.bunRoot,
+			XDG_CONFIG_HOME: configHome, XDG_CACHE_HOME: cacheHome, XDG_DATA_HOME: dataHome,
+			XDG_STATE_HOME: stateHome, XDG_RUNTIME_DIR: runtime,
+			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(privateTmp, "bun-transpiler"),
+			OMP_KIT_OMP_SRC_FETCH: "0",
+		},
+		stdout: "pipe", stderr: "pipe", timeout: 10_000,
+	});
+	const output = run.stdout.toString();
+	expect(run.exitCode, output + run.stderr.toString()).toBe(0);
+	const rows: Finding[] = JSON.parse(output).data.findings;
+	expect(finding(rows, "rch")).toMatchObject({ status: "OK", evidence: { state: "NOT_RUNNING" } });
+	expect(snapshotWatched(watched)).toEqual(before);
+}, 15_000);
