@@ -1991,6 +1991,45 @@ export function applyScratchForPressure(home: string, deps: ApplyDeps):
 	return { free_pct: freePct, pressure, result };
 }
 
+export type OwnedScratchState = "unreleased" | "released" | "held" | "hold-expired";
+
+/** One dir the caller owns and where it stands: the list a disposal-point guard shows an owner that has not binned its work. */
+export interface OwnedScratchRow { dir: string; label: string; state: OwnedScratchState; bin: ScratchBin | "unbinned" }
+
+/**
+ * The caller's own scratch dirs across the scratch roots (ompkit-774u.15 C): those whose owner record names the caller's
+ * agent and a session it holds, or the caller's own pid or an ancestor. Read-only; a dir the owner already released is
+ * listed as released, a hold as held until its expiry. Dirs of other owners never appear.
+ */
+export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[] {
+	const now = deps.now ?? Date.now();
+	const rows: OwnedScratchRow[] = [];
+	for (const root of resolveScratchRoots(home)) {
+		let names: string[];
+		try {
+			names = readdirSync(root);
+		} catch {
+			continue;
+		}
+		for (const name of names) {
+			const dir = join(root, name);
+			if (isSymlink(dir) || isSymlink(join(dir, ".owner"))) continue;
+			const text = readText(join(dir, ".owner"));
+			const owner = text === null ? null : parseOwnerFile(text);
+			if (owner === null || !(callerHoldsSeat(owner, deps) || callerIsOwnedBy(owner.pid, process.pid, deps.run))) continue;
+			const released = readReleaseRecord(dir);
+			if (released) {
+				rows.push({ dir, label: owner.label, state: "released", bin: released.bin ?? "unbinned" });
+			} else if (owner.bin === "hold" && owner.expires !== null) {
+				rows.push({ dir, label: owner.label, state: Date.parse(owner.expires) > now ? "held" : "hold-expired", bin: "hold" });
+			} else {
+				rows.push({ dir, label: owner.label, state: "unreleased", bin: owner.bin ?? "unbinned" });
+			}
+		}
+	}
+	return rows.sort((left, right) => left.dir.localeCompare(right.dir));
+}
+
 export function touchForAge(path: string, ageMs: number, now: number = Date.now()): void {
 	utimesSync(path, new Date(now - ageMs), new Date(now - ageMs));
 }
