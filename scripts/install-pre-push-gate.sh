@@ -19,6 +19,15 @@ command -v am >/dev/null 2>&1 || {
 	echo "install-pre-push-gate: native am is required to regenerate reservation guards" >&2
 	exit 2
 }
+# Native regeneration also touches pre-commit. Never displace somebody else's
+# hook (even into a backup) while refreshing this publication member.
+for hook in pre-commit pre-push; do
+	path="$HOOKS/$hook"
+	if [ -e "$path" ] && ! grep -Fq "mcp-agent-mail chain-runner ($hook)" "$path"; then
+		echo "install-pre-push-gate: refusing to replace an existing non-chain $hook hook" >&2
+		exit 2
+	fi
+done
 am guard install "$ROOT" "$ROOT" --prepush
 mkdir -p "$(dirname "$DEST")"
 cp "$ROOT/scripts/pre-push-gate.sh" "$DEST"

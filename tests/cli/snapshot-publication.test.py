@@ -167,13 +167,13 @@ def installer_regenerates_custody(fixture: Fixture) -> None:
     mutation_refused(fixture)
 
 
-def nonchain_hook_preserved(fixture: Fixture) -> None:
+def nonchain_hook_preserved(fixture: Fixture, hook_name: str = "pre-push") -> None:
     scripts = fixture.repo / "scripts"
     scripts.mkdir(exist_ok=True)
     for name in ("install-pre-push-gate.sh", "pre-push-gate.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     hooks = fixture.repo / ".git/hooks"
-    custom = hooks / "pre-push"
+    custom = hooks / hook_name
     custom.write_text("#!/bin/sh\nexit 23\n")
     before = {path: path.read_bytes() for path in hooks.rglob("*") if path.is_file()}
     result = fixture.run("sh", str(scripts / "install-pre-push-gate.sh"), allow_failure=True)
@@ -200,7 +200,8 @@ def main() -> int:
     for name, check in (("publication", publication), ("mutation-custody", mutation_refused),
                         ("unadmitted-history", unadmitted_history_refused),
                         ("installer-regeneration", installer_regenerates_custody),
-                        ("nonchain-custody", nonchain_hook_preserved)):
+                        ("nonchain-custody", nonchain_hook_preserved),
+                        ("nonchain-precommit-custody", lambda fixture: nonchain_hook_preserved(fixture, "pre-commit"))):
         for phase in ("installed", "regenerated"):
             # A fresh origin keeps publication a real ref update on both
             # trials; re-pushing an up-to-date ref would not exercise a hook.

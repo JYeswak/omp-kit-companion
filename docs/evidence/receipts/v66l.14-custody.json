@@ -1,0 +1,18 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_c8832b9be4241789ab9572a2381353dae87f71d4152e412958fab4a347e883d6",
+ "limitations": [
+  "Native matrix ten pass and two original publication reds; mutation-deletion mutant killed semantically; publication-scope correction and its causal mutant remain UNPROVEN; no whole-bead, release or installed-upgrade claim."
+ ],
+ "operation": "snapshot-publication-custody-preservation",
+ "parameters": {
+  "regression_sha256": "45b09a3ef7124c7bf4e25672485b6bcf90791f21acbcb9af0af53efde34a6fa1",
+  "subject_sha256": "3bd9f088e5462c07404c2c1eca38eec3a3c23fb95e86454efbbae0c2fc4eec0b"
+ },
+ "producer": "FrostyOrchid",
+ "result_ref": {
+  "bytes": 2744,
+  "sha256": "a8840fcd09f2bf74ce748b231b581bc8b3294e4a0e219204f1d3e9020eb189b9"
+ }
+}
