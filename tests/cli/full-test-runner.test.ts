@@ -30,13 +30,43 @@ test("full ladder requires every ordered stage, every shipped live row, and name
 test("mid-ladder RED exposes its producer status and keeps later stages NOT_RUN", () => {
  const result = sample("GREEN manifest producer_rc=0\nRED   harness-gate producer_rc=7\n", 1);
  expect(result.stages.manifest).toEqual({ status: "PASS", producer_rc: 0, duration_ms: null });
- expect(result.stages["harness-gate"]).toEqual({ status: "FAIL", producer_rc: 7, duration_ms: null });
+ expect(result.stages["harness-gate"]).toMatchObject({ status: "FAIL", producer_rc: 7, duration_ms: null });
  expect(result.stages["e2e-live"].status).toBe("NOT_RUN");
  expect(Object.hasOwn(result.stages["e2e-live"], "duration_ms")).toBe(true);
  expect(result.stages["e2e-live"].duration_ms).toBe(null);
  expect(result.live_scenarios.status).toBe("NOT_RUN");
  expect(result.failures).toContain("Stage harness-gate returned producer_rc=7");
  expect(result.failures).not.toContain("Live scenario rows missing: scenario-one, scenario-two");
+});
+
+test("failed-stage JSON retains bounded verdict and tail without adjacent stage output", () => {
+ const prefix = "OMP_KIT_STAGE_START name=manifest\n" + "earlier stage\n".repeat(2000)
+  + "GREEN manifest producer_rc=0 duration_ms=12\n";
+ const failed = "OMP_KIT_STAGE_START name=harness-gate\nactual failure verdict\n" + "x".repeat(12_000)
+  + "\nactual failure tail\nRED   harness-gate producer_rc=7 duration_ms=1234\n";
+ const later = "OMP_KIT_STAGE_START name=harness-selftest\nlater stage must not replace failure\n";
+ const diagnostic = "d".repeat(2000) + "\nactual producer diagnostic";
+ const report = classifyLadder({ code: 1, stdout: prefix + failed + later, stderr: diagnostic }, []);
+ const stage = report.stages["harness-gate"];
+ expect(stage).toMatchObject({ status: "FAIL", producer_rc: 7, duration_ms: 1234 });
+ expect(stage.output?.stdout_head).toContain("actual failure verdict");
+ expect(stage.output?.stdout_tail).toBe(failed.slice(-2500));
+ expect(stage.output?.stderr_tail).toBe(diagnostic.slice(-1000));
+ expect(stage.output?.stdout_chars).toBe(failed.length);
+ expect(stage.output?.stdout_head?.length).toBeLessThanOrEqual(2500);
+ expect(stage.output?.stdout_tail.length).toBeLessThanOrEqual(2500);
+ expect(stage.output?.stderr_tail.length).toBeLessThanOrEqual(1000);
+ expect(stage.output?.stdout_head).not.toContain("earlier stage");
+ expect(stage.output?.stdout_tail).not.toContain("later stage");
+ expect(report.stages.manifest.output).toBeUndefined();
+});
+
+test("a missing failed-stage marker never labels earlier ladder output as its verdict", () => {
+ const report = sample("OMP_KIT_STAGE_START name=manifest\nearlier stage verdict\n"
+  + "GREEN manifest producer_rc=0 duration_ms=12\nRED   harness-gate producer_rc=7 duration_ms=1234\n", 1);
+ expect(report.stages["harness-gate"].status).toBe("FAIL");
+ expect(report.stages["harness-gate"].output).toBeUndefined();
+ expect(report.stages["harness-gate"].reason).toContain("start marker");
 });
 
 test("producer success without complete ordered proof is a failure, never implicit green", () => {

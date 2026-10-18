@@ -234,33 +234,20 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None, finish
         failed_durations = {stage: durations[stage] for stage in failed_stage_names if stage in durations}
         if failed_durations:
             detail["failed_stage_durations_ms"] = failed_durations
-        producer = test.get("producer") if isinstance(test.get("producer"), dict) else {}
-        if failed_stage_names:
-            # The ladder's own output holds the failing stage's message; failures[] alone drops it (run 39061124857).
-            for key in ("stdout", "stderr"):
-                text = producer.get(key)
+        # The public CLI owns stage selection and redaction before bounding.
+        # Do not re-parse its now-bounded whole-ladder producer tail for a verdict.
+        for stage in failed_stage_names:
+            output = test["stages"][stage].get("output")
+            if not isinstance(output, dict):
+                continue
+            size = output.get("stdout_chars")
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                detail["producer_stdout_chars"] = size
+            for key, limit in (("stdout_head", 2500), ("stdout_tail", 2500), ("stderr_tail", 1000)):
+                text = output.get(key)
                 if isinstance(text, str) and text:
-                    if key == "stdout":
-                        detail["producer_stdout_chars"] = len(text)
-                        # producer.stdout is the whole ladder, not just the failed stage.
-                        for stage in failed_stage_names:
-                            marker = f"OMP_KIT_STAGE_START name={stage}\n"
-                            if text.startswith(marker):
-                                start = 0
-                            else:
-                                start = text.find("\n" + marker)
-                                if start < 0:
-                                    continue
-                                start += 1
-                            end = text.find("\nOMP_KIT_STAGE_START name=", start + len(marker))
-                            text = text[start:] if end < 0 else text[start:end + 1]
-                            break
-                    limit = 2500 if key == "stdout" else 1000
-                    detail[f"producer_{key}_tail"] = text[-limit:]
-                    if key == "stdout":
-                        if len(text) > limit:
-                            # Some stages (regex-budget) print their verdict first and a very long report after it, so the tail alone cannot name the cause.
-                            detail["producer_stdout_head"] = text[:limit]
+                    detail[f"producer_{key}"] = text[:limit] if key == "stdout_head" else text[-limit:]
+            break
         if expected_live_ids is not None and omp_version is not None:
             detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail

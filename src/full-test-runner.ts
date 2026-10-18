@@ -10,7 +10,10 @@ import { RELEASE_DATA } from "./release-assets.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
-export type FullStage = { status: "PASS" | "FAIL" | "NOT_RUN"; producer_rc: number | null; duration_ms: number | null; reason?: string };
+export type FullStage = {
+ status: "PASS" | "FAIL" | "NOT_RUN"; producer_rc: number | null; duration_ms: number | null; reason?: string;
+ output?: { stdout_chars: number; stdout_head?: string; stdout_tail: string; stderr_tail: string };
+};
 export type FullTestProducerArtifacts = { directory: string; stdout_path: string; stderr_path: string };
 export type FullTestProducer = { producer_rc: number | null; stdout: string; stderr: string; artifacts: FullTestProducerArtifacts | null; artifact_error: string | null };
 export type FullTestCause = { cause_code: string; cause_name: string; cause_message: string; cause_stack_head: string | null };
@@ -159,7 +162,7 @@ function snapshot(root: string | undefined, release: boolean): Snapshot {
  * know is a newer release's stage: it must be GREEN and is accepted. Every stage this version knows must still
  * appear, GREEN, in this order; a known stage that is skipped or reordered is a failure.
  */
-export function classifyLadder(result: BundledRunResult, ids: readonly string[]): {
+export function classifyLadder(result: BundledRunResult, ids: readonly string[], output: Pick<BundledRunResult, "stdout" | "stderr"> = result): {
  stages: Record<FullStageName, FullStage>; live_scenarios: FullTestReport["live_scenarios"]; failures: string[];
 } {
  const stages = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null, duration_ms: null }])) as Record<FullStageName, FullStage>;
@@ -193,6 +196,24 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[])
    }
    stages[name] = { status: match[1] === "GREEN" ? "PASS" : "FAIL", producer_rc: Number(match[3]),
     duration_ms: match[4] === undefined ? null : Number(match[4]) };
+   if (match[1] === "RED") {
+    const marker = `OMP_KIT_STAGE_START name=${name}\n`;
+    const start = output.stdout.startsWith(marker) ? 0 : output.stdout.indexOf("\n" + marker);
+    if (start < 0) {
+     stages[name].reason = "Failed-stage output unavailable: start marker not observed";
+    } else {
+     const begin = output.stdout.startsWith(marker) ? 0 : start + 1;
+     const end = output.stdout.indexOf("\nOMP_KIT_STAGE_START name=", begin + marker.length);
+     const until = end < 0 ? output.stdout.length : end + 1;
+     const length = until - begin;
+     stages[name].output = {
+      stdout_chars: length,
+      ...(length > 2500 ? { stdout_head: output.stdout.slice(begin, begin + 2500) } : {}),
+      stdout_tail: output.stdout.slice(Math.max(begin, until - 2500), until),
+      stderr_tail: output.stderr.slice(-1000),
+     };
+    }
+   }
    next++;
   }
   if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`); break; }
@@ -265,7 +286,10 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
   home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
- const classified = classifyLadder(result, ids);
+ const redact = (text: string) => redactFullTestText(text, privateRoots);
+ const stdout = redact(result.stdout);
+ const stderr = redact(result.stderr);
+ const classified = classifyLadder(result, ids, { stdout, stderr });
  const currentStage = currentStageReport(result.in_flight_stage ?? null);
  const failures = [...classified.failures];
  if (!snapshots.release.unchanged) failures.push("Release snapshot changed during isolated test");
@@ -274,13 +298,10 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  for (const path of [...snapshots.home.incomplete_paths, ...snapshots.project.incomplete_paths]) failures.push(`Operator file could not be read completely: ${path}`);
  const incomplete = !snapshots.release.complete || !snapshots.project.complete || !snapshots.home.complete;
  const passed = result.code === 0 && !failures.length && classified.live_scenarios.status === "PASS" && classified.stages["e2e-plant"].status === "PASS";
- const redact = (text: string) => redactFullTestText(text, privateRoots);
  const plant = classified.stages["e2e-plant"].status === "NOT_RUN" ? "NOT_RUN"
   : classified.stages["e2e-plant"].status === "PASS" && !failures.includes("Planted negative control was not named RED") ? "PASS" : "FAIL";
  const guardBlocked = classified.stages["cli-crosscheck"].reason?.startsWith("omp-trust-guard FAIL-CLOSED") === true;
  const blocked = result.code === 3 || guardBlocked || (incomplete && failures.length === 1 && result.code === 0);
- const stdout = redact(result.stdout);
- const stderr = redact(result.stderr);
  const artifactRepo = process.env.OMP_KIT_CASE_CWD ?? process.env.GITHUB_WORKSPACE;
  let artifacts: FullTestProducerArtifacts | null = null;
  let artifactError: string | null = null;
@@ -293,6 +314,7 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   current_stage: currentStage, cause, live_scenarios: classified.live_scenarios,
   proofs: { G4_live: { status: classified.live_scenarios.status === "NOT_RUN" ? "NOT_RUN" : classified.live_scenarios.status === "PASS" && plant === "PASS" ? "PASS" : "FAIL",
    expected_scenarios: ids.length, observed_scenarios: classified.live_scenarios.observed_ids.length, plant } },
-  snapshots, producer: { producer_rc: result.code, stdout, stderr, artifacts, artifact_error: artifactError },
+  snapshots, producer: { producer_rc: result.code, stdout: passed ? stdout : stdout.slice(-2500),
+   stderr: passed ? stderr : stderr.slice(-1000), artifacts, artifact_error: artifactError },
   failures: failures.map(redact), proof_scope: "ISOLATED_FIXTURE_ONLY" };
 }

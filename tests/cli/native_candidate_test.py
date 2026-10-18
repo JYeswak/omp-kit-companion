@@ -282,10 +282,9 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertEqual(detail["missing_scenarios"], ["planted-fail"])
 
     def test_refusal_detail_keeps_failing_stage_producer_tail_only_on_failure(self) -> None:
-        producer = {"producer_rc": 1, "stdout": "x" * 6000 + "coverage producer_rc=2\nRED   e2e-live producer_rc=2", "stderr": "e" * 3000 + "launcher boom"}
-        failing = {"data": {"test": {"status": "FAIL", "stages": {"e2e-live": {"status": "FAIL"}},
-                                     "failures": ["Stage e2e-live returned producer_rc=2"],
-                                     "live_scenarios": {"expected_ids": [], "observed_ids": []}, "producer": producer}}, "errors": []}
+        failing = self._failing_full(
+            "e2e-live", "x" * 6000 + "coverage producer_rc=2\nRED   e2e-live producer_rc=2",
+            "e" * 3000 + "launcher boom")
         child = types.SimpleNamespace(returncode=1, stdout=json.dumps(failing).encode(), stderr=b"tail")
         detail = native_candidate.refusal_detail("test --full", child)
         self.assertTrue(detail["producer_stdout_tail"].endswith("RED   e2e-live producer_rc=2"))
@@ -293,8 +292,8 @@ class CandidateReceiptTests(unittest.TestCase):
         self.assertTrue(detail["producer_stderr_tail"].endswith("launcher boom"))
         self.assertLessEqual(len(detail["producer_stdout_tail"]), 2500)
         self.assertLessEqual(len(detail["producer_stderr_tail"]), 1000)
-        passing = {"data": {"test": {"status": "PASS", "stages": {"e2e-live": {"status": "PASS"}},
-                                     "failures": [], "live_scenarios": {"expected_ids": [], "observed_ids": []}, "producer": producer}}, "errors": []}
+        passing = self._failing_full("e2e-live", "private failing output")
+        passing["data"]["test"]["stages"]["e2e-live"]["status"] = "PASS"
         detail = native_candidate.refusal_detail("test --full", types.SimpleNamespace(returncode=1, stdout=json.dumps(passing).encode(), stderr=b"tail"))
         self.assertNotIn("producer_stdout_tail", detail)
         self.assertNotIn("producer_stderr_tail", detail)
@@ -328,9 +327,13 @@ class CandidateReceiptTests(unittest.TestCase):
     @staticmethod
     def _failing_full(stage: str, stdout: str, stderr: str = "") -> dict:
         return {"data": {"test": {
-            "status": "FAIL", "stages": {"manifest": {"status": "PASS"}, stage: {"status": "FAIL"}},
+            "status": "FAIL", "stages": {"manifest": {"status": "PASS"}, stage: {
+                "status": "FAIL", "output": {
+                    "stdout_chars": len(stdout),
+                    **({"stdout_head": stdout} if len(stdout) > 2500 else {}),
+                    "stdout_tail": stdout, "stderr_tail": stderr}}},
             "failures": [f"Stage {stage} returned producer_rc=1"], "live_scenarios": {"expected_ids": [], "observed_ids": []},
-            "producer": {"producer_rc": 1, "stdout": stdout, "stderr": stderr}}}, "errors": []}
+            "producer": {"producer_rc": 1, "stdout": "bounded ladder tail is not the failing-stage verdict", "stderr": ""}}}, "errors": []}
 
     def test_refusal_detail_keeps_the_head_of_oversized_stage_output_where_the_verdict_is(self) -> None:
         # regex-budget prints its verdict first and then one 800 KB JSON line: the tail alone can never name the cause.
@@ -356,20 +359,6 @@ class CandidateReceiptTests(unittest.TestCase):
         for key in ("producer_stdout_head", "producer_stdout_tail", "producer_stdout_chars"):
             self.assertNotIn(key, clean)
 
-    def test_refusal_detail_bounds_the_failed_stage_not_the_whole_ladder(self) -> None:
-        verdict = "REGEX-BUDGET: FAIL\nlive stream: FAIL total=600ms / 500ms\n"
-        failed = ("OMP_KIT_STAGE_START name=regex-budget\n" + verdict
-                  + "JSON_REPORT=" + "x" * 800_000 + "\nRED   regex-budget producer_rc=1\n")
-        prefix = "OMP_KIT_STAGE_START name=manifest\n" + "earlier passing output\n" * 1000
-        later = "OMP_KIT_STAGE_START name=claim-selftest\nlater output must not replace the failure\n"
-        stdout = prefix + failed + later
-        child = types.SimpleNamespace(
-            returncode=1, stdout=json.dumps(self._failing_full("regex-budget", stdout)).encode(), stderr=b"")
-        detail = native_candidate.refusal_detail("full", child)
-        self.assertTrue(detail["producer_stdout_head"].startswith("OMP_KIT_STAGE_START name=regex-budget\n" + verdict))
-        self.assertEqual(detail["producer_stdout_tail"], failed[-2500:])
-        self.assertNotIn("earlier passing output", detail["producer_stdout_head"])
-        self.assertNotIn("later output", detail["producer_stdout_tail"])
 
     def test_refusal_detail_reports_measured_stage_durations_including_the_failing_stage(self) -> None:
         stderr = (b"OMP_KIT_STAGE_START name=manifest started_at_ms=1000\n"
@@ -536,6 +525,15 @@ def native_failure_log() -> None:
     archive_dir = Path(os.environ["OMP_KIT_NATIVE_FAILURE_ARCHIVE_DIR"])
     target = os.environ["TARGET"]
     original_env = native_candidate.cert_env
+    original_run = native_candidate.run_scoped
+    full_reports: list[dict] = []
+
+    def recording_run(argv: list[str], *, cwd: Path, env: dict, timeout: int) -> subprocess.CompletedProcess:
+        child = original_run(argv, cwd=cwd, env=env, timeout=timeout)
+        if argv[1:] == ["test", "--full", "--json"]:
+            full_reports.append(json.loads(child.stdout)["data"]["test"])
+        return child
+
     head = "CIOUT1 planted stage head: owned nice exits 1"
     tail = "CIOUT1 planted stage tail: owned nice exits 1"
     error = "CIOUT1 planted stage stderr: owned nice exits 1"
@@ -562,7 +560,8 @@ def native_failure_log() -> None:
             omp_track=os.environ["OMP_TRACK"], asset=str(archive_dir / "asset.json"),
             archive_dir=str(archive_dir), out=str(Path(work) / "refusal.json"))
         stdout, stderr = io.StringIO(), io.StringIO()
-        with unittest.mock.patch.object(native_candidate, "cert_env", failing_stage_env):
+        with unittest.mock.patch.object(native_candidate, "cert_env", failing_stage_env), \
+                unittest.mock.patch.object(native_candidate, "run_scoped", recording_run):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = native_candidate.native(args)
         # Print the real native console, not a reconstruction of its receipt.
@@ -570,6 +569,21 @@ def native_failure_log() -> None:
         print(stderr.getvalue(), end="", file=sys.stderr, flush=True)
         receipt = json.loads(Path(args.out).read_text(encoding="utf-8"))
         check = unittest.TestCase()
+        public_report = full_reports[0]
+        public_stage = public_report["stages"]["regex-budget"]
+        check.assertEqual(public_stage["status"], "FAIL")
+        check.assertEqual(public_stage["producer_rc"], 1)
+        check.assertGreaterEqual(public_stage["duration_ms"], 1000)
+        output = public_stage["output"]
+        check.assertIn(head, output["stdout_head"])
+        check.assertIn(tail, output["stdout_tail"])
+        check.assertIn(error, output["stdout_tail"])
+        for key, limit in (("stdout_head", 2500), ("stdout_tail", 2500), ("stderr_tail", 1000)):
+            check.assertLessEqual(len(output.get(key, "")), limit)
+        check.assertLessEqual(len(public_report["producer"]["stdout"]), 2500)
+        check.assertLessEqual(len(public_report["producer"]["stderr"]), 1000)
+        print(json.dumps({"scope": "actual public CLI failure JSON, expected refusal",
+                          "stage": public_stage}), flush=True)
         check.assertEqual(code, 1)
         check.assertIs(receipt["certified"], False)
         check.assertEqual(receipt["failure"], "native full refused rc=1")
