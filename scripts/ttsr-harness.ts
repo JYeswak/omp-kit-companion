@@ -1126,7 +1126,7 @@ function sha256(file: string): string {
 	return hash.digest("hex");
 }
 
-function witnessBindings(ruleFile: string, casesFile: string): Record<string, string> {
+async function witnessBindings(ruleFile: string, casesFile: string): Promise<Record<string, string>> {
 	const matcher = path.join(OMP_SRC, "export/ttsr.ts");
 	const nativeEntry = Bun.resolveSync("@oh-my-pi/pi-natives", matcher);
 	const nativeRoot = path.resolve(path.dirname(nativeEntry), "..");
@@ -1137,14 +1137,20 @@ function witnessBindings(ruleFile: string, casesFile: string): Record<string, st
 	const platformRoot = path.dirname(platformManifest);
 	const addons = fs.readdirSync(platformRoot).filter(file => file.endsWith(".node")).sort();
 	if (addons.length === 0) throw new Error("native addon bytes are unavailable for binding");
-	const nativeDigest = createHash("sha256");
-	for (const file of [path.join(nativeRoot, "package.json"), path.join(nativeRoot, "native/loader-state.js"), platformManifest, ...addons.map(file => path.join(platformRoot, file))]) {
-		nativeDigest.update(path.basename(file)).update(fs.readFileSync(file));
-	}
+	const nativeFiles = [path.join(nativeRoot, "package.json"), path.join(nativeRoot, "native/loader-state.js"), platformManifest, ...addons.map(file => path.join(platformRoot, file))];
 	const launcher = fs.realpathSync(OMP_BIN.includes("/") ? OMP_BIN : (Bun.which(OMP_BIN) ?? OMP_BIN));
+	// The three dominant costs (native addons, bun runtime, OMP launcher: ~180 MB) are independent. Reading and
+	// hashing them concurrently overlaps their I/O and CPU; the digests are the same bytes in the same order as the
+	// sequential sha256() they replace.
+	const [nativeBytes, [launcherSha256, runtimeSha256]] = await Promise.all([
+		Promise.all(nativeFiles.map(async file => new Uint8Array(await Bun.file(file).arrayBuffer()))),
+		Promise.all([launcher, process.execPath].map(async file => Buffer.from(await crypto.subtle.digest("SHA-256", await Bun.file(file).arrayBuffer())).toString("hex"))),
+	]);
+	const nativeDigest = createHash("sha256");
+	nativeFiles.forEach((file, index) => nativeDigest.update(path.basename(file)).update(nativeBytes[index]!));
 	return {
 		omp_launcher: launcher,
-		omp_launcher_sha256: sha256(launcher),
+		omp_launcher_sha256: launcherSha256,
 		omp_package: path.resolve(OMP_SRC, ".."),
 		omp_package_sha256: sha256(path.resolve(OMP_SRC, "../package.json")),
 		omp_source: fs.realpathSync(OMP_SRC),
@@ -1154,7 +1160,7 @@ function witnessBindings(ruleFile: string, casesFile: string): Record<string, st
 		native_sha256: nativeDigest.digest("hex"),
 		kit_root: KIT,
 		harness_runtime: fs.realpathSync(process.execPath),
-		harness_runtime_sha256: sha256(process.execPath),
+		harness_runtime_sha256: runtimeSha256,
 		kit_harness_sha256: sha256(import.meta.path),
 		policy_sha256: sha256(path.join(KIT, "policy/ttsr.json")),
 		rule_loader_sha256: sha256(path.join(KIT, "scripts/rule-class.ts")),
@@ -1221,7 +1227,7 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 			status: "OK", rule: lr.name, case_line: selected.line, registration: "REGISTERED",
 			whole: whole ? "fire" : "quiet",
 			prefix: first === undefined ? null : { phase: first > length ? "final" : "stream", position: first, wire_length: length },
-			evaluator: "OK", witness: { source: selected.source, tool: selected.tool, path: selected.path, expect: selected.expect }, bindings: witnessBindings(ruleFile, casesFile),
+			evaluator: "OK", witness: { source: selected.source, tool: selected.tool, path: selected.path, expect: selected.expect }, bindings: await witnessBindings(ruleFile, casesFile),
 		};
 	} catch (error) {
 		return unavailable("EVALUATOR_FAILED", String(error));

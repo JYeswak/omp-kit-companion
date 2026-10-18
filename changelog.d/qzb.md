@@ -1,0 +1,2 @@
+### Fixed
+- `ttsr-harness --observe` reads and hashes the three large runtime bindings it reports (the native addons, the bun runtime and the OMP launcher, about 180 MB) concurrently instead of one after another. The reported digests are byte-identical, and a new test pins each one to an independent hash of the same bytes. This removes the largest controllable share of the observe command's cold-start cost; the one-second budget, the final-witness shortcut and every semantic and negative witness are unchanged.
