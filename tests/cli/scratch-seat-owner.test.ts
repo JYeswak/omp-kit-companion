@@ -166,6 +166,55 @@ test.skipIf(!HAVE_LSOF)("real seat process: a scratch dir written by a tool shel
 	}
 }, 60_000);
 
+test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasable by the last seat; with no seat left it is REAP (SCRATCHCARRY1 AC3)", async () => {
+	const owners = join(tempDir("seat-chain-"), "session-owners");
+	mkdirSync(owners, { recursive: true });
+	process.env.OMP_KIT_SESSION_OWNERS_DIR = owners;
+	const lock = join(owners, `${SESSION}.lock`);
+	writeFileSync(lock, "");
+	const root = tempDir("seat-chain-root-");
+	const home = tempDir("seat-chain-home-");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	process.env.XDG_STATE_HOME = join(home, "state");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	const real = defaultLiveness();
+	const live: { kill(signal?: string): void }[] = [];
+	const start = async () => {
+		const seat = Bun.spawn(["sh", "-c", `exec 9<>"$LOCK"; echo ready; exec sleep 120`], { env: { ...process.env, LOCK: lock }, stdout: "pipe", stderr: "ignore" });
+		live.push(seat);
+		await seat.stdout.getReader().read();
+		return seat;
+	};
+	const stop = async (seat: { kill(signal?: string): void; exited: Promise<number> }) => { seat.kill("SIGTERM"); await seat.exited; };
+	try {
+		const first = await start();
+		const dir = join(root, `omp.${first.pid}`);
+		mkdirSync(dir);
+		writeFileSync(join(dir, ".owner"), seatOwner(first.pid));
+		await stop(first);
+		const second = await start();
+		expect(real.signalAlive(first.pid)).toBe(false);
+		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+		await stop(second);
+		const third = await start();
+		expect(real.signalAlive(first.pid)).toBe(false);
+		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+		// The last seat releases a dir the first one created; an unrelated agent in the same session cannot.
+		const work = join(root, `work.${first.pid}`);
+		mkdirSync(work);
+		writeFileSync(join(work, ".owner"), seatOwner(first.pid).replace("label=omp", "label=work"));
+		const sibling = { liveness: real, run: defaultRunner };
+		expect(releaseScratch(work, home, { ...sibling, callerSeat: asSeat("CrimsonHorizon", [SESSION]) })).toMatchObject({ ok: false, reason: "caller-not-owner" });
+		expect(releaseScratch(work, home, { ...sibling, callerSeat: asSeat(AGENT, [SESSION]) })).toMatchObject({ ok: true, changed: true, ownerPid: first.pid });
+		// With the last seat gone and no pid alive, the other dir is REAP as before.
+		await stop(third);
+		expect(real.seatLive?.(AGENT, SESSION)).toBe(false);
+		expect(inspectSession(dir, root, sibling)).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+	} finally {
+		for (const seat of live) seat.kill("SIGKILL");
+	}
+}, 60_000);
+
 const PS_TABLE = "  100     1\n  200   100\n  300   200\n  400     1\n";
 const LOCK_A = `/Users/josh/.omp/run/session-owners/${SESSION}.lock`;
 const LOCK_B = `/Users/josh/.omp/run/session-owners/${OTHER_SESSION}.lock`;
