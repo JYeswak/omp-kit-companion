@@ -355,10 +355,10 @@ function evaluationTargets(rulesDir: string) {
 	return { rules, admissions, byName, legacyStaticPresent };
 }
 
-async function mechanicalFires(c: Case, chunkWidth?: number): Promise<boolean> {
+async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undefined)[] = [undefined]): Promise<boolean[]> {
 	const evaluator = SCRATCH_ADMISSION.evaluate;
 	if (c.rule !== SCRATCH_ADMISSION.name || typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
-	if (c.source !== "tool") return false;
+	if (c.source !== "tool") return chunkWidths.map(() => false);
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mechanical-case.${process.pid}.`)));
 	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: KIT, created: new Date().toISOString() });
 	try {
@@ -398,11 +398,17 @@ async function mechanicalFires(c: Case, chunkWidth?: number): Promise<boolean> {
 			: c.tool === "edit" ? { path: target, oldText: c.snippet, newText: `${c.snippet}\n` }
 			: { command: c.snippet };
 		const wire = JSON.stringify(input, null, c.argumentSpace ? 2 : undefined);
-		let assembled = "";
-		const width = chunkWidth ?? Math.max(1, wire.length);
-		for (let i = 0; i < wire.length; i += width) assembled += wire.slice(i, i + width);
-		const decoded = JSON.parse(assembled);
-		return (await evaluator({ toolName: c.tool, input: decoded, cwd: root }, { cwd: root }))?.block === true;
+		const outcomes: boolean[] = [];
+		// A case owns one immutable reference fixture. Every dispatch still
+		// decodes complete arguments and re-reads production repository facts.
+		for (const chunkWidth of chunkWidths) {
+			let assembled = "";
+			const width = chunkWidth ?? Math.max(1, wire.length);
+			for (let i = 0; i < wire.length; i += width) assembled += wire.slice(i, i + width);
+			const decoded = JSON.parse(assembled);
+			outcomes.push((await evaluator({ toolName: c.tool, input: decoded, cwd: root }, { cwd: root }))?.block === true);
+		}
+		return outcomes;
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 /**
@@ -411,7 +417,7 @@ async function mechanicalFires(c: Case, chunkWidth?: number): Promise<boolean> {
  * (ttsr-coordinator.ts: `toolcall_end` -> #checkAstStream), so the verdict includes them.
  */
 async function g2Fires(rule: PayloadTarget, c: Case): Promise<boolean> {
-	if (isAdmissionTarget(rule)) return mechanicalFires(c);
+	if (isAdmissionTarget(rule)) return (await mechanicalVerdicts(c))[0]!;
 	if (!scopeApplies(rule, c)) return false;
 	const m = new TtsrManager(SETTINGS);
 	if (!m.addRule(rule)) return false;
@@ -425,15 +431,23 @@ async function g2Fires(rule: PayloadTarget, c: Case): Promise<boolean> {
 	return hit(m.checkSnapshot(wire, ctx), rule.name);
 }
 
+function admissionPrefixResult(c: Case, outcomes: readonly boolean[], offset = 0): { fired: number[]; length: number } {
+	const length = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet }).length;
+	if (outcomes.length !== offset + 3) throw new Error("mechanical admission proof is incomplete");
+	for (let i = offset + 1; i < outcomes.length; i++)
+		if (outcomes[i] !== outcomes[offset]) throw new Error("mechanical admission depends on chunk partition");
+	return { fired: outcomes[offset] ? [length + 1] : [], length };
+}
+
 async function admissionPrefixSweep(c: Case): Promise<{ fired: number[]; length: number }> {
-	const wire = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet });
-	const outcomes: boolean[] = [];
-	// Only complete arguments reach admission, independent of stream partition.
-	for (const width of [1, G2_CHUNK, Math.max(1, wire.length)]) {
-		outcomes.push(await mechanicalFires(c, width));
-	}
-	if (outcomes.some(value => value !== outcomes[0])) throw new Error("mechanical admission depends on chunk partition");
-	return { fired: outcomes[0] ? [wire.length + 1] : [], length: wire.length };
+	const length = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet }).length;
+	return admissionPrefixResult(c, await mechanicalVerdicts(c, [1, G2_CHUNK, Math.max(1, length)]));
+}
+
+async function admissionEvidence(c: Case): Promise<{ g2: boolean; fired: number[]; length: number }> {
+	const length = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet }).length;
+	const outcomes = await mechanicalVerdicts(c, [undefined, 1, G2_CHUNK, Math.max(1, length)]);
+	return { g2: outcomes[0]!, ...admissionPrefixResult(c, outcomes, 1) };
 }
 
 /**
@@ -559,9 +573,9 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		if (!target || (!isAdmissionTarget(target) && target.cls === "always")) continue;
 		const admission = isAdmissionTarget(target);
 		const rule = admission ? target : target.rule;
-		const g2 = await g2Fires(rule, c);
+		const { g2, fired, length } = admission ? await admissionEvidence(c)
+			: { g2: await g2Fires(rule, c), ...await g3Fires(rule, c) };
 		const g2ok = g2 === (c.expect === "fire");
-		const { fired, length } = await g3Fires(rule, c);
 		const wire = wirePayload(c);
 		let g3ok = true;
 		let g3note: string;
