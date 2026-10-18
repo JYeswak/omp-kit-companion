@@ -1067,8 +1067,13 @@ class RollingReleaseTest(unittest.TestCase):
         with patch.object(release_reuse, "_api", side_effect=api), patch.object(release_reuse, "_artifact_files", side_effect=download), \
              patch.object(release_reuse, "_assert_main_execution"):
             self.assertEqual(release_reuse._load_owner_authority(REPOSITORY, "810", "1"), (allocation, bound, notes))
+            # The schedule fallback is a real train owner (release-train.yml `on: schedule`).
+            with patch.object(release_reuse, "_api", side_effect=lambda r, e, **k: dict(owner, event="schedule") if e == "actions/runs/810/attempts/1" else api(r, e, **k)):
+                self.assertEqual(release_reuse._load_owner_authority(REPOSITORY, "810", "1"), (allocation, bound, notes))
             for changed in (dict(owner, run_attempt=2), dict(owner, path=release_reuse.RELEASE_WORKFLOW),
-                            dict(owner, repository={"full_name": "foreign/repository"})):
+                            dict(owner, repository={"full_name": "foreign/repository"}),
+                            dict(owner, event="push"), dict(owner, event="pull_request"),
+                            dict(owner, event="schedule", head_branch="other")):
                 with patch.object(release_reuse, "_api", return_value=changed):
                     with self.assertRaises(ValueError):
                         release_reuse._load_owner_authority(REPOSITORY, "810", "1")

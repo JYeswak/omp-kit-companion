@@ -538,10 +538,15 @@ def _load_owner_authority(repository: str, train_id: str, attempt: str, *, timeo
     if not train_id.isascii() or not train_id.isdigit() or not attempt.isascii() or not attempt.isdigit() or int(attempt) < 1:
         raise ValueError("owner run and attempt must be explicit native identities")
     owner = _api(repository, f"actions/runs/{train_id}/attempts/{attempt}")
+    # The train job runs on workflow_run, workflow_dispatch and its 5-minute schedule fallback
+    # (release-train.yml `on:`), and every one of them may allocate. Refusing `schedule` here made
+    # each scheduled train refuse its own allocation and every qualification it dispatched
+    # (2026-10-18 19:22-20:40Z, qualify 0.2.49 x4). Schedule runs only on the default branch, and
+    # the path, branch, repository and attempt checks still bind the owner.
     if (str(owner.get("id")) != train_id or owner.get("run_attempt") != int(attempt)
             or owner.get("repository", {}).get("full_name") != repository
             or owner.get("path") != OWNER_WORKFLOW or owner.get("head_branch") != "main"
-            or owner.get("event") not in ("workflow_run", "workflow_dispatch")):
+            or owner.get("event") not in ("workflow_run", "workflow_dispatch", "schedule")):
         raise ValueError("allocation issuer is not this repository's exact main train run/attempt")
     deadline = time.monotonic() + timeout
     while True:
