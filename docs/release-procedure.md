@@ -3,6 +3,233 @@
 How any fleet repo cuts a versioned release (PUB1c). The companion repo is
 the reference implementation; uds adopts this same procedure next.
 
+## End-to-end contract: published, installed, selected, and loaded are different
+
+The release environment is complete only when a substantive source change reaches
+the running agents without a person selecting a version, switching links, or
+prompting the next upgrade. A GitHub release alone is not that outcome.
+
+This is the single canonical map. Solid edges describe the implemented path;
+dashed recovery/reconciliation edges are requirements whose deployed behavior must
+be demonstrated. “Source-wired” does not mean installed, enabled, loaded, or tested
+on the operator's machine.
+
+```mermaid
+flowchart TD
+    S["Source change + release note<br/>shared main / exact custody"]
+    G["Immutable committed snapshot<br/>normal pre-push gate"]
+    C["Exact-source green push CI<br/>ci.yml / notes coverage"]
+    O["Select Q / allocate V<br/>release-train.yml / release_reuse.py"]
+    Q["Build once; 3 platforms x 2 tracks<br/>release.yml / native-candidate.py"]
+    T["Exact vV to Q tag<br/>isolated key / unique ACK"]
+    A["Sign same bytes at tag ref<br/>Sigstore / 3 upgrade consumers"]
+    P["Verify complete remote assets<br/>draft to stable / safe Latest"]
+    L["Local kit-update scheduler<br/>launchd / systemd<br/>INCIDENT: not loaded"]
+    D["Discover and verify target<br/>pollPublishedRelease / platform"]
+    I["Guarded install + full postcheck<br/>authenticate before candidate execution<br/>BOOTSTRAP GAP: old runner"]
+    B["Active CLI link + receipt<br/>retained directory is not activation"]
+    K["Every selected profile link + lock<br/>relinkKitPlugin / apply plugin<br/>MANUAL: selection recovered"]
+    N["Canary: selected to loaded<br/>native Tern / session witness<br/>UNPROVEN"]
+    F["Every profile and seat<br/>Latest / CLI / selected / loaded"]
+    V["Next release: no prompt<br/>same scheduler / installed updater"]
+    R["Typed recovery + receipts<br/>undo or reconcile exact phase"]
+    M["Stale / no-run / partial alerts<br/>bounded evidence and cache"]
+    X["OMP updated separately<br/>CI pins / session admission"]
+    S --> G --> C --> O --> Q --> T --> A --> P
+    L --> D --> I --> B --> K --> N --> F --> V
+    P -->|"Latest metadata"| D
+    V -. "next scheduled cycle" .-> L
+    X -. "track inputs" .-> Q
+    X -. "runtime admission" .-> N
+    C -. "fix source" .-> S
+    Q -. "qualification failed" .-> R
+    T -. "ref or ACK uncertain" .-> R
+    I -. "postcheck failed" .-> R
+    K -. "profile phase failed" .-> R
+    N -. "activation not admitted" .-> R
+    D -. "CURRENT: reconcile drift" .-> K
+    R -. "verified phase retry" .-> L
+    R --> M
+    F --> M
+```
+
+### Observed incident, not version-pinned configuration
+
+| Boundary | Observed state on 2026-10-18 | What that proves |
+|---|---|---|
+| Published release | Stable Latest `v0.2.48`, seven assets, exact source `687e6f4d521d29cab9a7c62fd8331566a1183292` | One real automatic publication; not five releases or local uptake |
+| Shipping consumers | Native run `39139419077`: all three signed installer/compiled-upgrade receipts say `0.2.39` to `0.2.48` | Real GitHub-hosted upgrade execution; not the operator fleet's loaded version |
+| Operator CLI | Initially `0.2.38`; later manual reconciliation `591c512d…` activated `0.2.48`. Native link and binary SHA `68b5e672…` independently match the signed release. | Actual local CLI recovery, not an automatic scheduled update |
+| Profile selection | Initially selected `0.2.37`; manual plugin receipt `4f1b55b4…` applied the 20 existing kit profiles plus default to `0.2.48`; all 21 actual links independently match. Four unmanaged profiles were left alone. | Package selection recovered. Already-running sessions are a separate boundary. |
+| Chief's OMP runtime | `18.12.1` | OMP and kit update independently |
+| Local scheduler | `service status kit-update --json`: installed, `loaded:false`, no recorded run | A plist on disk is not an active automatic update loop |
+| Postcheck observations | The old 0.2.38 updater's 16:45–16:48 check still produced 109/110 with zero foreign writes. Its runtime lacks the source-cache environment support used by Tern's compiled OMP. Earlier direct candidate testing separately exposed a foreign legacy-cron writer and an owned-work-root emulation leak. | The old updater's harness can reject a healthy candidate; quiescence alone does not repair that bootstrap boundary. |
+| Candidate-owned local check | Actual 0.2.48 binary, 16:50–16:53: PASS/exit 0 on OMP 18.12.1, all 11 stages, G4 110/110 and plant PASS; 8,588 watched HOME paths unchanged, project unchanged, release unchanged. | Supports the explicit receipt-checked reconciliation, not automatic polling, loaded extensions or five cycles |
+| Retained target | Old attempt `d712708b…` was compensated; its byte-identical target was preserved by the operator before the new attempt. New receipt `591c512d…` is RECONCILED. | Preserve recovery evidence; never infer activation or permission to clobber from a directory's presence. |
+| Delivery owner | Existing P0 `ompkit-v66l.22` FLEETUPG1 | Local postcheck isolation, profile/loaded inventory, canary activation and next-release automatic uptake remain open |
+
+The versions above are evidence from one incident. The implementation must
+discover the next verified publication; none is an admission constant or a target
+that an operator must update by hand.
+
+### Version-question acceptance: CLI-current is not session-current
+
+A real test session read a globally resolved `omp-kit` skill, ran only
+`omp-kit --version`, saw `0.2.48`, and concluded “No update is needed.”
+That conclusion is unsupported. The native version producer must report
+published release, resolved CLI, this profile's selected package/link/lock, and
+actual loaded session code separately. Missing loaded evidence is UNKNOWN, not
+current and not automatic permission to restart.
+
+The skill's own `version: 0.1.0` is independent metadata, not a kit release.
+Its resolved origin and stale private-source install instructions are a separate
+instruction-shadowing issue. Inventory effective skill/rule/extension origins;
+neither a skill metadata version nor a CLI version proves the other layers.
+Provider/advisor quota warnings do not establish any kit-version fact.
+
+
+### Executable edges and ownership
+
+| Edge | Producer and consumer | Required admission and output | Proof status |
+|---|---|---|---|
+| Work to published source | Exact reserved paths, native commit guard, `scripts/pre-push-gate.sh`, `scripts/fresh-gate.sh`; fleet's external `git_converge.py` | Publish the committed shared-main snapshot. Live unrelated dirty files are not artifact inputs. Foreign editing leases must not be mistaken for ownership of immutable committed bytes. | Native shared-main publication observed; editing/publication lease coupling remains a separate known gap. |
+| Source to green CI | `.github/workflows/ci.yml`, `scripts/check-pushed-notes.sh`, `scripts/release-notes.sh` | Actual successful push CI for exact source; full unreleased-range notes from a verified published ancestor. A schedule, tag, cached green label or running attempt is not qualification. | Proven for frozen release source Q; it does not qualify newer main or erase its failures. |
+| Completion to allocation | `.github/workflows/release-train.yml`, `scripts/release_reuse.py` `_drive`, `_dispatch_allocation`, `_watch_plan` | Canonical workflow paths, main ancestry, one active train, immutable owner/attempt, notes digest and native dispatch acknowledgement. Cron is missed-event recovery, not a replacement for completion events. | One natural completion-to-publication cycle observed; five cycles and latency targets remain unmet. |
+| Allocation to final-version candidate | `.github/workflows/release.yml`, `scripts/package-release.sh`, `scripts/package-release.ts`, `scripts/native-candidate.py` | One final-version build; exact archive/index/manifest/SBOM identities and both certified OMP tracks on each shipping platform. The optional Intel probe is advisory. | Real final-version qualification reused; no operator bootstrap or rehearsal counted as a new cycle. |
+| Candidate to tag | `release-train.yml` `publish` then `tag-qualified`; `release_reuse.py` `require-allocation`, `require-green`, `promotion`, `require-attempt`, `require-created-ref` | Revalidate exact qualified authority before loading the repository-only SSH key. No candidate executable/build in the key-bearing job. Require unique native new-ref acknowledgement and direct remote `vV -> Q`; never force or rebind. | Native bot-created historical-Q tag observed; local refusal/race tests are not extra live release cycles. |
+| Tag to signatures and upgrade evidence | `release.yml` `reuse-evidence`, `attest`, `attest-index`, `signed-consumers`; `release_reuse.py` `_require_signed_consumers` | Sign the already certified bytes from the tag-ref workflow. Require exact issuer/workflow/source/ref and genuine older published-version upgrades. Three local fixture runs or green job titles alone are not receipts. | Exact public index signature verified; three native 0.2.39-to-0.2.48 receipts read. Next released updater's upgrade remains required. |
+| Signed evidence to public release | `release-train.yml` sign-phase `publish`; `release_reuse.py` `_verify_final`, `_repair_release`, `_latest_flag` | Verify every required existing remote asset; upload only absent exact bytes. Publish the draft only after complete authority/asset checks. An older recovered cut cannot regress Latest. | Stable Latest and all seven canonical assets observed for one cut. |
+| Loaded local timer to Latest query | Registered `kit-update` service; `src/cli.ts` service dispatcher; `src/kit-update-job.ts` `pollPublishedRelease` | Scheduler actually loaded, enabled GitHub polling, ordinary read credentials, native `gh` available in the service environment, correct platform and monotonic target. Polling is already called before the optional static fallback. | Source-wired in released code; operator job is installed but not loaded. Publication does not bootstrap it. |
+| Poll to guarded update | `pollPublishedRelease`, `src/kit-update.ts` `planKitUpdate` / `applyKitUpdate`, `installer/install.sh` | Same-directory verified index/archive, digest-bound attestation bundle, safe target/prefix and exact prior/postimages. Existing target, pending receipt and failed download need explicit recovery, not clobbering. | Hosted consumers passed. Operator's d712 attempt was explicitly undone: receipt `ABORTED_AFTER_COMPENSATION`, activation `RESTORED`. PARTIAL alone does not prove undo. |
+| CLI update to profile selection | Direct CLI's successful-update branch and `runKitUpdateJob` call `relinkKitPlugin`; `apply plugin --apply --yes --store … --profiles all --include-default` | Verify complete, unique profile coverage, package identity and mutation receipt. Both direct CLI and job skip relink after PARTIAL; only the job also reconciles its service. | Relink exists in immutable 0.2.38/0.2.48 source. The failed operator attempt did not reach it; that is not proof the implementation is absent. |
+| Selected package to loaded kit | Native OMP/Tern activation at qualified safe boundaries, actual session witness and version inventory | Distinguish rules/skills/MCP reload from extension process restart. Never hot-interrupt busy or human-paused seats. A symlink, lockfile or CLI version does not prove which extensions a running agent loaded. | Canary and complete loaded-version reporting are not yet proven. |
+| Completed uptake to next uptake | Loaded scheduler, installed updater, durable failure state, inventory and notifier | Demonstrate the next genuine publication with no chief prompt. Reconcile profile/service/loaded drift even when the CLI already reports CURRENT; do not silently forget an incomplete phase. | Unmet. Same-CLI reconciliation, partial-phase recovery and a real next-release tick still require proof. |
+
+### Prerequisites, credentials, and independent version domains
+
+| Domain | Required input or tooling | Boundary |
+|---|---|---|
+| Repository publication | Shared `main`, real push CI, native Git/GitHub CLI, available owner artifacts | Never qualify a private-index side history, an unpublished reservation tag, or an author-supplied run title. |
+| GitHub coordination | Ordinary workflow `GITHUB_TOKEN` with the job's declared contents/actions permissions | Command-local `gh auth git-credential` supports admitted private Git reads without persisted checkout credentials. It is not the tag authority or a personal-token fallback. |
+| Tag authority | `release-tag` environment; `RELEASE_DEPLOY_KEY`; nonsecret `RELEASE_DEPLOY_KEY_FINGERPRINT`; expected GitHub host key | Repository write deploy keys are not intrinsically tag-only credentials. Main-only environment admission, protected immutable release tags, isolated short-lived SSH agent, bounded push, verified remote ref and cleanup are separate controls. |
+| Attestation | GitHub-hosted tag-ref workflow, OIDC and attestation permissions; native `gh attestation verify` | Require exact repository, issuer, signer workflow, source digest and ref. A digest or green job name alone is not a signature. |
+| Local scheduled process | Stable kit launcher, native `gh` and ordinary read authentication in its actual noninteractive environment, supported platform, private service temp/state paths | A terminal's PATH/authentication does not prove the launchd/systemd job has them. A plist/unit is not loaded or recently successful. |
+| Poll configuration | `OMP_KIT_UPDATE_ENABLED=1`, `OMP_KIT_UPDATE_POLL=github`, `OMP_KIT_UPDATE_REPO=owner/repo` | Configure the repository once, not a release number. Static `INDEX`/`ARCHIVE`/`VERSION`/`SOURCE_TAG` inputs are an explicit fallback, not the normal automatic loop. |
+| Native OMP | Independently installed runtime and source/native identity; source-pinned CI minimum/certified tracks | Kit update does not install or silently change OMP. Record the actual session runtime separately from package/CLI/loaded-kit identity. |
+| Profile selection | Discover profiles plus default, kit package identity, symlink/directory and lockfile snapshots | Do not equate a lockfile's package version, a release manifest version, a selected store and in-memory loaded extensions without their own evidence. |
+| Legacy/global skill, extension and rule copies | Resolved `skill://` origins, `src/apply-extensions.ts`, profile extension entries and effective rule/extension origins | Global skills, standalone copied extensions and local overlays are separate from the plugin symlink. Inventory origin/hash/precedence; migrate explicitly owned bytes with receipts. Do not silently delete custom policy or equate selected package with all effective instructions/code. |
+| Runtime admission | Qualified Tern seat identity, idle/paused/busy state, approved reload/restart route and loaded-version witness | `tern inspect --json` and native session records are observation tools. A queued request, send exit code or source file on disk is not activation proof. |
+| Capacity and retention | Disk headroom, bounded jobs/network calls, bounded logs/cache, retained known-good version and unresolved receipts | Fail explicitly on unavailable prerequisites. Do not purge active versions or recovery evidence to make an update pass. |
+
+### Repair and rollout order for the observed incident
+
+The existing FLEETUPG1 owner executes the local-state changes; the map is not a
+parallel installer or a second activation authority.
+
+1. **Inventory first.** Produce one row per profile/active seat: desired published
+   release, CLI executable/manifest, selected plugin store/package/lock, actual
+   loaded kit witness, OMP runtime, stale/unknown reason and last successful tick.
+   Preserve UNKNOWN for a missing loaded witness; do not infer memory from links.
+2. **Diagnose the real postcheck.** Bind the failed receipt and exact scenario
+   manifest to its source/runtime. Separate the missing scenario from foreign
+   state changes with causal controls. Keep both missing-result rejection and
+   genuine tested-process write detection intact.
+3. **Recover the existing attempt.** Inspect the rollback receipt and retained
+   target's verified bytes/references. Use supported verified reuse, receipt
+   reconcile or undo as applicable. `KIT_TARGET_EXISTS` is not authority to delete,
+   overwrite or pretend the directory is active.
+4. **Prove CLI and profile application.** Let the guarded job install and postcheck,
+   then apply the exact verified store to every selected profile and default.
+   Read both mutation receipts and every postimage; retain the previous good state.
+5. **Activate a canary.** At an admitted safe boundary, reload rules/skills/MCP
+   where supported; extension changes require the qualified in-place restart
+   route and an actual loaded-version witness. Unqualified restart tooling is
+   not a workaround. Expand to remaining seats only after canary health passes.
+6. **Load and verify the scheduler.** Use the native `service install kit-update`
+   dry-run/apply/backup/bootstrap path under the approved owner. Read back
+   `service status kit-update --json` and `service doctor kit-update --json`.
+   Prove an independent scheduled run; a successful manual `service run` is not
+   proof that the periodic job is loaded or will survive login/reboot.
+7. **Prove the next release.** A genuinely newer certified publication must reach
+   the installed updater, every selected profile and running canary/fleet seats
+   without a chief prompt. Preserve the real previous-version upgrade evidence.
+8. **Exercise recovery before claiming reliability.** Test failed download,
+   invalid signature/bytes, retained target, failed/missing scenario, concurrent
+   foreign write, partial relink, service reconcile failure, busy/human-paused
+   seat, failed canary, interruption and the next successful independent tick.
+   The expected result is a truthful incomplete state and safe retry/undo, never
+   an OK envelope hiding stale agents.
+
+### Local state machine and non-negotiable recovery
+
+- **Discovery:** disabled, unavailable metadata, unauthenticated service, no newer
+  publication, downloaded-but-unverified, and eligible update are different states.
+  A network/auth failure is not `CURRENT`.
+- **Retryable staging:** a prior `poll-V` directory or attestation sidecar can
+  survive failure. Reuse only validated matching bytes or a new owned staging
+  attempt; never blindly overwrite unverified files.
+- **Installation:** a retained release directory does not prove activation.
+  Recover using the original receipt, exact postimages and declared undo/reconcile
+  path. Keep the prior verified version available.
+- **Candidate-owned validation:** switching the CLI link does not replace the
+  already-running old updater's imported harness/runtime. Authenticate the candidate
+  before execution, then run its version-bound postcheck in a separate process
+  with the correct native manager/source/cache environment. The old-updater/new-
+  candidate/Tern-source-cache combination must be covered, not just npm-managed
+  hosted consumers. Missing scenario results still fail.
+- **Compensation truth:** `applyKitUpdate` may return PARTIAL with the new CLI
+  still active. `undoKitUpdate` is a separate, receipt/postimage-checked action.
+  The job currently labels PARTIAL as UNDONE without calling that action; neither
+  the label nor its notification proves the old link was restored.
+- **Postcheck:** require the candidate manifest's complete expected named-result
+  set, not a fixed scenario-count constant. In this incident, 109/110 was a failure.
+  Attribute effects using isolated state and an adversarial foreign-write control;
+  retain genuine tested-process write detection. Empty, missing or unjudged
+  runs must not aggregate to OK; never widen the denominator or hide failed runs.
+- **Profile phase:** a successful CLI switch with a failed or partial plugin
+  relink is incomplete uptake. Preserve both kit and plugin receipts. The next tick
+  must repair this phase even when no newer CLI version exists.
+- **Activation phase:** first prove a canary's selected package, actual loaded
+  extensions and healthy behavior. Expand only after its readback succeeds.
+  Preserve human pause, identity ambiguity and busy-seat protection.
+- **Scheduler self-update:** service reconciliation must not kill its own active
+  update before a terminal receipt is durable. Preserve or restore the loaded job
+  and prove the next independent scheduled tick.
+- **Visibility and retention:** report Latest, installed CLI, profile selection,
+  lock identity and actual loaded kit separately. Alert on stale/no-run/partial
+  states. Bound downloaded archives, logs and receipts without deleting active
+  versions, unresolved recovery evidence or a live process's files.
+
+### Proven breaks and source-visible recovery gaps
+
+Source-only branches are distinguished below from the observed old-harness failure:
+
+1. The job maps `applyKitUpdate` PARTIAL to UNDONE and says undo completed, but
+   the apply path returns PARTIAL without compensation and the job never calls
+   separate `undoKitUpdate`. Verify actual active-link/receipt postimages; fix
+   the missing effect or the false status before claiming automatic rollback.
+2. The job returns CURRENT before pending-recovery, profile and service
+   reconciliation when no newer CLI is found. A partial update can leave the
+   latest CLI active with unresolved recovery; CURRENT must not hide that state.
+   The normal relink path is reached only after UPDATED.
+3. A relink or service-reconcile failure returns UPDATED with a failure reason;
+   the service dispatcher maps that status to OK/exit 0. That is not full uptake.
+4. Fixed per-version poll staging, non-clobbering downloads and exclusive-create
+   bundle files need a real failed-attempt/repeated-tick recovery proof.
+5. The local scheduler was observed unloaded. Manual CLI/profile recovery and
+   one quiet-window check do not prove automatic updates under normal fleet load.
+6. The actual old updater ran candidate checks through old runtime code, producing
+   a missing scenario on Tern's managed-source layout. The candidate-owned check
+   passed all 110 scenarios on the same verified tree. Permanent self-update must
+   validate the candidate with its own authenticated code, not pin an old harness.
+
+For every edge, acceptance requires a positive native transition, a causal
+negative that blocks the unsafe transition, an exact source/artifact/operation
+identity, and a preserved recovery result. The final acceptance is a subsequent
+release reaching running canary and fleet agents without a prompt, not completion
+of this document.
+
+
 ## 1. Fragments, every commit
 
 `CHANGELOG.md` has the upstream oh-my-pi shape (can1357/oh-my-pi AGENTS.md
@@ -104,10 +331,10 @@ sha256; the installer (`installer/install.sh --version X.Y.Z --index URL
 --prefix DIR`) verifies the hash before installing and refuses on mismatch.
 Release candidate indexes contain exactly `darwin-arm64-none`, `linux-arm64-gnu`,
 and `linux-x64-gnu`. `darwin-x64-none` is a non-shipping CI probe and is
-excluded from published indexes and attestations. Release runs certify it
-after the candidate (`intel-probe` in release.yml): reported, never gating, and
-holding no macOS slot while the ship targets certify. Release-mode candidate
-generation requires both minimum and certified OMP receipts for all three
+excluded from published indexes and attestations. The publisher dispatches
+`.github/workflows/release-intel-probe.yml` separately after shipping qualification;
+its reported result never gates publication or holds the shipping train.
+Release-mode candidate generation requires both minimum and certified OMP receipts for all three
 ship targets; a missing or refused ship receipt blocks attestation.
 
 ## 5. Signing (delegated)
@@ -123,23 +350,26 @@ signing identity. Source policy is not proof that a fleet installation has adopt
 
 ## 6. Publish and install-check
 
-Publish the GitHub release from the tag, then install from the published
-index on a machine that did not build it (fresh HOME where possible).
+The sign phase exercises the installer and a genuine released-to-released upgrade
+against the signed final candidate before publication. After publication, the
+operator's automatic poll/install/profile/activation chain must also be proved.
 
 ### Pending update receipts
 
-If an update ends PARTIAL on a false postcheck while the new release is in
-fact active, later updates refuse with PENDING_RECOVERY and no command
-clears it. Inspect `omp-kit audit --json` and both component postimages,
-then run `omp-kit update --reconcile RECEIPT --yes`: it rescans the active
-kit symlink, release bytes and the receipt's recorded postimages and marks
-the receipt RECONCILED only when all three match, recording what was
-verified. The install prefix is derived from the receipt postimage itself,
-never from the running binary (which predates the command on a stuck
-machine); pass an explicit `--prefix PATH` only to point at a relocated
-install, and it is validated the same way, by matching. A mismatch refuses
-and the receipt stays pending; undo or a real
-fix is the way out, never a forced install.
+An update can return PARTIAL while the new CLI remains active; pending recovery
+then blocks successor updates. Inspect `omp-kit audit --json`, the activation
+receipt, actual link and both recorded binary postimages.
+
+For an eligible pending READY receipt only, `omp-kit update --reconcile RECEIPT --yes`
+rescans the active kit link, release bytes and recorded postimages. It marks
+RECONCILED only when those match. This records state consistency, not a passing
+missing scenario or a repaired health regression. Fix or explicitly undo a real
+failed postcheck; do not use receipt reconciliation to relabel it healthy.
+
+The prefix is derived from the receipt; an explicit relocated `--prefix PATH`
+must match the same postimages. A mismatch stays pending. A receipt already
+ABORTED_AFTER_COMPENSATION with activation RESTORED is not this READY path, and
+its retained release directory must not be deleted or overwritten to force retry.
 
 ## 7. Release train (RELTRAIN1, automatic; manual cut is the fallback)
 
@@ -211,9 +441,9 @@ ancestor; an actually newer green supersedes pending older sources.
   not merely for a version to appear in the release list.
 - The optional Intel consumer reads bound source `Q` separately from execution
   head `H`, checks its exact producer attempt, and remains non-shipping evidence.
-- Bootstrap requires the first green descendant containing `ROLLING-RELEASE-V2`;
-  older historical workflow definitions cannot safely consume the signing-only
-  protocol. They are not rebuilt or granted relaxed signer authority.
+- Before allocating a new source, the controller compares the actual signing
+  inputs in the selected source and admitted main history. A manually bumped
+  protocol marker or remembered version does not grant signing compatibility.
 
 This correctness cutover removes starvation and the duplicate full bump/candidate
 build. It does not claim instantaneous publication or alter native certification,
@@ -235,12 +465,13 @@ Install on publish (existing `kit-update` service, no new daemon):
   downloaded (index plus platform archive into one private directory)
   and applied under the existing update receipt and reconcile path
   (`src/kit-update-job.ts`, covered by `tests/cli/kit-update-job.test.ts`).
-- After an update the service relinks the kit plugin package with the new
-  binary itself (`apply plugin --apply`) and reports one line. A failed
-  postcheck leaves the prior version active and reports the undo; a
-  failed relink keeps the good update and reports BLOCKED with the
-  receipt. The service ticks every 300 s, so a published release lands
-  within minutes.
+- After UPDATED, direct CLI and job source can relink selected profiles and retain
+  the plugin receipt; the job additionally reconciles the service. PARTIAL does
+  not itself restore the prior link, despite the job's current UNDONE label.
+  Relink/reconcile failures remain incomplete uptake even if a result says UPDATED.
+  The 300-second tick is a configured interval, not loaded-state or latency proof.
+  CURRENT-version reconciliation, repeated-tick recovery and actual loaded-version
+  readback must pass the end-to-end contract above.
 
 Budgets remain acceptance targets, not source-level claims: two natural green
 pushes must publish without a human command, commit-to-published must be measured
