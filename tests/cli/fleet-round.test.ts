@@ -421,6 +421,19 @@ test("regexes: positive controls, rejects and boundaries in Bun/JSC", () => {
 	expect(matchLine(LABEL_LINE, `ROUND: ${"0".repeat(MAX_LINE)}`)).toBeNull();
 });
 
+function matchCpuMs(pattern: RegExp, input: string, iterations = 2_000): number {
+	const start = process.cpuUsage();
+	for (let i = 0; i < iterations; i++) matchLine(pattern, input);
+	const elapsed = process.cpuUsage(start);
+	return (elapsed.user + elapsed.system) / 1_000;
+}
+
+function requireBoundedCpuGrowth(pattern: RegExp, short: number, long: number): number {
+	const ratio = long / Math.max(short, 0.5);
+	if (!(ratio < 4)) throw new Error(`REGEX_CPU_GROWTH ${pattern}: short=${short}ms long=${long}ms ratio=${ratio} limit=4`);
+	return ratio;
+}
+
 test("regexes: doubled near-misses stay bounded (linear, capped)", () => {
 	const families: [RegExp, (n: number) => string][] = [
 		[LABEL_LINE, n => `CLAIM ${"a".repeat(Math.min(n, 63))}:${" ".repeat(n)}`],
@@ -431,18 +444,29 @@ test("regexes: doubled near-misses stay bounded (linear, capped)", () => {
 		[SEAT, n => `${"a".repeat(Math.min(n, 63))}:${"1".repeat(n)}`],
 	];
 	for (const [pattern, make] of families) {
-		const time = (n: number): number => {
-			const input = make(n);
-			const start = performance.now();
-			for (let i = 0; i < 2_000; i++) matchLine(pattern, input);
-			return performance.now() - start;
-		};
+		// This checks matcher work, not time the runner was descheduled.
+		// Keep the original inputs, warmup, iteration count, floor and growth bound.
+		const time = (n: number): number => matchCpuMs(pattern, make(n));
 		time(1000);
 		const short = time(1000);
 		const long = time(2000);
 		expect(matchLine(pattern, make(2000))).toBeNull();
-		expect(long / Math.max(short, 0.5)).toBeLessThan(4);
+		expect(requireBoundedCpuGrowth(pattern, short, long)).toBeLessThan(4);
 	}
+});
+
+test("regexes: CPU growth gate rejects the strict fourfold boundary", () => {
+	expect(() => requireBoundedCpuGrowth(NO_EPIC, 1, 4)).toThrow("REGEX_CPU_GROWTH");
+});
+
+test("regexes: CPU growth gate rejects a genuine superlinear matcher", () => {
+	const pattern = new RegExp("a(a|aa)+b");
+	expect(matchLine(pattern, "aaab")?.[0]).toBe("aaab");
+	const short = matchCpuMs(pattern, `${"a".repeat(16)}!`, 1);
+	const longInput = `${"a".repeat(32)}!`;
+	const long = matchCpuMs(pattern, longInput, 1);
+	expect(matchLine(pattern, longInput)).toBeNull();
+	expect(() => requireBoundedCpuGrowth(pattern, short, long)).toThrow("REGEX_CPU_GROWTH");
 });
 
 // ---- barrier timer -------------------------------------------------------------------------------
