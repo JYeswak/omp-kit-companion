@@ -89,6 +89,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Beads doctor and planning score report configured acceptance breadth with component-aware split suggestions | ompkit-rhy9.21 (BLOCKED: dirty overlap on CHANGELOG.md and package.json) |
 | Tracker recovery bounds quarantine growth, emits native health receipts, and refuses intervention while database holders are live | ompkit-rhy9.14 (IN REVIEW; independent verification pending) |
 | Stock Ubuntu extension CI passes [81/0 with fleet tools absent](https://github.com/JYeswak/omp-kit-companion/actions/runs/39100227808/job/117594813422); the separate [callback assertion control fails 81/1](https://github.com/JYeswak/omp-kit-companion/actions/runs/39100330584/job/117595119154). Both original hosted clauses are independently audited; overall main CI remains RED on fixture repair | ompkit-oq1h.4 (IN REVIEW; closure pending) |
+| Native tool admission for opted-in fleet repositories is ready for independent replay, including owned synthetic scratch inputs, tracked-source copies and reusable instructions. Original acceptance and separate external-live caller-root qualification remain pending | ompkit-xa5s.4 (IN PROGRESS; independent replay pending; no installed or release claim) |
 
 ## In progress
 
