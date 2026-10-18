@@ -29,7 +29,7 @@ import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
-import { writeScratchOwner } from "../src/fleet-guard/scratch.ts";
+import { mechanicalVerdicts as admissionVerdicts, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
 
@@ -311,58 +311,10 @@ function evaluationTargets(rulesDir: string) {
 async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undefined)[] = [undefined]): Promise<boolean[]> {
 	const evaluator = SCRATCH_ADMISSION.evaluate;
 	if (c.rule !== SCRATCH_ADMISSION.name || typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
-	if (c.source !== "tool") return chunkWidths.map(() => false);
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mechanical-case.${process.pid}.`)));
-	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: KIT, created: new Date().toISOString() });
-	try {
-		const env: Record<string, string> = {};
-		for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key]) env[key] = process.env[key]!;
-		Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
-		const git = (args: string[], input?: string): string => {
-			const result = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
-				{ env, stdout: "pipe", stderr: "pipe", timeout: 2_000,
-					...(input === undefined ? {} : { stdin: Buffer.from(input) }) });
-			if (result.exitCode !== 0) throw new Error(`mechanical Git fixture setup failed: ${result.stderr.toString()}`);
-			return result.stdout.toString().trimEnd();
-		};
-		git(["init", "--quiet"]);
-		fs.mkdirSync(path.join(root, ".omp"));
-		fs.writeFileSync(path.join(root, ".omp/fleet.json"), '{"enabled":true}\n');
-		for (const [p, content] of Object.entries(c.reference?.tracked ?? {})) {
-			const oid = git(["hash-object", "-w", "--no-filters", "--stdin"], content);
-			git(["update-index", "--add", "--cacheinfo", `100644,${oid},${p}`]);
-		}
-		// Historical absolute fixture paths are projected into this real isolated
-		// repository; no operator repository or its index is accessed.
-		const marker = "var/agent-tmp/";
-		const offset = c.path.indexOf(marker);
-		const target = path.isAbsolute(c.path) && offset >= 0 ? c.path.slice(offset) : c.path;
-		if (path.isAbsolute(target) || target.split("/").includes("..")) throw new Error("fixture target escapes isolated repository");
-		if (offset >= 0) {
-			const child = c.path.slice(offset + marker.length).split("/")[0]!;
-			writeScratchOwner(path.join(root, marker, child), { pid: process.pid, label: child, repo: root, created: new Date().toISOString() });
-		}
-		const absolute = path.join(root, target);
-		fs.mkdirSync(path.dirname(absolute), { recursive: true });
-		// A replacement edit must be applicable and unambiguous, not an unknown
-		// payload whose generic refusal accidentally passes a source-copy case.
-		if (c.tool === "edit") fs.writeFileSync(absolute, c.snippet);
-		const input = c.tool === "write" ? { path: target, content: c.snippet }
-			: c.tool === "edit" ? { path: target, oldText: c.snippet, newText: `${c.snippet}\n` }
-			: { command: c.snippet };
-		const wire = JSON.stringify(input, null, c.argumentSpace ? 2 : undefined);
-		const outcomes: boolean[] = [];
-		// A case owns one immutable reference fixture. Every dispatch still
-		// decodes complete arguments and re-reads production repository facts.
-		for (const chunkWidth of chunkWidths) {
-			let assembled = "";
-			const width = chunkWidth ?? Math.max(1, wire.length);
-			for (let i = 0; i < wire.length; i += width) assembled += wire.slice(i, i + width);
-			const decoded = JSON.parse(assembled);
-			outcomes.push((await evaluator({ toolName: c.tool, input: decoded, cwd: root }, { cwd: root }))?.block === true);
-		}
-		return outcomes;
-	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	// One immutable fixture and one live dispatch per case: production repository
+	// facts are re-read on that dispatch and nothing is cached across cases. Each
+	// requested chunk partition must reassemble to the exact wire to share it.
+	return admissionVerdicts(c, chunkWidths, { kit: KIT, evaluate: evaluator });
 }
 /**
  * G2: full payload through the live-shaped path. Returns the verdict at the end of the stream.
@@ -391,7 +343,7 @@ function admissionPrefixResult(c: Case, outcomes: readonly boolean[], offset = 0
 	const length = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet }).length;
 	if (outcomes.length !== offset + 3) throw new Error("mechanical admission proof is incomplete");
 	for (let i = offset + 1; i < outcomes.length; i++)
-		if (outcomes[i] !== outcomes[offset]) throw new Error("mechanical admission depends on chunk partition");
+		if (outcomes[i] !== outcomes[offset]) throw new Error(PARTITION_ERROR);
 	return { fired: outcomes[offset] ? [length + 1] : [], length };
 }
 
