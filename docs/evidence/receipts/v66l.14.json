@@ -1,0 +1,19 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_471c98dc96154a72498b16efa2929831464eb468c2d62b3064c328f4d71f7267",
+ "limitations": [
+  "Native incumbent publication remains RED; no generator fix, publication-scope mutant kill, whole-bead completion, runtime certification or installed upgrade claimed."
+ ],
+ "operation": "snapshot-publication-incumbent",
+ "parameters": {
+  "native_generator_sha256": "99184073709693c8c821e9e4e8c71f60cceb2599ca29537fe8bc5e28d560285a",
+  "native_source_sha256": "5481b3416e79960a6b20dee077490598191a3929c1024feb7fd2def9bed611a6",
+  "subject_sha256": "075612c69c5b99f847a08c911ed8c966873f8db3d3d82e80e3d1debb274b7952"
+ },
+ "producer": "FrostyOrchid",
+ "result_ref": {
+  "bytes": 7112,
+  "sha256": "47a1a2a56205ea8089570cdb74709ac3efd4c859d3187b077e269bc7bd75ee44"
+ }
+}
