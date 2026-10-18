@@ -39,6 +39,8 @@ new_repo() {
 	# it would refuse the seed commit and masquerade as our bespoke cases.
 	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"*
 	git -C "$dir" commit -q --allow-empty --message "root" 2>/dev/null
+	# Shared-main hooks require main regardless of the host's init.defaultBranch.
+	git -C "$dir" branch -M main
 	printf '%s' "$dir"
 }
 
