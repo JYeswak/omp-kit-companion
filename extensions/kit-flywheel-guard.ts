@@ -179,7 +179,7 @@ export function compactionRereadMessage(pending: PendingReread): string {
 	if (!pending.agentsOk) steps.push(`reread ${pending.agentsPath} in full`);
 	const assignee = pending.identities.length > 0 ? pending.identities[0] : "<your agent name>";
 	if (!pending.beadOk) {
-		steps.push(`run \`br list --status in_progress --assignee ${assignee}\` and \`br show <id>\` for your in-progress bead`);
+		steps.push(`run \`br list --status in_progress --assignee ${assignee} --json\` and \`br show <id> --json\` for your in-progress bead`);
 	}
 	return [
 		"<system-reminder>",
@@ -255,10 +255,28 @@ function rereadMissing(pending: PendingReread): string {
 	return missing.join(" and ");
 }
 
+/** Concatenated `type:"text"` blocks of a native content array; null when none. */
+function contentBlocksText(blocks: unknown): string | null {
+	if (!Array.isArray(blocks)) return null;
+	const parts: string[] = [];
+	for (const block of blocks) {
+		if (field(block, "type") !== "text") continue;
+		const text = field(block, "text");
+		if (typeof text === "string") parts.push(text);
+	}
+	return parts.length > 0 ? parts.join("") : null;
+}
+
+/**
+ * Result text: OMP's native `tool_execution_end` envelope carries
+ * `{content: [{type:"text", text}], details}`; older string shapes at the top
+ * level or under `details` are still accepted.
+ */
 function stringField(value: unknown, keys: readonly string[]): string | null {
 	if (typeof value === "string") return value;
 	if (value === null || typeof value !== "object") return null;
 	const record = value as Record<string, unknown>;
+	if (Array.isArray(record["content"])) return contentBlocksText(record["content"]);
 	for (const key of keys) {
 		const candidate = key in record ? record[key] : undefined;
 		if (typeof candidate === "string") return candidate;
@@ -284,6 +302,8 @@ function resultTainted(result: unknown): boolean {
 			if (typeof code === "number" && code !== 0) return true;
 		}
 	}
+	// Native read truncation arrives nested as `details.truncation.truncated`.
+	if (details !== null && field(details["truncation"], "truncated") === true) return true;
 	return false;
 }
 
@@ -376,7 +396,8 @@ export function observeRereadResult(call: RereadCall, result: unknown, pending: 
 			if (!pending.beadOk && isBrListCall(command)) {
 				try {
 					const parsed: unknown = JSON.parse(stdout);
-					if (Array.isArray(parsed) && parsed.length === 0) pending.beadOk = true;
+					const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
+					if (Array.isArray(issues) && issues.length === 0) pending.beadOk = true;
 				} catch {
 					// Non-JSON list output proves nothing; the flag stays unset.
 				}

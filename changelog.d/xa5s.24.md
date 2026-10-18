@@ -1,0 +1,1 @@
+- The post-compaction reread gate now decodes OMP's native tool-result envelope (text blocks in `result.content`), treats `details.truncation.truncated` as a partial read, accepts native `br list --json` `{"issues":[]}` as no held bead, and its reminder names the `--json` commands that clear it, so successful rereads unlock the session instead of leaving it blocked until respawn.

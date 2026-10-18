@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { compactionRereadMessage, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
@@ -325,6 +325,11 @@ async function endAs(h: FakeHost, cwd: string, id: string, toolName: string, res
 	return h.emit("tool_execution_end", { toolCallId: id, toolName, result, isError }, h.ctx(cwd));
 }
 
+/** OMP's native tool_execution_end result envelope (pi-agent-core agent.ts). */
+function native(text: string, details: Record<string, unknown> = {}): unknown {
+	return { content: [{ type: "text", text }], details };
+}
+
 function showStdout(id: string, status: string, assignee: string | null): string {
 	return JSON.stringify([{ id, title: "t", status, assignee }]);
 }
@@ -341,9 +346,9 @@ test("REREAD: compact then edit with no reread is blocked (planted negative)", a
 test("REREAD: AGENTS read plus owned in_progress br show unblocks the edit", async () => {
 	const { h, cwd, agents } = await rereadHost();
 	expect(await callAs(h, cwd, "r1", "read", { path: agents })).toEqual([undefined]);
-	await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
 	expect(await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" })).toEqual([undefined]);
-	await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-1", "in_progress", "TestWorker") } });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
 	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
 	expect(await callAs(h, cwd, "g1", "bash", { command: "cd sub && git commit -m done" })).toEqual([undefined]);
 });
@@ -351,7 +356,7 @@ test("REREAD: AGENTS read plus owned in_progress br show unblocks the edit", asy
 test("REREAD: a failed read never clears the flag", async () => {
 	const { h, cwd, agents } = await rereadHost();
 	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } }, true);
+	await endAs(h, cwd, "r1", "read", native("rules\n"), true);
 	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
 	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
 });
@@ -366,9 +371,9 @@ test("REREAD: reading the wrong AGENTS.md never clears the flag", async () => {
 	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
 	await h.emit("session_compact", {}, h.ctx(cwd));
 	await callAs(h, cwd, "r1", "read", { path: join(outer, "AGENTS.md") });
-	await endAs(h, cwd, "r1", "read", { details: { content: "outer\n" } });
+	await endAs(h, cwd, "r1", "read", native("outer\n"));
 	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-1", "in_progress", "TestWorker") } });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
 	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
 	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
 	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
@@ -378,9 +383,9 @@ test("REREAD: br show of a closed or foreign bead never clears the flag", async 
 	for (const [status, assignee] of [["closed", "TestWorker"], ["in_progress", "SomebodyElse"]] as const) {
 		const { h, cwd, agents } = await rereadHost();
 		await callAs(h, cwd, "r1", "read", { path: agents });
-		await endAs(h, cwd, "r1", "read", { details: { content: "rules\n" } });
+		await endAs(h, cwd, "r1", "read", native("rules\n"));
 		await callAs(h, cwd, "s1", "bash", { command: "br show k-9 --json" });
-		await endAs(h, cwd, "s1", "bash", { details: { stdout: showStdout("k-9", status, assignee) } });
+		await endAs(h, cwd, "s1", "bash", native(showStdout("k-9", status, assignee)));
 		const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
 		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
 	}
@@ -396,10 +401,55 @@ test("REREAD: call arguments alone never clear the flag", async () => {
 test("REREAD: an empty br list clears the bead flag", async () => {
 	const { h, cwd, agents } = await rereadHost();
 	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", { content: "rules\n" });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
 	await callAs(h, cwd, "s1", "bash", { command: "br list --assignee TestWorker --json" });
-	await endAs(h, cwd, "s1", "bash", { details: { stdout: "[]" } });
+	await endAs(h, cwd, "s1", "bash", native("[]"));
 	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("REREAD: a truncated native read never clears the flag", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n", { truncation: { truncated: true } }));
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: native content with no text blocks never clears the flag", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", { content: [{ type: "image", data: "x", mimeType: "image/png" }], details: { content: "rules\n" } });
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: a native br list object holding an in_progress row is not empty", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
+	await endAs(h, cwd, "s1", "bash", native(JSON.stringify({ issues: [{ id: "k-1", status: "in_progress", assignee: "SomebodyElse" }], total: 1, limit: 0, offset: 0, has_more: false })));
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: a native empty br list issues object clears the bead flag", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
+	await endAs(h, cwd, "s1", "bash", native(JSON.stringify({ issues: [], total: 0, limit: 0, offset: 0, has_more: false })));
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("REREAD: the reminder names the --json commands that clear the gate", () => {
+	const text = compactionRereadMessage({ agentsPath: "/x/AGENTS.md", identities: ["TestWorker"], agentsOk: false, beadOk: false });
+	expect(text).toContain("br list --status in_progress --assignee TestWorker --json");
+	expect(text).toContain("br show <id> --json");
 });
 
 test("REREAD: read and grep stay allowed while pending", async () => {
