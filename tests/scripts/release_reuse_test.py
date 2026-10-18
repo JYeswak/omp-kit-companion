@@ -1258,9 +1258,11 @@ class RollingReleaseTest(unittest.TestCase):
                              display_title=release_reuse.release_title("sign", BASE_VERSION, source, "810"), **sign))
         return rows
 
-    def _drive_prior_cut(self, rows_for, *, state="unexecuted", native_sign=None, owner=None, owns=None, source_bound=False, **case):
+    def _drive_prior_cut(self, rows_for, *, state="unexecuted", native_sign=None, after_sign=None, owner=None, owns=None,
+                         source_bound=False, **case):
         """Drive the real prepare stage against a prior cut. `state` is what the fenced job snapshot proves; `native_sign`
-        is the canonical run object the API returns for the signing run (default: a canonical terminal-green sign)."""
+        is the canonical run object the API returns for the signing run (default: a canonical terminal-green sign) and
+        `after_sign` overrides fields on every later re-read of it (the attempt fence)."""
         with self.published_floor_case(unpublished_tag="v0.2.20", **case) as (args, root, source, dispatch):
             dispatch.return_value = "9001"
             rows = rows_for(source if source_bound else SOURCE_SHA)
@@ -1272,8 +1274,12 @@ class RollingReleaseTest(unittest.TestCase):
             if native_sign is not None:
                 canonical_sign.update(native_sign)
             fixture_api = release_reuse._api
+            reads = {"sign": 0}
             def api(repository, endpoint, **kwargs):
-                return canonical_sign if endpoint == "actions/runs/777" else fixture_api(repository, endpoint, **kwargs)
+                if endpoint != "actions/runs/777":
+                    return fixture_api(repository, endpoint, **kwargs)
+                reads["sign"] += 1
+                return canonical_sign if reads["sign"] == 1 or after_sign is None else dict(canonical_sign, **after_sign)
             def runs(repository, workflow, event="workflow_dispatch", **kwargs):
                 return list(rows) if workflow == "release.yml" else []
             lookup = owner if owner is not None else (lambda *a, **k: (allocation, bound, notes))
@@ -1285,11 +1291,14 @@ class RollingReleaseTest(unittest.TestCase):
             with contextlib.ExitStack() as stack:
                 for entered in patches:
                     stack.enter_context(entered)
+                captured = io.StringIO()
                 try:
-                    release_reuse._drive(args)
+                    with contextlib.redirect_stdout(captured):
+                        release_reuse._drive(args)
                     error = None
                 except Exception as caught:  # noqa: BLE001 - each test asserts the exact outcome
                     error = caught
+            self.drive_output = captured.getvalue()
             plan = json.loads((root / "plan.json").read_text()) if (root / "plan.json").exists() else None
             return plan, error, source, dispatch
 
@@ -1329,11 +1338,56 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual(plan["kind"], "resume")
             dispatch.assert_not_called()
-        with self.subTest("a failed signing run keeps the diagnose-forward refusal"):
-            plan, error, _, dispatch = self._drive_prior_cut(lambda _s: self._prior_cut(sign={"conclusion": "failure"}),
-                                                             native_sign={"conclusion": "failure"})
-            self.assertRegex(str(error), "tag-ref signing 777 failed")
-            dispatch.assert_not_called()
+
+    def test_owner_bound_terminal_signing_failure_retains_the_old_cut_and_admits_a_corrected_new_source(self) -> None:
+        for conclusion in release_reuse.TERMINAL_SIGNING_FAILURES:
+            with self.subTest(conclusion):
+                plan, error, source, dispatch = self._drive_prior_cut(
+                    lambda _s: self._prior_cut(sign={"conclusion": conclusion}), native_sign={"conclusion": conclusion})
+                self.assertIsNone(error)
+                self.assertEqual((plan["kind"], plan["source_sha"], plan["version"]), ("allocate", source, "0.2.21"))
+                self.assertNotEqual(plan["source_sha"], SOURCE_SHA, "the corrected source is a different source")
+                self.assertIn(f"RETAINED=signing-failed source_sha={SOURCE_SHA} version={BASE_VERSION} sign_run_id=777 attempt=1",
+                              self.drive_output)
+                dispatch.assert_not_called()
+
+    def test_failed_cut_is_never_recertified_resigned_or_reallocated_as_the_same_source(self) -> None:
+        plan, error, source, dispatch = self._drive_prior_cut(
+            lambda source: self._prior_cut(sign={"conclusion": "failure"}, source=source), native_sign={"conclusion": "failure"},
+            source_bound=True, owns=True)
+        self.assertIsNone(error)
+        self.assertEqual(plan, {"kind": "skip"})
+        self.assertIn("REASON=selected-source-signing-unrepairable", self.drive_output)
+        dispatch.assert_not_called()
+
+    def test_unproven_signing_failures_keep_the_diagnose_refusal(self) -> None:
+        refused = {
+            "cancelled is not a terminal failure": dict(listed="cancelled", native_sign={"conclusion": "cancelled"}),
+            "signing run is not the canonical tag-ref run": dict(native_sign={"head_branch": "main"}),
+            "signing run is foreign to this repository": dict(native_sign={"repository": {"full_name": "other/repo"}}),
+            "signing run came from another event": dict(native_sign={"event": "push"}),
+            "attempt changed on re-read": dict(after_sign={"run_attempt": 2}),
+            "run no longer failed on re-read": dict(after_sign={"conclusion": "success"}),
+            "cut not owned by its allocation": dict(owns=False),
+        }
+        for name, options in refused.items():
+            with self.subTest(name):
+                options = dict(options)
+                listed = options.pop("listed", "failure")
+                native = dict(options.pop("native_sign", {}), conclusion=listed)
+                plan, error, _, dispatch = self._drive_prior_cut(
+                    lambda _s: self._prior_cut(sign={"conclusion": listed}), native_sign=native, **options)
+                self.assertRegex(str(error), "tag-ref signing 777 failed|does not own its claimed allocation")
+                self.assertIsNone(plan)
+                dispatch.assert_not_called()
+        with self.subTest("a failed signing run on an unbound cut is never classified"):
+            unbound = release_reuse.UnboundQualification("no owner authority binds this qualification")
+            with patch.object(release_reuse, "_terminal_unbound_failure", return_value=False):
+                plan, error, _, dispatch = self._drive_prior_cut(
+                    lambda _s: self._prior_cut(sign={"conclusion": "failure"}), native_sign={"conclusion": "failure"},
+                    owner=lambda *a, **k: (_ for _ in ()).throw(unbound))
+            self.assertIs(error, unbound)
+            self.assertIsNone(plan)
 
     def test_unbound_or_title_forged_cut_is_never_classified_or_abandoned(self) -> None:
         unbound = release_reuse.UnboundQualification("no owner authority binds this qualification")
@@ -1387,15 +1441,23 @@ class RollingReleaseTest(unittest.TestCase):
         allocation, _, _ = owner_fixture()
         row = self._prior_cut(sign={"conclusion": "success"})[1]
         canonical = dict(candidate_run(), id=777, head_branch=f"v{BASE_VERSION}", display_title=row["display_title"])
-        def decide(native, rows=None):
+        def decide(native, rows=None, state="unexecuted"):
             with patch.object(release_reuse, "_api", return_value=native), \
-                 patch.object(release_reuse, "_sign_authority_state", return_value="unexecuted"):
-                return release_reuse._signing_cannot_complete(REPOSITORY, [row] if rows is None else rows, allocation)
-        self.assertTrue(decide(canonical))
-        self.assertFalse(decide(canonical, rows=[]))
-        self.assertFalse(decide(dict(canonical, display_title="sign 0.2.20 " + "c" * 40 + " train-810")))
-        self.assertFalse(decide(dict(canonical, head_sha="c" * 40)))
-        self.assertFalse(decide(None))
+                 patch.object(release_reuse, "_sign_authority_state", return_value=state):
+                return release_reuse._signing_terminal_outcome(REPOSITORY, [row] if rows is None else rows, allocation)
+        self.assertEqual(decide(canonical), {"outcome": "skipped-dag", "run_id": 777, "run_attempt": 1})
+        self.assertIsNone(decide(canonical, state="executed"))
+        self.assertIsNone(decide(canonical, state="unknown"))
+        self.assertIsNone(decide(canonical, rows=[]))
+        self.assertIsNone(decide(dict(canonical, display_title="sign 0.2.20 " + "c" * 40 + " train-810")))
+        self.assertIsNone(decide(dict(canonical, head_sha="c" * 40)))
+        self.assertIsNone(decide(None))
+        failed = dict(canonical, conclusion="failure")
+        self.assertEqual(decide(failed), {"outcome": "failed", "run_id": 777, "run_attempt": 1, "conclusion": "failure"})
+        self.assertIsNone(decide(dict(failed, conclusion="cancelled")))
+        self.assertIsNone(decide(dict(failed, status="in_progress", conclusion=None)))
+        self.assertIsNone(decide(dict(failed, head_sha="c" * 40)))
+        self.assertIsNone(decide(dict(failed, event="push")))
 
     def test_missing_published_tag_reserves_its_version_without_blocking_allocation(self) -> None:
         with self.published_floor_case(orphan=True) as (args, root, source, dispatch):

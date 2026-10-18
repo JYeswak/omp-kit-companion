@@ -416,13 +416,14 @@ def release_title(phase: str, version: str, sha: str, train_id: str) -> str:
     return f"{phase} {version} {sha} train-{train_id}"
 
 
-def final_run_matches(run: Any, *, repository: str, source_sha: str, version: str, train_id: str, phase: str) -> bool:
+def final_run_matches(run: Any, *, repository: str, source_sha: str, version: str, train_id: str, phase: str,
+                      conclusion: str = "success") -> bool:
     return (
         isinstance(run, dict)
         and run.get("path") == RELEASE_WORKFLOW
         and run.get("event") == "workflow_dispatch"
         and run.get("repository", {}).get("full_name") == repository
-        and run.get("status") == "completed" and run.get("conclusion") == "success"
+        and run.get("status") == "completed" and run.get("conclusion") == conclusion
         and type(run.get("run_attempt")) is int and run["run_attempt"] >= 1
         and run.get("display_title") == release_title(phase, version, source_sha, train_id)
         and (run.get("head_branch") == "main" if phase == "qualify"
@@ -795,23 +796,39 @@ def _sign_authority_state(repository: str, sign_run: dict[str, Any]) -> str:
     return "unexecuted" if skipped else "executed"
 
 
-def _signing_cannot_complete(repository: str, rows: list[dict[str, Any]], allocation: dict[str, Any]) -> bool:
-    """True only for an owner-authorized cut whose canonical tag-ref signing run is terminal-green with mandatory
-    authority groups positively established as skipped.
+TERMINAL_SIGNING_FAILURES = ("failure", "timed_out")
 
-    The identity comes from the immutable owner allocation, never from a title. The signing run is fetched natively and
-    must satisfy final_run_matches (repository, tag-ref workflow, dispatch event, tag/source, version, train, phase,
-    terminal success). The tag-ref workflow is immutable, so re-dispatching its publisher can only refuse again. In-flight,
-    failed-signing (existing diagnose path), fully executed and unknown/transient snapshots are never classified."""
+
+def _signing_terminal_outcome(repository: str, rows: list[dict[str, Any]], allocation: dict[str, Any]) -> dict[str, Any] | None:
+    """The positively established terminal outcome of an owner-authorized cut's canonical tag-ref signing run, if any.
+
+    Returns {"outcome": "skipped-dag"|"failed", "run_id", "run_attempt"} or None. The identity comes from the immutable
+    owner allocation, never from a title. The signing run is fetched natively and must satisfy final_run_matches
+    (repository, tag-ref workflow, dispatch event, tag/source, version, train, phase) with either terminal success whose
+    mandatory authority groups are positively skipped (fenced attempt snapshot) or a terminal failure/timeout that is
+    unchanged when re-read (same attempt and conclusion). The tag-ref workflow is immutable, so neither outcome can be
+    repaired for the same source and version; the caller retains the cut as evidence and never re-signs it. In-flight,
+    cancelled, fully executed, non-canonical and unknown/transient runs return None and keep their existing path."""
     version, sha, train_id = allocation["version"], allocation["source_sha"], allocation["train_run_id"]
     signs = [row for row in rows if row.get("display_title") == release_title("sign", version, sha, train_id)]
     if not signs:
-        return False
+        return None
     latest = max(signs, key=_attempt_order)
     run = _api(repository, f"actions/runs/{latest['id']}")
-    if not final_run_matches(run, repository=repository, source_sha=sha, version=version, train_id=train_id, phase="sign"):
-        return False
-    return _sign_authority_state(repository, run) == "unexecuted"
+    identity = dict(repository=repository, source_sha=sha, version=version, train_id=train_id, phase="sign")
+    if final_run_matches(run, **identity):
+        if _sign_authority_state(repository, run) == "unexecuted":
+            return {"outcome": "skipped-dag", "run_id": run["id"], "run_attempt": run["run_attempt"]}
+        return None
+    conclusion = run.get("conclusion") if isinstance(run, dict) else None
+    if conclusion in TERMINAL_SIGNING_FAILURES:
+        # The re-read is the canonical check: same run and attempt, still terminal with the same conclusion, and the
+        # exact repository / tag-ref workflow / dispatch / tag source / version / train identity.
+        after = _api(repository, f"actions/runs/{run['id']}")
+        if (isinstance(after, dict) and after.get("id") == run["id"] and after.get("run_attempt") == run.get("run_attempt")
+                and final_run_matches(after, **identity, conclusion=conclusion)):
+            return {"outcome": "failed", "run_id": run["id"], "run_attempt": run["run_attempt"], "conclusion": conclusion}
+    return None
 
 
 def pending_candidate(rows: list[dict[str, Any]], published: set[str], published_floor: str | None) -> dict[str, Any] | None:
@@ -1015,9 +1032,11 @@ def _drive(args: argparse.Namespace) -> int:
                     published.discard(f"v{prior_version}")
     remaining = list(rows)
     authority: tuple[dict[str, Any], dict[str, Any], bytes] | None = None
-    # Cuts whose immutable tag-ref signing is canonical, terminal-green and positively shows the mandatory authority
-    # groups skipped. Their tag and bytes are retained as evidence; they are neither resumed nor re-signed, and the
-    # source is never selected again. Classification needs established owner authority, never a title alone.
+    # Cuts whose immutable tag-ref signing is canonical and terminal: green with the mandatory authority groups positively
+    # skipped, or failed/timed out (unchanged when re-read). The same source and version can never be repaired, re-signed
+    # or retagged, so the cut is retained as evidence and its source is never selected again; any OTHER green source
+    # (a genuinely corrected one) is admitted normally with a new derived version. Classification needs established
+    # owner authority and canonical native sign metadata, never a title; anything unproven keeps its existing path.
     unsignable_shas: set[str] = set()
     while True:
         pending = pending_candidate(remaining, published, recovery_floor)
@@ -1036,9 +1055,12 @@ def _drive(args: argparse.Namespace) -> int:
             selection = dict(allocation, qualification_run_id=canonical.get("qualification_run_id"),
                              allocation_artifact_id=canonical.get("allocation_artifact_id"),
                              allocation_sha256=canonical.get("allocation_sha256"), qualification_attempt=pending.get("run_attempt"))
-            if (owner_allocation_matches(allocation, canonical, selection, owner_notes, qualification_id=str(pending["id"]),
-                                         qualification_attempt=int(pending.get("run_attempt", 0)))
-                    and _signing_cannot_complete(repository, rows, allocation)):
+            terminal = (_signing_terminal_outcome(repository, rows, allocation)
+                        if owner_allocation_matches(allocation, canonical, selection, owner_notes, qualification_id=str(pending["id"]),
+                                                    qualification_attempt=int(pending.get("run_attempt", 0))) else None)
+            if terminal is not None:
+                print(f"RETAINED=signing-{terminal['outcome']} source_sha={allocation['source_sha']} version={allocation['version']} "
+                      f"sign_run_id={terminal['run_id']} attempt={terminal['run_attempt']}")
                 unsignable_shas.add(allocation["source_sha"])
                 remaining = [row for row in remaining if row["id"] != pending["id"]]
                 authority = None
