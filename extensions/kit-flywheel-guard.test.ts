@@ -538,3 +538,72 @@ test("isMutatingCall: edit/write, br mutations and git commit/push; never reads 
 	expect(mutating("bash", { command: "git log --grep=push" })).toBe(false);
 	expect(mutating("bash", {})).toBe(false);
 });
+
+// --- BLOCK_REFUSED (ompkit-fp72.131 BLOCKEDADMIT1) ------------------------------
+
+interface BlockFixture { labels?: string[]; comments?: string[]; edges?: Array<{ type: string; status: string }> }
+
+/** `br show --json` and `br dep list --json` answer from one fixture; shaped like the real br 0.7.4 envelopes. */
+function blockResponder(fixture: BlockFixture, fail: "show" | "dep" | null = null): Responder {
+	return call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		const verb = call.args[0];
+		if (verb === "show") {
+			if (fail === "show") return { stdout: "", stderr: "boom", code: 1 };
+			return { stdout: JSON.stringify([{ id: "kit-9", status: "open", assignee: "BlueFox", labels: fixture.labels ?? [],
+				comments: (fixture.comments ?? []).map(text => ({ author: "X", text })) }]), stderr: "", code: 0 };
+		}
+		if (verb === "dep") {
+			if (fail === "dep") return { stdout: "", stderr: "boom", code: 1 };
+			return { stdout: JSON.stringify((fixture.edges ?? []).map(edge => ({ issue_id: "kit-9", depends_on_id: "kit-fix", ...edge }))), stderr: "", code: 0 };
+		}
+		return { stdout: "[]", stderr: "", code: 0 };
+	};
+}
+
+async function blockCall(fixture: BlockFixture, command: string, fail: "show" | "dep" | null = null): Promise<FlywheelToolCallResult | undefined> {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { respond: blockResponder(fixture, fail) });
+	return toolCall(h, project, command);
+}
+
+const SET_BLOCKED = "br --actor BlueFox update kit-9 --status blocked";
+
+test("BLOCK_REFUSED: blocked with no blocks edge is refused, with an open blocks edge it is allowed", async () => {
+	const refused = await blockCall({}, SET_BLOCKED);
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("BLOCK_REFUSED");
+	expect(refused?.reason).toContain("kit-9 has no open blocks edge to a fix");
+	expect(await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED)).toBeUndefined();
+	expect(await blockCall({ edges: [{ type: "blocks", status: "in_progress" }] }, "br update kit-9 -s blocked")).toBeUndefined();
+});
+
+test("BLOCK_REFUSED: a closed blocker, a parent-child edge or a related edge is not a fix", async () => {
+	expect((await blockCall({ edges: [{ type: "blocks", status: "closed" }] }, SET_BLOCKED))?.block).toBe(true);
+	expect((await blockCall({ edges: [{ type: "blocks", status: "tombstone" }] }, SET_BLOCKED))?.block).toBe(true);
+	expect((await blockCall({ edges: [{ type: "parent-child", status: "open" }] }, SET_BLOCKED))?.block).toBe(true);
+	expect((await blockCall({ edges: [{ type: "related", status: "open" }] }, SET_BLOCKED))?.block).toBe(true);
+	expect(await blockCall({ edges: [{ type: "blocks", status: "closed" }, { type: "blocks", status: "open" }] }, SET_BLOCKED)).toBeUndefined();
+});
+
+test("BLOCK_REFUSED: human-gate needs a comment naming the effect only Joshua can perform", async () => {
+	const label = await blockCall({ labels: ["human-gate"] }, SET_BLOCKED);
+	expect(label?.block).toBe(true);
+	expect(label?.reason).toContain("no comment names the effect only Joshua can perform");
+	const vague = await blockCall({ labels: ["human-gate"], comments: ["HUMAN-GATE: later"] }, SET_BLOCKED);
+	expect(vague?.block).toBe(true);
+	const named = { labels: ["human-gate"], comments: ["HUMAN-GATE: rotate the Infisical machine token in the vault UI"] };
+	expect(await blockCall(named, SET_BLOCKED)).toBeUndefined();
+	expect(await blockCall({ comments: named.comments }, `${SET_BLOCKED} --add-label human-gate`)).toBeUndefined();
+	expect((await blockCall({}, `${SET_BLOCKED} --add-label human-gate`))?.block).toBe(true);
+});
+
+test("BLOCK_REFUSED: other status updates, other verbs and unreadable beads", async () => {
+	expect(await blockCall({}, "br update kit-9 --status open")).toBeUndefined();
+	expect(await blockCall({}, "br update kit-9 --priority 1")).toBeUndefined();
+	expect(await blockCall({}, "br show kit-9 --json")).toBeUndefined();
+	const showDown = await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "show");
+	expect(showDown?.block).toBe(true);
+	expect(showDown?.reason).toContain("cannot be checked");
+	expect((await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "dep"))?.block).toBe(true);
+});

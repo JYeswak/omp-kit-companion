@@ -538,7 +538,9 @@ export interface TrackerRequest {
 	db?: string;
 	/** Identities this command line itself claims (flags and inline env assignments). */
 	identities: string[];
-	operation: "close" | "claim" | "start";
+	operation: "close" | "claim" | "start" | "block";
+	/** Labels this command adds or sets (comma-split). */
+	addLabels: string[];
 	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
 	actor: string | null;
 	assignee: string | null;
@@ -596,6 +598,7 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 		let actor: string | null = null;
 		let assignee: string | null = null;
 		let status: string | null = null;
+		const addLabels: string[] = [];
 		let claim = false;
 		let force = false;
 		let readOnly = false;
@@ -620,6 +623,7 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 				if (flag === "--actor") actor = value;
 				if (flag === "--assignee") assignee = value;
 				if (flag === "--status" || flag === "-s") status = value;
+				if (flag === "--add-label" || flag === "--set-labels" || flag === "--labels") addLabels.push(...value.split(",").map(label => label.trim()).filter(label => label !== ""));
 				continue;
 			}
 			if (subcommand === undefined) subcommand = word;
@@ -628,10 +632,11 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 		if (readOnly) continue;
 		const nativeStatus = status?.toLowerCase();
 		const operation = subcommand === "close" ? "close"
-			: subcommand === "update" && claim ? "claim"
-				: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start" : null;
+			: subcommand === "update" && nativeStatus === "blocked" ? "block"
+				: subcommand === "update" && claim ? "claim"
+					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start" : null;
 		if (operation === null) continue;
-		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force });
+		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force, addLabels });
 	}
 	return requests;
 }
@@ -861,6 +866,63 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 	return undefined;
 }
 
+export const BLOCK_REFUSED = "BLOCK_REFUSED";
+/** A human-gate comment must name the effect only Joshua can perform: `HUMAN-GATE: <effect>`, at least 16 characters. */
+const HUMAN_GATE_COMMENT = /human-gate:\s*\S[\s\S]{14,}/i;
+
+function refuseBlock(id: string, why: string, next: string): FlywheelToolCallResult {
+	return { block: true, reason: `kit-flywheel-guard ${BLOCK_REFUSED}: ${id} ${why}. ${next} Nothing was changed.` };
+}
+
+async function execJson(exec: FlywheelExec, request: TrackerRequest, args: string[]): Promise<{ ok: true; value: unknown } | { ok: false; why: string }> {
+	let result: FlywheelExecResult;
+	try {
+		result = await exec(request.bin, [...args, "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+	} catch (error) {
+		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` could not run (${error instanceof Error ? error.message : String(error)})` };
+	}
+	if (result.code !== 0 || result.killed) return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` exited ${result.killed ? "after timeout" : result.code}` };
+	try {
+		return { ok: true, value: JSON.parse(result.stdout) };
+	} catch {
+		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` returned unparseable output` };
+	}
+}
+
+/**
+ * BLOCKEDADMIT1: status=blocked needs an open blocks edge to a bead that is not closed, or the human-gate
+ * label backed by a comment that names the effect only Joshua can perform. A wait on a role's decision is an
+ * assigned bead, not a blocked one. Reads are native `show`/`dep list`; an unreadable bead is refused.
+ */
+async function checkBlockedHasFix(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	for (const id of request.ids) {
+		const shown = await execJson(deps.exec, request, ["show", id, "--json"]);
+		const edges = await execJson(deps.exec, request, ["dep", "list", id, "--json"]);
+		if (!shown.ok) return refuseBlock(id, `cannot be checked for a blocking fix (${shown.why})`, "Restore the native lookup, then retry.");
+		if (!edges.ok) return refuseBlock(id, `cannot be checked for a blocking fix (${edges.why})`, "Restore the native lookup, then retry.");
+		const rows: unknown[] = Array.isArray(edges.value) ? edges.value : [];
+		const open = rows.some(row => field(row, "type") === "blocks" && typeof field(row, "status") === "string"
+			&& field(row, "status") !== "closed" && field(row, "status") !== "tombstone");
+		if (open) continue;
+		const bead = Array.isArray(shown.value) ? shown.value[0] : shown.value;
+		const labels = field(bead, "labels");
+		const labelled = request.addLabels.includes("human-gate") || (Array.isArray(labels) && labels.includes("human-gate"));
+		const comments = field(bead, "comments");
+		const named = Array.isArray(comments) && comments.some(comment => {
+			const text = field(comment, "text");
+			return typeof text === "string" && HUMAN_GATE_COMMENT.test(text);
+		});
+		if (labelled && named) continue;
+		if (labelled) {
+			return refuseBlock(id, "carries human-gate but no comment names the effect only Joshua can perform",
+				"Add a comment `HUMAN-GATE: <the credential, account, payment or legal act only Joshua can do>` first.");
+		}
+		return refuseBlock(id, "has no open blocks edge to a fix",
+			`Run \`br dep add ${id} <fix bead>\` (an open bead, never an epic you are under) first, or, if only Joshua can perform the effect, add a \`HUMAN-GATE: <effect>\` comment and the human-gate label. A decision owed by a director, chief or owner is an assigned bead with the decision as its next action, not a blocked one.`);
+	}
+	return undefined;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -876,6 +938,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const pane = hasClose ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
 	const warnings: string[] = [];
 	for (const request of requests) {
+		if (request.operation === "block") {
+			const refusal = await checkBlockedHasFix(request, deps);
+			if (refusal !== undefined) return refusal;
+			continue;
+		}
 		if (request.operation !== "close") {
 			const refusal = await checkNativeClaim(request, deps);
 			if (refusal !== undefined) return refusal;
