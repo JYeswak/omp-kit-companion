@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean } = {}) {
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean } = {}) {
 	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0;
 	let finish: (value: NativeRchResult) => void = () => { throw new Error("build not started"); };
 	const status = () => ({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
@@ -24,13 +24,17 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 				value = { complete: true, journal_errors: [], jobs: [{ wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
 					schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
 					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
-					recovery: { wrapper_id: "rchw-fixture", build_id: 41, execution_started: options.executed ?? true, preparation_cancelled: options.executed === false,
+					recovery: { wrapper_id: "rchw-fixture", build_id: 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
 						exit_code: remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning },
 				} }] };
 			} else throw new Error("Unexpected native operation");
 			return { exit: 0, state: "exited", stdout: JSON.stringify(value) };
 		},
 		build() {
+			if (options.admissionRefused) {
+				// Native admission refusal (RCH-I003/RCH-I001): no wrapper is ever journaled and nothing runs remotely.
+				return { pid: 0, alive: () => false, result: Promise.resolve({ exit: 1, state: "exited", stdout: "" } as NativeRchResult) };
+			}
 			submitted++; running = true; remoteRunning = true;
 			const result = new Promise<NativeRchResult>(resolve => { finish = resolve; });
 			if (options.delayedJournal) {
@@ -119,4 +123,30 @@ test("a native journal published after spawn can still bind the live owned build
 	expect(result.overall).toBe("COMPLETE");
 	expect(result.compilerExit).toBe(0);
 	expect(result.cleanup).toBe("complete");
+});
+
+test("a passing remote check whose lease records exit 0 and retires without an execution_started flag is complete", async () => {
+	// `cargo check` retrieves no artifact, so the journal may never flag execution_started; a recorded exit code on a retired, uncancelled lease is remote execution.
+	const result = await runRchCycle(input, nativeFixture({ nativeExit: 0, remoteExit: 0, executionStarted: false }).executor);
+	expect(result.compilerExit).toBe(0);
+	expect(result.overall).toBe("COMPLETE");
+	expect(result.reason).toBe("native_return_and_readiness_observed");
+});
+
+test("native admission refusal with no bound wrapper and no execution is REFUSED rch_capacity_unavailable, not a build failure", async () => {
+	const fixture = nativeFixture({ admissionRefused: true });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.wrapperId).toBeNull();
+	expect(result.nativeExit).toBe(1);
+	expect(result.overall).toBe("REFUSED");
+	expect(result.reason).toBe("rch_capacity_unavailable");
+	expect(fixture.remoteActive()).toBe(false);
+});
+
+test("a remote command that ran but whose artifact return was refused is BUILD_FAILED artifact_return_refused with the build exit shown", async () => {
+	const result = await runRchCycle(input, nativeFixture({ nativeExit: 1, remoteExit: 0 }).executor);
+	expect(result.compilerExit).toBe(0);
+	expect(result.overall).toBe("BUILD_FAILED");
+	expect(result.reason).toBe("artifact_return_refused");
+	expect(result.lease).toContain("build_exit=0");
 });

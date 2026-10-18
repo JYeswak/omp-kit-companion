@@ -1,3 +1,5 @@
 ### Added
 
 - `omp-kit rch lease --slots N [--worker ID] [--project PATH] [--plan | --apply --yes] -- COMMAND` wraps the native `rch` build lifecycle: it observes worker capacity and disk, admits only healthy or warning workers with enough slots, refuses with a typed capacity reason otherwise, runs the command, and reports next-agent readiness, so any repo that builds on `rch` can use one admission path instead of its own lease script.
+
+- `omp-kit rch lease` corrects three classifications found in the real-machine replay: a passing remote `cargo check` whose retired, sources-released lease records exit 0 is now `COMPLETE` (execution is proven by the recorded exit code, not only `execution_started`); a native admission refusal (no bound wrapper, no execution, nonzero native exit) is `REFUSED rch_capacity_unavailable` instead of `BUILD_FAILED native_return_failed`; and a remote command that ran but whose artifact return was refused is `BUILD_FAILED artifact_return_refused` with `build_exit` from the lease.

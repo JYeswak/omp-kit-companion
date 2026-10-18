@@ -137,7 +137,10 @@ async function returnedLease(executor: RchExecutor, id: string, worker: string):
 	const lease = object(matches[0]?.lease), recovery = object(lease?.recovery), identity = object(lease?.identity);
 	if (!lease || !recovery || lease.schema_version !== 1 || lease.worker_id !== worker || recovery.wrapper_id !== id ||
 		!nonnegativeInteger(identity?.remote_build_id) || identity.remote_build_id === 0 || recovery.build_id !== identity.remote_build_id) return null;
-	const observed = recovery.execution_started === true && recovery.preparation_cancelled === false && nonnegativeInteger(recovery.exit_code);
+	// `cargo check` retrieves no artifact, so execution_started may never be set. A recorded exit code on a retired, sources-released,
+	// uncancelled lease can only come from a completed remote command, so it proves execution without trusting the native exit alone.
+	const observed = recovery.preparation_cancelled === false && nonnegativeInteger(recovery.exit_code) &&
+		(recovery.execution_started === true || (recovery.retired === true && recovery.sources_released === true));
 	return { retired: recovery.retired === true && recovery.sources_released === true, executionObserved: observed, compilerExit: observed ? recovery.exit_code as number : null };
 }
 
@@ -203,6 +206,8 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	}
 	if (result.compilerState === "cancelled" || input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "native_execution_cancelled"; }
 	else if (result.compilerExit !== null && result.compilerExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_remote_command_failed"; }
+	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.wrapperId === null && result.compilerExit === null && result.executionObserved !== true) { result.overall = "REFUSED"; result.reason = "rch_capacity_unavailable"; }
+	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.executionObserved === true) { result.overall = "BUILD_FAILED"; result.reason = "artifact_return_refused"; }
 	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_return_failed"; }
 	else if (result.compilerState !== "exited" || result.executionObserved !== true) { result.overall = "UNREADY"; result.reason = "native_remote_completion_not_observed"; }
 	else if (result.cleanup !== "complete" || result.nextAgentReady !== true) { result.overall = "UNREADY"; result.reason = "post_run_readiness_not_proven"; }
