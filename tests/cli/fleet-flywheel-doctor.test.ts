@@ -11,8 +11,8 @@ const MIN = 60_000;
 const BUSY = "output\n⠧ Working (12s)\n";
 const IDLE = "output\n> \n";
 
-/** `then` replaces the pane text once keys are sent to it (what the pane shows after the remedy). */
-type FakePane = { index: number; window?: number; omp: boolean; text: string; idleMin?: number; then?: string };
+/** `then` supplies the screen after each successful key send, in order when an array is given. */
+type FakePane = { index: number; window?: number; omp: boolean; text: string; idleMin?: number; then?: string | string[] };
 type SentKeys = { pane: string; keys: string[] }[];
 function directorIo(panes: FakePane[], session = "cfsios", sent: SentKeys = []): FleetIo {
 	const listing = panes.map((pane, n) => `${session}\t${pane.window ?? 0}\t${pane.index}\t${1000 + n}\t%${100 + n}`).join("\n");
@@ -25,7 +25,8 @@ function directorIo(panes: FakePane[], session = "cfsios", sent: SentKeys = []):
 			if (!pane) return null;
 			if (args[0] === "send-keys") {
 				sent.push({ pane: args[2]!, keys: args.slice(3) });
-				if (pane.then !== undefined) pane.text = pane.then;
+				const next = Array.isArray(pane.then) ? pane.then.shift() : pane.then;
+				if (next !== undefined) pane.text = next;
 				return "";
 			}
 			return pane.text;
@@ -215,7 +216,9 @@ const IDLE_BAND = screen(STEER_BAND, "❯", STATUS_IDLE);
 const BUSY_BAND = (elapsed: string) => screen(FOLLOW_BAND, "❯", statusBusy(elapsed), ["  ⎋ Running requested loop"]);
 const STARTED = screen([], "❯", statusBusy("1s"));
 const DRAFT = (text: string) => screen([], `❯ ${text}`, STATUS_IDLE);
-const pendingPane = (text: string, idleMin: number, then?: string): FakePane[] => [{ index: 1, omp: true, text, idleMin, ...(then === undefined ? {} : { then }) }];
+const FLUSH_BAND = screen(FOLLOW_BAND, "❯", STATUS_IDLE);
+const RESTORED_DRAFT = DRAFT("Reply with only the word MANGO.");
+const pendingPane = (text: string, idleMin: number, then?: string | string[]): FakePane[] => [{ index: 1, omp: true, text, idleMin, ...(then === undefined ? {} : { then }) }];
 
 test("band parser reads the real QueuedMessagesBand render and ignores look-alikes", () => {
 	expect(parseQueuedBand(IDLE_BAND.split("\n"))).toMatchObject({ groups: [{ label: "Steering", count: 1 }], messages: ["Read-only reviewer for cfs-census-regexp-var-repair-u8gcs. Please i…"] });
@@ -224,6 +227,25 @@ test("band parser reads the real QueuedMessagesBand render and ignores look-alik
 	expect(parseQueuedBand(" Steering·1\n   1. x\n   └ ⌥↑ to edit".split("\n"))).toBeNull();
 	expect(parseQueuedBand(["   1. x", "   └ ⌥↑ to edit"])).toBeNull();
 	expect(parseQueuedBand(DRAFT("hello").split("\n"))).toBeNull();
+});
+
+test("empty, inconsistent and ambiguous queue bands cannot authorize a flush", () => {
+	for (const band of [
+		[" Steering · 0", "   └ ⌥↑ to edit"],
+		[" Steering · 1", "   └ ⌥↑ to edit"],
+		[" Steering · 0", "   1. message", "   └ ⌥↑ to edit"],
+		[" Steering · 2", "   1. message", "   └ ⌥↑ to edit"],
+		[" Steering · 1", "   1.    ", "   └ ⌥↑ to edit"],
+		[" Steering · 1", "   2. message", "   └ ⌥↑ to edit"],
+		[" Steering · 2", "   1. first", "   1. second", "   └ ⌥↑ to edit"],
+		[" Steering · 1", "   1. first", " Steering · 1", "   1. second", "   └ ⌥↑ to edit"],
+	]) {
+		expect(parseQueuedBand(band)).toBeNull();
+		const sent: SentKeys = [];
+		const report = flushPending(directorIo(pendingPane(screen(band, "❯", STATUS_IDLE), 3), "cfsios", sent), true);
+		expect(report.panes).toEqual([]);
+		expect(sent).toEqual([]);
+	}
 });
 
 test("composer parser reads ❯ and box composers, not tool boxes", () => {
@@ -242,22 +264,94 @@ test("busy elapsed comes from the status-line spinner", () => {
 });
 
 test("band over an idle empty composer is STUCK_PENDING and --apply sends M-Up then Enter", () => {
-	const rows = inspectStuckPending(directorIo(pendingPane(IDLE_BAND, 3)));
-	expect(rows[0]).toMatchObject({ component: "STUCK_PENDING", status: "DEGRADED", evidence: { level: "WARN", target: "cfsios:0.1", pane_id: "%100", shape: "QUEUED_BAND", action: "FLUSH", preview: "Read-only reviewer for cfs-census-regexp-var-repair-u8gcs. Please i…" } });
+	const rows = inspectStuckPending(directorIo(pendingPane(FLUSH_BAND, 3)));
+	expect(rows[0]).toMatchObject({ component: "STUCK_PENDING", status: "DEGRADED", evidence: { level: "WARN", target: "cfsios:0.1", pane_id: "%100", shape: "QUEUED_BAND", action: "FLUSH", preview: "Reply with only the word MANGO." } });
 	const planSent: SentKeys = [];
-	expect(flushPending(directorIo(pendingPane(IDLE_BAND, 3, STARTED), "cfsios", planSent), false).panes.map((pane) => pane.result)).toEqual(["PLANNED"]);
+	expect(flushPending(directorIo(pendingPane(FLUSH_BAND, 3, [RESTORED_DRAFT, STARTED]), "cfsios", planSent), false).panes.map((pane) => pane.result)).toEqual(["PLANNED"]);
 	expect(planSent).toEqual([]);
 	const sent: SentKeys = [];
-	const report = flushPending(directorIo(pendingPane(IDLE_BAND, 3, STARTED), "cfsios", sent), true);
+	const io = directorIo(pendingPane(FLUSH_BAND, 3, [RESTORED_DRAFT, STARTED]), "cfsios", sent);
+	const tmux = io.tmux;
+	let draftCaptured = false;
+	io.tmux = (args) => {
+		if (args[0] === "send-keys" && args[3] === "Enter") expect(draftCaptured).toBe(true);
+		const out = tmux(args);
+		if (args[0] === "capture-pane" && sent.length === 1 && out === RESTORED_DRAFT) draftCaptured = true;
+		return out;
+	};
+	const report = flushPending(io, true);
 	expect(sent).toEqual([{ pane: "%100", keys: ["M-Up"] }, { pane: "%100", keys: ["Enter"] }]);
 	expect(report).toMatchObject({ overall: "CHANGED", panes: [{ result: "STARTED", keys_sent: ["M-Up", "Enter"] }] });
 });
 
 test("no spinner after the flush is STILL_STUCK", () => {
 	const sent: SentKeys = [];
-	const report = flushPending(directorIo(pendingPane(IDLE_BAND, 3, DRAFT("Read-only reviewer")), "cfsios", sent), true);
+	const report = flushPending(directorIo(pendingPane(FLUSH_BAND, 3, RESTORED_DRAFT), "cfsios", sent), true);
 	expect(sent.flatMap((entry) => entry.keys)).toEqual(["M-Up", "Enter"]);
 	expect(report).toMatchObject({ overall: "FINDINGS", panes: [{ result: "STILL_STUCK" }] });
+});
+
+test("ineffective dequeue, empty or changed draft, capture failure and new BUSY never send Enter", () => {
+	for (const after of [
+		FLUSH_BAND,
+		DRAFT(""),
+		DRAFT("a different queued message"),
+		screen([], "❯ Reply with only the word MANGO.", statusBusy("1s")),
+		STARTED,
+		screen(FOLLOW_BAND, "❯ Reply with only the word MANGO.", STATUS_IDLE),
+		"unrecognized composer",
+		null,
+	]) {
+		const sent: SentKeys = [];
+		const io = directorIo(pendingPane(FLUSH_BAND, 3), "cfsios", sent);
+		const tmux = io.tmux;
+		io.tmux = (args) => args[0] === "capture-pane" && sent.length > 0 ? after : tmux(args);
+		const report = flushPending(io, true);
+		expect(sent).toEqual([{ pane: "%100", keys: ["M-Up"] }]);
+		expect(report).toMatchObject({ overall: "FINDINGS", panes: [{ result: "SKIPPED_CHANGED", keys_sent: ["M-Up"] }] });
+	}
+});
+
+test("failed key sends report only keys accepted by tmux, never a start caused elsewhere", () => {
+	for (const failed of ["M-Up", "Enter"]) {
+		const sent: SentKeys = [];
+		const io = directorIo(pendingPane(FLUSH_BAND, 3, [RESTORED_DRAFT, STARTED]), "cfsios", sent);
+		const tmux = io.tmux;
+		io.tmux = (args) => args[0] === "send-keys" && args[3] === failed ? null : tmux(args);
+		const expected = failed === "M-Up" ? [] : ["M-Up"];
+		expect(flushPending(io, true)).toMatchObject({ overall: "FINDINGS", panes: [{ result: "STILL_STUCK", keys_sent: expected }] });
+		expect(sent.flatMap((entry) => entry.keys)).toEqual(expected);
+	}
+});
+
+test("truncated payloads and multiple queued messages stay report-only", () => {
+	for (const band of [
+		STEER_BAND,
+		[" Steering · 1", "   1. Read the report...", "   └ ⌥↑ to edit"],
+		[" Steering · 2", "   1. first", "   2. second", "   └ ⌥↑ to edit"],
+		[" Steering · 1", "   1. first", " After yield · 1", "   1. second", "   └ ⌥↑ to edit"],
+	]) {
+		const sent: SentKeys = [];
+		const report = flushPending(directorIo(pendingPane(screen(band, "❯", STATUS_IDLE), 3), "cfsios", sent), true);
+		expect(report.panes).toMatchObject([{ action: "ALERT", result: "ALERTED", keys_sent: [] }]);
+		expect(sent).toEqual([]);
+	}
+});
+
+test("a multiline restored draft cannot match a single visible queue preview", () => {
+	const sent: SentKeys = [];
+	const io = directorIo(pendingPane(FLUSH_BAND, 3, DRAFT("Reply with only the word MANGO.\n  then run another command")), "cfsios", sent);
+	expect(flushPending(io, true)).toMatchObject({ overall: "FINDINGS", panes: [{ result: "SKIPPED_CHANGED", keys_sent: ["M-Up"] }] });
+	expect(sent).toEqual([{ pane: "%100", keys: ["M-Up"] }]);
+});
+
+test("a restored payload change beyond the displayed report preview never sends Enter", () => {
+	const prefix = "Review the complete request before taking action. ".repeat(3);
+	const band = [" Steering · 1", `   1. ${prefix}read only`, "   └ ⌥↑ to edit"];
+	const sent: SentKeys = [];
+	const io = directorIo(pendingPane(screen(band, "❯", STATUS_IDLE), 3, DRAFT(`${prefix}write files`)), "cfsios", sent);
+	expect(flushPending(io, true)).toMatchObject({ overall: "FINDINGS", panes: [{ result: "SKIPPED_CHANGED", keys_sent: ["M-Up"] }] });
+	expect(sent).toEqual([{ pane: "%100", keys: ["M-Up"] }]);
 });
 
 test("band while busy is quiet; band while busy 5 min is STALE_STEER and gets no keys", () => {
@@ -347,7 +441,7 @@ test("%6 screen over a fresh transcript is not rechecked or frozen", () => {
 
 test("a pane that changed before the keys is skipped", () => {
 	const sent: SentKeys = [];
-	const panes = pendingPane(IDLE_BAND, 3);
+	const panes = pendingPane(FLUSH_BAND, 3);
 	const io = directorIo(panes, "cfsios", sent);
 	const tmux = io.tmux;
 	let captures = 0;

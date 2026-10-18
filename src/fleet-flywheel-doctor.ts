@@ -146,22 +146,37 @@ const BOTTOM_WINDOW = 15;
 
 export type QueuedBand = { start: number; groups: { label: string; count: number }[]; messages: string[] };
 
-/** The queued-messages band in the bottom rows of a pane capture, or null. */
+/** A nonempty queued-messages band with complete, consistently numbered groups, or null. */
 export function parseQueuedBand(lines: readonly string[]): QueuedBand | null {
 	for (let hint = lines.length - 1; hint >= Math.max(0, lines.length - BOTTOM_WINDOW); hint--) {
 		if (!BAND_HINT.test(lines[hint]!)) continue;
 		const groups: QueuedBand["groups"] = [];
 		const messages: string[] = [];
 		let start = hint;
+		let groupRows = 0;
+		let nextRowNumber = 0;
 		for (let index = hint - 1; index >= 0; index--) {
 			const heading = BAND_HEADING.exec(lines[index]!);
 			const row = heading ? null : BAND_ROW.exec(lines[index]!);
 			if (!heading && !row) break;
-			if (heading) groups.unshift({ label: heading[1]!, count: Number(heading[2]) });
-			else messages.unshift(row![1]!);
+			if (heading) {
+				const count = Number(heading[2]);
+				if (!Number.isSafeInteger(count) || count <= 0 || count !== groupRows || nextRowNumber !== 1
+					|| groups.some((group) => group.label === heading[1])) return null;
+				groups.unshift({ label: heading[1]!, count });
+				groupRows = 0;
+				nextRowNumber = 0;
+			} else {
+				const number = Number.parseInt(lines[index]!.trimStart(), 10);
+				if (!row![1]!.trim() || !Number.isSafeInteger(number) || number < 1
+					|| (groupRows > 0 && number !== nextRowNumber - 1)) return null;
+				messages.unshift(row![1]!);
+				groupRows++;
+				nextRowNumber = number;
+			}
 			start = index;
 		}
-		return groups.length ? { start, groups, messages } : null;
+		return groups.length && groupRows === 0 ? { start, groups, messages } : null;
 	}
 	return null;
 }
@@ -223,9 +238,13 @@ function viewPane(io: FleetIo, paneId: string): PaneView | null {
 	return { lines, band, composer: parseComposer(lines), busyMs: busyElapsedMs(lines, band?.start) };
 }
 
-/** What a stuck pane should get: Josh's remedy (dequeue + Enter) only for a band over an empty composer. */
+/** Only a single complete queued message over an empty composer has an unambiguous dequeue payload. */
 function pendingAction(view: PaneView): PendingAction | null {
-	if (view.band) return view.composer === "" ? "FLUSH" : "ALERT";
+	if (view.band) {
+		const message = view.band.messages[0]!.trim();
+		return view.composer === "" && view.band.groups.length === 1 && view.band.messages.length === 1
+			&& !message.endsWith("…") && !message.endsWith("...") ? "FLUSH" : "ALERT";
+	}
 	if (!view.composer) return null;
 	if (!view.composer.match(KIT_SEND_MARKER)) return "ALERT";
 	return view.composer.replace(KIT_SEND_MARKER, "").trim() ? "SUBMIT" : "CLEAR";
@@ -280,7 +299,7 @@ export function inspectStuckPending(io: FleetIo): Finding[] {
 	if (scan === null) return [{ component: "STUCK_PENDING", status: "UNVERIFIED", reason: NO_TMUX, recommended_action: NO_TMUX_ACTION }];
 	const rows: Finding[] = scan.pending.map((pane) => ({ component: "STUCK_PENDING", status: "DEGRADED",
 		reason: `WARN ${pane.target} (${pane.pane_id}): ${pane.shape === "QUEUED_BAND" ? `queued ${pane.band!.map((group) => `${group.label} · ${group.count}`).join(", ")}` : "composer text"} idle ${Math.floor(pane.idle_ms / 1000)} s: "${pane.preview}"`,
-		recommended_action: pane.action === "FLUSH" ? "omp-kit fleet flush-pending --apply --yes sends Alt+Up then Enter." : pane.action === "ALERT" ? "A human or unknown draft is in the way; inspect the pane, nothing will be sent." : `Report only: the composer holds a kit-send marker; ${pane.action === "SUBMIT" ? "submit" : "clear"} it by hand.`,
+		recommended_action: pane.action === "FLUSH" ? "omp-kit fleet flush-pending --apply --yes sends Alt+Up, verifies the restored draft, then Enter." : pane.action === "ALERT" ? "The queue payload or composer is ambiguous; inspect the pane, nothing will be sent." : `Report only: the composer holds a kit-send marker; ${pane.action === "SUBMIT" ? "submit" : "clear"} it by hand.`,
 		evidence: { level: "WARN", target: pane.target, pane_id: pane.pane_id, shape: pane.shape, action: pane.action, idle_ms: pane.idle_ms, preview: pane.preview } }));
 	rows.push(...scan.stale.map((pane): Finding => ({ component: "STALE_STEER", status: "DEGRADED",
 		reason: `WARN ${pane.target} (${pane.pane_id}): queued ${pane.band.map((group) => `${group.label} · ${group.count}`).join(", ")} while the turn has run ${Math.floor(pane.busy_ms / 60_000)} min: "${pane.preview}"`,
@@ -306,9 +325,9 @@ export type FlushResult = PendingPane & { result: "PLANNED" | "STARTED" | "STILL
 export type FlushReport = { overall: "OK" | "CHANGED" | "FINDINGS" | "UNAVAILABLE"; applied: boolean; panes: FlushResult[]; stale_steer: StaleSteer[]; frozen_turn: FrozenTurn[] };
 
 /**
- * Plan (default) or apply. The only keys ever sent are Alt+Up then Enter, to an
- * idle pane whose queued band sits over an empty composer, re-read just before
- * sending. Busy, frozen and composer-text panes are reported, never touched.
+ * Plan (default) or apply. Alt+Up is limited to one complete queued message over
+ * an idle empty composer. Enter requires a fresh idle capture with that exact
+ * nonempty draft and no remaining band. Captures and key sends are not atomic.
  */
 export function flushPending(io: FleetIo, apply: boolean, admission?: AdmissionInput): FlushReport {
 	const scan = scanPending(io);
@@ -322,11 +341,17 @@ export function flushPending(io: FleetIo, apply: boolean, admission?: AdmissionI
 		const now = viewPane(io, pane.pane_id);
 		if (!now || now.busyMs !== null || pendingAction(now) !== "FLUSH") return { ...pane, result: "SKIPPED_CHANGED", keys_sent: [] };
 		const sent: string[] = [];
-		if (io.tmux(["send-keys", "-t", pane.pane_id, "M-Up"]) !== null) {
-			sent.push("M-Up");
-			io.sleep(400);
-			if (io.tmux(["send-keys", "-t", pane.pane_id, "Enter"]) !== null) sent.push("Enter");
+		if (io.tmux(["send-keys", "-t", pane.pane_id, "M-Up"]) === null) return { ...pane, result: "STILL_STUCK", keys_sent: sent };
+		sent.push("M-Up");
+		io.sleep(400);
+		const dequeued = viewPane(io, pane.pane_id);
+		if (!dequeued || dequeued.busyMs !== null || dequeued.band !== null
+			|| dequeued.lines.some((line) => BAND_HINT.test(line))
+			|| !dequeued.composer || dequeued.composer !== now.band!.messages[0]!.trim()) {
+			return { ...pane, result: "SKIPPED_CHANGED", keys_sent: sent };
 		}
+		if (io.tmux(["send-keys", "-t", pane.pane_id, "Enter"]) === null) return { ...pane, result: "STILL_STUCK", keys_sent: sent };
+		sent.push("Enter");
 		for (let waited = 1000; waited <= FLUSH_VERIFY_MS; waited += 1000) {
 			io.sleep(1000);
 			if (viewPane(io, pane.pane_id)?.busyMs != null) return { ...pane, result: "STARTED", keys_sent: sent };
