@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { ensureOmpSource, ompSourceCacheRoot } from "./omp-source-cache.ts";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { cachedOmpPackage, ensureOmpSource, ompSourceCacheRoot } from "./omp-source-cache.ts";
+import { accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
@@ -168,6 +169,43 @@ function ternManagerState(launcher: string): TernManagerState | null {
 			status: "UNVERIFIED",
 			reason: code === "ENOENT" ? "Tern state.json is missing" : "Tern state.json is unreadable",
 		};
+	}
+}
+
+/** Bind a standalone Tern launcher to its manager-recorded bytes and exact-version registry source.
+ * This verifies two identities; it does not claim the registry source was extracted from the binary.
+ */
+export function verifyTernOmpSource(launcher: string, source: string): boolean {
+	try {
+		const realLauncher = realpathSync(launcher);
+		const state = ternManagerState(realLauncher);
+		if (!state || state.status !== "PRESENT" || state.version === null) return false;
+		const record: unknown = JSON.parse(readFileSync(join(dirname(dirname(realLauncher)), "state.json"), "utf8"));
+		if (typeof record !== "object" || record === null || !("managed" in record) || record.managed !== true ||
+			!("installed" in record) || typeof record.installed !== "object" || record.installed === null ||
+			!("sha256" in record.installed) || typeof record.installed.sha256 !== "string") return false;
+		const expected = record.installed.sha256;
+		if (expected.length !== 64 || Buffer.from(expected, "hex").toString("hex") !== expected) return false;
+		const pkg = resolve(source, "..");
+		const versionDir = resolve(pkg, "../../..");
+		if (basename(versionDir) !== state.version) return false;
+		const cached = cachedOmpPackage(state.version, { OMP_KIT_OMP_SRC_CACHE: dirname(versionDir) });
+		if (!cached || realpathSync(join(cached, "src")) !== realpathSync(source)) return false;
+		const hash = createHash("sha256");
+		const fd = openSync(realLauncher, "r");
+		const buffer = Buffer.allocUnsafe(64 * 1024);
+		try {
+			for (;;) {
+				const bytes = readSync(fd, buffer, 0, buffer.length, null);
+				if (bytes === 0) break;
+				hash.update(buffer.subarray(0, bytes));
+			}
+		} finally {
+			closeSync(fd);
+		}
+		return hash.digest("hex") === expected;
+	} catch {
+		return false;
 	}
 }
 interface BunManagerPackage {

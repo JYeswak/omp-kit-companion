@@ -165,9 +165,11 @@ async function run(): Promise<void> {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
 			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
-			else if (name === "extensions/fleet-guard.ts") {
+			else if (name === "extensions/fleet-guard.ts" || name === "scripts/ttsr-harness.ts") {
+				// Bundle local helpers so the installed script needs no checkout source tree.
 				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
-				if (!bundled.success || bundled.outputs.length !== 1) fail("FLEET_GUARD_BUNDLE_FAILED");
+				if (!bundled.success || bundled.outputs.length !== 1)
+					fail(name === "extensions/fleet-guard.ts" ? "FLEET_GUARD_BUNDLE_FAILED" : "HARNESS_BUNDLE_FAILED");
 				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
 			} else if (name === "package.json") content.set(name, stampPackageVersion(safeSource(name), version));
 			else content.set(name, safeSource(name));

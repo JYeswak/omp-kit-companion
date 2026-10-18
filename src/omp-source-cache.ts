@@ -47,6 +47,16 @@ export function cachedOmpPackage(version: string, env: Record<string, string | u
 	const pkg = packageDir(versionDir);
 	if (!existsSync(join(versionDir, ".verified.json"))) return null;
 	if (manifestVersion(pkg) !== version) return null;
+	try {
+		const receipt: unknown = JSON.parse(readFileSync(join(versionDir, ".verified.json"), "utf8"));
+		const integrity = lockIntegrity(versionDir, version);
+		if (typeof receipt !== "object" || receipt === null ||
+			!("package" in receipt) || receipt.package !== PACKAGE_NAME ||
+			!("version" in receipt) || receipt.version !== version ||
+			!("integrity" in receipt) || integrity === null || receipt.integrity !== integrity) return null;
+	} catch {
+		return null;
+	}
 	if (!MATCHER_FILES.every(file => existsSync(join(pkg, "src", file)))) return null;
 	return pkg;
 }

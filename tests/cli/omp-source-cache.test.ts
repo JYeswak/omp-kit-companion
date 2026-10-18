@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedOmpPackage, ensureOmpSource } from "../../src/omp-source-cache.ts";
-import { resolveOmpIdentity } from "../../src/paths.ts";
+import { resolveOmpIdentity, verifyTernOmpSource } from "../../src/paths.ts";
 import { resolveOmpSource } from "../../scripts/rule-class.ts";
 
 // Real paths: macOS tmpdir() sits under the /var -> /private/var symlink.
@@ -72,6 +73,37 @@ test("a cached directory whose manifest names another version is not served", ()
 	const fake = fakeInstall();
 	ensureOmpSource("9.9.9", env, { install: fake.install });
 	expect(fake.calls.length).toBe(1);
+});
+
+test("cached source refuses a forged or mismatched registry receipt", () => {
+	const cache = fresh();
+	const env = { OMP_KIT_OMP_SRC_CACHE: cache };
+	ensureOmpSource("9.9.9", env, { install: fakeInstall().install });
+	const receipt = join(cache, "9.9.9", ".verified.json");
+	const original = JSON.parse(readFileSync(receipt, "utf8"));
+	for (const patch of [{ version: "9.9.8" }, { package: "another-package" }, { integrity: "sha512-forged" }]) {
+		writeFileSync(receipt, JSON.stringify({ ...original, ...patch }));
+		expect(cachedOmpPackage("9.9.9", env)).toBeNull();
+	}
+});
+
+test("Tern observe identity binds launcher bytes and exact-version cached source", () => {
+	const cache = fresh();
+	const env = { OMP_KIT_OMP_SRC_CACHE: cache };
+	const pkg = ensureOmpSource("9.9.9", env, { install: fakeInstall().install });
+	const manager = join(base, `tern-proof-${++n}`);
+	mkdirSync(join(manager, "versions"), { recursive: true });
+	const launcher = join(manager, "versions", "9.9.9");
+	const bytes = '#!/bin/sh\necho "9.9.9"\n';
+	writeFileSync(launcher, bytes);
+	const state = { managed: true, installed: { version: "9.9.9", sha256: createHash("sha256").update(bytes).digest("hex") } };
+	writeFileSync(join(manager, "state.json"), JSON.stringify(state));
+	expect(verifyTernOmpSource(launcher, join(pkg, "src"))).toBe(true);
+	writeFileSync(launcher, '#!/bin/sh\necho "9.9.9"\n# foreign same-version bytes\n');
+	expect(verifyTernOmpSource(launcher, join(pkg, "src"))).toBe(false);
+	writeFileSync(launcher, bytes);
+	writeFileSync(join(cache, "9.9.9", ".verified.json"), "{}");
+	expect(verifyTernOmpSource(launcher, join(pkg, "src"))).toBe(false);
 });
 
 test("off switch, missing cache root and non-release versions refuse before any install", () => {

@@ -27,6 +27,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
+import { verifyTernOmpSource } from "../src/paths.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
@@ -1189,8 +1190,9 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 		const selectedLauncher = pathLauncher ? fs.realpathSync(pathLauncher) : null;
 		const packageRoot = fs.realpathSync(path.resolve(OMP_SRC, ".."));
 		const withinPackage = path.relative(packageRoot, configured);
-		if (!selectedLauncher || configured !== selectedLauncher || withinPackage === ".." || withinPackage.startsWith(".." + path.sep) || path.isAbsolute(withinPackage)) {
-			return unavailable("OMP_IDENTITY_MISMATCH");
+		if (!selectedLauncher || configured !== selectedLauncher) return unavailable("OMP_IDENTITY_MISMATCH");
+		if (withinPackage === ".." || withinPackage.startsWith(".." + path.sep) || path.isAbsolute(withinPackage)) {
+			if (!verifyTernOmpSource(configured, OMP_SRC)) return unavailable("OMP_IDENTITY_MISMATCH");
 		}
 	} catch (error) {
 		return unavailable("OMP_IDENTITY_MISMATCH", String(error));

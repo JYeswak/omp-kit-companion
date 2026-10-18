@@ -1,0 +1,1 @@
+- Allow observe witnesses with Tern-managed OMP binaries when their bytes match the manager's recorded digest and their exact-version registry source has a matching cache receipt; reject substituted launchers and inconsistent receipts.

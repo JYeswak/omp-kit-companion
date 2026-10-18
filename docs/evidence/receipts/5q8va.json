@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_2c5b79bf417a237584334962b9f765ce371f6e70b711edca3d0645b73b63f2b6",
+ "limitations": [
+  "Local compiled candidate0.2.99 only; released-installed acceptance and non-author verification remain open. No cold CI gain or historical cause claim."
+ ],
+ "operation": "5q8va-local-compiled-observe",
+ "parameters": {
+  "harness_sha256": "07655351198ec4bcca336de3375e3469799c5e821ba1f3e5c819c82b87043a97",
+  "identity_sha256": "4dcc6c0c5347381fdff9198157744be07f9f2b0cceea0ca124e7df307acc8e03",
+  "omp_launcher_sha256": "fa41b27d434380e99b713e4f9ced0f73eb1fc0c409fdf23a57c119971d24bac5",
+  "results": "package-release8pass0fail90expect; source-cache+observe-bindings17pass0fail39expect; selected-test-runner4pass0fail11expect; relocated-compiled-review-rules ok:true; embedded-runtime observe deadline2500ms measured328.369417,327.829375,336.376792ms all exit0 wholefire final41016 wire41015"
+ },
+ "producer": "FrostyOrchid",
+ "result_ref": {
+  "bytes": 72070656,
+  "sha256": "04a257d3a88e1e37f2c48270391e61aac02119a2ca4fbdcc1bd421f8b948820f"
+ }
+}
