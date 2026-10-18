@@ -228,7 +228,7 @@ jobs:
           SHA: ${{ steps.candidate.outputs.sha }}
         run: |
           set -euo pipefail
-          git fetch origin main --tags
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch origin main --tags
           [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
           files=(candidate-index/release-index.json)
           for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
@@ -290,7 +290,7 @@ jobs:
           set -euo pipefail
           [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          git fetch origin main --tags
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch origin main --tags
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > producer-run.json
           [[ "$(jq -er .run_attempt producer-run.json)" == "$PRODUCER_ATTEMPT" ]]
           python3 scripts/release_reuse.py require-allocation --repository "$GITHUB_REPOSITORY" \
