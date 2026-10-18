@@ -33,7 +33,8 @@ export type FullTestResultReference = {
  counts: FullTestCounts | null; failing_names: string[] | null;
  case_report_error: string | null;
  stdout: FullTestStreamReference | null; stderr: FullTestStreamReference | null;
- capture_complete: boolean; missing_fields: string[];
+ /** Structural execution capture only; never suite completion or authenticated retention. */
+ execution_capture_complete: boolean; missing_fields: string[];
  retention: { status: "UNRETAINED" | "CITED_UNVERIFIED"; durable: false; citations: FullTestCitation[]; errors: string[] };
 };
 export type FullTestCause = { cause_code: string; cause_name: string; cause_message: string; cause_stack_head: string | null };
@@ -317,7 +318,7 @@ export function describeFullTestProducer(result: BundledRunResult | null, option
    producer_exit: producerExit, runner_exit: result?.code ?? null, signal,
    counts: summary.counts, failing_names: summary.failing_names?.map(redact) ?? null, ...streams,
    case_report_error: nativeSummary?.error ? redact(nativeSummary.error) : null,
-   capture_complete: missing.length === 0, missing_fields: missing, retention,
+   execution_capture_complete: missing.length === 0, missing_fields: missing, retention,
   },
  };
 }

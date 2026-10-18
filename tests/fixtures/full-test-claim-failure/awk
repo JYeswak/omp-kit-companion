@@ -1,0 +1,9 @@
+#!/bin/sh
+# Accept only the planted bad claims table so the real selftest assertion fails.
+# Delegate reporter emission and every other awk operation to the actual tool.
+for argument do
+  case "$argument" in
+    bad.tsv|*/bad.tsv) exit 0 ;;
+  esac
+done
+exec /usr/bin/awk "$@"

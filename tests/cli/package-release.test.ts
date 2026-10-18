@@ -14,7 +14,7 @@ const sourceCacheRoot = ompSourceCacheRoot(process.env);
 const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
 const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
 const output = mkdtempSync(join(scratch, "p21-release-"));
-writeFileSync(join(output, ".owner"), `pid=${process.pid}\nlabel=p21-release\nrepo=omp-kit-companion\ncreated=${new Date().toISOString()}\n`);
+writeFileSync(join(output, ".owner"), `pid=${process.pid}\nlabel=p21-release\nrepo=${caseCwd}\ncreated=${new Date().toISOString()}\n`);
 const stubBin = join(output, "stub-bin");
 mkdirSync(stubBin, { recursive: true });
 writeFileSync(join(stubBin, "omp"), "#!/bin/sh\nprintf 'omp stub\\n'\n");
@@ -68,6 +68,8 @@ beforeAll(() => {
 	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA ?? exported;
 	// An admitted archive has no HEAD; its expanded revision selects objects from the explicit caller.
 	const objectStore = exported === undefined ? repo : caseCwd;
+	if (exported === undefined)
+		expect(sourceGit(repo, ["rev-parse", "--show-toplevel"]).toString().trim()).toBe(repo);
 	sourceRevision = sourceGit(objectStore, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
 	if (selected !== undefined) expect(sourceRevision).toBe(selected);
 	const sourceArchive = join(output, "selected-source.tar");
@@ -335,7 +337,7 @@ test("installed integrations and invariant gate run from the package", () => {
 		cwd: home,
 		env: { ...process.env, ...nativeCacheEnv, HOME: home, TMPDIR: output, TMP: output, TEMP: output,
 			XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
-			OMP_KIT_CASE_CWD: caseCwd, PATH: ladderPath,
+			OMP_KIT_CASE_CWD: caseCwd, OMP_KIT_TEST_WORK_ROOT: output, PATH: ladderPath,
 			OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
 			OMP_PATH: ompIdentity.launcher, OMP_SRC: ompIdentity.source },
 		stdout: "pipe", stderr: "pipe",
@@ -345,8 +347,50 @@ test("installed integrations and invariant gate run from the package", () => {
 	const fullReport = JSON.parse(full.stdout.toString()).data.test;
 	expect(fullReport.producer.stdout).toContain("GREEN flywheel-invariants");
 	expect(fullReport.stages.manifest.status).toBe("PASS");
+	expect(fullReport.producer.result_ref).toMatchObject({
+		source_revision: sourceRevision, producer_exit: 0, runner_exit: 0,
+		execution_capture_complete: true, missing_fields: [], failing_names: [],
+		counts: { protocol: "OMP_KIT_CASES", unit: "TEST_CASE_EXECUTION", fail: 0 },
+		retention: { status: "UNRETAINED", durable: false },
+	});
 // The full ladder runs the complete e2e-live suite (~200 s locally); same budget as kit-update's N+2 journey.
 }, 900_000);
+
+test("native full-test retains a real named failing case without counting later stages as skips", () => {
+	const { home, installedBinary } = installCandidate("named-failure-home");
+	const identity = resolveOmpIdentity(process.env);
+	const faultBin = join(output, "archived-source", "tests", "fixtures", "full-test-claim-failure");
+	const failed = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
+		cwd: home, env: { ...process.env, ...nativeCacheEnv, HOME: home, TMPDIR: output,
+			XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
+			OMP_KIT_CASE_CWD: caseCwd, OMP_KIT_TEST_WORK_ROOT: output,
+			PATH: [faultBin, join(home, ".local", "opt", "omp-kit", "bin"), process.env.PATH ?? ""].join(delimiter),
+			OMP: identity.launcher, OMP_BIN: identity.launcher, OMP_PATH: identity.launcher, OMP_SRC: identity.source },
+		stdout: "pipe", stderr: "pipe",
+	});
+	expect(failed.exitCode, failed.stdout.toString() + failed.stderr.toString()).toBe(1);
+	const report = JSON.parse(failed.stdout.toString()).data.test;
+	expect(report.status).toBe("FAIL");
+	expect(report.stages["claim-selftest"]).toMatchObject({ status: "FAIL", producer_rc: 1 });
+	expect(report.stages["cli-crosscheck"].status).toBe("NOT_RUN");
+	const reference = report.producer.result_ref;
+	expect(reference).toMatchObject({
+		source_revision: sourceRevision, producer_exit: 1, runner_exit: 1,
+		execution_capture_complete: true, missing_fields: [],
+		counts: { protocol: "OMP_KIT_CASES", unit: "TEST_CASE_EXECUTION", fail: 1, skip: 0 },
+		failing_names: ["claim-selftest: unmatched-pattern"],
+		retention: { status: "UNRETAINED", durable: false },
+	});
+	for (const name of ["stdout", "stderr"] as const) {
+		const stream = reference[name];
+		const stored = readFileSync(stream.path);
+		expect(stored.byteLength).toBe(stream.bytes);
+		expect(createHash("sha256").update(stored).digest("hex")).toBe(stream.sha256);
+		expect(stream.identity_matches).toBe(true);
+		expect(stream.capture_complete).toBe(true);
+	}
+	expect(readFileSync(reference.stdout.path, "utf8")).toContain("SELFTEST_FAIL: planted unmatched enforce=yes row was accepted");
+}, 120_000);
 
 test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", () => {
 	const { home, installedRoot, installedBinary } = installCandidate("missing-matrix-home");
