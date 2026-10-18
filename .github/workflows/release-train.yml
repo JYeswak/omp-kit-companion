@@ -248,7 +248,9 @@ jobs:
           done
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
           if ! jq -e --arg tag "v$VERSION" 'any(.[][]; .tag_name == $tag)' releases.json; then
-            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$SHA" --draft \
+            # The certified tag already exists and is source-checked above.
+            # Do not request workflow-write authority for unused tag creation.
+            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
               --title "v$VERSION" --notes-file selection/release-notes.md "${files[@]}"
           fi
           # Native authority and ALL remote archive/SBOM/index bytes verify
