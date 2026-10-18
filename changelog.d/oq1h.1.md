@@ -1,3 +1,4 @@
 ### Fixed
 - Heavy disk admission works without sbh: OS-native statfs default on the cwd with sbh as an auto-detected adapter; CI no longer installs sbh and asserts its absence. (ompkit-oq1h.1)
 - Statfs verdict is a pure injected-boundary decision (no environment seam); unit matrix covers it hermetically.
+- Statfs pressure is proven natively: on a real sub-10 GiB filesystem (Linux `/dev/shm`) the real CLI defers 75 with `disk low (statfs)` and never starts the command, a healthy `sbh` still decides under `auto`, and `disk_observer: "statfs"` ignores it. A test-only `--preload` forces the statfs reading healthy to show the same command then runs, and a mutant table shows each statfs mutant (always healthy, always pressure, floor ignored, unreadable-as-healthy, sbh-only) is killed by exactly the cases that guard it. (ompkit-oq1h.1)

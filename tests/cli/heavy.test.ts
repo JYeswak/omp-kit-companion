@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import { decideDiskPressure, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
+import { type DiskCapacity, decideDiskPressure, type DiskVerdict, diskVerdict, HEAVY_DISK_NEED_BYTES, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -28,9 +28,10 @@ function heavyEnv(root: string, extraEnv: Record<string, string> = {}): Record<s
 	return { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${healthy}:${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv };
 }
 
-async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}) {
-	const child = Bun.spawn([process.execPath, entry, ...args], {
-		cwd: root,
+async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}, options: { cwd?: string; preload?: string } = {}) {
+	const preload = options.preload ? ["--preload", options.preload] : [];
+	const child = Bun.spawn([process.execPath, ...preload, entry, ...args], {
+		cwd: options.cwd ?? root,
 		env: heavyEnv(root, extraEnv),
 		stdin: "ignore", stdout: "pipe", stderr: "pipe",
 	});
@@ -431,16 +432,60 @@ test("HEAVYDISK1: waiting status names the disk reason", async () => {
 });
 const GIB = 1024 ** 3;
 
+type Decide = (capacity: DiskCapacity | null, floorPct: number | null) => DiskVerdict;
+
+// The original oq1h.1 decision matrix as named cases, so the same assertions can also be pointed at
+// planted mutants through the injected boundary (no environment seam).
+const HEALTHY_CASE = "healthy: 100 GiB free runs";
+const PRESSURE_CASE = "pressure: 5 GiB free defers";
+const FLOOR_CASE = "floor: percent below disk_floor_pct defers";
+const FAILURE_CASE = "failure: an unreadable statfs is unavailable, never healthy";
+const STATFS_CASES: Record<string, (decide: Decide) => void> = {
+	[HEALTHY_CASE]: (decide) => {
+		expect(decide({ freeBytes: 100 * GIB, freePct: 50 }, null)).toEqual({ kind: "ok", observer: "statfs" });
+	},
+	[PRESSURE_CASE]: (decide) => {
+		expect(decide({ freeBytes: 5 * GIB, freePct: 50 }, null)).toEqual({ kind: "pressure", text: "disk low (statfs)", observer: "statfs" });
+	},
+	[FLOOR_CASE]: (decide) => {
+		const floor = decide({ freeBytes: 100 * GIB, freePct: 30 }, 40);
+		expect(floor.kind).toBe("pressure");
+		if (floor.kind === "pressure") expect(floor.text).toContain("disk low (statfs)");
+	},
+	[FAILURE_CASE]: (decide) => {
+		expect(decide(null, null)).toEqual({ kind: "unavailable", text: "no disk observer available", observer: "statfs" });
+	},
+};
+
+function failingCases(decide: Decide): string[] {
+	return Object.entries(STATFS_CASES).flatMap(([name, check]) => {
+		try { check(decide); return []; } catch { return [name]; }
+	});
+}
+
 test("oq1h.1 unit: statfs decision matrix without environment", () => {
-	expect(decideDiskPressure({ freeBytes: 100 * GIB, freePct: 50 }, null))
-		.toEqual({ kind: "ok", observer: "statfs" });
-	expect(decideDiskPressure({ freeBytes: 5 * GIB, freePct: 50 }, null))
-		.toEqual({ kind: "pressure", text: "disk low (statfs)", observer: "statfs" });
-	const floor = decideDiskPressure({ freeBytes: 100 * GIB, freePct: 30 }, 40);
-	expect(floor.kind).toBe("pressure");
-	if (floor.kind === "pressure") expect(floor.text).toContain("disk low (statfs)");
-	expect(decideDiskPressure(null, null))
-		.toEqual({ kind: "unavailable", text: "no disk observer available", observer: "statfs" });
+	for (const check of Object.values(STATFS_CASES)) check(decideDiskPressure);
+});
+
+test("oq1h.1 planted: each statfs mutant is killed by exactly the cases that guard it", () => {
+	const healthy: DiskVerdict = { kind: "ok", observer: "statfs" };
+	const mutants: Record<string, { decide: Decide; killedBy: string[] }> = {
+		"always healthy (forced ok): the 5 GiB pressure case fails": {
+			decide: () => healthy, killedBy: [PRESSURE_CASE, FLOOR_CASE, FAILURE_CASE] },
+		"always pressure": {
+			decide: () => ({ kind: "pressure", text: "disk low (statfs)", observer: "statfs" }), killedBy: [HEALTHY_CASE, FAILURE_CASE] },
+		"floor ignored": {
+			decide: (capacity) => decideDiskPressure(capacity, null), killedBy: [FLOOR_CASE] },
+		"unreadable statfs treated as healthy": {
+			decide: (capacity, floor) => capacity === null ? healthy : decideDiskPressure(capacity, floor), killedBy: [FAILURE_CASE] },
+		"sbh-only (no statfs observer)": {
+			decide: () => ({ kind: "unavailable", text: "no disk observer available", observer: "statfs" }), killedBy: [HEALTHY_CASE, PRESSURE_CASE, FLOOR_CASE] },
+	};
+	// Positive control: the real decider fails none of the cases, so a kill below is the mutant's doing.
+	expect(failingCases(decideDiskPressure)).toEqual([]);
+	for (const [name, mutant] of Object.entries(mutants)) {
+		expect({ mutant: name, killed: failingCases(mutant.decide).sort() }).toEqual({ mutant: name, killed: [...mutant.killedBy].sort() });
+	}
 });
 
 test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", async () => {
@@ -466,3 +511,124 @@ test("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", a
 	expect(result.stderr).toContain("disk_observer");
 	expect(existsSync(marker)).toBe(false);
 }, 40_000);
+
+// ---- oq1h.1 native cases: the real statfs through the real CLI -----------------------------------------
+// No production seam and no environment variable forges a disk here: pressure comes from a real small
+// filesystem, and the one forged reading is a --preload that only a test can name (fixtures/).
+const NO_SBH_PATH = "/usr/bin:/bin";
+const forgeHealthyStatfs = resolve(import.meta.dir, "fixtures", "forge-healthy-statfs.ts");
+
+function measure(directory: string): { freeBytes: number; freePct: number } {
+	const observed = statfsSync(directory);
+	return { freeBytes: Number(observed.bavail) * Number(observed.bsize), freePct: Math.min(100, (Number(observed.bavail) / Number(observed.blocks)) * 100) };
+}
+
+// A real filesystem with less than the 10 GiB admission need, so pressure is observed, not injected.
+// Linux: /dev/shm, a tmpfs sized from RAM (about 7.8 GiB on GitHub's 16 GB runners). Elsewhere set
+// OMP_KIT_TEST_LOW_FS_DIR to a directory on a small mounted volume (macOS: hdiutil create -size 200m -fs APFS -attach).
+function lowCapacityBase(): string | null {
+	for (const candidate of [process.env.OMP_KIT_TEST_LOW_FS_DIR, process.platform === "linux" ? "/dev/shm" : undefined]) {
+		if (!candidate) continue;
+		try {
+			if (measure(candidate).freeBytes < HEAVY_DISK_NEED_BYTES) return candidate;
+		} catch { /* absent or unreadable: try the next candidate */ }
+	}
+	return null;
+}
+
+const LOW_BASE = lowCapacityBase();
+// On GitHub's Linux runners the pressure cases are not optional: a runner whose /dev/shm outgrew the need must fail, not skip.
+const LOW_FS_REQUIRED = process.platform === "linux" && process.env.GITHUB_ACTIONS === "true";
+
+async function onLowFilesystem(body: (directory: string) => Promise<void>): Promise<void> {
+	const directory = mkdtempSync(join(LOW_BASE as string, `omp-kit-heavy-test.${process.pid}.`));
+	writeFileSync(join(directory, ".owner"), `pid=${process.pid} label=heavy-test-lowfs created=${new Date().toISOString()}\n`, { mode: 0o600 });
+	try {
+		expect(measure(directory).freeBytes).toBeLessThan(HEAVY_DISK_NEED_BYTES);
+		await body(directory);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+// One real `heavy --no-wait` of a marker-writing command with `cwd` as the measured directory.
+async function nativeRun(input: { cwd: string; config?: Parameters<typeof configure>[1]; sbh?: 0 | 1; preload?: string }) {
+	// Positive control for the planted state: this PATH must really lack sbh.
+	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: NO_SBH_PATH } }).exitCode).not.toBe(0);
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1, ...input.config });
+	const path = input.sbh === undefined ? NO_SBH_PATH : `${fakeSbh(root, input.sbh, "native-bin")}:${NO_SBH_PATH}`;
+	const marker = join(root, "native-marker");
+	const result = await invoke(root, ["heavy", "--no-wait", "--label", "oq1h1-native", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: path }, { cwd: input.cwd, preload: input.preload });
+	return { code: result.code, stderr: result.stderr, ran: existsSync(marker) };
+}
+
+test.skipIf(!LOW_FS_REQUIRED)("oq1h.1 native: GitHub's Linux runner offers a real filesystem below the 10 GiB need", () => {
+	expect(LOW_BASE).not.toBeNull();
+});
+
+test.skipIf(LOW_BASE === null)("oq1h.1 native: statfs pressure on a real low-capacity filesystem defers 75 and never starts the command", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const result = await nativeRun({ cwd });
+		expect(result.code).toBe(75);
+		expect(result.stderr).toContain("disk low (statfs)");
+		expect(result.ran).toBe(false);
+	});
+});
+
+test.skipIf(LOW_BASE === null)("oq1h.1 planted: a forged-healthy statfs reading starts the command on the same real low filesystem", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const honest = await nativeRun({ cwd });
+		expect(honest.code).toBe(75);
+		expect(honest.ran).toBe(false);
+		// The mutant: only the statfs reading is forced healthy. The 75 above is what the pressure case would then lose.
+		const forced = await nativeRun({ cwd, preload: forgeHealthyStatfs });
+		expect(forced.code).toBe(0);
+		expect(forced.ran).toBe(true);
+	});
+});
+
+test.skipIf(LOW_BASE === null)("oq1h.1 native: auto lets a healthy sbh decide over real statfs pressure (sbh precedence)", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const result = await nativeRun({ cwd, sbh: 0 });
+		expect(result.code).toBe(0);
+		expect(result.ran).toBe(true);
+	});
+});
+
+test.skipIf(LOW_BASE === null)("oq1h.1 native: disk_observer statfs never consults sbh, so a healthy sbh cannot hide real pressure", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const result = await nativeRun({ cwd, sbh: 0, config: { disk_observer: "statfs" } });
+		expect(result.code).toBe(75);
+		expect(result.stderr).toContain("disk low (statfs)");
+		expect(result.ran).toBe(false);
+	});
+});
+
+test("oq1h.1 native: with no sbh the statfs verdict on the fixture disk equals the independent measurement", async () => {
+	const cwd = fixture();
+	const pressured = measure(cwd).freeBytes < HEAVY_DISK_NEED_BYTES;
+	const result = await nativeRun({ cwd });
+	expect(result.code).toBe(pressured ? 75 : 0);
+	expect(result.ran).toBe(!pressured);
+	if (pressured) expect(result.stderr).toContain("disk low (statfs)");
+});
+
+test("oq1h.1 native: disk_floor_pct reaches the real CLI verdict", async () => {
+	const cwd = fixture();
+	const { freeBytes, freePct } = measure(cwd);
+	const pressured = freeBytes < HEAVY_DISK_NEED_BYTES || freePct < 50;
+	const result = await nativeRun({ cwd, config: { disk_floor_pct: 50 } });
+	expect(result.code).toBe(pressured ? 75 : 0);
+	expect(result.ran).toBe(!pressured);
+});
+
+test("oq1h.1 native: a floor above the measured percent defers through diskVerdict", async () => {
+	const verdict = await diskVerdict({ config: { slots: 2, max_wait_s: 1, disk_observer: "statfs", disk_floor_pct: 100 }, cwd: fixture() });
+	expect(verdict.kind).toBe("pressure");
+	if (verdict.kind === "pressure") {
+		expect(verdict.observer).toBe("statfs");
+		expect(verdict.text).toContain("disk low (statfs)");
+	}
+});
