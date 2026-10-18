@@ -30,7 +30,7 @@ import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
 import { writeScratchOwner } from "../src/fleet-guard/scratch.ts";
-import { CASE_HEADER, parseReferenceFacts, type CaseReferenceFacts } from "../src/case-corpus.ts";
+import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
@@ -226,61 +226,12 @@ function g1(lr: LoadedRule): G1Result {
 
 // ---------------------------------------------------------------- cases
 
-interface Case {
-	line: number;
-	rule: string;
-	expect: "fire" | "quiet";
-	source: Source;
-	tool: string;
-	path: string;
-	snippet: string;
-	note: string;
-	/** Fixture facts, independent of the expected admission outcome. */
-	reference?: CaseReferenceFacts;
+interface Case extends CorpusCase {
 	argumentSpace?: boolean;
 }
 
-function decodeSnippet(raw: string): string {
-	return raw.replace(/\\([nt])/g, (_, c: string) => (c === "n" ? "\n" : "\t"));
-}
-
 function loadCases(file: string): { cases: Case[]; errors: string[] } {
-	const cases: Case[] = [];
-	const errors: string[] = [];
-	const lines = fs.readFileSync(file, "utf8").split("\n");
-	if (lines[0].replace(/\r$/, "") !== CASE_HEADER) return { cases, errors: ["cases header: expected exact eight-column CASE_HEADER"] };
-	for (let i = 1; i < lines.length; i++) {
-		const raw = lines[i].replace(/\r$/, "");
-		if (raw.trim() === "" || raw.startsWith("#")) continue;
-		const cols = raw.split("\t");
-		if (cols.length !== 8) {
-			errors.push(`cases line ${i + 1}: ${cols.length} columns, need exactly 8`);
-			continue;
-		}
-		const [rule, expect, source, tool, p, snippet, note, rawReference] = cols;
-		let reference: CaseReferenceFacts | undefined;
-		try {
-			reference = parseReferenceFacts(rawReference);
-		} catch (error) {
-			errors.push(`cases line ${i + 1}: invalid reference facts: ${error}`);
-			continue;
-		}
-		if (expect !== "fire" && expect !== "quiet") errors.push(`cases line ${i + 1}: expect=${expect}`);
-		if (!["text", "thinking", "tool"].includes(source)) errors.push(`cases line ${i + 1}: source=${source}`);
-		if (source === "tool" && !["bash", "edit", "write"].includes(tool)) errors.push(`cases line ${i + 1}: tool=${tool}`);
-		cases.push({
-			line: i + 1,
-			rule,
-			expect: expect as Case["expect"],
-			source: source as Source,
-			tool,
-			path: p,
-			snippet: decodeSnippet(snippet),
-			note,
-			reference,
-		});
-	}
-	return { cases, errors };
+	return parseCaseCorpus(fs.readFileSync(file, "utf8"));
 }
 
 // Mirrors TtsrToolInspector#normalizePathCandidates with a stable logical case root.

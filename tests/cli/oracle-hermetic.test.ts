@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CASE_HEADER } from "../../src/case-corpus.ts";
+import { CASE_HEADER, parseCaseCorpus } from "../../src/case-corpus.ts";
+import { referenceAdmission } from "../../scripts/admission-reference.ts";
 
 // fp72.58 ORACLEHERM1: the oracle must not depend on the checkout's location.
 // Rules and cases resolve against a synthetic root unless OMP_KIT_CASE_CWD
@@ -50,8 +51,10 @@ function extractHead(dir: string): void {
 	extractRef(dir);
 }
 
-function runOracle(cwd: string): { rc: number; out: string } {
-	const proc = Bun.spawnSync(["bun", "run", "--no-env-file", "--config=/dev/null", "scripts/differential-oracle.ts"], { cwd, stdout: "pipe", stderr: "pipe", env: cleanEnv() });
+function runOracle(cwd: string, cases?: string): { rc: number; out: string } {
+	const args = ["bun", "run", "--no-env-file", "--config=/dev/null", "scripts/differential-oracle.ts"];
+	if (cases !== undefined) args.push(cases);
+	const proc = Bun.spawnSync(args, { cwd, stdout: "pipe", stderr: "pipe", env: cleanEnv() });
 	return { rc: proc.exitCode ?? 1, out: proc.stdout.toString() };
 }
 test("oracle JSON identical across extract cwds with no absolute paths", () => {
@@ -113,3 +116,69 @@ test("G2 harness from an extract stays green", () => {
 		rmSync(parent, { recursive: true, force: true });
 	}
 }, 300000);
+
+test("admission reference derives source identity from inputs, not an expected verdict", () => {
+	const input = { source: "tool", tool: "write", path: "var/agent-tmp/reference.1/renamed.ts", snippet: "export const value = 42;" };
+	expect(referenceAdmission(input)).toBe(false);
+	const indexed = { ...input, reference: { tracked: { "src/value.ts": input.snippet } } };
+	expect(referenceAdmission(indexed)).toBe(true);
+	expect(referenceAdmission({ ...indexed, snippet: "export const synthetic = 7;" })).toBe(false);
+	expect(referenceAdmission({ ...indexed, path: "var/agent-tmp/reference.1/src/value.ts", snippet: "modified source" })).toBe(true);
+	expect(referenceAdmission({ ...input, path: "var/agent-tmp/reference.1/packet.md", snippet: "Instructions" })).toBe(true);
+	expect(referenceAdmission({ ...input, path: "var/agent-tmp/reference.1/report.md", snippet: "packet: dispatch.md" })).toBe(false);
+	expect(referenceAdmission({ ...input, path: "var/agent-tmp/reference.1/run.sh", snippet: "#!/bin/sh" })).toBe(true);
+	expect(referenceAdmission({ ...input, path: "scripts/run.sh", snippet: "#!/bin/sh" })).toBe(false);
+	expect(() => referenceAdmission({ ...input, path: "local://unexamined/target" })).toThrow("ADMISSION_REFERENCE_UNSUPPORTED_PATH");
+});
+
+test("full differential oracle rejects falsified native-admission truth without dropping its rows", () => {
+	const dir = scratchDir("oracle-admission-negative");
+	try {
+		const original = readFileSync(join(root, "cases/cases.tsv"), "utf8");
+		const parsed = parseCaseCorpus(original);
+		expect(parsed.errors).toEqual([]);
+		const target = parsed.cases.find(row => row.rule === "scratch-is-not-a-home" && row.expect === "quiet");
+		if (!target) throw new Error("missing native quiet control");
+		const lines = original.split("\n");
+		const fields = lines[target.line - 1].split("\t");
+		fields[1] = "fire";
+		lines[target.line - 1] = fields.join("\t");
+		const cases = join(dir, "wrong-truth.tsv");
+		writeFileSync(cases, lines.join("\n"));
+		const result = runOracle(root, cases);
+		expect(result.rc).toBe(1);
+		const report = JSON.parse(result.out);
+		expect(report.status).toBe("FAIL");
+		expect(report.rows).toBe(parsed.cases.length);
+		expect(report.checked).toBe(parsed.cases.length);
+		expect(report.native_checked + report.admission_reference_checked).toBe(parsed.cases.length);
+		expect(report.admission_reference_checked).toBe(parsed.cases.filter(row => row.rule === "scratch-is-not-a-home").length);
+		expect(report.worker_errors).toBe(0);
+		expect(report.reference_errors).toBe(0);
+		expect(report.unexpected_mismatches).toContainEqual(expect.objectContaining({
+			line: target.line, oracle: "ADMISSION_CONTRACT", expected: "fire", reference: "quiet", kit: "quiet",
+		}));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}, 120000);
+
+test("differential oracle refuses shifted and malformed reference fields before evaluation", () => {
+	const dir = scratchDir("oracle-schema-negative");
+	try {
+		const cases = join(dir, "invalid.tsv");
+		for (const [row, diagnostic] of [
+			["scratch-is-not-a-home\tquiet\ttool\twrite\tvar/agent-tmp/data.json\t{}\tnote\t\textra", "9 columns, need exactly 8"],
+			["scratch-is-not-a-home\tquiet\ttool\twrite\tvar/agent-tmp/data.json\t{}\tnote\t{\"tracked\":[]}", "invalid reference facts"],
+		]) {
+			writeFileSync(cases, `${CASE_HEADER}\n${row}\n`);
+			const result = runOracle(root, cases);
+			expect(result.rc).toBe(1);
+			const report = JSON.parse(result.out);
+			expect(report.status).toBe("FAIL");
+			expect(report.case_errors.join("\n")).toContain(diagnostic);
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
