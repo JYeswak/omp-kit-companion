@@ -250,13 +250,13 @@ if [ "$needs_shell" = 1 ]; then
 				scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
 					if [ -e "$ARCHIVE_DIR/$file" ]; then
 						if [ "$shellcheck_runner" = "pinned" ]; then
-							if docker run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" "/archive/$file"; then
+							if docker run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file"; then
 								:
 							else
 								shell_rc=1
 							fi
 						else
-							if shellcheck "$ARCHIVE_DIR/$file"; then
+							if shellcheck -x -P "$ARCHIVE_DIR" "$ARCHIVE_DIR/$file"; then
 								:
 							else
 								shell_rc=1
