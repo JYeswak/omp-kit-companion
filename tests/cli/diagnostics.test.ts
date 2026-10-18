@@ -1130,7 +1130,8 @@ function rchDeps(sockPath: string, over: Partial<RchReachabilityDeps> = {}): Rch
 	return {
 		uid: 501,
 		daemon: () => ({ running: true, socketPath: sockPath }),
-		launchdPid: () => 424242,
+		platform: "darwin",
+		daemonPid: () => 424242,
 		lsofUnixSockets: () => [sockPath],
 		statSocket: () => ({ kind: "missing", ino: null }),
 		...over,
@@ -1194,7 +1195,7 @@ test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERI
 	for (const [state, over] of [
 		["RCH_UNAVAILABLE", { daemon: () => null }],
 		["SOCKET_PATH_UNKNOWN", { daemon: () => ({ running: true, socketPath: null }) }],
-		["PID_UNKNOWN", { launchdPid: () => null }],
+		["PID_UNKNOWN", { daemonPid: () => null }],
 		["LSOF_UNAVAILABLE", { lsofUnixSockets: () => null }],
 	] as const) {
 		const row = inspectRchReachability(rchDeps(sock, over));
@@ -1216,6 +1217,106 @@ test("rch: default statSocket reads real fixture socket state", async () => {
 		expect(deps.statSocket(sock).kind).toBe("missing");
 		writeFileSync(sock, "not a socket\n");
 		expect(deps.statSocket(sock).kind).toBe("other");
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+// ---- oq1h.5: a fresh install without fleet tools is judged on what exists ------------------------------------
+function planningSkillFixture(f: Fixture, localCopy: "absent" | "same" | "different"): void {
+	const kit = Buffer.from("kit-owned planning protocol\n");
+	mkdirSync(join(f.root, "skills", "jeff-planning-enhanced"), { recursive: true });
+	writeFileSync(join(f.root, "skills", "jeff-planning-enhanced", "SKILL.md"), kit);
+	if (localCopy === "absent") return;
+	const local = join(f.home, ".agents", "skills", "jeff-planning-enhanced");
+	mkdirSync(local, { recursive: true });
+	writeFileSync(join(local, "SKILL.md"), localCopy === "same" ? kit : "a local edit\n");
+}
+
+test("oq1h.5: an unscoped inventory does not judge a planning skill the user never installed", async () => {
+	const f = fixture(); installOmp(f); planningSkillFixture(f, "absent");
+	const input = { root: f.root, home: f.home, ompPath: f.ompPath };
+	expect((await diagnose(input)).map((row) => row.component)).not.toContain("planning_skill");
+	// An explicit scope still reports the missing copy as drift.
+	expect(finding(await diagnose({ ...input, scope: "kit" }), "planning_skill").status).toBe("DRIFT");
+	expect(finding(await diagnose({ ...input, scope: "planning_skill" }), "planning_skill").status).toBe("DRIFT");
+	// Planted negatives: an installed copy is judged again, so a dropped judgment cannot hide real drift.
+	planningSkillFixture(f, "same");
+	expect(finding(await diagnose(input), "planning_skill").status).toBe("OK");
+	planningSkillFixture(f, "different");
+	expect(finding(await diagnose(input), "planning_skill").status).toBe("DRIFT");
+});
+
+test("oq1h.5: an unscoped inventory omits rch when it is not installed, and doctor --scope rch still says so", async () => {
+	const f = fixture(); installOmp(f);
+	const input = { root: f.root, home: f.home, ompPath: f.ompPath };
+	// Positive control for the planted state: the diagnose PATH (only the omp bin directory) must lack rch.
+	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v rch"], { env: { PATH: dirname(f.ompPath) } }).exitCode).not.toBe(0);
+	expect((await diagnose(input)).map((row) => row.component)).not.toContain("rch");
+	const scoped = finding(await diagnose({ ...input, scope: "rch" }), "rch");
+	expect(scoped.status).toBe("UNVERIFIED");
+	expect(scoped.evidence?.state).toBe("RCH_UNAVAILABLE");
+	// Planted negative: with an rch on PATH the unscoped inventory judges it again.
+	const bin = join(f.base, "rch-bin");
+	mkdirSync(bin);
+	writeFileSync(join(bin, "rch"), `#!/bin/sh\nprintf '%s\\n' '{"data":{"running":false}}'\n`);
+	chmodSync(join(bin, "rch"), 0o755);
+	const present = await withEnvironment({
+		PATH: `${dirname(f.ompPath)}${delimiter}${bin}`, HOME: f.home, BUN_INSTALL: dirname(dirname(f.ompPath)),
+		OMP_KIT_OMP_SRC_CACHE: join(f.home, "omp-source-cache"), OMP_KIT_OMP_SRC_FETCH: "0",
+	}, () => diagnoseNative(input));
+	expect(finding(present, "rch").evidence?.state).toBe("NOT_RUNNING");
+});
+
+type RchRunCall = [string, readonly string[]];
+function rchRunner(answers: Record<string, { code: number; out: string } | null>, calls: RchRunCall[] = []) {
+	return (binary: string, args: readonly string[]) => {
+		calls.push([binary, args]);
+		return answers[binary] ?? null;
+	};
+}
+
+test("oq1h.5: on Linux the rchd pid is the single rchd process of this uid, never a guess", () => {
+	const uid = process.getuid?.() ?? 0;
+	const calls: RchRunCall[] = [];
+	expect(defaultRchReachability(rchRunner({ pgrep: { code: 0, out: "424242\n" } }, calls), "linux").daemonPid()).toBe(424242);
+	expect(calls).toEqual([["pgrep", ["-u", String(uid), "-x", "rchd"]]]);
+	// Several rchd processes are ambiguous (a real Mac showed three while launchd supervised one): unknown, not the first.
+	expect(defaultRchReachability(rchRunner({ pgrep: { code: 0, out: "93530\n75440\n89873\n" } }), "linux").daemonPid()).toBeNull();
+	expect(defaultRchReachability(rchRunner({ pgrep: { code: 1, out: "" } }), "linux").daemonPid()).toBeNull();
+	expect(defaultRchReachability(rchRunner({}), "linux").daemonPid()).toBeNull();
+	// macOS keeps its launchd lookup and never consults pgrep.
+	const darwinCalls: RchRunCall[] = [];
+	const darwin = defaultRchReachability(rchRunner({ launchctl: { code: 0, out: "state = running\n\tpid = 31337\n" } }, darwinCalls), "darwin");
+	expect(darwin.daemonPid()).toBe(31337);
+	expect(darwinCalls.map(([binary]) => binary)).toEqual(["launchctl"]);
+});
+
+test("oq1h.5: a live rchd on Linux reaches RUNNING through the same checks, and an ambiguous pid stays UNVERIFIED", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-linux-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const status = { code: 0, out: JSON.stringify({ data: { running: true, socket_path: sock } }) };
+		const running = inspectRchReachability(defaultRchReachability(rchRunner({
+			rch: status, pgrep: { code: 0, out: "777\n" }, lsof: { code: 0, out: `p777\nn${sock}\n` },
+		}), "linux"));
+		expect(running.status).toBe("OK");
+		expect(running.evidence?.state).toBe("RUNNING");
+		expect(running.evidence?.pid).toBe(777);
+		const ambiguous = inspectRchReachability(defaultRchReachability(rchRunner({ rch: status, pgrep: { code: 0, out: "1\n2\n" } }), "linux"));
+		expect(ambiguous.status).toBe("UNVERIFIED");
+		expect(ambiguous.evidence?.state).toBe("PID_UNKNOWN");
+		expect(ambiguous.recommended_action).not.toContain("launchctl");
+		// An unlinked socket under a live daemon is a FAIL on Linux too, with advice that is not launchd-only.
+		rmSync(sock);
+		const unlinked = inspectRchReachability(defaultRchReachability(rchRunner({
+			rch: status, pgrep: { code: 0, out: "777\n" }, lsof: { code: 0, out: `p777\nn${sock}\n` },
+		}), "linux"));
+		expect(unlinked.status).toBe("FAIL");
+		expect(unlinked.evidence?.state).toBe("SOCKET_UNLINKED");
+		expect(unlinked.recommended_action).not.toContain("launchctl");
 	} finally {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}

@@ -567,13 +567,14 @@ it does not certify those IDs exist in an apply tracker.
 
 | Scope | What it reports | Example |
 |---|---|---|
-| `--scope kit` | Release rule inventory, manifest, and packaged planning skill | `omp-kit doctor --scope kit` |
+| `--scope kit` | Release rule inventory, manifest, and packaged planning skill; an unscoped `doctor` judges the planning skill only when you keep a copy under `~/.agents/skills/jeff-planning-enhanced`, while this scope reports a missing copy as drift | `omp-kit doctor --scope kit` |
 | `--scope omp` | OMP launcher identity and its source package | `omp-kit doctor --scope omp` |
 | `--scope rules` | Installed, effective, project, and retired rules against the manifest | `omp-kit doctor --scope rules` |
 | `--scope policy` | Per-profile TTSR keys through native `omp config get` | `omp-kit doctor --scope policy` |
 | `--scope settings` | Per-key TTSR status for the selected profiles | `omp-kit doctor --scope settings` |
 | `--scope extensions` | Extension listing and imports that would fail to load | `omp-kit doctor --scope extensions` |
 | `--scope router` | Router skill tooling presence | `omp-kit doctor --scope router` |
+| `--scope rch` | rch daemon reachability (`RUNNING`, `NOT_RUNNING`, `SOCKET_UNLINKED`, or `RCH_UNAVAILABLE` when rch is not installed); an unscoped `doctor` includes this row only when rch is installed | `omp-kit doctor --scope rch` |
 | `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
 | `--scope lsp` | Language-server configuration layers; `--deep --yes` probes TypeScript in a private fixture | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |

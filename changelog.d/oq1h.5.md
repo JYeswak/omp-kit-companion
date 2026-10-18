@@ -1,0 +1,3 @@
+### Fixed
+- A fresh install without fleet tools no longer fails `health` or reads `UNVERIFIED` in `doctor`: an unscoped inventory judges the packaged planning skill only when you keep a local copy to drift from, and includes the `rch` row only when rch is installed. `doctor --scope kit` still reports a missing planning-skill copy as drift and `doctor --scope rch` still reports `RCH_UNAVAILABLE`. (ompkit-oq1h.5)
+- The `rch` reachability check finds the daemon pid on Linux (the single `rchd` process of your user; several matches stay `PID_UNKNOWN` rather than guessing) and gives restart advice that is not launchd-only. (ompkit-oq1h.5)

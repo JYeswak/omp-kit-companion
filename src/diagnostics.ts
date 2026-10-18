@@ -1392,12 +1392,14 @@ export interface RchDaemonReport {
 }
 
 export interface RchReachabilityDeps {
-	/** Login uid for the launchd lookup, or null when unavailable. */
+	/** Login uid for the daemon lookup, or null when unavailable. */
 	uid: number | null;
+	/** Platform that selects the pid lookup and the restore advice. */
+	platform: NodeJS.Platform;
 	/** Parsed `rch --json daemon status`, or null when rch is missing/unrunnable/unparseable. */
 	daemon(): RchDaemonReport | null;
-	/** Live pid of com.rch.daemon, or null when none. */
-	launchdPid(): number | null;
+	/** Live pid of the rch daemon (macOS: com.rch.daemon under launchd; elsewhere: the single rchd process of this uid), or null when none or ambiguous. */
+	daemonPid(): number | null;
 	/** Unix-socket paths the pid holds listening, or null when lsof is unavailable. */
 	lsofUnixSockets(pid: number): string[] | null;
 	/** lstat view of a path: socket with inode, non-socket, or missing. */
@@ -1420,10 +1422,10 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 			"Inspect `rch --json daemon status` output, then rerun omp-kit doctor.", { state: "SOCKET_PATH_UNKNOWN" });
 	}
 	const base = { socket_path: path };
-	const pid = deps.launchdPid();
+	const pid = deps.daemonPid();
 	if (pid === null) {
-		return finding("rch", "UNVERIFIED", `rchd reports running on ${path} but no live com.rch.daemon pid was found; reachability is unknown`,
-			"Check the daemon under the login launchd domain, then rerun omp-kit doctor.", { ...base, state: "PID_UNKNOWN" });
+		return finding("rch", "UNVERIFIED", `rchd reports running on ${path} but no single live rchd pid was found; reachability is unknown`,
+			"Check that exactly one rchd runs for this user (macOS: com.rch.daemon in the login launchd domain), then rerun omp-kit doctor.", { ...base, state: "PID_UNKNOWN" });
 	}
 	const held = deps.lsofUnixSockets(pid);
 	if (held === null) {
@@ -1432,7 +1434,9 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	}
 	const bound = held.includes(path);
 	const stat = deps.statSocket(path);
-	const restore = `Restore with \`launchctl kickstart -k gui/${deps.uid ?? "<uid>"}/com.rch.daemon\` only when \`rch status --jobs\` shows an empty queue; verify with \`rch status\` (Daemon Running, workers, slots). Never automate the kickstart from doctor.`;
+	const restore = deps.platform === "darwin"
+		? `Restore with \`launchctl kickstart -k gui/${deps.uid ?? "<uid>"}/com.rch.daemon\` only when \`rch status --jobs\` shows an empty queue; verify with \`rch status\` (Daemon Running, workers, slots). Never automate the kickstart from doctor.`
+		: "Restart rchd under its service manager only when `rch status --jobs` shows an empty queue; verify with `rch status` (Daemon Running, workers, slots). Never automate the restart from doctor.";
 	if (stat.kind === "missing" && bound) {
 		return finding("rch", "FAIL", `rchd pid ${pid} is alive and holds ${path}, but the path is missing: the socket was unlinked under the live daemon`,
 			restore, { ...base, state: "SOCKET_UNLINKED", pid });
@@ -1468,24 +1472,37 @@ function parseRchStatus(out: string): RchDaemonReport | null {
 	return { running: record["running"], socketPath: typeof socketPath === "string" && socketPath !== "" ? socketPath : null };
 }
 
-export function defaultRchReachability(): RchReachabilityDeps {
+type RchRun = (binary: string, args: readonly string[], timeoutMs: number) => { code: number; out: string } | null;
+
+/** The one rchd process this uid owns, or null when there is none or several: an ambiguous match is never guessed. */
+function singleRchdPid(uid: number | null, run: RchRun): number | null {
+	if (uid === null) return null;
+	const listed = run("pgrep", ["-u", String(uid), "-x", "rchd"], 5000);
+	if (listed === null || listed.code !== 0) return null;
+	const pids = listed.out.split("\n").map((line) => line.trim()).filter((line) => /^\d+$/.test(line));
+	return pids.length === 1 ? Number(pids[0]) : null;
+}
+
+export function defaultRchReachability(run: RchRun = rchArgs, platform: NodeJS.Platform = process.platform): RchReachabilityDeps {
 	const uid = process.getuid?.() ?? null;
 	return {
 		uid,
+		platform,
 		daemon: () => {
-			const status = rchArgs("rch", ["--json", "daemon", "status"], 5000);
+			const status = run("rch", ["--json", "daemon", "status"], 5000);
 			if (status === null || status.code !== 0) return null;
 			return parseRchStatus(status.out);
 		},
-		launchdPid: () => {
+		daemonPid: () => {
+			if (platform !== "darwin") return singleRchdPid(uid, run);
 			if (uid === null) return null;
-			const printed = rchArgs("launchctl", ["print", `gui/${uid}/com.rch.daemon`], 5000);
+			const printed = run("launchctl", ["print", `gui/${uid}/com.rch.daemon`], 5000);
 			if (printed === null || printed.code !== 0) return null;
 			const match = printed.out.match(/\bpid\s*=\s*(\d+)/);
 			return match?.[1] ? Number(match[1]) : null;
 		},
 		lsofUnixSockets: (pid) => {
-			const listed = rchArgs("lsof", ["-a", "-p", String(pid), "-U", "-Fn"], 15000);
+			const listed = run("lsof", ["-a", "-p", String(pid), "-U", "-Fn"], 15000);
 			if (listed === null || listed.code !== 0) return null;
 			return listed.out.split("\n").filter((line) => line.startsWith("n/")).map((line) => line.slice(1));
 		},
@@ -1510,8 +1527,16 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const root = resolve(input.root);
 	const home = resolve(input.home);
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
-	if (wants("rch")) rows.push(inspectRchReachability(defaultRchReachability()));
-	if (wants("planning_skill") && (input.scope === "kit" || pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file")) {
+	const scoped = Boolean(input.scope);
+	if (wants("rch")) {
+		const rch = inspectRchReachability(defaultRchReachability());
+		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while --scope rch still reports it.
+		if (scoped || rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(rch);
+	}
+	// Unscoped, the planning skill is judged only when the user has a local copy to drift from; a scope names it explicitly.
+	const planningShipped = pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file";
+	const planningLocal = pathState(join(home, ".agents", "skills", "jeff-planning-enhanced", "SKILL.md")) !== "missing";
+	if (wants("planning_skill") && (input.scope === "kit" || (planningShipped && (scoped || planningLocal)))) {
 		rows.push(inspectPlanningSkill(root, home));
 	}
 	if (input.scope === "beads" && input.project) rows.push(inspectBeadAcceptance(resolve(input.project)));
