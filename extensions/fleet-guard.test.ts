@@ -99,14 +99,15 @@ test("logical routes traverse the chain without globally allowing tool calls", a
 test("registered handler uses the actual calling context's local mapping", async () => {
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
+	const { cwd: callingCwd } = fixture(false);
 	await fleetGuard(pi, { cwd, pid });
 	const handler = pi.handlers[0]!;
 	const event = { toolName: "write", input: { path: "local://notes/out" } };
-	expect(await handler(event, { cwd: "/private/tmp", localProtocolOptions: { getArtifactsDir: () => join(cwd, "artifacts") } })).toBeUndefined();
+	expect(await handler(event, { cwd: callingCwd, localProtocolOptions: { getArtifactsDir: () => join(cwd, "artifacts") } })).toBeUndefined();
 	expect((await handler(event, { cwd, localProtocolOptions: { getArtifactsDir: () => "/tmp/foreign-artifacts" } }))?.reason).toContain("scratch-write");
 	expect((await handler(event, { cwd, localProtocolOptions: { getArtifactsDir: () => null } }))?.reason).toContain("backing root");
 	expect((await handler(event, { cwd }))?.reason).toContain("backing root");
-	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: "/private/tmp" })).toBeUndefined();
+	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: callingCwd })).toBeUndefined();
 });
 
 test("tracked edits honor injected reservation verdicts and fail open", async () => {
