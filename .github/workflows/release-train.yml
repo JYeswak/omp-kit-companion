@@ -37,8 +37,8 @@ jobs:
     if: >-
       github.event.repository.private == false &&
       ((github.event_name == 'workflow_dispatch' && inputs.candidate_run_id == '') ||
-       (github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') ||
-       (github.event.workflow_run.name == 'Unpublished release candidate' &&
+       (github.event.workflow_run.path == '.github/workflows/ci.yml' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') ||
+       (github.event.workflow_run.path == '.github/workflows/release.yml' &&
         github.event.workflow_run.event == 'workflow_dispatch' &&
         github.event.workflow_run.head_branch == 'main' &&
         startsWith(github.event.workflow_run.display_title, 'rehearse ')))
@@ -116,7 +116,7 @@ jobs:
       (github.event.repository.private == false ||
        github.repository == 'JYeswak/omp-kit-companion') &&
       ((github.event_name == 'workflow_run' &&
-        github.event.workflow_run.name == 'Unpublished release candidate' &&
+        github.event.workflow_run.path == '.github/workflows/release.yml' &&
         github.event.workflow_run.conclusion == 'success' &&
         startsWith(github.event.workflow_run.display_title, 'qualify ')) ||
        (github.event_name == 'workflow_dispatch' && inputs.candidate_run_id != ''))

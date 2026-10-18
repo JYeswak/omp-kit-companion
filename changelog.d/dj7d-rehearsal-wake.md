@@ -1,1 +1,2 @@
 - Resume the rolling release train when a main-branch rehearsal finishes, so a rehearsal that overlapped green CI cannot strand qualified production work; rehearsal artifacts still cannot authorize publication.
+- Route completed CI and candidate events by their canonical workflow path, not a dynamic run name, so valid qualification can reach the independently verified publisher.
