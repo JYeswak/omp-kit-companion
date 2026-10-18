@@ -17,9 +17,19 @@ import type { PullRefusal } from "../src/fleet-watch";
  * function `isMutatingCall`). Only observed successful `tool_execution_end`
  * results clear the flag: a read of exactly the named AGENTS.md with
  * non-empty content, and a `br show` whose parsed output is in_progress (or
- * rework) and assigned to a session identity (or a `br list` that returns
- * empty). Call arguments, echoes, failures, wrong paths and foreign/closed
- * beads never clear it. Nothing else in a turn makes it speak.
+ * rework) and assigned to a session identity (or a `br list --assignee <a
+ * session identity> --json` that returns no issues; a list without
+ * `--assignee`, or for another name, never clears it). Call arguments,
+ * echoes, failures, wrong paths and foreign/closed beads never clear it.
+ * Nothing else in a turn makes it speak.
+ *
+ * Self-declared identity: a session with no host identity (no BR_ACTOR /
+ * BR_AGENT_NAME / AGENT_NAME and no Agent Mail pane identity) pins one from
+ * its first successful, untainted ownership observation: the assignee of an
+ * owned in_progress/rework `br show --json` row, or X of an empty
+ * `br list --assignee X --json`. The pin persists for the session, so later
+ * compactions compare against it. It is self-declared: a guard against
+ * forgetting the reread, not a security boundary.
  *
  * Only applicable rereads are mandatory: AGENTS discovery ends at the nearest
  * Git boundary; tracker rereads require executable br and a local/ancestor
@@ -352,13 +362,20 @@ function brShowIds(command: string): string[] {
 	return ids;
 }
 
-function isBrListCall(command: string): boolean {
+/** `--assignee` values named by `br|bd list` verbs in a bash command; a list without one contributes nothing. */
+function brListAssignees(command: string): string[] {
+	const assignees: string[] = [];
 	for (const words of shellCommands(command)) {
 		const parsed = simpleExecutable(words);
 		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
-		if (firstVerb(parsed.rest, BR_VALUE_FLAGS) === "list") return true;
+		if (firstVerb(parsed.rest, BR_VALUE_FLAGS) !== "list") continue;
+		for (let at = 0; at < parsed.rest.length; at += 1) {
+			const word = parsed.rest[at]!;
+			const value = word === "--assignee" ? parsed.rest[at + 1] : word.startsWith("--assignee=") ? word.slice("--assignee=".length) : undefined;
+			if (value !== undefined && value.trim() !== "") assignees.push(value.trim());
+		}
 	}
-	return false;
+	return assignees;
 }
 
 export interface RereadCall {
@@ -370,7 +387,9 @@ export interface RereadCall {
 /**
  * Observe one successful tool result against the pending reread. Only
  * observed results count: call arguments, echoes, failures, wrong paths and
- * foreign/closed beads never set a flag. Returns true when both flags land.
+ * foreign/closed beads never set a flag. An identity-less pending pins the
+ * first owned assignee it observes (see the header). Returns true when both
+ * flags land.
  */
 export function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string): boolean {
 	if (resultTainted(result)) return false;
@@ -386,21 +405,26 @@ export function observeRereadResult(call: RereadCall, result: unknown, pending: 
 		const command = field(call.input, "command");
 		const stdout = typeof command === "string" ? stringField(result, READ_CONTENT_KEYS) : null;
 		if (stdout !== null && typeof command === "string") {
+			const owns = (name: string): boolean => {
+				if (pending.identities.length === 0) pending.identities = [name];
+				return pending.identities.some(identity => identity.toLowerCase() === name.toLowerCase());
+			};
 			for (const id of brShowIds(command)) {
 				const row = parseBeadRow(stdout, id);
-				if (row !== null && BEAD_OWNED_STATUSES[row.status] === true && row.assignee !== null
-					&& pending.identities.some(name => name.toLowerCase() === row.assignee!.toLowerCase())) {
+				if (row !== null && BEAD_OWNED_STATUSES[row.status] === true && row.assignee !== null && owns(row.assignee)) {
 					pending.beadOk = true;
 				}
 			}
-			if (!pending.beadOk && isBrListCall(command)) {
+			const listAssignees = pending.beadOk ? [] : brListAssignees(command);
+			if (listAssignees.length > 0) {
+				let issues: unknown = null;
 				try {
 					const parsed: unknown = JSON.parse(stdout);
-					const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
-					if (Array.isArray(issues) && issues.length === 0) pending.beadOk = true;
+					issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
 				} catch {
 					// Non-JSON list output proves nothing; the flag stays unset.
 				}
+				if (Array.isArray(issues) && issues.length === 0 && listAssignees.some(owns)) pending.beadOk = true;
 			}
 		}
 	}
@@ -898,6 +922,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
 	let pendingReread: PendingReread | null = null;
+	/** Identity pinned by an identity-less session's first owned observation (self-declared; see header). */
+	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
 	pi.on("session_compact", async (_event, ctx) => {
 		// Arm conservatively before discovery: an I/O failure cannot bypass the gate.
@@ -907,6 +933,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		try {
 			pendingReread.identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
 		} catch { /* the reminder still goes out without a name */ }
+		if (pendingReread.identities.length === 0 && selfDeclared !== null) pendingReread.identities = [selfDeclared];
 		pendingReread.agentsPath = nearestAgentsMd(ctx.cwd);
 		pendingReread.beadOk = !trackerRereadApplies(ctx.cwd, env);
 		pendingReread.agentsOk = pendingReread.agentsPath === null;
@@ -951,10 +978,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const call = pendingCalls.get(_event.toolCallId);
 			if (call === undefined) return;
 			pendingCalls.delete(_event.toolCallId);
-			if (observeRereadResult(call, _event.result, pendingReread, home)
-				&& pendingReread.agentsOk && pendingReread.beadOk) {
-				pendingReread = null;
-			}
+			const identityLess = pendingReread.identities.length === 0;
+			const done = observeRereadResult(call, _event.result, pendingReread, home);
+			if (identityLess && pendingReread.identities.length > 0) selfDeclared = pendingReread.identities[0]!;
+			if (done && pendingReread.agentsOk && pendingReread.beadOk) pendingReread = null;
 		} catch (error) {
 			// Fail closed: the flags stay unset, so the gate keeps blocking.
 			ctx.ui?.notify(`kit-flywheel-guard ${COMPACTION_REREAD}: reread observation failed (${error instanceof Error ? error.message : String(error)}); still blocked.`, "warning");

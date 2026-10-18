@@ -306,13 +306,15 @@ test("BGDEADLINE1: named services need readiness and cannot disguise a finite su
 // --- COMPACTION_REREAD gate (ompkit-xa5s.24) ----------------------------------
 
 /** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
-async function rereadHost(extra: string[] = []): Promise<{ h: FakeHost; cwd: string; agents: string }> {
+async function rereadHost(extra: string[] = [], identity: string | null = "TestWorker"): Promise<{ h: FakeHost; cwd: string; agents: string }> {
 	const cwd = mkdtempSync(join(base, "reread-"));
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
 	for (const name of extra) writeFileSync(join(cwd, name), "x\n");
 	mkdirSync(join(cwd, ".beads"));
-	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
+	const env: Record<string, string> = { PATH: brPath(cwd) };
+	if (identity !== null) env.BR_ACTOR = identity;
+	const h = await createFlywheelHost(base, { env });
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	return { h, cwd, agents };
 }
@@ -450,6 +452,55 @@ test("REREAD: the reminder names the --json commands that clear the gate", () =>
 	const text = compactionRereadMessage({ agentsPath: "/x/AGENTS.md", identities: ["TestWorker"], agentsOk: false, beadOk: false });
 	expect(text).toContain("br list --status in_progress --assignee TestWorker --json");
 	expect(text).toContain("br show <id> --json");
+});
+
+/** Native AGENTS read plus one native bash result, then the edit attempt's handler results. */
+async function rereadThenEdit(h: FakeHost, cwd: string, agents: string, tag: string, command: string, stdout: string): Promise<unknown[]> {
+	await callAs(h, cwd, `r-${tag}`, "read", { path: agents });
+	await endAs(h, cwd, `r-${tag}`, "read", native("rules\n"));
+	await callAs(h, cwd, `s-${tag}`, "bash", { command });
+	await endAs(h, cwd, `s-${tag}`, "bash", native(stdout));
+	return callAs(h, cwd, `e-${tag}`, "edit", { path: "f.ts", diff: "+x" });
+}
+
+const emptyList = JSON.stringify({ issues: [], total: 0, limit: 0, offset: 0, has_more: false });
+
+test("REREAD: an identity-less session clears after its own native br show", async () => {
+	const { h, cwd, agents } = await rereadHost([], null);
+	const [blocked] = await callAs(h, cwd, "e0", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect(await rereadThenEdit(h, cwd, agents, "1", "br show k-1 --json", showStdout("k-1", "in_progress", "Selfie"))).toEqual([undefined]);
+});
+
+test("REREAD: an identity-less session clears after an empty native br list for its declared assignee", async () => {
+	const { h, cwd, agents } = await rereadHost([], null);
+	expect(await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --assignee=Selfie --json", emptyList)).toEqual([undefined]);
+});
+
+test("REREAD: an empty br list for another assignee never clears a resolved identity", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	const [blocked] = await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --assignee SomebodyElse --json", emptyList);
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect(await rereadThenEdit(h, cwd, agents, "2", "br list --status in_progress --assignee testworker --json", emptyList)).toEqual([undefined]);
+});
+
+test("REREAD: an empty br list without --assignee never clears", async () => {
+	for (const identity of ["TestWorker", null]) {
+		const { h, cwd, agents } = await rereadHost([], identity);
+		const [blocked] = await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --json", emptyList);
+		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	}
+});
+
+test("REREAD: a pinned self-declared identity rejects another assignee after the next compaction", async () => {
+	const { h, cwd, agents } = await rereadHost([], null);
+	expect(await rereadThenEdit(h, cwd, agents, "pin", "br show k-1 --json", showStdout("k-1", "in_progress", "Selfie"))).toEqual([undefined]);
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	const [foreignShow] = await rereadThenEdit(h, cwd, agents, "show-b", "br show k-2 --json", showStdout("k-2", "in_progress", "SomebodyElse"));
+	expect((foreignShow as FlywheelToolCallResult)?.block).toBe(true);
+	const [foreignList] = await rereadThenEdit(h, cwd, agents, "list-b", "br list --assignee SomebodyElse --json", emptyList);
+	expect((foreignList as FlywheelToolCallResult)?.block).toBe(true);
+	expect(await rereadThenEdit(h, cwd, agents, "list-a", "br list --assignee Selfie --json", emptyList)).toEqual([undefined]);
 });
 
 test("REREAD: read and grep stay allowed while pending", async () => {
