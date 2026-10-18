@@ -88,6 +88,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Scratch plan/apply expose row sizes, malformed-owner counts, per-root/per-verdict totals, policy, and receipt through the public CLI | ompkit-rhy9.17 (OPEN: policy-drift negative remains) |
 | Beads doctor and planning score report configured acceptance breadth with component-aware split suggestions | ompkit-rhy9.21 (BLOCKED: dirty overlap on CHANGELOG.md and package.json) |
 | Tracker recovery bounds quarantine growth, emits native health receipts, and refuses intervention while database holders are live | ompkit-rhy9.14 (IN REVIEW; independent verification pending) |
+| Stock Ubuntu extension CI passes [81/0 with fleet tools absent](https://github.com/JYeswak/omp-kit-companion/actions/runs/39100227808/job/117594813422); the separate [callback assertion control fails 81/1](https://github.com/JYeswak/omp-kit-companion/actions/runs/39100330584/job/117595119154). Both original hosted clauses are independently audited; overall main CI remains RED on fixture repair | ompkit-oq1h.4 (IN REVIEW; closure pending) |
 
 ## In progress
 
@@ -97,7 +98,6 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
 | Memory doctor reports read-only CASS status and static LaunchAgent declarations separately from retrieval qualification | ompkit-bj08.10 (IN PROGRESS) |
 | Source-free CLI fixture repair is held locally by the staged-import guard's quoted-fixture refusal; hosted qualification and genuine Intel failure diagnostics remain unverified | ompkit-fp72.125 → ompkit-fp72.124 / ompkit-fp72.63 (BLOCKED) |
-| Required stock Ubuntu extension tests explicitly exclude fleet tools from PATH; native claim cases stay in the tool-equipped fleet suite, with hosted positive/negative and independent acceptance pending | ompkit-oq1h.4 (IN PROGRESS) |
 
 ## Rolling releases (reviewed 2026-10-17)
 
