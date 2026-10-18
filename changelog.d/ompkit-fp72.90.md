@@ -1,0 +1,1 @@
+- Integration checks now refuse extension paths escaping HOME, including symlink escapes and unresolved links, before reading or hashing extension source; profile, global and plugin extensions within HOME remain supported.

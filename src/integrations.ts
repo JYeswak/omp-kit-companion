@@ -124,7 +124,24 @@ function listedExtensionPaths(configText: string): string[] {
 }
 function resolveExtensionPath(home: string, agentDir: string, path: string): string {
 	const expanded = path.startsWith("~/") ? join(home, path.slice(2)) : path;
-	return isAbsolute(expanded) ? expanded : resolve(agentDir, expanded);
+	const candidate = resolve(agentDir, expanded);
+	// Keep global/plugin paths under HOME, not just this profile's agent dir.
+	// Check both spellings before any extension bytes are read or hashed.
+	if (!pathIsWithin(home, candidate)) {
+		throw new IntegrationsInputError("INVALID_EXTENSION_PATH", "Extension path resolves outside HOME");
+	}
+	let canonicalHome: string;
+	let canonicalPath: string;
+	try {
+		canonicalHome = realpathSync(home);
+		canonicalPath = resolveWritePath(candidate);
+	} catch {
+		throw new IntegrationsInputError("INVALID_EXTENSION_PATH", "Extension path cannot be resolved safely");
+	}
+	if (!pathIsWithin(canonicalHome, canonicalPath)) {
+		throw new IntegrationsInputError("INVALID_EXTENSION_PATH", "Extension symlink resolves outside HOME");
+	}
+	return candidate;
 }
 
 function resolvedExtensionConfig(configText: string, home: string, profile: string): string {
@@ -293,7 +310,6 @@ function containedOmpCommand(input: IntegrationsInput, ompPath: string, args: st
 	}
 	return [ompPath, ...args];
 }
-
 /**
  * MOCKSPAWN1 (ompkit-ssfx): the JS runtime that launches mock-model.mjs.
  * process.execPath runs scripts under `bun src/...` but is the compiled
