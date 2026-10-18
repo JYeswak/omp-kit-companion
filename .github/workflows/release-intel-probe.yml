@@ -1,6 +1,16 @@
 name: Intel release probe
 
 on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Completed canonical qualification run to probe without gating publication
+        required: true
+        type: string
+      candidate_run_attempt:
+        description: Exact native qualification attempt
+        required: true
+        type: string
   workflow_run:
     workflows: ["Unpublished release candidate"]
     types: [completed]
@@ -11,7 +21,7 @@ permissions:
 
 jobs:
   resolve-candidate:
-    if: github.event.repository.private == false && github.event.workflow_run.conclusion == 'success'
+    if: ${{ github.event.repository.private == false && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.display_title, 'rehearse '))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -19,25 +29,42 @@ jobs:
       version: ${{ steps.candidate.outputs.version }}
       has_probe: ${{ steps.candidate.outputs.has_probe }}
       producer_attempt: ${{ steps.candidate.outputs.producer_attempt }}
+      run_id: ${{ steps.producer.outputs.run_id }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Resolve the native producer without trusting caller source or version
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
+          ATTEMPT: ${{ inputs.candidate_run_attempt || github.event.workflow_run.run_attempt }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ && "$ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > producer-run.json
+          if [[ -z "$EVENT_SHA" ]]; then
+            EVENT_SHA="$(jq -er .head_sha producer-run.json)"
+          fi
+          printf 'run_id=%s\nattempt=%s\nevent_sha=%s\n' \
+            "$RUN_ID" "$ATTEMPT" "$EVENT_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: unpublished-candidate-index-attempt-${{ github.event.workflow_run.run_attempt }}
+          name: unpublished-candidate-index-attempt-${{ steps.producer.outputs.attempt }}
           path: candidate-index/
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.producer.outputs.run_id }}
           github-token: ${{ github.token }}
       - name: Bind the probe to the completed candidate and check for Intel assets
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_ID: ${{ steps.producer.outputs.run_id }}
+          EVENT_SHA: ${{ steps.producer.outputs.event_sha }}
+          EVENT_ATTEMPT: ${{ steps.producer.outputs.attempt }}
         run: |
           set -euo pipefail
           proof=candidate-index/candidate-proof.json
@@ -85,7 +112,7 @@ jobs:
         with:
           name: candidate-darwin-x64-none-attempt-${{ needs['resolve-candidate'].outputs.producer_attempt }}
           path: ${{ runner.temp }}/native/darwin-x64-none
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ needs['resolve-candidate'].outputs.run_id }}
           github-token: ${{ github.token }}
       - name: Certify downloaded archive on OMP ${{ matrix.track }}
         run: |

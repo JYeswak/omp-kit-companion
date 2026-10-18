@@ -180,6 +180,18 @@ jobs:
           done
           printf 'promote=true\nversion=%s\nsha=%s\nphase=%s\ntrain_id=%s\ntrain_attempt=%s\nbase_tag=%s\n' \
             "$version" "$sha" "$phase" "$train_id" "$train_attempt" "$base_tag" >> "$GITHUB_OUTPUT"
+      - name: Dispatch the optional Intel probe without waiting for its outcome
+        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
+          attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' producer-run.json)"
+          timeout 60s gh workflow run release-intel-probe.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f candidate_run_id="$RUN_ID" -f candidate_run_attempt="$attempt"
       - name: Tag only the fully qualified source, then sign the same bytes at the tag ref
         if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
         env:
