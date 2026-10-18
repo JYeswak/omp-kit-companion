@@ -19,7 +19,8 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 		mkdirSync(join(scratch, "selection"));
 		symlinkSync(join(repo, "scripts/release-train.sh"), join(scratch, "scripts/release-train.sh"));
 		writeFileSync(join(scratch, "selection/release-notes.md"), "- Fixture notes only.\n");
-		writeFileSync(join(scratch, "bin/git"), `#!/bin/sh\ncase "$1" in\nfetch) exit 0;;\nrev-parse) printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;;\ntag) printf '%s\\n' v0.2.41;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
+		// The workflow passes command-local "-c credential.helper=..." options before the subcommand; the stub must still dispatch on the subcommand.
+		writeFileSync(join(scratch, "bin/git"), `#!/bin/sh\nwhile [ "$1" = "-c" ]; do shift 2; done\ncase "$1" in\nfetch) exit 0;;\nrev-parse) printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;;\ntag) printf '%s\\n' v0.2.41;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
 		// External services are isolated only for this SBOM precondition test;
 		// their successful stubs are NOT certification or signature evidence.
 		writeFileSync(join(scratch, "bin/gh"), `#!/bin/sh\ncase "$1 $2" in\n"api "*) printf '%s\\n' '[]';;\n"release create") printf '%s\\n' DRAFT_FIXTURE_ONLY;;\n"release edit") printf '%s\\n' PUBLICATION_FIXTURE_ONLY;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
