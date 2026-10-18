@@ -1019,8 +1019,10 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	const ownerText = readText(ownerPath);
 	const owner = ownerText === null ? null : parseOwnerFile(ownerText);
 	if (!owner) return releaseLegacy(dir, home, deps, stat.dev, stat.ino, ownerText, opts);
-	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") ||
-		owner.label.startsWith(".") || !basename(dir).endsWith(`.${owner.pid}`))
+	// The directory name is not part of the release authority: a respawn rewrites .owner to the successor's pid and keeps
+	// the name (respawn_seat rehome), so the name suffix is the creator's pid. The caller check below is what binds the
+	// release to its owner, and the marker pins the owner text and inode.
+	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
 	const seatOwned = callerHoldsSeat(owner, deps);
 	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
@@ -1142,9 +1144,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps)
 function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
 	const released = readReleaseRecord(dir);
-	if (!released || dirname(dir) !== root || (released.legacy
-		? basename(dir) !== released.legacyName
-		: !basename(dir).endsWith(`.${released.owner.pid}`)))
+	if (!released || dirname(dir) !== root || (released.legacy && basename(dir) !== released.legacyName))
 		return fail("owner-release-changed-after-initial-check");
 	if (!released.legacy && !ownerMatchesScratchRoot(released.owner, root, dir, deps)) return fail("owner-repo-outside-scratch-root");
 	const identity = inodeOf(dir);
@@ -1566,9 +1566,9 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 		return null;
 	}
 	const released = readReleaseRecord(dir);
-	const releasedNameOk = released !== null && (released.legacy
-		? basename(dir) === released.legacyName
-		: basename(dir).endsWith(`.${released.owner.pid}`));
+	// A verified owner release (marker bound to the owner text, device and inode) stands whatever the directory's name,
+	// since a respawn rehomes .owner to the successor and keeps the creator's pid in the name.
+	const releasedNameOk = released !== null && (!released.legacy || basename(dir) === released.legacyName);
 	if (released && !released.legacy && !ownerMatchesScratchRoot(released.owner, root, dir, deps)) {
 		return { dir, action: "SKIP", reason: "owner-repo-outside-scratch-root", owner: released.owner, sizeBytes: dirSize(dir) };
 	}
