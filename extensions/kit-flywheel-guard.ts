@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type { PullRefusal } from "../src/fleet-watch";
 
 /**
@@ -20,6 +20,11 @@ import type { PullRefusal } from "../src/fleet-watch";
  * rework) and assigned to a session identity (or a `br list` that returns
  * empty). Call arguments, echoes, failures, wrong paths and foreign/closed
  * beads never clear it. Nothing else in a turn makes it speak.
+ *
+ * Only applicable rereads are mandatory: AGENTS discovery ends at the nearest
+ * Git boundary; tracker rereads require executable br and a local/ancestor
+ * .beads or explicit BEADS_DB/BEADS_DIR. Absent prerequisites do not lock a
+ * stock session. Unexpected discovery errors leave the conservative gate armed.
  *
  * Fail-open stays only where it already is: the self-close check keeps its
  * fail-open behaviour, but the reread gate's own errors block — a crash in
@@ -124,24 +129,62 @@ const BR_VALUE_FLAGS: Record<string, true> = {
 };
 const WRAPPERS: Record<string, true> = { env: true, command: true, exec: true, nohup: true, time: true, builtin: true };
 
-export function nearestAgentsMd(cwd: string): string | null {
-	for (let dir = resolve(cwd); ; dir = dirname(dir)) {
-		const candidate = join(dir, "AGENTS.md");
-		if (existsSync(candidate)) return candidate;
-		if (dirname(dir) === dir) return null;
+/** Only a verified absence is not applicable; discovery failures stay fail-closed. */
+function rereadPathExists(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return false;
+		throw error;
 	}
 }
 
-export function compactionRereadMessage(cwd: string, identities: readonly string[]): string {
-	const agents = nearestAgentsMd(cwd);
-	const reread = agents
-		? `reread ${agents} in full`
-		: `reread the repository's AGENTS.md in full (none found from ${cwd} upward)`;
-	const assignee = identities.length > 0 ? identities[0] : "<your agent name>";
+export function nearestAgentsMd(cwd: string): string | null {
+	for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+		const candidate = join(dir, "AGENTS.md");
+		if (rereadPathExists(candidate)) return candidate;
+		// A nested stock repository does not inherit the toolkit checkout's rules.
+		if (rereadPathExists(join(dir, ".git")) || dirname(dir) === dir) return null;
+	}
+}
+
+function trackerRereadApplies(cwd: string, env: Record<string, string | undefined>): boolean {
+	let hasBr = false;
+	for (const directory of (env.PATH ?? "").split(delimiter)) {
+		const candidate = resolve(cwd, directory || ".", "br");
+		try {
+			if (!statSync(candidate).isFile()) continue;
+			accessSync(candidate, constants.X_OK);
+			hasBr = true;
+			break;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES" || code === "ELOOP") continue;
+			throw error;
+		}
+	}
+	if (!hasBr) return false;
+	// An explicitly selected tracker remains applicable even when it is broken.
+	if (env.BEADS_DB?.trim() || env.BEADS_DIR?.trim()) return true;
+	for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+		if (rereadPathExists(join(dir, ".beads"))) return true;
+		if (dirname(dir) === dir) return false;
+	}
+}
+
+export function compactionRereadMessage(pending: PendingReread): string {
+	const steps: string[] = [];
+	if (!pending.agentsOk) steps.push(`reread ${pending.agentsPath} in full`);
+	const assignee = pending.identities.length > 0 ? pending.identities[0] : "<your agent name>";
+	if (!pending.beadOk) {
+		steps.push(`run \`br list --status in_progress --assignee ${assignee}\` and \`br show <id>\` for your in-progress bead`);
+	}
 	return [
 		"<system-reminder>",
 		`kit-flywheel-guard ${COMPACTION_REREAD}: the context was just compacted and the summary does not carry the rules.`,
-		`Before continuing: ${reread}, then run \`br list --status in_progress --assignee ${assignee}\` and \`br show <id>\` for your in-progress bead.`,
+		`Before continuing: ${steps.join(", then ")}.`,
 		"</system-reminder>",
 	].join("\n");
 }
@@ -836,15 +879,22 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	let pendingReread: PendingReread | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
 	pi.on("session_compact", async (_event, ctx) => {
-		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
-		let identities = envIdentities;
-		try {
-			identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
-		} catch { /* the reminder still goes out without a name */ }
-		pendingReread = { agentsPath: nearestAgentsMd(ctx.cwd), identities, agentsOk: false, beadOk: false };
+		// Arm conservatively before discovery: an I/O failure cannot bypass the gate.
 		pendingCalls.clear();
+		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
+		pendingReread = { agentsPath: null, identities: envIdentities, agentsOk: false, beadOk: false };
+		try {
+			pendingReread.identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
+		} catch { /* the reminder still goes out without a name */ }
+		pendingReread.agentsPath = nearestAgentsMd(ctx.cwd);
+		pendingReread.beadOk = !trackerRereadApplies(ctx.cwd, env);
+		pendingReread.agentsOk = pendingReread.agentsPath === null;
+		if (pendingReread.agentsOk && pendingReread.beadOk) {
+			pendingReread = null;
+			return;
+		}
 		pi.sendMessage(
-			{ customType: "kit-flywheel-guard", content: compactionRereadMessage(ctx.cwd, identities), display: true,
+			{ customType: "kit-flywheel-guard", content: compactionRereadMessage(pendingReread), display: true,
 				details: { behavior: COMPACTION_REREAD } },
 			// Idle: append to context now. Streaming (auto-compaction mid-run): inject at the next step boundary.
 			{ deliverAs: ctx.isIdle?.() === false ? "aside" : "nextTurn" },

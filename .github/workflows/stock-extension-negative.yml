@@ -3,6 +3,15 @@ name: Stock extension negative control
 # Deliberate red control, separate from ordinary source qualification on main.
 on:
   workflow_dispatch:
+    inputs:
+      control:
+        description: Deliberate stock-suite negative control
+        type: choice
+        required: true
+        default: callback
+        options:
+          - callback
+          - compaction
 
 permissions:
   contents: read
@@ -12,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  callback-assertion-must-fail:
+  stock-negative-must-fail:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -24,5 +33,12 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.3
-      - name: Intentionally fail the actual callback test under stock isolation
-        run: bun scripts/test-stock-extensions.ts --plant-assertion
+      - name: Intentionally fail the selected guard under stock isolation
+        env:
+          CONTROL: ${{ inputs.control }}
+        run: |
+          case "$CONTROL" in
+            callback) bun scripts/test-stock-extensions.ts --plant-assertion ;;
+            compaction) bun scripts/test-stock-extensions.ts --restore-unconditional-flags ;;
+            *) echo "Unknown negative control: $CONTROL"; exit 2 ;;
+          esac

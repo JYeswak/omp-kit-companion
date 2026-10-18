@@ -1,18 +1,20 @@
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // One entrypoint for ordinary stock CI and its explicitly requested negative control.
 const repo = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const args = process.argv.slice(2);
-if (args.length > 1 || (args.length === 1 && args[0] !== "--plant-assertion")) {
-	throw new Error("Usage: bun scripts/test-stock-extensions.ts [--plant-assertion]");
+const negativeModes = ["--plant-assertion", "--restore-unconditional-flags"];
+if (args.length > 1 || (args.length === 1 && !negativeModes.includes(args[0]!))) {
+	throw new Error("Usage: bun scripts/test-stock-extensions.ts [--plant-assertion | --restore-unconditional-flags]");
 }
 const plantAssertion = args[0] === "--plant-assertion";
-if (plantAssertion) {
+const restoreUnconditionalFlags = args[0] === "--restore-unconditional-flags";
+if (plantAssertion || restoreUnconditionalFlags) {
 	const workspace = process.env.GITHUB_WORKSPACE;
 	if (process.env.GITHUB_ACTIONS !== "true" || !workspace || realpathSync(workspace) !== repo) {
-		throw new Error("--plant-assertion is restricted to this repository's ephemeral GitHub Actions workspace");
+		throw new Error(`${args[0]} is restricted to this repository's ephemeral GitHub Actions workspace`);
 	}
 }
 
@@ -63,6 +65,22 @@ console.log(`stock-extensions: isolated HOME/TMPDIR/XDG/PATH; retained scratch $
 if (plantAssertion) {
 	console.log("stock-extensions: NEGATIVE CONTROL changes actual extensions/kit-callback.test.ts bytes; this is NOT ordinary source qualification");
 	appendFileSync(join(repo, "extensions", "kit-callback.test.ts"), '\n\ntest("STOCK_EXTENSION_NEGATIVE_CONTROL intentionally failing callback assertion", () => {\n\texpect("planted callback failure").toBe("ordinary source qualification");\n});\n');
+}
+if (restoreUnconditionalFlags) {
+	const path = join(repo, "extensions", "kit-flywheel-guard.ts");
+	let source = readFileSync(path, "utf8");
+	for (const [before, after] of [
+		["pendingReread.beadOk = !trackerRereadApplies(ctx.cwd, env);", "pendingReread.beadOk = false;"],
+		["pendingReread.agentsOk = pendingReread.agentsPath === null;", "pendingReread.agentsOk = false;"],
+	]) {
+		const at = source.indexOf(before!);
+		if (at < 0 || at !== source.lastIndexOf(before!)) {
+			throw new Error(`Compaction mutant injection failed: expected one ${JSON.stringify(before)}`);
+		}
+		source = source.replace(before!, after!);
+	}
+	writeFileSync(path, source);
+	console.log("stock-extensions: NEGATIVE CONTROL restored unconditional agentsOk=false/beadOk=false in actual kit-flywheel-guard.ts; this is NOT ordinary source qualification");
 }
 
 // Do not inherit credentials, pane/fleet settings, Bun options, or dotenv contents.

@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
@@ -42,6 +42,83 @@ function brTable(table: Record<string, FlywheelExecResult>): Responder {
 
 // --- COMPACTION_REREAD ---------------------------------------------------
 
+function stockRepo(parent = base): string {
+	const cwd = mkdtempSync(join(parent, "stock-repo-"));
+	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
+	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+	return cwd;
+}
+
+function brPath(cwd: string): string {
+	const bin = join(cwd, "bin");
+	mkdirSync(bin);
+	// An executable PATH entry is enough for discovery; these tests never run it.
+	symlinkSync(process.execPath, join(bin, "br"));
+	return bin;
+}
+
+test("stock compaction: a git repo without AGENTS.md or br remains editable", async () => {
+	const cwd = stockRepo();
+	const h = await createFlywheelHost(base, { env: { PATH: join(cwd, "no-tools") } });
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	for (const [tool, input] of [
+		["edit", { path: "f.ts", diff: "+x" }],
+		["write", { path: "f.ts", content: "x" }],
+		["bash", { command: "git commit -m change" }],
+	] as const) {
+		expect(await callAs(h, cwd, tool, tool, input)).toEqual([undefined]);
+	}
+});
+
+for (const prerequisites of ["no-br", "tracker-without-br"] as const) {
+	test(`stock compaction: AGENTS read clears the gate with ${prerequisites}`, async () => {
+		const cwd = stockRepo();
+		const agents = join(cwd, "AGENTS.md");
+		writeFileSync(agents, "repository rules\n");
+		if (prerequisites === "tracker-without-br") mkdirSync(join(cwd, ".beads"));
+		const h = await createFlywheelHost(base, { env: { PATH: join(cwd, "no-tools") } });
+		await h.emit("session_compact", {}, h.ctx(cwd));
+		const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
+		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+		await callAs(h, cwd, "read", "read", { path: agents });
+		await endAs(h, cwd, "read", "read", { content: readFileSync(agents, "utf8") }, true);
+		const [failedRead] = await callAs(h, cwd, "failed", "edit", { path: "f.ts", diff: "+x" });
+		expect((failedRead as FlywheelToolCallResult)?.block).toBe(true);
+		await callAs(h, cwd, "read-ok", "read", { path: agents });
+		await endAs(h, cwd, "read-ok", "read", { content: readFileSync(agents, "utf8") });
+		expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+	});
+}
+
+test("stock compaction: a tracker-only repo still requires an owned bead result", async () => {
+	const cwd = stockRepo();
+	mkdirSync(join(cwd, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	await callAs(h, cwd, "show", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "show", "bash", { stdout: showStdout("k-1", "in_progress", "TestWorker") });
+	expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("stock compaction: an ancestor tracker remains applicable across a nested git boundary", async () => {
+	const parent = mkdtempSync(join(base, "ancestor-tracker-"));
+	mkdirSync(join(parent, ".beads"));
+	const cwd = stockRepo(parent);
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	await callAs(h, cwd, "foreign", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "foreign", "bash", { stdout: showStdout("k-1", "in_progress", "SomebodyElse") });
+	const [foreign] = await callAs(h, cwd, "still-blocked", "edit", { path: "f.ts", diff: "+x" });
+	expect((foreign as FlywheelToolCallResult)?.block).toBe(true);
+	await callAs(h, cwd, "owned", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "owned", "bash", { stdout: showStdout("k-1", "in_progress", "TestWorker") });
+	expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
 test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.md and br show", async () => {
 	const root = mkdtempSync(join(base, "proj-"));
 	const repo = join(root, "repo");
@@ -49,7 +126,8 @@ test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.
 	mkdirSync(cwd, { recursive: true });
 	writeFileSync(join(root, "AGENTS.md"), "outer\n");
 	writeFileSync(join(repo, "AGENTS.md"), "inner\n");
-	const h = await createFlywheelHost(base);
+	mkdirSync(join(repo, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(repo) } });
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	expect(h.sent.length).toBe(1);
 	const { message, options } = h.sent[0]!;
@@ -64,7 +142,8 @@ test("COMPACTION_REREAD: mid-run compaction injects at the next step boundary an
 	const cwd = mkdtempSync(join(base, "proj-"));
 	writeFileSync(join(cwd, "AGENTS.md"), "rules\n");
 	const home = identityHome(cwd, "41", "{\"name\":\"AmberHeron\"}");
-	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%41" }, home, respond: brTable({}) });
+	mkdirSync(join(cwd, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), TMUX_PANE: "%41" }, home, respond: brTable({}) });
 	await h.emit("session_compact", { compactionEntry: {}, fromExtension: false }, h.ctx(cwd, false));
 	expect(h.sent.length).toBe(1);
 	expect(h.sent[0]!.options?.deliverAs).toBe("aside");
@@ -232,7 +311,8 @@ async function rereadHost(extra: string[] = []): Promise<{ h: FakeHost; cwd: str
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
 	for (const name of extra) writeFileSync(join(cwd, name), "x\n");
-	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestWorker" } });
+	mkdirSync(join(cwd, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	return { h, cwd, agents };
 }
@@ -282,7 +362,8 @@ test("REREAD: reading the wrong AGENTS.md never clears the flag", async () => {
 	const cwd = mkdtempSync(join(base, "reread-inner-"));
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "inner\n");
-	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestWorker" } });
+	mkdirSync(join(cwd, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
 	await h.emit("session_compact", {}, h.ctx(cwd));
 	await callAs(h, cwd, "r1", "read", { path: join(outer, "AGENTS.md") });
 	await endAs(h, cwd, "r1", "read", { details: { content: "outer\n" } });
