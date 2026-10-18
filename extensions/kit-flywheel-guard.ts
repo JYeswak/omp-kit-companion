@@ -564,8 +564,12 @@ function isAssignment(word: string): boolean {
 	return true;
 }
 
-/** Supported close/claim/start mutations, with the cwd selected by leading cd commands. */
-export function trackerRequests(command: string, cwd: string, home: string): TrackerRequest[] {
+/** Shells whose `-c <script>` string is parsed too, so a wrapped `sh -c "br ..."` is not a bypass (ompkit-fp72.131 AC7). */
+const SHELL_WRAPPERS: Record<string, true> = { sh: true, bash: true, zsh: true, dash: true };
+const MAX_SHELL_DEPTH = 3;
+
+/** Supported close/claim/start/block mutations, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
+export function trackerRequests(command: string, cwd: string, home: string, depth = 0): TrackerRequest[] {
 	const requests: TrackerRequest[] = [];
 	let current = cwd;
 	for (const raw of shellCommands(command)) {
@@ -592,6 +596,16 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 			continue;
 		}
 		const name = basename(argv[0]!);
+		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
+			const flag = argv.findIndex((word, index) => index > 0 && /^-[A-Za-z]*c$/.test(word));
+			const script = flag > 0 ? argv[flag + 1] : undefined;
+			if (script !== undefined) {
+				for (const nested of trackerRequests(script, current, home, depth + 1)) {
+					requests.push({ ...nested, identities: [...identities, ...nested.identities], actor: nested.actor ?? inlineActor });
+				}
+			}
+			continue;
+		}
 		if (name !== "br" && name !== "bd") continue;
 		let db: string | undefined;
 		let subcommand: string | undefined;

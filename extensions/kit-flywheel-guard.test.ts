@@ -607,3 +607,37 @@ test("BLOCK_REFUSED: other status updates, other verbs and unreadable beads", as
 	expect(showDown?.reason).toContain("cannot be checked");
 	expect((await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "dep"))?.block).toBe(true);
 });
+
+test("BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is checked like the bare command", async () => {
+	const open = { edges: [{ type: "blocks", status: "open" }] };
+	for (const wrapped of [
+		`sh -c "${SET_BLOCKED}"`,
+		`bash -lc '${SET_BLOCKED}'`,
+		`zsh -c "bash -c '${SET_BLOCKED}'"`,
+		`BR_ACTOR=BlueFox sh -c "br update kit-9 --status blocked"`,
+		`cd /tmp && sh -c "${SET_BLOCKED}"`,
+	]) {
+		const refused = await blockCall({}, wrapped);
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain("BLOCK_REFUSED");
+		expect(await blockCall(open, wrapped)).toBeUndefined();
+	}
+});
+
+test("BLOCK_REFUSED: shell words that only mention br, plain sh, and over-deep or odd -c flags are not parsed as mutations", async () => {
+	expect(await blockCall({}, `sh -c "echo br update kit-9 --status blocked"`)).toBeUndefined();
+	expect(await blockCall({}, "sh script.sh")).toBeUndefined();
+	expect(await blockCall({}, `sh -x ${SET_BLOCKED}`)).toBeUndefined();
+	const deep = `sh -c "sh -c \\"sh -c \\\\\\"sh -c '${SET_BLOCKED}'\\\\\\"\\""`;
+	expect(trackerRequests(deep, "/proj", "/home/u")).toEqual([]);
+	const started = performance.now();
+	expect(trackerRequests(`sh -${"a".repeat(50_000)}b "${SET_BLOCKED}"`, "/proj", "/home/u")).toEqual([]);
+	expect(performance.now() - started).toBeLessThan(500);
+});
+
+test("trackerRequests: wrapped close and claim keep the caller's inline identity", () => {
+	const [close] = trackerRequests(`BR_ACTOR=RedOwl sh -c "br close kit-3"`, "/proj", "/home/u");
+	expect(close?.operation).toBe("close");
+	expect(close?.identities).toContain("RedOwl");
+	expect(close?.actor).toBe("RedOwl");
+});
