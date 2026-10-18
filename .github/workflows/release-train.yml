@@ -176,6 +176,9 @@ jobs:
               --platform "$platform" --archive-dir "archives/$platform/"
             if [[ "$phase" == sign ]]; then
               gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "sbom-$platform-attempt-$attempt" -D "sboms/$platform/"
+              # The SBOM action names the uploaded member after artifact-name.
+              # Preserve its bytes while staging the stable public asset name.
+              mv "sboms/$platform/sbom-$platform-attempt-$attempt" "sboms/$platform/sbom-$platform.spdx.json"
             fi
           done
           printf 'promote=true\nversion=%s\nsha=%s\nphase=%s\ntrain_id=%s\ntrain_attempt=%s\nbase_tag=%s\n' \
