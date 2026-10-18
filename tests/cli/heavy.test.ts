@@ -457,9 +457,18 @@ const STATFS_CASES: Record<string, (decide: Decide) => void> = {
 	},
 };
 
+// A kill is a case's own assertion failing (Bun reports it as an Error whose message starts "expect(").
+// Anything else, such as a mutant that crashes or a case that cannot run, is a setup error: it must surface
+// instead of being counted as a kill.
 function failingCases(decide: Decide): string[] {
 	return Object.entries(STATFS_CASES).flatMap(([name, check]) => {
-		try { check(decide); return []; } catch { return [name]; }
+		try {
+			check(decide);
+			return [];
+		} catch (error) {
+			if (error instanceof Error && error.message.startsWith("expect(")) return [name];
+			throw new Error(`setup error in statfs case "${name}": ${String(error)}`, { cause: error });
+		}
 	});
 }
 
@@ -483,6 +492,8 @@ test("oq1h.1 planted: each statfs mutant is killed by exactly the cases that gua
 	};
 	// Positive control: the real decider fails none of the cases, so a kill below is the mutant's doing.
 	expect(failingCases(decideDiskPressure)).toEqual([]);
+	// Setup errors are not kills: a decider that crashes surfaces as an error, never as a silently killed mutant.
+	expect(() => failingCases(() => { throw new TypeError("decider crashed"); })).toThrow("setup error in statfs case");
 	for (const [name, mutant] of Object.entries(mutants)) {
 		expect({ mutant: name, killed: failingCases(mutant.decide).sort() }).toEqual({ mutant: name, killed: [...mutant.killedBy].sort() });
 	}
