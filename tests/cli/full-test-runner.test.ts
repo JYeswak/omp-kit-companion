@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -446,5 +446,35 @@ test("contradictory counters and a nested Bun report cannot become whole-produce
   expect(nested.capture_complete).toBe(false);
   expect(nested.counts).toBe(null);
   expect(nested.missing_fields).toContain("counts");
+ } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("a real Bun cwd operand cannot relabel nested test output as immediate producer counts", async () => {
+ const fixture = await referenceProducerFixture();
+ try {
+  mkdirSync(join(fixture.root, "test"));
+  const nested = [process.execPath, "--no-env-file", "test", "--config", "/dev/null", join(fixture.root, "cases.test.ts")];
+  await Bun.write(join(fixture.root, "test", "report.ts"), [
+   `const child = Bun.spawnSync(${JSON.stringify(nested)}, { stdout: "pipe", stderr: "pipe" });`,
+   "process.stdout.write(child.stdout);",
+   "process.stderr.write(child.stderr);",
+   "process.exit(child.exitCode);",
+  ].join("\n"));
+  fixture.git("add", "--", "test/report.ts");
+  fixture.git("-c", "user.name=ResultFixture", "-c", "user.email=result@example.invalid", "commit", "--only", "-qm", "actual nested producer", "--", "test/report.ts");
+  const argv = [process.execPath, "--cwd", "test", "run", "./report.ts"];
+  const child = Bun.spawnSync(argv, { cwd: fixture.root, stdout: "pipe", stderr: "pipe" });
+  expect(child.exitCode).toBe(1);
+  const stdout = child.stdout.toString(), stderr = child.stderr.toString();
+  const result = { code: child.exitCode, stdout, stderr, execution: {
+   argv, cwd: fixture.root, launched: true, exit_code: child.signalCode ? null : child.exitCode, signal: child.signalCode ?? null,
+   interrupted: false, stdout_complete: true, stderr_complete: true,
+   stdout_capture: { bytes: Buffer.byteLength(stdout), sha256: new Bun.CryptoHasher("sha256").update(stdout).digest("hex") },
+   stderr_capture: { bytes: Buffer.byteLength(stderr), sha256: new Bun.CryptoHasher("sha256").update(stderr).digest("hex") },
+  } };
+  const reference = describeFullTestProducer(result, { source_revision: fixture.git("rev-parse", "HEAD"), artifact_root: fixture.root }).result_ref;
+  expect(reference.counts).toBe(null);
+  expect(reference.missing_fields).toContain("counts");
+  expect(reference.capture_complete).toBe(false);
  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 });

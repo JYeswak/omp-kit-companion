@@ -147,7 +147,8 @@ function fullTestCounts(stdout: string, stderr: string, argv: readonly string[] 
  const executable = argv?.[0];
  const name = executable?.slice(executable.lastIndexOf("/") + 1);
  let command = 1;
- while (argv?.[command]?.startsWith("-") && argv[command] !== "--") command++;
+ // Only a known operand-free prefix is supported; an unknown option's value may itself be "test".
+ while (argv?.[command] === "--no-env-file") command++;
  if ((name !== "bun" && name !== "bun.exe") || argv?.[command] !== "test") return { counts: null, failing_names: null };
  if (!stdout.includes("bun test v") && !stderr.includes("bun test v")) return { counts: null, failing_names: null };
  let pass: number | null = null, fail: number | null = null, skip: number | null = null, total: number | null = null;
