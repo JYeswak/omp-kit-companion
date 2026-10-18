@@ -243,6 +243,28 @@ test("explicit selected version mismatch refuses without state or prefix writes"
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.2/bin/omp-kit");
 }));
 
+test("plan reads the archive and refuses bytes that differ from the index digest before any state or prefix write", async () => fixture(async ctx => {
+ const link = join(ctx.prefix, "bin", "omp-kit");
+ const bytes = readFileSync(ctx.archivePath);
+ const tampered = Buffer.from(bytes);
+ tampered[Math.floor(tampered.length / 2)] ^= 0xff;
+ writeFileSync(ctx.archivePath, tampered);
+ const refused = await planKitUpdate(input(ctx));
+ expect(refused).toMatchObject({ exitCode: 2, status: "REFUSED", reason: "ARCHIVE_DIGEST_MISMATCH", provenance: "UNVERIFIED" });
+ expect(existsSync(ctx.stateRoot)).toBe(false);
+ expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(readlinkSync(link)).toBe("../releases/1.2.2/bin/omp-kit");
+ // Control: the same index with the untouched bytes still plans, so the refusal above is the digest check, not the fixture.
+ writeFileSync(ctx.archivePath, bytes);
+ expect(await planKitUpdate(input(ctx))).toMatchObject({ exitCode: 0, status: "UPDATE_AVAILABLE", provenance: "INTEGRITY_ONLY" });
+}));
+
+test("plan refuses a missing archive as an incomplete local source", async () => fixture(async ctx => {
+ rmSync(ctx.archivePath);
+ expect(await planKitUpdate(input(ctx))).toMatchObject({ exitCode: 2, status: "REFUSED", reason: "LOCAL_SOURCE_REQUIRED" });
+ expect(existsSync(ctx.stateRoot)).toBe(false);
+}));
+
 // A failed matcher/live post-check stays RED even when guarded compensation restores the prior link.
 test("verified archive activates one symlink, retains old release and leaves failed live check pending", async () => fixture(async ctx => {
  const planned = await planKitUpdate(input(ctx));

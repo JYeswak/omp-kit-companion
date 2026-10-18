@@ -1,0 +1,2 @@
+### Fixed
+- `omp-kit update --plan` now reads the local archive and compares its SHA-256 with the index digest before it prints a plan. A tampered archive is refused with `ARCHIVE_DIGEST_MISMATCH` and a missing or unsafe one with `LOCAL_SOURCE_REQUIRED` or `UNSAFE_KIT_SOURCE`, instead of a green plan that echoed the index's digest unobserved. Nothing is written for a refused plan, and an intact archive plans exactly as before; apply still verifies the bytes again under its own lock.

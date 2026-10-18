@@ -57,10 +57,13 @@ function directory(path: string): void {
  const stat = lstatSync(path);
  if (!stat.isDirectory() || realpathSync(path) !== path || stat.uid !== process.getuid?.()) throw new Error("UNSAFE_KIT_PREFIX");
 }
-function regular(path: string): Buffer {
+function assertRegular(path: string): void {
  if (!isAbsolute(path) || resolve(path) !== path) throw new Error("UNSAFE_KIT_SOURCE");
  const stat = lstatSync(path);
  if (!stat.isFile() || realpathSync(path) !== path) throw new Error("UNSAFE_KIT_SOURCE");
+}
+function regular(path: string): Buffer {
+ assertRegular(path);
  return readFileSync(path);
 }
 function relativeTarget(version: string): string {
@@ -155,6 +158,11 @@ function localIndex(input: KitUpdateInput): { raw: string; archivePath: string }
  const asset = index.assets[`${input.platform.os}-${input.platform.arch}-${input.platform.libc}`];
  if (index.version !== input.version || index.source_tag !== input.sourceTag || !asset ||
   basename(input.archivePath) !== asset.filename || dirname(input.archivePath) !== dirname(input.indexPath)) throw new Error("LOCAL_SOURCE_REQUIRED");
+ // A plan must not print a digest it never observed: hash the archive bytes against the index before previewing.
+ let observed: string;
+ try { assertRegular(input.archivePath); observed = shaFile(input.archivePath); }
+ catch (error) { throw new Error(error instanceof Error && error.message === "UNSAFE_KIT_SOURCE" ? "UNSAFE_KIT_SOURCE" : "LOCAL_SOURCE_REQUIRED"); }
+ if (observed !== asset.sha256) throw new Error("ARCHIVE_DIGEST_MISMATCH");
  return { raw, archivePath: input.archivePath };
 }
 
