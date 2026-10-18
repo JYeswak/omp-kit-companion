@@ -261,7 +261,7 @@ export interface PendingReread {
 function rereadMissing(pending: PendingReread): string {
 	const missing: string[] = [];
 	if (!pending.agentsOk) missing.push(pending.agentsPath === null ? "AGENTS.md (none found)" : `read ${pending.agentsPath}`);
-	if (!pending.beadOk) missing.push("br show of your in_progress bead (or an empty br list)");
+	if (!pending.beadOk) missing.push("`br show <id> --json` of your in_progress bead (or an empty `br list --status in_progress --assignee <you> --json`)");
 	return missing.join(" and ");
 }
 

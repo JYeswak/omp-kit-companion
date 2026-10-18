@@ -694,3 +694,35 @@ test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a
 	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "blocked", dependency_type: "parent-child" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
 	expect((await closeCall({}, "br close kit-x"))?.block).toBeUndefined();
 });
+
+// --- COMPACTION_REREAD wording and clearing envelopes (ompkit-xa5s.24 rework, chief ORDER AM63971) ---
+
+test("REREAD: the block reason names the --json commands that clear; plain br show text never clears", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	const [blocked] = await callAs(h, cwd, "e0", "edit", { path: "f.ts", diff: "+x" });
+	const reason = (blocked as FlywheelToolCallResult)?.reason ?? "";
+	expect(reason).toContain("`br show <id> --json`");
+	expect(reason).toContain("br list --status in_progress --assignee <you> --json");
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1" });
+	await endAs(h, cwd, "s1", "bash", native("◐ k-1 · t   [● P0 · IN_PROGRESS]\nOwner: TestWorker\nAssignee: TestWorker\n"));
+	const [stillBlocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((stillBlocked as FlywheelToolCallResult)?.block).toBe(true);
+	await callAs(h, cwd, "s2", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s2", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	expect(await callAs(h, cwd, "e2", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("REREAD: br list --json clears with the empty array and with br's {issues: [], total: 0} envelope, not with rows", async () => {
+	for (const [stdout, clears] of [["[]", true], [JSON.stringify({ issues: [], total: 0, limit: 50, offset: 0, has_more: false }), true],
+		[JSON.stringify({ issues: [{ id: "k-1" }], total: 1 }), false]] as const) {
+		const { h, cwd, agents } = await rereadHost();
+		await callAs(h, cwd, "r1", "read", { path: agents });
+		await endAs(h, cwd, "r1", "read", native("rules\n"));
+		await callAs(h, cwd, "l1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
+		await endAs(h, cwd, "l1", "bash", native(stdout));
+		const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+		expect((after as FlywheelToolCallResult | undefined)?.block === true).toBe(!clears);
+	}
+});
