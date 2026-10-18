@@ -38,6 +38,7 @@ import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } f
  let matcherRoot = "";
  let matcherExecutable = "";
  let matcherCaller = "";
+let nativePath = "";
 function countRuleRows(root: string): { rules: number; ttsrRules: number } {
 	const rules = readdirSync(join(root, "rules")).filter((name) => name.endsWith(".md"));
 	const ttsrRules = readFileSync(join(root, "MANIFEST.tsv"), "utf8").split("\n").slice(1).filter((row) => row.trim() !== "" && row.split("\t")[2] !== "always").length;
@@ -110,8 +111,29 @@ function withOmpIdentity(env: Record<string, string>, launcher: string, source: 
 	return { ...env, OMP: launcher, OMP_BIN: launcher, OMP_PATH: launcher, OMP_SRC: source };
 }
 
-function invoke(input: FastTestInput, env: Record<string, string>) {
-	const result = Bun.spawnSync([stableExecutable], {
+function withoutAmbientNative(command: string[], source: string | undefined): string[] {
+	if (!source) return command;
+	const roots = new Set<string>();
+	for (let directory = source; ; directory = dirname(directory)) {
+		const candidate = join(directory, "node_modules", "@oh-my-pi", "pi-natives");
+		if (existsSync(join(candidate, "package.json"))) roots.add(realpathSync(candidate));
+		if (dirname(directory) === directory) break;
+	}
+	if (roots.size === 0) return command;
+	if (process.platform === "darwin") {
+		const policy = ["(version 1)", "(allow default)",
+			...[...roots].map(root => `(deny file-read* (subpath ${JSON.stringify(root)}))`)].join("\n");
+		return ["/usr/bin/sandbox-exec", "-p", policy, ...command];
+	}
+	const bubblewrap = process.platform === "linux" ? Bun.which("bwrap") : null;
+	if (!bubblewrap) throw new Error("Missing-native fixture requires OS containment when an ancestor supplies pi-natives");
+	return [bubblewrap, "--ro-bind", "/", "/", "--bind", fixtureBase, fixtureBase,
+		...[...roots].flatMap(root => ["--tmpfs", root]),
+		"--proc", "/proc", "--dev", "/dev", "--die-with-parent", "--", ...command];
+}
+
+function invoke(input: FastTestInput, env: Record<string, string>, missingNativeSource?: string) {
+	const result = Bun.spawnSync(withoutAmbientNative([stableExecutable], missingNativeSource), {
 		cwd: fixtureBase,
 		env: { ...env, OMP_KIT_TEST_INPUT: JSON.stringify(input) },
 		stdout: "pipe",
@@ -122,8 +144,8 @@ function invoke(input: FastTestInput, env: Record<string, string>) {
 	const report = JSON.parse(stdout) as FastTestReport;
 	return { result, stdout, stderr, report };
 }
-async function invokeMatcher(input: MatcherObservationInput, env: Record<string, string>, cwd = fixtureBase) {
-	const child = Bun.spawn([matcherCaller], {
+async function invokeMatcher(input: MatcherObservationInput, env: Record<string, string>, cwd = fixtureBase, missingNativeSource?: string) {
+	const child = Bun.spawn(withoutAmbientNative([matcherCaller], missingNativeSource), {
 		cwd, env: { ...env, OMP_KIT_MATCHER_INPUT: JSON.stringify(input) }, stdout: "pipe", stderr: "pipe",
 	});
 	const [exitCode, stdout, stderr] = await Promise.all([
@@ -203,6 +225,17 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
  	process.env.TMP = suiteTmp;
  	process.env.TEMP = suiteTmp;
  	fixtureBase = mkdtempSync(join(tmpdir(), "omp-kit-fast-test-"));
+	const installedOmp = resolveOmpIdentity(process.env);
+	const toolBin = join(fixtureBase, "native-tools");
+	mkdirSync(toolBin);
+	symlinkSync(process.execPath, join(toolBin, "bun"));
+	symlinkSync(installedOmp.launcher, join(toolBin, "omp"));
+	// Baseline matcher fixtures do not inherit optional operator tools such as rch.
+	nativePath = [toolBin, "/usr/bin", "/bin"].join(delimiter);
+	// A real ambient native package makes both OS containment branches observable.
+	const ambientScope = join(fixtureBase, "node_modules", "@oh-my-pi");
+	mkdirSync(ambientScope, { recursive: true });
+	symlinkSync(installedOmp.nativeRoot, join(ambientScope, "pi-natives"), "dir");
 	const prefix = join(fixtureBase, "kit");
 	releaseRoot = join(prefix, "releases", "v1.0.0");
 	mkdirSync(join(releaseRoot, "bin"), { recursive: true });
@@ -316,7 +349,7 @@ describe("runFastTest", () => {
 		writeFileSync(projectScript, `#!/bin/sh\nprintf executed > '${projectMarker}'\n`);
 		chmodSync(projectScript, 0o755);
 		const input: FastTestInput = { root: releaseRoot, executablePath: stableExecutable, home, project };
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const homeBefore = snapshotTree(home);
 		const projectBefore = snapshotTree(project);
 		const releaseBefore = snapshotTree(dirname(dirname(stableExecutable)));
@@ -421,7 +454,7 @@ describe("runFastTest", () => {
 		const fake = createOmpWithoutNative(fakeRoot);
 		const nativeHome = makeTestHome("missing-native-home");
 		const nativeEnv = withOmpIdentity(environment(nativeHome, [dirname(fake.launcher), "/usr/bin", "/bin"].join(delimiter)), fake.launcher, fake.source);
-		const native = invoke({ root: releaseRoot, executablePath: stableExecutable, home: nativeHome }, nativeEnv);
+		const native = invoke({ root: releaseRoot, executablePath: stableExecutable, home: nativeHome }, nativeEnv, fake.source);
 		expect(native.result.exitCode).toBe(3);
 		expect(native.report.exitCode).toBe(3);
 		expect(native.report.blocker?.kind).toBe("NATIVE_MATCHER_UNAVAILABLE");
@@ -436,7 +469,7 @@ describe("runFastTest", () => {
 		const project = join(fixtureBase, "plant-project");
 		mkdirSync(project, { recursive: true });
 		const input: FastTestInput = { root: plant.root, executablePath: plant.stable, home, project };
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const casesBefore = readFileSync(join(plant.root, "cases", "cases.tsv"), "utf8");
 		const homeBefore = snapshotTree(home);
 		const projectBefore = snapshotTree(project);
@@ -472,7 +505,7 @@ describe("runFastTest", () => {
 		mkdirSync(workerTmp);
 		const homeBefore = snapshotTree(home);
 		const observeEnv = {
-			...environment(home, process.env.PATH ?? "/usr/bin:/bin"),
+			...environment(home, nativePath),
 			TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp,
 			// The hosting Bun process may cache this script before its JS starts.
 			XDG_CACHE_HOME: join(workerTmp, "caller-cache"),
@@ -683,7 +716,7 @@ describe("runMatcherObservation", () => {
 		const cases = join(matcherRoot, "cases", "cases.tsv");
 		const rule = "bash-glob-silenced";
 		const expectedRuleSha256 = createHash("sha256").update(readFileSync(join(REPO_ROOT, "rules", `${rule}.md`))).digest("hex");
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const homeBefore = snapshotTree(home);
 		const projectBefore = snapshotTree(project);
 		const releaseBefore = snapshotTree(matcherRoot);
@@ -751,7 +784,7 @@ describe("runMatcherObservation", () => {
 			`process.stderr.write(${JSON.stringify(privateEvidence)});`,
 			"process.exitCode = 1;",
 		].join("\n"));
-		const identityEnv = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const identityEnv = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const expectedRuleSha256 = createHash("sha256").update(readFileSync(join(REPO_ROOT, "rules", "bash-glob-silenced.md"))).digest("hex");
 		const report = (await invokeMatcher({
 			root,
@@ -820,7 +853,7 @@ describe("runMatcherObservation", () => {
 			root: matcherRoot, executablePath: matcherExecutable, rules: join(matcherRoot, "rules"),
 			cases: join(matcherRoot, "cases/cases.tsv"), rule: "bash-glob-silenced", caseLine: 2,
 			expectedRuleSha256: createHash("sha256").update(readFileSync(join(matcherRoot, "rules/bash-glob-silenced.md"))).digest("hex"),
-		}, env)).report;
+		}, env, fixtureBase, kind === "missing-native" ? selected.source : undefined)).report;
 		expect(report.observation).toMatchObject({ status: "UNAVAILABLE", evaluator: "UNAVAILABLE", reason: "NATIVE_MATCHER_UNAVAILABLE" });
 		if (report.observation.status !== "UNAVAILABLE") throw new Error("incomplete native installation must remain unavailable");
 
@@ -854,7 +887,7 @@ describe("runMatcherObservation", () => {
 			"",
 		].join("\n"));
 
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const child = Bun.spawnSync([matcherExecutable, "test", "--rules", rules, "--cases", cases, "--json"], {
 			cwd: project, env, stdout: "pipe", stderr: "pipe",
 		});
@@ -899,7 +932,7 @@ describe("runMatcherObservation", () => {
 		const home = makeTestHome("bundled-cli-home");
 		const project = join(fixtureBase, "bundled-cli-cwd");
 		mkdirSync(project, { recursive: true });
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		const child = Bun.spawnSync([matcherExecutable, "test", "--json"], {
 			cwd: project, env, stdout: "pipe", stderr: "pipe",
 		});
@@ -928,7 +961,7 @@ describe("runMatcherObservation", () => {
 		const project = join(fixtureBase, "external-pack-negative-cwd");
 		mkdirSync(project, { recursive: true });
 		const identity = resolveOmpIdentity(process.env);
-		const env = withOmpIdentity(environment(home, process.env.PATH ?? "/usr/bin:/bin"), identity.launcher, identity.source);
+		const env = withOmpIdentity(environment(home, nativePath), identity.launcher, identity.source);
 		type Envelope = {
 			data?: { overall?: string; test?: { status?: string; proofs?: { G3_quiet_prefix?: { status?: string } } } };
 			errors?: Array<{ code?: string }>;

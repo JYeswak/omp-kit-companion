@@ -154,7 +154,7 @@ jobs:
           base_tag="$(python3 scripts/release_reuse.py notes-floor --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA")"
           sh scripts/release-notes.sh check --base-tag "$base_tag" --head "$GITHUB_SHA"
       - name: Install bubblewrap for Linux integration containment
-        if: runner.os == 'Linux' && matrix.suite == 'package-release'
+        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'package-release')
         run: |
           set -euo pipefail
           sudo apt-get update
