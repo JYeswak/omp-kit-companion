@@ -1105,7 +1105,7 @@ class RollingReleaseTest(unittest.TestCase):
                                       requested="", version="", rehearsal="false", plan=str(root / "plan.json"), timeout=60)
             with patch.object(release_reuse, "_api", side_effect=api), \
                  patch.object(release_reuse, "_command", side_effect=command), \
-                 patch.object(release_reuse, "_published", return_value={"v0.2.19"}), \
+                 patch.object(release_reuse, "_publication_inventory", return_value={"v0.2.19": False}), \
                  patch.object(release_reuse, "_is_ancestor", return_value=True), \
                  patch.object(release_reuse, "_run_rows", return_value=[unbound, bound]), \
                  patch.object(release_reuse, "_artifact_files", return_value={"qualification.json": json.dumps(canonical).encode()}), \
@@ -1148,7 +1148,8 @@ class RollingReleaseTest(unittest.TestCase):
     @contextlib.contextmanager
     def published_floor_case(self, *, orphan=False, with_published_tag=False,
                              unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False,
-                             signer_drift: str | None = None):
+                             signer_drift: str | None = None, extra_release: dict[str, Any] | None = None,
+                             with_remote=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
@@ -1200,11 +1201,20 @@ class RollingReleaseTest(unittest.TestCase):
                 git("tag", unpublished_tag)
             git("update-ref", "refs/remotes/origin/main", owner)
             environment["GITHUB_SHA"] = owner
+            if with_remote:
+                clean_git_env = {key: value for key, value in environment.items() if not key.startswith("GIT_")}
+                created = native_run(["git", "init", "--bare", str(root / "origin.git")], env=clean_git_env,
+                                     text=True, stdout=release_reuse.subprocess.PIPE, stderr=release_reuse.subprocess.PIPE)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                git("remote", "add", "origin", str(root / "origin.git"))
+                git("push", "origin", "main", "--tags")
             stable = [{"tag_name": "v0.2.19", "draft": False, "prerelease": False}]
             if orphan or with_published_tag:
                 stable.append({"tag_name": "v0.2.22", "draft": False, "prerelease": False})
             stable += [{"tag_name": "v0.2.99", "draft": True, "prerelease": False},
                        {"tag_name": "v0.2.98", "draft": False, "prerelease": True}]
+            if extra_release is not None:
+                stable.append(extra_release)
             def api(repository, endpoint, **kwargs):
                 if endpoint == "releases?per_page=100":
                     return [stable]
@@ -1215,7 +1225,8 @@ class RollingReleaseTest(unittest.TestCase):
                 raise AssertionError(endpoint)
             original_command = release_reuse._command
             def command(argv, **kwargs):
-                return original_command(argv, cwd=str(root))
+                kwargs["cwd"] = str(root)
+                return original_command(argv, **kwargs)
             def process(argv, **kwargs):
                 if argv[0] == "git":
                     kwargs["cwd"] = str(root)
@@ -1245,6 +1256,61 @@ class RollingReleaseTest(unittest.TestCase):
             plan = json.loads((root / "plan.json").read_text())
             self.assertEqual(plan["kind"], "allocate")
             self.assertEqual(plan["source_sha"], source)
+            dispatch.assert_not_called()
+
+    def test_ready_signed_cut_recovers_without_waiting_for_an_unrelated_rehearsal(self) -> None:
+        def rows(source):
+            return self._prior_cut(sign={"conclusion": "success"}, source=source) + [
+                dict(candidate_run(), id=99999, status="in_progress", conclusion=None,
+                     display_title="rehearse 0.0.1 " + SOURCE_SHA + " train-99999")]
+        plan, error, _, dispatch = self._drive_prior_cut(rows, state="executed")
+        self.assertIsNone(error)
+        assert plan is not None
+        self.assertEqual((plan["kind"], plan["version"]), ("resume", BASE_VERSION))
+        self.assertEqual(plan["recovery_ids"], ["777"])
+        dispatch.assert_called_once()
+
+    def test_new_allocation_waits_for_native_idle_then_refreshes_reserved_versions(self) -> None:
+        with self.published_floor_case(with_remote=True) as (args, root, source, dispatch):
+            active = dict(candidate_run(), status="in_progress", conclusion=None,
+                          display_title="rehearse 0.0.1 " + SOURCE_SHA + " train-99999")
+            state = {"idle": False}
+            waited = []
+            original_command = release_reuse._command
+            def command(argv, **kwargs):
+                if argv[0] == "sh" and len(argv) > 2 and argv[2] == "wait-release-idle":
+                    waited.append(argv)
+                    baseline = original_command(["git", "rev-parse", "v0.2.19^{commit}"])
+                    original_command(["git", "--git-dir", str(root / "origin.git"), "update-ref",
+                                      "refs/tags/v0.2.20", baseline])
+                    state["idle"] = True
+                    return "RELEASE=idle"
+                return original_command(argv, **kwargs)
+            with patch.object(release_reuse, "_run_rows", side_effect=lambda *a, **k: [] if state["idle"] else [active]), \
+                 patch.object(release_reuse, "_command", side_effect=command):
+                self.assertEqual(release_reuse._drive(args), 0)
+            plan = json.loads(Path(args.plan).read_text())
+            self.assertEqual((plan["kind"], plan["source_sha"], plan["version"]), ("allocate", source, "0.2.21"))
+            self.assertEqual(len(waited), 1)
+            dispatch.assert_not_called()
+
+    def test_native_work_racing_an_idle_observation_cannot_allocate_or_wait_forever(self) -> None:
+        with self.published_floor_case(with_remote=True) as (args, root, _, dispatch):
+            active = dict(candidate_run(), status="in_progress", conclusion=None,
+                          display_title="rehearse 0.0.1 " + SOURCE_SHA + " train-99999")
+            waited = []
+            original_command = release_reuse._command
+            def command(argv, **kwargs):
+                if argv[0] == "sh" and len(argv) > 2 and argv[2] == "wait-release-idle":
+                    waited.append(argv)
+                    return "RELEASE=idle"
+                return original_command(argv, **kwargs)
+            with patch.object(release_reuse, "_run_rows", return_value=[active]), \
+                 patch.object(release_reuse, "_command", side_effect=command):
+                with self.assertRaisesRegex(ValueError, "native release work is still active"):
+                    release_reuse._drive(args)
+            self.assertEqual(len(waited), 1)
+            self.assertFalse(Path(args.plan).exists())
             dispatch.assert_not_called()
 
     @staticmethod
@@ -1301,6 +1367,22 @@ class RollingReleaseTest(unittest.TestCase):
             self.drive_output = captured.getvalue()
             plan = json.loads((root / "plan.json").read_text()) if (root / "plan.json").exists() else None
             return plan, error, source, dispatch
+
+    def test_public_prerelease_is_terminal_not_an_abandoned_stable_cut(self) -> None:
+        plan, error, source, dispatch = self._drive_prior_cut(
+            lambda _source: self._prior_cut(sign={"conclusion": "success"}), state="executed",
+            extra_release={"tag_name": f"v{BASE_VERSION}", "draft": False, "prerelease": True})
+        self.assertIsNone(error)
+        self.assertEqual((plan["kind"], plan["source_sha"], plan["version"]), ("allocate", source, "0.2.21"))
+        dispatch.assert_not_called()
+
+    def test_unpublished_prerelease_draft_keeps_authenticated_recovery(self) -> None:
+        plan, error, _, dispatch = self._drive_prior_cut(
+            lambda _source: self._prior_cut(sign={"conclusion": "success"}), state="executed",
+            extra_release={"tag_name": f"v{BASE_VERSION}", "draft": True, "prerelease": True})
+        self.assertIsNone(error)
+        self.assertEqual((plan["kind"], plan["version"]), ("resume", BASE_VERSION))
+        dispatch.assert_called_once()
 
     def test_actual_all_skipped_authority_groups_do_not_trap_recovery_on_the_old_cut(self) -> None:
         plan, error, source, dispatch = self._drive_prior_cut(lambda _s: self._prior_cut(sign={"conclusion": "success"}))

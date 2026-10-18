@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Wait for the candidate lane, then reconcile the qualified frontier
+      - name: Reconcile the qualified owner before waiting for a new allocation
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -62,7 +62,6 @@ jobs:
           REHEARSAL: ${{ inputs.rehearsal || 'false' }}
         run: |
           set -euo pipefail
-          sh scripts/release-train.sh wait-release-idle --repo "$GITHUB_REPOSITORY" --timeout 1200 --poll 15
           # Keep this job's lock through certification AND the independent
           # publisher's terminal outcome. No next train may reuse an in-flight V.
           git fetch origin main --tags

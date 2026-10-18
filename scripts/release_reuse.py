@@ -734,8 +734,8 @@ def _verify_final(args: argparse.Namespace) -> int:
     return 0
 
 
-def _command(argv: list[str], *, cwd: str | None = None) -> str:
-    result = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+def _command(argv: list[str], *, cwd: str | None = None, timeout: int = 120) -> str:
+    result = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
     if result.returncode:
@@ -759,9 +759,14 @@ def _run_rows(repository: str, workflow: str, event: str = "workflow_dispatch", 
     return [row for page in pages for row in page["workflow_runs"]]
 
 
-def _published(repository: str) -> set[str]:
+def _publication_inventory(repository: str) -> dict[str, bool]:
+    """Public tags mapped to prerelease state; drafts remain recoverable."""
     pages = _api(repository, "releases?per_page=100", paginate=True)
-    return {row["tag_name"] for page in pages for row in page if not row["draft"] and not row["prerelease"]}
+    return {row["tag_name"]: row["prerelease"] for page in pages for row in page if not row["draft"]}
+
+
+def _published(repository: str) -> set[str]:
+    return {tag for tag, prerelease in _publication_inventory(repository).items() if not prerelease}
 
 
 AUTHORITY_JOB_GROUPS = ("attest", "attest-index", "signed-consumers")
@@ -1003,7 +1008,11 @@ def _drive(args: argparse.Namespace) -> int:
     repository = args.repository
     root = _command(["git", "rev-parse", "--show-toplevel"])
     tools = Path(__file__).resolve().parent
-    published = _published(repository)
+    inventory = _publication_inventory(repository)
+    published = {tag for tag, prerelease in inventory.items() if not prerelease}
+    # A public prerelease is terminal, not a failed stable publication to
+    # re-promote. Stable floors and Latest still exclude it.
+    terminal_publications = set(inventory)
     tags = [tag for tag in _command(["git", "tag", "--list", "v*"]).splitlines() if tag.startswith("v") and stable_version(tag[1:])]
     released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
     head = _command(["git", "rev-parse", "origin/main"])
@@ -1030,6 +1039,7 @@ def _drive(args: argparse.Namespace) -> int:
                         raise
                 else:
                     published.discard(f"v{prior_version}")
+                    terminal_publications.discard(f"v{prior_version}")
     remaining = list(rows)
     authority: tuple[dict[str, Any], dict[str, Any], bytes] | None = None
     # Cuts whose immutable tag-ref signing is canonical and terminal: green with the mandatory authority groups positively
@@ -1039,7 +1049,7 @@ def _drive(args: argparse.Namespace) -> int:
     # owner authority and canonical native sign metadata, never a title; anything unproven keeps its existing path.
     unsignable_shas: set[str] = set()
     while True:
-        pending = pending_candidate(remaining, published, recovery_floor)
+        pending = pending_candidate(remaining, terminal_publications, recovery_floor)
         if pending is None:
             break
         _, _, _, train = pending["display_title"].split()
@@ -1102,8 +1112,21 @@ def _drive(args: argparse.Namespace) -> int:
     else:
         # Native work owns the lane; a tag only reserves a version number.
         # Unknown active runs still require reconciliation, never a competing allocation.
-        if any(row.get("status") != "completed" for row in rows):
-            raise ValueError("native release work is still active or unresolved; wait before allocation")
+        active = [row for row in rows if row.get("status") != "completed"]
+        if active:
+            # A recognized probe may wait; its label never grants allocation
+            # authority. Unknown work still refuses before any wait or effect.
+            if (getattr(args, "_native_idle_waited", False)
+                    or any(row.get("status") not in ("queued", "in_progress", "waiting")
+                           or not str(row.get("display_title", "")).startswith("rehearse ") for row in active)):
+                raise ValueError("native release work is still active or unresolved; wait before allocation")
+            _command(["sh", str(tools / "release-train.sh"), "wait-release-idle", "--repo", repository,
+                      "--timeout", "1200", "--poll", "15"], timeout=1200)
+            args._native_idle_waited = True
+            _command(["git", "fetch", "origin", "main", "--tags"])
+            # Waiting may change tags, publication and the green frontier. Select
+            # again from fresh native state, never allocate the pre-wait snapshot.
+            return _drive(args)
         if not published_floors:
             raise ValueError("no authenticated published ancestor release floor exists")
         published_tag = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))
