@@ -1,0 +1,1 @@
+- Resume the rolling release train when a main-branch rehearsal finishes, so a rehearsal that overlapped green CI cannot strand qualified production work; rehearsal artifacts still cannot authorize publication.

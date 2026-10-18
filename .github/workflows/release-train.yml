@@ -37,7 +37,11 @@ jobs:
     if: >-
       github.event.repository.private == false &&
       ((github.event_name == 'workflow_dispatch' && inputs.candidate_run_id == '') ||
-       (github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'))
+       (github.event.workflow_run.name == 'CI' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') ||
+       (github.event.workflow_run.name == 'Unpublished release candidate' &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        startsWith(github.event.workflow_run.display_title, 'rehearse ')))
     runs-on: ubuntu-latest
     timeout-minutes: 150
     concurrency:
@@ -53,6 +57,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      # A terminal rehearsal only wakes qualified-source reconciliation.
+      # Its unsigned artifacts never become production promotion authority.
       - name: Reconcile the qualified owner before waiting for a new allocation
         id: prepare
         env:
