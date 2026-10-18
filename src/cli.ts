@@ -76,6 +76,7 @@ import { proveSend } from "./send.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
+import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
@@ -532,6 +533,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			findings = [await inspectDicklesworthstone()];
 		} else if (scope === "fleet") {
 			findings = inspectFleetScope(liveFleetIo());
+		} else if (scope === "ownership") {
+			findings = inspectOwnership(liveOwnershipIo());
 		} else if (scope === "reservations") {
 			findings = [inspectReservationAge(request)];
 		} else if (scope === "github") {
