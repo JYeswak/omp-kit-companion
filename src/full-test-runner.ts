@@ -7,6 +7,7 @@ import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
+import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
@@ -15,7 +16,24 @@ export type FullStage = {
  output?: { stdout_chars: number; stdout_head?: string; stdout_tail: string; stderr_tail: string };
 };
 export type FullTestProducerArtifacts = { directory: string; stdout_path: string; stderr_path: string };
-export type FullTestProducer = { producer_rc: number | null; stdout: string; stderr: string; artifacts: FullTestProducerArtifacts | null; artifact_error: string | null };
+export type FullTestProducer = { producer_rc: number | null; stdout: string; stderr: string; artifacts: FullTestProducerArtifacts | null; artifact_error: string | null; result_ref: FullTestResultReference };
+export type FullTestCounts = { protocol: "BUN_TEST"; unit: "TEST_CASE"; pass: number; fail: number; skip: number; total: number };
+export type FullTestCitation =
+ | { kind: "git"; stream: "stdout" | "stderr"; repository: string; commit: string; path: string; bytes: number; sha256: string; bead?: string }
+ | { kind: "agent-mail"; stream: "stdout" | "stderr"; project_key: string; message_id: number; attachment: string; bytes: number; sha256: string };
+export type FullTestStreamReference = {
+ representation: "REDACTED_DECODED_UTF8"; bytes: number; sha256: string; path: string | null;
+ capture: { bytes: number; sha256: string } | null; capture_complete: boolean; identity_matches: boolean | null;
+};
+export type FullTestResultReference = {
+ schema_version: 1; source_revision: string | null; source_revision_authority: "BUILD_METADATA_NOT_EXTERNAL_QUALIFICATION";
+ argv: string[] | null; argv_sha256: string | null; argv_sha256_representation: "CANONICAL_JSON_ORIGINAL_ARGV"; argv_representation: "PRIVACY_REDACTED"; cwd: string | null;
+ execution: "NOT_OBSERVED" | "EXIT_NOT_OBSERVED" | "EXITED" | "INTERRUPTED"; producer_exit: number | null; runner_exit: number | null; signal: string | null;
+ counts: FullTestCounts | null; failing_names: string[] | null;
+ stdout: FullTestStreamReference | null; stderr: FullTestStreamReference | null;
+ capture_complete: boolean; missing_fields: string[];
+ retention: { status: "UNRETAINED" | "CITED_UNVERIFIED"; durable: false; citations: FullTestCitation[]; errors: string[] };
+};
 export type FullTestCause = { cause_code: string; cause_name: string; cause_message: string; cause_stack_head: string | null };
 export type FullTestReport = {
  status: FastTestStatus; exitCode: 0 | 1 | 3; fast: FastTestReport; fast_duration_ms: number;
@@ -77,7 +95,7 @@ export function recoverInterruptedRun(error: unknown, roots: readonly string[] =
  return { cause: describeCause(error, roots), result: { code: 3, stdout: "", stderr: "", in_flight_stage: null } };
 }
 /** `stateRoot` defaults to $XDG_STATE_HOME/omp-kit (or ~/.local/state/omp-kit) and is part of the watched operator set. */
-export type FullTestInput = FastTestInput & { stateRoot?: string };
+export type FullTestInput = FastTestInput & { stateRoot?: string; references?: unknown };
 export function currentStageReport(
  progress: NonNullable<BundledRunResult["in_flight_stage"]> | null,
  endedAt = performance.now(),
@@ -103,6 +121,201 @@ export function retainProducerOutput(repoRoot: string, output: Pick<BundledRunRe
  writeFileSync(stdout_path, output.stdout, { mode: 0o600 });
  writeFileSync(stderr_path, output.stderr, { mode: 0o600 });
  return { directory, stdout_path, stderr_path };
+}
+
+function referenceInteger(value: string): number | null {
+ if (!value.length) return null;
+ for (let index = 0; index < value.length; index++) {
+  const code = value.charCodeAt(index);
+  if (code < 48 || code > 57) return null;
+ }
+ const count = Number(value);
+ return Number.isSafeInteger(count) ? count : null;
+}
+
+function referenceRevision(value: unknown): value is string {
+ if (typeof value !== "string" || (value.length !== 40 && value.length !== 64)) return false;
+ for (let index = 0; index < value.length; index++) {
+  const code = value.charCodeAt(index);
+  if (!(code >= 48 && code <= 57) && !(code >= 97 && code <= 102)) return false;
+ }
+ return true;
+}
+
+/** Recognize one complete Bun test report; unrelated stage/proof/scenario totals are never substituted. */
+function fullTestCounts(stdout: string, stderr: string, argv: readonly string[] | null): { counts: FullTestCounts | null; failing_names: string[] | null } {
+ const executable = argv?.[0];
+ const name = executable?.slice(executable.lastIndexOf("/") + 1);
+ let command = 1;
+ while (argv?.[command]?.startsWith("-") && argv[command] !== "--") command++;
+ if ((name !== "bun" && name !== "bun.exe") || argv?.[command] !== "test") return { counts: null, failing_names: null };
+ if (!stdout.includes("bun test v") && !stderr.includes("bun test v")) return { counts: null, failing_names: null };
+ let pass: number | null = null, fail: number | null = null, skip: number | null = null, total: number | null = null;
+ let summaries = 0, namedFailures: number | null = null;
+ let ambiguous = false;
+ const names: string[] = [];
+ const inspect = (text: string): void => {
+  for (let begin = 0; begin < text.length;) {
+   const end = text.indexOf("\n", begin);
+   const line = text.slice(begin, end < 0 ? text.length : end).trim();
+   begin = end < 0 ? text.length : end + 1;
+   const space = line.indexOf(" ");
+   const number = space < 0 ? null : referenceInteger(line.slice(0, space));
+   const label = space < 0 ? "" : line.slice(space + 1);
+   if (number !== null) {
+    if (label === "pass") { if (pass !== null) ambiguous = true; else pass = number; }
+    else if (label === "fail") { if (fail !== null) ambiguous = true; else fail = number; }
+    else if (label === "skip") { if (skip !== null) ambiguous = true; else skip = number; }
+    else if (label === "tests failed:" || label === "test failed:") {
+     namedFailures = number; names.length = 0;
+    }
+   }
+   if (line.startsWith("(fail) ")) {
+    let name = line.slice(7);
+    const bracket = name.lastIndexOf(" [");
+    if (bracket >= 0 && name.endsWith("]")) {
+     const duration = name.slice(bracket + 2, -1);
+     const suffix = duration.endsWith("ms") ? 2 : duration.endsWith("s") ? 1 : 0;
+     const value = suffix ? duration.slice(0, -suffix) : "";
+     if (value.length && Number.isFinite(Number(value))) name = name.slice(0, bracket);
+    }
+    names.push(name);
+   }
+   if (line.startsWith("Ran ")) {
+    const tests = line.indexOf(" test", 4);
+    const count = tests < 0 ? null : referenceInteger(line.slice(4, tests));
+    const rest = tests < 0 ? "" : line.slice(tests);
+    const across = rest.startsWith(" tests across ") ? 14 : rest.startsWith(" test across ") ? 13 : 0;
+    const file = across ? rest.indexOf(" file", across) : -1;
+    const files = file < 0 ? null : referenceInteger(rest.slice(across, file));
+    const ending = file < 0 ? "" : rest.slice(file);
+    if (count !== null && files !== null && files > 0 && (ending.startsWith(" files.") || ending.startsWith(" file."))) {
+     total = count; summaries++;
+    }
+   }
+  }
+ };
+ inspect(stdout); inspect(stderr);
+ if (ambiguous || summaries !== 1 || pass === null || fail === null || total === null) return { counts: null, failing_names: null };
+ // Bun omits the zero-skip row. Infer zero only from its reported total, never from silence alone.
+ if (skip === null && total === pass + fail) skip = 0;
+ if (skip === null || total !== pass + fail + skip) return { counts: null, failing_names: null };
+ if ((fail === 0 && names.length > 0) || (namedFailures !== null && namedFailures !== fail)) return { counts: null, failing_names: null };
+ return {
+  counts: { protocol: "BUN_TEST", unit: "TEST_CASE", pass, fail, skip, total },
+  failing_names: fail === 0 ? [] : (namedFailures === null || namedFailures === fail) && names.length === fail ? names : null,
+ };
+}
+
+function fullTextIdentity(text: string): { bytes: number; sha256: string } {
+ return { bytes: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex") };
+}
+
+function referenceRecord(value: unknown): value is Record<string, unknown> {
+ return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function fullTestCitations(input: unknown, streams: { stdout: FullTestStreamReference | null; stderr: FullTestStreamReference | null }, redact: (text: string) => string): FullTestResultReference["retention"] {
+ const citations: FullTestCitation[] = [], errors: string[] = [];
+ let value = input;
+ if (typeof value === "string") {
+  try { value = JSON.parse(value); } catch { errors.push("Reference input is not JSON"); }
+ }
+ if (value !== undefined && value !== null && !Array.isArray(value)) errors.push("References must be an array of concrete stream citations");
+ if (Array.isArray(value)) for (const [index, row] of value.entries()) {
+  const invalid = (): void => { errors.push(`Reference ${index} is incomplete, unsupported, or differs from the captured stream identity`); };
+  if (!referenceRecord(row) || (row.stream !== "stdout" && row.stream !== "stderr")) { invalid(); continue; }
+  const stream = streams[row.stream];
+  if (!stream || row.bytes !== stream.bytes || row.sha256 !== stream.sha256) { invalid(); continue; }
+  if (row.kind === "git" && typeof row.repository === "string" && row.repository.length > 0
+   && referenceRevision(row.commit) && typeof row.path === "string" && row.path.length > 0
+   && !isAbsolute(row.path) && !row.path.split("/").includes("..") && !row.path.includes("\\")
+   && (row.bead === undefined || typeof row.bead === "string")) {
+   citations.push({ kind: "git", stream: row.stream, repository: redact(row.repository), commit: row.commit,
+    path: redact(row.path), bytes: stream.bytes, sha256: stream.sha256,
+    ...(typeof row.bead === "string" ? { bead: redact(row.bead) } : {}) });
+  } else if (row.kind === "agent-mail" && typeof row.project_key === "string" && row.project_key.length > 0
+   && typeof row.message_id === "number" && Number.isSafeInteger(row.message_id) && row.message_id > 0
+   && typeof row.attachment === "string" && row.attachment.length > 0) {
+   citations.push({ kind: "agent-mail", stream: row.stream, project_key: redact(row.project_key),
+    message_id: row.message_id, attachment: redact(row.attachment), bytes: stream.bytes, sha256: stream.sha256 });
+  } else invalid();
+ }
+ // A locator is a citation, not proof that its commit, message or attachment exists or was retrieved.
+ return { status: citations.length ? "CITED_UNVERIFIED" : "UNRETAINED", durable: false, citations, errors };
+}
+
+/**
+ * Full decoded-stream identities and actual execution facts, independent of bounded public previews.
+ * Scratch files and supplied external locators never become durable or authenticated evidence here.
+ */
+export function describeFullTestProducer(result: BundledRunResult | null, options: {
+ source_revision: string | null; roots?: readonly string[]; artifact_root?: string; references?: unknown;
+}): FullTestProducer {
+ const redact = (text: string): string => redactFullTestText(text, options.roots ?? []);
+ const stdout = result ? redact(result.stdout) : "", stderr = result ? redact(result.stderr) : "";
+ const execution = result?.execution;
+ const argv = execution?.launched && Array.isArray(execution.argv) && execution.argv.length > 0
+  && execution.argv.every((argument: unknown) => typeof argument === "string") ? execution.argv : null;
+ const cwd = execution?.launched && typeof execution.cwd === "string" && execution.cwd.length > 0 ? execution.cwd : null;
+ const signal = typeof execution?.signal === "string" ? execution.signal : null;
+ const producerExit = execution?.launched && typeof execution.exit_code === "number" && Number.isSafeInteger(execution.exit_code)
+  && execution.exit_code >= 0 && signal === null ? execution.exit_code : null;
+ let artifacts: FullTestProducerArtifacts | null = null, artifactError: string | null = null;
+ if (options.artifact_root !== undefined && result && (execution?.launched || result.stdout.length || result.stderr.length)) {
+  try { artifacts = retainProducerOutput(options.artifact_root, { stdout, stderr }); }
+  catch (error) { artifactError = redact(error instanceof Error ? error.message : String(error)).slice(0, 200); }
+ }
+ const stream = (name: "stdout" | "stderr", raw: string, text: string): FullTestStreamReference | null => {
+  if (!result || (!execution?.launched && !raw.length)) return null;
+  const identity = fullTextIdentity(raw);
+  const capture = execution?.[name === "stdout" ? "stdout_capture" : "stderr_capture"] ?? null;
+  return {
+   representation: "REDACTED_DECODED_UTF8", ...(raw === text ? identity : fullTextIdentity(text)),
+   path: artifacts?.[name === "stdout" ? "stdout_path" : "stderr_path"] ?? null, capture,
+   capture_complete: execution?.[name === "stdout" ? "stdout_complete" : "stderr_complete"] === true,
+   identity_matches: capture ? capture.bytes === identity.bytes && capture.sha256 === identity.sha256 : null,
+  };
+ };
+ const streams = { stdout: stream("stdout", result?.stdout ?? "", stdout), stderr: stream("stderr", result?.stderr ?? "", stderr) };
+ const summary = result ? fullTestCounts(result.stdout, result.stderr, argv) : { counts: null, failing_names: null };
+ const retention = fullTestCitations(options.references, streams, redact);
+ const missing: string[] = [];
+ const source = referenceRevision(options.source_revision) ? options.source_revision : null;
+ if (!source) missing.push("source_revision");
+ if (!argv) missing.push("argv");
+ if (!cwd) missing.push("cwd");
+ if (producerExit === null) missing.push("producer_exit");
+ if (execution?.interrupted) missing.push("execution.interrupted");
+ if (!summary.counts) missing.push("counts");
+ if (summary.failing_names === null) missing.push("failing_names");
+ for (const name of ["stdout", "stderr"] as const) {
+  const captured = streams[name];
+  if (!captured?.capture) missing.push(`${name}.capture`);
+  if (captured?.identity_matches !== true) missing.push(`${name}.identity`);
+  if (!captured?.capture_complete) missing.push(`${name}.eof`);
+  if (!captured?.path) missing.push(`${name}.storage`);
+ }
+ if (retention.errors.length) missing.push("citations");
+ return {
+  producer_rc: result?.code ?? null, stdout, stderr, artifacts, artifact_error: artifactError,
+  result_ref: {
+   schema_version: 1, source_revision: source, source_revision_authority: "BUILD_METADATA_NOT_EXTERNAL_QUALIFICATION",
+   argv: argv?.map(redact) ?? null,
+   argv_sha256: argv ? createHash("sha256").update(JSON.stringify(argv), "utf8").digest("hex") : null,
+   argv_sha256_representation: "CANONICAL_JSON_ORIGINAL_ARGV", argv_representation: "PRIVACY_REDACTED", cwd: cwd ? redact(cwd) : null,
+   execution: !execution?.launched ? "NOT_OBSERVED" : execution.interrupted ? "INTERRUPTED"
+    : producerExit !== null || signal !== null ? "EXITED" : "EXIT_NOT_OBSERVED",
+   producer_exit: producerExit, runner_exit: result?.code ?? null, signal,
+   counts: summary.counts, failing_names: summary.failing_names?.map(redact) ?? null, ...streams,
+   capture_complete: missing.length === 0, missing_fields: missing, retention,
+  },
+ };
+}
+
+function fullTestSourceRevision(root: string): string | null {
+ try { return validateReleaseManifest(JSON.parse(readFileSync(join(root, RELEASE_MANIFEST_NAME), "utf8"))).source_revision ?? null; }
+ catch { return null; }
 }
 
 type Snapshot = { digest: string | null; complete: boolean };
@@ -236,6 +449,9 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
 export async function runFullTest(input: FullTestInput, expectedCounts?: FastTestExpectations): Promise<FullTestReport> {
  if (![input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])].every(isAbsolute))
   throw new Error("full-test release, executable, HOME, and project paths must be absolute");
+ const sourceRevision = fullTestSourceRevision(input.root);
+ const references = input.references ?? process.env.OMP_KIT_FULL_TEST_REFERENCES;
+ const artifactRepo = process.env.OMP_KIT_CASE_CWD ?? process.env.GITHUB_WORKSPACE;
  const watchedPaths = operatorWatchedPaths(input.home, input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit"));
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
@@ -244,7 +460,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
 	const fast = expectedCounts ? await runFastTest(input, expectedCounts) : await runFastTest(input);
 	const fast_duration_ms = Math.round(performance.now() - fastStarted);
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null, duration_ms: null }])) as Record<FullStageName, FullStage>;
- const empty: FullTestProducer = { producer_rc: null, stdout: "", stderr: "", artifacts: null, artifact_error: null };
+ const empty = describeFullTestProducer(null, { source_revision: sourceRevision, references, roots: [input.root, input.home] });
  if (fast.status !== "PASS") {
   const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
   const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
@@ -287,8 +503,9 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
   home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
  const redact = (text: string) => redactFullTestText(text, privateRoots);
- const stdout = redact(result.stdout);
- const stderr = redact(result.stderr);
+ const producer = describeFullTestProducer(result, { source_revision: sourceRevision, references, roots: privateRoots,
+  ...(artifactRepo === undefined ? {} : { artifact_root: artifactRepo }) });
+ const { stdout, stderr } = producer;
  const classified = classifyLadder(result, ids, { stdout, stderr });
  const currentStage = currentStageReport(result.in_flight_stage ?? null);
  const failures = [...classified.failures];
@@ -302,19 +519,12 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   : classified.stages["e2e-plant"].status === "PASS" && !failures.includes("Planted negative control was not named RED") ? "PASS" : "FAIL";
  const guardBlocked = classified.stages["cli-crosscheck"].reason?.startsWith("omp-trust-guard FAIL-CLOSED") === true;
  const blocked = result.code === 3 || guardBlocked || (incomplete && failures.length === 1 && result.code === 0);
- const artifactRepo = process.env.OMP_KIT_CASE_CWD ?? process.env.GITHUB_WORKSPACE;
- let artifacts: FullTestProducerArtifacts | null = null;
- let artifactError: string | null = null;
- if (artifactRepo) {
-  try { artifacts = retainProducerOutput(artifactRepo, { stdout, stderr }); }
-  catch (error) { artifactError = redact(error instanceof Error ? error.message : String(error)).slice(0, 200); }
- }
  return { status: passed ? "PASS" : blocked ? "BLOCKED" : "FAIL", exitCode: passed ? 0 : blocked ? 3 : 1,
   fast, fast_duration_ms, omp_version: ompVersion, stages: classified.stages,
   current_stage: currentStage, cause, live_scenarios: classified.live_scenarios,
   proofs: { G4_live: { status: classified.live_scenarios.status === "NOT_RUN" ? "NOT_RUN" : classified.live_scenarios.status === "PASS" && plant === "PASS" ? "PASS" : "FAIL",
    expected_scenarios: ids.length, observed_scenarios: classified.live_scenarios.observed_ids.length, plant } },
-  snapshots, producer: { producer_rc: result.code, stdout: passed ? stdout : stdout.slice(-2500),
-   stderr: passed ? stderr : stderr.slice(-1000), artifacts, artifact_error: artifactError },
+  snapshots, producer: { ...producer, stdout: passed ? stdout : stdout.slice(-2500),
+   stderr: passed ? stderr : stderr.slice(-1000) },
   failures: failures.map(redact), proof_scope: "ISOLATED_FIXTURE_ONLY" };
 }

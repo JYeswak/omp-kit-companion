@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { previewKitRelease, stageKitRelease, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
+import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
+import { packageSourceRevision } from "../../scripts/package-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
@@ -27,37 +28,56 @@ const indexPath = join(output, "release-index.json");
 let asset: ReleaseAsset;
 let bytes: Buffer;
 let index: { schema_version: number; version: string; source_tag: string; assets: Record<string, ReleaseAsset> };
-function copyReleaseSource(destination: string): void {
-	mkdirSync(destination);
-	for (const directory of ["src", "installer", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "scripts", "tests/live", "plugins/omp-kit-tern"]) {
-		cpSync(join(repo, directory), join(destination, directory), { recursive: true });
-	}
-	const skillDir = join(destination, "skills", "jeff-planning-enhanced");
-	mkdirSync(skillDir, { recursive: true });
-	writeFileSync(join(skillDir, "SKILL.md"), "fixture skill\n");
-	const configDir = join(destination, "config");
-	mkdirSync(configDir, { recursive: true });
-	writeFileSync(join(configDir, "planning-score.toml"), "fixture configuration\n");
-	for (const file of ["LICENSE", "package.json", "tsconfig.json"]) {
-		const source = join(repo, file);
-		if (existsSync(source)) cpSync(source, join(destination, file));
-	}
-	const docs = join(destination, "docs");
-	mkdirSync(docs);
-	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv"])
-		cpSync(join(repo, "docs", file), join(docs, file));
-	writeFileSync(join(destination, "MANIFEST.tsv"), "stale generated manifest sentinel\n");
-	appendFileSync(join(destination, "rules", "kit-close-needs-evidence.md"), "\n<!-- package-time manifest fixture -->\n");
+let sourceRevision: string;
+
+function sourceGit(directory: string, args: string[]): Buffer {
+	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+	const result = Bun.spawnSync(["git", "-C", directory, ...args], { cwd: directory,
+		env: { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "SourceStamp",
+			GIT_AUTHOR_EMAIL: "source@example.invalid", GIT_COMMITTER_NAME: "SourceStamp", GIT_COMMITTER_EMAIL: "source@example.invalid" },
+		stdout: "pipe", stderr: "pipe" });
+	expect(result.exitCode, result.stderr.toString()).toBe(0);
+	return result.stdout;
+}
+function sourceTree(directory: string, mode: "freeze" | "digest" | "release"): string {
+	const digest = createHash("sha256");
+	const visit = (path: string, name: string): void => {
+		const stat = lstatSync(path);
+		if (stat.isDirectory()) {
+			if (mode === "release") chmodSync(path, 0o700);
+			for (const child of readdirSync(path).sort()) visit(join(path, child), `${name}/${child}`);
+			if (mode === "freeze") chmodSync(path, 0o555);
+			digest.update(JSON.stringify([name, "directory", lstatSync(path).mode]));
+		} else if (stat.isSymbolicLink()) {
+			digest.update(JSON.stringify([name, "symlink", readlinkSync(path)]));
+		} else {
+			if (mode === "freeze") chmodSync(path, stat.mode & 0o111 ? 0o555 : 0o444);
+			digest.update(JSON.stringify([name, lstatSync(path).mode,
+				createHash("sha256").update(readFileSync(path)).digest("hex")]));
+		}
+	};
+	visit(directory, "");
+	return digest.digest("hex");
 }
 
 beforeAll(() => {
-	const source = join(output, "source");
-	copyReleaseSource(source);
-	const built = Bun.spawnSync(["sh", join(source, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
-		cwd: source, env: { ...process.env, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
+	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA;
+	sourceRevision = sourceGit(repo, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
+	if (selected !== undefined) expect(sourceRevision).toBe(selected);
+	const sourceArchive = join(output, "selected-source.tar");
+	sourceGit(repo, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
+	const archived = join(output, "archived-source");
+	mkdirSync(archived);
+	const extracted = Bun.spawnSync(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe" });
+	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
+	const sourceBefore = sourceTree(archived, "freeze");
+	const built = Bun.spawnSync(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
+		cwd: output, env: { ...process.env, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
-	expect(readFileSync(join(source, "MANIFEST.tsv"), "utf8")).toBe("stale generated manifest sentinel\n");
+	expect(sourceTree(archived, "digest")).toBe(sourceBefore);
+	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
 	asset = JSON.parse(built.stdout.toString()) as ReleaseAsset;
 	bytes = readFileSync(join(output, asset.filename));
 	expect(createHash("sha256").update(bytes).digest("hex")).toBe(asset.sha256);
@@ -65,7 +85,11 @@ beforeAll(() => {
 	writeFileSync(indexPath, `${JSON.stringify(index)}\n`);
 	writeFileSync(join(output, `${asset.filename}.sigstore.json`), '{"fixture":true}\n');
 }, 30_000);
-afterAll(() => rmSync(output, { recursive: true, force: true }));
+afterAll(() => {
+	const archived = join(output, "archived-source");
+	if (existsSync(archived)) sourceTree(archived, "release");
+	rmSync(output, { recursive: true, force: true });
+});
 
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
@@ -77,13 +101,15 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		return { version: info.version, source_tag: info.release.source_tag, platform: info.platform };
 	} });
 	expect(staged.files).toContain("skills/jeff-planning-enhanced/SKILL.md");
-	expect(readFileSync(join(staged.root, "skills", "jeff-planning-enhanced", "SKILL.md"), "utf8")).toBe("fixture skill\n");
+	expect(readFileSync(join(staged.root, "skills", "jeff-planning-enhanced", "SKILL.md")))
+		.toEqual(readFileSync(join(output, "archived-source", "skills", "jeff-planning-enhanced", "SKILL.md")));
 	expect(staged.files).toContain("config/planning-score.toml");
-	expect(readFileSync(join(staged.root, "config", "planning-score.toml"), "utf8")).toBe("fixture configuration\n");
+	expect(readFileSync(join(staged.root, "config", "planning-score.toml")))
+		.toEqual(readFileSync(join(output, "archived-source", "config", "planning-score.toml")));
 	const shippedRule = readFileSync(join(staged.root, "rules", "kit-close-needs-evidence.md"));
 	const generatedRuleManifest = readFileSync(join(staged.root, "MANIFEST.tsv"), "utf8");
 	const ruleRow = generatedRuleManifest.split("\n").find(row => row.startsWith("kit-close-needs-evidence\t"));
-	expect(generatedRuleManifest).not.toContain("stale generated manifest sentinel");
+	expect(shippedRule).toEqual(readFileSync(join(output, "archived-source", "rules", "kit-close-needs-evidence.md")));
 	expect(ruleRow?.split("\t")[1]).toBe(createHash("sha256").update(shippedRule).digest("hex"));
 	expect(staged.manifest.files.find(file => file.path === "MANIFEST.tsv")?.sha256)
 		.toBe(createHash("sha256").update(generatedRuleManifest).digest("hex"));
@@ -91,6 +117,10 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(stagedPackage.version).toBe("1.2.3");
 	expect(stagedPackage.omp?.version).toBe("1.2.3");
 	expect(staged.manifest.version).toBe("1.2.3");
+	expect(staged.manifest.source_revision).toBe(sourceRevision);
+	expect(JSON.parse(readFileSync(join(staged.root, "package.json"), "utf8")).source_revision).toBe(sourceRevision);
+	expect(staged.manifest.files.find(file => file.path === "package.json")?.sha256)
+		.toBe(createHash("sha256").update(readFileSync(join(staged.root, "package.json"))).digest("hex"));
 	expect(staged.executable).toBe(join(staged.root, "bin", "omp-kit"));
 	expect(staged.manifest.files.map(file => file.path)).toEqual([...staged.manifest.files.map(file => file.path)].sort());
 	expect(lstatSync(join(staged.root, "scripts", "runtime-adapter.sh")).mode & 0o111).toBeGreaterThan(0);
@@ -117,6 +147,70 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(readdirSync(output).filter(name => name.startsWith("kit-stage-"))).toHaveLength(1);
 	expect(lstatSync(staged.executable).isFile()).toBe(true);
 	expect(existsSync(join(staged.root, "reports"))).toBe(false);
+});
+
+test("SourceStamp uses the physical source checkout and refuses dirty, missing, or unexpanded identity", () => {
+	const selected = join(output, "source-stamp-checkout");
+	mkdirSync(selected);
+	const packagePath = join(selected, "package.json");
+	const packageBytes = Buffer.from(JSON.stringify({ source_revision: "$Format:%H$" }));
+	writeFileSync(packagePath, packageBytes);
+	sourceGit(selected, ["init", "-q"]);
+	sourceGit(selected, ["add", "package.json"]);
+	sourceGit(selected, ["-c", "core.hooksPath=/dev/null", "commit", "-qm", "SourceStamp fixture"]);
+	const revision = sourceGit(selected, ["rev-parse", "HEAD"]).toString().trim();
+	expect(packageSourceRevision(selected, packageBytes)).toBe(revision);
+	expect(packageSourceRevision(selected, packageBytes, revision)).toBe(revision);
+	const originalGitDir = process.env.GIT_DIR;
+	const originalWorkTree = process.env.GIT_WORK_TREE;
+	try {
+		process.env.GIT_DIR = join(repo, ".git");
+		process.env.GIT_WORK_TREE = repo;
+		expect(packageSourceRevision(selected, packageBytes)).toBe(revision);
+	} finally {
+		if (originalGitDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = originalGitDir;
+		if (originalWorkTree === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = originalWorkTree;
+	}
+	appendFileSync(packagePath, "\n");
+	expect(packageSourceRevision(selected, readFileSync(packagePath))).toBe(null);
+	expect(packageSourceRevision(selected, readFileSync(packagePath), revision)).toBe(null);
+	sourceGit(selected, ["add", "package.json"]);
+	expect(packageSourceRevision(selected, readFileSync(packagePath))).toBe(null);
+	sourceGit(selected, ["-c", "core.hooksPath=/dev/null", "commit", "-qm", "SourceStamp changed fixture"]);
+	const changedRevision = sourceGit(selected, ["rev-parse", "HEAD"]).toString().trim();
+	expect(changedRevision).not.toBe(revision);
+	expect(packageSourceRevision(selected, readFileSync(packagePath))).toBe(changedRevision);
+	expect(packageSourceRevision(selected, readFileSync(packagePath), revision)).toBe(null);
+	expect(packageSourceRevision(selected, readFileSync(packagePath), null)).toBe(null);
+	writeFileSync(join(selected, "untracked-source.ts"), "export const changed = true;\n");
+	expect(packageSourceRevision(selected, readFileSync(packagePath))).toBe(null);
+	const nested = join(selected, "gitless-source");
+	mkdirSync(nested);
+	expect(packageSourceRevision(nested, packageBytes)).toBe(null);
+	expect(packageSourceRevision(join(output, "does-not-exist"), packageBytes)).toBe(null);
+	expect(packageSourceRevision(join(output, "does-not-exist"), packageBytes, revision)).toBe(null);
+});
+
+test("SourceStamp retains actual Git archive expansion without selecting an ancestor checkout", () => {
+	const archived = join(output, "archived-source");
+	expect(packageSourceRevision(archived, readFileSync(join(archived, "package.json")))).toBe(sourceRevision);
+	expect(packageSourceRevision(archived, readFileSync(join(archived, "package.json")), sourceRevision)).toBe(sourceRevision);
+	for (const stamp of ["$Format:%H$", "v1.2.3", "abc1234", "a".repeat(40) + "\n", "a".repeat(64) + "\n", "A".repeat(40), "x".repeat(1_000_000)]) {
+		expect(packageSourceRevision(archived, Buffer.from(JSON.stringify({ source_revision: stamp })))).toBe(null);
+	}
+});
+
+test("SourceStamp manifest field is optional for legacy archives and strict when present", () => {
+	const legacy = { schema_version: 1, version: "1.2.3", source_tag: "v1.2.3",
+		files: [{ path: "bin/omp-kit", sha256: "a".repeat(64) }] };
+	expect(Object.hasOwn(validateReleaseManifest(legacy), "source_revision")).toBe(false);
+	expect(validateReleaseManifest({ ...legacy, source_revision: null }).source_revision).toBe(null);
+	expect(validateReleaseManifest({ ...legacy, source_revision: sourceRevision }).source_revision).toBe(sourceRevision);
+	expect(validateReleaseManifest({ ...legacy, source_revision: "b".repeat(64) }).source_revision).toBe("b".repeat(64));
+	for (const source_revision of [undefined, 123, "", "main", "a".repeat(39), "a".repeat(41), "a".repeat(40) + "\n", "f".repeat(1_000_000)]) {
+		expect(() => validateReleaseManifest({ ...legacy, source_revision })).toThrow("INVALID_RELEASE_MANIFEST");
+	}
+	expect(() => validateReleaseManifest({ ...legacy, source_revision: sourceRevision, extra: true })).toThrow("INVALID_RELEASE_MANIFEST");
 });
 
 function installCandidate(name: string): { home: string; installedRoot: string; installedBinary: string } {

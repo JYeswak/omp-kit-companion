@@ -9,7 +9,7 @@ export const RELEASE_BINARY_NAME = "bin/omp-kit";
 export type ReleasePlatform = { os: "darwin" | "linux"; arch: "arm64" | "x64"; libc: "none" | "gnu" | "musl" };
 export type ReleaseAsset = ReleasePlatform & { filename: string; sha256: string; manifest_sha256: string };
 export type ReleaseIndex = { schema_version: 1; version: string; source_tag: string; assets: Record<string, ReleaseAsset> };
-export type ReleaseManifest = { schema_version: 1; version: string; source_tag: string; files: { path: string; sha256: string }[] };
+export type ReleaseManifest = { schema_version: 1; version: string; source_tag: string; source_revision?: string | null; files: { path: string; sha256: string }[] };
 export type KitReleasePlan = {
  exitCode: 0; status: "UPDATE_AVAILABLE" | "CURRENT"; currentVersion: string; currentSha256?: string; version: string; sourceTag: string;
  asset: ReleaseAsset; platform: ReleasePlatform; indexSha256: string; provenance: "INTEGRITY_ONLY";
@@ -96,7 +96,11 @@ export function parseReleaseIndexJson(raw: string): ReleaseIndex {
 }
 
 export function validateReleaseManifest(value: unknown): ReleaseManifest {
- if (!record(value) || Object.keys(value).sort().join(",") !== "files,schema_version,source_tag,version" || value.schema_version !== RELEASE_SCHEMA_VERSION || !version(value.version) || value.source_tag !== `v${value.version}` || !Array.isArray(value.files) || !value.files.length) fail("INVALID_RELEASE_MANIFEST");
+ if (!record(value)) fail("INVALID_RELEASE_MANIFEST");
+ const keys = Object.keys(value).sort().join(",");
+ if ((keys !== "files,schema_version,source_tag,version" && keys !== "files,schema_version,source_revision,source_tag,version") || value.schema_version !== RELEASE_SCHEMA_VERSION || !version(value.version) || value.source_tag !== `v${value.version}` || !Array.isArray(value.files) || !value.files.length) fail("INVALID_RELEASE_MANIFEST");
+ if (Object.hasOwn(value, "source_revision") && value.source_revision !== null
+  && (typeof value.source_revision !== "string" || (value.source_revision.length !== 40 && value.source_revision.length !== 64) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.source_revision))) fail("INVALID_RELEASE_MANIFEST");
  let previous = "";
  for (const entry of value.files) {
   if (!record(entry) || Object.keys(entry).sort().join(",") !== "path,sha256" || !safeName(entry.path) || entry.path === RELEASE_MANIFEST_NAME || !digest(entry.sha256) || entry.path <= previous) fail("INVALID_RELEASE_MANIFEST");

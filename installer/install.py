@@ -148,10 +148,18 @@ def archive_members(path, asset):
 
 
 def verify_manifest(members, manifest, version):
-    if (not isinstance(manifest, dict) or set(manifest) != {"schema_version", "version", "source_tag", "files"}
+    if not isinstance(manifest, dict):
+        refuse("release manifest identity mismatch")
+    legacy_keys = {"schema_version", "version", "source_tag", "files"}
+    if (set(manifest) not in (legacy_keys, legacy_keys | {"source_revision"})
             or manifest["schema_version"] != 1 or manifest["version"] != version
             or manifest["source_tag"] != "v" + version or not isinstance(manifest["files"], list)):
         refuse("release manifest identity mismatch")
+    source_revision = manifest.get("source_revision")
+    if source_revision is not None and (
+            not isinstance(source_revision, str) or len(source_revision) not in (40, 64)
+            or any(char not in "0123456789abcdef" for char in source_revision)):
+        refuse("release manifest source revision invalid")
     expected = {}
     for entry in manifest["files"]:
         if (not isinstance(entry, dict) or set(entry) != {"path", "sha256"}

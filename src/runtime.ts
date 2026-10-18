@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,11 +9,27 @@ import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity
 import { parseOwnerFile } from "./scratch.ts";
 import { ompSourceCacheRoot } from "./omp-source-cache.ts";
 
+export type BundledRunExecution = {
+	argv: readonly string[];
+	cwd: string;
+	launched: boolean;
+	exit_code: number | null;
+	signal: string | null;
+	interrupted: boolean;
+	/** Successful pipe EOF, independent of producer success or runner interruption. */
+	stdout_complete: boolean;
+	stderr_complete: boolean;
+	/** Identities of the available decoded UTF-8 text, not the original pipe bytes. */
+	stdout_capture: { bytes: number; sha256: string };
+	stderr_capture: { bytes: number; sha256: string };
+};
+
 export interface BundledRunResult {
 	code: number;
 	stdout: string;
 	stderr: string;
 	in_flight_stage?: { name: string; started_at: number; started_at_ms: number } | null;
+	execution?: BundledRunExecution;
 }
 export class BundledRunInterruptedError extends Error {
 	constructor(readonly originalCause: unknown, readonly partialResult: BundledRunResult) {
@@ -151,7 +168,8 @@ async function runIsolated(
 	try {
 		for (const directory of PRIVATE_DIRS) mkdirSync(join(privateRoot, directory), { mode: 0o700 });
 		const ownsGroup = process.platform === "darwin" || process.platform === "linux";
-		const child = Bun.spawn(shell ? ["/bin/sh", absoluteScript, ...args] : [realExecutable, absoluteScript, ...args], {
+		const argv = shell ? ["/bin/sh", absoluteScript, ...args] : [realExecutable, absoluteScript, ...args];
+		const child = Bun.spawn(argv, {
 			cwd: realRoot,
 			env: { ...sanitizedEnv(identity, process.env, privateRoot), ...(shell ? {} : { BUN_BE_BUN: "1" }) },
 			stdout: "pipe",
@@ -161,8 +179,10 @@ async function runIsolated(
 		let inFlight: BundledRunResult["in_flight_stage"] = null;
 		let partialStdout = "";
 		let partialStderr = "";
+		let stdoutComplete = false;
+		let stderrComplete = false;
 		const streams: Readable[] = [];
-		const readText = async (input: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void, onLine?: (line: string) => void): Promise<void> => {
+		const readText = async (input: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void, onComplete: () => void, onLine?: (line: string) => void): Promise<void> => {
 			const stream = Readable.fromWeb(input);
 			streams.push(stream);
 			const drained = finished(stream);
@@ -182,8 +202,9 @@ async function runIsolated(
 			});
 			await drained;
 			if (pending) onLine?.(pending.endsWith("\r") ? pending.slice(0, -1) : pending);
+			onComplete();
 		};
-		const stdout = readText(child.stdout, chunk => { partialStdout += chunk; }, line => {
+		const stdout = readText(child.stdout, chunk => { partialStdout += chunk; }, () => { stdoutComplete = true; }, line => {
 			const prefix = "OMP_KIT_STAGE_START name=";
 			if (line.startsWith(prefix)) {
 				const name = line.slice(prefix.length);
@@ -199,10 +220,23 @@ async function runIsolated(
 			const name = completed.split(" ")[0];
 			if (inFlight?.name === name) inFlight = null;
 		});
-		const stderr = readText(child.stderr, chunk => { partialStderr += chunk; });
+		const stderr = readText(child.stderr, chunk => { partialStderr += chunk; }, () => { stderrComplete = true; });
 		const drained = Promise.all([stdout, stderr]);
 		let childExited = false;
-		const exited = child.exited.then(code => { childExited = true; return code; });
+		let actualExitCode: number | null = null;
+		let actualSignal: string | null = null;
+		const exited = child.exited.then(code => {
+			childExited = true;
+			actualSignal = child.signalCode ?? null;
+			actualExitCode = actualSignal === null ? code : null;
+			return code;
+		});
+		const captureExecution = (interrupted: boolean): BundledRunExecution => ({
+			argv, cwd: realRoot, launched: true, exit_code: actualExitCode, signal: actualSignal, interrupted,
+			stdout_complete: stdoutComplete, stderr_complete: stderrComplete,
+			stdout_capture: { bytes: Buffer.byteLength(partialStdout, "utf8"), sha256: createHash("sha256").update(partialStdout, "utf8").digest("hex") },
+			stderr_capture: { bytes: Buffer.byteLength(partialStderr, "utf8"), sha256: createHash("sha256").update(partialStderr, "utf8").digest("hex") },
+		});
 		let cleanup: Promise<void> | undefined;
 		const signal = (name: "SIGTERM" | "SIGKILL") => {
 			// The detached group is created above, never discovered from other processes.
@@ -241,12 +275,12 @@ async function runIsolated(
 				if (groupAlive) await stop();
 			}
 			await Promise.race([drained, interrupted]);
-			return { code, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight };
+			return { code, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(false) };
 		} catch (error) {
 			await stop();
 			if (!cleanupPrivateRoot) partialStderr += "\nIsolated child exit unconfirmed; private runtime scratch retained.\n";
 			throw new BundledRunInterruptedError(error, {
-				code: 3, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight,
+				code: 3, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(true),
 			});
 		} finally {
 			process.off("SIGTERM", onTerm);

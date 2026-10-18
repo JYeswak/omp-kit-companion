@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from "node:crypto";
-import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
@@ -69,10 +69,10 @@ function writeAll(fd: number, bytes: Uint8Array): void {
  * STAMP1 (ompkit-fp72.3): stamp the release version into the archived
  * package.json (.version and, when present, .omp.version) so the archive
  * carries the version it was built for, independent of the source tree's
- * working version. Key order and other fields are preserved; only the two
- * version values change. Refuses an unparseable package.json fail-closed.
+ * working version. Preserve other metadata and bind source_revision to the
+ * selected build source (or null). Refuses unparseable package.json fail-closed.
  */
-function stampPackageVersion(source: Buffer, version: string): Buffer {
+function stampPackageVersion(source: Buffer, version: string, sourceRevision: string | null): Buffer {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(source.toString("utf8"));
@@ -83,6 +83,7 @@ function stampPackageVersion(source: Buffer, version: string): Buffer {
 	const stamped: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(parsed)) stamped[key] = value;
 	stamped.version = version;
+	stamped.source_revision = sourceRevision;
 	const omp = stamped.omp;
 	if (omp && typeof omp === "object" && !Array.isArray(omp)) {
 		const ompOut: Record<string, unknown> = {};
@@ -91,6 +92,37 @@ function stampPackageVersion(source: Buffer, version: string): Buffer {
 		stamped.omp = ompOut;
 	}
 	return Buffer.from(JSON.stringify(stamped, null, 2) + "\n");
+}
+
+/**
+ * Build-source metadata only, not authenticated provenance. An archive's expanded
+ * export-subst stamp survives without Git; a checkout must have its own clean HEAD.
+ * Never discover an ancestor repository or let inherited GIT_* select another tree.
+ * A final observation may only retain the initially observed revision, never upgrade it.
+ */
+export function packageSourceRevision(sourceRoot: string, sourcePackage: Uint8Array, initialRevision?: string | null): string | null {
+ if (initialRevision === null) return null;
+ try {
+  const physicalRoot = realpathSync(sourceRoot);
+  if (!existsSync(join(physicalRoot, ".git"))) {
+   const parsed: unknown = JSON.parse(Buffer.from(sourcePackage).toString("utf8"));
+   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("source_revision" in parsed)) return null;
+   return typeof parsed.source_revision === "string" && (parsed.source_revision.length === 40 || parsed.source_revision.length === 64) && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(parsed.source_revision)
+    && (initialRevision === undefined || initialRevision === parsed.source_revision) ? parsed.source_revision : null;
+  }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const git = (args: string[]): string | null => {
+   const child = Bun.spawnSync(["git", "-C", physicalRoot, ...args], { cwd: physicalRoot, env, stdout: "pipe", stderr: "pipe" });
+   return child.exitCode === 0 ? child.stdout.toString().trim() : null;
+  };
+  const top = git(["rev-parse", "--show-toplevel"]);
+  if (!top || realpathSync(top) !== physicalRoot || git(["status", "--porcelain=v1", "--untracked-files=all"]) !== "") return null;
+  const revision = git(["rev-parse", "--verify", "HEAD"]);
+  return revision && (revision.length === 40 || revision.length === 64) && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision)
+   && (initialRevision === undefined || initialRevision === revision) ? revision : null;
+ } catch {
+  return null;
+ }
 }
 
 function safeSource(name: string): Buffer {
@@ -140,6 +172,8 @@ function argumentsOf(args: string[]) {
 }
 async function run(): Promise<void> {
 	const { version, key, out } = argumentsOf(process.argv.slice(2));
+	const sourcePackage = safeSource("package.json");
+	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
 	const filename = `omp-kit-v${version}-${key}.tar`;
 	const output = join(out, filename);
 	try { lstatSync(output); fail("RELEASE_ARCHIVE_EXISTS"); } catch (error) {
@@ -175,10 +209,16 @@ async function run(): Promise<void> {
 				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
 				if (!bundled.success || bundled.outputs.length !== 1) fail(BUNDLE_ERRORS[name]!);
 				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
-			} else if (name === "package.json") content.set(name, stampPackageVersion(safeSource(name), version));
+			} else if (name === "package.json") continue;
 			else content.set(name, safeSource(name));
 		}
-		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
+		// Reobserve after compilation and resource reads. This detects an observed
+		// changed/dirty HEAD, not transient edit-and-revert or authenticated source binding.
+		const finalSourcePackage = safeSource("package.json");
+		const source_revision = finalSourcePackage.equals(sourcePackage)
+			? packageSourceRevision(root, finalSourcePackage, initialSourceRevision) : null;
+		content.set("package.json", stampPackageVersion(sourcePackage, version, source_revision));
+		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`, source_revision,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);
 		validateReleaseManifest(JSON.parse(manifest.toString("utf8")));
 		content.set(RELEASE_MANIFEST_NAME, manifest);
@@ -216,7 +256,9 @@ function safeCompiled(binary: string): Buffer {
 	if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail("UNSAFE_COMPILED_BINARY");
 	return readFileSync(binary);
 }
-try { await run(); } catch (error) {
-	process.stderr.write(`package-release: ${error instanceof Error ? error.message : String(error)}\n`);
-	process.exitCode = 1;
+if (import.meta.main) {
+ try { await run(); } catch (error) {
+  process.stderr.write(`package-release: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+ }
 }

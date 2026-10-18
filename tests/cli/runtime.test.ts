@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,6 +107,70 @@ test("native stage progress opt-in survives child environment sanitization", () 
 		.toBeUndefined();
 });
 
+for (const termination of ["nonzero", "signal"] as const) {
+	test(`runtime shell ${termination} reports executed argv, canonical cwd, real exit, and EOF capture identities`, async () => {
+		const { base, admission } = ownedRuntimeFixture();
+		const release = join(base, "release");
+		const executable = join(release, "bin", "omp-kit");
+		const omp = createOmp(join(base, "omp"), "v1");
+		for (const directory of ["release/bin", "release/scripts", "operator-home", "tmp"]) mkdirSync(join(base, directory), { recursive: true });
+		writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+		const producer = join(release, "scripts", "actual-ladder.sh");
+		const producerArgs = ["argument with spaces", "utf8-☃", ""];
+		const fullStdout = "complete available runtime output ☃ ".repeat(200);
+		const expectedStderr = termination === "nonzero" ? "complete diagnostic ☃ ".repeat(100) + "without newline" : "";
+		writeFileSync(producer, [
+			`printf '%s\\n' "$PWD" "$0" "$@"`,
+			`printf '%s\\n' ${JSON.stringify(fullStdout)}`,
+			`printf '%s' ${JSON.stringify(expectedStderr)} >&2`,
+			termination === "nonzero" ? "exit 23" : `kill -TERM "$$"`,
+		].join("\n"));
+		symlinkSync(producer, join(release, "scripts", "ladder.sh"));
+		const releaseAlias = join(base, "release-alias");
+		symlinkSync(release, releaseAlias, "dir");
+		const runner = `
+			import { runIsolatedShell } from ${JSON.stringify(join(REPO_ROOT, "src/runtime.ts"))};
+			const result = await runIsolatedShell("scripts/ladder.sh", ${JSON.stringify(producerArgs)}, ${JSON.stringify(releaseAlias)}, ${JSON.stringify(executable)});
+			process.stdout.write(JSON.stringify(result));
+		`;
+		const child = Bun.spawn([process.execPath, "--eval", runner], {
+			cwd: base, stdout: "pipe", stderr: "pipe",
+			env: {
+				PATH: [dirname(omp.launcher), dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+				HOME: join(base, "operator-home"), TMPDIR: join(base, "tmp"),
+				OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+				...admission,
+			},
+		});
+		const stdout = new Response(child.stdout).text();
+		const stderr = new Response(child.stderr).text();
+		// Watchdog only: real OS-process completion is event-driven; fake time cannot stop a hung child.
+		let timer: NodeJS.Timeout | undefined;
+		const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("runtime execution evidence deadline")), 6000); });
+		try {
+			const [code, output, diagnostic] = await Promise.race([Promise.all([child.exited, stdout, stderr]), deadline]);
+			expect(code, diagnostic).toBe(0);
+			const result = JSON.parse(output);
+			const expectedStdout = [realpathSync(release), realpathSync(producer), ...producerArgs, fullStdout].join("\n") + "\n";
+			expect(result.stdout).toBe(expectedStdout);
+			expect(result.stderr).toBe(expectedStderr);
+			if (termination === "nonzero") expect(result.code).toBe(23);
+			else expect(result.code).not.toBe(0);
+			expect(result.execution).toEqual({
+				argv: ["/bin/sh", realpathSync(producer), ...producerArgs], cwd: realpathSync(release), launched: true,
+				exit_code: termination === "nonzero" ? 23 : null, signal: termination === "nonzero" ? null : "SIGTERM",
+				interrupted: false, stdout_complete: true, stderr_complete: true,
+				stdout_capture: { bytes: Buffer.byteLength(expectedStdout), sha256: createHash("sha256").update(expectedStdout).digest("hex") },
+				stderr_capture: { bytes: Buffer.byteLength(expectedStderr), sha256: createHash("sha256").update(expectedStderr).digest("hex") },
+			});
+		} finally {
+			clearTimeout(timer);
+			if (child.exitCode === null) child.kill("SIGKILL");
+			await Promise.allSettled([child.exited, stdout, stderr]);
+		}
+	}, 12_000);
+}
+
 for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) {
 	test(`isolated ${interruption} drains real stage evidence and stops its owned descendants before scratch cleanup`, async () => {
 		const { base, admission } = ownedRuntimeFixture();
@@ -188,6 +253,21 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 			const [code, output, diagnostic] = await Promise.race([Promise.all([child.exited, stdout, stderr]), deadline]);
 			expect(code, diagnostic).toBe(interruption === "leader-exit" ? 7 : 3);
 			const report = JSON.parse(output);
+			expect(report.result.execution).toMatchObject({
+				argv: ["/bin/sh", realpathSync(join(release, "scripts", "ladder.sh")), base],
+				cwd: realpathSync(release), launched: true,
+				exit_code: interruption === "leader-exit" ? 7 : 0, signal: null,
+				interrupted: interruption !== "leader-exit",
+				stdout_complete: interruption !== "stream-error", stderr_complete: true,
+			});
+			expect(report.result.execution.stdout_capture).toEqual({
+				bytes: Buffer.byteLength(report.result.stdout),
+				sha256: createHash("sha256").update(report.result.stdout).digest("hex"),
+			});
+			expect(report.result.execution.stderr_capture).toEqual({
+				bytes: Buffer.byteLength(report.result.stderr),
+				sha256: createHash("sha256").update(report.result.stderr).digest("hex"),
+			});
 			if (interruption !== "leader-exit") {
 				expect(report.cause.cause_code).toBe(interruption === "stream-error" ? "STREAM_READ_FAILED" : "SIGTERM");
 				if (interruption === "stream-error") {

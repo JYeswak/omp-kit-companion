@@ -1,6 +1,7 @@
 {
   "name": "omp-kit-companion",
   "version": "0.2.43",
+  "source_revision": "$Format:%H$",
   "description": "Tested stream-triggered rules and a guarded CLI for an existing OMP installation",
   "license": "MIT",
   "omp": {

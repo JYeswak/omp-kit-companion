@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BundledRunInterruptedError } from "../../src/runtime.ts";
-import { classifyLadder, currentStageReport, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
+import { classifyLadder, currentStageReport, describeFullTestProducer, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
 const successful = names.map(name => `GREEN ${name} producer_rc=0 duration_ms=120`).join("\n");
@@ -280,4 +280,171 @@ test("fail-closed trust guard marks cli-crosscheck NOT_RUN instead of a matcher 
  const ordinaryExit = sample(`${earlier}\nRED   cli-crosscheck producer_rc=3`, 1);
  expect(ordinaryExit.stages["cli-crosscheck"].status).toBe("FAIL");
  expect(ordinaryExit.failures).toContain("Stage cli-crosscheck returned producer_rc=3");
+});
+
+async function referenceProducerFixture() {
+ const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-result-reference-")));
+ const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+ for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_CONFIG_GLOBAL") delete env[key];
+ const git = (...args: string[]): string => {
+  const child = Bun.spawnSync(["git", "-C", root, "-c", "core.hooksPath=/dev/null", ...args], { env, stdout: "pipe", stderr: "pipe" });
+  if (child.exitCode !== 0) throw new Error(child.stderr.toString());
+  return child.stdout.toString().trim();
+ };
+ await Bun.write(join(root, ".owner"), `pid=${process.pid}\nlabel=result-reference\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
+ await Bun.write(join(root, ".gitignore"), "/.owner\n/*.txt\n/var/\n");
+ const file = join(root, "cases.test.ts");
+ await Bun.write(file, [
+  'import { expect, test } from "bun:test";',
+  'import { readFileSync, writeFileSync } from "node:fs";',
+  'test("real producer writes π", () => {',
+  ' const path = new URL("./pass.txt", import.meta.url);',
+  ' writeFileSync(path, "π".repeat(5000));',
+  ' const actual = readFileSync(path, "utf8");',
+  ' expect(actual).toHaveLength(5000); console.log(actual);',
+  '});',
+  'test("real producer detects wrong bytes", () => {',
+  ' const path = new URL("./fail.txt", import.meta.url);',
+  ' writeFileSync(path, "observed");',
+  ' expect(readFileSync(path, "utf8")).toBe("required");',
+  '});',
+ ].join("\n"));
+ git("init", "--quiet", "--initial-branch=main");
+ git("add", "--", ".gitignore", "cases.test.ts");
+ git("-c", "user.name=ResultFixture", "-c", "user.email=result@example.invalid", "commit", "--only", "-qm", "producer source", "--", ".gitignore", "cases.test.ts");
+ const source = git("rev-parse", "HEAD");
+ const argv = [process.execPath, "--no-env-file", "test", "--config", "/dev/null", file];
+ const child = Bun.spawnSync(argv, { cwd: root, env, stdout: "pipe", stderr: "pipe" });
+ const stdout = child.stdout.toString(), stderr = child.stderr.toString();
+ const identity = (text: string) => ({ bytes: Buffer.byteLength(text), sha256: new Bun.CryptoHasher("sha256").update(text).digest("hex") });
+ const result = { code: child.exitCode, stdout, stderr, execution: {
+  argv, cwd: root, launched: true, exit_code: child.signalCode ? null : child.exitCode, signal: child.signalCode ?? null,
+  interrupted: false, stdout_complete: true, stderr_complete: true,
+  stdout_capture: identity(stdout), stderr_capture: identity(stderr),
+ } };
+ return { root, git, source, result };
+}
+
+test("real failed producer reference binds full Unicode streams, actual counts and names without durable scratch credit", async () => {
+ const fixture = await referenceProducerFixture();
+ try {
+  expect(fixture.result.code).toBe(1);
+  const producer = describeFullTestProducer(fixture.result, { source_revision: fixture.source, roots: [fixture.root], artifact_root: fixture.root });
+  const reference = producer.result_ref;
+  expect(reference.missing_fields).toEqual([]);
+  expect(reference.capture_complete).toBe(true);
+  expect(reference.source_revision).toBe(fixture.source);
+  expect(reference.producer_exit).toBe(1);
+  expect(reference.counts).toEqual({ protocol: "BUN_TEST", unit: "TEST_CASE", pass: 1, fail: 1, skip: 0, total: 2 });
+  expect(reference.failing_names).toEqual(["real producer detects wrong bytes"]);
+  expect(reference.argv_sha256).toBe(new Bun.CryptoHasher("sha256").update(JSON.stringify(fixture.result.execution.argv)).digest("hex"));
+  expect(reference.retention).toMatchObject({ status: "UNRETAINED", durable: false, citations: [] });
+  for (const name of ["stdout", "stderr"] as const) {
+   const stream = reference[name]!;
+   const stored = readFileSync(stream.path!);
+   expect(stored.toString()).toBe(producer[name]);
+   expect(stream.bytes).toBe(stored.byteLength);
+   expect(stream.sha256).toBe(new Bun.CryptoHasher("sha256").update(stored).digest("hex"));
+   expect(stream.identity_matches).toBe(true);
+   expect(stream.capture_complete).toBe(true);
+  }
+  expect(reference.stdout!.bytes).toBeGreaterThan(10_000);
+  expect(reference.stdout!.bytes).toBeGreaterThan(producer.stdout.length);
+ } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("missing producer facts and truncated available text cannot become a complete capture", async () => {
+ const fixture = await referenceProducerFixture();
+ try {
+  const options = { source_revision: fixture.source, artifact_root: fixture.root };
+  for (const [field, missing] of [["argv", "argv"], ["exit_code", "producer_exit"], ["cwd", "cwd"]] as const) {
+   const execution = { ...fixture.result.execution };
+   Reflect.deleteProperty(execution, field);
+   const reference = describeFullTestProducer({ ...fixture.result, execution }, options).result_ref;
+   expect(reference.capture_complete).toBe(false);
+   expect(reference.missing_fields).toContain(missing);
+  }
+  const variants = [
+   { name: "source_revision", result: fixture.result, options: { ...options, source_revision: null } },
+   { name: "argv", result: { ...fixture.result, execution: { ...fixture.result.execution, argv: [] } }, options },
+   { name: "producer_exit", result: { ...fixture.result, execution: { ...fixture.result.execution, exit_code: null } }, options },
+   { name: "counts", result: { ...fixture.result, stderr: fixture.result.stderr.slice(0, fixture.result.stderr.lastIndexOf("Ran ")) }, options },
+   { name: "failing_names", result: { ...fixture.result, stderr: fixture.result.stderr.split("\n").filter(line => !line.trim().startsWith("(fail) ")).join("\n") }, options },
+   { name: "stdout.identity", result: { ...fixture.result, stdout: fixture.result.stdout.slice(-2500) }, options },
+   { name: "stderr.eof", result: { ...fixture.result, execution: { ...fixture.result.execution, stderr_complete: false } }, options },
+   { name: "execution.interrupted", result: { ...fixture.result, execution: { ...fixture.result.execution, interrupted: true } }, options },
+  ];
+  for (const variant of variants) {
+   const reference = describeFullTestProducer(variant.result, variant.options).result_ref;
+   expect(reference.capture_complete).toBe(false);
+   expect(reference.missing_fields).toContain(variant.name);
+   expect(reference.retention.durable).toBe(false);
+  }
+  const unknown = describeFullTestProducer({ code: 3, stdout: "", stderr: "" }, options).result_ref;
+  expect(unknown.execution).toBe("NOT_OBSERVED");
+  expect(unknown.producer_exit).toBe(null);
+  expect(unknown.stdout).toBe(null);
+  expect(unknown.stderr).toBe(null);
+  expect(unknown.capture_complete).toBe(false);
+ } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("concrete existing git citations preserve logs while bare, invented and mismatched references never authorize retention", async () => {
+ const fixture = await referenceProducerFixture();
+ try {
+  const options = { source_revision: fixture.source, artifact_root: fixture.root };
+  const original = describeFullTestProducer(fixture.result, options);
+  await Bun.write(join(fixture.root, "retained.stdout"), original.stdout);
+  fixture.git("add", "--", "retained.stdout");
+  fixture.git("-c", "user.name=ResultFixture", "-c", "user.email=result@example.invalid", "commit", "--only", "-qm", "existing stream", "--", "retained.stdout");
+  const commit = fixture.git("rev-parse", "HEAD");
+  const stream = original.result_ref.stdout!;
+  const citation = { kind: "git", stream: "stdout", repository: fixture.root, commit, path: "retained.stdout", bytes: stream.bytes, sha256: stream.sha256 };
+  const cited = describeFullTestProducer(fixture.result, { ...options, references: [citation] });
+  expect(cited.result_ref.retention).toEqual({ status: "CITED_UNVERIFIED", durable: false, citations: [citation], errors: [] });
+  expect(readFileSync(join(fixture.root, "retained.stdout"), "utf8")).toBe(original.stdout);
+  expect(cited.stdout).toBe(original.stdout);
+  const absentCommit = describeFullTestProducer(fixture.result, { ...options, references: [{ ...citation, commit: "f".repeat(40), path: "absent.stdout" }] });
+  expect(absentCommit.result_ref.retention.status).toBe("CITED_UNVERIFIED");
+  expect(absentCommit.result_ref.retention.durable).toBe(false);
+  const inventedMessage = describeFullTestProducer(fixture.result, { ...options, references: [{
+   kind: "agent-mail", stream: "stdout", project_key: fixture.root, message_id: Number.MAX_SAFE_INTEGER,
+   attachment: "unretrieved.stdout", bytes: stream.bytes, sha256: stream.sha256,
+  }] });
+  expect(inventedMessage.result_ref.retention.status).toBe("CITED_UNVERIFIED");
+  expect(inventedMessage.result_ref.retention.durable).toBe(false);
+  for (const references of [[{ kind: "agent-mail", message_id: Number.MAX_SAFE_INTEGER }], [{ ...citation, bytes: stream.bytes - 1 }], [{ ...citation, commit: "not-a-revision" }]]) {
+   const reference = describeFullTestProducer(fixture.result, { ...options, references }).result_ref;
+   expect(reference.capture_complete).toBe(false);
+   expect(reference.missing_fields).toContain("citations");
+   expect(reference.retention.status).toBe("UNRETAINED");
+   expect(reference.retention.durable).toBe(false);
+  }
+ } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("contradictory counters and a nested Bun report cannot become whole-producer test totals", async () => {
+ const fixture = await referenceProducerFixture();
+ try {
+  const options = { source_revision: fixture.source, artifact_root: fixture.root };
+  const footer = fixture.result.stderr.lastIndexOf("Ran ");
+  const poisoned = fixture.result.stderr.slice(0, footer) + "0 pass\n0 fail\nRan 0 tests across 1 file. [1.00ms]\n";
+  const duplicate = fixture.result.stderr.replace(" 1 pass\n", " 1 pass\n 1 pass\n");
+  const contradiction = fixture.result.stderr.replace(" 1 fail\n", " 0 fail\n").replace("Ran 2 tests", "Ran 1 test");
+  for (const stderr of [poisoned, duplicate, contradiction]) {
+   const result = { ...fixture.result, stderr, execution: { ...fixture.result.execution,
+    stderr_capture: { bytes: Buffer.byteLength(stderr), sha256: new Bun.CryptoHasher("sha256").update(stderr).digest("hex") },
+   } };
+   const reference = describeFullTestProducer(result, options).result_ref;
+   expect(reference.capture_complete).toBe(false);
+   expect(reference.missing_fields).toContain("counts");
+   expect(reference.counts).toBe(null);
+  }
+  const nested = describeFullTestProducer({ ...fixture.result, execution: { ...fixture.result.execution,
+   argv: ["/bin/sh", join(fixture.root, "ladder.sh")],
+  } }, options).result_ref;
+  expect(nested.capture_complete).toBe(false);
+  expect(nested.counts).toBe(null);
+  expect(nested.missing_fields).toContain("counts");
+ } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 });

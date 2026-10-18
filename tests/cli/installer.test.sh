@@ -11,6 +11,45 @@ python3 - "$WORK/help.log" <<'PY'
 import sys
 assert 'Usage: install.sh' in open(sys.argv[1]).read()
 PY
+# Semantic verifier fixtures, not signature or external source qualification.
+python3 -B - "$ROOT/installer/install.py" <<'PY'
+import hashlib
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("installer_source_stamp", sys.argv[1])
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+binary = b"source stamp fixture bytes\n"
+members = {"bin/omp-kit": ("file", binary), "release-manifest.json": ("file", b"fixture")}
+legacy = {"schema_version": 1, "version": "1.2.3", "source_tag": "v1.2.3",
+          "files": [{"path": "bin/omp-kit", "sha256": hashlib.sha256(binary).hexdigest()}]}
+installer.verify_manifest(members, legacy, "1.2.3")
+for revision in (None, "a" * 40, "b" * 64):
+    installer.verify_manifest(members, dict(legacy, source_revision=revision), "1.2.3")
+for revision in (False, 123, "", "main", "abc1234", "a" * 39, "b" * 65,
+                 "A" * 40, "a" * 40 + "\n", "a" * 63 + "\n", "x" * 1_000_000):
+    try:
+        installer.verify_manifest(members, dict(legacy, source_revision=revision), "1.2.3")
+    except ValueError as error:
+        assert str(error) == "release manifest source revision invalid", error
+    else:
+        raise AssertionError("invalid source revision accepted")
+for manifest in (dict(legacy, extra=True), dict(legacy, source_revision="a" * 40, extra=True)):
+    try:
+        installer.verify_manifest(members, manifest, "1.2.3")
+    except ValueError as error:
+        assert str(error) == "release manifest identity mismatch", error
+    else:
+        raise AssertionError("unknown manifest field accepted")
+try:
+    installer.verify_manifest(dict(members, **{"bin/omp-kit": ("file", b"changed")}),
+                              dict(legacy, source_revision="a" * 40), "1.2.3")
+except ValueError as error:
+    assert str(error) == "internal file SHA-256 mismatch: bin/omp-kit", error
+else:
+    raise AssertionError("source revision bypassed byte verification")
+PY
 ASSET=$(TMPDIR="$WORK" "$ROOT/scripts/package-release.sh" --version 1.2.3 --platform "$(/usr/bin/uname -s | tr '[:upper:]' '[:lower:]')-$(/usr/bin/uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')-$(if [ "$(/usr/bin/uname -s)" = Darwin ]; then printf none; else printf gnu; fi)" --out "$WORK/assets")
 printf '%s\n' "$ASSET" > "$WORK/asset.json"
 python3 - "$WORK/asset.json" "$WORK/assets/release-index.json" <<'PY'
