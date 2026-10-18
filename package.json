@@ -13,7 +13,8 @@
       "extensions/kit-save-guard.ts",
       "extensions/fleet-guard.ts",
       "extensions/kit-callback.ts",
-      "extensions/kit-flywheel-guard.ts"
+      "extensions/kit-flywheel-guard.ts",
+      "extensions/kit-agent-mail-guard.ts"
     ]
   }
 }

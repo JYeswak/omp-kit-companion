@@ -12,7 +12,7 @@
 
 </div>
 
-A tested rule pack, five guard extensions, four skills, and a guarded CLI for
+A tested rule pack, six guard extensions, four skills, and a guarded CLI for
 an existing OMP install. Every change
 the CLI makes is planned first, written with a receipt, and reversible with
 `omp-kit undo`.
@@ -44,7 +44,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 31 named scopes, opt-in guard extensions
+Around that core sit diagnostics for 32 named scopes, opt-in guard extensions
 for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Why use omp-kit
@@ -54,8 +54,8 @@ for multi-agent fleets, service jobs, and a self-updating release channel.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 31 components, from OMP identity to leaked secrets |
-| Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-guard-optin`, `kit-callback` extensions |
+| See what is broken | `omp-kit doctor --scope NAME` covers 32 components, from OMP identity to leaked secrets |
+| Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
 
@@ -122,7 +122,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 31 diagnostic scopes
+### Doctor: 32 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -132,8 +132,6 @@ a next step. The full scope table is in the [Command reference](#command-referen
 omp-kit doctor --scope settings          # per-profile TTSR keys via native `omp config get`
 omp-kit doctor --scope extensions        # extension imports that would fail to load
 omp-kit doctor --scope services          # launchd/systemd jobs that are failing
-omp-kit doctor --scope public-files      # missing CODEOWNERS, templates, dependabot
-omp-kit doctor --scope mcp --sources     # MCP servers configured in other harnesses
 ```
 
 ### Secrets scan
@@ -158,17 +156,18 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares five extensions:
+The repo is an OMP plugin. `package.json` declares six extensions:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
-| `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos that commit `.omp/kit-guard.json`. Opted in with the guard missing blocks every tool call |
-| `fleet-guard.ts` | `tool_call` | Opt-in only: blocks forbidden scratch writes/source copies, new branches/worktrees, unreserved tracked edits and overlong hot-path reservations |
+| `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
+| `fleet-guard.ts` | `tool_call` | Opt-in only: blocks forbidden scratch writes and source copies, new branches and worktrees, unreserved tracked edits, overlong hot-path reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
-| `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, tells the agent to re-read the nearest `AGENTS.md` and its in-progress bead; blocks `br close` / `bd close` on a bead assigned to the caller (`SELF_CLOSE_REFUSED`) |
-| `kit-callback.ts` | `agent_end` | For worker panes listed in `fleet-watch.json`, sends the last `DONE`/`BLOCKED` line (or an `IDLE` excerpt) to the coordinator pane through `ntm send`. Never blocks |
+| `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, re-reads `AGENTS.md` and the in-progress bead; refuses a self-close (`SELF_CLOSE_REFUSED`), `blocked` without an open fix (`BLOCK_REFUSED`) and a close that strands a blocked bead (`BLOCK_RELEASE_REQUIRED`) |
+| `kit-agent-mail-guard.ts` | `tool_call` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
+| `kit-callback.ts` | `agent_end` | For `fleet-watch.json` worker panes, sends the last `DONE`/`BLOCKED` line to the coordinator via `ntm send`. Never blocks |
 
-Installing the plugin loads all five. `omp-kit apply extensions` installs only
+Installing the plugin loads all six. `omp-kit apply extensions` installs only
 the two listed in `policy/extensions.json` (`kit-guard-optin.ts` and
 `fleet-guard.ts`) into the profiles you select:
 
@@ -258,11 +257,10 @@ index and archive paths, then reruns the matcher and live post-checks after
 applying. The `kit-update` service is the path that follows new releases
 automatically; see [Release and update flow](#how-it-works).
 
-A `PARTIAL` update retains its receipt-bound `undo` command even if interruption
-prevents a full postcheck report. JSON `postcheck_detail` retains the original
-cause and any current stage; absent report failures are an empty list, not a
-successful postcheck. Configured private paths and recognized credential shapes
-are redacted before cause fields are truncated.
+A `PARTIAL` update keeps its receipt-bound `undo` command even if interruption
+prevents a full postcheck. `postcheck_detail` keeps the original cause and any
+current stage; no report failures means an empty list, not a successful
+postcheck. Private paths and credential shapes are redacted before truncation.
 
 ### OMP source cache
 
@@ -603,6 +601,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope identity` | Pane identities that are missing, shared, or stale | `omp-kit doctor --scope identity --project PATH` |
 | `--scope flywheel` | Fleet practice grades from git and the tracker (`BEADS_DB`) | `omp-kit doctor --scope flywheel --project PATH` |
 | `--scope fleet` | Live panes and Agent Mail: `DIRECTOR_DOING_WORK`, `COMMUNICATION_PURGATORY`, frozen turns, stale steering | `omp-kit doctor --scope fleet` |
+| `--scope ownership` | Records with no live or tracked owner | `omp-kit doctor --scope ownership` |
 | `--scope derived` | Literal facts in config files that a probe should replace | `omp-kit doctor --scope derived --project PATH` |
 | `--scope layout` | Deviations from the standard repo layout | `omp-kit doctor --scope layout --project PATH` |
 | `--scope public-files` | Missing standard public files | `omp-kit doctor --scope public-files --project PATH` |
