@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -39,9 +40,10 @@ beforeAll(() => {
 	for (const file of ["MANIFEST.tsv", "package.json"]) {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	writeFileSync(join(pack, "rules", "plant-quoted.md"), PLANTED_RULE);
 	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER +
 		"plant-quoted\tfire\ttool\tbash\t-\trun secret-token-xyz now\tfires unquoted\n" +

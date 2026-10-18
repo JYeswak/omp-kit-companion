@@ -4,7 +4,7 @@ import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, l
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { bunCapExec, runWithCap } from "../../src/service-run.ts";
-import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 function lesson(repo: string, what: string, lessonClass: LessonEntry["class"] = "SCOPE_GAP"): LessonEntry {
@@ -604,9 +604,10 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 		cpSync(join(repoRoot, directory), join(release, directory), { recursive: true });
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["build-manifest.sh", "runtime-adapter.sh", "rule-class.ts", "ttsr-harness.ts"]) {
+	for (const file of ["build-manifest.sh", "runtime-adapter.sh", "rule-class.ts"]) {
 		cpSync(join(repoRoot, "scripts", file), join(release, "scripts", file));
 	}
+	writeBundledHarness(release);
 	const executable = join(release, "bin", "omp-kit");
 	const built = Bun.spawnSync([process.execPath, "build", join(repoRoot, "src", "cli.ts"),
 		"--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",

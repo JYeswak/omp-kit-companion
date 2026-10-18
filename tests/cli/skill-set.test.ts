@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { runCapabilitiesCheck, runContextInventory } from "../../src/context.ts";
 import { pinnedCoreSkills } from "../../src/skill-set.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -46,9 +47,10 @@ beforeAll(() => {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	for (const name of ["alpha", "gamma", "delta"]) {
 		const dir = join(agentSkills, name);
 		mkdirSync(dir, { recursive: true });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 
@@ -49,9 +49,10 @@ function copyPackResources(destination: string): void {
 	}
 	for (const file of ["MANIFEST.tsv"]) writeFileSync(join(destination, file), readFileSync(join(REPO_ROOT, file)));
 	mkdirSync(join(destination, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts"]) {
+	for (const file of ["rule-class.ts"]) {
 		writeFileSync(join(destination, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(destination);
 }
 
 function snapshotTree(root: string): string {

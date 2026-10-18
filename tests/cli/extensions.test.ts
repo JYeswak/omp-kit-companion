@@ -3,6 +3,7 @@ import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmS
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { checkExtensionImports, extractImportSpecifiers } from "../../src/extensions.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -40,9 +41,10 @@ beforeAll(() => {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	for (const file of ["MANIFEST.tsv", "package.json"]) {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}

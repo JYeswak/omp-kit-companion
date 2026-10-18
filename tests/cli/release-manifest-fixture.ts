@@ -1,6 +1,22 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import process from "node:process";
+
+let bundledHarness: Uint8Array | undefined;
+
+/** Match package-release.ts: relocated fixtures have no checkout source tree. */
+export function writeBundledHarness(root: string): void {
+	if (!bundledHarness) {
+		const repo = resolve(import.meta.dir, "../..");
+		const build = Bun.spawnSync([process.execPath, "build", join(repo, "scripts/ttsr-harness.ts"),
+			"--target=bun", "--format=esm"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		if (build.exitCode !== 0) throw new Error(`fixture harness bundle failed (${build.exitCode}): ${build.stderr.toString()}`);
+		bundledHarness = build.stdout;
+	}
+	mkdirSync(join(root, "scripts"), { recursive: true });
+	writeFileSync(join(root, "scripts/ttsr-harness.ts"), bundledHarness);
+}
 
 export function writeReleaseManifest(root: string): void {
 	const files: { path: string; sha256: string }[] = [];

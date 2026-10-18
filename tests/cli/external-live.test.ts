@@ -6,6 +6,7 @@ import { runtimeTempRoot } from "../../src/runtime.ts";
 import { evaluateExternalLiveEvidence, runExternalLive, validateExternalLiveSchema } from "../../src/external-live.ts";
 import { readExternalPackSnapshot, type ExternalPackSnapshot } from "../../src/external-pack.ts";
 import { reduceCandidate } from "../../src/reducer.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 let scratch = "";
@@ -16,7 +17,7 @@ function copyResources(destination: string): void {
 	for (const directory of ["rules", "cases", "policy"]) {
 		cpSync(join(REPO_ROOT, directory), join(destination, directory), { recursive: true });
 	}
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "external-live.mjs", "limit-process-tree.sh", "runtime-adapter.sh"]) {
+	for (const file of ["rule-class.ts", "external-live.mjs", "limit-process-tree.sh", "runtime-adapter.sh"]) {
 		mkdirSync(join(destination, "scripts"), { recursive: true });
 		cpSync(join(REPO_ROOT, "scripts", file), join(destination, "scripts", file));
 		if (file.endsWith(".sh")) chmodSync(join(destination, "scripts", file), 0o755);
@@ -25,6 +26,7 @@ function copyResources(destination: string): void {
 		mkdirSync(join(destination, "tests", "live"), { recursive: true });
 		cpSync(join(REPO_ROOT, "tests", "live", file), join(destination, "tests", "live", file));
 	}
+	writeBundledHarness(destination);
 }
 
 beforeAll(() => {

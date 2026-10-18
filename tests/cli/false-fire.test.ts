@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const APPROVED_FIELDS = ["rule", "expect", "source", "tool", "path", "snippet"] as const;
@@ -30,9 +31,10 @@ beforeAll(() => {
 	for (const directory of ["rules", "retired", "cases", "policy", "extensions"]) {
 		cpSync(join(REPO_ROOT, directory), join(release, directory), { recursive: true });
 	}
-	for (const file of ["MANIFEST.tsv", "scripts/ttsr-harness.ts", "scripts/rule-class.ts"]) {
+	for (const file of ["MANIFEST.tsv", "scripts/rule-class.ts"]) {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
+	writeBundledHarness(release);
 	const build = Bun.spawnSync([
 		process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
 		"--no-compile-autoload-tsconfig", join(REPO_ROOT, "src/cli.ts"), `--outfile=${binary}`,

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
-import { writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const OMP_IDENTITY = resolveOmpIdentity();
@@ -61,9 +61,10 @@ function stageRelease(): string {
 		cpSync(join(REPO_ROOT, directory), join(root, directory), { recursive: true });
 	}
 	mkdirSync(join(root, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(root, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(root);
 	const manifest = Bun.spawnSync(["sh", join(REPO_ROOT, "scripts/build-manifest.sh"), "--stdout"], {
 		cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe",
 	});

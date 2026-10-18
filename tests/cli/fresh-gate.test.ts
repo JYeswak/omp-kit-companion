@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { cpSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
@@ -12,9 +13,10 @@ function fixture(): string {
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	mkdirSync(join(dir, "rules"));
 	mkdirSync(join(dir, "scripts"));
-	for (const name of ["rules/bash-glob-silenced.md", "scripts/build-manifest.sh", "scripts/rule-class.ts", "scripts/ttsr-harness.ts"]) {
+	for (const name of ["rules/bash-glob-silenced.md", "scripts/build-manifest.sh", "scripts/rule-class.ts"]) {
 		cpSync(join(root, name), join(dir, name));
 	}
+	writeBundledHarness(dir);
 	return dir;
 }
 

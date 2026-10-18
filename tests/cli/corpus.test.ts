@@ -5,6 +5,7 @@ import process from "node:process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -43,9 +44,10 @@ beforeAll(() => {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	writeFileSync(join(sessions, "s1.jsonl"), [
 		`{"type":"title","v":1,"title":"fixture","updatedAt":"2026-09-30T10:00:00.000Z"}`,
 		`{"type":"session","version":3,"id":"s1","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,

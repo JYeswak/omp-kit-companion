@@ -5,6 +5,7 @@ import process from "node:process";
 import { dirname, join, resolve } from "node:path";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 function certifiedOmpVersion(): string {
@@ -73,9 +74,10 @@ beforeAll(() => {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	writeSkill(home, join(".omp", "agent", "skills"), "alpha", SKILL_ALPHA);
 	writeSkill(home, join(".omp", "agent", "skills"), "beta-hidden", SKILL_HIDDEN);
 	writeFileSync(join(home, ".omp", "agent", "rules", "ctx-probe-rule.md"), RULE_FIXTURE);

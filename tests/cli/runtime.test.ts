@@ -500,7 +500,13 @@ describe("OMP installation identity", () => {
 					const pkg = join(versionRoot, "node_modules", "@oh-my-pi", "pi-coding-agent");
 					mkdirSync(dirname(pkg), { recursive: true });
 					symlinkSync(dirname(source), pkg);
-					writeFileSync(join(versionRoot, ".verified.json"), "{}\n");
+					const integrity = "sha512-R7BaZ9wxsrQhxfYxt8bXczwmfDctUPklqSLAeDulbl716WxnVCSBe6MYIscyJ+oRq7bqsq+s+tDNEf1HWG/R6A==";
+					writeFileSync(join(versionRoot, "bun.lock"), JSON.stringify({ packages: {
+						"@oh-my-pi/pi-coding-agent": [`@oh-my-pi/pi-coding-agent@${version}`, "", {}, integrity],
+					} }) + "\n");
+					writeFileSync(join(versionRoot, ".verified.json"), JSON.stringify({
+						package: "@oh-my-pi/pi-coding-agent", version, integrity,
+					}) + "\n");
 				};
 				seedCache(cache, original.source);
 				seedCache(join(privateRoot, "home", ".local", "opt", "omp-kit", "omp-src"), other.source);

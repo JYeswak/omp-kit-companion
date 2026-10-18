@@ -8,6 +8,7 @@ import { optInState } from "../../extensions/kit-guard-optin.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { judgeFleet, readProfileWiring, runIntegrations, staticVerdict } from "../../src/integrations.ts";
 import type { LiveAttempt } from "../../src/integrations.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
  const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -72,9 +73,10 @@ function profileConfig(extensions: string[]): string {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	writeFileSync(join(release, "tests/live/mock-model.mjs"), readFileSync(join(REPO_ROOT, "tests/live/mock-model.mjs")));
 	writeFileSync(join(release, "tests/live/integrations.json"), readFileSync(join(REPO_ROOT, "tests/live/integrations.json")));
 	const planted = join(plantHome, ".omp/profiles/planted/agent");

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -53,9 +54,10 @@ beforeAll(() => {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["ttsr-harness.ts", "rule-class.ts", "context-inventory.ts"]) {
+	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
+	writeBundledHarness(release);
 	const watch = writeProgram("omp-watch.sh");
 	const uca = writeProgram("uca");
 	const updater = writeProgram("localbench-omp-update");

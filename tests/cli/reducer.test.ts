@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { reduceCandidate, type PredicateOutcome, type ReducerOptions, type ReducerPredicate } from "../../src/reducer.ts";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { runMatcherObservation, type MatcherObservationReport } from "../../src/test-runner.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const open = "BEGIN PUBLIC DEMO\n";
@@ -26,9 +27,10 @@ beforeAll(() => {
 	rules = join(base, "synthetic-rules");
 	for (const path of [join(release, "bin"), join(release, "scripts"), rules]) mkdirSync(path, { recursive: true });
 	for (const path of ["rules", "retired", "cases", "policy", "extensions"]) cpSync(join(repo, path), join(release, path), { recursive: true });
-	for (const path of ["MANIFEST.tsv", "scripts/ttsr-harness.ts", "scripts/rule-class.ts"]) {
+	for (const path of ["MANIFEST.tsv", "scripts/rule-class.ts"]) {
 		writeFileSync(join(release, path), readFileSync(join(repo, path)));
 	}
+	writeBundledHarness(release);
 	const rule = "---\ncondition:\n  - 'PUBLIC DANGER'\nscope:\n  - text\ninterruptMode: never\n---\nPublic synthetic reduction fixture.\n";
 	writeFileSync(join(rules, "synthetic-reduction.md"), rule);
 	ruleSha = sha(rule);

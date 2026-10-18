@@ -4,6 +4,7 @@ import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, r
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const source = resolve(import.meta.dir, "../..");
 let base = "";
@@ -44,7 +45,8 @@ beforeAll(() => {
 		mkdirSync(dir, { recursive: true });
 	}
 	for (const dir of ["rules", "retired", "cases", "policy", "extensions"]) cpSync(join(source, dir), join(release, dir), { recursive: true });
-	for (const file of ["MANIFEST.tsv", "scripts/ttsr-harness.ts", "scripts/rule-class.ts"]) writeFileSync(join(release, file), readFileSync(join(source, file)));
+	for (const file of ["MANIFEST.tsv", "scripts/rule-class.ts"]) writeFileSync(join(release, file), readFileSync(join(source, file)));
+	writeBundledHarness(release);
 	writeFileSync(join(home, "canary"), "operator state must not change\n");
 	writeFileSync(join(project, "canary"), "project contents are data, not executable configuration\n");
 	for (const [directory, pattern] of [[incumbent, "PUBLIC DANGER"], [candidate, "PUBLIC"]]) {

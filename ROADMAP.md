@@ -97,8 +97,9 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Native `omp-kit tern` SDK/control integration: command family wired, context-aware bindings and owned native plugin probes; compiled release assets and independent full acceptance remain pending | #102 / ompkit-kdbz.2.13 |
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
 | Memory doctor reports read-only CASS status and static LaunchAgent declarations separately from retrieval qualification | ompkit-bj08.10 (IN PROGRESS) |
-| Source-free CLI fixture repair is held locally by the staged-import guard's quoted-fixture refusal; hosted qualification and genuine Intel failure diagnostics remain unverified | ompkit-fp72.125 → ompkit-fp72.124 / ompkit-fp72.63 (BLOCKED) |
+| Source-free CLI fixture repair is resumed after the actual ordinary import guard update and parser readback passed; normal source save and full source-bound qualification remain in progress, without installed or release acceptance | ompkit-fp72.125 (IN PROGRESS; original three clauses open) |
 | Optional Intel failure and literal no-publish rehearsal have actual hosted witnesses. [Native-refusal propagation control is published](https://github.com/JYeswak/omp-kit-companion/commit/970fb2394ea2365b45bed989dc94dfe8ce469a02); its hosted negative and compatible-source timing remain unverified until source qualification is repaired | ompkit-6q9i → ompkit-fp72.125 (BLOCKED; original AC2/AC3 open) |
+| Independent CPU-growth method review, native causal controls and a single-process incumbent/candidate comparison are recorded. Historical macOS failure attribution and saved-revision qualification remain unverified; the candidate remains under its author's source custody | ompkit-v66l.18 → ompkit-fp72.125 (BLOCKED; only original AC3 verified) |
 
 ## Rolling releases (reviewed 2026-10-17)
 
