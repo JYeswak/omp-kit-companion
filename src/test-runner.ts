@@ -402,13 +402,18 @@ export async function runFastTest(input: FastTestInput, requestedExpected?: Fast
 		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected);
 	}
 	const redact = redactor(input, identity);
-	let gate: BundledRunResult;
-	try {
-		gate = await runBundled(HARNESS, ["--gate-json"], input.root, input.executablePath);
-	} catch (error) {
-		const kind = blockerKind(error);
-		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected);
+	// The gate and the selftest are independent isolated runs (own private roots, no shared
+	// state), so the proof waits for the slower one, not their sum. Both settle before any
+	// return, and their results are consumed in the original order: gate first, then selftest.
+	const [gateRun, selftestRun] = await Promise.allSettled([
+		runBundled(HARNESS, ["--gate-json"], input.root, input.executablePath),
+		runBundled(HARNESS, ["--selftest"], input.root, input.executablePath),
+	]);
+	if (gateRun.status === "rejected") {
+		const kind = blockerKind(gateRun.reason);
+		return blockedReport(diagnostics, { kind, message: errorText(gateRun.reason), remedy: remedyFor(kind) }, redact, expected);
 	}
+	const gate = gateRun.value;
 	const parsed = parseStructuredGate(gate.stdout, gate.code, expected);
 	if (!parsed && NATIVE_LOAD_FAILURE.test(`${gate.stderr}\n${gate.stdout}`)) {
 		const kind: FastTestBlockerKind = "NATIVE_MATCHER_UNAVAILABLE";
@@ -419,13 +424,11 @@ export async function runFastTest(input: FastTestInput, requestedExpected?: Fast
 		return blockedReport(diagnostics, { kind, message: gate.stderr || gate.stdout || "harness emitted invalid structured gate evidence", remedy: remedyFor(kind) }, redact, expected, gate);
 	}
 
-	let selftest: BundledRunResult;
-	try {
-		selftest = await runBundled(HARNESS, ["--selftest"], input.root, input.executablePath);
-	} catch (error) {
-		const kind = blockerKind(error);
-		return blockedReport(diagnostics, { kind, message: errorText(error), remedy: remedyFor(kind) }, redact, expected, gate);
+	if (selftestRun.status === "rejected") {
+		const kind = blockerKind(selftestRun.reason);
+		return blockedReport(diagnostics, { kind, message: errorText(selftestRun.reason), remedy: remedyFor(kind) }, redact, expected, gate);
 	}
+	const selftest = selftestRun.value;
 	if (!/^SELFTEST:/m.test(selftest.stdout) && NATIVE_LOAD_FAILURE.test(`${selftest.stderr}\n${selftest.stdout}`)) {
 		const kind: FastTestBlockerKind = "NATIVE_MATCHER_UNAVAILABLE";
 		return blockedReport(diagnostics, { kind, message: selftest.stderr || selftest.stdout || "OMP matcher selftest did not load", remedy: remedyFor(kind) }, redact, expected, gate, selftest);
