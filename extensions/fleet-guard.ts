@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { check as checkGit } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
-import { applyScratchEnv, check as checkScratch, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
+import { applyScratchEnv, check as checkScratch, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
 
@@ -15,6 +15,7 @@ import { fleetPolicyState } from "./fleet-policy.ts";
 interface ToolCallContext {
 	cwd: string;
 	localProtocolOptions?: { getArtifactsDir?: () => string | null };
+	sessionManager?: { getSessionId?: () => string | undefined };
 }
 
 interface ExtensionApi {
@@ -25,6 +26,7 @@ interface ExtensionApi {
 export interface GuardDeps {
 	cwd?: string;
 	pid?: number;
+	env?: Record<string, string | undefined>;
 }
 
 /** Ordered chain: lexical scratch, Git, repository facts, then reservations. First block wins. */
@@ -39,9 +41,15 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	const pid = deps?.pid ?? process.pid;
 	const initial = await fleetPolicyState(cwd);
 	if (initial.kind === "off") return;
+	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
+	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
+	// belong to a subagent session).
+	let seat: { dir: string; repo: string; created: string; recorded: boolean } | null = null;
 	if (initial.kind === "on") {
 		const dir = scratchDirFor(initial.root, pid);
-		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created: new Date().toISOString() });
+		const created = new Date().toISOString();
+		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created });
+		seat = { dir, repo: initial.root, created, recorded: false };
 		applyScratchEnv(dir);
 		try { await exportAgentMailStorageRoot(); }
 		catch {
@@ -50,6 +58,13 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	}
 	pi.setLabel("fleet-guard");
 	pi.on("tool_call", async (event, context) => {
+		const agent = seat !== null && !seat.recorded ? hostAgentName(deps?.env) : undefined;
+		const session = agent !== undefined ? context?.sessionManager?.getSessionId?.() : undefined;
+		if (seat !== null && agent !== undefined && session) {
+			seat.recorded = true;
+			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session }); }
+			catch { /* the pid-only owner stays valid */ }
+		}
 		const callingCwd = context?.cwd ?? cwd;
 		const policy = await fleetPolicyState(callingCwd);
 		if (policy.kind === "off") return undefined;

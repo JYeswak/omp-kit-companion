@@ -75,6 +75,35 @@ test("an opted-in repository gets owned scratch and filesystem refusals", async 
 	expect(quiet).toBeUndefined();
 });
 
+const SESSION = "01a15012-af9e-7628-bee6-496084668412";
+const ownerOf = (cwd: string, pid: number): string => readFileSync(join(cwd, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
+
+test("OWNERKEY1: the first tool call records the agent and its omp session in the seat owner, once", async () => {
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
+	// Before any call the session is unknown: the owner is the pid-only record it always was.
+	expect(ownerOf(cwd, pid)).not.toContain("session=");
+	const handler = pi.handlers[0]!;
+	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
+	const first = ownerOf(cwd, pid);
+	expect(first).toContain(`pid=${pid}\nlabel=omp\n`);
+	expect(first).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\n`);
+	// A later call from a subagent session must not replace the main session.
+	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => "01a1502a-5647-76ba-89c5-949087f3e283" } });
+	expect(ownerOf(cwd, pid)).toBe(first);
+});
+
+test("OWNERKEY1: without a host agent name, or without a session id, the seat owner stays pid-only", async () => {
+	for (const [env, session] of [[{}, SESSION], [{ AGENT_NAME: "TurquoiseSummit" }, undefined], [{ AGENT_NAME: "../evil" }, SESSION]] as const) {
+		const pi = fakePi();
+		const { cwd, pid } = fixture();
+		await fleetGuard(pi, { cwd, pid, env });
+		await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => session } });
+		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "label", "repo", "created"]);
+	}
+});
+
 test("scratch fires before git and reservations in the chain", async () => {
 	const both = await handleToolCall({ toolName: "bash", command: "git add -A" }, { cwd: "/tmp" });
 	expect(both?.reason).toContain("fleet-guard blanket-git");

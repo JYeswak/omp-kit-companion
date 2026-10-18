@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { check, gitBlanketArgs, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
+import { check, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -196,6 +196,28 @@ test("session scratch dir matches the S2 owner-name contract", () => {
 	// Session TMPDIR may itself be repo scratch; use an unwritten nonrepo path.
 	const plainBase = "/nonexistent/ompkit-fleet-plain";
 	expect(scratchDirFor(plainBase, 7)).toBe(join(plainBase, "var", "agent-tmp", "omp.7"));
+});
+
+test("OWNERKEY1: a seat owner carries agent and session together, and only when both are well formed", () => {
+	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-seat-owner-"));
+	roots.push(repo);
+	const dir = join(repo, "var", "agent-tmp", "omp.4242");
+	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
+	const session = "01a15012-af9e-7628-bee6-496084668412";
+	writeScratchOwner(dir, { ...base, agent: "TurquoiseSummit", session });
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\nagent=TurquoiseSummit\nsession=${session}\n`);
+	for (const partial of [{ agent: "TurquoiseSummit" }, { session }, { agent: "../evil", session }, { agent: "TurquoiseSummit", session: "short" }]) {
+		writeScratchOwner(dir, { ...base, ...partial });
+		expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\n`);
+	}
+});
+
+test("OWNERKEY1: the host agent name is AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME, and never an unsafe value", () => {
+	expect(hostAgentName({ AGENT_NAME: "A", BR_ACTOR: "B", BR_AGENT_NAME: "C" })).toBe("A");
+	expect(hostAgentName({ BR_ACTOR: " B ", BR_AGENT_NAME: "C" })).toBe("B");
+	expect(hostAgentName({ BR_AGENT_NAME: "C" })).toBe("C");
+	expect(hostAgentName({ AGENT_NAME: "../x", BR_ACTOR: "ok" })).toBe("ok");
+	expect(hostAgentName({})).toBeUndefined();
 });
 
 test("applyScratchEnv points child tools at the session dir", () => {

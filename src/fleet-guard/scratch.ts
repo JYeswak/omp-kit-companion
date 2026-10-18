@@ -61,12 +61,24 @@ export function scratchDirFor(cwd: string, pid: number = process.pid): string {
 	return join(base, "var", "agent-tmp", `omp.${pid}`);
 }
 
-export interface ScratchOwner { pid: number; label: string; repo: string; created: string }
+/** `agent` and `session` come together or not at all: the durable owner of the seat dir, so a respawn (new pid) keeps it. */
+export interface ScratchOwner { pid: number; label: string; repo: string; created: string; agent?: string; session?: string }
+
+// Same shape src/scratch.ts accepts for the owner's agent and session fields.
+const AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
+
+/** The host agent name (AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME), or undefined when none is set. */
+export function hostAgentName(env: Record<string, string | undefined> = process.env): string | undefined {
+	return [env.AGENT_NAME, env.BR_ACTOR, env.BR_AGENT_NAME].map((value) => value?.trim()).find((value) => value !== undefined && AGENT_NAME.test(value));
+}
 
 export function writeScratchOwner(dir: string, owner: ScratchOwner): void {
 	mkdirSync(dir, { recursive: true, mode: 0o755 });
 	const temp = join(dir, `.owner.${process.pid}.tmp`);
-	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n`, { mode: 0o644 });
+	const durable = owner.agent !== undefined && owner.session !== undefined && AGENT_NAME.test(owner.agent) && SESSION_ID.test(owner.session)
+		? `agent=${owner.agent}\nsession=${owner.session}\n` : "";
+	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}`, { mode: 0o644 });
 	renameSync(temp, join(dir, ".owner"));
 }
 

@@ -19,11 +19,16 @@ import { homedir } from "node:os";
 export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
 export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number }) => ScratchRunResult;
 
-export interface ScratchOwner { pid: number; processStart: string | null; label: string; repo: string; createdAt: string; argv0: string | null }
+export interface ScratchOwner { pid: number; processStart: string | null; label: string; repo: string; createdAt: string; argv0: string | null;
+	/** The durable owner: the agent and its omp session id. Both or neither; a pid alone is only an attribute of the current process. */
+	agent: string | null; session: string | null }
 
 const OWNER_FIELDS = ["pid", "process_start", "label", "repo", "created_at", "argv0"] as const;
 const LEGACY_OWNER_FIELDS = ["pid", "label", "repo", "created"] as const;
-const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS];
+const SEAT_FIELDS = ["agent", "session"] as const;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS];
+const AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const SESSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const RELEASE_FILE = ".omp-kit-release";
 const QUARANTINE_IDLE_MS = 72 * 3600 * 1000;
 const DEFAULT_QUARANTINE_TTL_HOURS = 24;
@@ -79,12 +84,18 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 }
 
 function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null {
-	const complete = OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === OWNER_FIELDS.length;
-	const legacy = LEGACY_OWNER_FIELDS.every(field => seen[field] !== undefined) && Object.keys(seen).length === LEGACY_OWNER_FIELDS.length;
+	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
+	if (seat.length === 1) return null;
+	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
+		Object.keys(seen).length === fields.length + seat.length;
+	const complete = base(OWNER_FIELDS);
+	const legacy = base(LEGACY_OWNER_FIELDS);
 	if (!complete && !legacy) return null;
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!)) return null;
+	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) return null;
 	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
-		repo: seen.repo!, createdAt: seen.created_at ?? seen.created!, argv0: seen.argv0 ?? null };
+		repo: seen.repo!, createdAt: seen.created_at ?? seen.created!, argv0: seen.argv0 ?? null,
+		agent: seen.agent ?? null, session: seen.session ?? null };
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
 	return owner.processStart !== null && owner.argv0 !== null;
@@ -97,6 +108,16 @@ export interface LivenessDeps {
 	signalAlive: (pid: number) => boolean;
 	psVisible: (pid: number) => boolean;
 	processStart: (pid: number) => string | null;
+	/**
+	 * True when the omp session of a named seat is held by a live process, false when nothing holds it,
+	 * null when that cannot be told. The session id is the unique key; the agent name is the owner's claim.
+	 */
+	seatLive?: (agent: string, session: string) => boolean | null;
+}
+
+/** Directory of the omp session-ownership leases (`<session id>.lock`, held by the live seat's process). */
+export function sessionOwnersDir(env: NodeJS.ProcessEnv = process.env): string {
+	return env.OMP_KIT_SESSION_OWNERS_DIR ?? join(homedir(), ".omp", "run", "session-owners");
 }
 
 export function defaultLiveness(): LivenessDeps {
@@ -127,6 +148,18 @@ export function defaultLiveness(): LivenessDeps {
 				return null;
 			}
 		},
+		seatLive: (_agent: string, session: string): boolean | null => {
+			if (!SESSION_PATTERN.test(session)) return null;
+			const lock = join(sessionOwnersDir(), `${session}.lock`);
+			if (!existsSync(lock)) return false;
+			try {
+				const out = Bun.spawnSync(["lsof", "-t", "--", lock], { stdout: "pipe", stderr: "pipe" });
+				if (out.exitCode === 0 && out.stdout.toString().trim() !== "") return true;
+				return out.exitCode === 1 && out.stderr.toString().trim() === "" ? false : null;
+			} catch {
+				return null;
+			}
+		},
 	};
 }
 
@@ -140,6 +173,71 @@ export function probeOwner(pid: number, expectedStart: string, deps: LivenessDep
 	// so recheck with ps; a visible PID is never treated as dead.
 	if (deps.psVisible(pid)) return "live-unreachable";
 	return "dead";
+}
+
+/** The calling process and its ancestors, nearest first; null when the process table cannot be read. */
+function ancestorPids(callerPid: number, run: ScratchRunner): number[] | null {
+	const out = run(["ps", "-axo", "pid=,ppid="]);
+	if (out.code !== 0) return null;
+	const parents = new Map<number, number>();
+	for (const line of out.stdout.split("\n")) {
+		const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+		if (!match) continue;
+		parents.set(Number(match[1]), Number(match[2]));
+	}
+	const chain = [callerPid];
+	let current = callerPid;
+	for (let depth = 0; depth < 256; depth++) {
+		const parent = parents.get(current);
+		if (parent === undefined || parent <= 0 || chain.includes(parent)) break;
+		chain.push(parent);
+		current = parent;
+	}
+	return chain;
+}
+
+export interface SeatIdentity {
+	agent: string | null;
+	/** Every omp session lease held by the caller's ancestors (the main session, advisors, subagents). */
+	sessions: string[];
+	/** The one main session, or null when it cannot be told apart. */
+	main: string | null;
+}
+
+function sessionIdOf(path: string, kind: "lock" | "transcript"): string | null {
+	const parts = path.split("/");
+	const name = parts[parts.length - 1] ?? "";
+	let id: string | null = null;
+	if (kind === "lock" && parts[parts.length - 2] === "session-owners" && name.endsWith(".lock")) id = name.slice(0, -".lock".length);
+	// A main transcript is <sessions>/<project>/<timestamp>_<id>.jsonl; advisors nest one directory deeper.
+	if (kind === "transcript" && parts[parts.length - 3] === "sessions" && name.endsWith(".jsonl") && name.includes("_"))
+		id = name.slice(name.lastIndexOf("_") + 1, -".jsonl".length);
+	return id !== null && SESSION_PATTERN.test(id) ? id : null;
+}
+
+/**
+ * Who is calling: the host agent name (AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME) and the omp sessions whose
+ * lease a process in the caller's ancestry holds open. Read-only: ps and lsof.
+ */
+export function callerSeat(run: ScratchRunner, env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): SeatIdentity {
+	const agent = [env.AGENT_NAME, env.BR_ACTOR, env.BR_AGENT_NAME].map(value => value?.trim()).find(value => value !== undefined && AGENT_PATTERN.test(value)) ?? null;
+	const chain = ancestorPids(pid, run)?.filter(ancestor => ancestor > 1);
+	if (chain === undefined) return { agent, sessions: [], main: null };
+	const out = run(["lsof", "-a", "-p", chain.join(","), "-Fn"], { timeoutMs: LSOF_TIMEOUT_MS });
+	if (out.code === null) return { agent, sessions: [], main: null };
+	const locks = new Set<string>();
+	const transcripts = new Set<string>();
+	for (const line of out.stdout.split("\n")) {
+		if (!line.startsWith("n")) continue;
+		const lock = sessionIdOf(line.slice(1), "lock");
+		if (lock !== null) locks.add(lock);
+		const transcript = sessionIdOf(line.slice(1), "transcript");
+		if (transcript !== null) transcripts.add(transcript);
+	}
+	const sessions = [...locks];
+	const both = sessions.filter(id => transcripts.has(id));
+	const main = both.length === 1 ? both[0]! : both.length === 0 && sessions.length === 1 ? sessions[0]! : null;
+	return { agent, sessions, main };
 }
 
 const PS_MONTHS: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
@@ -259,7 +357,9 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 }
 
 export interface DiskCapacity { bavail: number; blocks: number }
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null }
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null;
+	/** Who is calling (host agent and held omp sessions); defaults to the real ps/lsof lookup for release, and is absent for create. */
+	callerSeat?: () => SeatIdentity }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -332,7 +432,7 @@ function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string,
 	}
 }
 
-export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
+function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
 	const sized = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
 		({ dir, action, reason, owner, sizeBytes: dirSize(dir) });
 	if (isSymlink(dir)) return { dir, action: "SKIP", reason: "session-is-symlink", owner: null, sizeBytes: 0 };
@@ -379,6 +479,21 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, nam
 	if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
 	if (!clear) return sized("LIVE", `owner-${state}-but-open-fds-present`, owner);
 	return sized("REAP", `owner-${state}-no-open-fds`, owner);
+}
+
+/**
+ * Owner liveness is the pid proof OR a live seat: an owner that names an agent and an omp session stays LIVE
+ * while that session's lease is held, even after a respawn changed the pid or the tool shell that wrote the
+ * record exited. A pid-only owner keeps the pid rule. A seat that cannot be probed is never reaped.
+ */
+export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
+	const verdict = inspectByPid(dir, root, deps, nameRequired, ownerRoot);
+	const owner = verdict.owner;
+	if (verdict.action !== "REAP" || owner === null || owner.agent === null || owner.session === null) return verdict;
+	const seat = deps.liveness.seatLive?.(owner.agent, owner.session) ?? null;
+	if (seat === true) return { ...verdict, action: "LIVE", reason: "owner-seat-alive" };
+	if (seat === null) return { ...verdict, action: "SKIP", reason: "owner-seat-liveness-unproven" };
+	return verdict;
 }
 
 /**
@@ -790,30 +905,21 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	const parsed = parseOwnerFile(ownerText);
 	const suffixPid = /\.(\d+)$/.exec(marker.legacyName);
 	const owner: ScratchOwner = parsed ?? { pid: suffixPid ? Number(suffixPid[1]) : 0, processStart: null,
-		label: marker.legacyName, repo: "", createdAt: "", argv0: null };
+		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null };
 	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName };
 }
 
 function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
 	if (ownerPid === callerPid) return true;
-	const out = run(["ps", "-axo", "pid=,ppid="]);
-	if (out.code !== 0) return false;
-	const parents = new Map<number, number>();
-	for (const line of out.stdout.split("\n")) {
-		const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-		if (!match) continue;
-		parents.set(Number(match[1]), Number(match[2]));
-	}
-	const seen = new Set<number>([callerPid]);
-	let current = callerPid;
-	for (let depth = 0; depth < 256; depth++) {
-		const parent = parents.get(current);
-		if (parent === undefined || parent <= 0 || seen.has(parent)) return false;
-		if (parent === ownerPid) return true;
-		seen.add(parent);
-		current = parent;
-	}
-	return false;
+	const chain = ancestorPids(callerPid, run);
+	return chain !== null && chain.slice(1).includes(ownerPid);
+}
+
+/** A successor seat: the same agent holding the omp session the owner record names, whatever its pid. */
+function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
+	if (owner.agent === null || owner.session === null) return false;
+	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
+	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
 }
 
 export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
@@ -845,9 +951,10 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") ||
 		owner.label.startsWith(".") || !basename(dir).endsWith(`.${owner.pid}`))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
-	if (!callerIsOwnedBy(owner.pid, process.pid, deps.run))
+	const seatOwned = callerHoldsSeat(owner, deps);
+	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
-	if (owner.processStart !== null) {
+	if (owner.processStart !== null && !seatOwned) {
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
 			return { ok: false, changed: false, dir,
@@ -937,7 +1044,9 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps)
 	const dir = join(root, `${label}.${process.pid}`);
 	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
-	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n`;
+	const seat = deps.callerSeat?.();
+	const durable = seat?.agent && seat.main ? `agent=${seat.agent}\nsession=${seat.main}\n` : "";
+	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}`;
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
 	} catch {
@@ -1003,7 +1112,7 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 
 
 function ownerSnapshot(owner: ScratchOwner): string {
-	return [owner.pid, owner.processStart ?? "", owner.label, owner.repo, owner.createdAt, owner.argv0 ?? ""].join("\n");
+	return [owner.pid, owner.processStart ?? "", owner.label, owner.repo, owner.createdAt, owner.argv0 ?? "", owner.agent ?? "", owner.session ?? ""].join("\n");
 }
 
 /** Atomic quarantine + full recheck, then delete. Returns the terminal action. */
