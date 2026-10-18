@@ -284,6 +284,7 @@ jobs:
           persist-credentials: false
       # No package setup, builds, archives or candidate executables in this job.
       - name: Revalidate exact qualified authority immediately before tag creation
+        id: authority
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -304,10 +305,14 @@ jobs:
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
-            echo 'OUTCOME_UNKNOWN: existing tag does not confer signing ownership' >&2
-            exit 4
+            python3 scripts/release_reuse.py recover-tag-creation --repository "$GITHUB_REPOSITORY" \
+              --selection "$RUNNER_TEMP/tag-owner-allocation.json/selection.json" \
+              --notes "$RUNNER_TEMP/tag-owner-allocation.json/release-notes.md" \
+              --publisher-id "$GITHUB_RUN_ID" --publisher-attempt "$GITHUB_RUN_ATTEMPT"
+            echo 'recovered=true' >> "$GITHUB_OUTPUT"
           fi
       - name: Create only the exact qualified tag with the admitted repository identity
+        if: steps.authority.outputs.recovered != 'true'
         id: tag
         env:
           RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
@@ -368,6 +373,7 @@ jobs:
           set -e
           printf 'push_status=%s\nack_path=%s\n' "$pushed" "$ack" >> "$GITHUB_OUTPUT"
       - name: Require unique creation acknowledgment before signing the certified bytes
+        if: steps.authority.outputs.recovered != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PUSH_STATUS: ${{ steps.tag.outputs.push_status }}
@@ -378,5 +384,25 @@ jobs:
             --source-sha "$SHA" --version "$VERSION" --push-status "$PUSH_STATUS" --destination "github.com:$GITHUB_REPOSITORY.git"
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > created-tag.json
           [[ "$(jq -er .object.type created-tag.json)" == commit && "$(jq -er .object.sha created-tag.json)" == "$SHA" ]]
+          python3 scripts/release_reuse.py tag-creation-receipt --ack "$PUSH_ACK" \
+            --source-sha "$SHA" --version "$VERSION" --push-status "$PUSH_STATUS" \
+            --destination "github.com:$GITHUB_REPOSITORY.git" --repository "$GITHUB_REPOSITORY" \
+            --selection "$RUNNER_TEMP/tag-owner-allocation.json/selection.json" \
+            --publisher-id "$GITHUB_RUN_ID" --publisher-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/tag-creation/tag-creation.json"
+      - name: Retain native creator acknowledgment before signer dispatch
+        if: steps.authority.outputs.recovered != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tag-creation-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tag-creation/tag-creation.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Dispatch signing after durable creation acknowledgment
+        if: steps.authority.outputs.recovered != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
             -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"

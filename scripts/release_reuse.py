@@ -1587,6 +1587,155 @@ def _probe_source(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tag_creation_receipt(args: argparse.Namespace) -> int:
+    """Persist the creator's exact acknowledgment before the signing effect."""
+    _require_created_ref(args)
+    selection = _read_json(args.selection)
+    if (selection.get("source_sha") != args.source_sha or selection.get("version") != args.version
+            or selection.get("repository") != args.repository):
+        raise ValueError("tag creator receipt differs from the authorized allocation")
+    receipt = {
+        "schema_version": 1, "repository": args.repository,
+        "publisher_id": args.publisher_id, "publisher_attempt": args.publisher_attempt,
+        "selection": selection, "destination": args.destination,
+        "ack": Path(args.ack).read_text(encoding="utf-8"), "push_status": args.push_status,
+    }
+    target = Path(args.output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    return 0
+
+
+def _require_signing_unattempted(repository: str, rows: list[dict[str, Any]], titles: set[str],
+                                creators: dict[tuple[int, int], str], current: tuple[str, str]) -> None:
+    """An empty run listing cannot authorize retry of an attempted remote effect."""
+    retained_at = min(_timestamp(created) for created in creators.values())
+    for row in rows:
+        if row.get("display_title") not in titles:
+            continue
+        if type(row.get("run_attempt")) is not int or row["run_attempt"] < 1:
+            raise ValueError("publisher attempt inventory is unknown")
+        for attempt in range(1, row["run_attempt"] + 1):
+            if (str(row["id"]), str(attempt)) == current:
+                continue
+            endpoint = f"actions/runs/{row['id']}/attempts/{attempt}"
+            original = _api(repository, endpoint)
+            if (original.get("id") != row["id"] or original.get("run_attempt") != attempt
+                    or original.get("head_sha") != row["head_sha"] or original.get("path") != OWNER_WORKFLOW
+                    or original.get("repository", {}).get("full_name") != repository
+                    or original.get("head_branch") != "main" or original.get("event") != row["event"]
+                    or original.get("status") != "completed" or original.get("display_title") not in titles):
+                raise ValueError("prior publisher attempt is unresolved; signing outcome unknown")
+            creator = (row["id"], attempt) in creators
+            if not creator and _timestamp(original.get("updated_at")) < retained_at:
+                continue
+            pages = _api(repository, f"{endpoint}/jobs?per_page=100", paginate=True)
+            jobs = [job for page in pages for job in page["jobs"]]
+            if not pages or len(jobs) != pages[0].get("total_count"):
+                raise ValueError("prior publisher job snapshot is incomplete")
+            tag_jobs = [job for job in jobs if job.get("name") == "tag-qualified"]
+            step_name = ("Dispatch signing after durable creation acknowledgment" if creator
+                         else "Revalidate exact qualified authority immediately before tag creation")
+            if (len(tag_jobs) != 1 or tag_jobs[0].get("run_id") != row["id"]
+                    or tag_jobs[0].get("status") != "completed"):
+                raise ValueError("prior publisher tag job is unresolved")
+            steps = [step for step in tag_jobs[0].get("steps", []) if step.get("name") == step_name]
+            if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "skipped":
+                raise ValueError("OUTCOME_UNKNOWN: prior publisher may have dispatched signing; never retry")
+            after = _api(repository, endpoint)
+            keys = ("id", "path", "head_sha", "run_attempt", "run_started_at", "updated_at", "status", "conclusion")
+            if any(after.get(key) != original.get(key) for key in keys):
+                raise ValueError("prior publisher changed during signing-attempt verification")
+
+
+def _recover_tag_creation(args: argparse.Namespace) -> int:
+    """Recover only an immutable native publisher's previously acknowledged creation."""
+    selection = _read_json(args.selection)
+    source, version = selection["source_sha"], selection["version"]
+    train_id = selection["train_run_id"]
+    qualified_id = selection["qualification_run_id"]
+    qualified = _authorize_selection(args.repository, selection, Path(args.notes).read_bytes(),
+                                     source, version, train_id)
+    if (str(qualified.get("id")) != qualified_id or qualified.get("run_attempt") != selection["qualification_attempt"]
+            or qualified.get("status") != "completed" or qualified.get("conclusion") != "success"):
+        raise ValueError("tag recovery qualification changed or is not terminal green")
+    tag = _api(args.repository, f"git/ref/tags/v{version}")
+    if tag.get("object", {}).get("type") != "commit" or tag.get("object", {}).get("sha") != source:
+        raise ValueError("tag recovery ref is not the exact qualified commit")
+    rows = (_run_rows(args.repository, "release-train.yml", "workflow_run")
+            + _run_rows(args.repository, "release-train.yml", "workflow_dispatch"))
+    titles = {f"Promote run {qualified_id}", f"Publish {qualified['display_title']}"}
+    creators: dict[tuple[int, int], str] = {}
+    for row in rows:
+        if row.get("display_title") not in titles:
+            continue
+        if (row.get("path") != OWNER_WORKFLOW or row.get("head_branch") != "main"
+                or row.get("repository", {}).get("full_name") != args.repository
+                or row.get("event") not in ("workflow_run", "workflow_dispatch")
+                or type(row.get("id")) is not int or not _git_sha(row.get("head_sha"))):
+            raise ValueError("tag recovery publisher has unknown or foreign native identity")
+        _assert_main_execution(args.repository, row["head_sha"])
+        pages = _api(args.repository, f"actions/runs/{row['id']}/artifacts?per_page=100", paginate=True)
+        artifacts = [item for page in pages for item in page["artifacts"]]
+        for artifact in artifacts:
+            name = artifact.get("name", "")
+            attempt = name.removeprefix("tag-creation-")
+            if name == attempt or not attempt.isascii() or not attempt.isdigit() or int(attempt) < 1:
+                continue
+            if str(row["id"]) == args.publisher_id and attempt == args.publisher_attempt:
+                continue
+            endpoint = f"actions/runs/{row['id']}/attempts/{attempt}"
+            original = _api(args.repository, endpoint)
+            if (original.get("id") != row["id"] or original.get("run_attempt") != int(attempt)
+                    or original.get("head_sha") != row["head_sha"] or original.get("path") != OWNER_WORKFLOW
+                    or original.get("head_branch") != "main" or original.get("event") != row["event"]
+                    or original.get("repository", {}).get("full_name") != args.repository
+                    or original.get("status") != "completed" or original.get("display_title") not in titles):
+                raise ValueError("tag creator historical attempt has unknown or foreign native identity")
+            checked = _owner_artifact(artifacts, name, original)
+            if checked is None:
+                continue
+            receipt = json.loads(_artifact_files(args.repository, checked, {"tag-creation.json"})["tag-creation.json"])
+            destination = f"github.com:{args.repository}.git"
+            expected_ack = f"To {destination}\n*\t{source}:refs/tags/v{version}\t[new tag]\nDone\n"
+            if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+                    or receipt.get("repository") != args.repository or receipt.get("publisher_id") != str(row["id"])
+                    or receipt.get("publisher_attempt") != attempt
+                    or receipt.get("selection") != selection or receipt.get("destination") != destination
+                    or type(receipt.get("push_status")) is not int or receipt["push_status"] != 0
+                    or receipt.get("ack") != expected_ack):
+                raise ValueError("tag recovery creator artifact differs from exact native allocation/acknowledgment")
+            after = _api(args.repository, endpoint)
+            keys = ("id", "path", "head_sha", "run_attempt", "run_started_at", "updated_at",
+                    "status", "conclusion", "event", "head_branch", "repository", "display_title")
+            if any(after.get(key) != original.get(key) for key in keys):
+                raise ValueError("tag creator historical attempt changed during verification")
+            creators[(row["id"], int(attempt))] = checked["created_at"]
+    if not creators:
+        raise ValueError("OUTCOME_UNKNOWN: existing tag has no retained native creator acknowledgment")
+    signs = [row for row in _run_rows(args.repository, "release.yml")
+             if row.get("display_title") == release_title("sign", version, source, train_id)]
+    if signs:
+        sign = _api(args.repository, f"actions/runs/{max(signs, key=_attempt_order)['id']}")
+        if (not final_run_matches(dict(sign, status="completed"), repository=args.repository, source_sha=source, version=version,
+                                  train_id=train_id, phase="sign", conclusion=sign.get("conclusion"))
+                or sign.get("head_branch") != f"v{version}"
+                or sign.get("status") not in ("queued", "in_progress", "waiting", "requested", "pending", "completed")
+                or (sign["status"] == "completed" and sign.get("conclusion") != "success")):
+            raise ValueError("existing signing run is failed or has different native authority; never redispatch")
+        print(f"TAG_RECOVERY=already-dispatched sign_run_id={sign['id']}")
+        return 0
+    _require_signing_unattempted(args.repository, rows, titles, creators,
+                                (args.publisher_id, args.publisher_attempt))
+    run_id = _native_dispatch(args.repository, "release.yml", f"v{version}", {
+        "version": version, "sha": source, "train_run_id": train_id,
+        "train_attempt": selection["train_attempt"], "base_tag": selection["base_tag"],
+        "certified_run_id": qualified_id,
+    })
+    print(f"TAG_RECOVERY=dispatched sign_run_id={run_id}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1659,6 +1808,18 @@ def main(argv: list[str] | None = None) -> int:
         created.add_argument(f"--{flag}", required=True)
     created.add_argument("--push-status", type=int, required=True)
     created.set_defaults(func=_require_created_ref)
+
+    receipt = commands.add_parser("tag-creation-receipt")
+    for flag in ("ack", "source-sha", "version", "destination", "selection", "repository",
+                 "publisher-id", "publisher-attempt", "output"):
+        receipt.add_argument(f"--{flag}", required=True)
+    receipt.add_argument("--push-status", type=int, required=True)
+    receipt.set_defaults(func=_tag_creation_receipt)
+
+    recover = commands.add_parser("recover-tag-creation")
+    for flag in ("repository", "selection", "notes", "publisher-id", "publisher-attempt"):
+        recover.add_argument(f"--{flag}", required=True)
+    recover.set_defaults(func=_recover_tag_creation)
 
     current = commands.add_parser("require-attempt")
     current.add_argument("--repository", required=True)

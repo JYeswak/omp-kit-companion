@@ -418,6 +418,140 @@ class RollingReleaseTest(unittest.TestCase):
             authorized = [self.tag_ack_status(repo, reply[0], source, status=child.returncode) for child, reply in replies]
             self.assertEqual(sorted(authorized), [0, 4])
 
+    def test_creator_receipt_requires_actual_new_tag_ack_and_exact_selection(self) -> None:
+        with self.native_tag_repo() as (repo, source, newer):
+            result = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
+                                    cwd=repo, capture_output=True, text=True, check=True)
+            ack, selection, output = (repo.parent / name for name in ("ack", "selection.json", "tag-creation.json"))
+            ack.write_text(result.stdout)
+            selection.write_text(json.dumps({"source_sha": source, "version": "0.0.0", "repository": REPOSITORY}))
+            args = argparse.Namespace(ack=str(ack), selection=str(selection), output=str(output),
+                                      source_sha=source, version="0.0.0", repository=REPOSITORY,
+                                      destination=str(repo.parent / "origin.git"), push_status=0,
+                                      publisher_id="90", publisher_attempt="1")
+            self.assertEqual(release_reuse._tag_creation_receipt(args), 0)
+            self.assertEqual(json.loads(output.read_text())["ack"], result.stdout)
+            output.unlink()
+            args.source_sha = newer
+            with self.assertRaises(ValueError):
+                release_reuse._tag_creation_receipt(args)
+            self.assertFalse(output.exists())
+            args.source_sha = source
+            same = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
+                                  cwd=repo, capture_output=True, text=True, check=True)
+            ack.write_text(same.stdout)
+            with self.assertRaises(ValueError):
+                release_reuse._tag_creation_receipt(args)
+            self.assertFalse(output.exists())
+
+    def test_retained_creator_recovers_missing_signer_but_never_foreign_or_unproved_tag(self) -> None:
+        selection = selected_owner()
+        source, version, train = selection["source_sha"], selection["version"], selection["train_run_id"]
+        publisher = {"id": 90, "run_attempt": 1, "head_sha": "b" * 40, "head_branch": "main",
+                     "path": release_reuse.OWNER_WORKFLOW, "event": "workflow_dispatch",
+                     "repository": {"full_name": REPOSITORY}, "status": "completed", "conclusion": "failure",
+                     "display_title": f"Promote run {RUN_ID}", "run_started_at": "2026-01-01T00:00:00Z",
+                     "updated_at": "2026-01-01T00:02:00Z"}
+        qualified = dict(candidate_run(), id=int(RUN_ID), run_attempt=1, status="completed", conclusion="success",
+                         display_title=release_reuse.release_title("qualify", version, source, train))
+        destination = f"github.com:{REPOSITORY}.git"
+        receipt = {"schema_version": 1, "repository": REPOSITORY, "publisher_id": "90", "publisher_attempt": "1",
+                   "selection": selection, "destination": destination, "push_status": 0,
+                   "ack": f"To {destination}\n*\t{source}:refs/tags/v{version}\t[new tag]\nDone\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "selection.json").write_text(json.dumps(selection))
+            (root / "notes").write_bytes(b"notes")
+            args = argparse.Namespace(repository=REPOSITORY, selection=str(root / "selection.json"),
+                                      notes=str(root / "notes"), publisher_id="91", publisher_attempt="1")
+            def run(*, proof: Any = receipt, ref: Any = source, artifact: Any = True, sign: Any = None,
+                    rerun: Any = False, after_changed: Any = False, attempted: Any = False, prior_recovery: Any = False):
+                args.publisher_id, args.publisher_attempt = ("90", "2") if rerun else ("91", "1")
+                historical_reads = 0
+                recovery = dict(publisher, id=92, run_started_at="2026-01-01T00:03:00Z",
+                                updated_at="2026-01-01T00:04:00Z")
+                def api(repository, endpoint, **kwargs):
+                    if endpoint.startswith("git/ref/"):
+                        return {"object": {"type": "commit", "sha": ref}}
+                    if endpoint == "actions/runs/90/artifacts?per_page=100":
+                        return [{"artifacts": [{"id": 77, "name": "tag-creation-1", "expired": False,
+                                                "created_at": "2026-01-01T00:01:00Z",
+                                                "workflow_run": {"id": 90, "head_sha": publisher["head_sha"]}}]
+                                  if artifact else []}]
+                    if endpoint == "actions/runs/777" and sign:
+                        return sign
+                    if endpoint == "actions/runs/90/attempts/1/jobs?per_page=100":
+                        return [{"total_count": 1, "jobs": [{"name": "tag-qualified", "run_id": 90,
+                                  "status": "completed", "steps": [{
+                                      "name": "Dispatch signing after durable creation acknowledgment",
+                                      "status": "completed", "conclusion": "failure" if attempted else "skipped"}]}]}]
+                    if endpoint == "actions/runs/90/attempts/1":
+                        nonlocal historical_reads
+                        historical_reads += 1
+                        return dict(publisher, conclusion="cancelled" if after_changed and historical_reads > 1 else "failure")
+                    if endpoint == "actions/runs/92/artifacts?per_page=100":
+                        return [{"artifacts": []}]
+                    if endpoint == "actions/runs/92/attempts/1":
+                        return recovery
+                    if endpoint == "actions/runs/92/attempts/1/jobs?per_page=100":
+                        return [{"total_count": 1, "jobs": [{"name": "tag-qualified", "run_id": 92,
+                                  "status": "completed", "steps": [{
+                                      "name": "Revalidate exact qualified authority immediately before tag creation",
+                                      "status": "completed", "conclusion": "failure"}]}]}]
+                    raise AssertionError(endpoint)
+                def rows(repository, workflow, event="workflow_dispatch", **kwargs):
+                    latest = dict(publisher, run_attempt=2, status="in_progress", conclusion=None) if rerun else publisher
+                    publishers = [latest, recovery] if prior_recovery else [latest]
+                    return ([sign] if sign else []) if workflow == "release.yml" else (publishers if event == "workflow_dispatch" else [])
+                with patch.object(release_reuse, "_authorize_selection", return_value=qualified), \
+                     patch.object(release_reuse, "_api", side_effect=api), \
+                     patch.object(release_reuse, "_run_rows", side_effect=rows), \
+                     patch.object(release_reuse, "_assert_main_execution"), \
+                     patch.object(release_reuse, "_artifact_files", return_value={"tag-creation.json": json.dumps(proof).encode()}), \
+                     patch.object(release_reuse, "_native_dispatch", return_value="777") as dispatch:
+                    error = None
+                    try:
+                        release_reuse._recover_tag_creation(args)
+                    except ValueError as caught:
+                        error = caught
+                    return error, dispatch
+            error, dispatch = run()
+            self.assertIsNone(error)
+            dispatch.assert_called_once_with(REPOSITORY, "release.yml", f"v{version}", {
+                "version": version, "sha": source, "train_run_id": train, "train_attempt": selection["train_attempt"],
+                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID})
+            error, dispatch = run(rerun=True)
+            self.assertIsNone(error)
+            dispatch.assert_called_once()
+            error, dispatch = run(after_changed=True)
+            self.assertIsInstance(error, ValueError)
+            dispatch.assert_not_called()
+            error, dispatch = run(attempted=True)
+            self.assertIsInstance(error, ValueError)
+            self.assertIn("never retry", str(error))
+            dispatch.assert_not_called()
+            error, dispatch = run(prior_recovery=True)
+            self.assertIsInstance(error, ValueError)
+            self.assertIn("never retry", str(error))
+            dispatch.assert_not_called()
+            for options in ({"artifact": False}, {"ref": "f" * 40},
+                            {"proof": dict(receipt, publisher_attempt="2")},
+                            {"proof": dict(receipt, push_status=True)},
+                            {"proof": dict(receipt, ack=receipt["ack"].replace("*\t", "=\t"))},
+                            {"proof": dict(receipt, selection=dict(selection, qualification_attempt=2))}):
+                with self.subTest(options=options):
+                    error, dispatch = run(**options)
+                    self.assertIsInstance(error, ValueError)
+                    dispatch.assert_not_called()
+            sign = dict(qualified, id=777, head_sha=source, head_branch=f"v{version}",
+                        display_title=release_reuse.release_title("sign", version, source, train),
+                        run_started_at="2026-01-01T00:00:00Z")
+            for status, conclusion in (("queued", None), ("in_progress", None), ("requested", None),
+                                       ("pending", None), ("completed", "success"), ("completed", "failure")):
+                error, dispatch = run(sign=dict(sign, status=status, conclusion=conclusion))
+                self.assertEqual(error is None, conclusion != "failure")
+                dispatch.assert_not_called()
+
     def test_running_and_red_descendants_do_not_starve_eligible_green(self) -> None:
         a, b, c = "a" * 40, "b" * 40, "c" * 40
         rows = green_ci_runs(a)["workflow_runs"]
