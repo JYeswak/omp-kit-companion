@@ -15,6 +15,7 @@ const MAX_WAIT_SECONDS = 900;
 
 type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string };
 type DiskObserver = "sbh" | "statfs" | "auto";
+const DISK_OBSERVERS: readonly DiskObserver[] = ["sbh", "statfs", "auto"];
 type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null };
 type MachineLoad = { load1: number; ncpu: number };
 type HeavySignal = "SIGINT" | "SIGTERM";
@@ -39,12 +40,18 @@ function ensureStorage(root: string): { jobs: string; lock: string } {
 	return { jobs, lock: join(root, "mutex") };
 }
 
-function loadConfig(): HeavyConfig {
+/**
+ * SAVEFIRST1 (ompkit-774u.16): `override` is `--disk-observer`; it replaces
+ * load.json's disk_observer for one call, so a save path (the pre-push gate)
+ * can admit on physical bytes alone while sbh's policy floor stays a flag, not
+ * a veto. The floor and every other setting still come from load.json.
+ */
+function loadConfig(override?: DiskObserver): HeavyConfig {
 	const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "omp-kit", "load.json");
 	let raw: string;
 	try { raw = readFileSync(path, "utf8"); }
 	catch (error) {
-		if (errorCode(error) === "ENOENT") return { slots: 2, max_wait_s: MAX_WAIT_SECONDS, disk_observer: "auto", disk_floor_pct: null };
+		if (errorCode(error) === "ENOENT") return { slots: 2, max_wait_s: MAX_WAIT_SECONDS, disk_observer: override ?? "auto", disk_floor_pct: null };
 		throw error;
 	}
 	const value: unknown = JSON.parse(raw);
@@ -59,7 +66,7 @@ function loadConfig(): HeavyConfig {
 		throw new Error(`invalid heavy-work config: disk_observer must be "sbh", "statfs" or "auto": ${path}`);
 	if (floor !== null && (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 50))
 		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
-	return { slots, max_wait_s: maxWait, disk_observer: observer, disk_floor_pct: floor };
+	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: floor };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -286,15 +293,21 @@ function statusLine(jobs: readonly HeavyJob[], id: string, reason: string): stri
 }
 
 
-export async function runHeavy(command: readonly string[], options: { label?: string; noWait: boolean }): Promise<number> {
+export async function runHeavy(command: readonly string[], options: { label?: string; noWait: boolean; diskObserver?: string }): Promise<number> {
 	if (command.length === 0 || !command[0]) {
-		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] -- <command...>`\n");
+		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
 		return 2;
 	}
+	const override = options.diskObserver;
+	if (override !== undefined && !DISK_OBSERVERS.includes(override as DiskObserver)) {
+		process.stderr.write(`heavy: --disk-observer must be "statfs", "sbh" or "auto", got "${override}"; no command was run\n`);
+		return 2;
+	}
+	const observerOverride = override as DiskObserver | undefined;
 	let config: HeavyConfig;
 	let storage: { jobs: string; lock: string };
 	try {
-		config = loadConfig();
+		config = loadConfig(observerOverride);
 		storage = ensureStorage(join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "omp-kit", "load"));
 	} catch (error) {
 		process.stderr.write(`heavy: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -347,6 +360,13 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			if (signal) {
 				if (rowCreated) await removeQueuedJob(storage, job.id, owner, liveness);
 				return SIGNAL_EXIT_CODES[signal] ?? 1;
+			}
+			if (rowCreated) {
+				// A waiting job re-reads the disk settings each poll, so a config change reaches it before
+				// its deadline (2026-10-18: one stale job held the queue head for 900 s). Slots and the
+				// wait deadline stay as first read.
+				const fresh = loadConfig(observerOverride);
+				config = { ...config, disk_observer: fresh.disk_observer, disk_floor_pct: fresh.disk_floor_pct };
 			}
 			const acquired = await acquireLock(storage.lock, owner, deadline, options.noWait, liveness);
 			if (!acquired) {

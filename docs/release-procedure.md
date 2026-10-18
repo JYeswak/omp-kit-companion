@@ -258,6 +258,17 @@ controller's published-ancestor selection: draft, prerelease, unpublished reserv
 tags and publications after the checked source cannot narrow its coverage. A missing
 published floor or unavailable metadata refuses validation; neither silently skips it.
 
+Disk pressure never blocks a push (ompkit-774u.16). The gate's compile and harness
+steps run through `omp-kit heavy --disk-observer statfs`, which admits on physical
+bytes alone: a disk with less than 10 GiB free still refuses, and the gate names
+the step heavy refused. When sbh is on PATH and reports pressure, the gate prints
+one `WARN disk-pressure: sbh reports N% free ...` line pointing at waste management
+(ompkit-774u.15) and continues. `--disk-observer statfs|sbh|auto` overrides
+`load.json`'s `disk_observer` for one call; without it, `heavy` admits as before.
+The 180-second budget judges only the gate's own work: each heavy step prints
+`heavy admission wait: Ns`, and that queue wait is subtracted like CI deferral
+(`FRESH-GATE: GREEN ... queued=Ns judged=Ns`).
+
 ## 2. Optional changelog bookkeeping (not a release prerequisite)
 
 ```sh

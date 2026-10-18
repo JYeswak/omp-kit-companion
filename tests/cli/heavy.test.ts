@@ -643,3 +643,76 @@ test("oq1h.1 native: a floor above the measured percent defers through diskVerdi
 		expect(verdict.text).toContain("disk low (statfs)");
 	}
 });
+
+// ---- SAVEFIRST1 (ompkit-774u.16): --disk-observer lets a save path admit on physical bytes -------------
+// The fixture disk must really hold the 10 GiB need for the "ample bytes" half; a runner without it
+// skips by name rather than passing on a different state.
+const FIXTURE_AMPLE = measure(process.cwd()).freeBytes >= HEAVY_DISK_NEED_BYTES;
+
+test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1 planted: --disk-observer statfs admits under sbh pressure when the bytes physically fit (needs >= 10 GiB free)", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const pressured = { PATH: `${fakeSbh(root, 1)}:${process.env.PATH ?? ""}:/usr/bin:/bin` };
+	const control = join(root, "control-marker");
+	// Positive control for the plant: without the flag this sbh really refuses.
+	const refused = await invoke(root, ["heavy", "--no-wait", "--label", "sbh-veto", "--", "sh", "-c", `printf ran > '${control}'`], pressured);
+	expect(refused.code).toBe(75);
+	expect(refused.stderr).toContain("disk low: sbh check --need 10G reports pressure");
+	expect(existsSync(control)).toBe(false);
+	const marker = join(root, "saved-marker");
+	const admitted = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "save-path", "--", "sh", "-c", `printf ran > '${marker}'`], pressured);
+	expect(admitted.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+});
+
+test("SAVEFIRST1: --disk-observer overrides load.json, so a missing sbh named there cannot block a statfs call", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "sbh" });
+	const noSbh = { PATH: "/usr/bin:/bin" };
+	const strict = await invoke(root, ["heavy", "--no-wait", "--label", "cfg-sbh", "--", "sh", "-c", "exit 0"], noSbh);
+	expect(strict.code).toBe(HEAVY_PREREQ_MISSING);
+	const marker = join(root, "override-marker");
+	const overridden = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "cfg-override", "--", "sh", "-c", `printf ran > '${marker}'`], noSbh);
+	const pressured = measure(root).freeBytes < HEAVY_DISK_NEED_BYTES;
+	expect(overridden.code).toBe(pressured ? 75 : 0);
+	expect(existsSync(marker)).toBe(!pressured);
+	expect(overridden.stderr).not.toContain("sbh unavailable");
+});
+
+test("SAVEFIRST1: an unknown --disk-observer value runs nothing", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1 });
+	const marker = join(root, "bogus-marker");
+	const result = await invoke(root, ["heavy", "--disk-observer", "bytes", "--", "sh", "-c", `printf ran > '${marker}'`]);
+	expect(result.code).toBe(2);
+	expect(result.stderr).toContain('--disk-observer must be "statfs", "sbh" or "auto", got "bytes"');
+	expect(existsSync(marker)).toBe(false);
+});
+
+test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still refuses below the 10 GiB physical floor, whatever sbh says", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const root = fixture();
+		configure(root, { slots: 8, max_wait_s: 1 });
+		const marker = join(root, "lowfs-marker");
+		const result = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "lowfs-save", "--", "sh", "-c", `printf ran > '${marker}'`],
+			{ PATH: `${fakeSbh(root, 0, "native-bin")}:${NO_SBH_PATH}` }, { cwd });
+		expect(result.code).toBe(75);
+		expect(result.stderr).toContain("deferred: disk low (statfs) (--no-wait)");
+		expect(existsSync(marker)).toBe(false);
+	});
+});
+
+test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1: a waiting job re-reads load.json each poll, so an observer change admits it before its deadline (needs >= 10 GiB free)", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 8 });
+	const marker = join(root, "refresh-marker");
+	const started = Date.now();
+	const run = invoke(root, ["heavy", "--label", "stale-config", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: `${fakeSbh(root, 1)}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+	await waitForLedgerState(root, "queued", 15_000);
+	configure(root, { slots: 8, max_wait_s: 8, disk_observer: "statfs" });
+	const result = await run;
+	expect(result.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+	expect(Date.now() - started).toBeLessThan(8_000);
+}, 30_000);

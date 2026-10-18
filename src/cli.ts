@@ -3911,8 +3911,10 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 	const parsed = parse(args);
 	if ("request" in parsed && parsed.request.command.name === "heavy" && !parsed.request.flags.has("--help")) {
 		const label = parsed.request.flags.get("--label");
+		const diskObserver = parsed.request.flags.get("--disk-observer");
 		return runHeavy(parsed.request.commandArgs ?? [], {
 			...(typeof label === "string" ? { label } : {}),
+			...(typeof diskObserver === "string" ? { diskObserver } : {}),
 			noWait: parsed.request.flags.has("--no-wait"),
 		});
 	}

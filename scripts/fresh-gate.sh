@@ -102,17 +102,72 @@ gate_manifest() {
 	)
 }
 
+# SAVEFIRST1 (ompkit-774u.16): saving work needs only physical room. The gate's heavy
+# steps admit on the OS statfs reading (the 10 GiB floor still refuses a truly full
+# disk); sbh's policy floor becomes the WARN line from disk_pressure_flag, not a veto.
+# The step's heavy admission wait is queue time, not gate work: the child records when
+# it actually started, and the wait before it goes to queued.secs, which the 180 s
+# judgment subtracts like deferral.
+heavy_step() {
+	step=$1
+	shift
+	admitted="$WORK/$step.admitted"
+	rm -f "$admitted"
+	queued_at=$(date +%s)
+	rc=0
+	# The child script expands $0/$@ itself, so the single quotes are intended.
+	# shellcheck disable=SC2016
+	bun run --no-env-file --config=/dev/null src/cli.ts heavy --label "fresh-gate-$step" --disk-observer statfs -- \
+		sh -c 'date +%s >"$0"; exec "$@"' "$admitted" "$@" || rc=$?
+	if [ -s "$admitted" ]; then
+		wait_s=$(($(cat "$admitted") - queued_at))
+	else
+		wait_s=$(($(date +%s) - queued_at))
+	fi
+	echo "$wait_s" >>"$WORK/queued.secs"
+	echo "heavy admission wait: ${wait_s}s ($step)"
+	if [ ! -s "$admitted" ]; then
+		echo "FRESH-GATE: RED: heavy refused admission for $step (exit $rc); the heavy line above names the reason" >&2
+	fi
+	return "$rc"
+}
+
+# sbh pressure is a flag routed to waste management, never a veto on saving work.
+disk_pressure_flag() {
+	command -v sbh >/dev/null 2>&1 || return 0
+	sbh_rc=0
+	sbh_out=$(sbh check --need 10G 2>/dev/null) || sbh_rc=$?
+	[ "$sbh_rc" -eq 1 ] || return 0
+	pct=$(printf '%s\n' "$sbh_out" | sed -n 's/^.*"free_pct":\([0-9][0-9.]*\).*$/\1/p' | head -n 1)
+	if [ -n "$pct" ]; then
+		pct=$(printf '%.1f%%' "$pct")
+	else
+		pct="an unparsed"
+	fi
+	echo "WARN disk-pressure: sbh reports $pct free (below its floor); saving continues on the 10 GiB physical floor; run waste management (ompkit-774u.15)"
+}
+
 gate_harness() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun run --no-env-file --config=/dev/null src/cli.ts heavy --label fresh-gate-harness -- bun scripts/ttsr-harness.ts --gate
+		heavy_step harness bun scripts/ttsr-harness.ts --gate
 	)
 }
 gate_cli_compile() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun run --no-env-file --config=/dev/null src/cli.ts heavy --label fresh-gate-cli-compile -- bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
+		heavy_step cli-compile bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
 	)
+}
+
+# judge_budget ELAPSED DEFERRED QUEUED: the gate judges only the time its own work ran.
+judge_budget() {
+	judged=$(($1 - $2 - $3))
+	if [ "$judged" -ge 180 ]; then
+		fail "elapsed=${1}s (deferred to CI ${2}s, heavy queue wait ${3}s, judged ${judged}s) exceeds 180s"
+		return 1
+	fi
+	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s deferred=${2}s queued=${3}s judged=${judged}s"
 }
 
 append_changed() {
@@ -444,6 +499,7 @@ fi
 # archive lives under var/agent-tmp, so without this every case path looks like scratch.
 : "${OMP_KIT_CASE_CWD:=$ROOT}"
 export OMP_KIT_CASE_CWD
+disk_pressure_flag
 started=$(date +%s)
 run_step manifest gate_manifest || exit 1
 run_step cli-compile gate_cli_compile || exit 1
@@ -459,9 +515,10 @@ deferred=0
 if [ -f "$WORK/deferred.secs" ]; then
 	deferred=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/deferred.secs")
 fi
-judged=$((elapsed - deferred))
-if [ "$judged" -ge 180 ]; then
-	fail "elapsed=${elapsed}s (deferred to CI ${deferred}s, judged ${judged}s) exceeds 180s"
-	exit 1
+# Heavy queue wait behind another agent's job is not this gate's work (2026-10-18: a
+# 748 s RED was ten minutes queued behind one stuck job).
+queued=0
+if [ -f "$WORK/queued.secs" ]; then
+	queued=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 fi
-echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${elapsed}s deferred=${deferred}s judged=${judged}s"
+judge_budget "$elapsed" "$deferred" "$queued" || exit 1
