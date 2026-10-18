@@ -433,7 +433,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: unpublished-candidate-index-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/signed-journey/candidate-index/
+          path: ${{ runner.temp }}/signed-journey/candidate/
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-selection-attempt-${{ github.run_attempt }}
@@ -447,7 +447,7 @@ jobs:
         run: |
           set -euo pipefail
           J="$RUNNER_TEMP/signed-journey"
-          index="$J/candidate-index/release-index.json"
+          index="$J/candidate/release-index.json"
           gh attestation verify "$index" --repo "$GITHUB_REPOSITORY" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
