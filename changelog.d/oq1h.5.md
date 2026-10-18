@@ -1,3 +1,3 @@
-### Fixed
-- An unscoped `health` or `doctor` on a fresh install without fleet tools is no longer failed by the two fleet-only rows: the packaged planning skill is judged only when you keep a local copy to drift from, and the `rch` row is included only when rch is installed. `doctor --scope kit` still reports a missing planning-skill copy as drift, and the `rch` diagnostic scope still reports `RCH_UNAVAILABLE`. (ompkit-oq1h.5)
-- The `rch` reachability check finds the daemon pid on Linux (the single `rchd` process of your user; several matches stay `PID_UNKNOWN` rather than guessing) and gives restart advice that is not launchd-only. (ompkit-oq1h.5)
+### Changed
+- Withdraw optional fleet-health release claims pending original CLI acceptance: actual health JSON must visibly report explicit, non-judged `NOT_APPLICABLE` for absent prerequisites, while present-drift and explicit missing-scope negatives remain failures. No overall-health OK claim is made. (ompkit-oq1h.5)
+- Library or diagnose observations do not qualify `doctor --scope rch`. Its actual `src/commands.ts` grammar and the existing `5vph` prerequisite remain pending; no unqualified Linux RCH rider, installed-native success, or release credit is claimed. (ompkit-oq1h.5)
