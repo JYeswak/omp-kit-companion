@@ -10,6 +10,7 @@ import { readDrainStore, staleClaims } from "./drain.ts";
 import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
 import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
 import { inspectStateRoot } from "./state-root.ts";
+import { runtimeTempRoot } from "./runtime.ts";
 import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
 import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
@@ -1468,7 +1469,7 @@ function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { 
 			// XDG_RUNTIME_DIR is set. Pin the SAME read-only socket parent before
 			// redirecting HOME/cache; config and RCH_SOCKET_PATH still override it.
 			const runtime = process.env.XDG_RUNTIME_DIR?.trim() ? process.env.XDG_RUNTIME_DIR : join(cache, "rch");
-			privateRoot = mkdtempSync(join(tmpdir(), "omp-kit-rch-probe-"));
+			privateRoot = mkdtempSync(join(runtimeTempRoot(), "omp-kit-rch-probe-"));
 			const privateHome = join(privateRoot, "home");
 			const privateTmp = join(privateRoot, "tmp");
 			for (const directory of ["home", "tmp", "config", "cache", "data", "state"]) mkdirSync(join(privateRoot, directory), { mode: 0o700 });

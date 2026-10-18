@@ -1332,6 +1332,9 @@ test("RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a nati
 	const stateHome = join(f.base, "caller-state");
 	const runtime = join(f.base, "caller-runtime");
 	const privateTmp = join(f.base, "private-tmp");
+	const ownedWork = join(f.project, "var", "agent-tmp", "rch-probe");
+	mkdirSync(ownedWork, { recursive: true });
+	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${f.project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	for (const path of [bin, cacheHome, dataHome, stateHome, runtime, privateTmp, join(configHome, "rch")]) mkdirSync(path, { recursive: true });
 	const selected = join(runtime, "selected.sock");
 	writeFileSync(join(configHome, "rch", "config.toml"), `[general]\nsocket_path = ${JSON.stringify(selected)}\n`);
@@ -1363,6 +1366,7 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 			XDG_CONFIG_HOME: configHome, XDG_CACHE_HOME: cacheHome, XDG_DATA_HOME: dataHome,
 			XDG_STATE_HOME: stateHome, XDG_RUNTIME_DIR: runtime,
 			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(privateTmp, "bun-transpiler"),
+			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: f.project,
 			OMP_KIT_OMP_SRC_FETCH: "0",
 		},
 		stdout: "pipe", stderr: "pipe", timeout: 10_000,
@@ -1373,3 +1377,37 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 	expect(finding(rows, "rch")).toMatchObject({ status: "OK", evidence: { state: "NOT_RUNNING" } });
 	expect(snapshotWatched(watched)).toEqual(before);
 }, 15_000);
+
+test("RCHRO1: unavailable probe leaves nested caller-HOME temp metadata untouched", () => {
+	const f = fixture();
+	const callerTmp = join(f.home, "tmp");
+	const emptyBin = join(f.base, "empty-bin");
+	const ownedWork = join(f.project, "var", "agent-tmp", "rch-probe");
+	for (const path of [callerTmp, emptyBin, ownedWork]) mkdirSync(path, { recursive: true });
+	writeFileSync(join(ownedWork, ".owner"), `pid=${process.pid}\nlabel=rch-probe\nrepo=${f.project}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const script = `
+import { lstatSync } from "node:fs";
+import { defaultRchReachability } from ${JSON.stringify(join(import.meta.dir, "../../src/diagnostics.ts"))};
+const before = lstatSync(process.env.TMPDIR, { bigint: true });
+const daemon = await defaultRchReachability().daemon();
+const after = lstatSync(process.env.TMPDIR, { bigint: true });
+console.log(JSON.stringify({
+  daemon,
+  before: [String(before.mtimeNs), String(before.ctimeNs)],
+  after: [String(after.mtimeNs), String(after.ctimeNs)],
+}));
+`;
+	const run = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], {
+		cwd: f.project,
+		env: {
+			PATH: emptyBin, HOME: f.home, TMPDIR: callerTmp, TMP: callerTmp, TEMP: callerTmp,
+			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(f.base, "bun-transpiler"),
+			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: f.project,
+		},
+		stdout: "pipe", stderr: "pipe", timeout: 5_000,
+	});
+	expect(run.exitCode, run.stdout.toString() + run.stderr.toString()).toBe(0);
+	const result = JSON.parse(run.stdout.toString());
+	expect(result.daemon).toBeNull();
+	expect(result.after).toEqual(result.before);
+});
