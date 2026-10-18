@@ -258,6 +258,10 @@ jobs:
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+            # Only the successful create-only ref request below owns the first
+            # signing dispatch. Listing lag must never grant that effect twice.
+            echo 'SIGNING=not-dispatched REASON=existing-qualified-tag; reconcile the existing signer or preserve OUTCOME_UNKNOWN' >&2
+            exit 4
           else
             # Historical workflow-bearing commits require workflows: write.
             # Keep the short-lived, repository-scoped App token on this effect only.
