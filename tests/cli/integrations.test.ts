@@ -151,6 +151,7 @@ function profileConfig(extensions: string[]): string {
 	if (build.exitCode !== 0) throw new Error(`compiled CLI fixture failed (${build.exitCode}): ${build.stdout.toString()}\n${build.stderr.toString()}`);
 	environment = {
 		...nativeCacheEnv,
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || REPO_ROOT,
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),

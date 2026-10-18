@@ -96,6 +96,7 @@ beforeAll(() => {
 	chmodSync(binary, 0o755);
 	environment = {
 		...nativeCacheEnv,
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || REPO_ROOT,
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),

@@ -106,6 +106,7 @@ function isolatedEnv(home: string, kit: string): Record<string, string> {
 	mkdirSync(agentMailRoot, { recursive: true });
 	return {
 		...nativeCacheEnv,
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || REPO_ROOT,
 		HOME: home,
 		TMPDIR: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"),

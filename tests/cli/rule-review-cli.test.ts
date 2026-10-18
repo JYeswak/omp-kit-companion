@@ -57,6 +57,7 @@ beforeAll(() => {
 	const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", join(source, "src/cli.ts"), "--outfile", binary], { cwd: base, stdout: "pipe", stderr: "pipe" });
 	if (build.exitCode !== 0) throw new Error(build.stdout.toString() + build.stderr.toString());
 	environment = { ...nativeCacheEnv, HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
+		OMP_KIT_CASE_CWD: process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || source,
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"), XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),
 		PATH: process.env.PATH ?? "/usr/bin:/bin", OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source };
 }, 60_000);
