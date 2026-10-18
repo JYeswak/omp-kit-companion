@@ -55,7 +55,8 @@ function readClaim(dir: string): RunClaim | null {
 
 /**
  * A persistent SQLite inode supplies the kernel's cross-process writer lock.
- * No SQL state or schema: BEGIN EXCLUSIVE excludes readers before claim-file mutations.
+ * No SQL state or schema: reserve the single writer, then ROLLBACK only to release it.
+ * COMMIT can fail behind readers after filesystem effects; readers need not block this mutex.
  * Never unlink the gate, which would split existing and incoming waiters.
  */
 function mutateClaim<T>(jobsDir: string, job: string, mutation: () => T): T | null {
@@ -72,9 +73,9 @@ function mutateClaim<T>(jobsDir: string, job: string, mutation: () => T): T | nu
 		const current = lstatSync(path);
 		if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isFile()) return null;
 		db.exec("PRAGMA busy_timeout = 0");
-		db.exec("BEGIN EXCLUSIVE");
+		db.exec("BEGIN IMMEDIATE");
 		const result = mutation();
-		db.exec("COMMIT");
+		db.exec("ROLLBACK");
 		return result;
 	} catch {
 		if (db?.inTransaction) {
@@ -188,6 +189,8 @@ export interface SpawnHandle {
 	readonly pid: number | null;
 	wait(): Promise<{ code: number | null; out: string }>;
 	kill(): void;
+	/** True only while this owned leader has not exited; descendants alone do not identify it. */
+	alive?(): boolean;
 }
 
 export interface CapExec {
@@ -230,11 +233,17 @@ export async function runWithCap(input: {
 	return { status: "FAILED", exit: outcome.code, elapsedMs, out: outcome.out };
 }
 
+export interface CapOutputOptions {
+	/** False streams without retaining a second copy of potentially large build logs. */
+	captureOutput?: boolean;
+	onOutput?(stream: "stdout" | "stderr", text: string): void;
+}
+
 /**
  * Finite pipe-based jobs own a fresh POSIX group by default. Native PTYs and
  * long-lived service launchers have separate lifecycle owners, not this adapter.
  */
-export function bunCapExec(): CapExec {
+export function bunCapExec(options: CapOutputOptions = {}): CapExec {
 	return {
 		spawn: (argv, opts) => {
 			const ownsGroup = process.platform === "darwin" || process.platform === "linux";
@@ -244,7 +253,10 @@ export function bunCapExec(): CapExec {
 			// Node's stream bridge drains both pipes immediately and destroy()
 			// cancels their actual readers, including an outstanding read.
 			const drained = Promise.all(streams.map((stream, index) => {
-				stream.setEncoding("utf8").on("data", chunk => { output[index] += chunk; });
+				stream.setEncoding("utf8").on("data", chunk => {
+					if (options.captureOutput !== false) output[index] += chunk;
+					options.onOutput?.(index === 0 ? "stdout" : "stderr", chunk);
+				});
 				return finished(stream).catch(() => { /* expected when cancellation destroys the pipe */ });
 			}));
 			let settled = false, cleanup: Promise<void> | undefined;
@@ -289,9 +301,9 @@ export function bunCapExec(): CapExec {
 				settled = true;
 				process.off("SIGTERM", kill);
 				process.off("SIGINT", kill);
-				return { code, out: `${output[0]}\n${output[1]}` };
+				return { code, out: options.captureOutput === false ? "" : `${output[0]}\n${output[1]}` };
 			});
-			return { pid: child.pid, wait: () => result, kill };
+			return { pid: child.pid, wait: () => result, kill, alive: () => !settled && child.exitCode === null };
 		},
 		sleep: (ms) => new Promise<void>((resolve) => {
 			const timer = setTimeout(resolve, ms);

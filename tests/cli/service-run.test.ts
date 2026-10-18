@@ -40,7 +40,7 @@ test("SVC1: an unreadable liveness probe cannot authorize stealing a claim", () 
 	}
 });
 
-test("SVC1: read contention leaves no unreported claim and permits the next run", () => {
+test("SVC1: passive gate readers do not starve a reported owner or leave an unreported claim", () => {
 	const dir = jobsDir();
 	const gate = join(dir, "load-watch.gate.sqlite");
 	writeFileSync(gate, "", { mode: 0o600, flag: "wx" });
@@ -48,20 +48,20 @@ test("SVC1: read contention leaves no unreported claim and permits the next run"
 	reader.exec("PRAGMA user_version = 1");
 	reader.exec("BEGIN");
 	reader.query("SELECT name FROM sqlite_master").all();
+	const claimed = acquireRunLock(dir, "load-watch");
 	try {
+		expect(claimed.status).toBe("ACQUIRED");
+		expect(readRunClaim(dir, "load-watch")?.pid).toBe(process.pid);
 		expect(acquireRunLock(dir, "load-watch").status).toBe("OVERLAP");
-		expect(readRunClaim(dir, "load-watch")).toBeNull();
 	} finally {
+		if (claimed.status === "ACQUIRED") claimed.lock.release();
 		reader.exec("ROLLBACK");
 		reader.close();
 	}
+	expect(readRunClaim(dir, "load-watch")).toBeNull();
 	const next = acquireRunLock(dir, "load-watch");
-	if (next.status !== "ACQUIRED") throw new Error("expected acquisition after the reader released");
-	try {
-		expect(readRunClaim(dir, "load-watch")?.pid).toBe(process.pid);
-	} finally {
-		next.lock.release();
-	}
+	if (next.status !== "ACQUIRED") throw new Error("expected acquisition after the previous owner released");
+	next.lock.release();
 	expect(readRunClaim(dir, "load-watch")).toBeNull();
 });
 
