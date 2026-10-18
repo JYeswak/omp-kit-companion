@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Exercise candidate indexing with detached minimum/certified OMP receipts."""
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -40,7 +42,6 @@ spec.loader.exec_module(native_candidate)
 def allow_test_source(source_sha: str) -> None:
     if len(source_sha) != 40:
         raise AssertionError("candidate did not preserve the source SHA shape")
-setattr(native_candidate, "verified_source", allow_test_source)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -74,6 +75,9 @@ class CandidateReceiptTests(unittest.TestCase):
         })
         environment.start()
         self.addCleanup(environment.stop)
+        source_check = unittest.mock.patch.object(native_candidate, "verified_source", allow_test_source)
+        source_check.start()
+        self.addCleanup(source_check.stop)
         self._write_assets()
 
     def tearDown(self) -> None:
@@ -512,5 +516,64 @@ class FullProofTests(unittest.TestCase):
         self.assertLessEqual(len(receipt["telemetry_error"]), 300)
 
 
+def native_failure_log() -> None:
+    """Plant a real packaged stage failure; never create a passing native receipt."""
+    archive_dir = Path(os.environ["OMP_KIT_NATIVE_FAILURE_ARCHIVE_DIR"])
+    target = os.environ["TARGET"]
+    original_env = native_candidate.cert_env
+    head = "CIOUT1 planted stage head: owned nice exits 1"
+    tail = "CIOUT1 planted stage tail: owned nice exits 1"
+    error = "CIOUT1 planted stage stderr: owned nice exits 1"
+
+    def failing_stage_env(home: Path, root: Path) -> dict:
+        env = original_env(home, root)
+        fault_bin = root / "fault-bin"
+        fault_bin.mkdir()
+        nice = fault_bin / "nice"
+        # Keep the actual child alive long enough for heavy's process-identity check.
+        nice.write_text("#!/bin/sh\n/bin/sleep 1\nprintf '%s\\n' "
+                        + repr(head) + " " + repr("x" * 8000) + " " + repr(tail)
+                        + "\nprintf '%s\\n' " + repr(error) + " >&2\nexit 1\n", encoding="utf-8")
+        nice.chmod(0o700)
+        return {**env, "PATH": str(fault_bin) + os.pathsep + env["PATH"]}
+
+    with tempfile.TemporaryDirectory(prefix="native-failure-log-") as work:
+        args = types.SimpleNamespace(
+            version=os.environ["CANDIDATE_VERSION"], platform=target,
+            source_sha=os.environ["SOURCE_SHA"], omp_version=os.environ["OMP_VERSION"],
+            omp_track=os.environ["OMP_TRACK"], asset=str(archive_dir / "asset.json"),
+            archive_dir=str(archive_dir), out=str(Path(work) / "refusal.json"))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(native_candidate, "cert_env", failing_stage_env):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = native_candidate.native(args)
+        # Print the real native console, not a reconstruction of its receipt.
+        print(stdout.getvalue(), end="", flush=True)
+        print(stderr.getvalue(), end="", file=sys.stderr, flush=True)
+        receipt = json.loads(Path(args.out).read_text(encoding="utf-8"))
+        check = unittest.TestCase()
+        check.assertEqual(code, 1)
+        check.assertIs(receipt["certified"], False)
+        check.assertEqual(receipt["failure"], "native full refused rc=1")
+        check.assertNotIn("full", receipt["proofs"])
+        check.assertEqual(set(receipt["proofs"]), {"status", "doctor", "fast"})
+        detail = receipt["refusal_detail"]
+        check.assertEqual(detail["failed_stages"], ["harness-gate"])
+        check.assertGreaterEqual(detail["failed_stage_durations_ms"]["harness-gate"], 1000)
+        check.assertIn("verdict: failing stage harness-gate after ", stdout.getvalue())
+        check.assertIn(head, detail["producer_stdout_head"])
+        check.assertIn(tail, detail["producer_stdout_tail"])
+        check.assertIn(error, detail["producer_stdout_tail"])
+        for key, limit in (("producer_stdout_head", 2500), ("producer_stdout_tail", 2500),
+                           ("producer_stderr_tail", 1000)):
+            check.assertLessEqual(len(detail.get(key, "")), limit)
+        check.assertIn(head, stderr.getvalue())
+        check.assertIn(tail, stderr.getvalue())
+        print("CIOUT1 native forced-exit console: PASS (expected refusal, not certification)")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--native-failure-log"]:
+        native_failure_log()
+    else:
+        unittest.main()

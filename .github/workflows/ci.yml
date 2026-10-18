@@ -505,6 +505,12 @@ jobs:
         with:
           name: candidate-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native/${{ matrix.platform }}
+      - name: Prove native refusal console with an owned stage exiting 1
+        env:
+          TARGET: ${{ matrix.platform }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          OMP_KIT_NATIVE_FAILURE_ARCHIVE_DIR: ${{ runner.temp }}/native/${{ matrix.platform }}
+        run: python3 tests/cli/native_candidate_test.py --native-failure-log
       - name: Certify downloaded archive on OMP ${{ matrix.omp.track }}
         env:
           TARGET: ${{ matrix.platform }}
