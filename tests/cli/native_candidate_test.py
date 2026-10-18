@@ -356,6 +356,21 @@ class CandidateReceiptTests(unittest.TestCase):
         for key in ("producer_stdout_head", "producer_stdout_tail", "producer_stdout_chars"):
             self.assertNotIn(key, clean)
 
+    def test_refusal_detail_bounds_the_failed_stage_not_the_whole_ladder(self) -> None:
+        verdict = "REGEX-BUDGET: FAIL\nlive stream: FAIL total=600ms / 500ms\n"
+        failed = ("OMP_KIT_STAGE_START name=regex-budget\n" + verdict
+                  + "JSON_REPORT=" + "x" * 800_000 + "\nRED   regex-budget producer_rc=1\n")
+        prefix = "OMP_KIT_STAGE_START name=manifest\n" + "earlier passing output\n" * 1000
+        later = "OMP_KIT_STAGE_START name=claim-selftest\nlater output must not replace the failure\n"
+        stdout = prefix + failed + later
+        child = types.SimpleNamespace(
+            returncode=1, stdout=json.dumps(self._failing_full("regex-budget", stdout)).encode(), stderr=b"")
+        detail = native_candidate.refusal_detail("full", child)
+        self.assertTrue(detail["producer_stdout_head"].startswith("OMP_KIT_STAGE_START name=regex-budget\n" + verdict))
+        self.assertEqual(detail["producer_stdout_tail"], failed[-2500:])
+        self.assertNotIn("earlier passing output", detail["producer_stdout_head"])
+        self.assertNotIn("later output", detail["producer_stdout_tail"])
+
     def test_refusal_detail_reports_measured_stage_durations_including_the_failing_stage(self) -> None:
         stderr = (b"OMP_KIT_STAGE_START name=manifest started_at_ms=1000\n"
                   b"OMP_KIT_STAGE_START name=regex-budget started_at_ms=1500\nnoise\n")

@@ -240,10 +240,24 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None, finish
             for key in ("stdout", "stderr"):
                 text = producer.get(key)
                 if isinstance(text, str) and text:
+                    if key == "stdout":
+                        detail["producer_stdout_chars"] = len(text)
+                        # producer.stdout is the whole ladder, not just the failed stage.
+                        for stage in failed_stage_names:
+                            marker = f"OMP_KIT_STAGE_START name={stage}\n"
+                            if text.startswith(marker):
+                                start = 0
+                            else:
+                                start = text.find("\n" + marker)
+                                if start < 0:
+                                    continue
+                                start += 1
+                            end = text.find("\nOMP_KIT_STAGE_START name=", start + len(marker))
+                            text = text[start:] if end < 0 else text[start:end + 1]
+                            break
                     limit = 2500 if key == "stdout" else 1000
                     detail[f"producer_{key}_tail"] = text[-limit:]
                     if key == "stdout":
-                        detail["producer_stdout_chars"] = len(text)
                         if len(text) > limit:
                             # Some stages (regex-budget) print their verdict first and a very long report after it, so the tail alone cannot name the cause.
                             detail["producer_stdout_head"] = text[:limit]
