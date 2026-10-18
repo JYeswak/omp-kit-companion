@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { check, gitBlanketArgs, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
@@ -37,7 +36,6 @@ test("write tool to tmp roots is blocked and names the rule", () => {
 		const blocked = check({ toolName: "write", input: { path: target } }, ctx(dir));
 		expect(blocked?.block).toBe(true);
 		expect(blocked?.reason).toContain("fleet-guard scratch-write");
-		expect(blocked?.reason).toContain("AGENTS.md");
 	}
 });
 
@@ -57,6 +55,73 @@ test("writes directly under HOME root are blocked, nested writes allowed", () =>
 	expect(check({ toolName: "edit", input: { paths: [join(dir, "ok.md"), "/tmp/bad"] } }, ctx(dir))?.block).toBe(true);
 });
 
+test("logical write routes do not inherit a forbidden filesystem cwd", () => {
+	for (const cwd of ["/tmp", "/private/tmp"]) {
+		for (const toolName of ["write", "edit"]) {
+			for (const path of ["proc://owned-job/kill", "agent://coordinator", "xd://report_issue", "PROC://OwnedJob/kill"]) {
+				for (const input of [{ path }, { file: path }, { paths: [path] }])
+					expect(check({ toolName, input }, ctx(cwd))).toBeUndefined();
+			}
+		}
+	}
+});
+
+test("a logical route never exempts another filesystem target or a shell filename", () => {
+	for (const input of [
+		{ path: "proc://owned-job/kill", file: "/tmp/out" },
+		{ paths: ["agent://coordinator", "/private/tmp/out", "xd://report_issue"] },
+		{ path: "/tmp/proc://owned-job/kill" },
+		{ path: "./proc://owned-job/kill" },
+		{ path: "proc:/owned-job/kill" },
+		{ path: "%70roc://owned-job/kill" },
+		{ path: "unknown://owned-job/kill" },
+	])
+		expect(check({ toolName: "write", input }, ctx("/private/tmp"))?.reason).toContain("scratch-write");
+	expect(check({ toolName: "bash", command: "echo x > proc://owned-job/kill" }, ctx("/tmp"))?.block).toBe(true);
+});
+
+test("filesystem URIs are decoded before forbidden-root classification", () => {
+	const dir = home();
+	const context = { cwd: join(dir, "repo"), localRoot: "/private/tmp/session/local" };
+	for (const path of [
+		"file:///tmp/out", "file:///private/%74mp/out", "file:///repo/%2e%2e/tmp/out",
+		"ssh://host/tmp/out", "ssh://host/private/%74mp/out", "ssh://host/repo/%2e%2e/tmp/out",
+		"local://out", "local:/out", "local:///out", "/repo/local://out",
+	])
+		expect(check({ toolName: "write", input: { path } }, context)?.reason).toContain("scratch-write");
+	expect(check({ toolName: "write", input: { path: `file://${dir}/repo/out` } }, context)).toBeUndefined();
+	expect(check({ toolName: "write", input: { path: "ssh://host/srv/project/out" } }, context)).toBeUndefined();
+});
+
+test("local URI paths use the caller root, not cwd, and reject traversal before normalization", () => {
+	const dir = home();
+	const context = { cwd: "/tmp", localRoot: join(dir, "repo", "local") };
+	for (const path of ["local://notes/out", "local:/notes/out", "local:///notes/out", "local://a%3Ab/out", "local://percent%2520/out"])
+		expect(check({ toolName: "write", input: { path } }, context)).toBeUndefined();
+	for (const path of ["local://%2e%2e/out", "local://notes/%2e%2e/out", "local://%2ftmp/out", "local://notes/%5c..%5cout"])
+		expect(check({ toolName: "write", input: { path } }, context)?.block).toBe(true);
+	expect(check({ toolName: "write", input: { path: "local://out" } }, ctx(join(dir, "repo")))?.reason).toContain("backing root");
+});
+
+test("malformed filesystem URIs and invalid paths fail closed", () => {
+	const dir = home();
+	for (const path of [
+		"file:///tmp/%ZZ", "file://remote/tmp/out", "file:///tmp/%2Fout",
+		"ssh://host:bad/srv/out", "ssh://%ZZ/srv/out", "ssh://host/srv/%ZZ",
+		"ssh://host/srv/out?query=1", "ssh://host/srv/out#fragment",
+		"local://%ZZ", "local://notes/%00out", "file:///srv/%00out", "/srv/\0out",
+	])
+		expect(check({ toolName: "write", input: { path } }, { cwd: join(dir, "repo"), localRoot: join(dir, "local") })?.block).toBe(true);
+});
+
+test("long URI near misses remain bounded at the real scratch caller", () => {
+	const started = performance.now();
+	for (const path of [`ssh://${"a".repeat(60_000)}!`, `local://${"a".repeat(60_000)}%`, "a".repeat(65_537)]) {
+		expect(check({ toolName: "write", input: { path } }, ctx("/tmp"))?.block).toBe(true);
+	}
+	expect(performance.now() - started).toBeLessThan(1000);
+});
+
 test("bash redirects and sink operands to tmp are blocked", () => {
 	const dir = home();
 	expect(check({ toolName: "bash", command: "echo hi > /tmp/x" }, ctx(dir))?.block).toBe(true);
@@ -72,6 +137,21 @@ test("bash redirects and sink operands to tmp are blocked", () => {
 	expect(check({ toolName: "bash", command: "mkdir -p sub/dir" }, ctx(dir))).toBeUndefined();
 	expect(check({ toolName: "bash", command: "echo ok; echo hi > /tmp/x" }, ctx(dir))?.block).toBe(true);
 	expect(check({ toolName: "bash", command: "cp -t /tmp/d f1 f2" }, ctx(dir))?.block).toBe(true);
+});
+
+test("native Bash input objects retain redirection and compound blanket-staging refusals", () => {
+	const dir = join(home(), "work");
+	// Admission only: these strings are never executed and create no system-temp files.
+	expect(check({ toolName: "bash", input: { command: "printf prohibited > /tmp/native-never-write.txt" } }, ctx(dir))?.reason).toContain("scratch-write");
+	expect(check({ toolName: "bash", input: { command: "printf stock > owned.txt && git add -A" } }, ctx(dir))?.reason).toContain("blanket-git");
+	expect(check({ toolName: "bash", input: { command: "printf stock > owned.txt; env -i git commit -a -m x" } }, ctx(dir))?.reason).toContain("blanket-git");
+	for (const command of ["(git add -A)", "( (git add --all) )", "true && (git commit -a -m x)"])
+		expect(check({ toolName: "bash", input: { command } }, ctx(dir))?.reason).toContain("blanket-git");
+	for (const command of ["printf '%s' '(git add -A)'", "printf '%s' \\(git add -A\\)", "printf '%s' 'x; git add -A'",
+		"cat <<'EOF'\n(git add -A)\nEOF", "printf '%s' '(git add -A) trailing junk'"])
+		expect(check({ toolName: "bash", input: { command } }, ctx(dir))).toBeUndefined();
+	expect(check({ toolName: "bash", input: { command: "printf '%s' 'git add -A'" } }, ctx(dir))).toBeUndefined();
+	expect(check({ toolName: "bash", input: { command: "printf done && git add exact.txt" } }, ctx(dir))).toBeUndefined();
 });
 
 test("shellWriteTargets covers every sink in a compound command", () => {
@@ -113,8 +193,8 @@ test("session scratch dir matches the S2 owner-name contract", () => {
 	expect(dir).toBe(join(repo, "var", "agent-tmp", "omp.4242"));
 	writeScratchOwner(dir, { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" });
 	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe("pid=4242\nlabel=omp\nrepo=" + repo + "\ncreated=2026-10-02T00:00:00.000Z\n");
-	const plainBase = mkdtempSync(join(realpathSync(tmpdir()), "fleet-plain-"));
-	roots.push(plainBase);
+	// Session TMPDIR may itself be repo scratch; use an unwritten nonrepo path.
+	const plainBase = "/nonexistent/ompkit-fleet-plain";
 	expect(scratchDirFor(plainBase, 7)).toBe(join(plainBase, "var", "agent-tmp", "omp.7"));
 });
 

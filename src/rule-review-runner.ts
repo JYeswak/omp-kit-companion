@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { CASE_HEADER } from "./case-corpus.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, type ExternalCaseSnapshot, type ExternalPackSnapshot } from "./external-pack.ts";
 import { reviewAuthoredRuleChange, witnessKey, type AuthoredRuleWitness, type RuleReviewObservation, type RuleReviewReport, type RuleReviewSide } from "./rule-review.ts";
 import { runtimeTempRoot } from "./runtime.ts";
@@ -60,7 +61,7 @@ function sameBindings(left: MatcherObservation, right: MatcherObservation, allow
 
 function caseRow(row: ExternalCaseSnapshot): string {
 	const snippet = row.snippet.replace(/\n/g, "\\n").replace(/\t/g, "\\t");
-	return [row.rule, row.expect, row.source, row.tool, row.path, snippet, row.note].join("\t");
+	return [row.rule, row.expect, row.source, row.tool, row.path, snippet, row.note, row.referenceFacts === undefined ? "" : JSON.stringify(row.referenceFacts)].join("\t");
 }
 
 /** Read-only selected-pack comparison, using only the existing isolated native observer. */
@@ -95,7 +96,7 @@ export async function runInstalledRuleReview(input: InstalledRuleReviewInput): P
 		const frozen = [...union.entries()].sort(([left], [right]) => compare(left, right)).map(([, value]) => value);
 		scratch = mkdtempSync(join(runtimeTempRoot(), "omp-kit-review-"));
 		const cases = join(scratch, "frozen-witnesses.tsv");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n" + frozen.map(({ row }) => caseRow(row)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
+		writeFileSync(cases, CASE_HEADER + "\n" + frozen.map(({ row }) => caseRow(row)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
 		const ruleMaps = {
 			incumbent: new Map(packs.incumbent.rules.map(rule => [rule.name, rule])),
 			candidate: new Map(packs.candidate.rules.map(rule => [rule.name, rule])),

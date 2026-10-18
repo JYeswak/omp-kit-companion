@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -21,7 +22,7 @@ interruptMode: never
 Planted rule that fires even inside quotes.
 `;
 
-const CASES_HEADER = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
+const CASES_HEADER = CASE_HEADER + "\n";
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
@@ -46,8 +47,8 @@ beforeAll(() => {
 	writeBundledHarness(release);
 	writeFileSync(join(pack, "rules", "plant-quoted.md"), PLANTED_RULE);
 	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER +
-		"plant-quoted\tfire\ttool\tbash\t-\trun secret-token-xyz now\tfires unquoted\n" +
-		"plant-quoted\tquiet\ttool\tbash\t-\trun everything else now\tunrelated command\n");
+		"plant-quoted\tfire\ttool\tbash\t-\trun secret-token-xyz now\tfires unquoted\t\n" +
+		"plant-quoted\tquiet\ttool\tbash\t-\trun everything else now\tunrelated command\t\n");
 	const build = Bun.spawnSync([
 		process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
 		"--no-compile-autoload-tsconfig", join(REPO_ROOT, "src/cli.ts"), `--outfile=${binary}`,
@@ -123,7 +124,7 @@ test("test --metamorphic refuses incompatible flags without measuring", () => {
 test("strict zero-break gate fails on a planted fresh break", () => {
 	const planted = join(pack, "rules", "plant-fresh.md");
 	writeFileSync(planted, `---\ncondition:\n  - 'fresh-ratchet-token'\nscope: tool:bash\ninterruptMode: never\n---\nPlanted fresh break.\n`);
-	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER + "plant-fresh\tquiet\ttool\tbash\t-\techo fresh-ratchet-token\tplanted quiet case\n");
+	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER + "plant-fresh\tquiet\ttool\tbash\t-\techo fresh-ratchet-token\tplanted quiet case\t\n");
 	const { exitCode, report } = metamorphic([]);
 	expect(exitCode).toBe(1);
 	expect(report?.status).toBe("FAIL");
@@ -135,7 +136,7 @@ test("text-scope cases have no shell relations: prose in quotes still fires, not
 	mkdirSync(join(textPack, "rules"), { recursive: true });
 	writeFileSync(join(textPack, "rules", "plant-prose.md"), `---\ncondition:\n  - 'sign-off token'\nscope: text\ninterruptMode: never\n---\nPlanted prose rule.\n`);
 	writeFileSync(join(textPack, "cases.tsv"), CASES_HEADER +
-		"plant-prose\tfire\ttext\t-\t-\tWe have sign-off token now\tprose claim\n");
+		"plant-prose\tfire\ttext\t-\t-\tWe have sign-off token now\tprose claim\t\n");
 	const { exitCode, envelope } = runCli(["test", "--metamorphic",
 		"--rules", join(textPack, "rules"), "--cases", join(textPack, "cases.tsv"), "--json"]);
 	expect(exitCode).toBe(0);

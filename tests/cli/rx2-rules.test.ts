@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { lintCondition } from "../../scripts/regex-budget.ts";
@@ -40,9 +41,9 @@ function makeFixture(): string {
 	const rulesDir = join(dir, "rules");
 	mkdirSync(rulesDir);
 	for (const name of ruleNames) copyFileSync(join(root, "rules", `${name}.md`), join(rulesDir, `${name}.md`));
-	const rows = ["rule\texpect\tsource\ttool\tpath\tsnippet\tnote"];
+	const rows = [CASE_HEADER];
 	for (const [rule, expected, source, snippet] of cases) {
-		rows.push([rule, expected, source, "bash", "-", snippet, "RX2 escaped boundary"].join("\t"));
+		rows.push([rule, expected, source, "bash", "-", snippet, "RX2 escaped boundary", ""].join("\t"));
 	}
 	writeFileSync(join(dir, "cases.tsv"), `${rows.join("\n")}\n`);
 	return dir;

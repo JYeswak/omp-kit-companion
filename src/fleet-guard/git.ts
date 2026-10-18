@@ -31,7 +31,7 @@ function asString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function commandFromEvent(event: FleetGuardEvent): string | undefined {
+export function commandFromEvent(event: FleetGuardEvent): string | undefined {
 	const direct = [event.command, event.arguments && typeof event.arguments === "object" ? (event.arguments as Record<string, unknown>).command : undefined, event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).command : undefined, event.params && typeof event.params === "object" ? (event.params as Record<string, unknown>).command : undefined];
 	for (const value of direct) {
 		const text = asString(value);
@@ -46,7 +46,9 @@ function commandFromEvent(event: FleetGuardEvent): string | undefined {
 	return undefined;
 }
 
-function shellWords(segment: string): string[] {
+// Decode words within an execution segment, not a complete shell grammar.
+// Keep group punctuation out of words; nested interpreters/substitutions are handled by check().
+export function shellWords(segment: string): string[] {
 	const words: string[] = [];
 	let word = "";
 	let quote: "'" | "\"" | undefined;
@@ -70,7 +72,7 @@ function shellWords(segment: string): string[] {
 			quote = character;
 			continue;
 		}
-		if (/\s/.test(character)) {
+		if (/\s/.test(character) || character === "(" || character === ")") {
 			if (word) words.push(word);
 			word = "";
 			continue;
@@ -82,7 +84,7 @@ function shellWords(segment: string): string[] {
 	return words;
 }
 
-function commandSegments(command: string): string[] {
+export function commandSegments(command: string): string[] {
 	const segments: string[] = [];
 	let segment = "";
 	let quote: "'" | "\"" | undefined;
@@ -127,7 +129,7 @@ const AMEND_REASON =
 // Shell NAME=value assignment (env wrapper), never a git flag or subcommand.
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-function stripEnvWrappers(words: readonly string[]): readonly string[] | undefined {
+export function stripEnvWrappers(words: readonly string[]): readonly string[] | undefined {
 	let index = 0;
 	if (words[index] === "env") {
 		index++;

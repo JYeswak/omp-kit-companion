@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -12,7 +13,7 @@ const open = "BEGIN PUBLIC DEMO\n";
 const close = "END PUBLIC DEMO\n";
 const original = `${open}noise one\nPUBLIC DANGER\nnoise two\n${close}`;
 const wanted = `${open}PUBLIC DANGER\n${close}`;
-const header = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
+const header = CASE_HEADER + "\n";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 let base = "";
 let release = "";
@@ -47,7 +48,7 @@ function nativeOracle(expectedRuleSha256 = ruleSha): { evaluate: ReducerPredicat
 	const evaluate: ReducerPredicate = async (candidate, context) => {
 		if (context.signal.aborted) return { status: "UNAVAILABLE", reason: "aborted" };
 		const encoded = candidate.replace(/\n/g, "\\n").replace(/\t/g, "\\t");
-		const bytes = `${header}synthetic-reduction\tfire\ttext\t-\t-\t${encoded}\tpublic synthetic payload\n`;
+		const bytes = `${header}synthetic-reduction\tfire\ttext\t-\t-\t${encoded}\tpublic synthetic payload\t\n`;
 		writeFileSync(cases, bytes);
 		const report = await runMatcherObservation({ root: release, executablePath, rules, cases,
 			rule: "synthetic-reduction", caseLine: 2, expectedRuleSha256,

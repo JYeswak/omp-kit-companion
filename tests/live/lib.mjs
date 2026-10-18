@@ -11,6 +11,8 @@
 //   bun lib.mjs plant <ruleFile>             overwrite kit-close-needs-evidence with the baseline condition
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const scenarios = JSON.parse(fs.readFileSync(path.join(HERE, "scenarios.json"), "utf8"));
@@ -34,9 +36,13 @@ async function coverage(rulesDir) {
 	const { loadRules } = await import("../../scripts/rule-class.ts");
 	const errs = [];
 	const rows = [];
-	const rules = loadRules(rulesDir);
-	for (const { name, cls } of rules) {
-		const mine = scenarios.filter(s => s.rule === name && !s.plant);
+	const { guardName } = await import("./admission-extension.mjs");
+	const rules = [
+		...loadRules(rulesDir).map(rule => ({ ...rule, backend: "ttsr" })),
+		{ name: guardName, cls: "tripwire", backend: "admission" },
+	];
+	for (const { name, cls, backend } of rules) {
+		const mine = scenarios.filter(s => s.rule === name && (s.backend ?? "ttsr") === backend && !s.plant);
 		const kinds = mine.map(s => s.kind);
 		for (const s of mine) if (s.class !== cls) errs.push(`${s.id}: declares class ${s.class}, omp's parsed rule says ${cls}`);
 		if (cls === "always") {
@@ -51,15 +57,16 @@ async function coverage(rulesDir) {
 			const ran = e.marker === "present" || (e.files_present ?? []).length > 0;
 			if (cls === "tripwire" && !blocked) errs.push(`${s.id}: tripwire fire must assert the action did not run`);
 			if (cls !== "tripwire" && !ran) errs.push(`${s.id}: ${cls} fire must assert the action ran`);
-			if (!(name in (e.rules ?? {}))) errs.push(`${s.id}: fire scenario does not expect ${name}`);
+			if (backend === "ttsr" && !(name in (e.rules ?? {}))) errs.push(`${s.id}: fire scenario does not expect ${name}`);
+			if (backend === "admission" && e.admission?.refused !== true) errs.push(`${s.id}: admission fire must expect a bound refusal`);
 		}
 		for (const s of mine.filter(s => s.kind === "near-miss")) {
 			if (name in (s.expect.rules ?? {})) errs.push(`${s.id}: near-miss expects its own rule`);
 		}
-		rows.push(`${cls.padEnd(9)} ${name.padEnd(32)} ${kinds.join(",")}`);
+		rows.push(`${backend.padEnd(9)} ${cls.padEnd(9)} ${name.padEnd(32)} ${kinds.join(",")}`);
 	}
-	const known = new Set(rules.map(r => r.name));
-	for (const s of scenarios) if (!known.has(s.rule)) errs.push(`${s.id}: rule ${s.rule} is not in ${rulesDir}`);
+	const known = new Set(rules.map(r => `${r.backend}:${r.name}`));
+	for (const s of scenarios) if (!known.has(`${s.backend ?? "ttsr"}:${s.rule}`)) errs.push(`${s.id}: backend/rule ${s.backend ?? "ttsr"}/${s.rule} is not registered`);
 	const ids = scenarios.map(s => s.id);
 	for (const id of ids) if (ids.indexOf(id) !== ids.lastIndexOf(id)) errs.push(`duplicate scenario id ${id}`);
 	const byClass = {};
@@ -96,18 +103,35 @@ function toolResultFailures(messages, expected) {
 	}
 	if (args?.command !== expected.command) failures.push("tool command did not match " + expected.command);
 	if (typeof result?.content !== "string" || result.isError === true || /Command exited with code [1-9]\d*/.test(result.content)) {
-		failures.push("tool result did not show ok=" + expected.ok + " action=" + expected.action);
+		failures.push(`tool result did not show ok=${expected.ok} action=${expected.action}`);
 		return failures;
 	}
 	try {
 		const payload = JSON.parse(result.content.split(/\r?\n/, 1)[0]);
 		if (payload.ok !== expected.ok || payload.data?.action !== expected.action) {
-			failures.push("tool result did not show ok=" + expected.ok + " action=" + expected.action);
+			failures.push(`tool result did not show ok=${expected.ok} action=${expected.action}`);
 		}
 	} catch {
 		failures.push("tool result is not JSON from the selected bash call");
 	}
 	return failures;
+}
+
+function admissionFailures(messages, scenario) {
+	const expected = scenario.turns.find(turn => turn.tool)?.tool;
+	const calls = messages.filter(message => message.role === "assistant").flatMap(message => message.tool_calls ?? []);
+	const matching = calls.filter(call => {
+		try { return call.function?.name === expected?.name && isDeepStrictEqual(JSON.parse(call.function.arguments), expected.args); }
+		catch { return false; }
+	});
+	if (matching.length !== 1) return ["native admission call did not match the original tool and arguments exactly once"];
+	const result = messages.find(message => message.role === "tool" && message.tool_call_id === matching[0].id);
+	if (typeof result?.content !== "string") return ["native admission result is not bound to the original tool call"];
+	const refused = result.content.startsWith(`fleet-guard ${scenario.rule}: `);
+	if (refused !== scenario.expect.admission.refused) return ["native admission refusal disagrees with the expected action"];
+	if (!refused && (result.isError === true || !result.content.includes("Successfully wrote")))
+		return ["native admission quiet case did not return a successful write result"];
+	return [];
 }
 
 function verdict(i, log, proj, ompExit) {
@@ -146,6 +170,7 @@ function verdict(i, log, proj, ompExit) {
 		if (!transcript.includes(t)) errs.push(`transcript lacks ${JSON.stringify(t)}`);
 	}
 	if (e.tool_result_json) errs.push(...toolResultFailures(reqs.at(-1).body.messages, e.tool_result_json));
+	if (e.admission) errs.push(...admissionFailures(reqs.at(-1).body.messages, s));
 
 	const marker = path.join(proj, `.ran_${s.id}`);
 	if (e.marker === "present" && !fs.existsSync(marker)) errs.push(`marker .ran_${s.id} absent: the command did not run`);
@@ -174,6 +199,22 @@ switch (cmd) {
 		break;
 	case "prep": {
 		const s = scenarios[Number(args[0])];
+		if (s.backend === "admission") {
+			const project = args[2];
+			if (!project) throw new Error("native admission fixture requires the actual project root");
+			fs.mkdirSync(path.join(project, ".omp"), { recursive: true });
+			fs.writeFileSync(path.join(project, ".omp", "fleet.json"), '{"enabled":true}\n');
+			const scratch = path.join(project, "var", "agent-tmp", "probe");
+			fs.mkdirSync(scratch, { recursive: true });
+			fs.writeFileSync(path.join(scratch, ".owner"), `pid=${process.pid}\nlabel=probe\nrepo=${project}\ncreated=${new Date().toISOString()}\n`);
+			const env = { ...process.env };
+			for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+			Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" });
+			for (const [sourcePath, content] of Object.entries(s.indexed_sources ?? {})) {
+				const hash = execFileSync("git", ["-C", project, "hash-object", "-w", "--stdin", "--no-filters"], { env, input: content, encoding: "utf8" }).trim();
+				execFileSync("git", ["-C", project, "update-index", "--add", "--cacheinfo", `100644,${hash},${sourcePath}`], { env });
+			}
+		}
 		fs.writeFileSync(args[1], JSON.stringify({ turns: s.turns, chunk: s.chunk ?? 6 }));
 		break;
 	}

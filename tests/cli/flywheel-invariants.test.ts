@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, REQUIRED_ANTI, REQUIRED_KERNEL } from "../../scripts/check-flywheel-invariants.ts";
@@ -16,7 +17,7 @@ function tree(): string {
 	mkdirSync(join(root, "rules"));
 	mkdirSync(join(root, "cases"));
 	writeFileSync(join(root, "rules/kit-demo.md"), "---\ncondition: 'x'\n---\nbody\n");
-	writeFileSync(join(root, "cases/cases.tsv"), "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nkit-demo\tfire\ttext\t-\t-\tx\tn\nkit-demo\tquiet\ttext\t-\t-\ty\tn\n");
+	writeFileSync(join(root, "cases/cases.tsv"), CASE_HEADER + "\nkit-demo\tfire\ttext\t-\t-\tx\tn\t\nkit-demo\tquiet\ttext\t-\t-\ty\tn\t\n");
 	return root;
 }
 const row = (id: string, guide: string, kind = "ttsr", mechanism = "kit-demo") =>

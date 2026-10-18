@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ test("witness bindings hash the exact runtime, launcher and native addon bytes",
 	const cases = join(scratch, "cases.tsv");
 	mkdirSync(rules, { recursive: true });
 	writeFileSync(join(rules, "external-binding.md"), "---\ncondition: 'BINDING_KEY'\nscope: text\ninterruptMode: never\n---\nBinding witness.\n");
-	writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-binding\tfire\ttext\t-\t-\tBINDING_KEY\tbinding\n");
+	writeFileSync(cases, CASE_HEADER + "\nexternal-binding\tfire\ttext\t-\t-\tBINDING_KEY\tbinding\t\n");
 	const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-binding", "--line", "2"], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 	expect(result.exitCode).toBe(0);
 	const { bindings } = JSON.parse(result.stdout.toString());

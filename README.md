@@ -63,24 +63,24 @@ for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Tested rule pack
 
-`rules/` holds the shipped rules; `cases/cases.tsv` holds their seven-column
-fire and near-miss cases. Count them and split them by class:
+`rules/` holds the pack. `cases/cases.tsv` has eight columns: `rule`, `expect`,
+`source`, `tool`, `path`, `snippet`, `note`, `reference_facts`. The last is empty
+or a JSON `{"tracked":{"relative/path":"content"}}` map.
+Count them and split them by class:
 
 ```sh
 ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack in this tree has 32 rules: 17 `reminder`, 12 `tripwire`, 1 `always`
-(`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`, which loads the
-unsafe-code skills when `unsafe` appears in a Rust file), and 1 `canary`
-(`zz-canary-scope-probe`, a discovery probe). Tripwires cover unverified "done"
-claims, evidence-free bead closes, `--no-verify`, plaintext secrets, hand edits
-that turn the pack off, test skips, GitHub Actions polling, and scratch written
-into durable locations. Reminders cover shell traps such as `$?` after a pipe
-into `head`, force-push without `--force-with-lease`, pattern kills, and
-embedded `(?i)` flags that never fire in a JS RegExp. Rules pulled from the pack
-live in `retired/` with one reason per row in `retired/REASONS.tsv`.
+The pack has 31 rules: 17 `reminder`, 11 `tripwire`, 1 `always`
+(`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
+(`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
+the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
+`--no-verify`, secrets, configuration mutation, test skips and Actions polling.
+Reminders cover pipe exit status, force-push without `--force-with-lease`, pattern
+kills and unsupported embedded JS regex flags. Retired rules and reasons live in
+`retired/` and `retired/REASONS.tsv`.
 
 ```sh
 omp-kit test --json                       # bundled pack, G1-G3
@@ -163,8 +163,8 @@ The repo is an OMP plugin. `package.json` declares five extensions:
 | Extension | Hooks | Behavior |
 |---|---|---|
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos that commit `.omp/kit-guard.json`. Opted in with the guard missing blocks every tool call |
-| `fleet-guard.ts` | `tool_call` | Blocks writes outside `var/agent-tmp` (for example `/tmp` or `$HOME`), branch and worktree creation, tracked edits without an exclusive Agent Mail reservation, and reservation TTLs over the cap for paths in `.omp/hot-paths` |
-| `kit-save-guard.ts` | session and tool hooks | Tracks files written by write/edit/ast_edit; at turn end blocks at most twice for unsaved repo work, then warns once. Never commits, stashes, or pushes |
+| `fleet-guard.ts` | `tool_call` | Opt-in only: blocks forbidden scratch writes/source copies, new branches/worktrees, unreserved tracked edits and overlong hot-path reservations |
+| `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
 | `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, tells the agent to re-read the nearest `AGENTS.md` and its in-progress bead; blocks `br close` / `bd close` on a bead assigned to the caller (`SELF_CLOSE_REFUSED`) |
 | `kit-callback.ts` | `agent_end` | For worker panes listed in `fleet-watch.json`, sends the last `DONE`/`BLOCKED` line (or an `IDLE` excerpt) to the coordinator pane through `ntm send`. Never blocks |
 
@@ -381,7 +381,7 @@ omp plugin install "github:JYeswak/omp-kit-companion#v$KIT_VERSION"
 omp plugin list
 ```
 
-This loads `rules/` and all five extensions through OMP's plugin loader. See
+Fleet tool/save guards require the nearest repo's `.omp/fleet.json` with `{"enabled":true}`; stock repos stay unchanged. See
 [docs/usage.md](docs/usage.md) for how plugin rules rank against native rules
 and `~/.agents/rules` copies, and `omp-kit migrate --plan` to move legacy
 copies onto plugin layering.
@@ -508,6 +508,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Read-only reports for landed-but-open beads and stale in-progress claims (--project DIR reads DIR/.beads/beads.db; refused with --db) | `omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
+| `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit exact actively reserved paths to shared main, then converge and publish; distinguish saved-but-unpublished and uncertain saves | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
@@ -651,7 +652,8 @@ report without writing.
 | `.omp/infra-pins.toml` | Toolchain pins for `infra` | kit copy, `--file` overrides |
 | `.omp/mission.toml` | Mission record for `mission validate` | n/a |
 | `.omp/kit-guard.json` | Per-repo opt-in for `kit-guard-optin` | absent: off |
-| `.omp/fleet-guard.json` | Opt out of fleet-guard's branch rule | absent: rule on |
+| `.omp/fleet.json` | Shared fleet tool/save opt-in: `{"enabled":true}` | absent or false: off |
+| `.omp/fleet-guard.json` | Branch-rule opt-out within an opted-in fleet repo | absent: branch rule on |
 | `.omp/hot-paths` | Paths whose reservation TTL is capped | none |
 | `KIT_GUARD_SRC` | Guard source for `kit-guard-optin` | unset: opted-in repos block all tool calls |
 | `OMP_KIT_UPDATE_ENABLED`, `_POLL`, `_REPO`, `_INDEX`, `_ARCHIVE`, `_VERSION`, `_SOURCE_TAG` | kit-update job, read at `service install` | disabled |
@@ -772,7 +774,7 @@ setups use both.
 release is in [CHANGELOG.md](CHANGELOG.md) and on the GitHub release page.
 
 **Can I write my own rules and test them the same way?**
-Yes. Put rules in a directory and cases in the seven-column TSV format, then
+Yes. Put rules in a directory and cases in the eight-column TSV format, then
 run `omp-kit test --rules /abs/rules --cases /abs/cases.tsv --json`. `review
 rules` compares a candidate against the incumbent's witnesses. The
 [usage guide](docs/usage.md) covers the format.

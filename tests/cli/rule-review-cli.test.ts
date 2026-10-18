@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { createHash } from "node:crypto";
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,9 +17,9 @@ let incumbent = "";
 let candidate = "";
 let environment: Record<string, string>;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-const header = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
-const fire = "transition\tfire\ttext\t-\t-\tPUBLIC DANGER\tpublic-fire-control\n";
-const quiet = "transition\tquiet\ttext\t-\t-\t𝄞 PUBLIC SAFE\tincumbent-quiet-witness\n";
+const header = CASE_HEADER + "\n";
+const fire = "transition\tfire\ttext\t-\t-\tPUBLIC DANGER\tpublic-fire-control\t\n";
+const quiet = "transition\tquiet\ttext\t-\t-\t𝄞 PUBLIC SAFE\tincumbent-quiet-witness\t\n";
 
 function snapshot(root: string): string[] {
 	return readdirSync(root).sort().flatMap(name => {
@@ -53,7 +54,7 @@ beforeAll(() => {
 		writeFileSync(join(directory!, "rules", "transition.md"), "---\ncondition:\n  - '" + pattern + "'\nscope:\n  - text\ninterruptMode: never\n---\nSynthetic authored matcher fixture.\n");
 	}
 	writeFileSync(join(incumbent, "cases.tsv"), header + fire + quiet);
-	writeFileSync(join(candidate, "cases.tsv"), header + fire + "transition\tquiet\ttext\t-\t-\tMUNDANE SAFE\tcandidate-substitute-quiet\n");
+	writeFileSync(join(candidate, "cases.tsv"), header + fire + "transition\tquiet\ttext\t-\t-\tMUNDANE SAFE\tcandidate-substitute-quiet\t\n");
 	const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", join(source, "src/cli.ts"), "--outfile", binary], { cwd: base, stdout: "pipe", stderr: "pipe" });
 	if (build.exitCode !== 0) throw new Error(build.stdout.toString() + build.stderr.toString());
 	environment = { ...nativeCacheEnv, HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),

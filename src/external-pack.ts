@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, read
 import { isAbsolute, join, relative, sep } from "node:path";
 import { runMatcherObservation, type MatcherObservation } from "./test-runner.ts";
 
-const CASE_HEADER = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote";
+import { CASE_HEADER, parseReferenceFacts, type CaseReferenceFacts } from "./case-corpus.ts";
 const RULE_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
 const TOOL_NAMES: Record<string, true> = { bash: true, edit: true, write: true };
 const SOURCES: Record<string, true> = { text: true, thinking: true, tool: true };
@@ -42,6 +42,7 @@ export interface ExternalCaseSnapshot {
 	readonly path: string;
 	readonly snippet: string;
 	readonly note: string;
+	readonly referenceFacts?: CaseReferenceFacts;
 }
 
 export interface ExternalPackSnapshot {
@@ -194,8 +195,14 @@ export function readExternalPackSnapshot(rulesDirectory: string, casesFile: stri
 			}
 		} else if (row.trim() !== "" && !row.startsWith("#")) {
 			const columns = row.split("\t");
-			if (columns.length !== 7) return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} must have exactly seven TSV columns`);
-			const [rule, expect, source, tool, casePathValue, rawSnippet, note] = columns as [string, string, string, string, string, string, string];
+			if (columns.length !== 8) return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} must have exactly eight TSV columns`);
+			const [rule, expect, source, tool, casePathValue, rawSnippet, note, rawReferenceFacts] = columns as [string, string, string, string, string, string, string, string];
+			let referenceFacts: CaseReferenceFacts | undefined;
+			try {
+				referenceFacts = parseReferenceFacts(rawReferenceFacts);
+			} catch {
+				return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} has invalid reference_facts`);
+			}
 			if (!RULE_NAME.test(rule)) return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} has an invalid rule name`);
 			if (expect !== "fire" && expect !== "quiet") return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} expect must be fire or quiet`);
 			if (SOURCES[source] !== true) return inputError("INVALID_CASE_SCHEMA", `External cases line ${lineNumber} has an unsupported source`);
@@ -212,6 +219,7 @@ export function readExternalPackSnapshot(rulesDirectory: string, casesFile: stri
 				path: casePathValue,
 				snippet: rawSnippet.replace(/\\([nt])/g, (_match, code: string) => code === "n" ? "\n" : "\t"),
 				note,
+				...(referenceFacts === undefined ? {} : { referenceFacts }),
 			}));
 		}
 		if (newline === -1) break;

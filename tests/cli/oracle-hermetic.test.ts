@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 
 // fp72.58 ORACLEHERM1: the oracle must not depend on the checkout's location.
 // Rules and cases resolve against a synthetic root unless OMP_KIT_CASE_CWD
@@ -80,9 +81,9 @@ test("a corpus row really under var/agent-tmp still fires", () => {
 	const dir = scratchDir("oracle-hermetic-mini");
 	try {
 		const cases = [
-			"rule\texpected\tsource\ttool\tpath\tsnippet",
-			"scratch-is-not-a-home\tfire\ttool\twrite\tvar/agent-tmp/oracle-hermetic-mini/probe.sh\t#!/usr/bin/env bash",
-			"scratch-is-not-a-home\tquiet\ttool\twrite\tscripts/ok.sh\techo hi",
+			CASE_HEADER,
+			"scratch-is-not-a-home\tfire\ttool\twrite\tvar/agent-tmp/oracle-hermetic-mini/probe.sh\t#!/usr/bin/env bash\t\t",
+			"scratch-is-not-a-home\tquiet\ttool\twrite\tscripts/ok.sh\techo hi\t\t",
 		].join("\n") + "\n";
 		const casesFile = join(dir, "mini.tsv");
 		writeFileSync(casesFile, cases);

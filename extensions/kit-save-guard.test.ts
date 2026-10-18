@@ -20,10 +20,15 @@ function sh(cwd: string, ...args: string[]): { code: number; stdout: string } {
 	return { code: child.exitCode ?? 1, stdout: child.stdout.toString() };
 }
 
-/** Throwaway repo; withRemote wires a local bare upstream and pushes main. */
-function repo(opts: { remote?: boolean } = {}): string {
+/** Throwaway fleet repo; opt-in is real policy, and remote is a local bare upstream. */
+function repo(opts: { remote?: boolean; fleet?: boolean } = {}): string {
 	const root = mkdtempSync(join(base, "repo-"));
 	sh(root, "init");
+	if (opts.fleet !== false) {
+		mkdirSync(join(root, ".omp"));
+		writeFileSync(join(root, ".omp", "fleet.json"), '{"enabled":true}\n');
+		sh(root, "add", ".omp/fleet.json");
+	}
 	sh(root, "commit", "--allow-empty", "-m", "init [test]");
 	if (opts.remote) {
 		const bare = mkdtempSync(join(base, "bare-"));
@@ -146,6 +151,99 @@ function cfsiosFixture(): { root: string; file: string; base: string; held: stri
 	return { root, file, base, held };
 }
 
+
+test("stock absent and explicit-off policies allow stops without any local fleet tools", async () => {
+	for (const enabled of [undefined, false]) {
+		const root = repo({ fleet: false });
+		if (enabled === false) {
+			mkdirSync(join(root, ".omp"));
+			writeFileSync(join(root, ".omp", "fleet.json"), '{"enabled":false}\n');
+		}
+		const fake = fakePi(root);
+		const commands: string[] = [];
+		fake.pi.exec = async command => {
+			commands.push(command);
+			throw new Error(`stock repo must not invoke ${command}`);
+		};
+		await kitSaveGuard(fake.pi);
+		await fake.emit("session_start", { type: "session_start" });
+		const file = join(root, "stock.txt");
+		await emitPathToolCall(fake, "write", file, "stock-write");
+		writeFileSync(file, "stock user work\n");
+		await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }, false, "stock-write"));
+		await fake.emit("tool_call", { toolCallId: "stock-claim", toolName: "bash", input: {
+			command: `br --db '${join(root, ".beads", "beads.db")}' --actor FixtureOwner update stock-bead --claim`,
+		} });
+		await fake.emit("tool_execution_end", writeEvent("bash", { exitCode: 0 }, false, "stock-claim"));
+		expect(await stop(fake)).toBeUndefined();
+		expect(await stop(fake, true)).toBeUndefined();
+		await shutdown(fake);
+		expect(commands).toEqual([]);
+		expect(fake.notices).toEqual([]);
+	}
+});
+
+test("a nested stock Git repository does not inherit the containing fleet policy", async () => {
+	const parent = repo();
+	const nested = mkdtempSync(join(parent, "stock-"));
+	sh(nested, "init");
+	const fake = fakePi(nested);
+	const commands: string[] = [];
+	fake.pi.exec = async command => {
+		commands.push(command);
+		throw new Error(`nested stock repo must not invoke ${command}`);
+	};
+	await kitSaveGuard(fake.pi);
+	await fake.emit("session_start", { type: "session_start" });
+	await ownWrite(fake, join(nested, "nested.txt"), "nested stock work\n");
+	expect(await stop(fake)).toBeUndefined();
+	await shutdown(fake);
+	expect(commands).toEqual([]);
+	expect(fake.notices).toEqual([]);
+});
+
+test("malformed fleet policy is explicit and cannot silently disable the stop gate", async () => {
+	for (const contents of ["{", "{}", '{"enabled":"false"}', '{"enabled":null}']) {
+		const root = repo({ fleet: false });
+		mkdirSync(join(root, ".omp"));
+		writeFileSync(join(root, ".omp", "fleet.json"), contents);
+		const fake = fakePi(root);
+		const commands: string[] = [];
+		fake.pi.exec = async command => {
+			commands.push(command);
+			throw new Error(`unavailable policy must not invoke ${command}`);
+		};
+		await kitSaveGuard(fake.pi);
+		await fake.emit("session_start", { type: "session_start" });
+		await ownWrite(fake, join(root, "pending.txt"), "work with an invalid policy\n");
+		const result = await stop(fake);
+		expect(result).toMatchObject({ decision: "block" });
+		expect(reasonOf(result)).toContain("fleet policy unavailable");
+		expect(reasonOf(result)).toContain(".omp/fleet.json");
+		expect(isMutatingCall({ toolName: "bash", input: { command: reasonOf(result) } })).toBe(false);
+		await shutdown(fake);
+		expect(commands).toEqual([]);
+		expect(fake.notices).toEqual([{ message: expect.stringContaining("fleet policy unavailable"), type: "warning" }]);
+	}
+});
+
+test("explicitly disabling fleet policy before stop suppresses further fleet lookups and save demands", async () => {
+	const root = repo({ remote: true });
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	await ownWrite(fake, join(root, "before-off.txt"), "owned while opted in\n");
+	writeFileSync(join(root, ".omp", "fleet.json"), '{"enabled":false}\n');
+	const commands: string[] = [];
+	fake.pi.exec = async command => {
+		commands.push(command);
+		throw new Error(`disabled repo must not invoke ${command}`);
+	};
+	expect(await stop(fake)).toBeUndefined();
+	await shutdown(fake);
+	expect(commands).toEqual([]);
+	expect(fake.notices).toEqual([]);
+});
 
 test("session_stop drains in-flight path attribution before checking owned work", async () => {
 	const root = repo({ remote: true });

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -82,9 +83,9 @@ function makePack(): ExternalPackSnapshot {
 		{ flag: "wx", mode: 0o600 });
 	const cases = join(scratch, "external-pack", "cases.tsv");
 	const rows = [
-		"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
-		"public-live-marker\tfire\ttool\twrite\t.marker\tPUBLIC_BLOCK_SAMPLE\tblock witness",
-		"public-live-marker\tquiet\ttool\twrite\t.marker\tPUBLIC_ALLOW_SAMPLE\tquiet witness",
+		CASE_HEADER,
+		"public-live-marker\tfire\ttool\twrite\t.marker\tPUBLIC_BLOCK_SAMPLE\tblock witness\t",
+		"public-live-marker\tquiet\ttool\twrite\t.marker\tPUBLIC_ALLOW_SAMPLE\tquiet witness\t",
 	].join("\n") + "\n";
 	writeFileSync(cases, rows, { flag: "wx", mode: 0o600 });
 	return readExternalPackSnapshot(rules, cases);

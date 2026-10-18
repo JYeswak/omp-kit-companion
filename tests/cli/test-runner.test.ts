@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -498,7 +499,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-zebra.md"), "---\ncondition: 'ZEBRA_42'\nscope: text\ninterruptMode: never\n---\nExternal witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-zebra\tfire\ttext\t-\t-\tZEBRA_42 trailing context\tpositive\nexternal-zebra\tquiet\ttext\t-\t-\tZEBRA_4x\tnear miss\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-zebra\tfire\ttext\t-\t-\tZEBRA_42 trailing context\tpositive\t\nexternal-zebra\tquiet\ttext\t-\t-\tZEBRA_4x\tnear miss\t\n");
 		const expectedRuleHash = createHash("sha256").update(readFileSync(join(rules, "external-zebra.md"))).digest("hex");
 		const home = makeTestHome("external-witness-home");
 		const workerTmp = join(fixtureBase, "external-witness-tmp");
@@ -570,7 +571,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-path.md"), "---\ncondition: 'WRITE_MARKER'\nscope: 'tool:write(**/owned/*.md)'\ninterruptMode: never\n---\nPath witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-path\tfire\ttool\twrite\towned/note.md\tWRITE_MARKER\tin scope\nexternal-path\tquiet\ttool\twrite\tother/note.md\tWRITE_MARKER\tout of scope\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-path\tfire\ttool\twrite\towned/note.md\tWRITE_MARKER\tin scope\t\nexternal-path\tquiet\ttool\twrite\tother/note.md\tWRITE_MARKER\tout of scope\t\n");
 		const run = (line: number) => Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-path", "--line", String(line)], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		const inScope = run(2);
 		expect(inScope.exitCode).toBe(0);
@@ -587,7 +588,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-judged.md"), "---\nquestion: 'Was the marker ignored?'\nscope: text\ninterruptMode: never\n---\nJudged witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-judged\tfire\ttext\t-\t-\tmarker\tjudge required\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-judged\tfire\ttext\t-\t-\tmarker\tjudge required\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-judged", "--line", "2"], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		expect(result.exitCode).toBe(1);
 		expect(JSON.parse(result.stdout.toString())).toMatchObject({ status: "UNAVAILABLE", rule: "external-judged", reason: "JUDGE_REQUIRED", evaluator: "UNAVAILABLE" });
@@ -613,7 +614,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-anchor.md"), "---\ncondition: '^AAAAAAA$'\nscope: text\ninterruptMode: never\n---\nAnchor witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-anchor\tquiet\ttext\t-\t-\tAAAAAAAB\tearlier prefix only\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-anchor\tquiet\ttext\t-\t-\tAAAAAAAB\tearlier prefix only\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-anchor", "--line", "2"], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.stdout.toString())).toMatchObject({ status: "OK", whole: "quiet", prefix: { phase: "stream", position: 7, wire_length: 8 } });
@@ -626,7 +627,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-invalid.md"), "---\ncondition: ['[', '^MARKER$']\nscope: text\ninterruptMode: never\n---\nInvalid witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-invalid\tfire\ttext\t-\t-\tMARKER\tpartial condition\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-invalid\tfire\ttext\t-\t-\tMARKER\tpartial condition\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-invalid", "--line", "2"], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		expect(result.exitCode).toBe(1);
 		expect(JSON.parse(result.stdout.toString())).toMatchObject({ status: "UNAVAILABLE", reason: "INVALID_RULE", evaluator: "UNAVAILABLE" });
@@ -638,7 +639,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-bash-wire.md"), "---\ncondition: '\"command\":\"WIRE_KEY\"'\nscope: tool:bash\ninterruptMode: never\n---\nBash wire witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-bash-wire\tfire\ttool\tbash\t-\tWIRE_KEY\tJSON wire\nexternal-bash-wire\tquiet\ttool\tbash\t-\tWIRE_KEy\tnear miss\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-bash-wire\tfire\ttool\tbash\t-\tWIRE_KEY\tJSON wire\t\nexternal-bash-wire\tquiet\ttool\tbash\t-\tWIRE_KEy\tnear miss\t\n");
 		const run = (line: number) => Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-bash-wire", "--line", String(line)], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		const positive = run(2);
 		expect(positive.exitCode).toBe(0);
@@ -659,7 +660,7 @@ describe("runFastTest", () => {
 		const command = "br close x --actor \"" + actorToken + "\" --reason \"done\"";
 		const wireLength = JSON.stringify({ command }).length;
 		const ruleHash = createHash("sha256").update(readFileSync(rulePath)).digest("hex");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\n");
+		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
 		const started = performance.now();
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", "2500"], {
 			cwd: REPO_ROOT,
@@ -683,7 +684,7 @@ describe("runFastTest", () => {
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
 		writeFileSync(join(rules, "external-ast.md"), "---\nastCondition: 'console.log($$$A)'\nscope: 'tool:write(*.ts)'\ninterruptMode: never\n---\nAST witness.\n");
-		writeFileSync(cases, "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\nexternal-ast\tfire\ttool\twrite\tsrc/app.ts\tconsole.log(\"x\");\tAST final\nexternal-ast\tquiet\ttool\twrite\tsrc/app.ts\tconst s = \"console.log(x)\";\tAST near miss\n");
+		writeFileSync(cases, CASE_HEADER + "\nexternal-ast\tfire\ttool\twrite\tsrc/app.ts\tconsole.log(\"x\");\tAST final\t\nexternal-ast\tquiet\ttool\twrite\tsrc/app.ts\tconst s = \"console.log(x)\";\tAST near miss\t\n");
 		const run = (line: number) => Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-ast", "--line", String(line)], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		const positive = run(2);
 		expect(positive.exitCode).toBe(0);
@@ -881,9 +882,9 @@ describe("runMatcherObservation", () => {
 			"",
 		].join("\n"));
 		writeFileSync(cases, [
-			"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
-			`${rule}\tfire\ttool\tbash\t-\techo omp-kit-external-cutover-unique-token\tunique external fire`,
-			`${rule}\tquiet\ttool\tbash\t-\techo omp-kit-external-cutover-unique-toke\tquiet near-prefix`,
+			CASE_HEADER,
+			`${rule}\tfire\ttool\tbash\t-\techo omp-kit-external-cutover-unique-token\tunique external fire\t`,
+			`${rule}\tquiet\ttool\tbash\t-\techo omp-kit-external-cutover-unique-toke\tquiet near-prefix\t`,
 			"",
 		].join("\n"));
 
@@ -985,15 +986,15 @@ describe("runMatcherObservation", () => {
 				"---", `condition: '${token}'`, "scope: tool:bash", "interruptMode: never", "---", "External test rule.", "",
 			].join("\n"));
 			writeFileSync(cases, [
-				"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
-				`${ruleName}\tfire\ttool\tbash\t-\techo ${token}\tfire`,
-				`${ruleName}\tquiet\ttool\tbash\t-\techo ${token.slice(0, -1)}\tquiet prefix`,
+				CASE_HEADER,
+				`${ruleName}\tfire\ttool\tbash\t-\techo ${token}\tfire\t`,
+				`${ruleName}\tquiet\ttool\tbash\t-\techo ${token.slice(0, -1)}\tquiet prefix\t`,
 				"",
 			].join("\n"));
 			return { rules, cases };
 		};
 		const pack = createPack("external-pack-negative", "external-negative-rule");
-		const header = ["rule", "expect", "source", "tool", "path", "snippet", "note"].join("\t");
+		const header = CASE_HEADER;
 		const emptyRules = join(fixtureBase, "external-empty-rules");
 		const emptyCases = join(fixtureBase, "external-empty-cases.tsv");
 		mkdirSync(emptyRules, { recursive: true });
@@ -1008,7 +1009,7 @@ describe("runMatcherObservation", () => {
 		const fireOnlyCases = join(fixtureBase, "external-fire-only-cases.tsv");
 		writeFileSync(fireOnlyCases, [
 			header,
-			"external-negative-rule\tfire\ttool\tbash\t-\techo omp-kit-external-pack-negative-unique-token\tfire",
+			"external-negative-rule\tfire\ttool\tbash\t-\techo omp-kit-external-pack-negative-unique-token\tfire\t",
 			"",
 		].join("\n"));
 		const fireOnlyCandidate = readExternalPackSnapshot(pack.rules, fireOnlyCases);
@@ -1020,8 +1021,8 @@ describe("runMatcherObservation", () => {
 		const missingReferenceCases = join(fixtureBase, "external-missing-reference-cases.tsv");
 		writeFileSync(missingReferenceCases, [
 			header,
-			"deleted-external-rule\tfire\ttool\tbash\t-\techo external-token\tfire",
-			"deleted-external-rule\tquiet\ttool\tbash\t-\techo external-toke\tquiet",
+			"deleted-external-rule\tfire\ttool\tbash\t-\techo external-token\tfire\t",
+			"deleted-external-rule\tquiet\ttool\tbash\t-\techo external-toke\tquiet\t",
 			"",
 		].join("\n"));
 		const missingReferenceCandidate = readExternalPackSnapshot(pack.rules, missingReferenceCases);
@@ -1055,6 +1056,20 @@ describe("runMatcherObservation", () => {
 		const schemaMismatch = invoke(pack.rules, badSchema);
 		expect(schemaMismatch.exitCode).toBe(2);
 		expect(schemaMismatch.envelope.errors?.[0]?.code).toBe("INVALID_CASE_SCHEMA");
+
+		const schemaRow = ["external-negative-rule", "fire", "tool", "bash", "-", "echo external-token", "schema witness"];
+		for (const columns of [
+			schemaRow,
+			[...schemaRow, "", "ninth column"],
+			[...schemaRow, "not json"],
+			[...schemaRow, '{"tracked":[]}'],
+		]) {
+			writeFileSync(badSchema, `${header}\n${columns.join("\t")}\n`);
+			expect(() => readExternalPackSnapshot(pack.rules, badSchema)).toThrow("External cases line 2");
+		}
+		const referenceFacts = { tracked: { "src/public.ts": "export const publicMarker = true;\n" } };
+		writeFileSync(badSchema, `${header}\n${[...schemaRow, JSON.stringify(referenceFacts)].join("\t")}\n`);
+		expect(readExternalPackSnapshot(pack.rules, badSchema).cases[0]?.referenceFacts).toEqual(referenceFacts);
 
 		const unsupported = createPack("external-pack-question", "external-question-rule", [
 			"---", "question: Does this require a judge?", "scope: tool:bash", "---", "Judge-only external rule.", "",
@@ -1092,11 +1107,11 @@ describe("runMatcherObservation", () => {
 			"---", `condition: '${laterToken}'`, "scope: tool:bash", "interruptMode: never", "---", "Stale snapshot regression rule.", "",
 		].join("\n"));
 		writeFileSync(cases, [
-			"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
-			`${firstRule}\tfire\ttool\tbash\t-\techo ${firstToken}\tfirst rule fire`,
-			`${firstRule}\tquiet\ttool\tbash\t-\techo ${firstToken.slice(0, -1)}\tfirst rule quiet`,
-			`${laterRule}\tfire\ttool\tbash\t-\techo ${laterToken}\tlater rule fire`,
-			`${laterRule}\tquiet\ttool\tbash\t-\techo ${laterToken.slice(0, -1)}\tlater rule quiet`,
+			CASE_HEADER,
+			`${firstRule}\tfire\ttool\tbash\t-\techo ${firstToken}\tfirst rule fire\t`,
+			`${firstRule}\tquiet\ttool\tbash\t-\techo ${firstToken.slice(0, -1)}\tfirst rule quiet\t`,
+			`${laterRule}\tfire\ttool\tbash\t-\techo ${laterToken}\tlater rule fire\t`,
+			`${laterRule}\tquiet\ttool\tbash\t-\techo ${laterToken.slice(0, -1)}\tlater rule quiet\t`,
 			"",
 		].join("\n"));
 

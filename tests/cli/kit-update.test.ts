@@ -8,6 +8,7 @@ import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 
 test("unknown update failure preserves its code and original message", () => {
  expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
@@ -61,9 +62,9 @@ function manifest(version: string, executable: Buffer, extraFiles: readonly Fixt
 function fixtureContractFiles(): FixtureFile[] {
 	const rule = Buffer.from("# Rule A\n");
 	const manifestFile = Buffer.from("name\tsha256\tclass\tpack\nrule-a\t" + sha(rule) + "\ttripwire\t1234567\n");
-	const cases = Buffer.from("rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n" +
-		"rule-a\tfire\ttext\t-\t-\tbr close x\tfixture fire\n" +
-		"rule-a\tquiet\ttext\t-\t-\tbr list\tfixture quiet\n");
+	const cases = Buffer.from(CASE_HEADER + "\n" +
+		"rule-a\tfire\ttext\t-\t-\tbr close x\tfixture fire\t\n" +
+		"rule-a\tquiet\ttext\t-\t-\tbr list\tfixture quiet\t\n");
 	return [{ name: "MANIFEST.tsv", bytes: manifestFile }, { name: "cases/cases.tsv", bytes: cases }, { name: "rules/rule-a.md", bytes: rule }];
 }
 async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
@@ -130,7 +131,7 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): {
 	const casesPath = join(sourceRoot, "cases", "cases.tsv");
 	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
 	const caseLines = rawCases.split("\n");
-	if (caseLines[0] !== "rule\texpect\tsource\ttool\tpath\tsnippet\tnote") throw new Error("candidate cases fixture has an unknown schema");
+	if (caseLines[0] !== CASE_HEADER) throw new Error("candidate cases fixture has an unknown schema");
 	const rows = caseLines.slice(1).filter(row => row.trim() !== "" && !row.startsWith("#"));
 	// These existing controls have no known metamorphic breaks; N+2 tests case-count drift only.
 	const fire = rows.find(row => {

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { CASE_HEADER } from "./case-corpus.ts";
 import { digest, EXTERNAL_PACK_LIMITS, readBoundedFile, readExternalPackSnapshot, type ExternalPackSnapshot } from "./external-pack.ts";
 import { reduceCandidate, type EvaluationContext, type PredicateOutcome } from "./reducer.ts";
 import { runtimeTempRoot } from "./runtime.ts";
@@ -118,7 +119,7 @@ function decodeFixture(bytes: Uint8Array): FalseFireFixture {
 function caseText(fixture: FalseFireFixture, snippet: string): string {
 	const { witness } = fixture;
 	const encodedSnippet = snippet.replace(/\t/g, "\\t").replace(/\n/g, "\\n");
-	return `rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n${witness.rule}\tquiet\t${witness.source}\t${witness.tool}\t${witness.path}\t${encodedSnippet}\t${CASE_NOTE}\n`;
+	return `${CASE_HEADER}\n${witness.rule}\tquiet\t${witness.source}\t${witness.tool}\t${witness.path}\t${encodedSnippet}\t${CASE_NOTE}\t\n`;
 }
 
 function rulesFingerprint(pack: ExternalPackSnapshot): string {

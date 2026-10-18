@@ -29,6 +29,11 @@ const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/bu
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
 	"scripts/ladder.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
+const BUNDLE_ERRORS: Record<string, string | undefined> = {
+	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
+	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
+	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
+};
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fail = (reason: string): never => { throw new Error(reason); };
 const octal = (header: Buffer, offset: number, width: number, value: number) => {
@@ -165,11 +170,10 @@ async function run(): Promise<void> {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
 			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
-			else if (name === "extensions/fleet-guard.ts" || name === "scripts/ttsr-harness.ts") {
+			else if (BUNDLE_ERRORS[name]) {
 				// Bundle local helpers so the installed script needs no checkout source tree.
 				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
-				if (!bundled.success || bundled.outputs.length !== 1)
-					fail(name === "extensions/fleet-guard.ts" ? "FLEET_GUARD_BUNDLE_FAILED" : "HARNESS_BUNDLE_FAILED");
+				if (!bundled.success || bundled.outputs.length !== 1) fail(BUNDLE_ERRORS[name]!);
 				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
 			} else if (name === "package.json") content.set(name, stampPackageVersion(safeSource(name), version));
 			else content.set(name, safeSource(name));

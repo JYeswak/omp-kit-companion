@@ -1,6 +1,7 @@
 /**
  * kit-save-guard: stop-hook save guard for files changed by this session.
  *
+ * Fleet save enforcement requires repository-local `.omp/fleet.json` opt-in.
  * Only successful local write/edit/ast_edit result paths are attributed. At
  * turn end it blocks at most twice with the owned paths and save steps, then
  * emits one warning line. `session_shutdown` remains a non-blocking backstop.
@@ -11,6 +12,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
+import { fleetPolicyState } from "./fleet-policy";
 
 export interface SaveGuardExecResult {
 	stdout: string;
@@ -923,6 +925,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	pi.on("session_start", async (_event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
+		if ((await fleetPolicyState(ctx.cwd)).kind !== "on") return;
 		const state = sessionStateFor(sessions, sessionId);
 		state.pendingToolPathWork = state.pendingToolPathWork
 			.then(() => recordSessionStart(pi.exec.bind(pi), state, ctx.cwd))
@@ -931,10 +934,11 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		await state.pendingToolPathWork;
 	});
 
-	pi.on("tool_call", (event, ctx) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolCallId.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId.length === 0) return;
+		if ((await fleetPolicyState(ctx.cwd)).kind !== "on") return;
 		const state = sessionStateFor(sessions, sessionId);
 		if (event.toolName === "bash" && typeof event.input === "object" && event.input !== null &&
 			"command" in event.input && typeof event.input.command === "string") {
@@ -949,39 +953,47 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		const state = sessionId.length > 0 ? sessions.get(sessionId) : undefined;
+		if (sessionId.length === 0) return;
+		const state = sessions.get(sessionId);
 		const pathSnapshots = state?.pendingToolPathSnapshots.get(event.toolCallId);
-		if (state) state.pendingToolPathSnapshots.delete(event.toolCallId);
+		state?.pendingToolPathSnapshots.delete(event.toolCallId);
 		const claims = state?.pendingClaims.get(event.toolCallId);
 		state?.pendingClaims.delete(event.toolCallId);
-		if (state && claims?.length) state.activeBead = undefined;
-		let claimSucceeded = !event.isError;
-		const envelope = event.result;
-		const details = typeof envelope === "object" && envelope !== null && "details" in envelope ? envelope.details : undefined;
-		for (const result of [envelope, details]) {
-			if (typeof result !== "object" || result === null) continue;
-			if (("exitCode" in result && typeof result.exitCode === "number" && result.exitCode !== 0) ||
-				("code" in result && typeof result.code === "number" && result.code !== 0) ||
-				("truncated" in result && result.truncated === true) || ("partial" in result && result.partial === true)) claimSucceeded = false;
-		}
-		if (state && claims && claimSucceeded) {
-			for (const request of claims) {
-				const bead = nativeClaim(request);
-				if (bead && !await beadProblem(pi.exec.bind(pi), bead)) state.activeBead = bead;
+		const paths = pathsFromToolEvent(event, ctx.cwd);
+		if (!claims?.length && paths.length === 0) return;
+		// Freeze opted-in result bytes before asynchronous policy/repository discovery.
+		const completedSnapshots = new Map<string, FileSnapshot>();
+		if (state) {
+			for (const change of paths) {
+				const absolutePath = path.resolve(ctx.cwd, change.path);
+				completedSnapshots.set(absolutePath, snapshotFile(absolutePath));
 			}
 		}
-		if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "ast_edit") return;
-		const paths = pathsFromToolEvent(event, ctx.cwd);
-		if (paths.length === 0 || sessionId.length === 0) return;
 		const currentState = state ?? sessionStateFor(sessions, sessionId);
-		// Freeze the result bytes before asynchronous repository discovery can observe a peer's next write.
-		const completedSnapshots = new Map<string, FileSnapshot>();
-		for (const change of paths) {
-			const absolutePath = path.resolve(ctx.cwd, change.path);
-			completedSnapshots.set(absolutePath, snapshotFile(absolutePath));
-		}
+		// Queue policy discovery too: stop must not overtake an in-flight attribution.
 		currentState.pendingToolPathWork = currentState.pendingToolPathWork
-			.then(() => recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots, completedSnapshots))
+			.then(async () => {
+				if ((await fleetPolicyState(ctx.cwd)).kind !== "on") return;
+				if (claims?.length) currentState.activeBead = undefined;
+				let claimSucceeded = !event.isError;
+				const envelope = event.result;
+				const details = typeof envelope === "object" && envelope !== null && "details" in envelope ? envelope.details : undefined;
+				for (const result of [envelope, details]) {
+					if (typeof result !== "object" || result === null) continue;
+					if (("exitCode" in result && typeof result.exitCode === "number" && result.exitCode !== 0) ||
+						("code" in result && typeof result.code === "number" && result.code !== 0) ||
+						("truncated" in result && result.truncated === true) || ("partial" in result && result.partial === true)) claimSucceeded = false;
+				}
+				if (claims && claimSucceeded) {
+					for (const request of claims) {
+						const bead = nativeClaim(request);
+						if (bead && !await beadProblem(pi.exec.bind(pi), bead)) currentState.activeBead = bead;
+					}
+				}
+				if (paths.length > 0) {
+					await recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots, completedSnapshots);
+				}
+			})
 			.catch(() => undefined);
 		await currentState.pendingToolPathWork;
 	});
@@ -989,6 +1001,11 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	pi.on("session_stop", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (event.session_id !== sessionId) return;
+		const policy = await fleetPolicyState(ctx.cwd);
+		if (policy.kind === "off") return;
+		if (policy.kind === "unavailable") {
+			return { decision: "block", reason: `kit-save-guard: fleet policy unavailable at ${JSON.stringify(policy.root)}: ${policy.reason}. Repair the repository-local .omp/fleet.json before ending.` };
+		}
 		const state = sessions.get(sessionId);
 		if (!state) return;
 		await waitForToolPathWork(state);
@@ -1024,8 +1041,14 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const state = sessions.get(sessionId);
-		if (!state) return;
 		try {
+			const policy = await fleetPolicyState(ctx.cwd);
+			if (policy.kind === "off") return;
+			if (policy.kind === "unavailable") {
+				ctx.ui.notify(`kit-save-guard: fleet policy unavailable at ${JSON.stringify(policy.root)}: ${policy.reason}`, "warning");
+				return;
+			}
+			if (!state) return;
 			await waitForToolPathWork(state);
 			if (!state.warningEmitted) {
 				const findings: SaveGuardFinding[] = [];

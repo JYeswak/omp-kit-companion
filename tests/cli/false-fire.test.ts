@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { cpSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
@@ -185,9 +186,9 @@ test("test --live-fixture routes to strict schema validation; plain and --full m
 		{ flag: "wx", mode: 0o600 });
 	const cases = join(base, "external-live-cases.tsv");
 	writeFileSync(cases, [
-		"rule\texpect\tsource\ttool\tpath\tsnippet\tnote",
-		"public-live-marker\tfire\ttool\twrite\t.marker\tPUBLIC_BLOCK_SAMPLE\tblock witness",
-		"public-live-marker\tquiet\ttool\twrite\t.marker\tPUBLIC_ALLOW_SAMPLE\tquiet witness",
+		CASE_HEADER,
+		"public-live-marker\tfire\ttool\twrite\t.marker\tPUBLIC_BLOCK_SAMPLE\tblock witness\t",
+		"public-live-marker\tquiet\ttool\twrite\t.marker\tPUBLIC_ALLOW_SAMPLE\tquiet witness\t",
 		"",
 	].join("\n"), { flag: "wx", mode: 0o600 });
 	const fixture = join(base, "invalid-external-live-fixture.json");

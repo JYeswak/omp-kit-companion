@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { commandFromEvent, commandSegments, stripEnvWrappers, shellWords } from "./git";
 
 /**
  * Fleet guard behaviours 1 (session scratch), 2 (block writes outside scratch)
@@ -20,6 +22,8 @@ export interface FleetGuardEvent {
 
 export interface FleetGuardContext {
 	cwd?: string;
+	/** Actual calling session's local:// backing root; never inferred from cwd. */
+	localRoot?: string;
 	agentName?: string;
 	isTrackedPath?: (absolutePath: string, repoRoot: string) => Promise<boolean> | boolean;
 	lookupReservations?: (input: { projectKey: string; agentName: string; path: string }) => Promise<{ covered: boolean; conflicts: readonly unknown[] }>;
@@ -33,7 +37,7 @@ export interface FleetGuardBlock {
 
 export type ScratchCheck = (event: FleetGuardEvent, context: FleetGuardContext) => FleetGuardBlock | undefined;
 
-const AGENTS_STORING = "See ~/.agents/AGENTS.md Storing (scratch goes in the repo's var/agent-tmp, never /tmp or ~).";
+const AGENTS_STORING = "This repository's enabled .omp/fleet.json policy keeps scratch in repo-local var/agent-tmp; system temp and home-root writes are refused.";
 const AGENTS_SHARED_TREE = "See AGENTS.md (shared tree: stage explicit paths, never git add -A / commit -a / add .).";
 
 /** Lexical roots no write may land under. Pre-resolved literals; no per-call I/O. */
@@ -93,6 +97,54 @@ function resolveCandidate(cwd: string, candidate: string): string | null {
 	}
 }
 
+/** Only handler-owned routes bypass filesystem classification, not the later guards. */
+const LOGICAL_WRITE_ROUTE = /^(?:proc|agent|xd):\/\//i;
+
+// Packaged guards have no resolvable SDK runtime dependency. This lexical projection
+// follows OMP's raw-path decoding/containment; native handlers still own authority
+// and symlink validation. localRoot comes only from the calling extension context.
+function resolveWriteCandidate(cwd: string, candidate: string, context: FleetGuardContext): string {
+	if (candidate.length > 65_536) throw new Error("filesystem write path exceeds guard limit");
+	// local:// alone has native single-slash and path-prefixed aliases.
+	let target = candidate.replace(/^local:\/(?!\/)/i, "local://");
+	if (!/^[a-z][a-z0-9+.-]*:/i.test(target)) {
+		const alias = /[\\/]local:\/\/(?=[^/]|$)/i.exec(target);
+		if (alias) target = target.slice(alias.index + 1);
+	}
+	const uri = /^(file|local|ssh):\/\/([^/?#]*)(\/[^?#]*)?([?#].*)?$/i.exec(target);
+	if (uri) {
+		const scheme = uri[1]!.toLowerCase();
+		if (uri[4]) throw new Error("filesystem URI queries/fragments are not write paths");
+		if (scheme === "file") target = fileURLToPath(target);
+		else if (scheme === "ssh") {
+			const url = new URL(target);
+			decodeURIComponent(uri[2]!); // Reject malformed authority escapes too.
+			if (!url.hostname || url.password || url.port === "0") throw new Error("invalid SSH authority");
+			target = decodeURIComponent(uri[3] ?? "");
+			if (!isAbsolute(target)) throw new Error("SSH path must be absolute");
+		} else {
+			// Native local:// uses the raw authority as the first relative segment,
+			// decodes once, and forbids traversal before resolving under its root.
+			const path = uri[3] ?? "";
+			const rawRelative = uri[2] ? `${uri[2]}${path === "/" ? "" : path}` : path.slice(1);
+			const relative = decodeURIComponent(rawRelative.replaceAll("\\", "/"));
+			const normalized = normalize(relative);
+			if (isAbsolute(relative) || relative.split(/[\\/]/).includes("..") || normalized.startsWith("..") || normalized.includes("/.."))
+				throw new Error("local URI path escapes its root");
+			if (!context.localRoot || !isAbsolute(context.localRoot)) throw new Error("local URI backing root is unavailable");
+			target = resolve(context.localRoot, relative);
+		}
+	}
+	const absolute = resolveCandidate(cwd, target);
+	if (absolute === null) throw new Error("invalid filesystem path");
+	return absolute;
+}
+
+/** Shared URI projection for lexical checks and local repository-fact admission. */
+export function resolveFilesystemWriteTarget(cwd: string, candidate: string, context: FleetGuardContext): string | undefined {
+	return LOGICAL_WRITE_ROUTE.test(candidate) ? undefined : resolveWriteCandidate(cwd, candidate, context);
+}
+
 /** Direct child of $HOME (writing to the HOME root itself is the $HOME-root case). */
 function isHomeDirectChild(absPath: string, home: string): boolean {
 	return home !== "" && dirname(absPath) === home;
@@ -131,8 +183,14 @@ function checkWritePaths(event: FleetGuardEvent, context: FleetGuardContext): Fl
 	const cwd = eventCwd(event, context);
 	const home = homeDir();
 	for (const candidate of candidatePaths(event.input)) {
-		const abs = resolveCandidate(cwd, candidate);
-		if (abs === null) continue;
+		let abs: string;
+		try {
+			const resolved = resolveFilesystemWriteTarget(cwd, candidate, context);
+			if (resolved === undefined) continue;
+			abs = resolved;
+		} catch (error) {
+			return { block: true, reason: `fleet-guard scratch-write: cannot resolve ${candidate}: ${String(error)}. ${AGENTS_STORING}` };
+		}
 		const root = forbiddenTarget(abs, home);
 		if (root !== null) return blockScratch("scratch-write", candidate, root);
 	}
@@ -246,7 +304,7 @@ export function shellWriteTargets(command: string): string[] {
 }
 
 /** git add -A/--all/./. and git commit -a/--all (blanket staging), argv machine. */
-export function gitBlanketArgs(argv: string[]): boolean {
+export function gitBlanketArgs(argv: readonly string[]): boolean {
 	let i = 0;
 	if (argv[i] !== "git") return false;
 	i++;
@@ -265,8 +323,7 @@ export function gitBlanketArgs(argv: string[]): boolean {
 
 function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
-	const command = typeof event.command === "string" ? event.command
-		: typeof event.input === "string" ? event.input : undefined;
+	const command = commandFromEvent(event) ?? (typeof event.input === "string" ? event.input : undefined);
 	if (tool !== "bash" || !command) return undefined;
 	const cwd = eventCwd(event, context);
 	const home = homeDir();
@@ -281,13 +338,15 @@ function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): F
 
 function checkBlanketGit(event: FleetGuardEvent): FleetGuardBlock | undefined {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
-	const command = typeof event.command === "string" ? event.command
-		: typeof event.input === "string" ? event.input : undefined;
+	const command = commandFromEvent(event) ?? (typeof event.input === "string" ? event.input : undefined);
 	if (tool !== "bash" || !command) return undefined;
-	const argv = shellTokens(command).filter(token => !/^[;&|()]$/.test(token.text)).map(token => token.text);
-	if (!gitBlanketArgs(argv)) return undefined;
-	return { block: true,
-		reason: `fleet-guard blanket-git: '${argv.slice(0, 4).join(" ")}' stages the shared tree. ${AGENTS_SHARED_TREE}` };
+	for (const segment of commandSegments(command)) {
+		const argv = stripEnvWrappers(shellWords(segment));
+		if (!argv || !gitBlanketArgs(argv)) continue;
+		return { block: true,
+			reason: `fleet-guard blanket-git: '${argv.slice(0, 4).join(" ")}' stages the shared tree. ${AGENTS_SHARED_TREE}` };
+	}
+	return undefined;
 }
 
 export function check(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {

@@ -28,6 +28,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
+import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
+import { writeScratchOwner } from "../src/fleet-guard/scratch.ts";
+import { CASE_HEADER, parseReferenceFacts, type CaseReferenceFacts } from "../src/case-corpus.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
@@ -232,6 +235,9 @@ interface Case {
 	path: string;
 	snippet: string;
 	note: string;
+	/** Fixture facts, independent of the expected admission outcome. */
+	reference?: CaseReferenceFacts;
+	argumentSpace?: boolean;
 }
 
 function decodeSnippet(raw: string): string {
@@ -242,15 +248,23 @@ function loadCases(file: string): { cases: Case[]; errors: string[] } {
 	const cases: Case[] = [];
 	const errors: string[] = [];
 	const lines = fs.readFileSync(file, "utf8").split("\n");
+	if (lines[0].replace(/\r$/, "") !== CASE_HEADER) return { cases, errors: ["cases header: expected exact eight-column CASE_HEADER"] };
 	for (let i = 1; i < lines.length; i++) {
 		const raw = lines[i].replace(/\r$/, "");
 		if (raw.trim() === "" || raw.startsWith("#")) continue;
 		const cols = raw.split("\t");
-		if (cols.length < 6) {
-			errors.push(`cases line ${i + 1}: ${cols.length} columns, need 7`);
+		if (cols.length !== 8) {
+			errors.push(`cases line ${i + 1}: ${cols.length} columns, need exactly 8`);
 			continue;
 		}
-		const [rule, expect, source, tool, p, snippet, note = ""] = cols;
+		const [rule, expect, source, tool, p, snippet, note, rawReference] = cols;
+		let reference: CaseReferenceFacts | undefined;
+		try {
+			reference = parseReferenceFacts(rawReference);
+		} catch (error) {
+			errors.push(`cases line ${i + 1}: invalid reference facts: ${error}`);
+			continue;
+		}
 		if (expect !== "fire" && expect !== "quiet") errors.push(`cases line ${i + 1}: expect=${expect}`);
 		if (!["text", "thinking", "tool"].includes(source)) errors.push(`cases line ${i + 1}: source=${source}`);
 		if (source === "tool" && !["bash", "edit", "write"].includes(tool)) errors.push(`cases line ${i + 1}: tool=${tool}`);
@@ -263,6 +277,7 @@ function loadCases(file: string): { cases: Case[]; errors: string[] } {
 			path: p,
 			snippet: decodeSnippet(snippet),
 			note,
+			reference,
 		});
 	}
 	return { cases, errors };
@@ -307,12 +322,96 @@ const G2_CHUNK = 7;
 // Bound selected long-positive observations; the full G3 gate remains exhaustive.
 const OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH = 8 * 1024;
 
+
+// Mechanical admission is not an SDK TTSR rule or a streamed matcher. Keep the
+// obligation name, but dispatch finished, valid tool arguments to production.
+interface AdmissionTarget {
+	readonly name: string;
+	readonly evaluate: typeof durabilityCheck;
+}
+const SCRATCH_ADMISSION: AdmissionTarget = { name: "scratch-is-not-a-home", evaluate: durabilityCheck };
+type PayloadTarget = Rule | AdmissionTarget;
+function isAdmissionTarget(value: PayloadTarget | LoadedRule): value is AdmissionTarget {
+	return value === SCRATCH_ADMISSION;
+}
+
+/** Backend ownership belongs to the selected package, never to an external rule's name. */
+function evaluationTargets(rulesDir: string) {
+	const installedRules = path.join(KIT, "rules");
+	const ownPackage = path.resolve(rulesDir) === installedRules ||
+		(fs.existsSync(installedRules) && fs.realpathSync(rulesDir) === fs.realpathSync(installedRules));
+	const admissions = ownPackage ? [SCRATCH_ADMISSION] : [];
+	const rules: LoadedRule[] = [];
+	const byName = new Map<string, LoadedRule | AdmissionTarget>();
+	let legacyStaticPresent = false;
+	for (const loaded of loadRules(rulesDir)) {
+		if (ownPackage && loaded.name === SCRATCH_ADMISSION.name) legacyStaticPresent = true;
+		else {
+			rules.push(loaded);
+			byName.set(loaded.name, loaded);
+		}
+	}
+	for (const target of admissions) byName.set(target.name, target);
+	return { rules, admissions, byName, legacyStaticPresent };
+}
+
+async function mechanicalFires(c: Case, chunkWidth?: number): Promise<boolean> {
+	const evaluator = SCRATCH_ADMISSION.evaluate;
+	if (c.rule !== SCRATCH_ADMISSION.name || typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
+	if (c.source !== "tool") return false;
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mechanical-case.${process.pid}.`)));
+	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: KIT, created: new Date().toISOString() });
+	try {
+		const env: Record<string, string> = {};
+		for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key]) env[key] = process.env[key]!;
+		Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+		const git = (args: string[], input?: string): string => {
+			const result = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
+				{ env, stdout: "pipe", stderr: "pipe", timeout: 2_000,
+					...(input === undefined ? {} : { stdin: Buffer.from(input) }) });
+			if (result.exitCode !== 0) throw new Error(`mechanical Git fixture setup failed: ${result.stderr.toString()}`);
+			return result.stdout.toString().trimEnd();
+		};
+		git(["init", "--quiet"]);
+		fs.mkdirSync(path.join(root, ".omp"));
+		fs.writeFileSync(path.join(root, ".omp/fleet.json"), '{"enabled":true}\n');
+		for (const [p, content] of Object.entries(c.reference?.tracked ?? {})) {
+			const oid = git(["hash-object", "-w", "--no-filters", "--stdin"], content);
+			git(["update-index", "--add", "--cacheinfo", `100644,${oid},${p}`]);
+		}
+		// Historical absolute fixture paths are projected into this real isolated
+		// repository; no operator repository or its index is accessed.
+		const marker = "var/agent-tmp/";
+		const offset = c.path.indexOf(marker);
+		const target = path.isAbsolute(c.path) && offset >= 0 ? c.path.slice(offset) : c.path;
+		if (path.isAbsolute(target) || target.split("/").includes("..")) throw new Error("fixture target escapes isolated repository");
+		if (offset >= 0) {
+			const child = c.path.slice(offset + marker.length).split("/")[0]!;
+			writeScratchOwner(path.join(root, marker, child), { pid: process.pid, label: child, repo: root, created: new Date().toISOString() });
+		}
+		const absolute = path.join(root, target);
+		fs.mkdirSync(path.dirname(absolute), { recursive: true });
+		// A replacement edit must be applicable and unambiguous, not an unknown
+		// payload whose generic refusal accidentally passes a source-copy case.
+		if (c.tool === "edit") fs.writeFileSync(absolute, c.snippet);
+		const input = c.tool === "write" ? { path: target, content: c.snippet }
+			: c.tool === "edit" ? { path: target, oldText: c.snippet, newText: `${c.snippet}\n` }
+			: { command: c.snippet };
+		const wire = JSON.stringify(input, null, c.argumentSpace ? 2 : undefined);
+		let assembled = "";
+		const width = chunkWidth ?? Math.max(1, wire.length);
+		for (let i = 0; i < wire.length; i += width) assembled += wire.slice(i, i + width);
+		const decoded = JSON.parse(assembled);
+		return (await evaluator({ toolName: c.tool, input: decoded, cwd: root }, { cwd: root }))?.block === true;
+	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
 /**
  * G2: full payload through the live-shaped path. Returns the verdict at the end of the stream.
  * For edit/write, omp also runs `astCondition` rules once at toolcall_end
  * (ttsr-coordinator.ts: `toolcall_end` -> #checkAstStream), so the verdict includes them.
  */
-async function g2Fires(rule: Rule, c: Case): Promise<boolean> {
+async function g2Fires(rule: PayloadTarget, c: Case): Promise<boolean> {
+	if (isAdmissionTarget(rule)) return mechanicalFires(c);
 	if (!scopeApplies(rule, c)) return false;
 	const m = new TtsrManager(SETTINGS);
 	if (!m.addRule(rule)) return false;
@@ -326,12 +425,24 @@ async function g2Fires(rule: Rule, c: Case): Promise<boolean> {
 	return hit(m.checkSnapshot(wire, ctx), rule.name);
 }
 
+async function admissionPrefixSweep(c: Case): Promise<{ fired: number[]; length: number }> {
+	const wire = JSON.stringify({ tool: c.tool, path: c.path, content: c.snippet });
+	const outcomes: boolean[] = [];
+	// Only complete arguments reach admission, independent of stream partition.
+	for (const width of [1, G2_CHUNK, Math.max(1, wire.length)]) {
+		outcomes.push(await mechanicalFires(c, width));
+	}
+	if (outcomes.some(value => value !== outcomes[0])) throw new Error("mechanical admission depends on chunk partition");
+	return { fired: outcomes[0] ? [wire.length + 1] : [], length: wire.length };
+}
+
 /**
  * G3: one character at a time. Returns every prefix length that fired (wire.length+1 = final
  * snapshot). astCondition rules are not swept: omp evaluates them only on the finished edit/write
  * call, so they can fire only at the final snapshot.
  */
-async function g3Fires(rule: Rule, c: Case): Promise<{ fired: number[]; length: number }> {
+async function g3Fires(rule: PayloadTarget, c: Case): Promise<{ fired: number[]; length: number }> {
+	if (isAdmissionTarget(rule)) return admissionPrefixSweep(c);
 	if (!scopeApplies(rule, c)) return { fired: [], length: 0 };
 	const m = new TtsrManager(SETTINGS);
 	const fired: number[] = [];
@@ -368,10 +479,31 @@ interface GateReport {
 	checks: {
 		registration: { total: number; passed: number };
 		coverage: { total: number; passed: number };
+		admissionRegistration: { total: number; passed: number };
+		admissionCoverage: { total: number; passed: number };
 		payload: { total: number; passed: number };
 		prefix: { total: number; passed: number; quietCases: number; quietPassed: number };
 	};
 	firstFires: { rule: string; line: number; expect: string; g2: string; first_fire: number | null; wire_length: number }[];
+}
+
+function admissionGateChecks(admissions: AdmissionTarget[], cases: Case[], lines: string[], failures: string[]) {
+	let registered = 0;
+	let covered = 0;
+	for (const target of admissions) {
+		const available = typeof target.evaluate === "function";
+		if (available) registered++;
+		else failures.push(`G1 ${target.name}: tool-admission module unavailable`);
+		lines.push(`${available ? "PASS" : "FAIL"} ADMISSION ${target.name}: production predicate available to conformance; native loader/effects qualified separately`);
+		const mine = cases.filter(c => c.rule === target.name);
+		const fire = mine.filter(c => c.expect === "fire").length;
+		const quiet = mine.filter(c => c.expect === "quiet").length;
+		const ok = fire > 0 && quiet > 0;
+		if (ok) covered++;
+		else failures.push(`COVERAGE ${target.name}: tool-admission fire=${fire} quiet=${quiet}`);
+		lines.push(`${ok ? "PASS" : "FAIL"} admission coverage ${target.name}: fire=${fire} quiet=${quiet}`);
+	}
+	return { registered, covered };
 }
 
 async function runGate(rulesDir: string, casesFile: string): Promise<GateReport> {
@@ -382,11 +514,11 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	let payloadPassed = 0;
 	let prefixPassed = 0;
 	let quietPassed = 0;
-	const rules = loadRules(rulesDir);
-	const byName = new Map(rules.map(r => [r.name, r]));
+	const { rules, admissions, byName, legacyStaticPresent } = evaluationTargets(rulesDir);
 	if (rules.length === 0) failures.push(`G1 ${rulesDir}: no rules — an empty scan set is not a pass`);
+	if (legacyStaticPresent) failures.push(`G1 ${SCRATCH_ADMISSION.name}: legacy static enforcement still present; qualified retirement is required`);
 
-	lines.push(`== G1 compile (${rules.length} rules, omp ${OMP_SRC})`);
+	lines.push(`== G1 selected SDK rules (${rules.length}; ${admissions.length} separate tool-admission modules; omp ${OMP_SRC})`);
 	for (const lr of rules) {
 		const r = g1(lr);
 		lines.push(`${r.ok ? "PASS" : "FAIL"} G1 ${lr.name} [${lr.cls}] ${r.detail}`);
@@ -413,6 +545,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		lines.push(`${ok ? "PASS" : "FAIL"} coverage ${lr.name} [${lr.cls}] fire=${nf} quiet=${nq}`);
 		if (!ok) failures.push(`COVERAGE ${lr.name}: fire=${nf} quiet=${nq}`);
 	}
+	const { registered: admissionRegistered, covered: admissionCovered } = admissionGateChecks(admissions, cases, lines, failures);
 	for (const c of cases) {
 		if (!byName.has(c.rule)) failures.push(`CASES line ${c.line}: unknown rule ${c.rule}`);
 	}
@@ -422,11 +555,13 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 	let quietPrefixFires = 0;
 	const firstFires: GateReport["firstFires"] = [];
 	for (const c of cases) {
-		const lr = byName.get(c.rule);
-		if (!lr || lr.cls === "always") continue;
-		const g2 = await g2Fires(lr.rule, c);
+		const target = byName.get(c.rule);
+		if (!target || (!isAdmissionTarget(target) && target.cls === "always")) continue;
+		const admission = isAdmissionTarget(target);
+		const rule = admission ? target : target.rule;
+		const g2 = await g2Fires(rule, c);
 		const g2ok = g2 === (c.expect === "fire");
-		const { fired, length } = await g3Fires(lr.rule, c);
+		const { fired, length } = await g3Fires(rule, c);
 		const wire = wirePayload(c);
 		let g3ok = true;
 		let g3note: string;
@@ -437,9 +572,11 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 				const at = fired[0];
 				g3note =
 					at > length ? "fired at final snapshot" : `fired on prefix ${at}/${length}: …${show(wire.slice(0, at).slice(-50))}`;
-			} else g3note = `quiet on all ${length} prefixes`;
+			} else g3note = admission ? "quiet at final dispatch under all chunk partitions (no partial admission)" : `quiet on all ${length} prefixes`;
 		} else {
-			g3note = fired.length > 0 ? `first fire at ${Math.min(fired[0], length)}/${length}` : "never fired while streaming";
+			if (admission) g3ok = fired.includes(length + 1);
+			g3note = admission ? (g3ok ? "fires at final dispatch under all chunk partitions" : "no final admission fire")
+				: fired.length > 0 ? `first fire at ${Math.min(fired[0], length)}/${length}` : "never fired while streaming";
 		}
 		const ok = g2ok && g3ok;
 		if (g2ok) payloadPassed++;
@@ -454,7 +591,7 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		if (!g2ok) failures.push(`G2 ${tag}: wanted ${c.expect}, full payload ${g2 ? "fires" : "is quiet"}: ${show(wire)}`);
 		if (!g3ok) failures.push(`G3 ${tag}: ${g3note}`);
 		firstFires.push({ rule: c.rule, line: c.line, expect: c.expect, g2: g2 ? "fire" : "quiet",
-			first_fire: fired.length > 0 ? Math.min(fired[0] ?? length, length) : null, wire_length: length });
+			first_fire: fired.length > 0 ? (admission ? fired[0] : Math.min(fired[0] ?? length, length)) : null, wire_length: length });
 	}
 	return {
 		failures,
@@ -469,6 +606,8 @@ async function runGate(rulesDir: string, casesFile: string): Promise<GateReport>
 		checks: {
 			registration: { total: rules.length, passed: registrationPassed },
 			coverage: { total: rules.filter(r => r.cls !== "always").length, passed: coveragePassed },
+			admissionRegistration: { total: admissions.length, passed: admissionRegistered },
+			admissionCoverage: { total: admissions.length, passed: admissionCovered },
 			payload: { total: cases.length, passed: payloadPassed },
 			prefix: { total: cases.length, passed: prefixPassed, quietCases, quietPassed },
 		},
@@ -499,6 +638,8 @@ function structuredGate(rep: GateReport) {
 		checks: {
 			registration: rep.checks.registration,
 			coverage: rep.checks.coverage,
+			admission_registration: rep.checks.admissionRegistration,
+			admission_coverage: rep.checks.admissionCoverage,
 			payload: rep.checks.payload,
 			prefix: {
 				total: rep.checks.prefix.total,
@@ -516,7 +657,7 @@ function structuredGate(rep: GateReport) {
 
 type MetamorphicRelation = "quoting" | "whitespace" | "env-prefix" | "path-form" | "chaining";
 
-interface MetamorphicVariant { relation: MetamorphicRelation; snippet: string; }
+interface MetamorphicVariant { relation: MetamorphicRelation; snippet: string; path?: string; argumentSpace?: boolean; }
 interface MetamorphicBreak {
 	rule: string; line: number; relation: MetamorphicRelation; variant: string;
 	expected: "fire" | "quiet"; observed: "fire" | "quiet";
@@ -527,13 +668,26 @@ function quoteForDouble(feed: string): string {
 	return feed.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$").replace(/`/g, "\\`");
 }
 
+function admissionVariants(c: Case): { variants: MetamorphicVariant[]; skipped: { relation: MetamorphicRelation; reason: string }[] } {
+	const variants: MetamorphicVariant[] = [{ relation: "whitespace", snippet: c.snippet, argumentSpace: true }];
+	// Content stays byte-identical: Git blob identity is the admission evidence.
+	const offset = c.path.indexOf("var/agent-tmp/");
+	const relative = path.isAbsolute(c.path) ? (offset >= 0 ? c.path.slice(offset) : undefined) : c.path;
+	if (relative !== undefined) variants.push({ relation: "path-form", snippet: c.snippet, path: `./${relative}` });
+	const skipped = (["quoting", "env-prefix", "chaining"] as const).map(relation => ({
+		relation, reason: "filesystem admission receives decoded arguments, not shell invocations",
+	}));
+	return { variants, skipped };
+}
+
 /**
  * Invariant-preserving variants of one case. Relations that cannot apply to the
  * case kind are reported as skipped with a reason instead of guessed variants.
  */
-function variantsFor(c: Case): { variants: MetamorphicVariant[]; skipped: { relation: MetamorphicRelation; reason: string }[] } {
+function variantsFor(c: Case, admission = false): { variants: MetamorphicVariant[]; skipped: { relation: MetamorphicRelation; reason: string }[] } {
 	const variants: MetamorphicVariant[] = [];
 	const skipped: { relation: MetamorphicRelation; reason: string }[] = [];
+	if (admission) return admissionVariants(c);
 	const bash = c.source === "tool" && c.tool === "bash";
 	const text = c.source === "text" || c.source === "thinking";
 	if (text) {
@@ -624,8 +778,8 @@ function loadBaseline(file: string): { ids: Set<string>; reasons: Record<string,
 }
 
 async function runMetamorphic(rulesDir: string, casesFile: string): Promise<MetamorphicReport> {
-	const rules = loadRules(rulesDir);
-	const byName = new Map(rules.map(r => [r.name, r]));
+	const { byName, legacyStaticPresent } = evaluationTargets(rulesDir);
+	if (legacyStaticPresent) throw new Error("legacy scratch matcher must be qualified for retirement before final metamorphic acceptance");
 	const { cases, errors } = loadCases(casesFile);
 	if (errors.length > 0) throw new Error(`metamorphic cases unreadable: ${errors[0]}`);
 	const breaks: MetamorphicBreak[] = [];
@@ -633,9 +787,11 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 	let variants = 0;
 	let skipped = 0;
 	for (const c of cases) {
-		const rule = byName.get(c.rule)?.rule;
-		if (!rule) continue;
-		const generated = variantsFor(c);
+		const target = byName.get(c.rule);
+		if (!target) throw new Error(`metamorphic evaluator/rule missing: ${c.rule}`);
+		const admission = isAdmissionTarget(target);
+		const rule = admission ? target : target.rule;
+		const generated = variantsFor(c, admission);
 		skipped += generated.skipped.length;
 		if (generated.variants.length === 0) continue;
 		evaluated += 1;
@@ -644,10 +800,10 @@ async function runMetamorphic(rulesDir: string, casesFile: string): Promise<Meta
 			// Each variant is an independent hypothetical stream: sharing the
 			// case's streamKey across different wires would let OMP's
 			// per-stream state leak between evaluations.
-			const observed = await g2Fires(rule, { ...c, snippet: v.snippet, line: c.line * 1000 + vi }) ? "fire" as const : "quiet" as const;
+			const observed = await g2Fires(rule, { ...c, snippet: v.snippet, path: v.path ?? c.path, argumentSpace: v.argumentSpace, line: c.line * 1000 + vi }) ? "fire" as const : "quiet" as const;
 			const expected = v.relation === "quoting" ? "quiet" as const : c.expect;
 			if (observed !== expected) {
-				breaks.push({ rule: c.rule, line: c.line, relation: v.relation, variant: v.snippet, expected, observed });
+				breaks.push({ rule: c.rule, line: c.line, relation: v.relation, variant: v.path ? `${v.path}: ${v.snippet}` : v.snippet, expected, observed });
 			}
 		}
 	}
@@ -674,7 +830,7 @@ function writePlant(
 
 async function selftest(): Promise<number> {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-selftest-"));
-	const header = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
+	const header = `${CASE_HEADER}\n`;
 	interface Plant {
 		id: string;
 		rule: string;
@@ -699,7 +855,7 @@ async function selftest(): Promise<number> {
 			rule: "plant-embedded-inline-flag",
 			condition: "foo|(?i)bar",
 			scope: "text",
-			cases: "plant-embedded-inline-flag\tfire\ttext\t-\t-\tbar\tplanted\nplant-embedded-inline-flag\tquiet\ttext\t-\t-\tbaz\tplanted\n",
+			cases: "plant-embedded-inline-flag\tfire\ttext\t-\t-\tbar\tplanted\t\nplant-embedded-inline-flag\tquiet\ttext\t-\t-\tbaz\tplanted\t\n",
 			wantRed: /^G1 plant-embedded-inline-flag: .*does not compile/,
 		},
 		{
@@ -708,7 +864,7 @@ async function selftest(): Promise<number> {
 			condition: "\\b(br|bd)\\s+close\\b(?![^\\n]*(--reason|-r)\\s)",
 			scope: "tool:bash",
 			cases:
-				'plant-prefix-close\tfire\ttool\tbash\t-\tbr close x\tplanted\nplant-prefix-close\tquiet\ttool\tbash\t-\tbr close x --reason "cargo test -> 41 passed; commit a1b2c3d"\tplanted\n',
+				'plant-prefix-close\tfire\ttool\tbash\t-\tbr close x\tplanted\t\nplant-prefix-close\tquiet\ttool\tbash\t-\tbr close x --reason "cargo test -> 41 passed; commit a1b2c3d"\tplanted\t\n',
 			wantRed: /^G3 plant-prefix-close quiet tool:bash line 3: fired on prefix/,
 		},
 		{
@@ -717,7 +873,7 @@ async function selftest(): Promise<number> {
 			condition: "\\b(br|bd)\\s+close\\b[^\\n]*(--reason|-r)\\s+[\"']?(done|implemented|fixed|complete)\\b",
 			scope: "tool:bash",
 			cases:
-				'plant-wire-blind-reason\tfire\ttool\tbash\t-\tbr close x --reason "done"\tplanted\nplant-wire-blind-reason\tquiet\ttool\tbash\t-\tbr close x\tplanted\n',
+				'plant-wire-blind-reason\tfire\ttool\tbash\t-\tbr close x --reason "done"\tplanted\t\nplant-wire-blind-reason\tquiet\ttool\tbash\t-\tbr close x\tplanted\t\n',
 			wantRed: /^G2 plant-wire-blind-reason fire tool:bash line 2: wanted fire, full payload is quiet/,
 		},
 		{
@@ -726,7 +882,7 @@ async function selftest(): Promise<number> {
 			condition: "zzplant_self_trigger",
 			scope: "text",
 			body: "Do not write zzplant_self_trigger in prose.",
-			cases: "plant-self-trigger\tfire\ttext\t-\t-\tsay zzplant_self_trigger\tplanted\nplant-self-trigger\tquiet\ttext\t-\t-\tsay zzplant_other\tplanted\n",
+			cases: "plant-self-trigger\tfire\ttext\t-\t-\tsay zzplant_self_trigger\tplanted\t\nplant-self-trigger\tquiet\ttext\t-\t-\tsay zzplant_other\tplanted\t\n",
 			wantRed: /^G1 plant-self-trigger: self-trigger: its own body fires it as text \(matched "zzplant_self_trigger"\)/,
 		},
 		{
@@ -736,7 +892,7 @@ async function selftest(): Promise<number> {
 			interruptMode: "never",
 			scope: "tool:write(*.md)",
 			cases:
-				"plant-ast-markdown\tfire\ttool\twrite\tnotes.md\tzzplant_ast_token\tplanted\nplant-ast-markdown\tquiet\ttool\twrite\tnotes.md\tThe notes mention zzplant_ast_token in passing.\tplanted\n",
+				"plant-ast-markdown\tfire\ttool\twrite\tnotes.md\tzzplant_ast_token\tplanted\t\nplant-ast-markdown\tquiet\ttool\twrite\tnotes.md\tThe notes mention zzplant_ast_token in passing.\tplanted\t\n",
 			// ast-grep parses the pattern in the file's language. In Markdown a pattern with no
 			// metavariable matches the same text anywhere in prose (measured on omp 18.3.0), so an
 			// astCondition rule must be scoped to code files: this plant must go RED.
@@ -748,7 +904,7 @@ async function selftest(): Promise<number> {
 			astCondition: "console.log($$$A)",
 			scope: "tool:write(*.ts)",
 			cases:
-				'plant-ast-tripwire\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tplanted\nplant-ast-tripwire\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tplanted\n',
+				'plant-ast-tripwire\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tplanted\t\nplant-ast-tripwire\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tplanted\t\n',
 			// Correct matches, wrong mechanism: a blocking rule that omp cannot run before the tool.
 			wantRed: /^G1 plant-ast-tripwire: astCondition on a blocking rule requires astLiveScenario evidence/,
 		},
@@ -758,7 +914,7 @@ async function selftest(): Promise<number> {
 			condition: "zzplant_disabled",
 			enabled: false,
 			scope: "text",
-			cases: "plant-disabled\tfire\ttext\t-\t-\tsay zzplant_disabled\tplanted\nplant-disabled\tquiet\ttext\t-\t-\tsay zzplant_other\tplanted\n",
+			cases: "plant-disabled\tfire\ttext\t-\t-\tsay zzplant_disabled\tplanted\t\nplant-disabled\tquiet\ttext\t-\t-\tsay zzplant_other\tplanted\t\n",
 			// Its cases pass on buildRuleFromMarkdown's object; omp's discovery would never load it.
 			wantRed: /^G1 plant-disabled: enabled: false: omp's discovery skips this file/,
 		},
@@ -772,7 +928,7 @@ async function selftest(): Promise<number> {
 			condition: shipped[0] ?? "",
 			scope: "tool:bash",
 			cases:
-				'plant-control-shipped-close\tfire\ttool\tbash\t-\tbr close x\tcontrol\nplant-control-shipped-close\tquiet\ttool\tbash\t-\tbr close x --reason "cargo test -> 41 passed; commit a1b2c3d"\tcontrol\n',
+				'plant-control-shipped-close\tfire\ttool\tbash\t-\tbr close x\tcontrol\t\nplant-control-shipped-close\tquiet\ttool\tbash\t-\tbr close x --reason "cargo test -> 41 passed; commit a1b2c3d"\tcontrol\t\n',
 			control: "shipped kit-close-needs-evidence condition is GREEN on the plant-(b) cases",
 		},
 		{
@@ -781,7 +937,7 @@ async function selftest(): Promise<number> {
 			condition: "zzplant_self_trigger",
 			scope: "text",
 			body: "Do not write the plant token in prose.",
-			cases: "plant-control-self-trigger\tfire\ttext\t-\t-\tsay zzplant_self_trigger\tcontrol\nplant-control-self-trigger\tquiet\ttext\t-\t-\tsay zzplant_other\tcontrol\n",
+			cases: "plant-control-self-trigger\tfire\ttext\t-\t-\tsay zzplant_self_trigger\tcontrol\t\nplant-control-self-trigger\tquiet\ttext\t-\t-\tsay zzplant_other\tcontrol\t\n",
 			control: "plant (d) with a body that describes the trigger without spelling it is GREEN",
 		},
 		{
@@ -791,7 +947,7 @@ async function selftest(): Promise<number> {
 			interruptMode: "never",
 			scope: "tool:write(*.ts)",
 			cases:
-				'plant-control-ast-code\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tcontrol\nplant-control-ast-code\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tcontrol\n',
+				'plant-control-ast-code\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tcontrol\t\nplant-control-ast-code\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tcontrol\t\n',
 			control: "an astCondition-only rule fires on code and stays quiet on a string literal, so G2/G3 run omp's AST matcher",
 		},
 		{
@@ -801,7 +957,7 @@ async function selftest(): Promise<number> {
 			interruptMode: "prose-only",
 			scope: "tool:write(*.ts)",
 			cases:
-				'plant-control-ast-prose-only\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tcontrol\nplant-control-ast-prose-only\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tcontrol\n',
+				'plant-control-ast-prose-only\tfire\ttool\twrite\tsrc/app.ts\tconsole.log("x");\tcontrol\t\nplant-control-ast-prose-only\tquiet\ttool\twrite\tsrc/app.ts\tconst s = "console.log(x)";\tcontrol\t\n',
 			control: "astCondition under prose-only passes G1: omp never interrupts a tool-source match under it",
 		},
 	];
@@ -828,9 +984,51 @@ async function selftest(): Promise<number> {
 			console.log(`FAIL plant (${p.id}) ${p.rule} did NOT go RED the named way (${wantRed}); got: ${rep.failures.join(" || ") || "GREEN"}`);
 		}
 	}
+	bad += await admissionSelftest(tmp);
 	fs.rmSync(tmp, { recursive: true, force: true });
 	console.log(bad === 0 ? "SELFTEST: all seven plants RED and named; controls GREEN" : `SELFTEST: ${bad} arm(s) failed`);
 	return bad === 0 ? 0 : 1;
+}
+
+async function admissionSelftest(tmp: string): Promise<number> {
+	let bad = 0;
+	// Dedicated mechanical controls: identical event/path/content, only real
+	// index facts differ. The fixture never derives facts from `expect`.
+	const mechanicalRule = SCRATCH_ADMISSION;
+	const source = "export const fixtureValue = 42;";
+	const mechanicalControls: Case[] = [
+		{ line: 1, rule: "scratch-is-not-a-home", expect: "quiet", source: "tool", tool: "write",
+			path: "var/agent-tmp/control.1/scripts/probe.mjs", snippet: source, note: "untracked disposable" },
+		{ line: 2, rule: "scratch-is-not-a-home", expect: "fire", source: "tool", tool: "write",
+			path: "var/agent-tmp/control.1/scripts/probe.mjs", snippet: source, note: "indexed canonical",
+			reference: { tracked: { "scripts/probe.mjs": source } } },
+		{ line: 3, rule: "scratch-is-not-a-home", expect: "quiet", source: "tool", tool: "write",
+			path: "var/agent-tmp/control.1/report.md", snippet: "Report: packet processing completed.", note: "informational markdown" },
+	];
+	for (const control of mechanicalControls) {
+		const actual = await g2Fires(mechanicalRule, control);
+		const sweep = await g3Fires(mechanicalRule, control);
+		let ok = actual === (control.expect === "fire")
+			&& (control.expect === "fire" ? sweep.fired.includes(sweep.length + 1) : sweep.fired.length === 0);
+		for (const variant of variantsFor(control, true).variants) {
+			if (await g2Fires(mechanicalRule, { ...control, ...variant, path: variant.path ?? control.path }) !== actual) ok = false;
+		}
+		console.log(`${ok ? "ok  " : "FAIL"} mechanical control: ${control.note}; final-only admission and argument/path equivalents`);
+		if (!ok) bad++;
+	}
+	const external = path.join(tmp, "external-admission-name");
+	fs.mkdirSync(external);
+	writePlant(external, SCRATCH_ADMISSION.name, { condition: "PUBLIC_ADMISSION_NAME_COLLISION" }, "tool:write", "An ordinary external rule.");
+	const externalTarget = evaluationTargets(external).byName.get(SCRATCH_ADMISSION.name);
+	const externalCases = path.join(tmp, "external-cases.tsv");
+	fs.writeFileSync(externalCases, `${CASE_HEADER}\nscratch-is-not-a-home\tfire\ttool\twrite\treport.txt\tPUBLIC_ADMISSION_NAME_COLLISION\texternal rule owns its own condition\t\n`);
+	const parsed = loadCases(externalCases);
+	if (parsed.errors.length) throw new Error(parsed.errors.join("; "));
+	const externalCase = parsed.cases[0];
+	const externalOk = externalCase !== undefined && externalTarget !== undefined && !isAdmissionTarget(externalTarget) && await g2Fires(externalTarget.rule, externalCase);
+	console.log(`${externalOk ? "ok  " : "FAIL"} control: an external same-name rule retains its selected SDK evaluator`);
+	if (!externalOk) bad++;
+	return bad;
 }
 
 // ---------------------------------------------------------------- cli crosscheck
@@ -838,7 +1036,8 @@ async function selftest(): Promise<number> {
 async function cliCrosscheck(jobs: number): Promise<number> {
 	const rules = loadRules(path.join(KIT, "rules"));
 	const byName = new Map(rules.map(r => [r.name, r]));
-	const { cases } = loadCases(path.join(KIT, "cases/cases.tsv"));
+	const { cases, errors: caseErrors } = loadCases(path.join(KIT, "cases/cases.tsv"));
+	if (caseErrors.length) throw new Error(`CLI cases unreadable: ${caseErrors.join("; ")}`);
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-cli-"));
 	const home = path.join(tmp, "home");
 	fs.mkdirSync(home);

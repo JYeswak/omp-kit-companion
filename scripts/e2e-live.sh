@@ -3,8 +3,8 @@
 #
 # For each scenario in tests/live/scenarios.json: a fresh git repo, a mock OpenAI-compatible
 # model (tests/live/mock-model.mjs) that streams scripted prose and tool calls, and one
-# `omp -p` run under an isolated HOME whose only rules are rules/*.md copied to
-# $HOME/.agents/rules (the system-wide root). The verdict (tests/live/lib.mjs) reads the
+# `omp -p` run under an isolated HOME. It loads the candidate's opt-in native
+# guards explicitly and copies rules/*.md to $HOME/.agents/rules. The verdict reads the
 # transcript omp sent back to the model and the side effects on disk: a tripwire names
 # itself and its action does not run; a reminder names itself and its action runs; a
 # near-miss runs and names nothing.
@@ -283,7 +283,7 @@ for i in $scenario_ids; do
   P="$T/proj-$name"; LOG="$T/log-$name.jsonl"; SC="$T/scen-$name.json"; PF="$T/port-$name"
   mkdir -p "$P"
   (cd "$P" && isolate && git init -q && git commit -q --allow-empty -m init) || { git_rc=$?; KEEP_WORK=1; echo "git init producer_rc=$git_rc scenario=$name" >&2; exit "$git_rc"; }
-  "$OMP_KIT_BUN" "$LIB" prep "$i" "$SC" || { prep_rc=$?; KEEP_WORK=1; echo "scenario prep producer_rc=$prep_rc id=$i" >&2; exit "$prep_rc"; }
+  "$OMP_KIT_BUN" "$LIB" prep "$i" "$SC" "$P" || { prep_rc=$?; KEEP_WORK=1; echo "scenario prep producer_rc=$prep_rc id=$i" >&2; exit "$prep_rc"; }
   "$OMP_KIT_BUN" --work-dir "$WORK_ROOT" --scenario "$SC" --log "$LOG" --port-file "$PF" "$MOCK" >"$T/mock-$name.txt" 2>&1 &
   MP=$!
   MOCK_PIDS="$MOCK_PIDS $MP:$name"
@@ -296,7 +296,7 @@ for i in $scenario_ids; do
   fi
   "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
   LIMIT_PGID_FILE="$T/pgid-$name"; rm -f "$LIMIT_PGID_FILE"; export LIMIT_PGID_FILE
-  (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
+  (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" --extension "$HERE/tests/live/admission-extension.mjs" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
   echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&2
   wait "$OP"; rc=$?; OP=""
   reap_mock

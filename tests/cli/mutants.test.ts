@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
@@ -24,7 +25,7 @@ interruptMode: never
 Fixture rule with a branch no case covers.
 `;
 
-const CASES_HEADER = "rule\texpect\tsource\ttool\tpath\tsnippet\tnote\n";
+const CASES_HEADER = CASE_HEADER + "\n";
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
@@ -51,8 +52,8 @@ beforeAll(() => {
 	writeBundledHarness(release);
 	writeFileSync(join(pack, "rules", "mut-test.md"), RULE);
 	writeFileSync(join(pack, "cases.tsv"), CASES_HEADER +
-		"mut-test\tfire\ttool\tbash\t-\trun alpha now\tcovers branch one\n" +
-		"mut-test\tquiet\ttool\tbash\t-\trun gamma now\tunrelated command\n");
+		"mut-test\tfire\ttool\tbash\t-\trun alpha now\tcovers branch one\t\n" +
+		"mut-test\tquiet\ttool\tbash\t-\trun gamma now\tunrelated command\t\n");
 	const build = Bun.spawnSync([
 		process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
 		"--no-compile-autoload-tsconfig", join(REPO_ROOT, "src/cli.ts"), `--outfile=${binary}`,
@@ -117,7 +118,7 @@ test("mutants report the known survivor of an uncovered branch", () => {
 test("adding the missing near-miss case kills the known survivor", () => {
 	const casesB = join(pack, "cases-b.tsv");
 	writeFileSync(casesB, readFileSync(join(pack, "cases.tsv"), "utf8") +
-		"mut-test\tfire\ttool\tbash\t-\trun beta now\tcovers branch two\n");
+		"mut-test\tfire\ttool\tbash\t-\trun beta now\tcovers branch two\t\n");
 	const { exitCode, envelope } = runCli(["test", "--mutants",
 		"--rules", join(pack, "rules"), "--cases", casesB, "--json"]);
 	expect(exitCode).toBe(0);
@@ -132,7 +133,7 @@ test("uncompilable mutants are skipped and counted", () => {
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "mut-group.md"), `---\ncondition:\n  - '(?<t>ab)+'\nscope: tool:bash\ninterruptMode: never\n---\nNamed group fixture: deleting the one-char group name is uncompilable.\n`);
 	writeFileSync(join(pack, "cases-group.tsv"), CASES_HEADER +
-		"mut-group\tfire\ttool\tbash\t-\trun abab now\tcovers the group\n");
+		"mut-group\tfire\ttool\tbash\t-\trun abab now\tcovers the group\t\n");
 	const { exitCode, envelope } = runCli(["test", "--mutants",
 		"--rules", dir, "--cases", join(pack, "cases-group.tsv"), "--json"]);
 	expect(exitCode).toBe(0);
@@ -147,7 +148,7 @@ test("the budget flag bounds the run and reports truncation", () => {
 	writeFileSync(join(dir, "mut-heavy.md"),
 		`---\ncondition:\n  - '${branches.join("|")}'\nscope: tool:bash\ninterruptMode: never\n---\nHeavy budget fixture.\n`);
 	writeFileSync(join(pack, "cases-heavy.tsv"), CASES_HEADER +
-		"mut-heavy\tfire\ttool\tbash\t-\trun b0zz now\tcovers branch one\n");
+		"mut-heavy\tfire\ttool\tbash\t-\trun b0zz now\tcovers branch one\t\n");
 	const bounded = runCli(["test", "--mutants", "--mutant-budget-secs", "0",
 		"--rules", dir, "--cases", join(pack, "cases-heavy.tsv"), "--json"]);
 	expect(bounded.exitCode).toBe(0);
