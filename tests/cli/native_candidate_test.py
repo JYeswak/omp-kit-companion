@@ -587,7 +587,48 @@ def native_failure_log() -> None:
             check.assertLessEqual(len(detail.get(key, "")), limit)
         check.assertIn(head, stderr.getvalue())
         check.assertIn(tail, stderr.getvalue())
+        receipt_out = os.environ.get("OMP_KIT_NATIVE_FAILURE_RECEIPT_OUT")
+        if receipt_out:
+            destination = Path(receipt_out)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(args.out, destination)
         print("CIOUT1 native forced-exit console: PASS (expected refusal, not certification)")
+
+
+def native_ship_failure_index() -> None:
+    """Feed a real native refusal through the unchanged aggregation CLI."""
+    check = unittest.TestCase()
+    positive = json.loads(
+        (Path(os.environ["OMP_KIT_NATIVE_INDEX_DIR"]) / "candidate-proof.json").read_text(encoding="utf-8"))
+    check.assertEqual(positive["source_sha"], os.environ["SOURCE_SHA"])
+    check.assertEqual(positive["version"], os.environ["CANDIDATE_VERSION"])
+    check.assertEqual(positive["certified_platforms"], list(RELEASE_PLATFORMS))
+    refusal_path = Path(os.environ["OMP_KIT_NATIVE_FAILURE_RECEIPT"])
+    refusal = json.loads(refusal_path.read_text(encoding="utf-8"))
+    check.assertIs(refusal["certified"], False)
+    check.assertEqual(refusal["platform"], "linux-x64-gnu")
+    check.assertEqual(refusal["omp_track"], "certified")
+    with tempfile.TemporaryDirectory(prefix="native-ship-failure-index-") as work:
+        root = Path(work)
+        receipts = root / "receipts"
+        # Never alter the passing receipts used by the real candidate.
+        shutil.copytree(os.environ["OMP_KIT_NATIVE_RECEIPTS_DIR"], receipts)
+        shutil.copyfile(refusal_path, receipts / "native-receipt-linux-x64-gnu-certified" / "receipt.json")
+        out = root / "candidate-index"
+        child = subprocess.run(
+            [sys.executable, str(SCRIPT), "candidate", "--release",
+             "--version", os.environ["CANDIDATE_VERSION"], "--source-sha", os.environ["SOURCE_SHA"],
+             "--assets", os.environ["OMP_KIT_NATIVE_ASSETS_DIR"], "--receipts", str(receipts),
+             "--out", str(out)],
+            cwd=ROOT, capture_output=True, timeout=60)
+        print(child.stdout.decode(errors="replace"), end="", flush=True)
+        print(child.stderr.decode(errors="replace"), end="", file=sys.stderr, flush=True)
+        check.assertEqual(child.returncode, 1)
+        check.assertIn("release candidate missing certified ship platform(s): linux-x64-gnu",
+                       child.stderr.decode(errors="replace"))
+        check.assertFalse((out / "release-index.json").exists())
+        check.assertFalse((out / "candidate-proof.json").exists())
+    print("REL1 native shipping refusal blocks candidate-index: PASS (controlled negative, not certification)")
 
 
 def native_timeout_log(binary: str) -> None:
@@ -634,6 +675,8 @@ def native_timeout_log(binary: str) -> None:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--native-failure-log"]:
         native_failure_log()
+    elif sys.argv[1:] == ["--native-ship-failure-index"]:
+        native_ship_failure_index()
     elif len(sys.argv) == 3 and sys.argv[1] == "--native-timeout-log":
         native_timeout_log(sys.argv[2])
     else:

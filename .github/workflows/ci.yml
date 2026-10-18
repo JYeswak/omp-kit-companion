@@ -530,6 +530,7 @@ jobs:
           TARGET: ${{ matrix.platform }}
           SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
           OMP_KIT_NATIVE_FAILURE_ARCHIVE_DIR: ${{ runner.temp }}/native/${{ matrix.platform }}
+          OMP_KIT_NATIVE_FAILURE_RECEIPT_OUT: ${{ runner.temp }}/native-refusal/receipt.json
         run: python3 tests/cli/native_candidate_test.py --native-failure-log
       - name: Certify downloaded archive on OMP ${{ matrix.omp.track }}
         env:
@@ -542,6 +543,14 @@ jobs:
             --asset "$RUNNER_TEMP/native/$TARGET/asset.json" \
             --archive-dir "$RUNNER_TEMP/native/$TARGET" \
             --out "$RUNNER_TEMP/native-receipt/receipt.json"
+      - name: Retain the actual certified-track shipping refusal for the aggregation control
+        if: ${{ always() && inputs.version != '' && matrix.platform == 'linux-x64-gnu' && matrix.omp.track == 'certified' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-ship-refusal-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-refusal/receipt.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.version && 7 || 2 }}
       - name: Preserve only detached bounded proof, including refusal
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -597,6 +606,20 @@ jobs:
             --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/candidates" \
             --receipts "$RUNNER_TEMP/receipts" \
             --out "$RUNNER_TEMP/candidate-index" "${release_args[@]}"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ env.RELEASE_CANDIDATE == 'true' }}
+        with:
+          name: native-ship-refusal-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-ship-refusal
+      - name: Prove a real shipping refusal blocks a separate index without changing passing receipts
+        if: ${{ env.RELEASE_CANDIDATE == 'true' }}
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          OMP_KIT_NATIVE_INDEX_DIR: ${{ runner.temp }}/candidate-index
+          OMP_KIT_NATIVE_ASSETS_DIR: ${{ runner.temp }}/candidates
+          OMP_KIT_NATIVE_RECEIPTS_DIR: ${{ runner.temp }}/receipts
+          OMP_KIT_NATIVE_FAILURE_RECEIPT: ${{ runner.temp }}/native-ship-refusal/receipt.json
+        run: python3 tests/cli/native_candidate_test.py --native-ship-failure-index
       - name: Retain private provisional index, never publish or update latest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

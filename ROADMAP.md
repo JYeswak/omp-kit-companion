@@ -98,6 +98,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
 | Memory doctor reports read-only CASS status and static LaunchAgent declarations separately from retrieval qualification | ompkit-bj08.10 (IN PROGRESS) |
 | Source-free CLI fixture repair is held locally by the staged-import guard's quoted-fixture refusal; hosted qualification and genuine Intel failure diagnostics remain unverified | ompkit-fp72.125 → ompkit-fp72.124 / ompkit-fp72.63 (BLOCKED) |
+| Optional Intel failures leave the three-platform index and attestation successful; literal no-publish rehearsal is observed. Native-refusal propagation into aggregation is being added; a hosted propagated negative and compatible-source timing comparison remain pending | ompkit-6q9i (IN PROGRESS) |
 
 ## Rolling releases (reviewed 2026-10-17)
 
