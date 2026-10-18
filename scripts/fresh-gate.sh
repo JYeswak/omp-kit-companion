@@ -277,7 +277,23 @@ if [ "$needs_shell" = 1 ]; then
 fi
 	if [ "$needs_actionlint" = 1 ]; then
 		if command -v actionlint >/dev/null 2>&1; then
-			actionlint "$ARCHIVE_DIR/.github/workflows"/*.yml "$ARCHIVE_DIR/.github/workflows"/*.yaml
+			set --
+			for workflow in "$ARCHIVE_DIR/.github/workflows"/*.yml "$ARCHIVE_DIR/.github/workflows"/*.yaml; do
+				if [ -e "$workflow" ] || [ -L "$workflow" ]; then
+					set -- "$@" "$workflow"
+				fi
+			done
+			if [ "$#" -gt 0 ]; then
+				if actionlint "$@"; then
+					:
+				else
+					lint_rc=$?
+					echo "focused actionlint: findings refuse the push" >&2
+					return "$lint_rc"
+				fi
+			else
+				echo "focused actionlint: no workflow files remain"
+			fi
 		else
 			echo "focused actionlint: unavailable; no workflow files were executed"
 		fi
