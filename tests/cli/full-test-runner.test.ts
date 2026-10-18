@@ -338,6 +338,7 @@ test("real failed producer reference binds full Unicode streams, actual counts a
   expect(reference.producer_exit).toBe(1);
   expect(reference.counts).toEqual({ protocol: "BUN_TEST", unit: "TEST_CASE", pass: 1, fail: 1, skip: 0, total: 2 });
   expect(reference.failing_names).toEqual(["real producer detects wrong bytes"]);
+  expect(reference.supervisor_note).toBe(null);
   expect(reference.argv_sha256).toBe(new Bun.CryptoHasher("sha256").update(JSON.stringify(fixture.result.execution.argv)).digest("hex"));
   expect(reference.retention).toMatchObject({ status: "UNRETAINED", durable: false, citations: [] });
   for (const name of ["stdout", "stderr"] as const) {

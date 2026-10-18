@@ -306,6 +306,121 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 	}, 12_000);
 }
 
+test("isolated child exit unconfirmed keeps the runner note out of the child stderr bytes and their identity", async () => {
+	const { base, admission } = ownedRuntimeFixture();
+	const release = join(base, "release");
+	const executable = join(release, "bin", "omp-kit");
+	const omp = createOmp(join(base, "omp"), "v1");
+	for (const directory of ["release/bin", "release/scripts", "operator-home", "tmp"]) mkdirSync(join(base, directory), { recursive: true });
+	writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+	writeFileSync(join(release, "scripts", "ladder.sh"), [
+		`printf '%s\\n' "$$" > "$1/child.pid"`,
+		`printf '%s\\n' "$HOME" > "$1/private-home"`,
+		`printf 'OMP_KIT_STAGE_START name=e2e-live\\n'`,
+		`printf 'current-stage-diagnostic\\n' >&2`,
+		`/bin/sleep 600 &`,
+		`wait "$!"`,
+	].join("\n"));
+	const childStderr = "current-stage-diagnostic\n";
+	// Withhold only the exit observation: the real child, its process group and both pipes stay untouched.
+	const runner = `
+		import { runIsolatedShell } from ${JSON.stringify(join(REPO_ROOT, "src/runtime.ts"))};
+		import { describeFullTestProducer, recoverInterruptedRun } from ${JSON.stringify(join(REPO_ROOT, "src/full-test-runner.ts"))};
+		const spawn = Bun.spawn;
+		Bun.spawn = (...args) => {
+			Bun.spawn = spawn;
+			const child = spawn(...args);
+			return new Proxy(child, {
+				get(target, key) {
+					if (key === "exited") return Promise.withResolvers().promise;
+					const value = Reflect.get(target, key, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		};
+		try {
+			await runIsolatedShell("scripts/ladder.sh", [${JSON.stringify(base)}], ${JSON.stringify(release)}, ${JSON.stringify(executable)});
+			process.exitCode = 99;
+		} catch (error) {
+			const recovered = recoverInterruptedRun(error, [${JSON.stringify(base)}]);
+			const producer = describeFullTestProducer(recovered.result, { source_revision: null, roots: [${JSON.stringify(base)}] });
+			process.stdout.write(JSON.stringify({ ...recovered, result_ref: producer.result_ref }));
+			process.exitCode = 3;
+		}
+	`;
+	const child = Bun.spawn([process.execPath, "--eval", runner], {
+		cwd: base, detached: true, stdout: "pipe", stderr: "pipe",
+		env: {
+			PATH: [dirname(omp.launcher), dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+			HOME: join(base, "operator-home"), TMPDIR: join(base, "tmp"),
+			OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+			...admission, OMP_KIT_NATIVE_STAGE_PROGRESS: "1",
+		},
+	});
+	const { promise: ready, resolve: markReady } = Promise.withResolvers<void>();
+	const stdout = new Response(child.stdout).text();
+	let diagnostics = "";
+	const stderr = (async () => {
+		const reader = child.stderr.getReader(), decoder = new TextDecoder();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			diagnostics += decoder.decode(value, { stream: true });
+			if (diagnostics.includes("OMP_KIT_STAGE_START name=e2e-live")) markReady();
+		}
+		diagnostics += decoder.decode();
+		return diagnostics;
+	})();
+	// A watchdog bounds a real OS-process test; readiness is signaled by actual stage output, not a sleep.
+	let timer: NodeJS.Timeout | undefined;
+	const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("owned runtime exit-unconfirmed deadline")), 8000); });
+	let privateRoot: string | undefined;
+	try {
+		await Promise.race([ready, deadline, child.exited.then(() => { throw new Error("runner exited before stage readiness"); })]);
+		child.kill("SIGTERM");
+		const [code, output, diagnostic] = await Promise.race([Promise.all([child.exited, stdout, stderr]), deadline]);
+		expect(code, diagnostic).toBe(3);
+		const report = JSON.parse(output);
+		privateRoot = dirname(readFileSync(join(base, "private-home"), "utf8").trim());
+		expect(report.cause.cause_code).toBe("SIGTERM");
+		// The supervisor note is reported beside, never inside, the child's pipe bytes and capture identity.
+		expect(report.result.supervisor_note).toBe("Isolated child exit unconfirmed; private runtime scratch retained.");
+		expect(report.result.stderr).toBe(childStderr);
+		expect(report.result.execution).toMatchObject({ exit_code: null, signal: null, interrupted: true });
+		expect(report.result.execution.stderr_capture).toEqual({
+			bytes: Buffer.byteLength(childStderr),
+			sha256: createHash("sha256").update(childStderr).digest("hex"),
+		});
+		expect(report.result_ref.stderr).toMatchObject({
+			bytes: Buffer.byteLength(childStderr),
+			sha256: createHash("sha256").update(childStderr).digest("hex"),
+			identity_matches: true,
+		});
+		expect(report.result_ref.supervisor_note).toBe("Isolated child exit unconfirmed; private runtime scratch retained.");
+		expect(report.result_ref.execution).toBe("INTERRUPTED");
+		expect(report.result_ref.producer_exit).toBe(null);
+		expect(report.result_ref.execution_capture_complete).toBe(false);
+		expect(report.result_ref.missing_fields).toEqual(expect.arrayContaining(["producer_exit", "execution.interrupted"]));
+		expect(report.result_ref.retention).toMatchObject({ status: "UNRETAINED", durable: false });
+		expect(existsSync(privateRoot)).toBe(true);
+	} finally {
+		clearTimeout(timer);
+		if (child.exitCode === null) child.kill("SIGKILL");
+		const pidPath = join(base, "child.pid");
+		if (existsSync(pidPath)) {
+			const pid = Number(readFileSync(pidPath, "utf8").trim());
+			if (Number.isSafeInteger(pid) && pid > 1) {
+				try { process.kill(-pid, "SIGKILL"); } catch { /* Only this fixture's owned process group. */ }
+			}
+		}
+		await Promise.allSettled([child.exited, stdout, stderr]);
+		// The retained scratch is this test's own: its child group was killed above.
+		if (privateRoot && relative(admission.OMP_KIT_TEST_WORK_ROOT, privateRoot).split("/")[0]?.startsWith("omp-kit-runtime-")) {
+			rmSync(privateRoot, { recursive: true, force: true });
+		}
+	}
+}, 12_000);
+
 describe("release paths", () => {
 	test("follows the stable launcher to the moved versioned release", () => {
 		const prefix = join(fixtureRoot(), "kit");

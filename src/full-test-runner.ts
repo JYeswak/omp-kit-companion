@@ -32,6 +32,8 @@ export type FullTestResultReference = {
  execution: "NOT_OBSERVED" | "EXIT_NOT_OBSERVED" | "EXITED" | "INTERRUPTED"; producer_exit: number | null; runner_exit: number | null; signal: string | null;
  counts: FullTestCounts | null; failing_names: string[] | null;
  case_report_error: string | null;
+ /** Runner diagnostic kept apart from producer pipe bytes; never part of stdout/stderr identities. */
+ supervisor_note: string | null;
  stdout: FullTestStreamReference | null; stderr: FullTestStreamReference | null;
  /** Structural execution capture only; never suite completion or authenticated retention. */
  execution_capture_complete: boolean; missing_fields: string[];
@@ -318,6 +320,7 @@ export function describeFullTestProducer(result: BundledRunResult | null, option
    producer_exit: producerExit, runner_exit: result?.code ?? null, signal,
    counts: summary.counts, failing_names: summary.failing_names?.map(redact) ?? null, ...streams,
    case_report_error: nativeSummary?.error ? redact(nativeSummary.error) : null,
+   supervisor_note: typeof result?.supervisor_note === "string" ? redact(result.supervisor_note) : null,
    execution_capture_complete: missing.length === 0, missing_fields: missing, retention,
   },
  };

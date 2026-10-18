@@ -32,6 +32,8 @@ export interface BundledRunResult {
 	in_flight_stage?: { name: string; started_at: number; started_at_ms: number } | null;
 	execution?: BundledRunExecution;
 	case_reports?: TestCaseReportCapture;
+	/** Runner-generated diagnostic, never child pipe bytes; excluded from stdout/stderr and their capture identities. */
+	supervisor_note?: string;
 }
 export class BundledRunInterruptedError extends Error {
 	constructor(readonly originalCause: unknown, readonly partialResult: BundledRunResult) {
@@ -286,9 +288,10 @@ async function runIsolated(
 				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}) };
 		} catch (error) {
 			await stop();
-			if (!cleanupPrivateRoot) partialStderr += "\nIsolated child exit unconfirmed; private runtime scratch retained.\n";
+			const supervisorNote = cleanupPrivateRoot ? null : "Isolated child exit unconfirmed; private runtime scratch retained.";
 			throw new BundledRunInterruptedError(error, {
 				code: 3, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(true),
+				...(supervisorNote ? { supervisor_note: supervisorNote } : {}),
 				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}),
 			});
 		} finally {
