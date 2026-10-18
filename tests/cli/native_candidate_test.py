@@ -572,8 +572,51 @@ def native_failure_log() -> None:
         print("CIOUT1 native forced-exit console: PASS (expected refusal, not certification)")
 
 
+def native_timeout_log(binary: str) -> None:
+    """Exercise the original 900-second bound on a real packaged full CLI."""
+    scratch = ROOT / "var" / "agent-tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="native-timeout-log-", dir=scratch) as work:
+        root = Path(work)
+        (root / ".owner").write_text(
+            f"pid={os.getpid()}\nlabel=native-timeout-log\nrepo={ROOT}\ncreated={time.time()}\n",
+            encoding="utf-8")
+        home = root / "home"
+        home.mkdir()
+        fault_bin = root / "fault-bin"
+        fault_bin.mkdir()
+        nice = fault_bin / "nice"
+        nice.write_text("#!/bin/sh\nexec /bin/sleep 1800\n", encoding="utf-8")
+        nice.chmod(0o700)
+        env = native_candidate.cert_env(home, root)
+        env.update(PATH=str(fault_bin) + os.pathsep + env["PATH"],
+                   OMP_KIT_CASE_CWD=str(ROOT), OMP_KIT_TEST_WORK_ROOT=str(root),
+                   OMP_KIT_NATIVE_STAGE_PROGRESS="1")
+        started = time.monotonic()
+        try:
+            child = native_candidate.run_scoped(
+                [str(Path(binary).resolve()), "test", "--full", "--json"],
+                cwd=ROOT, env=env, timeout=900)
+        except subprocess.TimeoutExpired as error:
+            detail = native_candidate.timeout_detail("full", error, 900)
+            check = unittest.TestCase()
+            check.assertIs(detail["timed_out"], True)
+            check.assertEqual(detail["timeout_seconds"], 900)
+            check.assertEqual(detail["current_stage"]["name"], "harness-gate")
+            wall_seconds = time.monotonic() - started
+            check.assertGreaterEqual(wall_seconds, 900)
+            check.assertGreater(detail["current_stage"]["elapsed_ms"], 0)
+            check.assertLessEqual(detail["current_stage"]["elapsed_ms"], round(wall_seconds * 1000))
+            print(json.dumps({"scope": "packaged CLI timeout, not native certification",
+                              "wall_seconds": round(wall_seconds, 3), "detail": detail}))
+        else:
+            raise AssertionError(f"owned hung stage did not reach the 900-second timeout: {child!r}")
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--native-failure-log"]:
         native_failure_log()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--native-timeout-log":
+        native_timeout_log(sys.argv[2])
     else:
         unittest.main()
