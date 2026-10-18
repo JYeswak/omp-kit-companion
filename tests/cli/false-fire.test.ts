@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const APPROVED_FIELDS = ["rule", "expect", "source", "tool", "path", "snippet"] as const;
@@ -42,6 +42,7 @@ beforeAll(() => {
 	if (build.exitCode !== 0) throw new Error(`compiled CLI fixture failed (${build.exitCode}): ${build.stdout.toString()}\n${build.stderr.toString()}`);
 	chmodSync(binary, 0o755);
 	environment = {
+		...nativeCacheEnv,
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),

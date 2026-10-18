@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
+import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
+
+// Isolate mutable HOME state without selecting a different installed SDK.
+const sourceCacheRoot = ompSourceCacheRoot(process.env);
+export const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
 
 let bundledHarness: Uint8Array | undefined;
 

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
-import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { nativeCacheEnv, writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const OMP_IDENTITY = resolveOmpIdentity();
@@ -105,6 +105,7 @@ function isolatedEnv(home: string, kit: string): Record<string, string> {
 	const agentMailRoot = process.env.AGENT_MAIL_STORAGE_ROOT ?? join(process.env.HOME ?? home, ".local", "share", "mcp-agent-mail-rust-live");
 	mkdirSync(agentMailRoot, { recursive: true });
 	return {
+		...nativeCacheEnv,
 		HOME: home,
 		TMPDIR: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"),

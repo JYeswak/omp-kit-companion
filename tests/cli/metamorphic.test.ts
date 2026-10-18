@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -54,6 +54,7 @@ beforeAll(() => {
 	], { cwd: base, stdout: "pipe", stderr: "pipe" });
 	if (build.exitCode !== 0) throw new Error(`compiled CLI fixture failed (${build.exitCode}): ${build.stdout.toString()}\n${build.stderr.toString()}`);
 	environment = {
+		...nativeCacheEnv,
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),

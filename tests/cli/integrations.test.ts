@@ -8,7 +8,7 @@ import { optInState } from "../../extensions/kit-guard-optin.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { judgeFleet, readProfileWiring, runIntegrations, staticVerdict } from "../../src/integrations.ts";
 import type { LiveAttempt } from "../../src/integrations.ts";
-import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 
  const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -150,6 +150,7 @@ function profileConfig(extensions: string[]): string {
 	], { cwd: base, stdout: "pipe", stderr: "pipe" });
 	if (build.exitCode !== 0) throw new Error(`compiled CLI fixture failed (${build.exitCode}): ${build.stdout.toString()}\n${build.stderr.toString()}`);
 	environment = {
+		...nativeCacheEnv,
 		HOME: home, TMPDIR: join(home, "tmp"), TMP: join(home, "tmp"), TEMP: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),

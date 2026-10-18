@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { nativeCacheEnv, writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 
@@ -91,6 +91,7 @@ function makeTestHome(name: string): string {
 
 function environment(home: string, pathValue: string): Record<string, string> {
 	return {
+		...nativeCacheEnv,
 		HOME: home,
 		TMPDIR: join(home, "tmp"),
 		TMP: join(home, "tmp"),
