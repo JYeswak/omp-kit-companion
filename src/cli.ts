@@ -62,7 +62,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3165,11 +3165,16 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "release") {
 		if (!request.argument) return refusal("SCRATCH_RELEASE_PATH_REQUIRED", "scratch release needs a directory path",
 			"Run omp-kit scratch release ABSOLUTE_DIR from the owning session or one of its child processes.");
-		const released = releaseScratch(request.argument, home, deps);
+		const binFlag = request.flags.get("--bin"), refFlag = request.flags.get("--ref");
+		const bin = SCRATCH_BINS.find((candidate) => candidate === binFlag);
+		if ((binFlag !== undefined && bin === undefined) || (refFlag !== undefined && typeof refFlag !== "string"))
+			return refusal("SCRATCH_RELEASE_BIN_INVALID", `--bin must be one of ${SCRATCH_BINS.join("|")} and --ref a file:PATH or bead:ID value`,
+				"Pass --bin throwaway, or --bin evidence|promote with --ref; a hold is declared when the directory is created.");
+		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}) });
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED", `Scratch release refused: ${released.reason}`,
 			"Use the exact owned task directory from its owner process; no directory was quarantined.");
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
-			dir: released.dir, changed: released.changed }, verification: "UNVERIFIED" };
+			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null }, verification: "UNVERIFIED" };
 	}
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);

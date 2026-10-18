@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 
 /**
@@ -19,16 +19,25 @@ import { homedir } from "node:os";
 export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
 export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number }) => ScratchRunResult;
 
+export type ScratchBin = "throwaway" | "evidence" | "promote" | "hold";
+export const SCRATCH_BINS: readonly ScratchBin[] = ["throwaway", "evidence", "promote", "hold"];
+
 export interface ScratchOwner { pid: number; processStart: string | null; label: string; repo: string; createdAt: string; argv0: string | null;
 	/** The durable owner: the agent and its omp session id. Both or neither; a pid alone is only an attribute of the current process. */
-	agent: string | null; session: string | null }
+	agent: string | null; session: string | null;
+	/** Where the dir goes when its work ends (ompkit-774u.15): absent means unbinned. A hold carries the bead that justifies it and an expiry within 14 days of creation. */
+	bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null }
 
 const OWNER_FIELDS = ["pid", "process_start", "label", "repo", "created_at", "argv0"] as const;
 const LEGACY_OWNER_FIELDS = ["pid", "label", "repo", "created"] as const;
 const SEAT_FIELDS = ["agent", "session"] as const;
-const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS];
+const BIN_FIELDS = ["bin", "purpose", "bead", "expires"] as const;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS];
 const AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SESSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
+const PURPOSE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+const EXPIRES_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z)?$/;
+const HOLD_MAX_MS = 14 * 86_400_000;
 const RELEASE_FILE = ".omp-kit-release";
 const QUARANTINE_IDLE_MS = 72 * 3600 * 1000;
 const DEFAULT_QUARANTINE_TTL_HOURS = 24;
@@ -83,19 +92,43 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 	return validateOwnerFields(seen);
 }
 
+interface BinFields { bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null }
+const NO_BIN: BinFields = { bin: null, purpose: null, bead: null, expires: null };
+
+/** The optional bin group of an owner record, or null when it is malformed. A hold needs a bead and an expiry no later than 14 days after creation. */
+function parseBinFields(seen: Record<string, string>, createdAt: string): BinFields | null {
+	const bin = SCRATCH_BINS.find(candidate => candidate === seen.bin);
+	if (bin === undefined) return null;
+	if (seen.purpose !== undefined && !PURPOSE_PATTERN.test(seen.purpose)) return null;
+	if (seen.bead !== undefined && !AGENT_PATTERN.test(seen.bead)) return null;
+	if (seen.expires !== undefined) {
+		if (bin !== "hold" || !EXPIRES_PATTERN.test(seen.expires) || !Number.isFinite(Date.parse(seen.expires))) return null;
+	}
+	if (bin === "hold") {
+		if (seen.bead === undefined || seen.expires === undefined) return null;
+		const lifetime = Date.parse(seen.expires) - Date.parse(createdAt);
+		if (!Number.isFinite(lifetime) || lifetime <= 0 || lifetime > HOLD_MAX_MS) return null;
+	}
+	return { bin, purpose: seen.purpose ?? null, bead: seen.bead ?? null, expires: seen.expires ?? null };
+}
+
 function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null {
 	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
 	if (seat.length === 1) return null;
+	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
-		Object.keys(seen).length === fields.length + seat.length;
+		Object.keys(seen).length === fields.length + seat.length + binned.length;
 	const complete = base(OWNER_FIELDS);
 	const legacy = base(LEGACY_OWNER_FIELDS);
 	if (!complete && !legacy) return null;
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!)) return null;
 	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) return null;
+	const createdAt = seen.created_at ?? seen.created!;
+	const bins = binned.length === 0 ? NO_BIN : parseBinFields(seen, createdAt);
+	if (bins === null) return null;
 	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
-		repo: seen.repo!, createdAt: seen.created_at ?? seen.created!, argv0: seen.argv0 ?? null,
-		agent: seen.agent ?? null, session: seen.session ?? null };
+		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
+		agent: seen.agent ?? null, session: seen.session ?? null, ...bins };
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
 	return owner.processStart !== null && owner.argv0 !== null;
@@ -489,6 +522,11 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
 	const verdict = inspectByPid(dir, root, deps, nameRequired, ownerRoot);
 	const owner = verdict.owner;
+	// A hold (bead plus an expiry within 14 days of creation) outlives its owner until it expires; an expired hold is
+	// flagged, never reaped: the owner process died, so only a renewal on the bead can extend it (ompkit-774u.15).
+	if (verdict.action === "REAP" && owner !== null && owner.bin === "hold" && owner.expires !== null)
+		return Date.parse(owner.expires) > (deps.now ?? Date.now())
+			? { ...verdict, action: "LIVE", reason: "held-by-bead" } : { ...verdict, action: "SKIP", reason: "hold-expired-unbinned" };
 	if (verdict.action !== "REAP" || owner === null || owner.agent === null || owner.session === null) return verdict;
 	const seat = deps.liveness.seatLive?.(owner.agent, owner.session) ?? null;
 	if (seat === true) return { ...verdict, action: "LIVE", reason: "owner-seat-alive" };
@@ -918,10 +956,14 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 	appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: owner?.pid ?? null });
 	return deleted;
 }
-interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string; legacy: boolean; legacyName: string | null }
+interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string; legacy: boolean; legacyName: string | null;
+	/** The destination the owner named when releasing (ompkit-774u.15): evidence and promote carry the reference that proves it; absent is the unbinned legacy release. */
+	bin: ScratchBin | null; ref: string | null }
 
 const RELEASE_MARKER_REQUIRED = ["version", "owner_sha256", "device", "inode", "released_at"] as const;
-const RELEASE_MARKER_OPTIONAL = ["legacy", "legacy_name", "release_reason", "release_actor", "legacy_owner_b64"] as const;
+const RELEASE_MARKER_OPTIONAL = ["legacy", "legacy_name", "release_reason", "release_actor", "legacy_owner_b64", "bin", "ref"] as const;
+const REF_PATTERN = /^(?:file:[^\s]{1,400}|bead:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
+const RELEASE_BINS: readonly ScratchBin[] = ["throwaway", "evidence", "promote"];
 
 function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerText" | "legacy" | "legacyName"> & { ownerHash: string; device: string; inode: string; legacyName: string | null; releaseReason: string | null } | null {
 	const seen: Record<string, string> = {};
@@ -944,8 +986,14 @@ function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerT
 	if (legacy && (seen.legacy_name === undefined || seen.release_reason === undefined)) return null;
 	if (!legacy && (seen.legacy_name !== undefined || seen.release_reason !== undefined ||
 		seen.release_actor !== undefined || seen.legacy_owner_b64 !== undefined)) return null;
+	const bin = seen.bin === undefined ? null : RELEASE_BINS.find(candidate => candidate === seen.bin) ?? null;
+	if (seen.bin !== undefined && bin === null) return null;
+	if (legacy && (seen.bin !== undefined || seen.ref !== undefined)) return null;
+	// Evidence and promote name where the content went; a throwaway has nothing to point at; a bin-less marker has no reference.
+	if ((bin === "evidence" || bin === "promote") !== (seen.ref !== undefined)) return null;
+	if (seen.ref !== undefined && !REF_PATTERN.test(seen.ref)) return null;
 	return { markerText: text, releasedAt: seen.released_at!, ownerHash: seen.owner_sha256!, device: seen.device!, inode: seen.inode!,
-		legacyName: seen.legacy_name ?? null, releaseReason: seen.release_reason ?? null };
+		legacyName: seen.legacy_name ?? null, releaseReason: seen.release_reason ?? null, bin, ref: seen.ref ?? null };
 }
 
 function readReleaseRecord(dir: string): ReleaseRecord | null {
@@ -971,13 +1019,13 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	if (!marker.legacyName) {
 		const owner = parseOwnerFile(ownerText);
 		if (!owner) return null;
-		return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: false, legacyName: null };
+		return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: false, legacyName: null, bin: marker.bin, ref: marker.ref };
 	}
 	const parsed = parseOwnerFile(ownerText);
 	const suffixPid = /\.(\d+)$/.exec(marker.legacyName);
 	const owner: ScratchOwner = parsed ?? { pid: suffixPid ? Number(suffixPid[1]) : 0, processStart: null,
-		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null };
-	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName };
+		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null, bin: null, purpose: null, bead: null, expires: null };
+	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName, bin: null, ref: null };
 }
 
 function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
@@ -995,7 +1043,32 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 
 export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
 
-export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string }
+export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string }
+
+/**
+ * The destination an owner names when it releases its dir (ompkit-774u.15). Null when acceptable, else the refusal reason.
+ * A throwaway needs no reference; evidence and promote must point at where the content went: `file:<path>` that git
+ * tracks in the owner's repo, or `bead:<id>` that `br show` finds. A hold is declared when the dir is made, not released.
+ */
+function releaseBinRefusal(owner: ScratchOwner, opts: ScratchReleaseOptions, deps: InspectDeps): string | null {
+	if (opts.bin === undefined) return opts.ref === undefined ? null : "ref-without-bin";
+	if (!RELEASE_BINS.includes(opts.bin)) return opts.bin === "hold" ? "hold-is-declared-at-creation" : "bin-unknown";
+	if (opts.bin === "throwaway") return opts.ref === undefined ? null : "throwaway-takes-no-ref";
+	if (opts.ref === undefined) return "ref-required";
+	if (!REF_PATTERN.test(opts.ref)) return "ref-invalid";
+	if (opts.ref.startsWith("bead:")) {
+		const shown = deps.run(["br", "show", opts.ref.slice("bead:".length), "--json"], { timeoutMs: 15_000 });
+		return shown.code === 0 && shown.stdout.trim().startsWith("[") ? null : "ref-bead-unverified";
+	}
+	const repo = resolve(owner.repo);
+	const target = resolve(repo, opts.ref.slice("file:".length));
+	if (target !== repo && !target.startsWith(`${repo}/`)) return "ref-outside-repo";
+	let regular = false;
+	try { regular = lstatSync(target).isFile(); } catch { /* absent */ }
+	if (!regular) return "ref-missing";
+	const tracked = deps.run(["git", "-C", repo, "ls-files", "--error-unmatch", "--", relative(repo, target)], { timeoutMs: 15_000 });
+	return tracked.code === 0 ? null : "ref-not-tracked";
+}
 
 export function releaseScratch(path: string, home: string, deps: InspectDeps, opts: ScratchReleaseOptions = {}): ScratchReleaseResult {
 	let dir: string;
@@ -1027,6 +1100,8 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	const seatOwned = callerHoldsSeat(owner, deps);
 	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
+	const binRefusal = releaseBinRefusal(owner, opts, deps);
+	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal, ownerPid: owner.pid };
 	if (owner.processStart !== null && !seatOwned) {
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
@@ -1041,7 +1116,8 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: owner.pid };
 	}
 	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
-	const markerText = `version=1\nowner_sha256=${createHash("sha256").update(ownerText).digest("hex")}\ndevice=${stat.dev}\ninode=${stat.ino}\nreleased_at=${releasedAt}\n`;
+	const binLines = opts.bin === undefined ? "" : `bin=${opts.bin}\n${opts.ref === undefined ? "" : `ref=${opts.ref}\n`}`;
+	const markerText = `version=1\nowner_sha256=${createHash("sha256").update(ownerText).digest("hex")}\ndevice=${stat.dev}\ninode=${stat.ino}\nreleased_at=${releasedAt}\n${binLines}`;
 	try {
 		writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
 	} catch {
@@ -1065,6 +1141,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number, ino: number,
 	ownerText: string | null, opts: ScratchReleaseOptions): ScratchReleaseResult {
 	const reason = opts.reason?.trim() ?? "";
+	if (opts.bin !== undefined || opts.ref !== undefined) return { ok: false, changed: false, dir, reason: "bin-needs-structured-owner", ownerPid: null };
 	if (opts.legacyOwner !== true || reason === "")
 		return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
 	if (/[\r\n\t]/.test(reason) || /[\r\n]/.test(basename(dir)))
@@ -1097,13 +1174,15 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 }
 export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string }
 
+export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: string; expires?: string }
+
 /**
  * Canonical scratch create: <repo>/var/agent-tmp/<label>.<pid>/ with a valid
  * .owner (pid, process start, label, repo, created). Agents call this instead
  * of hand-writing .owner files; hand-written bare-label owners are reported
  * as malformed-owner-file with per-root counts in the plan totals.
  */
-export function createScratch(label: string, repoDir: string, deps: InspectDeps): ScratchCreateResult {
+export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}): ScratchCreateResult {
 	if (!/^[A-Za-z0-9][A-Za-z0-9._%-]*$/.test(label)) return { ok: false, dir: "", exportLine: "", reason: "label-invalid" };
 	let repo: string;
 	try {
@@ -1119,7 +1198,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps)
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
 	const seat = deps.callerSeat?.();
 	const durable = seat?.agent && seat.main ? `agent=${seat.agent}\nsession=${seat.main}\n` : "";
-	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}`;
+	const binned = [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]]
+		.filter((pair): pair is [string, string] => pair[1] !== undefined).map(([key, value]) => `${key}=${value}\n`).join("");
+	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}${binned}`;
+	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
 	} catch {
