@@ -95,9 +95,11 @@ function environment(home: string, pathValue: string): Record<string, string> {
 	return {
 		...nativeCacheEnv,
 		HOME: home,
-		TMPDIR: join(home, "tmp"),
-		TMP: join(home, "tmp"),
-		TEMP: join(home, "tmp"),
+		// Native executable startup may use caller temp before JS can isolate it.
+		// Writable temp is separate from the operator HOME whose full tree is checked.
+		TMPDIR: suiteTmp,
+		TMP: suiteTmp,
+		TEMP: suiteTmp,
 		XDG_CONFIG_HOME: join(home, "xdg-config"),
 		XDG_CACHE_HOME: join(home, "xdg-cache"),
 		XDG_DATA_HOME: join(home, "xdg-data"),
