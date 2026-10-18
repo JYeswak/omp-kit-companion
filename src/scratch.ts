@@ -1129,7 +1129,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (!released || released.markerText !== markerText || released.ownerText !== ownerText ||
 		`${stat.dev}:${stat.ino}` !== inodeOf(dir))
 		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: owner.pid };
-	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid });
+	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid, bin: opts.bin ?? "unbinned" });
 	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
 }
 

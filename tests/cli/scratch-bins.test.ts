@@ -4,6 +4,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { reapLogPath } from "../../src/scratch.ts";
 import { createScratch, inspectOne, inspectSession, parseOwnerFile, releaseScratch, SCRATCH_BINS,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 
@@ -105,6 +106,8 @@ test("release --bin throwaway records the bin with no reference, and the release
 	const { dir, root, home } = fixture(ownerText(process.pid));
 	expect(releaseScratch(dir, home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });
 	expect(readFileSync(join(dir, ".omp-kit-release"), "utf8")).toContain("bin=throwaway\n");
+	const logged = readFileSync(reapLogPath(home), "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as { event: string; bin?: string });
+	expect(logged.filter((event) => event.event === "release").map((event) => event.bin)).toEqual(["throwaway"]);
 	expect(inspectOne(dir, root, deps())).toMatchObject({ action: "QUARANTINE", reason: "owner-released-would-quarantine" });
 });
 
