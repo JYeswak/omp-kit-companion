@@ -321,6 +321,64 @@ class CandidateReceiptTests(unittest.TestCase):
         child = types.SimpleNamespace(returncode=1, stdout=json.dumps(absent).encode(), stderr=b"tail")
         self.assertNotIn("probe_tail", native_candidate.refusal_detail("lsp-deep", child))
 
+    @staticmethod
+    def _failing_full(stage: str, stdout: str, stderr: str = "") -> dict:
+        return {"data": {"test": {
+            "status": "FAIL", "stages": {"manifest": {"status": "PASS"}, stage: {"status": "FAIL"}},
+            "failures": [f"Stage {stage} returned producer_rc=1"], "live_scenarios": {"expected_ids": [], "observed_ids": []},
+            "producer": {"producer_rc": 1, "stdout": stdout, "stderr": stderr}}}, "errors": []}
+
+    def test_refusal_detail_keeps_the_head_of_oversized_stage_output_where_the_verdict_is(self) -> None:
+        # regex-budget prints its verdict first and then one 800 KB JSON line: the tail alone can never name the cause.
+        verdict = "REGEX-BUDGET: FAIL\nlive stream: FAIL file=x total=600.0ms / 500ms\n"
+        stdout = verdict + "JSON_REPORT=" + "x" * 800_000
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(self._failing_full("regex-budget", stdout)).encode(), stderr=b"")
+        detail = native_candidate.refusal_detail("test --full", child)
+        self.assertTrue(detail["producer_stdout_head"].startswith(verdict))
+        self.assertEqual(detail["producer_stdout_chars"], len(stdout))
+        self.assertEqual(detail["producer_stdout_tail"], stdout[-2500:])
+        retained = sum(len(detail[key]) for key in ("producer_stdout_head", "producer_stdout_tail"))
+        self.assertLessEqual(retained, 5000)
+        # Output the tail already holds in full gets no head; a passing stage gets no producer text at all.
+        short = "RED   regex-budget producer_rc=1"
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(self._failing_full("regex-budget", short)).encode(), stderr=b"")
+        shortened = native_candidate.refusal_detail("test --full", child)
+        self.assertNotIn("producer_stdout_head", shortened)
+        self.assertEqual(shortened["producer_stdout_tail"], short)
+        passing = self._failing_full("regex-budget", stdout)
+        passing["data"]["test"]["stages"]["regex-budget"] = {"status": "PASS"}
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(passing).encode(), stderr=b"")
+        clean = native_candidate.refusal_detail("test --full", child)
+        for key in ("producer_stdout_head", "producer_stdout_tail", "producer_stdout_chars"):
+            self.assertNotIn(key, clean)
+
+    def test_refusal_detail_reports_measured_stage_durations_including_the_failing_stage(self) -> None:
+        stderr = (b"OMP_KIT_STAGE_START name=manifest started_at_ms=1000\n"
+                  b"OMP_KIT_STAGE_START name=regex-budget started_at_ms=1500\nnoise\n")
+        child = types.SimpleNamespace(returncode=1, stdout=json.dumps(self._failing_full("regex-budget", "RED")).encode(), stderr=stderr)
+        detail = native_candidate.refusal_detail("test --full", child, finished_at_ms=3500)
+        self.assertEqual(detail["stage_durations_ms"], {"manifest": 500, "regex-budget": 2000})
+        self.assertEqual(detail["failed_stage_durations_ms"], {"regex-budget": 2000})
+        # No marker or no finish time means no invented timing; a repeated marker keeps the first.
+        bare = types.SimpleNamespace(returncode=1, stdout=child.stdout, stderr=b"tail")
+        self.assertNotIn("stage_durations_ms", native_candidate.refusal_detail("test --full", bare, finished_at_ms=3500))
+        self.assertNotIn("stage_durations_ms", native_candidate.refusal_detail("test --full", child))
+        repeated = types.SimpleNamespace(returncode=1, stdout=child.stdout, stderr=stderr + b"OMP_KIT_STAGE_START name=manifest started_at_ms=9000\n")
+        self.assertEqual(native_candidate.refusal_detail("test --full", repeated, finished_at_ms=3500)["stage_durations_ms"]["manifest"], 500)
+        # Bounded: a run with many stages reports at most 32.
+        many = b"".join(b"OMP_KIT_STAGE_START name=s%d started_at_ms=%d\n" % (n, 1000 + n) for n in range(80))
+        wide = types.SimpleNamespace(returncode=1, stdout=child.stdout, stderr=many)
+        self.assertEqual(len(native_candidate.refusal_detail("test --full", wide, finished_at_ms=5000)["stage_durations_ms"]), 32)
+
+    def test_refusal_verdict_lines_name_the_failing_stage_and_its_duration(self) -> None:
+        detail = {"failed_stages": ["regex-budget"], "failed_stage_durations_ms": {"regex-budget": 2000},
+                  "probe_tail": {"failed_checks": ["hover", "references"]}}
+        self.assertEqual(native_candidate.refusal_verdict_lines(detail),
+                         ["verdict: failing checks: hover,references", "verdict: failing stage regex-budget after 2000 ms"])
+        self.assertEqual(native_candidate.refusal_verdict_lines({"failed_stages": ["e2e-live"]}), ["verdict: failing stage e2e-live"])
+        self.assertEqual(native_candidate.refusal_verdict_lines({}), [])
+        self.assertEqual(native_candidate.refusal_verdict_lines(None), [])
+
 
 
 

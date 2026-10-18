@@ -199,9 +199,12 @@ def finding(data, component):
     return matches[0]
 
 
-def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
+def refusal_detail(name, child, expected_live_ids=None, omp_version=None, finished_at_ms=None):
     """Bounded, kit-redacted cause of a refused native command, so a CI receipt names the failing stage and scenarios."""
     detail = {"command": name, "rc": child.returncode, "stderr_tail": child.stderr.decode(errors="replace")[-2000:]}
+    durations = observed_stage_durations(child.stderr, finished_at_ms)
+    if durations:
+        detail["stage_durations_ms"] = durations
     try:
         result = json.loads(child.stdout)
     except json.JSONDecodeError:
@@ -228,16 +231,52 @@ def refusal_detail(name, child, expected_live_ids=None, omp_version=None):
                       failures=(test.get("failures") or [])[:20],
                       missing_scenarios=sorted(set(scenarios.get("expected_ids") or []) - set(scenarios.get("observed_ids") or [])))
         failed_stage_names = [stage for stage, value in (test.get("stages") or {}).items() if value.get("status") == "FAIL"]
+        failed_durations = {stage: durations[stage] for stage in failed_stage_names if stage in durations}
+        if failed_durations:
+            detail["failed_stage_durations_ms"] = failed_durations
         producer = test.get("producer") if isinstance(test.get("producer"), dict) else {}
         if failed_stage_names:
             # The ladder's own output holds the failing stage's message; failures[] alone drops it (run 39061124857).
             for key in ("stdout", "stderr"):
                 text = producer.get(key)
                 if isinstance(text, str) and text:
-                    detail[f"producer_{key}_tail"] = text[-2500:] if key == "stdout" else text[-1000:]
+                    limit = 2500 if key == "stdout" else 1000
+                    detail[f"producer_{key}_tail"] = text[-limit:]
+                    if key == "stdout":
+                        detail["producer_stdout_chars"] = len(text)
+                        if len(text) > limit:
+                            # Some stages (regex-budget) print their verdict first and a very long report after it, so the tail alone cannot name the cause.
+                            detail["producer_stdout_head"] = text[:limit]
         if expected_live_ids is not None and omp_version is not None:
             detail["full_live_conditions"] = full_live_condition_report(test, expected_live_ids, omp_version)
     return detail
+
+
+def observed_stage_durations(stderr, finished_at_ms, limit=32):
+    """Wall time of each stage that printed a start marker, ending at the next marker or the finish; empty without either."""
+    if not isinstance(finished_at_ms, int) or isinstance(finished_at_ms, bool):
+        return {}
+    starts = {}
+    for stage, started_at_ms in stage_start_markers(stderr):
+        starts.setdefault(stage, started_at_ms)
+    ordered = sorted((started_at_ms, stage) for stage, started_at_ms in starts.items())
+    durations = {}
+    for index, (started_at_ms, stage) in enumerate(ordered[:limit]):
+        ended_at_ms = ordered[index + 1][0] if index + 1 < len(ordered) else finished_at_ms
+        durations[stage] = max(0, ended_at_ms - started_at_ms)
+    return durations
+
+def refusal_verdict_lines(detail):
+    """One line per failed probe check or stage, so a CI reader sees the cause before the JSON dump."""
+    detail = detail or {}
+    lines = []
+    failed_checks = (detail.get("probe_tail") or {}).get("failed_checks") or []
+    if failed_checks:
+        lines.append(f"verdict: failing checks: {','.join(failed_checks)}")
+    durations = detail.get("failed_stage_durations_ms") or {}
+    for stage in detail.get("failed_stages") or []:
+        lines.append(f"verdict: failing stage {stage}" + (f" after {durations[stage]} ms" if stage in durations else ""))
+    return lines
 def stage_start_markers(stderr):
     text = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
     prefix = "OMP_KIT_STAGE_START name="
@@ -526,11 +565,11 @@ def native(args):
                 (root / (name + ".stdout")).write_bytes(child.stdout)
                 (root / (name + ".stderr")).write_bytes(child.stderr)
                 if child.returncode != 0:
-                    receipt["refusal_detail"] = refusal_detail(name, child)
+                    receipt["refusal_detail"] = refusal_detail(name, child, finished_at_ms=finished_at_ms)
                     raise ValueError(f"native {name} refused rc={child.returncode}")
                 result = json.loads(child.stdout)
                 if result.get("ok") is not True:
-                    receipt["refusal_detail"] = refusal_detail(name, child)
+                    receipt["refusal_detail"] = refusal_detail(name, child, finished_at_ms=finished_at_ms)
                     raise ValueError(f"native {name} did not report a successful probe")
                 data = result["data"]
                 if name in ("status", "doctor"):
@@ -572,7 +611,7 @@ def native(args):
                     if name == "full":
                         condition_report = full_live_condition_report(test, expected_live_ids, omp_version)
                         if not all(condition_report["checks"].values()):
-                            receipt["refusal_detail"] = refusal_detail(name, child, expected_live_ids, omp_version)
+                            receipt["refusal_detail"] = refusal_detail(name, child, expected_live_ids, omp_version, finished_at_ms=finished_at_ms)
                             raise ValueError(
                                 f"native full ladder live condition(s) failed: {', '.join(condition_report['failed'])}"
                             )
@@ -1058,9 +1097,8 @@ for (const [name, working, episodic] of banks) {
     save(out, receipt)
     print(f"native candidate {args.platform}: {'CERTIFIED' if receipt['certified'] else 'REFUSED'}")
     if not receipt["certified"]:
-        probe_failed = ((receipt.get("refusal_detail") or {}).get("probe_tail") or {}).get("failed_checks") or []
-        if probe_failed:
-            print(f"verdict: failing checks: {chr(44).join(probe_failed)}")
+        for line in refusal_verdict_lines(receipt.get("refusal_detail")):
+            print(line)
         print(receipt["failure"], file=sys.stderr)
         if "refusal_detail" in receipt:
             print(json.dumps(receipt["refusal_detail"], indent=1), file=sys.stderr)
