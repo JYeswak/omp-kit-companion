@@ -758,6 +758,33 @@ def _run_rows(repository: str, workflow: str, event: str = "workflow_dispatch", 
     pages = _api(repository, query, paginate=True)
     return [row for page in pages for row in page["workflow_runs"]]
 
+def _existing_publisher_id(repository: str, rows: list[dict[str, Any]], candidate: dict[str, Any]) -> str | None:
+    """Discover coordination, never publication authority, before requesting another publisher."""
+    titles = {"workflow_dispatch": f"Promote run {candidate['id']}",
+              "workflow_run": f"Publish {candidate['display_title']}"}
+    selected = None
+    for row in rows:
+        event = row.get("event")
+        if not isinstance(event, str) or row.get("display_title") != titles.get(event):
+            continue
+        owner = row.get("repository")
+        if (row.get("path") != OWNER_WORKFLOW or row.get("head_branch") != "main"
+                or not isinstance(owner, dict) or owner.get("full_name") != repository
+                or not _git_sha(row.get("head_sha")) or type(row.get("id")) is not int or row["id"] < 1
+                or type(row.get("run_attempt")) is not int or row["run_attempt"] < 1
+                or row.get("status") not in ("queued", "in_progress", "waiting", "pending", "requested", "completed")):
+            raise ValueError("matching native publisher has unknown or foreign identity")
+        if row["status"] == "completed":
+            if row.get("conclusion") not in ("success", "failure", "cancelled", "timed_out", "skipped",
+                                              "neutral", "action_required", "stale"):
+                raise ValueError("matching native publisher has unknown terminal outcome")
+            if row["conclusion"] != "success":
+                continue
+        if selected is None or _attempt_order(row) > _attempt_order(selected):
+            selected = row
+    return str(selected["id"]) if selected is not None else None
+
+
 
 def _publication_inventory(repository: str) -> dict[str, bool]:
     """Public tags mapped to prerelease state; drafts remain recoverable."""
@@ -1014,7 +1041,7 @@ def _drive(args: argparse.Namespace) -> int:
     # re-promote. Stable floors and Latest still exclude it.
     terminal_publications = set(inventory)
     tags = [tag for tag in _command(["git", "tag", "--list", "v*"]).splitlines() if tag.startswith("v") and stable_version(tag[1:])]
-    released = [tag for tag in published if tag.startswith("v") and stable_version(tag[1:])]
+    released = [tag for tag in terminal_publications if tag.startswith("v") and stable_version(tag[1:])]
     head = _command(["git", "rev-parse", "origin/main"])
     published_floors = _published_ancestor_tags(tags, published, head)
     recovery_floor = max(published_floors, key=lambda tag: tuple(map(int, tag[1:].split("."))))[1:] if published_floors else None
@@ -1103,7 +1130,9 @@ def _drive(args: argparse.Namespace) -> int:
                 publisher_floor = max((int(row["id"]) for row in previous), default=0)
                 target = latest_sign or pending
                 recovery_ids.add(str(target["id"]))
-                publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(target["id"])})
+                publisher_id = _existing_publisher_id(repository, previous, target)
+                if publisher_id is None:
+                    publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(target["id"])})
                 publisher_runs[publisher_id] = target["display_title"].split()[0]
         return _store_plan(args, {"kind": "resume", "source_sha": sha, "version": version, "train_id": train_id,
                                  "train_attempt": allocation["train_attempt"], "qualification_run_id": canonical["qualification_run_id"],
@@ -1261,6 +1290,8 @@ def _watch_plan(args: argparse.Namespace) -> int:
         _timestamp(since)
         attempt_started = _timestamp(qualified.get("run_started_at"))
         observed = _run_rows(repository, "release.yml", since=since)
+        publishers = (_run_rows(repository, "release-train.yml", "workflow_run", since=since)
+                      + _run_rows(repository, "release-train.yml", "workflow_dispatch", since=since))
         signs = [row for row in observed if row.get("display_title") == sign_title and _attempt_order(row)[0] >= attempt_started]
         current = [qualified, max(signs, key=_attempt_order, default={})]
         for row in current:
@@ -1272,13 +1303,14 @@ def _watch_plan(args: argparse.Namespace) -> int:
                 # Tag-head workflow_run delivery is not guaranteed (dj7d).
                 # Wake the SAME independent publisher with a verified run ID;
                 # no second build/signing run and no raw promotion here.
-                publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(row["id"])})
+                publisher_id = _existing_publisher_id(repository, publishers, row)
+                if publisher_id is None:
+                    publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(row["id"])})
                 publisher_runs[publisher_id] = "sign"
                 plan["publisher_runs"] = publisher_runs
                 _store_plan(args, plan)
                 forwarded_signs.add(str(row["id"]))
                 recovery_ids.add(str(row["id"]))
-        publishers = _run_rows(repository, "release-train.yml", "workflow_run", since=since)
         if any(row.get("display_title") in (f"Publish {qualify_title}", f"Publish {sign_title}")
                and int(row["id"]) > publisher_floor and row.get("status") == "completed" and row.get("conclusion") != "success" for row in publishers):
             raise ValueError("independent candidate publisher failed; preserve its artifacts for recovery")
@@ -1288,7 +1320,9 @@ def _watch_plan(args: argparse.Namespace) -> int:
             # publisher that tags and requests tag-ref signing never starts. Wake the same publisher with the
             # verified successful qualification once, only after delivery had its grace and no signing run or
             # Publish row exists; it neither rebuilds the candidate nor skips any publisher check.
-            publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(qualification_id)})
+            publisher_id = _existing_publisher_id(repository, publishers, qualified)
+            if publisher_id is None:
+                publisher_id = _native_dispatch(repository, "release-train.yml", "main", {"candidate_run_id": str(qualification_id)})
             publisher_runs[publisher_id] = "qualify"
             plan["publisher_runs"] = publisher_runs
             _store_plan(args, plan)

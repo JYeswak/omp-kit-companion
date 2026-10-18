@@ -627,6 +627,9 @@ class RollingReleaseTest(unittest.TestCase):
             "completion time unknown": dict(qualified_overrides={"updated_at": None}),
             "natural workflow_run delivery exists": dict(publisher_rows=[
                 dict(candidate_run(), id=9100, display_title=f"Publish {title}", status="in_progress", conclusion=None)]),
+            "manual publisher already running": dict(publisher_rows=[
+                dict(candidate_run(), id=9001, path=release_reuse.OWNER_WORKFLOW,
+                     display_title=f"Promote run {RUN_ID}", status="in_progress", conclusion=None)]),
             "signing already requested": dict(sign_rows=[sign]),
         }
         for name, options in cases.items():
@@ -1211,8 +1214,8 @@ class RollingReleaseTest(unittest.TestCase):
             stable = [{"tag_name": "v0.2.19", "draft": False, "prerelease": False}]
             if orphan or with_published_tag:
                 stable.append({"tag_name": "v0.2.22", "draft": False, "prerelease": False})
-            stable += [{"tag_name": "v0.2.99", "draft": True, "prerelease": False},
-                       {"tag_name": "v0.2.98", "draft": False, "prerelease": True}]
+            # Public prereleases are supplied explicitly by version-reservation cases.
+            stable.append({"tag_name": "v0.2.99", "draft": True, "prerelease": False})
             if extra_release is not None:
                 stable.append(extra_release)
             def api(repository, endpoint, **kwargs):
@@ -1325,7 +1328,7 @@ class RollingReleaseTest(unittest.TestCase):
         return rows
 
     def _drive_prior_cut(self, rows_for, *, state="unexecuted", native_sign=None, after_sign=None, owner=None, owns=None,
-                         source_bound=False, **case):
+                         source_bound=False, publisher_rows=None, **case):
         """Drive the real prepare stage against a prior cut. `state` is what the fenced job snapshot proves; `native_sign`
         is the canonical run object the API returns for the signing run (default: a canonical terminal-green sign) and
         `after_sign` overrides fields on every later re-read of it (the attempt fence)."""
@@ -1347,7 +1350,9 @@ class RollingReleaseTest(unittest.TestCase):
                 reads["sign"] += 1
                 return canonical_sign if reads["sign"] == 1 or after_sign is None else dict(canonical_sign, **after_sign)
             def runs(repository, workflow, event="workflow_dispatch", **kwargs):
-                return list(rows) if workflow == "release.yml" else []
+                if workflow == "release.yml":
+                    return list(rows)
+                return [row for row in (publisher_rows or []) if row.get("event") == event]
             lookup = owner if owner is not None else (lambda *a, **k: (allocation, bound, notes))
             patches = [patch.object(release_reuse, "_run_rows", side_effect=runs), patch.object(release_reuse, "_api", side_effect=api),
                        patch.object(release_reuse, "_find_owner_for_qualification", side_effect=lookup),
@@ -1367,6 +1372,68 @@ class RollingReleaseTest(unittest.TestCase):
             self.drive_output = captured.getvalue()
             plan = json.loads((root / "plan.json").read_text()) if (root / "plan.json").exists() else None
             return plan, error, source, dispatch
+
+    def test_recovery_tracks_an_existing_publisher_without_duplicate_dispatch(self) -> None:
+        qualification = self._prior_cut()[0]
+        for event in ("workflow_dispatch", "workflow_run"):
+            for status in ("queued", "in_progress", "waiting", "completed"):
+                with self.subTest(event=event, status=status):
+                    title = (f"Promote run {RUN_ID}" if event == "workflow_dispatch"
+                             else f"Publish {qualification['display_title']}")
+                    publisher = dict(candidate_run(), id=9002, path=release_reuse.OWNER_WORKFLOW,
+                                     event=event, display_title=title, status=status,
+                                     conclusion="success" if status == "completed" else None)
+                    plan, error, _, dispatch = self._drive_prior_cut(
+                        lambda source: self._prior_cut(), publisher_rows=[publisher])
+                    self.assertIsNone(error)
+                    self.assertEqual(plan["kind"], "resume")
+                    self.assertEqual(plan["publisher_runs"], {"9002": "qualify"})
+                    self.assertEqual(plan["recovery_ids"], [RUN_ID])
+                    dispatch.assert_not_called()
+
+    def test_failed_or_unrelated_publisher_does_not_discharge_recovery(self) -> None:
+        for change in ({"status": "completed", "conclusion": "failure"},
+                       {"display_title": "Promote run 999999", "status": "in_progress", "conclusion": None}):
+            with self.subTest(change=change):
+                publisher = dict(candidate_run(), id=9002, path=release_reuse.OWNER_WORKFLOW,
+                                 display_title=f"Promote run {RUN_ID}")
+                publisher.update(change)
+                plan, error, _, dispatch = self._drive_prior_cut(
+                    lambda source: self._prior_cut(), publisher_rows=[publisher])
+                self.assertIsNone(error)
+                self.assertEqual(plan["publisher_runs"], {"9001": "qualify"})
+                dispatch.assert_called_once()
+
+    def test_matching_publisher_with_unknown_or_foreign_identity_refuses_new_effects(self) -> None:
+        for change in ({"path": ".github/workflows/foreign.yml"},
+                       {"repository": {"full_name": "foreign/repository"}},
+                       {"head_branch": "foreign"},
+                       {"head_sha": "unknown"},
+                       {"id": True},
+                       {"run_attempt": 0},
+                       {"status": "unknown"}):
+            with self.subTest(change=change):
+                publisher = dict(candidate_run(), id=9002, path=release_reuse.OWNER_WORKFLOW,
+                                 display_title=f"Promote run {RUN_ID}", status="in_progress", conclusion=None)
+                publisher.update(change)
+                plan, error, _, dispatch = self._drive_prior_cut(
+                    lambda source: self._prior_cut(), publisher_rows=[publisher])
+                self.assertIsInstance(error, ValueError)
+                self.assertIsNone(plan)
+                dispatch.assert_not_called()
+
+    def test_public_prerelease_without_a_tag_reserves_its_spent_version(self) -> None:
+        for spent in (22, 98):
+            with self.subTest(spent=spent), self.published_floor_case(extra_release={
+                "tag_name": f"v0.2.{spent}", "draft": False, "prerelease": True
+            }) as (args, root, source, dispatch):
+                self.assertEqual(release_reuse._drive(args), 0)
+                plan = json.loads((root / "plan.json").read_text())
+                self.assertEqual((plan["kind"], plan["version"]), ("allocate", f"0.2.{spent + 1}"))
+                self.assertEqual(plan["source_sha"], source)
+                self.assertEqual(plan["base_tag"], "v0.2.19")
+                self.assertNotIn(f"v0.2.{spent}", release_reuse._command(["git", "tag", "--list"]).splitlines())
+                dispatch.assert_not_called()
 
     def test_public_prerelease_is_terminal_not_an_abandoned_stable_cut(self) -> None:
         plan, error, source, dispatch = self._drive_prior_cut(
