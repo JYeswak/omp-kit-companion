@@ -12,6 +12,7 @@ on:
         options:
           - callback
           - compaction
+          - fleet-default-on
 
 permissions:
   contents: read
@@ -40,5 +41,6 @@ jobs:
           case "$CONTROL" in
             callback) bun scripts/test-stock-extensions.ts --plant-assertion ;;
             compaction) bun scripts/test-stock-extensions.ts --restore-unconditional-flags ;;
+            fleet-default-on) bun scripts/test-stock-extensions.ts --default-fleet-on ;;
             *) echo "Unknown negative control: $CONTROL"; exit 2 ;;
           esac

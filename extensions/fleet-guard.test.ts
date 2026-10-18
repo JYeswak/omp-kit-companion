@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
@@ -157,4 +158,39 @@ test("stock plugin loading neither creates fleet scratch nor changes caller temp
 	await fleetGuard(pi, { cwd, pid: process.pid });
 	expect(existsSync(join(cwd, "var", "agent-tmp"))).toBe(false);
 	expect(process.env.TMPDIR).toBe(previousTmp);
+});
+
+test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) permits temp writes and ordinary Git without fleet state", async missing => {
+	const { cwd } = fixture(false);
+	if (missing === "marker-missing") mkdirSync(join(cwd, ".omp"));
+	const pi = fakePi();
+	await fleetGuard(pi, { cwd, pid: process.pid });
+	const admit = async (event: Parameters<ToolCallHandler>[0]): Promise<void> => {
+		for (const handler of pi.handlers) {
+			const result = await handler(event, { cwd });
+			expect(result?.block === true).toBe(false);
+		}
+	};
+	const temp = mkdtempSync(join(tmpdir(), "stock-write-"));
+	roots.push(temp);
+	writeFileSync(join(temp, ".owner"), `pid=${process.pid}\nlabel=stock-write\nrepo=${join(import.meta.dir, "..")}\ncreated=${new Date().toISOString()}\n`);
+	const target = join(temp, "x");
+	await admit({ toolName: "write", input: { path: target, content: "stock temporary output\n" } });
+	writeFileSync(target, "stock temporary output\n");
+	expect(readFileSync(target, "utf8")).toBe("stock temporary output\n");
+	// Admission only: never create or overwrite a system /tmp fixture.
+	await admit({ toolName: "write", input: { path: "/tmp/x", content: "stock temporary output\n" } });
+	const git = (...args: string[]): string => {
+		const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+		if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+		return result.stdout.toString();
+	};
+	await admit({ toolName: "bash", input: { command: "git checkout -b stock-topic" } });
+	git("checkout", "-b", "stock-topic");
+	expect(git("symbolic-ref", "--short", "HEAD").trim()).toBe("stock-topic");
+	writeFileSync(join(cwd, "change.txt"), "ordinary stock change\n");
+	await admit({ toolName: "bash", input: { command: "git add -A" } });
+	git("add", "-A");
+	expect(git("diff", "--cached", "--name-only")).toBe("change.txt\n");
+	expect(existsSync(join(cwd, "var", "agent-tmp"))).toBe(false);
 });

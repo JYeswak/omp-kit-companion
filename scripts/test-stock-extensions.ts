@@ -5,13 +5,14 @@ import { fileURLToPath } from "node:url";
 // One entrypoint for ordinary stock CI and its explicitly requested negative control.
 const repo = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const args = process.argv.slice(2);
-const negativeModes = ["--plant-assertion", "--restore-unconditional-flags"];
+const negativeModes = ["--plant-assertion", "--restore-unconditional-flags", "--default-fleet-on"];
 if (args.length > 1 || (args.length === 1 && !negativeModes.includes(args[0]!))) {
-	throw new Error("Usage: bun scripts/test-stock-extensions.ts [--plant-assertion | --restore-unconditional-flags]");
+	throw new Error("Usage: bun scripts/test-stock-extensions.ts [--plant-assertion | --restore-unconditional-flags | --default-fleet-on]");
 }
 const plantAssertion = args[0] === "--plant-assertion";
 const restoreUnconditionalFlags = args[0] === "--restore-unconditional-flags";
-if (plantAssertion || restoreUnconditionalFlags) {
+const defaultFleetOn = args[0] === "--default-fleet-on";
+if (plantAssertion || restoreUnconditionalFlags || defaultFleetOn) {
 	const workspace = process.env.GITHUB_WORKSPACE;
 	if (process.env.GITHUB_ACTIONS !== "true" || !workspace || realpathSync(workspace) !== repo) {
 		throw new Error(`${args[0]} is restricted to this repository's ephemeral GitHub Actions workspace`);
@@ -81,6 +82,19 @@ if (restoreUnconditionalFlags) {
 	}
 	writeFileSync(path, source);
 	console.log("stock-extensions: NEGATIVE CONTROL restored unconditional agentsOk=false/beadOk=false in actual kit-flywheel-guard.ts; this is NOT ordinary source qualification");
+}
+if (defaultFleetOn) {
+	const path = join(repo, "extensions", "fleet-policy.ts");
+	const source = readFileSync(path, "utf8");
+	const before = 'error.code === "ENOENT") return { kind: "off", root };';
+	const after = 'error.code === "ENOENT") return { kind: "on", root };';
+	const first = source.indexOf(before);
+	const second = first < 0 ? -1 : source.indexOf(before, first + before.length);
+	if (first < 0 || second < 0 || source.indexOf(before, second + before.length) >= 0) {
+		throw new Error("Fleet default-on mutant injection failed: expected exactly two missing-marker branches");
+	}
+	writeFileSync(path, source.replaceAll(before, after));
+	console.log("stock-extensions: NEGATIVE CONTROL defaulted both missing fleet-marker branches to on in actual fleet-policy.ts; explicit false and invalid policies are unchanged; this is NOT ordinary source qualification");
 }
 
 // Do not inherit credentials, pane/fleet settings, Bun options, or dotenv contents.
