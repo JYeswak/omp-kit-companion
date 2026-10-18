@@ -384,6 +384,25 @@ const lessonData: DataSchema = { type: "object", required: ["overall", "entry", 
 } };
 
 export const COMMANDS: readonly Command[] = [
+	{ name: "rch", description: "Native remote-build lifecycle; no replacement daemon or cache policy", usage: "rch lease [FLAGS] -- COMMAND [ARG ...]", flags: [], example: "omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2", runnable: false, subcommands: [
+		{ name: "lease", description: "Observe, reclaim under native policy, admit, execute and verify next-agent readiness", usage: "rch lease --slots N [--worker ID] [--project PATH] [--plan | --apply --yes] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
+			...planApply,
+			{ name: "--slots", value: "N", description: "Required native admission capacity for this command; required, not a slot reservation" },
+			{ name: "--worker", value: "ID", description: "Require this exact configured worker; never silently repin" },
+			{ name: "--project", value: "PATH", description: "Canonical build working directory; defaults to current directory" },
+			{ name: "--job", description: "Native arbitrary-job mode, preserving its output and remote exit" },
+			{ name: "--result-dir", value: "PATH", repeatable: true, description: "Native job output directory to return, including after failure" },
+			{ name: "--require-tool", value: "NAME@VERSION", repeatable: true, description: "Exact native worker tool qualification" },
+			{ name: "--base", value: "REV", description: "Native immutable source base" },
+			{ name: "--dependency-base", value: "PATH=REV", repeatable: true, description: "Native dependency base" },
+			{ name: "--overlay-path", value: "PATH", repeatable: true, description: "Native explicitly owned overlay path" },
+			{ name: "--clean-overlay", description: "Native clean overlay mode" },
+			{ name: "--no-overlay", description: "Native base-only mode" },
+			{ name: "--source-content-receipt", description: "Request native source-content evidence" },
+		], example: "omp-kit rch lease --slots 2 --worker contabo-3 --apply --yes -- cargo test --locked -j 2", runnable: false, mutation: true,
+			dataSchema: { type: "object", required: ["overall", "cycle", "text"], properties: { overall: { enum: ["PLAN", "REFUSED", "COMPLETE", "BUILD_FAILED", "CANCELLED", "UNREADY"] }, cycle: { type: "object" }, text: { type: "string" } } },
+		},
+	] },
 	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },

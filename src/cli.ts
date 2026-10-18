@@ -18,6 +18,7 @@ import { applyMigration, planMigration, planMigrationMutation } from "./migrate.
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
 import { renderSkillSet, SkillSetInputError } from "./skill-set.ts";
+import { nativeRchExecutor, runRchCycle } from "./rch-cycle.ts";
 import { CORPUS_PLAN, CorpusInputError, runCorpus } from "./corpus.ts";
 import { calibrateCorpus, type CalibrationInput, type FireLabel } from "./rule-calibration.ts";
 import { DIAGNOSTIC_SCOPE_COMPONENTS, diagnose, health, inspectDicklesworthstone, inspectRegexTools, type DiagnosticStatus, type Finding } from "./diagnostics.ts";
@@ -213,15 +214,17 @@ function parse(args: readonly string[]): ParseResult {
 		const hint = nearest(bad, candidates.map((item) => item.name));
 		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
 	}
-	if (separator >= 0 && command.name !== "heavy") return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy", "Run omp-kit heavy [flags] -- COMMAND [ARG ...]; no child command was run."), json };
+	const rchLease = parent?.name === "rch" && command.name === "lease";
+	if (separator >= 0 && command.name !== "heavy" && !rchLease) return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy or rch lease", "Pass child arguments only to heavy or rch lease; no child command was run."), json };
 	const allowedFlags = [...GLOBAL_FLAGS, ...(parent ? [...parent.flags, ...command.flags] : command.flags)].map((item) => item.name);
 	for (const flag of flags.keys()) if (!allowedFlags.includes(flag)) return { failure: refusal("INVALID_FLAG", `${flag} is not valid for ${command.name}`, `Run omp-kit help ${parent ? `${parent.name} ` : ""}${command.name}.`), json };
 	const consumed = parent ? 2 : (positional.length ? 1 : 0);
 	const rest = positional.slice(consumed);
-	if (command.name === "heavy") {
-		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the child command after `--`", "Use omp-kit heavy [flags] -- COMMAND [ARG ...]; no child command was run."), json };
-		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "heavy needs `-- COMMAND [ARG ...]`", "Pass the child command after `--`; no command was run."), json };
-		if (!flags.has("--help") && json) return { failure: refusal("RAW_OUTPUT_MODE", "heavy preserves the child command's raw output", "Omit --json/--robot before `--`; pass child-specific flags after `--`."), json };
+	if (command.name === "heavy" || rchLease) {
+		const route = rchLease ? "rch lease" : "heavy";
+		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the child command after `--`", `Use omp-kit ${route} [flags] -- COMMAND [ARG ...]; no child command was run.`), json };
+		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", `${route} needs \`-- COMMAND [ARG ...]\``, "Pass the child command after `--`; no command was run."), json };
+		if (command.name === "heavy" && !flags.has("--help") && json) return { failure: refusal("RAW_OUTPUT_MODE", "heavy preserves the child command's raw output", "Omit --json/--robot before `--`; pass child-specific flags after `--`."), json };
 	} else if (command.name === "send") {
 		// send is the one three-positional command (SESSION PANE MESSAGE); the
 		// message keeps its spaces because the request joins rest (see sendCommand).
@@ -231,7 +234,7 @@ function parse(args: readonly string[]): ParseResult {
 	}
 	// A subcommand that declares --all accepts the flag in place of its positional (service status/doctor --all).
 	const allDeclared = (parent ? [...parent.flags, ...command.flags] : command.flags).some((flag) => flag.name === "--all");
-	if (command.argument && !rest.length && command.name !== "help" && command.name !== "heavy" && !flags.has("--help") && !(flags.has("--all") && allDeclared)) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
+	if (command.argument && !rest.length && command.name !== "help" && command.name !== "heavy" && !rchLease && !flags.has("--help") && !(flags.has("--all") && allDeclared)) return { failure: refusal("MISSING_ARGUMENT", `${command.name} needs ${command.argument}`, `Run omp-kit help ${command.name}.`), json };
 	const scope = flags.get("--scope");
 	if (typeof scope === "string") {
 		const grammar = (parent ? [...parent.flags, ...command.flags] : command.flags).find((flag) => flag.name === "--scope")?.value;
@@ -3514,6 +3517,38 @@ function missionAnchorCommand(request: ParsedCommand): CliResult {
 	return { code: drift.length === 0 ? 0 : 1, data: { overall: drift.length === 0 ? "AGREE" : "DRIFT", repos: rows }, verification: "PERFORMED" };
 }
 registerCommandHandler("mission anchor", missionAnchorCommand);
+
+async function rchLeaseCommand(request: ParsedCommand): Promise<CliResult> {
+	const slotsFlag = request.flags.get("--slots");
+	const slots = typeof slotsFlag === "string" ? Number(slotsFlag) : NaN;
+	if (!Number.isSafeInteger(slots) || slots < 1) return refusal("INVALID_FLAG", "--slots requires the positive native slot demand for this command", "Pass --slots N; no remote command was submitted.");
+	const worker = request.flags.get("--worker"), project = request.flags.get("--project");
+	if ((worker !== undefined && (typeof worker !== "string" || !worker.trim())) || (project !== undefined && (typeof project !== "string" || !project.trim())))
+		return refusal("INVALID_FLAG", "--worker and --project require non-empty values", "Use an exact worker ID and canonical working directory.");
+	const executable = Bun.which("rch");
+	if (!executable) return { code: 3, data: { overall: "UNAVAILABLE" }, errors: [{ code: "RCH_UNAVAILABLE", message: "Native rch was not found", remediation: "Install the qualified native RCH; no local fallback was attempted." }], verification: "NOT_RUN" };
+	const nativeOptions: string[] = [];
+	for (const flag of ["--job", "--clean-overlay", "--no-overlay", "--source-content-receipt"]) if (request.flags.has(flag)) nativeOptions.push(flag);
+	for (const flag of ["--base", "--dependency-base", "--overlay-path", "--result-dir", "--require-tool"]) {
+		const value = request.flags.get(flag);
+		if (typeof value === "string") for (const item of value.split("\n")) nativeOptions.push(flag, item);
+	}
+	const abort = new AbortController();
+	const cancelled = () => abort.abort();
+	process.once("SIGINT", cancelled);
+	process.once("SIGTERM", cancelled);
+	try {
+		const cycle = await runRchCycle({ worker: typeof worker === "string" ? worker : undefined, requiredSlots: slots, command: request.commandArgs ?? [], nativeOptions,
+			apply: request.flags.has("--apply"), signal: abort.signal }, nativeRchExecutor(realpathSync(executable), resolve(typeof project === "string" ? project : process.cwd())));
+		const failure = cycle.compilerExit !== null && cycle.compilerExit !== 0 ? cycle.compilerExit : cycle.nativeExit;
+		const code = cycle.overall === "COMPLETE" || cycle.overall === "PLAN" ? 0 : cycle.overall === "CANCELLED" ? 130 : cycle.overall === "REFUSED" ? 77 : cycle.overall === "BUILD_FAILED" && failure !== null && failure !== 0 ? failure : 1;
+		return { code, data: { overall: cycle.overall, cycle, text: cycle.lease }, verification: "PERFORMED" };
+	} finally {
+		process.off("SIGINT", cancelled);
+		process.off("SIGTERM", cancelled);
+	}
+}
+registerCommandHandler("rch lease", rchLeaseCommand);
 function drainFlag(flag: string | true | undefined): string | null {
 	if (typeof flag !== "string" || !flag.trim()) return null;
 	return flag;
