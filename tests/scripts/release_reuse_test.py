@@ -15,6 +15,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 import zipfile
+import subprocess
+import sys
+from collections.abc import Iterator
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -347,6 +350,74 @@ class ReleaseReuseTest(unittest.TestCase):
 
 
 class RollingReleaseTest(unittest.TestCase):
+    @contextlib.contextmanager
+    def native_tag_repo(self) -> Iterator[tuple[Path, str, str]]:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+            root = Path(directory)
+            remote, repo = root / "origin.git", root / "repo"
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)], env=env, check=True, capture_output=True)
+            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], env=env, check=True, capture_output=True)
+            def git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True, text=True)
+            git("config", "user.name", "Native receipt fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("remote", "add", "origin", str(remote))
+            git("commit", "--allow-empty", "-m", "qualified fixture [test]")
+            source = git("rev-parse", "HEAD").stdout.strip()
+            git("commit", "--allow-empty", "-m", "newer fixture [test]")
+            newer = git("rev-parse", "HEAD").stdout.strip()
+            yield repo, source, newer
+
+    def tag_ack_status(self, repo: Path, reply: str, source: str, *, version: str = "0.0.0", status: int = 0) -> int:
+        ack = repo.parent / "push-ack.txt"
+        ack.write_text(reply, encoding="utf-8")
+        return subprocess.run([
+            sys.executable, str(ROOT / "scripts/release_reuse.py"), "require-created-ref",
+            "--ack", str(ack), "--source-sha", source, "--version", version, "--push-status", str(status),
+            "--destination", str(repo.parent / "origin.git"),
+        ], capture_output=True, text=True).returncode
+
+    def test_only_real_new_tag_creation_authorizes_signing(self) -> None:
+        with self.native_tag_repo() as (repo, source, newer):
+            command = ["git", "-c", "push.followTags=false", "push", "--porcelain", "origin"]
+            first = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(self.tag_ack_status(repo, first.stdout, source, status=first.returncode), 0)
+            identical = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
+            self.assertEqual(identical.returncode, 0)
+            self.assertEqual(self.tag_ack_status(repo, identical.stdout, source), 4)
+            conflict = subprocess.run([*command, f"{newer}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
+            self.assertEqual(self.tag_ack_status(repo, conflict.stdout, newer, status=conflict.returncode), 4)
+
+    def test_native_creation_ack_refuses_wrong_binding_or_missing_reply(self) -> None:
+        with self.native_tag_repo() as (repo, source, newer):
+            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
+                                     cwd=repo, capture_output=True, text=True, check=True)
+            for reply, expected_source, version in (
+                (created.stdout, newer, "0.0.0"), (created.stdout, source, "0.0.1"),
+                ("", source, "0.0.0"), (created.stdout + "unexpected acknowledgment\n", source, "0.0.0"),
+                (created.stdout.splitlines()[1] + "\n", source, "0.0.0"),
+                (created.stdout + "Done\n", source, "0.0.0"),
+                ("To \n" + "\n".join(created.stdout.splitlines()[1:]) + "\n", source, "0.0.0"),
+                ("To bogus\n" + "\n".join(created.stdout.splitlines()[1:]) + "\n", source, "0.0.0"),
+            ):
+                self.assertEqual(self.tag_ack_status(repo, reply, expected_source, version=version), 4)
+
+    def test_native_tag_ack_rejects_nonsemantic_version(self) -> None:
+        with self.native_tag_repo() as (repo, source, _):
+            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/vnot-a-version"],
+                                     cwd=repo, capture_output=True, text=True, check=True)
+            self.assertEqual(self.tag_ack_status(repo, created.stdout, source, version="not-a-version"), 4)
+
+    def test_concurrent_native_tag_push_has_only_one_authorized_creator(self) -> None:
+        with self.native_tag_repo() as (repo, source, _):
+            command = ["git", "-c", "push.followTags=false", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"]
+            children = [subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+            replies = [(child, child.communicate()) for child in children]
+            authorized = [self.tag_ack_status(repo, reply[0], source, status=child.returncode) for child, reply in replies]
+            self.assertEqual(sorted(authorized), [0, 4])
+
     def test_running_and_red_descendants_do_not_starve_eligible_green(self) -> None:
         a, b, c = "a" * 40, "b" * 40, "c" * 40
         rows = green_ci_runs(a)["workflow_runs"]

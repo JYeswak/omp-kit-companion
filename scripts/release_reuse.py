@@ -1515,6 +1515,23 @@ def _repair_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_created_ref(args: argparse.Namespace) -> int:
+    """Only the acknowledged creator may dispatch the first signing run."""
+    if not _git_sha(args.source_sha):
+        raise ValueError("tag creation source is not an exact commit")
+    if not stable_version(args.version):
+        raise ValueError("tag creation version is not stable semantic versioning")
+    if (not args.destination or args.destination != args.destination.strip()
+            or any(char in args.destination for char in "\r\n\t")):
+        raise ValueError("tag creation destination is malformed")
+    expected = f"*\t{args.source_sha}:refs/tags/v{args.version}\t[new tag]"
+    lines = Path(args.ack).read_text(encoding="utf-8").splitlines()
+    if (args.push_status != 0 or len(lines) != 3 or lines[0] != f"To {args.destination}"
+            or lines[1] != expected or lines[2] != "Done"):
+        raise ValueError("OUTCOME_UNKNOWN: no unique exact new-tag creation acknowledgment; signing not dispatched")
+    return 0
+
+
 def _require_attempt(args: argparse.Namespace) -> int:
     _current_attempt(args.repository, _read_json(args.run))
     return 0
@@ -1636,6 +1653,12 @@ def main(argv: list[str] | None = None) -> int:
     for flag in ("repository", "version", "source-sha", "index", "archives", "sboms", "notes", "producer-run", "binding"):
         repair.add_argument(f"--{flag}", required=True)
     repair.set_defaults(func=_repair_release)
+
+    created = commands.add_parser("require-created-ref")
+    for flag in ("ack", "source-sha", "version", "destination"):
+        created.add_argument(f"--{flag}", required=True)
+    created.add_argument("--push-status", type=int, required=True)
+    created.set_defaults(func=_require_created_ref)
 
     current = commands.add_parser("require-attempt")
     current.add_argument("--repository", required=True)

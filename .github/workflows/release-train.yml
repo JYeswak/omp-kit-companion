@@ -71,7 +71,7 @@ jobs:
           REQUESTED_SHA: ${{ inputs.sha }}
           VERSION_OVERRIDE: ${{ inputs.version }}
           REHEARSAL: ${{ inputs.rehearsal || 'false' }}
-          RELEASE_IDENTITY_CONFIGURED: ${{ vars.RELEASE_APP_CLIENT_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+          RELEASE_IDENTITY_CONFIGURED: ${{ vars.RELEASE_DEPLOY_KEY_FINGERPRINT != '' }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == schedule && "$RELEASE_IDENTITY_CONFIGURED" != true ]]; then
@@ -135,6 +135,15 @@ jobs:
     concurrency:
       group: release-train-publish
       cancel-in-progress: false
+    outputs:
+      promote: ${{ steps.candidate.outputs.promote }}
+      phase: ${{ steps.candidate.outputs.phase }}
+      version: ${{ steps.candidate.outputs.version }}
+      sha: ${{ steps.candidate.outputs.sha }}
+      train_id: ${{ steps.candidate.outputs.train_id }}
+      train_attempt: ${{ steps.candidate.outputs.train_attempt }}
+      base_tag: ${{ steps.candidate.outputs.base_tag }}
+      producer_attempt: ${{ steps.candidate.outputs.producer_attempt }}
     permissions:
       contents: write
       actions: write
@@ -144,6 +153,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
       - name: Verify the producer and exact final candidate before promotion
         id: candidate
@@ -196,8 +206,8 @@ jobs:
               mv "sboms/$platform/sbom-$platform-attempt-$attempt" "sboms/$platform/sbom-$platform.spdx.json"
             fi
           done
-          printf 'promote=true\nversion=%s\nsha=%s\nphase=%s\ntrain_id=%s\ntrain_attempt=%s\nbase_tag=%s\n' \
-            "$version" "$sha" "$phase" "$train_id" "$train_attempt" "$base_tag" >> "$GITHUB_OUTPUT"
+          printf 'promote=true\nversion=%s\nsha=%s\nphase=%s\ntrain_id=%s\ntrain_attempt=%s\nbase_tag=%s\nproducer_attempt=%s\n' \
+            "$version" "$sha" "$phase" "$train_id" "$train_attempt" "$base_tag" "$attempt" >> "$GITHUB_OUTPUT"
       - name: Dispatch the optional Intel probe without waiting for its outcome
         if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
         continue-on-error: true
@@ -210,71 +220,6 @@ jobs:
           attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' producer-run.json)"
           timeout 60s gh workflow run release-intel-probe.yml --repo "$GITHUB_REPOSITORY" --ref main \
             -f candidate_run_id="$RUN_ID" -f candidate_run_attempt="$attempt"
-      - name: Resolve the immutable qualified tag before acquiring write authority
-        id: qualified-tag
-        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
-        env:
-          VERSION: ${{ steps.candidate.outputs.version }}
-          SHA: ${{ steps.candidate.outputs.sha }}
-        run: |
-          set -euo pipefail
-          git fetch origin main --tags
-          if git rev-parse -q --verify "refs/tags/v$VERSION"; then
-            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
-            echo 'create=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'create=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Acquire repository-scoped historical-tag authority
-        id: release-identity
-        if: steps.qualified-tag.outputs.create == 'true'
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-workflows: write
-          skip-token-revoke: false
-      - name: Tag only the fully qualified source, then sign the same bytes at the tag ref
-        if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'qualify'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG_TOKEN: ${{ steps.release-identity.outputs.token }}
-          VERSION: ${{ steps.candidate.outputs.version }}
-          SHA: ${{ steps.candidate.outputs.sha }}
-          TRAIN_ID: ${{ steps.candidate.outputs.train_id }}
-          TRAIN_ATTEMPT: ${{ steps.candidate.outputs.train_attempt }}
-          BASE_TAG: ${{ steps.candidate.outputs.base_tag }}
-          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
-        run: |
-          set -euo pipefail
-          git fetch origin main --tags
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=100" \
-            | jq '{workflow_runs: [.[].workflow_runs[]]}' > source-ci.json
-          python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
-          python3 scripts/release_reuse.py promotion --repository "$GITHUB_REPOSITORY" --source-sha "$SHA" --version "$VERSION"
-          python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
-          if git rev-parse -q --verify "refs/tags/v$VERSION"; then
-            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
-            # Only the successful create-only ref request below owns the first
-            # signing dispatch. Listing lag must never grant that effect twice.
-            echo 'SIGNING=not-dispatched REASON=existing-qualified-tag; reconcile the existing signer or preserve OUTCOME_UNKNOWN' >&2
-            exit 4
-          else
-            # Historical workflow-bearing commits require workflows: write.
-            # Keep the short-lived, repository-scoped App token on this effect only.
-            [[ -n "$RELEASE_TAG_TOKEN" ]] || { echo 'release tag identity unavailable' >&2; exit 4; }
-            GH_TOKEN="$RELEASE_TAG_TOKEN" gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$SHA" > /dev/null
-            git fetch origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
-            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
-          fi
-          # The unchanged installer/updater policy binds source-digest to Q.
-          # Only tag-ref release.yml has that execution identity. It downloads
-          # certified archives by run ID and cannot enter a build job.
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
-            -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"
       - name: Publish the same signed and certified artifacts, without regressive Latest
         if: steps.candidate.outputs.promote == 'true' && steps.candidate.outputs.phase == 'sign'
         env:
@@ -310,3 +255,128 @@ jobs:
           latest_flag="$(python3 scripts/release_reuse.py latest-flag --repository "$GITHUB_REPOSITORY" --version "$VERSION")"
           # shellcheck disable=SC2086
           gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false $latest_flag
+
+  tag-qualified:
+    needs: publish
+    if: needs.publish.outputs.promote == 'true' && needs.publish.outputs.phase == 'qualify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-tag
+    concurrency:
+      group: release-train-tag
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    env:
+      VERSION: ${{ needs.publish.outputs.version }}
+      SHA: ${{ needs.publish.outputs.sha }}
+      TRAIN_ID: ${{ needs.publish.outputs.train_id }}
+      TRAIN_ATTEMPT: ${{ needs.publish.outputs.train_attempt }}
+      BASE_TAG: ${{ needs.publish.outputs.base_tag }}
+      RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
+      PRODUCER_ATTEMPT: ${{ needs.publish.outputs.producer_attempt }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # No package setup, builds, archives or candidate executables in this job.
+      - name: Revalidate exact qualified authority immediately before tag creation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch origin main --tags
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > producer-run.json
+          [[ "$(jq -er .run_attempt producer-run.json)" == "$PRODUCER_ATTEMPT" ]]
+          python3 scripts/release_reuse.py require-allocation --repository "$GITHUB_REPOSITORY" \
+            --train-id "$TRAIN_ID" --train-attempt "$TRAIN_ATTEMPT" --qualification-id "$RUN_ID" \
+            --qualification-attempt "$PRODUCER_ATTEMPT" --source-sha "$SHA" --version "$VERSION" \
+            --base-tag "$BASE_TAG" --output "$RUNNER_TEMP/tag-owner-allocation.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=100" \
+            | jq '{workflow_runs: [.[].workflow_runs[]]}' > source-ci.json
+          python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
+          python3 scripts/release_reuse.py promotion --repository "$GITHUB_REPOSITORY" --source-sha "$SHA" --version "$VERSION"
+          python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
+          if git rev-parse -q --verify "refs/tags/v$VERSION"; then
+            [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+            echo 'OUTCOME_UNKNOWN: existing tag does not confer signing ownership' >&2
+            exit 4
+          fi
+      - name: Create only the exact qualified tag with the admitted repository identity
+        id: tag
+        env:
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+          EXPECTED_FINGERPRINT: ${{ vars.RELEASE_DEPLOY_KEY_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ -n "$RELEASE_DEPLOY_KEY" && -n "$EXPECTED_FINGERPRINT" ]] || { echo 'release tag identity unavailable' >&2; exit 4; }
+          work="$(mktemp -d "$RUNNER_TEMP/release-tag.XXXXXXXX")"
+          socket="$work/agent.sock"
+          known="$work/known_hosts"
+          public="$work/identity.pub"
+          ack="$work/push-ack.txt"
+          # Authenticated GitHub documentation, not unauthenticated ssh-keyscan.
+          # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known"
+          env -u RELEASE_DEPLOY_KEY ssh-agent -D -a "$socket" -t 60 > "$work/agent.log" 2>&1 &
+          agent_pid=$!
+          export SSH_AUTH_SOCK="$socket"
+          cleanup() {
+            status=$?
+            trap - EXIT
+            ssh-add -D >/dev/null || status=4
+            kill "$agent_pid" || status=4
+            set +e
+            wait "$agent_pid"
+            stopped=$?
+            set -e
+            printf 'SSH_AGENT_STOPPED wait_exit=%s\n' "$stopped"
+            if [[ -S "$socket" ]]; then status=4; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          for _ in {1..100}; do
+            [[ -S "$socket" ]] && break
+            sleep 0.1
+          done
+          [[ -S "$socket" ]] || { echo 'isolated SSH agent unavailable' >&2; exit 4; }
+          printf '%s\n' "$RELEASE_DEPLOY_KEY" | env -u RELEASE_DEPLOY_KEY ssh-add -t 60 -
+          unset RELEASE_DEPLOY_KEY
+          mapfile -t identities < <(ssh-add -L)
+          [[ "${#identities[@]}" == 1 ]] || { echo 'release identity cardinality mismatch' >&2; exit 4; }
+          printf '%s\n' "${identities[0]}" > "$public"
+          read -r _ fingerprint _ < <(ssh-keygen -lf "$public" -E sha256)
+          [[ "$fingerprint" == "$EXPECTED_FINGERPRINT" ]] || { echo 'release identity fingerprint mismatch' >&2; exit 4; }
+          printf -v GIT_SSH_COMMAND '%q ' /usr/bin/ssh -F /dev/null \
+            -o "IdentityAgent=$socket" -o "IdentityFile=$public" -o IdentitiesOnly=yes \
+            -o ForwardAgent=no -o AddKeysToAgent=no -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+            -o ConnectTimeout=15 -o ConnectionAttempts=1
+          export GIT_SSH_COMMAND
+          set +e
+          timeout --signal=TERM --kill-after=5s 45s git -c push.followTags=false push --porcelain \
+            "git@github.com:$GITHUB_REPOSITORY.git" "$SHA:refs/tags/v$VERSION" > "$ack"
+          pushed=$?
+          set -e
+          printf 'push_status=%s\nack_path=%s\n' "$pushed" "$ack" >> "$GITHUB_OUTPUT"
+      - name: Require unique creation acknowledgment before signing the certified bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUSH_STATUS: ${{ steps.tag.outputs.push_status }}
+          PUSH_ACK: ${{ steps.tag.outputs.ack_path }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_reuse.py require-created-ref --ack "$PUSH_ACK" \
+            --source-sha "$SHA" --version "$VERSION" --push-status "$PUSH_STATUS" --destination "github.com:$GITHUB_REPOSITORY.git"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > created-tag.json
+          [[ "$(jq -er .object.type created-tag.json)" == commit && "$(jq -er .object.sha created-tag.json)" == "$SHA" ]]
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
+            -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"
