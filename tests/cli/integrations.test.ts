@@ -6,7 +6,7 @@ import process from "node:process";
 import { join, relative, resolve, sep } from "node:path";
 import { optInState } from "../../extensions/kit-guard-optin.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { judgeFleet, readProfileWiring, runIntegrations, staticVerdict } from "../../src/integrations.ts";
+import { judgeFleet, readProfileWiring, resolveMockRuntime, runIntegrations, staticVerdict } from "../../src/integrations.ts";
 import type { LiveAttempt } from "../../src/integrations.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 
@@ -223,6 +223,54 @@ test("integrations --plan prints without reading profiles", () => {
 	const plan = (envelope.data as { integrations_plan?: { integrations?: string[] } }).integrations_plan;
 	expect(plan?.integrations).toContain("dcg");
 	expect(plan?.integrations).toContain("fleet-guard");
+});
+
+/**
+ * A starting process has no completion event: poll the port file the mock writes once it accepts
+ * connections. Real startup against the platform clock; fake timers cannot stand in for it.
+ */
+async function awaitPortFile(path: string): Promise<string> {
+	const deadline = performance.now() + 15_000;
+	while (performance.now() < deadline) {
+		const text = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
+		if (text) return text;
+		await Bun.sleep(25);
+	}
+	throw new Error("mock-model never wrote its port file");
+}
+
+test("MOCKSPAWN1: the mock server launches through a real bun; a compiled launcher that treats the script as a command never serves", async () => {
+	const dir = mkdtempSync(join(base, "mockspawn-"));
+	const compiled = join(dir, "compiled-omp-kit");
+	// The installed release answers its script argument as a CLI command: UNKNOWN_COMMAND, exit 2, no port file.
+	writeFileSync(compiled, '#!/bin/sh\necho "UNKNOWN_COMMAND: $1" >&2\nexit 2\n', { mode: 0o755 });
+	const scenario = join(dir, "scenario.json");
+	writeFileSync(scenario, JSON.stringify({ turns: [], chunk: 6 }));
+	const script = join(REPO_ROOT, "tests/live/mock-model.mjs");
+	const spawn = (runtime: string, label: string) => Bun.spawn([runtime, script], {
+		cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe",
+		env: { HOME: dir, TMPDIR: dir, TMP: dir, TEMP: dir, SCEN: scenario, LOG: join(dir, `${label}.log`),
+			PORTFILE: join(dir, `${label}.port`), BUN_BE_BUN: "1" },
+	});
+
+	// Contract: a resolvable bun wins over the process launcher; without one the launcher is kept.
+	expect(resolveMockRuntime(compiled, process.execPath)).toBe(process.execPath);
+	expect(resolveMockRuntime(compiled, null)).toBe(compiled);
+
+	// Planted negative: the pre-fix launch (process.execPath is the compiled launcher) never serves.
+	const broken = spawn(resolveMockRuntime(compiled, null), "broken");
+	expect(await broken.exited).toBe(2);
+	expect(await new Response(broken.stderr).text()).toContain("UNKNOWN_COMMAND");
+	expect(existsSync(join(dir, "broken.port"))).toBe(false);
+
+	// The resolved runtime serves: its port file appears and holds a port number.
+	const serving = spawn(resolveMockRuntime(compiled, process.execPath), "serving");
+	try {
+		expect(Number(await awaitPortFile(join(dir, "serving.port")))).toBeGreaterThan(0);
+	} finally {
+		serving.kill();
+		await serving.exited;
+	}
 });
 
 test("integrations rejects OMP aliases and Darwin sandbox-temp work paths", async () => {
