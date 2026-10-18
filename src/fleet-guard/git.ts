@@ -84,11 +84,18 @@ export function shellWords(segment: string): string[] {
 	return words;
 }
 
+// The `&` of a redirection (`2>&1`, `>&f`, `<&0`, `&>f`) is part of that redirection, never a command separator.
+function redirectionAmpersand(command: string, index: number): boolean {
+	const before = command[index - 1];
+	return before === ">" || before === "<" || command[index + 1] === ">";
+}
+
 export function commandSegments(command: string): string[] {
 	const segments: string[] = [];
 	let segment = "";
 	let quote: "'" | "\"" | undefined;
-	for (const character of command) {
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index]!;
 		if (quote) {
 			segment += character;
 			if (character === quote) quote = undefined;
@@ -96,6 +103,10 @@ export function commandSegments(command: string): string[] {
 		}
 		if (character === "'" || character === "\"") {
 			quote = character;
+			segment += character;
+			continue;
+		}
+		if (character === "&" && redirectionAmpersand(command, index)) {
 			segment += character;
 			continue;
 		}
@@ -108,6 +119,71 @@ export function commandSegments(command: string): string[] {
 	}
 	if (segment.trim()) segments.push(segment);
 	return segments;
+}
+
+const REDIRECTION_OPERATORS = ["<<<", "<<-", ">>", ">&", ">|", "<<", "<&", ">", "<"];
+
+// Length of the redirection operator that begins at `index` (optional leading file descriptor digits included),
+// or undefined. Digits only count at the start of a word: `x2>f` redirects to f and keeps the word `x2`.
+function redirectionOperatorLength(text: string, index: number): number | undefined {
+	let cursor = index;
+	if (index === 0 || /\s/.test(text[index - 1]!)) {
+		while (cursor < text.length && text[cursor]! >= "0" && text[cursor]! <= "9") cursor++;
+	}
+	for (const operator of ["&>>", "&>"]) {
+		if (cursor === index && text.startsWith(operator, cursor)) return operator.length;
+	}
+	for (const operator of REDIRECTION_OPERATORS) {
+		if (text.startsWith(operator, cursor)) return cursor - index + operator.length;
+	}
+	return undefined;
+}
+
+// End of the single word that follows a redirection operator (quote- and escape-aware).
+function redirectionTargetEnd(text: string, from: number): number {
+	let index = from;
+	let quote: "'" | "\"" | undefined;
+	while (index < text.length) {
+		const character = text[index]!;
+		if (quote) {
+			if (character === quote) quote = undefined;
+			index++;
+			continue;
+		}
+		if (character === "\\") { index += 2; continue; }
+		if (character === "'" || character === "\"") { quote = character; index++; continue; }
+		if (/\s/.test(character) || ";|&()<>".includes(character)) break;
+		index++;
+	}
+	return Math.min(index, text.length);
+}
+
+// A redirection is not a pathspec or an argument: drop each `[N]>`, `>>`, `>&`, `&>`, `<`, `<<`, `<&` operator and
+// its one target word before words are decoded. Quoted text is untouched. `<(`/`>(` process substitutions are left
+// for substitutionBodies().
+export function stripRedirections(segment: string): string {
+	let out = "";
+	let quote: "'" | "\"" | undefined;
+	let index = 0;
+	while (index < segment.length) {
+		const character = segment[index]!;
+		if (quote) {
+			out += character;
+			if (character === quote) quote = undefined;
+			index++;
+			continue;
+		}
+		if (character === "\\") { out += segment.slice(index, index + 2); index += 2; continue; }
+		if (character === "'" || character === "\"") { quote = character; out += character; index++; continue; }
+		const length = redirectionOperatorLength(segment, index);
+		if (length === undefined) { out += character; index++; continue; }
+		let target = index + length;
+		while (target < segment.length && /\s/.test(segment[target]!)) target++;
+		if (segment[target] === "(") { out += segment.slice(index, index + length); index += length; continue; }
+		out += " ";
+		index = redirectionTargetEnd(segment, target);
+	}
+	return out;
 }
 
 function repositoryRoot(start: string): string | undefined {
@@ -439,7 +515,7 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 		if (++units > SUBSTITUTION_BUDGET) return { block: true, reason: SUBSTITUTION_REASON };
 		const text = pending.pop()!;
 		for (const segment of commandSegments(text)) {
-			const words = shellWords(segment);
+			const words = shellWords(stripRedirections(segment));
 			for (const body of substitutionBodies(segment)) pending.push(body);
 			const effective = stripEnvWrappers(words);
 			if (!effective) continue;

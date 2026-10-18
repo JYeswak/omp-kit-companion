@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { check } from "../../src/fleet-guard/git.ts";
+import { check, commandSegments } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
@@ -187,6 +187,55 @@ describe("fleet guard main-only git checks", () => {
 		});
 		expect(snapshotTree(repo)).toEqual(before);
 		expect(gitState()).toBe(gitBefore);
+	});
+
+	test("redirections are not pathspecs: a redirected --only commit of reserved paths is admitted (ompkit-xa5s.27)", () => {
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			for (const command of [
+				"git commit --only -m msg -- some/path > var/agent-tmp/c.txt 2>&1",
+				"git commit --only -m msg -- some/path >> var/agent-tmp/c.txt 2>&1",
+				"git commit --only -m msg -- some/path &> var/agent-tmp/c.txt",
+				"git commit --only -m msg -- some/path >var/agent-tmp/c.txt 2>/dev/null",
+				"git commit --only -m msg -- some/path < /dev/null",
+				"git commit --only -m msg > out.txt 2>&1 -- some/path",
+				"git commit --only -m msg -- some/path 2>&1 | cat",
+				"git commit --only -m \"a > b 2>&1\" -- some/path > f",
+			]) {
+				expect(check(event(command), context), command).toBeUndefined();
+			}
+		});
+	});
+
+	test("redirections do not hide an unreserved path or a second command (ompkit-xa5s.27 planted negatives)", () => {
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			for (const command of [
+				"git commit --only -m msg -- foreignB.txt > f 2>&1",
+				"git commit --only -m msg -- some/path > f foreignB.txt",
+				"git commit --only -m msg -- some/path 2>&1 foreignB.txt",
+				"git commit --only -m msg -- '>x'",
+				"git commit --only -m msg -- some/path '> foreignB.txt'",
+				"git commit --only -m \"a > b\" -- foreignB.txt",
+				"git commit --only -m msg -- some/path 2>&1 && git commit --only -m msg -- foreignB.txt",
+				"echo a && git commit --only -m msg -- foreignB.txt",
+				"git commit --only -m msg -- some/path > f ; git commit --only -m msg -- foreignB.txt",
+				"git commit --only -m msg -- some/path & git commit --only -m msg -- foreignB.txt",
+			]) {
+				const verdict = check(event(command), context);
+				expect(verdict?.block, command).toBe(true);
+				expect(verdict?.reason, command).toContain("reservation");
+			}
+		});
+	});
+
+	test("commandSegments splits on ; & | && but not on the & of a redirection", () => {
+		expect(commandSegments("a && b")).toEqual(["a ", " b"]);
+		expect(commandSegments("a & b")).toEqual(["a ", " b"]);
+		expect(commandSegments("a ; b | c")).toEqual(["a ", " b ", " c"]);
+		expect(commandSegments("a > f 2>&1")).toEqual(["a > f 2>&1"]);
+		expect(commandSegments("a &> f")).toEqual(["a &> f"]);
+		expect(commandSegments("a >& f")).toEqual(["a >& f"]);
+		expect(commandSegments("a 2>&1 && b")).toEqual(["a 2>&1 ", " b"]);
+		expect(commandSegments("a '2>&1' & b")).toEqual(["a '2>&1' ", " b"]);
 	});
 
 	test("native entry path blocks unscoped amend through the chained checks", async () => {
