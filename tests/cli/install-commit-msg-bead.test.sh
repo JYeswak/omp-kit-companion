@@ -59,7 +59,10 @@ ok "$?" "4" "absent-chain-refuses"
 # 2. plain bash hook: moved aside, both run (marker written, bead enforced)
 B=$(new_repo plain)
 mkdir -p "$B/.git/hooks"
-printf '#!/bin/sh\nprintf MARKED >> "$1"\n' > "$B/.git/hooks/commit-msg"
+cat > "$B/.git/hooks/commit-msg" <<'HOOK'
+#!/bin/sh
+printf MARKED >> "$1"
+HOOK
 chmod +x "$B/.git/hooks/commit-msg"
 sh "$INSTALLER" "$B" > /dev/null 2>&1
 ok "$?" "0" "plain-install-rc"
@@ -78,17 +81,21 @@ ok "$?" "0" "plain-chain-skips-no-tracker"
 C=$(new_repo sibling)
 rm -f "$C/.git/hooks/commit-msg"
 mkdir -p "$C/.git/hooks"
-printf '#!/bin/sh\ndir=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)\n[ -x "$dir/commit-msg-impl.sh" ] || exit 1\nexit 0\n' > "$C/.git/hooks/commit-msg"
+cat > "$C/.git/hooks/commit-msg" <<'HOOK'
+#!/bin/sh
+dir=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)
+[ -x "$dir/commit-msg-impl.sh" ] || exit 1
+exit 0
+HOOK
 chmod +x "$C/.git/hooks/commit-msg"
 printf '#!/bin/sh\nexit 0\n' > "$C/.git/hooks/commit-msg-impl.sh"
 chmod +x "$C/.git/hooks/commit-msg-impl.sh"
 sh "$INSTALLER" "$C" > /dev/null 2>&1
 ok "$?" "0" "sibling-install-rc"
-[ -x "$C/.git/hooks/hooks.d/commit-msg/10-commit-msg" ] && [ -x "$C/.git/hooks/hooks.d/commit-msg/commit-msg-impl.sh" ]
-rc=$?
+if [ -x "$C/.git/hooks/hooks.d/commit-msg/10-commit-msg" ] && [ -x "$C/.git/hooks/hooks.d/commit-msg/commit-msg-impl.sh" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "sibling-moved-along"
-[ ! -e "$C/.git/hooks/commit-msg-impl.sh" ]
-ok "$?" "0" "sibling-not-duplicated"
+if [ ! -e "$C/.git/hooks/commit-msg-impl.sh" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "sibling-not-duplicated"
 printf '[test] fix widgets with no identity\n' > "$TMP/msg-c"
 (CDPATH='' cd -- "$C" && BEADS_DB="$TMP/definitely-absent.db" sh "$C/.git/hooks/commit-msg" "$TMP/msg-c") > /dev/null 2>&1
 ok "$?" "0" "sibling-chain-green"
@@ -98,14 +105,16 @@ ok "$?" "0" "sibling-chain-green"
 D=$(new_repo pathbound)
 rm -f "$D/.git/hooks/commit-msg"
 mkdir -p "$D/.git/hooks"
-printf '#!/bin/sh\ncase "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac\n' > "$D/.git/hooks/commit-msg"
+cat > "$D/.git/hooks/commit-msg" <<'HOOK'
+#!/bin/sh
+case "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac
+HOOK
 chmod +x "$D/.git/hooks/commit-msg"
 sh "$INSTALLER" "$D" > "$TMP/o-refuse" 2>&1
 ok "$?" "1" "regressed-install-rc"
 grep -q "ROLLBACK" "$TMP/o-refuse"
 ok "$?" "0" "rollback-announced"
-[ -x "$D/.git/hooks/commit-msg" ] && [ ! -e "$D/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]
-rc=$?
+if [ -x "$D/.git/hooks/commit-msg" ] && [ ! -e "$D/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "rollback-restored"
 printf '[test] fix widgets with no identity\n' > "$TMP/msg-d"
 sh "$D/.git/hooks/commit-msg" "$TMP/msg-d" > /dev/null 2>&1
@@ -120,12 +129,12 @@ printf '#!/bin/sh\nexit 1\n' > "$E/.git/hooks/commit-msg"
 chmod +x "$E/.git/hooks/commit-msg"
 sh "$INSTALLER" "$E" > /dev/null 2>&1
 ok "$?" "0" "refusing-install-rc"
-[ -x "$E/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]
-ok "$?" "0" "refusing-member-present"
+if [ -x "$E/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "refusing-member-present"
 
 # 3. pre-push members installed and dispatcher executable
-[ -x "$A/.git/hooks/pre-push" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]
-ok "$?" "0" "prepush-installed"
+if [ -x "$A/.git/hooks/pre-push" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" ] && [ -x "$A/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "prepush-installed"
 # The member resolves its repo from the cwd (pre-push protocol), so run the
 # chain from inside the fixture like a real push does.
 printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$A" rev-parse HEAD)" "$(git -C "$A" rev-parse HEAD)" | (CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-push") > /dev/null 2>&1
@@ -183,7 +192,10 @@ F=$(new_repo restore)
 mkdir -p "$F/.git/hooks/hooks.d/commit-msg"
 printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
 chmod +x "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
-printf '#!/bin/sh\ncase "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac\n' > "$F/.git/hooks/commit-msg"
+cat > "$F/.git/hooks/commit-msg" <<'HOOK'
+#!/bin/sh
+case "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac
+HOOK
 chmod +x "$F/.git/hooks/commit-msg"
 sh "$INSTALLER" "$F" > /dev/null 2>&1
 ok "$?" "1" "restore-rollback-rc"
@@ -217,7 +229,11 @@ ok "$?" "0" "idless-forward-only-check-fresh"
 H=$(new_repo stdin)
 mkdir -p "$H/.beads"
 : > "$H/.beads/beads.db"
-printf '#!/bin/sh\ncat >> "$(git rev-parse --git-dir)/bespoke-saw"\nexit 0\n' > "$H/.git/hooks/reference-transaction"
+cat > "$H/.git/hooks/reference-transaction" <<'HOOK'
+#!/bin/sh
+cat >> "$(git rev-parse --git-dir)/bespoke-saw"
+exit 0
+HOOK
 chmod +x "$H/.git/hooks/reference-transaction"
 sh "$INSTALLER" --no-pushed-beads "$H" > /dev/null 2>&1
 ok "$?" "0" "stdin-install-rc"
@@ -232,7 +248,15 @@ ok "$?" "0" "stdin-bespoke-saw-update"
 # 9. an installed runner of ours without stdin replay is upgraded in place
 I=$(new_repo upgrade)
 mkdir -p "$I/.git/hooks/hooks.d/reference-transaction"
-printf '#!/bin/sh\n# chain runner: run every executable NN-<name> member in hooks.d/<type> in\nset -u\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)\nrc=0\nfor hook in "$here/hooks.d/$(basename -- "$0")"/[0-9][0-9]-*; do [ -x "$hook" ] && { sh "$hook" "$@" || rc=$?; }; done\nexit $rc\n' > "$I/.git/hooks/reference-transaction"
+cat > "$I/.git/hooks/reference-transaction" <<'HOOK'
+#!/bin/sh
+# chain runner: run every executable NN-<name> member in hooks.d/<type> in
+set -u
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+rc=0
+for hook in "$here/hooks.d/$(basename -- "$0")"/[0-9][0-9]-*; do [ -x "$hook" ] && { sh "$hook" "$@" || rc=$?; }; done
+exit $rc
+HOOK
 chmod +x "$I/.git/hooks/reference-transaction"
 sh "$INSTALLER" --no-pushed-beads "$I" > "$TMP/o-upgrade" 2>&1
 ok "$?" "0" "upgrade-install-rc"

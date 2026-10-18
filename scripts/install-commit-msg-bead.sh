@@ -115,8 +115,10 @@ fi
 # One validator owns the declaration format and externally supplied digest.
 # Validate before any target mutation; validate the copied bytes again below.
 if [ -n "$TEMPLATE_IMPORT_MAP" ] || [ -n "$TEMPLATE_IMPORT_MAP_SHA" ]; then
-	[ -n "$TEMPLATE_IMPORT_MAP" ] && [ -n "$TEMPLATE_IMPORT_MAP_SHA" ] ||
-		{ echo 'install-commit-msg-bead: REFUSED template-import-map requires file and reviewed SHA256' >&2; exit 2; }
+	if [ -z "$TEMPLATE_IMPORT_MAP" ] || [ -z "$TEMPLATE_IMPORT_MAP_SHA" ]; then
+		echo 'install-commit-msg-bead: REFUSED template-import-map requires file and reviewed SHA256' >&2
+		exit 2
+	fi
 	sh "$KITROOT/scripts/check-commit-imports.sh" --validate-template-import-map "$TEMPLATE_IMPORT_MAP" --sha256 "$TEMPLATE_IMPORT_MAP_SHA" || exit 2
 fi
 
