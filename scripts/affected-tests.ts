@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 // affected-tests.ts — CIGATE1 (ompkit-v66l.27.1): select the test files a pushed diff affects.
 //
-// Usage: bun scripts/affected-tests.ts --root DIR [--changed-file PATH ...] [--explain]
+// Usage: bun scripts/affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance]
+//        bun scripts/affected-tests.ts --plan --budget-secs N --workers K [--timings FILE] [--deferred-out FILE]
+//            [--changed-file PATH ...] -- TEST...   (wall-budget plan; see planBudget)
 //
 // DIR is the exact-commit export the gate judges (no .git needed). Test files are bun suites
 // (*.test.ts and kin), shell suites (*.test.sh) and python suites (*_test.py, test_*.py). A test file
@@ -14,7 +16,7 @@
 // stdout: one selected test path per line, sorted. stderr: a one-line summary; with --explain, one
 // `path <- changed` line per selection naming the changed path that pulled it in.
 // Exit 0 with an empty stdout means no test is affected; 2 is a usage or unreadable-root error.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import process from "node:process";
 
@@ -26,7 +28,7 @@ const SCANNED_EXT = [...SOURCE_EXT, ".sh", ".py"];
 const SKIP_DIR: Record<string, true> = { ".git": true, node_modules: true, var: true, dist: true };
 const FIXTURE_DIR = "tests/fixtures/";
 
-export type Selection = { tests: string[]; reasons: Map<string, string> };
+export type Selection = { tests: string[]; reasons: Map<string, string>; distance: Map<string, number> };
 
 function walk(root: string, at = ""): string[] {
 	const out: string[] = [];
@@ -140,46 +142,111 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 		}
 	}
 	const reasons = new Map<string, string>();
+	// Hops from the nearest change: 0 for a changed test, 1 for a direct importer or namer, and so on.
+	const distance = new Map<string, number>();
 	for (const start of changed) {
 		if (!files.has(start)) continue;
-		const seen = new Set<string>([start]);
+		const seen = new Map<string, number>([[start, 0]]);
 		const queue = [start];
 		for (const namer of namers.get(start) ?? []) {
-			if (!seen.has(namer)) { seen.add(namer); queue.push(namer); }
+			if (!seen.has(namer)) { seen.set(namer, 1); queue.push(namer); }
 		}
 		while (queue.length > 0) {
 			const node = queue.shift() as string;
-			if (isTestFile(node) && !reasons.has(node)) reasons.set(node, start);
+			const hops = seen.get(node) as number;
+			if (isTestFile(node)) {
+				if (!reasons.has(node)) reasons.set(node, start);
+				if (hops < (distance.get(node) ?? Number.POSITIVE_INFINITY)) distance.set(node, hops);
+			}
 			for (const next of importers.get(node) ?? []) {
-				if (!seen.has(next)) { seen.add(next); queue.push(next); }
+				if (!seen.has(next)) { seen.set(next, hops + 1); queue.push(next); }
 			}
 		}
 	}
-	return { tests: [...reasons.keys()].sort(), reasons };
+	return { tests: [...reasons.keys()].sort(), reasons, distance };
 }
+
+// A file with no CI timing is planned at 10 s.
+const UNTIMED_MS = 10_000;
+
+/**
+ * Wall-budget plan (CIGATE1 rule 3): tests in nearest-first order, kept while the predicted wall of
+ * K workers, max(total / K, longest file), stays within the budget. A changed test file, and the
+ * first test, always run; whatever does not fit is deferred to CI by name.
+ */
+export function planBudget(tests: readonly string[], changed: ReadonlySet<string>, durations: Readonly<Record<string, number>>, budgetMs: number, workers: number): { run: string[]; deferred: string[]; predictedMs: number } {
+	const run: string[] = [];
+	const deferred: string[] = [];
+	let total = 0;
+	let longest = 0;
+	for (const test of tests) {
+		const ms = durations[test] ?? UNTIMED_MS;
+		const predicted = Math.max((total + ms) / workers, Math.max(longest, ms));
+		if (changed.has(test) || run.length === 0 || predicted <= budgetMs) {
+			run.push(test);
+			total += ms;
+			longest = Math.max(longest, ms);
+		} else deferred.push(test);
+	}
+	return { run, deferred, predictedMs: Math.max(total / workers, longest) };
+}
+
+const USAGE = "usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance]\n" +
+	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n";
 
 function main(argv: readonly string[]): number {
 	let root = "";
 	let explain = false;
+	let order = "path";
+	let plan = false;
+	let budgetSecs = Number.NaN;
+	let workers = Number.NaN;
+	let timings = "";
+	let deferredOut = "";
 	const changed: string[] = [];
-	for (let i = 0; i < argv.length; i++) {
+	let i = 0;
+	for (; i < argv.length; i++) {
 		const arg = argv[i];
-		if (arg === "--root" && i + 1 < argv.length) root = argv[++i] as string;
-		else if (arg === "--changed-file" && i + 1 < argv.length) changed.push(argv[++i] as string);
-		else if (arg === "--explain") explain = true;
-		else {
-			process.stderr.write("usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain]\n");
-			return 2;
+		const value = argv[i + 1];
+		if (arg === "--") { i++; break; }
+		if (arg === "--explain") explain = true;
+		else if (arg === "--plan") plan = true;
+		else if (value === undefined) { process.stderr.write(USAGE); return 2; }
+		else if (arg === "--root") { root = value; i++; }
+		else if (arg === "--changed-file") { changed.push(value); i++; }
+		else if (arg === "--order" && (value === "path" || value === "distance")) { order = value; i++; }
+		else if (arg === "--budget-secs") { budgetSecs = Number(value); i++; }
+		else if (arg === "--workers") { workers = Number(value); i++; }
+		else if (arg === "--timings") { timings = value; i++; }
+		else if (arg === "--deferred-out") { deferredOut = value; i++; }
+		else { process.stderr.write(USAGE); return 2; }
+	}
+	if (plan) {
+		if (!(budgetSecs > 0) || !Number.isInteger(workers) || workers < 1) { process.stderr.write(USAGE); return 2; }
+		let durations: Record<string, number> = {};
+		if (timings && existsSync(timings)) {
+			const parsed: unknown = JSON.parse(readFileSync(timings, "utf8"));
+			if (typeof parsed === "object" && parsed !== null && "files" in parsed && typeof parsed.files === "object" && parsed.files !== null)
+				durations = parsed.files as Record<string, number>;
 		}
+		const result = planBudget(argv.slice(i).filter((test) => test !== ""), new Set(changed), durations, budgetSecs * 1000, workers);
+		for (const test of result.run) process.stdout.write(`${test}\n`);
+		if (deferredOut) writeFileSync(deferredOut, result.deferred.map((test) => `${test}\n`).join(""), { flag: "a" });
+		process.stderr.write(`affected-tests plan: run ${result.run.length}, defer ${result.deferred.length}, predicted ${Math.round(result.predictedMs / 1000)} s on ${workers} workers against a ${budgetSecs} s budget\n`);
+		for (const test of result.deferred) process.stderr.write(`focused: deferred ${test} (over the ${budgetSecs} s wall budget); CI runs it\n`);
+		return 0;
 	}
 	if (!root || !existsSync(root) || !statSync(root).isDirectory()) {
 		process.stderr.write(`affected-tests: --root is not a directory: ${root || "(missing)"}\n`);
 		return 2;
 	}
-	const { tests, reasons } = selectAffected(root, changed.filter((path) => path !== ""));
+	const { tests: byPath, reasons, distance } = selectAffected(root, changed.filter((path) => path !== ""));
+	const tests = order === "distance"
+		? [...byPath].sort((left, right) => (distance.get(left) ?? 0) - (distance.get(right) ?? 0) || left.localeCompare(right))
+		: byPath;
 	for (const test of tests) process.stdout.write(`${test}\n`);
-	if (explain) for (const test of tests) process.stderr.write(`affected: ${test} <- ${reasons.get(test)}\n`);
-	const direct = tests.filter((test) => reasons.get(test) === test).length;
+	if (explain) for (const test of tests) process.stderr.write(`affected: ${test} <- ${reasons.get(test)} (${distance.get(test)} hops)\n`);
+	const direct = tests.filter((test) => distance.get(test) === 0).length;
 	process.stderr.write(`affected-tests: ${tests.length} selected (${direct} changed, ${tests.length - direct} reach a changed path) from ${changed.length} changed paths under ${relative(process.cwd(), root) || "."}\n`);
 	return 0;
 }

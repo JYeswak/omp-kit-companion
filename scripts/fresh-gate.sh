@@ -185,7 +185,7 @@ select_affected_tests() {
 	for file in $CHANGED; do
 		[ -n "$file" ] && set -- "$@" --changed-file "$file"
 	done
-	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain "$@"
+	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain --order distance "$@"
 }
 
 # K parallel bun workers for the affected tests: a quarter of the online cores, 2..4, unless
@@ -515,11 +515,24 @@ fi
 		fi
 	fi
 	affected=$(select_affected_tests) || { echo "focused: affected-test selection failed" >&2; return 1; }
-	# Explicit mappings above join the import-scan selection; each runs once.
+	# Nearest first (changed tests, then direct importers); explicit mappings follow; each runs once.
 	# shellcheck disable=SC2086
-	focus_tests=$(printf '%s\n' $affected $focus_tests | sort -u)
+	focus_tests=$(printf '%s\n' $affected $focus_tests | awk 'NF && !seen[$0]++')
 	# shellcheck disable=SC2086
 	focus_tests=$(apply_ci_only $focus_tests) || return $?
+	# Wall budget (CIGATE1 rule 3, default 360 s): if the selection's predicted wall on K workers (CI
+	# per-file timings) exceeds it, the changed tests and the nearest importers run and the rest are
+	# deferred by name; the verdict is PARTIAL, never a bare pass.
+	if [ -n "$focus_tests" ]; then
+		set --
+		for file in $CHANGED; do
+			[ -n "$file" ] && set -- "$@" --changed-file "$file"
+		done
+		# shellcheck disable=SC2086
+		focus_tests=$(bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --plan \
+			--budget-secs "${FRESH_GATE_TEST_BUDGET_SECS:-360}" --workers "$(test_workers)" \
+			--timings "$ARCHIVE_DIR/.github/core-test-timings.json" --deferred-out "$WORK/excluded" "$@" -- $focus_tests) || return $?
+	fi
 	if [ -n "$focus_tests" ] && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (
 			cd "$ARCHIVE_DIR"

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 // CIGATE1 (ompkit-v66l.27.1): the selector the pre-push gate uses to pick the tests a diff affects.
@@ -93,6 +93,46 @@ test("mutant: without transitive import edges, a src change misses the test that
 		const mutant = join(dir, "mutant-selector.ts");
 		writeFileSync(mutant, oneHop);
 		expect(select(dir, ["src/leaf.ts"], mutant).tests).toEqual(["tests/cli/leaf.test.ts"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("wall-budget plan keeps changed tests and the nearest importers, and defers the rest by name", () => {
+	const dir = tree({ "timings.json": JSON.stringify({ version: 1, files: { "tests/a.test.ts": 50_000, "tests/b.test.ts": 50_000, "tests/c.test.ts": 50_000, "tests/big.test.ts": 400_000 } }) });
+	try {
+		const plan = (budget: number, tests: string[], changed: string[] = [], script = selector) => {
+			const deferred = join(dir, `deferred-${Math.random().toString(36).slice(2)}`);
+			const result = Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", script, "--plan", "--budget-secs", String(budget), "--workers", "2", "--timings", join(dir, "timings.json"), "--deferred-out", deferred, ...changed.flatMap((path) => ["--changed-file", path]), "--", ...tests], { stdout: "pipe", stderr: "pipe" });
+			return { code: result.exitCode, run: result.stdout.toString().split("\n").filter(Boolean), deferred: existsSync(deferred) ? readFileSync(deferred, "utf8").split("\n").filter(Boolean) : [], err: result.stderr.toString() };
+		};
+		// 2 workers, 60 s: a + b predict 50 s; adding c predicts 75 s, so c is deferred.
+		const fits = plan(60, ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts"]);
+		expect(fits.code).toBe(0);
+		expect(fits.run).toEqual(["tests/a.test.ts", "tests/b.test.ts"]);
+		expect(fits.deferred).toEqual(["tests/c.test.ts"]);
+		expect(fits.err).toContain("focused: deferred tests/c.test.ts (over the 60 s wall budget); CI runs it");
+		// A changed test always runs, even past the budget; the first test always runs.
+		expect(plan(60, ["tests/big.test.ts", "tests/a.test.ts"], ["tests/a.test.ts"]).run).toEqual(["tests/big.test.ts", "tests/a.test.ts"]);
+		expect(plan(360, ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts"]).deferred).toEqual([]);
+		expect(plan(0, ["tests/a.test.ts"]).code).toBe(2);
+		// Mutant: a plan that ignores the changed set defers the changed test once the budget is spent.
+		const source = readFileSync(selector, "utf8");
+		const blind = source.replace("if (changed.has(test) || run.length === 0 || predicted <= budgetMs) {", "if (run.length === 0 || predicted <= budgetMs) {");
+		expect(blind).not.toBe(source);
+		const mutant = join(dir, "mutant-plan.ts");
+		writeFileSync(mutant, blind);
+		expect(plan(60, ["tests/big.test.ts", "tests/a.test.ts"], ["tests/a.test.ts"], mutant).deferred).toEqual(["tests/a.test.ts"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("--order distance puts changed tests first, then the nearest importers", () => {
+	const dir = tree(FILES);
+	try {
+		const result = Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--order", "distance", "--changed-file", "src/leaf.ts", "--changed-file", "tests/cli/via-cli.test.ts"], { stdout: "pipe" });
+		expect(result.stdout.toString().split("\n").filter(Boolean)).toEqual(["tests/cli/via-cli.test.ts", "tests/cli/leaf.test.ts"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

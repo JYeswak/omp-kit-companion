@@ -119,7 +119,7 @@ test("focused selection skips suites and shell files the range deleted, and stil
 	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		// The real selector and gate_focused; only the bun test run is a stand-in that checks its argv exists.
-		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
 			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",
@@ -159,7 +159,7 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 		chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
-		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
 			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",
@@ -701,3 +701,24 @@ test("CIGATE1 manifest: the checked-in manifest is valid and names only existing
 		if (kind === "ci-only") expect(expires).toBe("-");
 	}
 });
+
+test.skipIf(!AMPLE)("CIGATE1 wall budget: past the budget the nearest tests run and the rest are deferred by name in a PARTIAL verdict (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		for (const n of [2, 3]) writeFileSync(join(archive, `tests/cli/mod${n}.test.ts`), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("answer ${n}", () => { expect(answer()).toBe(42); });\n`);
+		// Untimed files plan at 10 s each; a 5 s budget keeps only the changed test (nearest first).
+		fx.env.FRESH_GATE_TEST_BUDGET_SECS = "5";
+		const partial = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
+		expect(partial.code).toBe(0);
+		expect(partial.out).toContain("affected-tests plan: run 1, defer 2");
+		expect(partial.out).toContain("focused: deferred tests/cli/mod.test.ts (over the 5 s wall budget); CI runs it");
+		expect(partial.out).toContain("FRESH-GATE: VERDICT PARTIAL files=1 ran=1 deferred=tests/cli/mod.test.ts,tests/cli/mod2.test.ts: CI runs the deferred files");
+		delete fx.env.FRESH_GATE_TEST_BUDGET_SECS;
+		const full = runFocused(fx, source, archive, "lib/mod.ts");
+		expect(full.out).toContain("FRESH-GATE: VERDICT TESTED files=3 ran=3");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
