@@ -18,6 +18,10 @@ export const DEFAULT_ENCODINGS = ["raw", "json"] as const;
 const NEAR_MISS_RATIO = 2.6;
 const NEAR_MISS_FLOOR_MS = 5;
 const STREAM_BUDGET_MS = 500;
+/** The write/edit live-stream fixture gets its own named budget, equal to the bash stream budget: file-write payloads deserve the same ceiling as streamed bash arguments. */
+export const WRITE_EDIT_STREAM_BUDGET_MS = 500;
+/** Committed write/edit live-stream fixture; non-authors replay the same bytes. A missing file fails the gate loudly instead of passing vacuously. */
+export const DEFAULT_WRITE_EDIT_STREAM_FILE = path.join(KIT, "scripts/fixtures/rx-write-edit-stream.md");
 /** A single 16k near-miss check may not exceed a tenth of the whole stream budget (also 10x the noise floor): flat catastrophics fail here even when their growth ratio looks innocent. */
 export const SINGLE_CHECK_CEILING_MS = STREAM_BUDGET_MS / 10;
 const GATE_DEADLINE_MS = 57_000;
@@ -43,6 +47,7 @@ type WorkerRequest = {
 	shapes: Shape[];
 	encodings: Encoding[];
 	streamWire?: string;
+	writeEditWire?: string;
 	ompSource: string;
 };
 export type ProbeSample = {
@@ -65,6 +70,10 @@ export type ConditionMeasurement = {
 	sample_stream_ms?: number[];
 	sample_stream_load1?: number[];
 	stream_deltas?: number;
+	write_edit_ms?: number;
+	sample_write_edit_ms?: number[];
+	sample_write_edit_load1?: number[];
+	write_edit_deltas?: number;
 	failures: MeasurementFailure[];
 };
 export type MeasureOptions = {
@@ -72,6 +81,7 @@ export type MeasureOptions = {
 	shapes?: readonly Shape[];
 	encodings?: readonly Encoding[];
 	streamWire?: string;
+	writeEditWire?: string;
 	workerTimeoutMs?: number;
 };
 
@@ -270,6 +280,21 @@ function measureRegex(re: RegExp, input: string): { ms: number; matched: boolean
 	return { ms: performance.now() - start, matched };
 }
 
+/** Test every 16-byte accumulated prefix of a live-stream wire: the same sweep for the bash stream and the write/edit stream. */
+function measureStreamWire(re: RegExp, wire: string): { ms: number; deltas: number } {
+	const start = performance.now();
+	let deltas = 0;
+	for (let end = 16; end <= wire.length; end += 16) {
+		measureRegex(re, wire.slice(0, end));
+		deltas++;
+	}
+	if (wire.length % 16 !== 0) {
+		measureRegex(re, wire);
+		deltas++;
+	}
+	return { ms: performance.now() - start, deltas };
+}
+
 async function workerMain(): Promise<void> {
 	const payloadIndex = process.argv.indexOf("--regex-budget-worker") + 1;
 	try {
@@ -298,31 +323,33 @@ async function workerMain(): Promise<void> {
 				process.stdout.write(JSON.stringify({ type: "sample", sample }) + "\n");
 			}
 		}
-		let streamMs: number | undefined;
-		let streamLoad1: number | undefined;
-		let streamDeltas: number | undefined;
-		if (request.streamWire !== undefined) {
-			process.stderr.write("RX_BUDGET_STREAM_START\n");
-			streamLoad1 = loadavg()[0] ?? Number.NaN;
-			const start = performance.now();
-			streamDeltas = 0;
-			for (let end = 16; end <= request.streamWire.length; end += 16) {
-				measureRegex(re, request.streamWire.slice(0, end));
-				streamDeltas++;
-			}
-			if (request.streamWire.length % 16 !== 0) {
-				measureRegex(re, request.streamWire);
-				streamDeltas++;
-			}
-			streamMs = performance.now() - start;
-		}
-		process.stdout.write(JSON.stringify({ type: "complete", streamMs, streamLoad1, streamDeltas }) + "\n");
+	let streamMs: number | undefined;
+	let streamLoad1: number | undefined;
+	let streamDeltas: number | undefined;
+	let writeEditMs: number | undefined;
+	let writeEditLoad1: number | undefined;
+	let writeEditDeltas: number | undefined;
+	if (request.streamWire !== undefined) {
+		process.stderr.write("RX_BUDGET_STREAM_START\n");
+		streamLoad1 = loadavg()[0] ?? Number.NaN;
+		const sweep = measureStreamWire(re, request.streamWire);
+		streamMs = sweep.ms;
+		streamDeltas = sweep.deltas;
+	}
+	if (request.writeEditWire !== undefined) {
+		process.stderr.write("RX_BUDGET_STREAM_START\n");
+		writeEditLoad1 = loadavg()[0] ?? Number.NaN;
+		const sweep = measureStreamWire(re, request.writeEditWire);
+		writeEditMs = sweep.ms;
+		writeEditDeltas = sweep.deltas;
+	}
+	process.stdout.write(JSON.stringify({ type: "complete", streamMs, streamLoad1, streamDeltas, writeEditMs, writeEditLoad1, writeEditDeltas }) + "\n");
 	} catch (error) {
 		process.stdout.write(JSON.stringify({ type: "error", error: String(error) }) + "\n");
 	}
 }
 
-type WorkerSummary = { samples: WorkerSample[]; complete: boolean; streamMs?: number; streamLoad1?: number; streamDeltas?: number; error?: string };
+type WorkerSummary = { samples: WorkerSample[]; complete: boolean; streamMs?: number; streamLoad1?: number; streamDeltas?: number; writeEditMs?: number; writeEditLoad1?: number; writeEditDeltas?: number; error?: string };
 
 function parseWorkerOutput(stdout: string): WorkerSummary {
 	const summary: WorkerSummary = { samples: [], complete: false };
@@ -331,11 +358,14 @@ function parseWorkerOutput(stdout: string): WorkerSummary {
 			const event = JSON.parse(line) as Record<string, unknown>;
 			if (event.type === "sample" && event.sample && typeof event.sample === "object") summary.samples.push(event.sample as WorkerSample);
 			else if (event.type === "complete") {
-				summary.complete = true;
-				if (typeof event.streamMs === "number") summary.streamMs = event.streamMs;
-				if (typeof event.streamLoad1 === "number") summary.streamLoad1 = event.streamLoad1;
-				if (typeof event.streamDeltas === "number") summary.streamDeltas = event.streamDeltas;
-			} else if (event.type === "error") summary.error = String(event.error ?? "worker error");
+			summary.complete = true;
+			if (typeof event.streamMs === "number") summary.streamMs = event.streamMs;
+			if (typeof event.streamLoad1 === "number") summary.streamLoad1 = event.streamLoad1;
+			if (typeof event.streamDeltas === "number") summary.streamDeltas = event.streamDeltas;
+			if (typeof event.writeEditMs === "number") summary.writeEditMs = event.writeEditMs;
+			if (typeof event.writeEditLoad1 === "number") summary.writeEditLoad1 = event.writeEditLoad1;
+			if (typeof event.writeEditDeltas === "number") summary.writeEditDeltas = event.writeEditDeltas;
+		} else if (event.type === "error") summary.error = String(event.error ?? "worker error");
 		} catch { /* Ignore non-JSON diagnostics; retain completed sample events. */ }
 	}
 	return summary;
@@ -383,6 +413,20 @@ function appliesToBashStream(scope: readonly string[] | undefined): boolean {
 	return !scope?.length || scope.includes("tool:bash");
 }
 
+/** The write/edit stream fixture represents file-write content; bash-only rules do not run on it. */
+export function appliesToWriteEditStream(scope: readonly string[] | undefined): boolean {
+	return !!scope?.some(token => token.startsWith("tool:write(") || token.startsWith("tool:edit("));
+}
+
+export function failsWriteEditStreamBudget(totalMs: number): boolean {
+	return !Number.isFinite(totalMs) || totalMs > WRITE_EDIT_STREAM_BUDGET_MS;
+}
+
+/** Encode file-write content as the write/edit live-stream wire: a synthetic write/edit tool-call payload swept in 16-byte prefixes, like the bash stream wire. */
+export function buildWriteEditWire(content: string): string {
+	return JSON.stringify({ path: "src/rx-write-edit-probe.ts", content });
+}
+
 export async function measureCondition(input: {
 	rule: string;
 	conditionIndex: number;
@@ -399,6 +443,7 @@ export async function measureCondition(input: {
 		shapes: [...(input.shapes ?? DEFAULT_SHAPES)],
 		encodings: [...(input.encodings ?? DEFAULT_ENCODINGS)],
 		...(input.streamWire === undefined || !appliesToBashStream(input.scope) ? {} : { streamWire: input.streamWire }),
+		...(input.writeEditWire === undefined || !appliesToWriteEditStream(input.scope) ? {} : { writeEditWire: input.writeEditWire }),
 		ompSource: OMP_SRC,
 	};
 	const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
@@ -457,10 +502,25 @@ export async function measureCondition(input: {
 		...(typeof result.streamMs === "number" ? { stream_ms: result.streamMs, sample_stream_ms: [result.streamMs] } : {}),
 		...(typeof result.streamLoad1 === "number" ? { sample_stream_load1: [result.streamLoad1] } : {}),
 		...(typeof result.streamDeltas === "number" ? { stream_deltas: result.streamDeltas } : {}),
+		...(typeof result.writeEditMs === "number" ? { write_edit_ms: result.writeEditMs, sample_write_edit_ms: [result.writeEditMs] } : {}),
+		...(typeof result.writeEditLoad1 === "number" ? { sample_write_edit_load1: [result.writeEditLoad1] } : {}),
+		...(typeof result.writeEditDeltas === "number" ? { write_edit_deltas: result.writeEditDeltas } : {}),
 		failures,
 	};
 }
 
+type StreamSection = {
+	complete: boolean;
+	file: string;
+	wire_bytes: number;
+	chunk_bytes: number;
+	deltas: number;
+	total_ms: number;
+	budget_ms: number;
+	sample_total_ms: number[];
+	sample_load1: number[];
+	by_rule: Array<{ rule: string; condition_index: number; ms: number; sample_ms: number[]; sample_load1: number[] }>;
+};
 type GateReport = {
 	status: "PASS" | "FAIL";
 	timing_samples: number;
@@ -469,24 +529,14 @@ type GateReport = {
 	load_average_after: number[];
 	rules_loaded: number;
 	conditions_measured: number;
-	stream: {
-		complete: boolean;
-		file: string;
-		wire_bytes: number;
-		chunk_bytes: number;
-		deltas: number;
-		total_ms: number;
-		budget_ms: number;
-		sample_total_ms: number[];
-		sample_load1: number[];
-		by_rule: Array<{ rule: string; condition_index: number; ms: number; sample_ms: number[]; sample_load1: number[] }>;
-	};
+	stream: StreamSection;
+	write_edit: StreamSection;
 	measurements: ConditionMeasurement[];
 	lint_violations: Array<{ rule: string; condition_index: number; code: string; pattern: string }>;
 	gate_elapsed_ms: number;
 };
 
-async function runGateSample(rulesDir: string, streamFile: string): Promise<GateReport> {
+async function runGateSample(rulesDir: string, streamFile: string, writeEditStreamFile: string = DEFAULT_WRITE_EDIT_STREAM_FILE): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
@@ -500,6 +550,8 @@ async function runGateSample(rulesDir: string, streamFile: string): Promise<Gate
 	}
 	const command = readFileSync(streamFile, "utf8");
 	const streamWire = JSON.stringify({ command });
+	const writeEditContent = readFileSync(writeEditStreamFile, "utf8");
+	const writeEditWire = buildWriteEditWire(writeEditContent);
 	const measurements: ConditionMeasurement[] = [];
 	for (const condition of rules) {
 		const remaining = deadline - Date.now();
@@ -513,6 +565,7 @@ async function runGateSample(rulesDir: string, streamFile: string): Promise<Gate
 			pattern: condition.pattern,
 			scope: condition.scope,
 			streamWire,
+			writeEditWire,
 			workerTimeoutMs: Math.min(DEFAULT_WORKER_TIMEOUT_MS, remaining - 500),
 		}));
 	}
@@ -526,7 +579,17 @@ async function runGateSample(rulesDir: string, streamFile: string): Promise<Gate
 	const streamTotal = byRule.reduce((sum, item) => sum + item.ms, 0);
 	const streamConditions = rules.filter(condition => appliesToBashStream(condition.scope)).length;
 	const streamComplete = byRule.length === streamConditions;
-	const failed = rules.length === 0 || !streamComplete || lintViolations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(streamTotal);
+	const writeEditByRule = measurements.filter(measurement => typeof measurement.write_edit_ms === "number").map(measurement => ({
+		rule: measurement.rule,
+		condition_index: measurement.condition_index,
+		ms: measurement.write_edit_ms!,
+		sample_ms: measurement.sample_write_edit_ms ?? [],
+		sample_load1: measurement.sample_write_edit_load1 ?? [],
+	}));
+	const writeEditTotal = writeEditByRule.reduce((sum, item) => sum + item.ms, 0);
+	const writeEditConditions = rules.filter(condition => appliesToWriteEditStream(condition.scope)).length;
+	const writeEditComplete = writeEditByRule.length === writeEditConditions;
+	const failed = rules.length === 0 || !streamComplete || !writeEditComplete || lintViolations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(streamTotal) || failsWriteEditStreamBudget(writeEditTotal);
 	const after = loadavg();
 	return {
 		status: failed ? "FAIL" : "PASS",
@@ -547,6 +610,18 @@ async function runGateSample(rulesDir: string, streamFile: string): Promise<Gate
 			sample_total_ms: [streamTotal],
 			sample_load1: [before[0] ?? Number.NaN],
 			by_rule: byRule.sort((left, right) => right.ms - left.ms),
+		},
+		write_edit: {
+			complete: writeEditComplete,
+			file: writeEditStreamFile,
+			wire_bytes: Buffer.byteLength(writeEditWire, "utf8"),
+			chunk_bytes: 16,
+			deltas: writeEditByRule.length ? (measurements.find(measurement => measurement.write_edit_deltas !== undefined)?.write_edit_deltas ?? 0) : 0,
+			total_ms: writeEditTotal,
+			budget_ms: WRITE_EDIT_STREAM_BUDGET_MS,
+			sample_total_ms: [writeEditTotal],
+			sample_load1: [before[0] ?? Number.NaN],
+			by_rule: writeEditByRule.sort((left, right) => right.ms - left.ms),
 		},
 		measurements,
 		lint_violations: lintViolations,
@@ -613,6 +688,14 @@ function summarizeRepeatedReports(reports: readonly GateReport[]): GateReport {
 			merged.stream_ms = medianMs(sample_stream_ms);
 			merged.stream_deltas = firstMeasurement.stream_deltas;
 		}
+		const writeEditRuns = repeated.map(measurement => measurement?.sample_write_edit_ms?.[0] ?? measurement?.write_edit_ms);
+		if (writeEditRuns.some(value => typeof value === "number")) {
+			const sample_write_edit_ms = writeEditRuns.map(value => value ?? Number.POSITIVE_INFINITY);
+			merged.sample_write_edit_ms = sample_write_edit_ms;
+			merged.sample_write_edit_load1 = repeated.map(measurement => measurement?.sample_write_edit_load1?.[0] ?? Number.NaN);
+			merged.write_edit_ms = medianMs(sample_write_edit_ms);
+			merged.write_edit_deltas = firstMeasurement.write_edit_deltas;
+		}
 		return merged;
 	});
 	const sample_total_ms = reports.map(report => report.stream.total_ms);
@@ -626,7 +709,18 @@ function summarizeRepeatedReports(reports: readonly GateReport[]): GateReport {
 		sample_ms: measurement.sample_stream_ms ?? [],
 		sample_load1: measurement.sample_stream_load1 ?? [],
 	})).sort((left, right) => right.ms - left.ms);
-	const failed = first.rules_loaded === 0 || !streamComplete || first.lint_violations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(total_ms);
+	const write_edit_sample_total_ms = reports.map(report => report.write_edit.total_ms);
+	const write_edit_sample_load1 = reports.map(report => report.write_edit.sample_load1[0] ?? report.load_average_before[0] ?? Number.NaN);
+	const write_edit_total_ms = medianMs(write_edit_sample_total_ms);
+	const writeEditComplete = reports.every(report => report.write_edit.complete);
+	const writeEditByRule = measurements.filter(measurement => typeof measurement.write_edit_ms === "number").map(measurement => ({
+		rule: measurement.rule,
+		condition_index: measurement.condition_index,
+		ms: measurement.write_edit_ms!,
+		sample_ms: measurement.sample_write_edit_ms ?? [],
+		sample_load1: measurement.sample_write_edit_load1 ?? [],
+	})).sort((left, right) => right.ms - left.ms);
+	const failed = first.rules_loaded === 0 || !streamComplete || !writeEditComplete || first.lint_violations.length > 0 || measurements.some(measurement => measurement.status !== "MEASURED" || measurement.failures.length > 0) || failsStreamBudget(total_ms) || failsWriteEditStreamBudget(write_edit_total_ms);
 	return {
 		...first,
 		status: failed ? "FAIL" : "PASS",
@@ -640,14 +734,22 @@ function summarizeRepeatedReports(reports: readonly GateReport[]): GateReport {
 			sample_load1,
 			by_rule: streamByRule,
 		},
+		write_edit: {
+			...first.write_edit,
+			complete: writeEditComplete,
+			total_ms: write_edit_total_ms,
+			sample_total_ms: write_edit_sample_total_ms,
+			sample_load1: write_edit_sample_load1,
+			by_rule: writeEditByRule,
+		},
 		measurements,
 	};
 }
 
 /** Run every case once per round so samples for each case are separated by a full pass over the others. */
-export async function runGate(rulesDir: string, streamFile: string): Promise<GateReport> {
+export async function runGate(rulesDir: string, streamFile: string, writeEditStreamFile: string = DEFAULT_WRITE_EDIT_STREAM_FILE): Promise<GateReport> {
 	const reports: GateReport[] = [];
-	for (let sample = 0; sample < TIMING_SAMPLE_COUNT; sample++) reports.push(await runGateSample(rulesDir, streamFile));
+	for (let sample = 0; sample < TIMING_SAMPLE_COUNT; sample++) reports.push(await runGateSample(rulesDir, streamFile, writeEditStreamFile));
 	return summarizeRepeatedReports(reports);
 }
 
@@ -696,6 +798,13 @@ function printReport(report: GateReport): void {
 		const samples = item.sample_ms.map((ms, index) => ms.toFixed(1) + "ms@load1=" + (item.sample_load1[index]?.toFixed(2) ?? "unknown"));
 		console.log("stream " + item.rule + "#" + item.condition_index + " | median=" + item.ms.toFixed(1) + "ms samples=[" + samples.join(", ") + "]");
 	}
+	const writeEditStatus = !report.write_edit.complete ? "INCOMPLETE" : failsWriteEditStreamBudget(report.write_edit.total_ms) ? "FAIL" : "PASS";
+	const writeEditSamples = report.write_edit.sample_total_ms.map((ms, index) => ms.toFixed(1) + "ms@load1=" + (report.write_edit.sample_load1[index]?.toFixed(2) ?? "unknown"));
+	console.log("write/edit stream: " + writeEditStatus + " file=" + report.write_edit.file + " wire=" + report.write_edit.wire_bytes + "B chunk=" + report.write_edit.chunk_bytes + "B deltas/condition=" + report.write_edit.deltas + " median=" + report.write_edit.total_ms.toFixed(1) + "ms / " + report.write_edit.budget_ms + "ms samples=[" + writeEditSamples.join(", ") + "]");
+	for (const item of report.write_edit.by_rule.slice(0, 8)) {
+		const samples = item.sample_ms.map((ms, index) => ms.toFixed(1) + "ms@load1=" + (item.sample_load1[index]?.toFixed(2) ?? "unknown"));
+		console.log("write/edit stream " + item.rule + "#" + item.condition_index + " | median=" + item.ms.toFixed(1) + "ms samples=[" + samples.join(", ") + "]");
+	}
 	console.log("JSON_REPORT=" + JSON.stringify(report));
 	console.log("Scope: measured shapes and this Bun/JSC runtime only; no universal regex-safety claim.");
 }
@@ -706,13 +815,16 @@ if (process.argv.includes("--regex-budget-worker")) {
 	const args = process.argv.slice(2);
 	const rulesIndex = args.indexOf("--rules");
 	const streamIndex = args.indexOf("--stream");
+	const writeEditIndex = args.indexOf("--write-edit-stream");
 	const rulesPath = rulesIndex < 0 ? path.join(KIT, "rules") : args[rulesIndex + 1];
 	const streamPath = streamIndex < 0 ? path.join(KIT, "scripts/e2e-live.sh") : args[streamIndex + 1];
-	if (!rulesPath || !streamPath || rulesPath.startsWith("--") || streamPath.startsWith("--")) throw new Error("--rules and --stream require a path");
+	const writeEditPath = writeEditIndex < 0 ? DEFAULT_WRITE_EDIT_STREAM_FILE : args[writeEditIndex + 1];
+	if (!rulesPath || !streamPath || !writeEditPath || rulesPath.startsWith("--") || streamPath.startsWith("--") || writeEditPath.startsWith("--")) throw new Error("--rules, --stream, and --write-edit-stream require a path");
 	const rulesDir = path.resolve(rulesPath);
 	const streamFile = path.resolve(streamPath);
+	const writeEditStreamFile = path.resolve(writeEditPath);
 	try {
-		const report = await runGate(rulesDir, streamFile);
+		const report = await runGate(rulesDir, streamFile, writeEditStreamFile);
 		printReport(report);
 		process.exitCode = report.status === "PASS" ? 0 : 1;
 	} catch (error) {

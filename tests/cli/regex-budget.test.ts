@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadRuleFile } from "../../scripts/rule-class.ts";
-import { failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, lintCondition, literalProbe, medianMs, measureCondition, runGate } from "../../scripts/regex-budget.ts";
+import { OMP_SRC, loadRuleFile } from "../../scripts/rule-class.ts";
+import { DEFAULT_ENCODINGS, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, lintCondition, literalProbe, medianMs, measureCondition, runGate } from "../../scripts/regex-budget.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -15,6 +15,16 @@ function fixtureRule(name: string, condition: string): { dir: string; name: stri
 	writeFileSync(file, "---\ncondition: " + JSON.stringify(condition) + "\nscope: tool:bash\ninterruptMode: never\n---\nfixture rule\n");
 	const loaded = loadRuleFile(file);
 	return { dir, name: loaded.name, pattern: loaded.rule.condition?.[0] ?? "" };
+}
+
+/** Copy a real repo rule into an owned temp dir so the test replays its own fixture, never the live rules tree. */
+function fixtureRuleCopy(fileName: string, source: string): { dir: string; name: string; pattern: string; scope: readonly string[] } {
+	mkdirSync(scratchRoot, { recursive: true });
+	const dir = mkdtempSync(join(scratchRoot, "regex-budget-test-"));
+	writeFileSync(join(dir, ".owner"), "pid=" + process.pid + "\nlabel=regex-budget-test\nrepo=" + root + "\ncreated=" + new Date().toISOString() + "\n");
+	copyFileSync(join(root, source), join(dir, fileName + ".md"));
+	const loaded = loadRuleFile(join(dir, fileName + ".md"));
+	return { dir, name: loaded.name, pattern: loaded.rule.condition?.[0] ?? "", scope: loaded.rule.scope ?? [] };
 }
 
 const cleanup = (dir: string) => { if (dir) rmSync(dir, { recursive: true, force: true }); };
@@ -233,5 +243,92 @@ test("median of five (a+)+b timings still fails the single-check ceiling widely"
 		const medians = [0, 1, 2].map(size => medianMs(repeatedMs.map(sample => sample[size] ?? Number.POSITIVE_INFINITY)));
 		expect(failsSingleCheckCeiling(medians)).toBe(true);
 		expect(medians[2]).toBeGreaterThan(100);
+	} finally { cleanup(fixture.dir); }
+});
+
+test("write/edit budget names the same 500ms ceiling as the bash stream", () => {
+	expect(WRITE_EDIT_STREAM_BUDGET_MS).toBe(500);
+	expect(failsWriteEditStreamBudget(500)).toBe(false);
+	expect(failsWriteEditStreamBudget(500.1)).toBe(true);
+	expect(failsWriteEditStreamBudget(Number.POSITIVE_INFINITY)).toBe(true);
+});
+
+test("write/edit stream gives a path-scoped rule a nonzero measured budget with the bash checklist", async () => {
+	const fixture = fixtureRuleCopy("fixture-rx-write-edit", "rules/kit-regex-engineering.md");
+	const fixtureText = readFileSync(DEFAULT_WRITE_EDIT_STREAM_FILE, "utf8");
+	try {
+		expect(fixture.scope.some(token => token.startsWith("tool:write(") || token.startsWith("tool:edit("))).toBe(true);
+		expect(appliesToWriteEditStream(fixture.scope)).toBe(true);
+		// OMP_SRC resolves from the installed build at runtime, so no static import can name it.
+		const ruleModule = await import(join(OMP_SRC, "capability/rule.ts"));
+		const compileRuleCondition = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
+		const re = compileRuleCondition(fixture.pattern);
+		const lines = fixtureText.split("\n");
+		const matches = lines.filter(line => line.startsWith("RX-MATCH:"));
+		const rejects = lines.filter(line => line.startsWith("RX-NOMATCH:"));
+		const nearMiss = lines.filter(line => line.startsWith("RX-NEARMISS:"));
+		expect(matches.length).toBeGreaterThan(0);
+		expect(rejects.length).toBeGreaterThan(0);
+		expect(nearMiss.length).toBeGreaterThan(0);
+		for (const line of matches) expect(re.test(line)).toBe(true);
+		for (const line of rejects) expect(re.test(line)).toBe(false);
+		for (const line of nearMiss) {
+			const start = performance.now();
+			expect(re.test(line)).toBe(false);
+			expect(failsSingleCheckCeiling([0, 0, performance.now() - start])).toBe(false);
+		}
+		const result = await measureCondition({
+			rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: fixture.scope,
+			writeEditWire: buildWriteEditWire(fixtureText), workerTimeoutMs: 20_000,
+		});
+		expect(result.status).toBe("MEASURED");
+		expect(result.failures).toEqual([]);
+		expect(typeof result.write_edit_ms).toBe("number");
+		expect(result.write_edit_ms!).toBeGreaterThan(0);
+		expect(result.write_edit_deltas).toBeGreaterThan(0);
+		expect(result.stream_ms).toBeUndefined();
+		expect(result.samples.length).toBe(DEFAULT_SHAPES.length * DEFAULT_ENCODINGS.length);
+		for (const sample of result.samples) expect(sample.ms).toHaveLength(DEFAULT_SIZES.length);
+	} finally { cleanup(fixture.dir); }
+});
+
+test("paired control: bash-stream wiring is unchanged by the write/edit stream", async () => {
+	const fixture = fixtureRule("fixture-paired-bash", "^a+b$");
+	const streamFile = join(fixture.dir, "stream.sh");
+	writeFileSync(streamFile, "echo a\n");
+	try {
+		const bashOnly = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], streamWire: "x".repeat(33), workerTimeoutMs: 10_000 });
+		expect(typeof bashOnly.stream_ms).toBe("number");
+		expect(bashOnly.write_edit_ms).toBeUndefined();
+		const withBothWires = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], streamWire: "x".repeat(33), writeEditWire: buildWriteEditWire("calm prose"), workerTimeoutMs: 10_000 });
+		expect(typeof withBothWires.stream_ms).toBe("number");
+		expect(withBothWires.write_edit_ms).toBeUndefined();
+		expect(withBothWires.stream_deltas).toBe(bashOnly.stream_deltas);
+		const report = await runGate(fixture.dir, streamFile);
+		expect(report.status).toBe("PASS");
+		expect(report.stream.complete).toBe(true);
+		expect(report.stream.by_rule).toHaveLength(1);
+		expect(report.write_edit.complete).toBe(true);
+		expect(report.write_edit.total_ms).toBe(0);
+		expect(report.write_edit.by_rule).toEqual([]);
+	} finally { cleanup(fixture.dir); }
+});
+
+test("mutant without the write/edit wiring measures a vacuous zero budget", async () => {
+	const fixture = fixtureRuleCopy("fixture-rx-nowire", "rules/kit-regex-engineering.md");
+	try {
+		const result = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: fixture.scope, streamWire: "x".repeat(33), workerTimeoutMs: 20_000 });
+		expect(result.status).toBe("MEASURED");
+		expect(result.stream_ms).toBeUndefined();
+		expect(result.write_edit_ms).toBeUndefined();
+	} finally { cleanup(fixture.dir); }
+});
+
+test("mutant with a deleted write/edit fixture fails closed instead of passing vacuously", async () => {
+	const fixture = fixtureRule("fixture-rx-missing", "^a+b$");
+	const streamFile = join(fixture.dir, "stream.sh");
+	writeFileSync(streamFile, "echo a\n");
+	try {
+		await expect(runGate(fixture.dir, streamFile, join(fixture.dir, "missing-write-edit.md"))).rejects.toThrow();
 	} finally { cleanup(fixture.dir); }
 });
