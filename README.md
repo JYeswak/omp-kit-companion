@@ -12,7 +12,7 @@
 
 </div>
 
-A tested rule pack, six guard extensions, four skills, and a guarded CLI for
+A tested rule pack, six guard extensions, five skills, and a guarded CLI for
 an existing OMP install.
 
 ```sh
@@ -171,7 +171,7 @@ omp-kit apply extensions --apply --yes --profiles all
 
 ### Skills
 
-`skills/` ships four OMP skills:
+`skills/` ships five OMP skills:
 
 - **omp-native:** use native OMP tooling first: `omp ttsr list/test/scan`,
   plugin links, and read-only settings.
