@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Selftest for fleet_restart.py: every gate must fire on a planted negative
-and pass its paired control. Run: python3 scripts/selftest.py (exit 0 = all
-gates bite). Planted negatives come from the 2026-10-11 fleet restart:
-busy pane, flags rebuilt from the screen, missing TMUX env, Sonnet pane
-missed by a model-name regex, plugin links left on the old release (RELINK1,
-ompkit-fp72.18), send without operator approval, /private/tmp cwd."""
+and pass its paired control. Run from this directory: python3 selftest.py
+(requires an owned repo var/agent-tmp TMPDIR). Planted negatives include busy panes, dropped flags,
+missing TMUX env, stale plugin links, unsafe sends and advisor loss."""
 import json
 import os
 import subprocess
@@ -108,11 +106,19 @@ def fake_home(root, link_version, release_version):
 
 
 def main():
-    # Never inherit TMPDIR. A restart run sets it inside a repo, and a temp dir
-    # there makes repo_root climb into that repo and the preserve gate fails.
-    base = os.path.join(os.path.expanduser("~"), ".local", "state", "omp-kit", "fleet-restart-selftest")
-    os.makedirs(base, exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix="fleet-restart-selftest.", dir=base)
+    # Scratch is explicit and must already be owned by this run; never fall
+    # back to Python's system temp directory or create an unmanaged root.
+    base = os.path.abspath(os.environ.get("TMPDIR", ""))
+    marker = os.sep + "var" + os.sep + "agent-tmp" + os.sep
+    if (not base or os.path.realpath(base) != base or marker not in base + os.sep
+            or not os.path.isdir(base) or not os.path.isfile(os.path.join(base, ".owner"))):
+        print("TMPDIR must be an owned repo var/agent-tmp directory", file=sys.stderr)
+        return 2
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(base)))
+    tmp = tempfile.mkdtemp(prefix="fleet-restart-selftest.%d." % os.getpid(), dir=base)
+    with open(os.path.join(tmp, ".owner"), "w") as owner:
+        owner.write("pid=%s\nlabel=fleet-restart-selftest\nrepo=%s\ncreated=%s\n" %
+                    (os.getpid(), repo_root, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
     uid = os.getuid()
 
     # --- missing TMUX env (ntm send then fails "no tmux sessions running")
@@ -307,6 +313,33 @@ def main():
     case("NEG staged message edited after approval -> refused, not sent",
          by.get("modeltest:0.1") == "REFUSED_FILE_CHANGED_AFTER_APPROVAL" and all("--panes=%55" not in a for a, _ in calls), json.dumps(by))
     case("CTL unchanged staged worker message sent via --file", by.get("uds--burn-down:0.1") == "SENT" and calls and "--file" in calls[-1][0], json.dumps(by))
+    target = "/Tern/omp/versions/18.10.4"
+    shell = fr.derive_pane_state("ntm", "jev:0.1", "%1", None, "/bin/zsh", target, "", [])
+    case("NEG pane shell txt is not an agent state", shell["state"] == "NO_OMP" and shell["action"] == "SKIP_SHELL" and shell["exe"] == "/bin/zsh")
+    worker = fr.herdr_agent({"foreground_processes": [{"pid": 1, "argv": ["/Tern/omp/versions/18.9.2", "__omp_worker_mnemopi_embed"]}]})
+    case("NEG __omp_worker is not the herdr agent", worker is None)
+    omp = fr.herdr_agent({"foreground_processes": [
+        {"pid": 1, "argv": ["/Tern/omp/versions/18.9.2", "__omp_worker_mnemopi_embed"]},
+        {"pid": 2, "argv": ["omp", "--profile", "muse"]}]})
+    case("CTL herdr omp child is the agent, worker ignored", omp["pid"] == 2 and "--profile" in omp["flags"] and "muse" in omp["flags"])
+    stale = fr.derive_pane_state("herdr", "w2:p1", "w2:p1", 2, "/Tern/omp/versions/18.9.2", target, "w4:p1", ["--profile", "muse"], "idle")
+    case("NEG different executable is RESPAWN, not RESTART", stale["surface"] == "herdr" and stale["state"] == "STALE" and stale["action"] == "RESPAWN")
+    current = fr.derive_pane_state("ntm", "jev:0.1", "%1", 9, target, target, "w4:p1", ["--profile", "codex"])
+    case("CTL same executable on ntm is CURRENT", current["state"] == "CURRENT" and current["action"] == "CURRENT" and current["surface"] == "ntm")
+    chief = fr.derive_pane_state("herdr", "w4:p1", "w4:p1", 9, target, target, ["w4:p1"], ["--profile", "grok"])
+    case("CTL chief stays SKIP_CHIEF when already on the target", chief["action"] == "SKIP_CHIEF" and chief["state"] == "CURRENT")
+    both = fr.herdr_states_from(
+        [{"pane_id": "w2:p1", "agent_status": "idle", "agent_session": {"value": "/s.jsonl"}}],
+        {"w2:p1": {"foreground_processes": [{"pid": 2, "argv": ["omp", "--resume=/s.jsonl"]}]}},
+        lambda pid: "/Tern/omp/versions/18.9.2", target, "w4:p1")
+    case("CTL herdr derivation keeps the session file and marks a stale build RESPAWN",
+         both[0]["session_file"] == "/s.jsonl" and both[0]["action"] == "RESPAWN" and both[0]["surface"] == "herdr")
+    argv_resume = fr.herdr_states_from(
+        [{"pane_id": "w2:p1", "agent_status": "idle"}],
+        {"w2:p1": {"foreground_processes": [{"pid": 2, "argv": ["omp", "--profile", "muse", "--resume", "/s.jsonl"]}]}},
+        lambda pid: target, target, "w4:p1")
+    case("CTL herdr session file comes from argv when agent_session is empty",
+         argv_resume[0]["session_file"] == "/s.jsonl" and argv_resume[0]["action"] == "CURRENT")
 
     import selftest_run  # noqa: E402  (watchers, save, advisor, respawn, autonomous run gates)
     selftest_run.gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE)

@@ -78,24 +78,29 @@ def live_ctx(env, home, releases, version=None, agents_dir=None, registry_path=f
         lines = p.stdout.strip().splitlines()
         return p.returncode == 0, lines[-1] if lines else "selftest printed nothing (rc %d)" % p.returncode
 
-    return Ctx(env=env, uid=os.getuid(), home=home, agents_dir=agents_dir or os.path.join(home, "Library", "LaunchAgents"),
-               registry=fw.load_registry(registry_path), run_fn=core.run, capture_fn=core.capture_live(env),
-               inventory_fn=lambda only=None: core.live_inventory(env, only=only), snapshot_fn=snapshot_fn,
-               lsof_fn=fr_save.lsof_live(core.run), align_fn=lambda: core.align_check(home, releases, version or core.kit_version()),
-               preflight_fn=preflight_fn, target_fn=lambda: fr_save.target_live(core.run),
-               parallel=True, releases=releases, version=version)
+    ctx = Ctx(env=env, uid=os.getuid(), home=home, agents_dir=agents_dir or os.path.join(home, "Library", "LaunchAgents"),
+              registry=fw.load_registry(registry_path), run_fn=core.run, capture_fn=core.capture_live(env),
+              inventory_fn=lambda only=None: core.live_inventory(env, only=only), snapshot_fn=snapshot_fn,
+              lsof_fn=fr_save.lsof_live(core.run), align_fn=lambda: core.align_check(home, releases, version or core.kit_version()),
+              preflight_fn=preflight_fn, target_fn=lambda: fr_save.target_live(core.run),
+              parallel=True, releases=releases, version=version)
+    ctx.herdr_fn = lambda target, chief: core.live_herdr_states(core.run, target, chief)
+    return ctx
 
 
 class Ledger:
     def __init__(self, path, clock):
         self.path, self.clock = path, clock
 
-    def add(self, event, **kw):
+    def add(self, event, durable=False, **kw):
+        row = dict({"schema_version": 1, "at": fw.iso(self.clock()), "event": event}, **kw)
         with open(self.path, "a") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
-                fh.write(json.dumps(dict({"at": fw.iso(self.clock()), "event": event}, **kw), ensure_ascii=False) + "\n")
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                 fh.flush()
+                if durable:
+                    os.fsync(fh.fileno())
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
@@ -127,6 +132,15 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
     save_doc["stage"] = "plan"
     write_json(os.path.join(run_dir, "save.json"), save_doc)
     target = ctx.target_fn()
+    herdr = {"ok": False, "why": "not collected", "rows": []}
+    herdr_fn = getattr(ctx, "herdr_fn", None)
+    if herdr_fn and target.get("ok"):
+        try:
+            herdr = herdr_fn(target.get("path"), chief)
+        except Exception as exc:
+            herdr = {"ok": False, "why": "herdr_fn: %s" % exc, "rows": []}
+    plan["herdr"] = herdr
+    write_json(os.path.join(run_dir, "plan.json"), plan)
     disc = fw.discover(ctx.agents_dir, ctx.registry, ctx.run_fn, ctx.uid)
     saved = {r["pane_id"]: r for r in save_doc["rows"]}
     rows, chief_cmd = [], None
@@ -175,7 +189,8 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
     man = {"kind": "run", "run_dir": os.path.abspath(run_dir), "created": core.now(), "snapshot_dir": os.path.abspath(snap_dir),
            "snapshot_at": inv.get("captured_at"), "chief": chief, "chief_respawn": chief_cmd, "protect": list(protect), "unprotect": list(unprotect),
            "only": list(only), "wave": wave, "busy_timeout_min": busy_timeout_min, "canary": int(canary), "strict_advisor": bool(strict_advisor),
-           "align": plan["align"], "target": target, "stages": STAGES, "rows": rows, "holds": holds, "refused": refused,
+           "align": plan["align"], "target": target, "herdr": plan.get("herdr") or {"ok": False, "why": "not collected", "rows": []},
+           "stages": STAGES, "rows": rows, "holds": holds, "refused": refused,
            "watchers": {"pause": disc["pause_plan"], "unclassified": [j for j in disc["jobs"] if j["status"] == "HOLD_UNCLASSIFIED"],
                         "unreadable": disc["unreadable"], "registered_missing": disc["registered_missing"], "deadman_left": disc["deadman_left"]},
            "counts": {"agent_panes": sum(1 for r in rows if r.get("omp_pid")), "advisor_on": sum(1 for r in rows if (r.get("advisor") or {}).get("on")),
@@ -233,10 +248,7 @@ def keys_row(r, text):
 
 
 def ledger_state(events):
-    """Per pane: sends, the last VERIFY (evidence only), and the VERDICT. Only a
-    VERDICT is terminal on --resume-run: it is written once, after the session and
-    version checks, so a crash between VERIFY and VERDICT re-verifies (no re-send).
-    CONTINUE_AFTER_BREAKER reopens only the HOLD_BREAKER verdicts."""
+    """Per pane: sends, verification, verdict, and advisor effect intent/receipt."""
     st = {}
     for e in events:
         if e["event"] == "CONTINUE_AFTER_BREAKER":
@@ -257,8 +269,13 @@ def ledger_state(events):
             s["verdict"] = e
         elif e["event"] == "SEND_LOST":
             s["send_lost"] = True
+        elif e["event"] == "ADVISOR_INTENT":
+            s["advisor_intent"] = e
+        elif e["event"] == "ADVISOR_SENT":
+            s["advisor_sent"] = e
         elif e["event"] == "ADVISOR":
             s["advisor"] = e["result"]
+            s["advisor_event"] = e
     return st
 
 
@@ -367,24 +384,45 @@ def poll_badge(ctx, pane_id, seconds):
         ctx.sleep(ctx.advisor_poll)
 
 
-def advisor_step(ctx, row, saved, approval, ledger, may_send=True):
-    """Advisor on before -> badge back after: wait a short grace (config/flag advisors,
-    and respawns launched with --advisor, come back by themselves), else exactly one
-    `/advisor on` (idempotent; bare `/advisor` toggles and is never sent), then poll.
-    `may_send` False (resume after a breaker stop): no send, ADVISOR_HELD_BREAKER."""
+def advisor_step(ctx, row, saved, approval, ledger, may_send=True, prior=None):
+    """Restore one saved advisor at most once and reconcile its badge on resume.
+
+    The fsynced ADVISOR_INTENT precedes the external send. If a restart happens
+    after that boundary but before a receipt/result row, resume observes the badge
+    and never repeats the ambiguous /advisor on effect.
+    """
     adv = saved.get("advisor") or {}
-    if not adv.get("on"):
-        result, sends = "ADVISOR_OFF", 0
+    prior = prior or {}
+    intent = prior.get("advisor_intent")
+    receipt = prior.get("advisor_sent")
+    attempted = bool(intent or receipt)
+    intent_id = (intent or receipt or {}).get("intent_id")
+    baseline = {
+        "badge_before": bool(adv.get("on")),
+        "source": adv.get("source"),
+        "config": adv.get("config"),
+        "watchdog_files": list(adv.get("watchdog_files") or []),
+    }
+    sends = 0
+    if not baseline["badge_before"]:
+        result = "ADVISOR_OFF"
     elif poll_badge(ctx, row["pane_id"], ctx.advisor_grace):
-        result, sends = "ADVISOR_KEPT", 0
+        result = "ADVISOR_RESTORED" if attempted else "ADVISOR_KEPT"
     elif not may_send:
-        result, sends = "ADVISOR_HELD_BREAKER", 0
+        result = "ADVISOR_HELD_BREAKER"
+    elif attempted:
+        result = "ADVISOR_RESTORED" if poll_badge(ctx, row["pane_id"], ctx.advisor_timeout) else "ADVISOR_FAILED"
     else:
+        intent_id = "%s|%s|advisor-on" % (os.path.abspath(ctx.run_dir or "."), row["pane_id"])
+        ledger.add("ADVISOR_INTENT", durable=True, pane=row["pane"], intent_id=intent_id,
+                   action="/advisor on", **baseline)
         sent = gated(ctx, keys_row(row, "/advisor on"), approval)
-        ledger.add("ADVISOR_SENT", pane=row["pane"], text="/advisor on", result=sent["result"])
+        ledger.add("ADVISOR_SENT", pane=row["pane"], intent_id=intent_id, text="/advisor on",
+                   result=sent.get("result"), rc=sent.get("rc"), argv=sent.get("argv"),
+                   output=str(sent.get("out") or "")[-300:])
         sends = 1
-        result = "ADVISOR_RESTORED" if sent["result"] == "SENT" and poll_badge(ctx, row["pane_id"], ctx.advisor_timeout) else "ADVISOR_FAILED"
-    ledger.add("ADVISOR", pane=row["pane"], result=result, source=adv.get("source"), sends=sends)
+        result = "ADVISOR_RESTORED" if sent.get("result") == "SENT" and poll_badge(ctx, row["pane_id"], ctx.advisor_timeout) else "ADVISOR_FAILED"
+    ledger.add("ADVISOR", pane=row["pane"], intent_id=intent_id, result=result, sends=sends, **baseline)
     return result
 
 
@@ -592,8 +630,8 @@ def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk
             if verdict.get("model_changed"):
                 res["model_changed"] = verdict["model_changed"]
             if verdict["result"] in ("VERIFIED", "SESSION_LOST", "VERSION_STALE"):
-                res["advisor"] = st["advisor"] if "advisor" in st else advisor_step(ctx, r, saved.get(r["pane_id"]) or {}, approval, ledger,
-                                                                                      may_send=brk["sends"])
+                res["advisor"] = st["advisor"] if "advisor" in st else advisor_step(
+                    ctx, r, saved.get(r["pane_id"]) or {}, approval, ledger, may_send=brk["sends"], prior=st)
             results[r["pane"]] = res
             continue
         if st.get("verify"):  # VERIFY written, crash before VERDICT: re-run the checks, never re-send
@@ -756,10 +794,21 @@ def build_report(run_dir, man, approval, save_doc, results, paused, resumed, dri
     plan_rows = {r["pane_id"]: r for r in man["rows"]}
     panes = [results[r["pane"]] for r in man["rows"] if r["pane"] in results]
     counts, advisor = {}, {}
+    advisor_evidence = []
     for p in panes:
         counts[p["result"]] = counts.get(p["result"], 0) + 1
         if p.get("advisor"):
             advisor[p["advisor"]] = advisor.get(p["advisor"], 0) + 1
+        baseline = (saved.get(p["pane_id"]) or {}).get("advisor") or {}
+        advisor_evidence.append({
+            "pane": p["pane"],
+            "pane_id": p["pane_id"],
+            "badge_before": bool(baseline.get("on")),
+            "source": baseline.get("source"),
+            "config": baseline.get("config"),
+            "watchdog_files": list(baseline.get("watchdog_files") or []),
+            "result": p.get("advisor"),
+        })
     fallback = []
     for p in panes:
         if p["result"] in FAILURES and p.get("mode") == "RESTART":
@@ -777,6 +826,7 @@ def build_report(run_dir, man, approval, save_doc, results, paused, resumed, dri
     rep = {"run_dir": os.path.abspath(run_dir), "manifest_sha256": man["manifest_sha256"], "approved_by": approval["approved_by"],
            "quote": approval["quote"], "resume_run": resume_run, "started": started, "finished": fw.iso(ctx.clock()), "error": error,
            "target": man["target"], "snapshot_dir": man["snapshot_dir"], "panes": panes, "counts": counts, "advisor": advisor,
+           "advisor_evidence": advisor_evidence,
            "failed": [p["pane"] for p in panes if failed(p)], "breaker": breaker, "warnings": warnings,
            "watchers": {"paused": [r for r in (paused or {}).get("rows", [])], "resume": resumed},
            "watchdog_drift": drift, "respawn_fallback": fallback, "scratch_held": scratch_held, "chief_respawn": man.get("chief_respawn")}
@@ -811,6 +861,12 @@ def render_report(rep):
                                              ", ".join("%s %d" % kv for kv in sorted(rep["advisor"].items())) or "none"),
             "Watchers resume: %s. WATCHDOG drift: %s." % (rep["watchers"]["resume"]["result"],
                                                           ", ".join("%s %s" % (d["status"], d["path"]) for d in rep["watchdog_drift"] if d["status"] != "SAME") or "none")]
+    if rep.get("advisor_evidence"):
+        out += ["", "## Advisor evidence", "", "| Pane | Before | Source | Pre-run WATCHDOG SHA-256 | Result |", "|---|---|---|---|---|"]
+        for e in rep["advisor_evidence"]:
+            hashes = "; ".join("%s#%s" % (f["path"], f.get("sha256") or "UNKNOWN") for f in e["watchdog_files"]) or "none"
+            out.append("| %s | %s | %s | %s | %s |" % (e["pane"], "on" if e["badge_before"] else "off",
+                                                       e["source"] or "UNKNOWN", hashes, e["result"] or "UNKNOWN"))
     if rep.get("warnings"):
         out += ["", "## Warnings (not failures)", ""] + ["- %s" % w for w in rep["warnings"]]
     out += ["", "| Pane | Mode | Result | Version | Session | Advisor | Why |", "|---|---|---|---|---|---|---|"]

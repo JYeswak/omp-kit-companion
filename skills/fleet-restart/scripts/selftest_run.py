@@ -123,6 +123,8 @@ class FakeFleet:
         return out
 
     def run(self, argv, env):
+        if argv and argv[0] == "git":
+            return 0, ""
         if argv[0] == "launchctl":
             return self.ld.handle(argv)
         if argv[0] == "ntm":
@@ -233,6 +235,100 @@ def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
     gate_respawn(case, tmp, uid, good_env, plan)
     gate_run(case, tmp, uid, good_env, aligned)
     gate_uxr3(case, tmp, plan, inventory, aligned)
+    gate_advisor_resume_crash(case, tmp, uid, good_env, aligned)
+
+def gate_advisor_resume_crash(case, tmp, uid, good_env, aligned):
+    """Crash after the advisor send returns, then prove resume reconciles once."""
+    root = os.path.join(tmp, "advisor-resume-crash")
+    os.makedirs(root, exist_ok=True)
+    home = fake_home(root)
+    agents = agents_fixture(root)
+    launchd = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    cwd = os.path.join(root, "runtime-pane")
+    os.makedirs(cwd, exist_ok=True)
+    os.makedirs(os.path.join(cwd, ".git"), exist_ok=True)
+    watchdog_user = os.path.join(fr_save.agent_dir(home, "claude"), "WATCHDOG.yml")
+    watchdog_project = os.path.join(cwd, "WATCHDOG.yaml")
+    with open(watchdog_user, "w") as fh:
+        fh.write("advisor: selftest-user\n")
+    with open(watchdog_project, "w") as fh:
+        fh.write("advisor: selftest-project\n")
+    pane = Pane("w:0.1", "%101", 101, cwd, advisor="runtime", flags="--profile claude")
+    fleet = FakeFleet([pane], launchd)
+    original_run = fleet.run
+
+    show_badge_after: dict[str, float] = {}
+
+    def delayed_advisor_run(argv, env):
+        out = original_run(argv, env)
+        if argv and argv[0] == "ntm" and argv[-1] == "/advisor on":
+            show_badge_after["at"] = fleet.t + 10
+        return out
+
+    original_capture = fleet.capture
+
+    def delayed_advisor_capture(pane_id):
+        screen = original_capture(pane_id)
+        due = show_badge_after.get("at")
+        if due is not None and fleet.t < due:
+            return [line.replace(" 👁", "") for line in screen]
+        return screen
+
+    ctx = ctx_for(fleet, home, agents, good_env, uid, aligned)
+    ctx.run_fn = delayed_advisor_run
+    ctx.capture_fn = delayed_advisor_capture
+    run_dir = os.path.join(root, "run")
+    fr_run.plan_run(run_dir, ctx, "%3", fr.DEFAULT_PROTECT, wave=1, busy_timeout_min=0, only=["w:0.1"])
+    approval = approve(run_dir)
+    original_add = fr_run.Ledger.add
+
+    class CrashAfterAdvisorReceipt(BaseException):
+        pass
+
+    def crash_before_advisor_result(ledger, event, **kw):
+        if event == "ADVISOR_SENT":
+            raise CrashAfterAdvisorReceipt()
+        return original_add(ledger, event, **kw)
+
+    fr_run.Ledger.add = crash_before_advisor_result
+    crashed = False
+    try:
+        fr_run.apply_run(run_dir, ctx, approval)
+    except CrashAfterAdvisorReceipt:
+        crashed = True
+    finally:
+        fr_run.Ledger.add = original_add
+
+    events = fr_run.Ledger(os.path.join(run_dir, fr_run.LEDGER), fleet.clock).events()
+    intents = [event for event in events if event["event"] == "ADVISOR_INTENT"]
+    receipts = [event for event in events if event["event"] == "ADVISOR_SENT"]
+    case("NEG crash after advisor send receipt preserves a durable intent before the result ledger",
+         crashed and len(intents) == 1 and not receipts and fleet.count("w:0.1", "/advisor on") == 1
+         and intents[0].get("source") == "runtime" and intents[0].get("badge_before") is True,
+         json.dumps({"crashed": crashed, "intent": intents, "receipts": receipts}))
+
+    save_doc = fw.read_json(os.path.join(run_dir, "save.json"))
+    saved_advisor = next(row["advisor"] for row in save_doc["rows"] if row["pane"] == "w:0.1")
+    expected_watchdogs = [
+        {"scope": "user", "path": watchdog_user, "sha256": fr_save.sha256_file(watchdog_user)},
+        {"scope": "project", "path": watchdog_project, "sha256": fr_save.sha256_file(watchdog_project)},
+    ]
+    case("CTL save.json exports pre-run runtime badge/source and exact WATCHDOG hashes",
+         saved_advisor.get("on") is True and saved_advisor.get("source") == "runtime"
+         and saved_advisor.get("watchdog_files") == expected_watchdogs, json.dumps(saved_advisor))
+
+    report, rc = fr_run.apply_run(run_dir, ctx, approval, resume_run=True)
+    exported = fw.read_json(os.path.join(run_dir, "report.json"))
+    evidence = next((row for row in exported.get("advisor_evidence", []) if row["pane"] == "w:0.1"), {})
+    case("CTL report.json exports advisor restoration with its pre-run source and hashes",
+         evidence.get("badge_before") is True and evidence.get("source") == "runtime"
+         and evidence.get("watchdog_files") == expected_watchdogs and evidence.get("result") == "ADVISOR_RESTORED"
+         and all(row["status"] == "SAME" for row in exported["watchdog_drift"]),
+         json.dumps({"evidence": evidence, "drift": exported.get("watchdog_drift")}))
+    case("CTL resume reconciles the delayed badge without a duplicate /advisor on",
+         rc == 0 and pane.badge and fleet.count("w:0.1", "/advisor on") == 1
+         and next((row.get("advisor") for row in report["panes"] if row["pane"] == "w:0.1"), None) == "ADVISOR_RESTORED",
+         json.dumps({"rc": rc, "sends": fleet.count("w:0.1", "/advisor on"), "panes": report.get("panes")}))
 
 
 # ---------- 1. check-env ----------
@@ -577,6 +673,7 @@ def gate_respawn(case, tmp, uid, good_env, plan):
 def fleet_fixture(root, ld):
     cwd = os.path.join(root, "w")
     os.makedirs(cwd, exist_ok=True)
+    os.makedirs(os.path.join(cwd, ".git"), exist_ok=True)
     panes = [Pane("w:0.1", "%101", 101, cwd, advisor="runtime"),
              Pane("w:0.2", "%102", 102, cwd),
              Pane("w:0.3", "%103", 103, cwd, advisor="config", flags="--profile cfgp"),

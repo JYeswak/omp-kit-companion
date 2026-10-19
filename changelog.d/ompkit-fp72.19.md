@@ -1,0 +1,6 @@
+### Added
+
+- `fleet-restart`: `fleet_restart.py states` classifies every ntm and herdr omp seat against the login-shell target from the omp child's running executable (the pane shell's zsh txt is never a state): `CURRENT`, `STALE` (respawn), `NO_OMP` (shell) or `UNKNOWN_EXE`, with the chief marked `SKIP_CHIEF`. The run manifest records the herdr seats too.
+- SKILL rules 17-19 from the 2026-10-14 restart: a pane already on the target build is not done until this run replaced its process or the approval named it for same-pid `/restart`; every leftover (stale seat, dead ntm mapping, skipped herdr pane, shell) is printed before any "fleet restarted" claim; old context on screen means the restart did not happen. Herdr relaunches use `send-text` then Enter, never `send-keys /exit`.
+- `fleet-restart`: the advisor restore writes an fsynced `ADVISOR_INTENT` with the pre-run badge, source and WATCHDOG hashes before `/advisor on`. A run that crashes after the send resumes without resending: it reports `ADVISOR_RESTORED` when the badge comes back, else `ADVISOR_FAILED`. `report.json`/`report.md` carry per-pane advisor evidence.
+- `fleet-restart`: `selftest.py` keeps its scratch in an owned repo `var/agent-tmp` TMPDIR and refuses (exit 2) without one, instead of writing under `~/.local/state`.

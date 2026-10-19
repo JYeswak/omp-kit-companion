@@ -329,6 +329,135 @@ def classify(pane, procs, chief, protect, unprotect=()):
         row["action"] = "RESTART"
     return row
 
+def txt_exe(lsof_text):
+    """Running executable from `lsof -Fn`: the name after the first `ftxt` field."""
+    fd = None
+    for line in (lsof_text or "").splitlines():
+        if line.startswith("f"):
+            fd = line[1:]
+        elif line.startswith("n") and fd == "txt":
+            return line[1:]
+    return None
+
+
+def herdr_agent(process_info):
+    """The omp agent in a herdr process-info payload. The shell and `__omp_worker` do not count."""
+    for proc in (process_info or {}).get("foreground_processes") or []:
+        argv = proc.get("argv") or []
+        args = " ".join(argv)
+        flags = omp_match(args)
+        if flags is not None:
+            return {"pid": proc.get("pid"), "args": args, "flags": flags}
+    return None
+
+
+def resume_from_flags(flags):
+    """Session file from live argv when herdr has not filled agent_session yet."""
+    flags = flags or []
+    for i, tok in enumerate(flags):
+        if tok in ("--resume", "-r", "--restore") and i + 1 < len(flags):
+            return flags[i + 1]
+        if tok.startswith("--resume=") or tok.startswith("--restore="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _chief_hit(pane, pane_id, chief):
+    if not chief:
+        return False
+    chiefs = chief if isinstance(chief, (list, tuple, set)) else (chief,)
+    return pane in chiefs or pane_id in chiefs
+
+
+def derive_pane_state(surface, pane, pane_id, omp_pid, exe, target, chief, flags, agent_status=None, session_file=None):
+    """One ntm or herdr seat. The pane shell's txt is zsh and is not a state.
+    `/restart` re-execs the running binary, so a different executable is RESPAWN."""
+    same = bool(exe and target and os.path.realpath(exe) == os.path.realpath(target))
+    if not omp_pid:
+        state, action = "NO_OMP", "SKIP_SHELL"
+    elif not exe:
+        state, action = "UNKNOWN_EXE", "HOLD_UNKNOWN_EXE"
+    elif not same:
+        state, action = "STALE", "RESPAWN"
+    else:
+        state, action = "CURRENT", "CURRENT"
+    if _chief_hit(pane, pane_id, chief) and omp_pid:
+        action = "SKIP_CHIEF"
+    return {"surface": surface, "pane": pane, "pane_id": pane_id, "omp_pid": omp_pid, "exe": exe,
+            "version": os.path.basename(exe) if exe and TERN_VERSION_RE.match(os.path.basename(exe)) else None,
+            "target": os.path.basename(target) if target and TERN_VERSION_RE.match(os.path.basename(target)) else None,
+            "state": state, "action": action, "flags": list(flags or []),
+            "agent_status": agent_status, "session_file": session_file}
+
+
+def ntm_states(panes, procs, exe_of, target, chief):
+    rows = []
+    for pane in panes:
+        agent = find_agent(procs, pane["pane_pid"])
+        exe = exe_of(agent["pid"]) if agent else None
+        rows.append(derive_pane_state("ntm", pane["pane"], pane["pane_id"], agent["pid"] if agent else None,
+                                      exe, target, chief, agent["flags"] if agent else []))
+    return rows
+
+
+def herdr_states_from(agents, infos, exe_of, target, chief):
+    rows = []
+    for agent in agents:
+        pane = agent.get("pane_id")
+        omp = herdr_agent(infos.get(pane) or {})
+        flags = omp["flags"] if omp else []
+        sess = (agent.get("agent_session") or {}).get("value") or resume_from_flags(flags)
+        rows.append(derive_pane_state("herdr", pane, pane, omp["pid"] if omp else None,
+                                      exe_of(omp["pid"]) if omp else None, target, chief,
+                                      flags, agent.get("agent_status"), sess))
+    return rows
+
+
+def live_herdr_states(run_fn, target, chief):
+    rc, text = run_fn(["herdr", "agent", "list"])
+    if rc != 0:
+        return {"ok": False, "why": text.strip()[:300], "rows": []}
+    try:
+        agents = json.loads(text)["result"]["agents"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return {"ok": False, "why": "herdr agent list: %s" % exc, "rows": []}
+    infos = {}
+    for agent in agents:
+        pane = agent.get("pane_id")
+        rc, body = run_fn(["herdr", "pane", "process-info", "--pane", pane])
+        if rc != 0:
+            infos[pane] = {}
+            continue
+        try:
+            infos[pane] = json.loads(body)["result"]["process_info"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            infos[pane] = {}
+
+    def exe_of(pid):
+        return txt_exe(run_fn(["lsof", "-nP", "-p", str(pid), "-a", "-d", "txt", "-Fn"])[1])
+
+    return {"ok": True, "rows": herdr_states_from(agents, infos, exe_of, target, chief)}
+
+
+def process_inventory(env):
+    """Pane pids and the process table, no screen capture. State uses the omp child, not the shell."""
+    fmt = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}"
+    rc, text = run(["tmux", "list-panes", "-a", "-F", fmt], tmux_env(env))
+    if rc != 0:
+        raise SystemExit("tmux list-panes failed (%d): %s" % (rc, text.strip()))
+    rc, ps = run(["ps", "-A", "-o", "pid=,ppid=,args="])
+    procs = []
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs.append({"pid": int(parts[0]), "ppid": int(parts[1]), "args": parts[2] if len(parts) > 2 else ""})
+    panes = []
+    for line in text.splitlines():
+        pane, pid, ppid, cwd = line.split("\t")
+        panes.append({"pane": pane, "pane_id": pid, "pane_pid": int(ppid), "cwd": cwd})
+    return panes, procs
+
+
 
 def build_plan(inv, chief, protect, align_report, unprotect=()):
     plan = {"created": now(), "snapshot_at": inv.get("captured_at"), "chief": chief, "protect": list(protect), "unprotect": list(unprotect),
@@ -713,6 +842,10 @@ def main(argv):
     p.add_argument("--releases", default=os.path.expanduser("~/.local/opt/omp-kit/releases"))
     p.add_argument("--version")
     p.add_argument("--out")
+    st = sub.add_parser("states", help="classify every ntm and herdr omp seat against the login-shell target")
+    st.add_argument("--target", help="realpath of the omp build; default: zsh -lc 'command -v omp'")
+    st.add_argument("--chief", action="append", default=[], help="pane name or id to mark SKIP_CHIEF; repeatable")
+    st.add_argument("--out")
     m = sub.add_parser("manifest")
     m.add_argument("kind", choices=["restart", "respawn", "messages"])
     m.add_argument("--run", help="run dir: defaults --plan and the stage-1 --snapshot from its run manifest")
@@ -815,6 +948,29 @@ def main(argv):
         plan = build_plan(inv, chief, DEFAULT_PROTECT + args.protect, align_check(args.home, args.releases, version))
         dump(plan, args.out)
         return 3 if plan.get("refused") else 0
+    if args.cmd == "states":
+        ok, code, detail = env_check(env, uid)
+        if not ok:
+            dump({"ok": False, "code": code, "detail": detail})
+            return 2
+        target = args.target
+        if not target:
+            rc, out = run(["zsh", "-lc", "command -v omp"])
+            which = out.strip().splitlines()[-1] if rc == 0 and out.strip() else ""
+            target = os.path.realpath(which) if which else ""
+        chiefs = args.chief or [x for x in (env.get("TMUX_PANE"), env.get("HERDR_PANE_ID")) if x]
+        panes, procs = process_inventory(env)
+
+        def exe_of(pid):
+            return txt_exe(run(["lsof", "-nP", "-p", str(pid), "-a", "-d", "txt", "-Fn"])[1])
+
+        ntm = ntm_states(panes, procs, exe_of, target, chiefs)
+        herdr = live_herdr_states(run, target, chiefs)
+        rows = ntm + herdr.get("rows", [])
+        dump({"ok": True, "target": target, "chief": chiefs, "herdr_ok": herdr.get("ok"),
+              "herdr_why": herdr.get("why"), "stale": [r["pane"] for r in rows if r["state"] == "STALE"],
+              "rows": rows}, args.out)
+        return 0
     if args.cmd == "manifest":
         plan_path = args.plan
         if args.kind == "messages":
