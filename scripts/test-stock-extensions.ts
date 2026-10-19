@@ -98,7 +98,7 @@ if (defaultFleetOn) {
 }
 
 // Do not inherit credentials, pane/fleet settings, Bun options, or dotenv contents.
-// Repository bunfig.toml still supplies the canonical test preload and timeout.
+// Repository bunfig.toml still supplies the canonical test preload and path ignores.
 const child = Bun.spawn([join(bin, "bun"), "--no-env-file", "test", "./extensions"], {
 	cwd: repo,
 	env,
