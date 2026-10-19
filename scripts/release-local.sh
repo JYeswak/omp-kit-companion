@@ -355,6 +355,7 @@ done
 mkdir "$PUB/x"
 tar -xf "$PUB/$DARWIN" -C "$PUB/x" bin/omp-kit
 codesign --verify --strict "$PUB/x/bin/omp-kit" || die "public darwin binary signature does not verify"
-spctl --assess --type execute -vv "$PUB/x/bin/omp-kit" 2>&1 | tee "$WORK/spctl.txt"
+# A bare Mach-O is not an app to `--type execute`; this is devid_release.py check_signature's assessment.
+spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/omp-kit" 2>&1 | tee "$WORK/spctl.txt"
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
 receipt released "$URL" "$RUN_ID"
