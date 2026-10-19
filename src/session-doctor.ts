@@ -112,6 +112,17 @@ function runText(args: readonly string[], env?: Record<string, string>): string 
 	}
 }
 
+/**
+ * NTMPROF1 (ompkit-dodx): the --profile flag a pane was launched with, or
+ * null when the pane runs the default profile. ntm 1.37 launches via
+ * profile-specific flags (--omp-claude/--omp-muse/...) which must surface
+ * here; a pane without the flag silently gets the default model and kit set.
+ */
+export function sessionProfile(command: string): string | null {
+	const match = /(?:^|\s)--profile\s+(\S+)/.exec(command);
+	return match ? match[1]! : null;
+}
+
 function isOmpCommand(command: string): boolean {
 	return /(?:^|[\s/])omp(?:\s|$)/.test(command);
 }
@@ -235,7 +246,10 @@ function entryFor(process: SessionProcess, parentByPid: ReadonlyMap<number, numb
 	}
 	const predates = components.filter((component) => component.installed_at_epoch_ms !== null && process.start_epoch_ms !== null && process.start_epoch_ms < component.installed_at_epoch_ms).map((component) => component.label);
 	const unresolved = components.filter((component) => component.installed_at_epoch_ms === null).map((component) => component.label);
+	const profile = sessionProfile(process.command);
+	const missingProfile = profile === null ? ["launched without --profile (runs the default profile)"] : [];
 	const verdict: SessionVerdict = predates.length ? "STALE" : unresolved.length ? "UNVERIFIED" : "CURRENT";
+	const unresolvedReasons = unresolved.map((component) => `install time unavailable for ${component}`);
 	return {
 		pid: process.pid,
 		ppid: process.ppid,
@@ -247,7 +261,7 @@ function entryFor(process: SessionProcess, parentByPid: ReadonlyMap<number, numb
 		pane_start_command: pane?.start_command ?? null,
 		verdict,
 		predates,
-		...(unresolved.length ? { reason: `install time unavailable for ${unresolved.join(", ")}` } : {}),
+		...([...unresolvedReasons, ...missingProfile].length ? { reason: [...unresolvedReasons, ...missingProfile].join("; ") } : {}),
 	};
 }
 
@@ -261,7 +275,7 @@ function renderText(report: Omit<SessionReport, "text">): string {
 		const pane = session.pane ?? "<no-tmux-pane>";
 		const predates = session.predates.length ? ` predates ${session.predates.join(", ")}` : "";
 		const reason = session.reason ? ` ${session.reason}` : "";
-		return `pid=${session.pid} pane=${pane} start=${session.start_time ?? session.start_epoch_ms ?? "UNKNOWN"} verdict=${session.verdict}${predates}${reason}`;
+		return `pid=${session.pid} pane=${pane} profile=${sessionProfile(session.command) ?? "<default>"} start=${session.start_time ?? session.start_epoch_ms ?? "UNKNOWN"} verdict=${session.verdict}${predates}${reason}`;
 	});
 	return ["SESSION COMPONENTS", ...components, "SESSIONS", ...rows].join("\n");
 }

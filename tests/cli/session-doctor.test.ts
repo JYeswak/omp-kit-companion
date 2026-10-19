@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { inspectOmpSessions, parsePsProcesses, parseTmuxPanes, type SessionInstall, type SessionProcess } from "../../src/session-doctor.ts";
+import { inspectOmpSessions, parsePsProcesses, parseTmuxPanes, sessionProfile, type SessionInstall, type SessionProcess } from "../../src/session-doctor.ts";
 
 const components = (agents: number): SessionInstall[] => [
 	{ label: "OMP package", path: "/omp/package", version: "18.5.0", installed_at_epoch_ms: 1000 },
@@ -44,4 +44,23 @@ test("missing install evidence is UNVERIFIED instead of falsely CURRENT", () => 
 	const report = inspectOmpSessions({ processes: [process(3000)], panes: [], components: [{ ...components(2500)[0]!, installed_at_epoch_ms: null }, ...components(2500).slice(1)], now_epoch_ms: 4000 });
 	expect(report.sessions[0]?.verdict).toBe("UNVERIFIED");
 	expect(report.sessions[0]?.reason).toContain("OMP package");
+});
+
+test("NTMPROF1: profile flag is extracted and missing profiles are flagged", () => {
+	expect(sessionProfile("omp --profile claude")).toBe("claude");
+	expect(sessionProfile("omp --profile muse --model x")).toBe("muse");
+	expect(sessionProfile("/bin/omp --profile codex")).toBe("codex");
+	expect(sessionProfile("omp -p")).toBeNull();
+	expect(sessionProfile("omp --model opus")).toBeNull();
+});
+
+test("NTMPROF1: pane without --profile carries the default-profile reason and text", () => {
+	expect(sessionProfile("bun /fixture/omp")).toBeNull();
+	const noFlag = { pid: 42, ppid: 1, command: "bun /fixture/user-home/.bun/bin/omp", start_epoch_ms: 3000, start_text: "Sat Oct 3 10:00:00 2026" };
+	const report = inspectOmpSessions({ processes: [noFlag], panes: [], components: components(2500), now_epoch_ms: 4000 });
+	expect(report.sessions[0]?.reason).toContain("launched without --profile");
+	expect(report.text).toContain("profile=<default>");
+	const named = inspectOmpSessions({ processes: [process(3000)], panes: [], components: components(2500), now_epoch_ms: 4000 });
+	expect(named.sessions[0]?.reason ?? "").not.toContain("--profile");
+	expect(named.text).toContain("profile=claude");
 });
