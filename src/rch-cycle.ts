@@ -58,8 +58,10 @@ export interface DeadLease {
 	basis: "stale_heartbeat" | "pid_birth_mismatch";
 }
 export interface DeadLeaseReport extends DeadLease {
-	/** `plan_only`: plan mode reports but never recovers. `reap_failed`: the native recover failed or the re-read did not show the lease retired. */
-	outcome: "reaped" | "reap_failed" | "plan_only";
+	/** Always `unreapable`: the installed native `rch jobs` verbs (attach, cancel, recover) cannot retire a dead-owner lease, so none is attempted. */
+	outcome: "unreapable";
+	/** Names the missing native capability. */
+	reason: string;
 }
 export interface DeadLeaseScope {
 	now: number;
@@ -165,28 +167,12 @@ function scanDeadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] | nu
 export function deadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] {
 	return scanDeadLeases(reply, scope) ?? [];
 }
-function leaseRetired(reply: unknown, id: string): boolean {
-	const envelope = object(reply);
-	if (envelope?.complete !== true || !Array.isArray(envelope.jobs)) return false;
-	const rows = envelope.jobs.map(object).filter(row => object(object(row?.lease)?.identity)?.local_wrapper_id === id);
-	if (rows.length === 0) return true; // no longer journaled, so it holds no slot
-	if (rows.length > 1) return false;
-	const recovery = object(object(rows[0]?.lease)?.recovery);
-	return recovery?.retired === true && recovery.sources_released === true;
-}
-/** Reap dead-owner leases through the native `jobs recover` only; a failure is reported and never changes the cycle's outcome. */
-async function reapDeadLeases(executor: RchExecutor, worker: string, apply: boolean, signal?: AbortSignal): Promise<DeadLeaseReport[] | null> {
+/** Why a reported dead lease is left in place. Observed on rch 2.1.34 (daemon.log): `jobs recover` exits 1 for dead-owner leases ("same-id remote execution has no durable completion yet"; "source-authority lock ... invalid claim record") and rchd's own dead-client lease recovery fails the same way on every retry. `rch jobs` has only attach, cancel and recover. */
+export const DEAD_LEASE_UNREAPABLE_REASON = "no native rch verb retires a dead-owner lease: jobs recover fails without durable remote completion or valid source-authority claims, and rch jobs has no reap, release or prune verb";
+/** Report dead-owner leases on one worker. Never runs a native verb: none can retire them, and an unreadable journal reports nothing. */
+async function reportDeadLeases(executor: RchExecutor, worker: string, signal?: AbortSignal): Promise<DeadLeaseReport[] | null> {
 	const dead = scanDeadLeases(exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS, signal)), { now: Date.now(), worker, excludePids: [process.pid] });
-	if (dead === null) return null;
-	if (!apply) return dead.map(lease => ({ ...lease, outcome: "plan_only" }));
-	const recovered = new Set<string>();
-	for (const lease of dead) {
-		if (signal?.aborted) break;
-		const native = await executor.capture(["jobs", "recover", lease.wrapperId, "--json"], GC_TIMEOUT_MS, signal);
-		if (native.state === "exited" && native.exit === 0) recovered.add(lease.wrapperId);
-	}
-	const reread = recovered.size ? exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS, signal)) : null;
-	return dead.map(lease => ({ ...lease, outcome: recovered.has(lease.wrapperId) && leaseRetired(reread, lease.wrapperId) ? "reaped" : "reap_failed" }));
+	return dead === null ? null : dead.map(lease => ({ ...lease, outcome: "unreapable", reason: DEAD_LEASE_UNREAPABLE_REASON }));
 }
 
 /** Only bind while our unreaped child is still alive; a later reused PID is not our wrapper. */
@@ -248,8 +234,7 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	const result: RchCycleResult = { overall: "REFUSED", reason: "invalid_input", worker: null, nativeExit: null, compilerExit: null, executionObserved: null, compilerState: "not-submitted", cleanup: "not-run", nextAgentReady: null,
 		before: null, after: null, wrapperId: null, deadLeases: null, lease: "", noClaim: "Bounds native admission and post-run readiness; does not prove compiler correctness or retire shared warm caches." };
 	const finish = () => {
-		const reaped = result.deadLeases?.filter(lease => lease.outcome === "reaped").length ?? 0;
-		result.lease = `LEASE worker=${result.worker ?? "none"} native_exit=${result.nativeExit ?? "none"} build_exit=${result.compilerExit ?? "unknown"} cleanup=${result.cleanup} next_agent_ready=${result.nextAgentReady ?? "unknown"} overall=${result.overall} reason=${result.reason} dead_leases=${result.deadLeases?.length ?? "unknown"} reaped=${reaped}`;
+		result.lease = `LEASE worker=${result.worker ?? "none"} native_exit=${result.nativeExit ?? "none"} build_exit=${result.compilerExit ?? "unknown"} cleanup=${result.cleanup} next_agent_ready=${result.nextAgentReady ?? "unknown"} overall=${result.overall} reason=${result.reason} dead_leases=${result.deadLeases?.length ?? "unknown"} reap=no_native_verb`;
 		return result;
 	};
 	if (!Number.isSafeInteger(input.requiredSlots) || input.requiredSlots < 1 || !input.command.length || input.command.some(arg => typeof arg !== "string" || arg.includes("\0"))) return finish();
@@ -258,23 +243,16 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	result.before = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
 	if (!result.before) { result.reason = "rch_status_unavailable"; return finish(); }
 	let worker = choose(result.before, input);
-	let status = result.before;
+	const status = result.before;
 	// Dead-owner leases hold pool slots; look on the admissible worker, or the trusted worker whose slots they may be holding.
 	const scope = worker ?? result.before.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
 	if (!input.apply) {
-		if (scope) result.deadLeases = await reapDeadLeases(executor, scope.id, false, input.signal);
+		if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
 		result.overall = "PLAN"; result.reason = worker ? "admissible_snapshot_not_a_reservation" : "rch_capacity_unavailable";
 		result.worker = worker?.id ?? input.worker ?? null; result.nextAgentReady = Boolean(worker); return finish();
 	}
 	if (input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "cancelled_before_submit"; return finish(); }
-	if (scope) {
-		result.deadLeases = await reapDeadLeases(executor, scope.id, true, input.signal);
-		if (result.deadLeases?.some(lease => lease.outcome === "reaped")) {
-			// Freed slots only count once the native status shows them; an unreadable re-read keeps the earlier admission.
-			const freed = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
-			if (freed) { status = freed; worker = choose(freed, input); }
-		}
-	}
+	if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
 	if (!worker || worker.pressure === "warning") {
 		// Native policy decides eligibility. A zero-byte reclaim is not restored capacity.
 		const candidate = worker ?? status.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));

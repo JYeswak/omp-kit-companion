@@ -54,7 +54,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	browsers: ["browsers"],
 	identity: ["identity"],
 	"regex-tools": ["regex-tools"],
-	rch: ["rch"],
+	rch: ["rch", "rch_gc_roots", "rch_workers"],
 };
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
@@ -1435,9 +1435,7 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	}
 	const bound = held.includes(path);
 	const stat = deps.statSocket(path);
-	const restore = deps.platform === "darwin"
-		? `Restore with \`launchctl kickstart -k gui/${deps.uid ?? "<uid>"}/com.rch.daemon\` only when \`rch status --jobs\` shows an empty queue; verify with \`rch status\` (Daemon Running, workers, slots). Never automate the kickstart from doctor.`
-		: "Restart rchd under its service manager only when `rch status --jobs` shows an empty queue; verify with `rch status` (Daemon Running, workers, slots). Never automate the restart from doctor.";
+	const restore = rchRestoreAdvice(deps.platform, deps.uid);
 	if (stat.kind === "missing" && bound) {
 		return finding("rch", "FAIL", `rchd pid ${pid} is alive and holds ${path}, but the path is missing: the socket was unlinked under the live daemon`,
 			restore, { ...base, state: "SOCKET_UNLINKED", pid });
@@ -1449,20 +1447,153 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	return finding("rch", "OK", `rchd pid ${pid} is reachable on ${path}`, "No action required.", { ...base, state: "RUNNING", pid });
 }
 
+/** The documented rchd restore (docs/rch-lease.md). Never automated by doctor: the kickstart drops in-flight jobs. */
+function rchRestoreAdvice(platform: NodeJS.Platform, uid: number | null): string {
+	return platform === "darwin"
+		? `Restore with \`launchctl kickstart -k gui/${uid ?? "<uid>"}/com.rch.daemon\` only when \`rch status --jobs\` shows an empty queue; verify with \`rch status\` (Daemon Running, workers, slots). Never automate the kickstart from doctor.`
+		: "Restart rchd under its service manager only when `rch status --jobs` shows an empty queue; verify with `rch status` (Daemon Running, workers, slots). Never automate the restart from doctor.";
+}
+
+/** The rch config directory as rch selects it: RCH_CONFIG_DIR, else the XDG dir, else the macOS native dir when only that exists. */
+export function rchConfigDir(home: string, env: NodeJS.ProcessEnv = process.env): string {
+	const xdgConfig = join(env.XDG_CONFIG_HOME || join(home, ".config"), "rch");
+	const nativeConfig = process.platform === "darwin" ? join(home, "Library", "Application Support", "com.rch.rch") : xdgConfig;
+	const configured = env.RCH_CONFIG_DIR;
+	if (configured) return configured === "~" ? home : configured.startsWith("~/") ? join(home, configured.slice(2)) : configured;
+	return [xdgConfig, nativeConfig].find(path => {
+		try { return statSync(path).isDirectory(); } catch { return false; }
+	}) ?? xdgConfig;
+}
+
+/** ompkit-5vph: rch gc never covered ~/rch-build/rch-remote by default (84 GB reclaimable under critical worker disk, measured 2026-10-03). */
+export const RCH_GC_EXTRA_ROOTS_KEY = "remediation.pooled_target.gc_extra_roots";
+export type RchConfigRead = { path: string; text: string } | { path: string; text: null; reason: "missing" | "unreadable" };
+export interface RchGcRootsDeps {
+	/** Absolute home directory the expected root lives under. */
+	home: string;
+	/** The rch user config file (config.toml); injected so fixtures never touch the real one. */
+	readConfig(): RchConfigRead;
+}
+
+export function inspectRchGcRoots(deps: RchGcRootsDeps): Finding {
+	const root = join(deps.home, "rch-build", "rch-remote");
+	const config = deps.readConfig();
+	const base = { config_path: config.path, key: RCH_GC_EXTRA_ROOTS_KEY, expected_root: root };
+	if (config.text === null && config.reason === "unreadable") {
+		return finding("rch_gc_roots", "UNVERIFIED", `${config.path} could not be read; ${RCH_GC_EXTRA_ROOTS_KEY} was not checked`,
+			`Make ${config.path} readable, then rerun omp-kit doctor.`, { ...base, state: "GC_ROOTS_UNVERIFIED" });
+	}
+	let listed: unknown = undefined;
+	if (config.text !== null) {
+		let parsed: unknown;
+		try { parsed = Bun.TOML.parse(config.text); } catch {
+			return finding("rch_gc_roots", "UNVERIFIED", `${config.path} is not valid TOML; ${RCH_GC_EXTRA_ROOTS_KEY} was not checked`,
+				`Fix the TOML syntax in ${config.path}, then rerun omp-kit doctor.`, { ...base, state: "GC_ROOTS_UNVERIFIED" });
+		}
+		let node: unknown = parsed;
+		for (const part of RCH_GC_EXTRA_ROOTS_KEY.split(".")) {
+			node = typeof node === "object" && node !== null && !Array.isArray(node) ? (node as Record<string, unknown>)[part] : undefined;
+		}
+		listed = node;
+	}
+	if (listed !== undefined && !Array.isArray(listed)) {
+		return finding("rch_gc_roots", "UNVERIFIED", `${RCH_GC_EXTRA_ROOTS_KEY} in ${config.path} is not an array of paths`,
+			`Set it to an array, e.g. \`gc_extra_roots = ["${root}"]\` under [remediation.pooled_target], then rerun omp-kit doctor.`, { ...base, state: "GC_ROOTS_UNVERIFIED" });
+	}
+	const roots = (listed ?? []) as unknown[];
+	const paths = roots.filter((entry): entry is string => typeof entry === "string");
+	if (paths.some(entry => entry === root || entry === `${root}/`)) {
+		return finding("rch_gc_roots", "OK", `${RCH_GC_EXTRA_ROOTS_KEY} lists ${root}`, "No action required.", { ...base, state: "GC_ROOTS_OK", listed_roots: paths });
+	}
+	const line = `gc_extra_roots = [${[...paths, root].map(entry => JSON.stringify(entry)).join(", ")}]`;
+	const where = config.text === null ? `${config.path} does not exist, so rch gc uses its default roots` : listed === undefined ? `${RCH_GC_EXTRA_ROOTS_KEY} is not set in ${config.path}` : `${RCH_GC_EXTRA_ROOTS_KEY} in ${config.path} does not list ${root}`;
+	return finding("rch_gc_roots", "DEGRADED", `${where}: rch gc never reclaims ${root}, so worker build overlays accumulate there`,
+		`Add \`${line}\` under [remediation.pooled_target] in ${config.path} (absolute path, no \`~\`), then rerun omp-kit doctor. Doctor edits nothing.`,
+		{ ...base, state: "GC_ROOTS_MISSING", listed_roots: paths });
+}
+
+/** ompkit-5vph: the daemon's per-worker view, from `rch --json status` (data.daemon.workers). */
+export interface RchDaemonWorker {
+	id: string;
+	status: string;
+	circuitState: string | null;
+	consecutiveFailures: number | null;
+	lastError: string | null;
+	telemetryFresh: boolean | null;
+	telemetryAgeSecs: number | null;
+}
+/** A direct connectivity probe of one worker, from `rch --json workers probe --all` (data.results). */
+export interface RchProbeWorker { id: string; status: string; ok: boolean }
+export interface RchWorkerHealthDeps {
+	uid: number | null;
+	platform: NodeJS.Platform;
+	/** Daemon status view, or null when `rch status` is unavailable or unparseable. */
+	daemonWorkers(): RchDaemonWorker[] | null;
+	/** Direct probe of every worker, or null when unavailable. Called only when the daemon flags a worker, since a probe opens an ssh connection per worker. */
+	probeWorkers(): RchProbeWorker[] | null;
+}
+
+/** Daemon statuses an operator chose; they are not health findings. */
+const RCH_OPERATOR_WORKER_STATES: readonly string[] = ["healthy", "draining", "disabled"];
+
+function rchDisagreementCause(worker: RchDaemonWorker): { cause: string; detail: string } {
+	if (worker.telemetryFresh === false) {
+		return { cause: "STALE_DAEMON_HEALTH", detail: `daemon health telemetry for ${worker.id} is stale${worker.telemetryAgeSecs === null ? "" : ` (${worker.telemetryAgeSecs}s old)`}; its ${worker.status} mark is not a current observation` };
+	}
+	if ((worker.circuitState !== null && worker.circuitState !== "closed") || (worker.consecutiveFailures ?? 0) > 0) {
+		return { cause: "DAEMON_CIRCUIT_NOT_RECOVERED", detail: `daemon circuit for ${worker.id} is ${worker.circuitState ?? "unknown"} after ${worker.consecutiveFailures ?? 0} consecutive failure(s)${worker.lastError ? ` (last error: ${worker.lastError})` : ""} and has not re-tested the worker` };
+	}
+	return { cause: "DAEMON_HEALTH_UNEXPLAINED", detail: `daemon marks ${worker.id} ${worker.status} with fresh telemetry and a closed circuit; status output gives no cause` };
+}
+
+export function inspectRchWorkerHealth(deps: RchWorkerHealthDeps): Finding {
+	const component = "rch_workers";
+	const workers = deps.daemonWorkers();
+	if (workers === null) {
+		return finding(component, "UNVERIFIED", "`rch --json status` gave no worker list; worker health was not compared with a probe",
+			"Run `rch status`, then rerun omp-kit doctor.", { state: "WORKER_STATUS_UNAVAILABLE" });
+	}
+	const flagged = workers.filter(worker => !RCH_OPERATOR_WORKER_STATES.includes(worker.status.toLowerCase()));
+	const totals = { workers_total: workers.length, workers_healthy: workers.filter(worker => worker.status.toLowerCase() === "healthy").length };
+	if (flagged.length === 0) {
+		return finding(component, "OK", `daemon marks no worker degraded or unreachable (${totals.workers_healthy}/${totals.workers_total} healthy)`, "No action required.", { ...totals, state: "WORKERS_HEALTHY" });
+	}
+	const probes = deps.probeWorkers();
+	if (probes === null) {
+		return finding(component, "UNVERIFIED", `daemon marks ${flagged.map(worker => `${worker.id} ${worker.status}`).join(", ")} but a direct probe could not run`,
+			"Run `rch workers probe --all --json` by hand to compare, then rerun omp-kit doctor.", { ...totals, state: "PROBE_UNAVAILABLE", daemon_flagged: flagged.map(worker => worker.id) });
+	}
+	const rows = flagged.map(worker => {
+		const probe = probes.find(row => row.id === worker.id);
+		return { worker, probe, verdict: probe === undefined ? "unprobed" : probe.ok ? "disagree" : "confirmed" } as const;
+	});
+	const disagree = rows.filter(row => row.verdict === "disagree");
+	const evidence = rows.map(row => ({ id: row.worker.id, daemon_status: row.worker.status, probe_status: row.probe?.status ?? null, verdict: row.verdict }));
+	if (disagree.length === 0) {
+		const confirmed = rows.filter(row => row.verdict === "confirmed");
+		return finding(component, confirmed.length ? "DEGRADED" : "UNVERIFIED",
+			confirmed.length
+				? `daemon and a direct probe agree: ${confirmed.map(row => `${row.worker.id} is ${row.worker.status} (probe ${row.probe?.status})`).join(", ")}`
+				: `daemon marks ${flagged.map(worker => worker.id).join(", ")} ${flagged.length > 1 ? "unhealthy" : flagged[0]?.status} but the probe returned no row for them`,
+			"Inspect the worker with `rch workers probe <id> --json` and fix it at the host; restarting rchd does not repair a worker.",
+			{ ...totals, state: confirmed.length ? "WORKERS_UNHEALTHY_CONFIRMED" : "PROBE_INCOMPLETE", workers: evidence });
+	}
+	const causes = disagree.map(row => ({ id: row.worker.id, ...rchDisagreementCause(row.worker) }));
+	const distinct = [...new Set(causes.map(row => row.cause))];
+	const probeOk = probes.filter(row => row.ok).length;
+	return finding(component, "DEGRADED",
+		`daemon marks ${disagree.map(row => `${row.worker.id} ${row.worker.status}`).join(", ")} (${totals.workers_healthy}/${totals.workers_total} healthy) but a direct probe finds them healthy (${probeOk}/${probes.length} ok); cause ${distinct.join("+")}: ${causes.map(row => row.detail).join("; ")}`,
+		`${rchRestoreAdvice(deps.platform, deps.uid)} Then rerun omp-kit doctor: the rch finding must be RUNNING (the socket exists) and this one OK. Use only this documented restart (docs/rch-lease.md), never \`rch daemon restart\`: it removed the socket on a real host (ompkit-5vph).`,
+		{ ...totals, state: "DAEMON_PROBE_DISAGREE", cause: distinct.join("+"), probe_ok: probeOk, probe_total: probes.length, workers: evidence, causes });
+}
+
 function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { code: number; out: string } | null {
 	let privateRoot: string | undefined;
 	try {
 		let env: NodeJS.ProcessEnv = process.env;
 		if (binary === "rch") {
 			const home = process.env.HOME || homedir();
-			const xdgConfig = join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "rch");
-			const nativeConfig = process.platform === "darwin" ? join(home, "Library", "Application Support", "com.rch.rch") : xdgConfig;
-			const configured = process.env.RCH_CONFIG_DIR;
-			const config = configured
-				? configured === "~" ? home : configured.startsWith("~/") ? join(home, configured.slice(2)) : configured
-				: [xdgConfig, nativeConfig].find(path => {
-					try { return statSync(path).isDirectory(); } catch { return false; }
-				}) ?? xdgConfig;
+			const config = rchConfigDir(home, process.env);
 			const cache = process.platform === "darwin" ? join(home, "Library", "Caches")
 				: process.env.XDG_CACHE_HOME && isAbsolute(process.env.XDG_CACHE_HOME) ? process.env.XDG_CACHE_HOME : join(home, ".cache");
 			// RCH's default socket constructor creates its cache directory unless
@@ -1550,6 +1681,82 @@ export function defaultRchReachability(run: RchRun = rchArgs, platform: NodeJS.P
 	};
 }
 
+export function defaultRchGcRoots(home: string, env: NodeJS.ProcessEnv = process.env): RchGcRootsDeps {
+	return {
+		home,
+		readConfig: () => {
+			const path = join(rchConfigDir(home, env), "config.toml");
+			try {
+				return { path, text: readFileSync(path, "utf8") };
+			} catch (error) {
+				return { path, text: null, reason: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable" };
+			}
+		},
+	};
+}
+
+function objectRows(value: unknown): Record<string, unknown>[] | null {
+	return Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null && !Array.isArray(row)) : null;
+}
+
+function parseRchJsonData(out: string): Record<string, unknown> | null {
+	try {
+		const data = (JSON.parse(out) as Record<string, unknown> | null)?.["data"];
+		return typeof data === "object" && data !== null ? data as Record<string, unknown> : null;
+	} catch {
+		return null;
+	}
+}
+
+/** `rch --json status` -> data.daemon.workers; a worker row without a string id or status is unknown, so the whole view is. */
+export function parseRchDaemonWorkers(out: string): RchDaemonWorker[] | null {
+	const daemon = parseRchJsonData(out)?.["daemon"];
+	const rows = objectRows(typeof daemon === "object" && daemon !== null ? (daemon as Record<string, unknown>)["workers"] : undefined);
+	if (rows === null) return null;
+	const workers: RchDaemonWorker[] = [];
+	for (const row of rows) {
+		if (typeof row["id"] !== "string" || typeof row["status"] !== "string") return null;
+		const lastError = row["last_error"];
+		workers.push({
+			id: row["id"], status: row["status"],
+			circuitState: typeof row["circuit_state"] === "string" ? row["circuit_state"] : null,
+			consecutiveFailures: typeof row["consecutive_failures"] === "number" ? row["consecutive_failures"] : null,
+			lastError: typeof lastError === "string" && lastError !== "" ? lastError : null,
+			telemetryFresh: typeof row["pressure_telemetry_fresh"] === "boolean" ? row["pressure_telemetry_fresh"] : null,
+			telemetryAgeSecs: typeof row["pressure_telemetry_age_secs"] === "number" ? row["pressure_telemetry_age_secs"] : null,
+		});
+	}
+	return workers;
+}
+
+/** `rch --json workers probe --all` -> data.results; only the probe's own `ok` status counts as healthy. */
+export function parseRchProbeWorkers(out: string): RchProbeWorker[] | null {
+	const rows = objectRows(parseRchJsonData(out)?.["results"]);
+	if (rows === null) return null;
+	const probes: RchProbeWorker[] = [];
+	for (const row of rows) {
+		if (typeof row["id"] !== "string" || typeof row["status"] !== "string") return null;
+		probes.push({ id: row["id"], status: row["status"], ok: row["status"] === "ok" });
+	}
+	return probes;
+}
+
+export function defaultRchWorkerHealth(uid: number | null, run: RchRun = rchArgs, platform: NodeJS.Platform = process.platform): RchWorkerHealthDeps {
+	return {
+		uid,
+		platform,
+		daemonWorkers: () => {
+			const status = run("rch", ["--json", "status"], 15000);
+			return status === null || status.code !== 0 ? null : parseRchDaemonWorkers(status.out);
+		},
+		probeWorkers: () => {
+			// A probe that finds some workers down may exit nonzero yet still print every row; the rows decide, not the exit code.
+			const probed = run("rch", ["--json", "workers", "probe", "--all"], 60000);
+			return probed === null ? null : parseRchProbeWorkers(probed.out);
+		},
+	};
+}
+
 export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (![input.root, input.home, ...(input.project ? [input.project] : []), ...(input.ompPath ? [input.ompPath] : []), ...(input.jsmPath ? [input.jsmPath] : [])].every(isAbsolute)) throw new Error("diagnostic paths must be absolute");
 	const selected = input.scope ? DIAGNOSTIC_SCOPE_COMPONENTS[input.scope] ?? [input.scope] : undefined;
@@ -1561,9 +1768,13 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
 	const scoped = Boolean(input.scope);
 	if (wants("rch")) {
-		const rch = inspectRchReachability(defaultRchReachability());
+		const rchDeps = defaultRchReachability();
+		const rch = inspectRchReachability(rchDeps);
 		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while an explicit rch scope still reports it.
 		if (scoped || rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(rch);
+		if (rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(inspectRchGcRoots(defaultRchGcRoots(home)));
+		// Worker health is compared with a probe only through a reachable daemon: an unlinked socket is already reported above and makes the daemon's view unreadable.
+		if (rch.evidence?.state === "RUNNING") rows.push(inspectRchWorkerHealth(defaultRchWorkerHealth(rchDeps.uid)));
 	}
 	// Unscoped, the planning skill is judged only when the user has a local copy to drift from; a scope names it explicitly.
 	const planningShipped = pathState(join(root, "skills", "jeff-planning-enhanced", "SKILL.md")) === "file";

@@ -4,7 +4,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { defaultRchReachability, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchReachability, inspectRegexTools, type Finding, type RchReachabilityDeps } from "../../src/diagnostics.ts";
+import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
@@ -1416,4 +1416,224 @@ console.log(JSON.stringify({
 	const result = JSON.parse(run.stdout.toString());
 	expect(result.daemon).toBeNull();
 	expect(result.after).toEqual(result.before);
+});
+
+// ompkit-5vph: doctor flags a missing gc_extra_roots.
+const GC_HOME = "/home/agent";
+const GC_ROOT = `${GC_HOME}/rch-build/rch-remote`;
+const GC_CONFIG = `${GC_HOME}/.config/rch/config.toml`;
+function gcRoots(read: RchConfigRead) {
+	return inspectRchGcRoots({ home: GC_HOME, readConfig: () => read });
+}
+
+test("5vph: a config without gc_extra_roots is a finding that names the key, the file and the exact fix line", () => {
+	const row = gcRoots({ path: GC_CONFIG, text: `[general]\nsocket_path = "/x"\n\n[remediation.pooled_target]\npooling_enabled = true\n` });
+	expect(row.component).toBe("rch_gc_roots");
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.state).toBe("GC_ROOTS_MISSING");
+	expect(row.reason).toContain("remediation.pooled_target.gc_extra_roots");
+	expect(row.reason).toContain(GC_CONFIG);
+	expect(row.recommended_action).toContain(`gc_extra_roots = ["${GC_ROOT}"]`);
+	expect(row.recommended_action).toContain("[remediation.pooled_target]");
+});
+
+test("5vph: the same config with the key listing ~/rch-build/rch-remote is OK", () => {
+	for (const root of [GC_ROOT, `${GC_ROOT}/`]) {
+		const row = gcRoots({ path: GC_CONFIG, text: `[remediation.pooled_target]\ngc_extra_roots = ["${root}"]\n` });
+		expect(row.status).toBe("OK");
+		expect(row.evidence?.state).toBe("GC_ROOTS_OK");
+	}
+	// Other roots do not hide the required one, and the fix line keeps them.
+	const other = gcRoots({ path: GC_CONFIG, text: `[remediation.pooled_target]\ngc_extra_roots = ["/srv/other"]\n` });
+	expect(other.status).toBe("DEGRADED");
+	expect(other.recommended_action).toContain(`gc_extra_roots = ["/srv/other", "${GC_ROOT}"]`);
+});
+
+test("5vph: a near-miss never satisfies the check: ~ form, wrong table, wrong path, non-string entry", () => {
+	for (const text of [
+		`[remediation.pooled_target]\ngc_extra_roots = ["~/rch-build/rch-remote"]\n`,
+		`[remediation.other]\ngc_extra_roots = ["${GC_ROOT}"]\n`,
+		`gc_extra_roots = ["${GC_ROOT}"]\n`,
+		`[remediation.pooled_target]\ngc_extra_roots = ["${GC_HOME}/rch-build"]\n`,
+		`[remediation.pooled_target]\ngc_extra_roots = [7]\n`,
+		`[remediation.pooled_target]\ngc_extra_roots = []\n`,
+	]) {
+		const row = gcRoots({ path: GC_CONFIG, text });
+		expect(row.status, text).toBe("DEGRADED");
+		expect(row.evidence?.state, text).toBe("GC_ROOTS_MISSING");
+	}
+});
+
+test("5vph: an absent config file is missing roots; an unreadable or invalid one is UNVERIFIED, never OK", () => {
+	const absent = gcRoots({ path: GC_CONFIG, text: null, reason: "missing" });
+	expect(absent.status).toBe("DEGRADED");
+	expect(absent.reason).toContain("does not exist");
+	expect(absent.recommended_action).toContain(`gc_extra_roots = ["${GC_ROOT}"]`);
+	for (const read of [{ path: GC_CONFIG, text: null, reason: "unreadable" }, { path: GC_CONFIG, text: "[remediation\n" }, { path: GC_CONFIG, text: `[remediation.pooled_target]\ngc_extra_roots = "${GC_ROOT}"\n` }] as const) {
+		const row = gcRoots(read);
+		expect(row.status).toBe("UNVERIFIED");
+		expect(row.evidence?.state).toBe("GC_ROOTS_UNVERIFIED");
+	}
+});
+
+test("5vph: the default reader selects rch's own config dir and reads config.toml from it", () => {
+	const base = mkdtempSync(join(tmpdir(), "rch-gc-"));
+	fixtures.push(base);
+	const home = join(base, "home");
+	const dir = join(base, "cfg");
+	mkdirSync(home);
+	mkdirSync(dir);
+	const env = { RCH_CONFIG_DIR: dir };
+	expect(rchConfigDir(home, env)).toBe(dir);
+	expect(rchConfigDir(home, { RCH_CONFIG_DIR: "~/c" })).toBe(join(home, "c"));
+	expect(rchConfigDir(home, { XDG_CONFIG_HOME: join(base, "xdg") })).toBe(join(base, "xdg", "rch"));
+	const absent = inspectRchGcRoots(defaultRchGcRoots(home, env));
+	expect(absent.evidence?.state).toBe("GC_ROOTS_MISSING");
+	expect(absent.reason).toContain(join(dir, "config.toml"));
+	writeFileSync(join(dir, "config.toml"), `[remediation.pooled_target]\ngc_extra_roots = ["${join(home, "rch-build", "rch-remote")}"]\n`);
+	expect(inspectRchGcRoots(defaultRchGcRoots(home, env)).evidence?.state).toBe("GC_ROOTS_OK");
+	// A directory where the file should be is unreadable, not missing.
+	rmSync(join(dir, "config.toml"));
+	mkdirSync(join(dir, "config.toml"));
+	expect(inspectRchGcRoots(defaultRchGcRoots(home, env)).evidence?.state).toBe("GC_ROOTS_UNVERIFIED");
+});
+
+test("5vph: rch diagnostic scope reports the gc roots through diagnose, from the fixture config, not the real one", async () => {
+	const f = fixture(); installOmp(f);
+	const bin = join(f.base, "rch-bin");
+	const cfg = join(f.base, "rch-cfg");
+	mkdirSync(bin);
+	mkdirSync(cfg);
+	writeFileSync(join(bin, "rch"), `#!/bin/sh\nprintf '%s\\n' '{"data":{"running":false}}'\n`);
+	chmodSync(join(bin, "rch"), 0o755);
+	const input = { root: f.root, home: f.home, ompPath: f.ompPath, scope: "rch" };
+	const previous = process.env.RCH_CONFIG_DIR;
+	process.env.RCH_CONFIG_DIR = cfg;
+	try {
+		const env = { PATH: `${dirname(f.ompPath)}${delimiter}${bin}`, HOME: f.home, BUN_INSTALL: dirname(dirname(f.ompPath)), OMP_KIT_OMP_SRC_CACHE: join(f.home, "omp-source-cache"), OMP_KIT_OMP_SRC_FETCH: "0" };
+		const missing = await withEnvironment(env, () => diagnoseNative(input));
+		expect(finding(missing, "rch_gc_roots").evidence?.state).toBe("GC_ROOTS_MISSING");
+		expect(finding(missing, "rch_gc_roots").recommended_action).toContain(`gc_extra_roots = ["${join(f.home, "rch-build", "rch-remote")}"]`);
+		writeFileSync(join(cfg, "config.toml"), `[remediation.pooled_target]\ngc_extra_roots = ["${join(f.home, "rch-build", "rch-remote")}"]\n`);
+		const present = await withEnvironment(env, () => diagnoseNative(input));
+		expect(finding(present, "rch_gc_roots").status).toBe("OK");
+		// A stopped daemon has no worker view to compare.
+		expect(present.map(row => row.component)).not.toContain("rch_workers");
+	} finally {
+		if (previous === undefined) delete process.env.RCH_CONFIG_DIR;
+		else process.env.RCH_CONFIG_DIR = previous;
+	}
+});
+
+// ompkit-5vph: the daemon marks workers degraded, a direct probe finds them healthy.
+function daemonWorker(id: string, over: Partial<RchDaemonWorker> = {}): RchDaemonWorker {
+	return { id, status: "healthy", circuitState: "closed", consecutiveFailures: 0, lastError: null, telemetryFresh: true, telemetryAgeSecs: 10, ...over };
+}
+function probed(id: string, ok = true): RchProbeWorker {
+	return { id, status: ok ? "ok" : "unreachable", ok };
+}
+function healthDeps(daemon: RchDaemonWorker[] | null, probe: RchProbeWorker[] | null, calls: { probes: number } = { probes: 0 }): RchWorkerHealthDeps {
+	return { uid: 501, platform: "darwin", daemonWorkers: () => daemon, probeWorkers: () => { calls.probes++; return probe; } };
+}
+const staleFleet = ["w1", "w2", "w3", "w4"].map(id => daemonWorker(id, { status: "unreachable", circuitState: "open", consecutiveFailures: 3, lastError: "ssh timeout", telemetryFresh: false, telemetryAgeSecs: 900 }));
+
+test("5vph: stale daemon health against a healthy probe is reported with its cause and the documented recovery only", () => {
+	const calls = { probes: 0 };
+	const row = inspectRchWorkerHealth(healthDeps(staleFleet, ["w1", "w2", "w3", "w4"].map(id => probed(id)), calls));
+	expect(row.component).toBe("rch_workers");
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.state).toBe("DAEMON_PROBE_DISAGREE");
+	expect(row.evidence?.cause).toBe("STALE_DAEMON_HEALTH");
+	expect(row.evidence?.probe_ok).toBe(4);
+	expect(row.evidence?.workers_healthy).toBe(0);
+	expect(row.reason).toContain("0/4 healthy");
+	expect(row.reason).toContain("4/4 ok");
+	expect(row.reason).toContain("900s old");
+	expect(calls.probes).toBe(1);
+	// Recovery is the documented restart, quoted from docs/rch-lease.md, and never `rch daemon restart`.
+	const docs = readFileSync(join(import.meta.dir, "..", "..", "docs", "rch-lease.md"), "utf8");
+	for (const command of ["rch status --jobs", "launchctl kickstart -k gui/$(id -u)/com.rch.daemon"]) expect(docs).toContain(command);
+	expect(row.recommended_action).toContain("`rch status --jobs`");
+	expect(row.recommended_action).toContain("launchctl kickstart -k gui/501/com.rch.daemon");
+	expect(row.recommended_action).toContain("never `rch daemon restart`");
+	expect(row.recommended_action).toContain("Then rerun omp-kit doctor: the rch finding must be RUNNING");
+});
+
+test("5vph: an open circuit with fresh telemetry is named as the cause, not stale health", () => {
+	const flagged = [daemonWorker("w1", { status: "degraded", circuitState: "open", consecutiveFailures: 4, lastError: "ssh timeout" }), daemonWorker("w2")];
+	const row = inspectRchWorkerHealth(healthDeps(flagged, [probed("w1"), probed("w2")]));
+	expect(row.evidence?.cause).toBe("DAEMON_CIRCUIT_NOT_RECOVERED");
+	expect(row.reason).toContain("ssh timeout");
+	expect(row.reason).toContain("1/2 healthy");
+	const bare = inspectRchWorkerHealth(healthDeps([daemonWorker("w1", { status: "degraded" })], [probed("w1")]));
+	expect(bare.evidence?.cause).toBe("DAEMON_HEALTH_UNEXPLAINED");
+	expect(bare.status).toBe("DEGRADED");
+});
+
+test("5vph: when the probe agrees the worker is down it is a worker fault, with no daemon restart advice", () => {
+	const row = inspectRchWorkerHealth(healthDeps([daemonWorker("w1", { status: "unreachable" }), daemonWorker("w2")], [probed("w1", false), probed("w2")]));
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.state).toBe("WORKERS_UNHEALTHY_CONFIRMED");
+	expect(row.recommended_action).not.toContain("kickstart");
+	// A mixed fleet still reports the disagreeing worker, and keeps the confirmed one in evidence.
+	const mixed = inspectRchWorkerHealth(healthDeps([daemonWorker("w1", { status: "unreachable" }), daemonWorker("w2", { status: "degraded" })], [probed("w1", false), probed("w2")]));
+	expect(mixed.evidence?.state).toBe("DAEMON_PROBE_DISAGREE");
+	expect((mixed.evidence?.workers as { id: string; verdict: string }[]).map(w => `${w.id}:${w.verdict}`)).toEqual(["w1:confirmed", "w2:disagree"]);
+	expect(mixed.reason).toContain("w2 degraded");
+	expect(mixed.reason).not.toContain("w1 unreachable");
+});
+
+test("5vph: a healthy daemon never runs the probe; operator-chosen states and missing evidence are not findings or OK", () => {
+	const calls = { probes: 0 };
+	const ok = inspectRchWorkerHealth(healthDeps([daemonWorker("w1"), daemonWorker("w2", { status: "draining" }), daemonWorker("w3", { status: "disabled" })], [], calls));
+	expect(ok.status).toBe("OK");
+	expect(ok.evidence?.state).toBe("WORKERS_HEALTHY");
+	expect(calls.probes).toBe(0);
+	expect(inspectRchWorkerHealth(healthDeps(null, [])).evidence?.state).toBe("WORKER_STATUS_UNAVAILABLE");
+	const noProbe = inspectRchWorkerHealth(healthDeps(staleFleet, null));
+	expect(noProbe.status).toBe("UNVERIFIED");
+	expect(noProbe.evidence?.state).toBe("PROBE_UNAVAILABLE");
+	const incomplete = inspectRchWorkerHealth(healthDeps(staleFleet, []));
+	expect(incomplete.status).toBe("UNVERIFIED");
+	expect(incomplete.evidence?.state).toBe("PROBE_INCOMPLETE");
+});
+
+test("5vph: on Linux the recovery names the service manager, not launchctl", () => {
+	const row = inspectRchWorkerHealth({ ...healthDeps(staleFleet, ["w1", "w2", "w3", "w4"].map(id => probed(id))), platform: "linux" });
+	expect(row.recommended_action).not.toContain("launchctl");
+	expect(row.recommended_action).toContain("service manager");
+});
+
+test("5vph: the real rch status and probe JSON shapes parse; a malformed row makes the view unknown", () => {
+	const status = JSON.stringify({ data: { daemon: { daemon: { workers_total: 2 }, workers: [
+		{ id: "w1", status: "healthy", circuit_state: "closed", consecutive_failures: 0, last_error: null, pressure_telemetry_fresh: true, pressure_telemetry_age_secs: 59 },
+		{ id: "w2", status: "degraded", circuit_state: "open", consecutive_failures: 3, last_error: "ssh timeout", pressure_telemetry_fresh: false, pressure_telemetry_age_secs: 900 },
+	] } } });
+	expect(parseRchDaemonWorkers(status)).toEqual([
+		{ id: "w1", status: "healthy", circuitState: "closed", consecutiveFailures: 0, lastError: null, telemetryFresh: true, telemetryAgeSecs: 59 },
+		{ id: "w2", status: "degraded", circuitState: "open", consecutiveFailures: 3, lastError: "ssh timeout", telemetryFresh: false, telemetryAgeSecs: 900 },
+	]);
+	expect(parseRchDaemonWorkers(JSON.stringify({ data: { daemon: { workers: [{ id: "w1" }] } } }))).toBeNull();
+	expect(parseRchDaemonWorkers("not json")).toBeNull();
+	expect(parseRchDaemonWorkers(JSON.stringify({ data: {} }))).toBeNull();
+	expect(parseRchProbeWorkers(JSON.stringify({ data: { results: [{ id: "w1", status: "ok", latency_ms: 5 }, { id: "w2", status: "timeout" }] } }))).toEqual([{ id: "w1", status: "ok", ok: true }, { id: "w2", status: "timeout", ok: false }]);
+	expect(parseRchProbeWorkers(JSON.stringify({ data: { results: [{ id: "w1" }] } }))).toBeNull();
+	expect(parseRchProbeWorkers("")).toBeNull();
+});
+
+test("5vph: the default health deps run only `rch --json status`, then the probe only when asked, and read probe rows even on a nonzero exit", () => {
+	const calls: RchRunCall[] = [];
+	const statusOut = JSON.stringify({ data: { daemon: { workers: [{ id: "w1", status: "degraded", pressure_telemetry_fresh: false, pressure_telemetry_age_secs: 900 }] } } });
+	const probeOut = JSON.stringify({ data: { results: [{ id: "w1", status: "ok" }] } });
+	const run = (binary: string, args: readonly string[]) => {
+		calls.push([binary, args]);
+		return args.includes("probe") ? { code: 1, out: probeOut } : { code: 0, out: statusOut };
+	};
+	const deps = defaultRchWorkerHealth(501, run, "darwin");
+	const row = inspectRchWorkerHealth(deps);
+	expect(row.evidence?.state).toBe("DAEMON_PROBE_DISAGREE");
+	expect(row.evidence?.cause).toBe("STALE_DAEMON_HEALTH");
+	expect(calls).toEqual([["rch", ["--json", "status"]], ["rch", ["--json", "workers", "probe", "--all"]]]);
+	expect(inspectRchWorkerHealth(defaultRchWorkerHealth(501, () => null, "darwin")).evidence?.state).toBe("WORKER_STATUS_UNAVAILABLE");
+	expect(inspectRchWorkerHealth(defaultRchWorkerHealth(501, (_binary, args) => args.includes("probe") ? null : { code: 0, out: statusOut }, "darwin")).evidence?.state).toBe("PROBE_UNAVAILABLE");
 });

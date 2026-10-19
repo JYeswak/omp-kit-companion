@@ -1,17 +1,18 @@
 import { expect, test } from "bun:test";
-import { deadLeases, runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
+import { DEAD_LEASE_UNREAPABLE_REASON, deadLeases, runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // A real remote_build_id from replay 3 (ev_30924d59) and its neighbour: both above Number.MAX_SAFE_INTEGER, both parse to the same double.
 const BIG_ID = "30068411341996668", BIG_ID_NEIGHBOUR = "30068411341996667";
 
-// A journaled lease planted beside the run under test. Defaults: owner absent, heartbeat an hour old, running/finalize, unretired, holding `slots` pool slots until recovered.
+// A journaled lease planted beside the run under test, in the shape a real host journals a dead wrapper (rch 2.1.34): state running, a recovery record present but unretired
+// (execution_started, no exit code, sources not released), owner absent, heartbeat an hour old, holding `slots` pool slots until retired.
 interface PlantedLease { id: string; worker?: string; pid?: number; birthSeconds?: number; alive?: boolean; ownerPresence?: string; ageMs?: number; acknowledged?: boolean; retired?: boolean; slots?: number }
 
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; rawIds?: [remote: string, build: string]; transport?: boolean; planted?: PlantedLease[]; recoverFails?: "exit" | "noop" } = {}) {
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; rawIds?: [remote: string, build: string]; transport?: boolean; planted?: PlantedLease[] } = {}) {
 	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0, recovered = false;
-	const planted = options.planted ?? [], recoverCalls: string[] = [], reapedIds = new Set<string>();
-	const plantedDone = (lease: PlantedLease) => lease.retired === true || reapedIds.has(lease.id);
+	const planted = options.planted ?? [], recoverCalls: string[] = [];
+	const plantedDone = (lease: PlantedLease) => lease.retired === true;
 	const plantedRow = (lease: PlantedLease) => ({ wrapper_alive: lease.alive ?? false, owner_presence: lease.ownerPresence ?? "absent", lease: {
 		schema_version: 1, wrapper_pid: lease.pid ?? 52001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: lease.birthSeconds ?? 1, microseconds: 3 } },
 		identity: { local_wrapper_id: lease.id, remote_build_id: 52 }, worker_id: lease.worker ?? "worker-a", state: plantedDone(lease) ? "finished" : "running", phase: plantedDone(lease) ? "finished" : "finalize",
@@ -32,10 +33,9 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 				return { exit: 0, state: "exited", stdout: "{}" };
 			}
 			if (args[0] === "jobs" && args[1] === "recover" && planted.some(lease => lease.id === args[2])) {
+				// What a real host answered: the recover cannot establish a terminal state for a dead-owner lease, exits 1, and retires nothing.
 				recoverCalls.push(args[2] ?? "");
-				if (options.recoverFails === "exit") return { exit: 1, state: "exited", stdout: "" };
-				if (options.recoverFails !== "noop") reapedIds.add(args[2] ?? "");
-				return { exit: 0, state: "exited", stdout: "{}" };
+				return { exit: 1, state: "exited", stdout: "" };
 			}
 			if (args[0] === "status") value = status();
 			else if (args[0] === "gc") return { exit: options.gcExit ?? 0, state: "exited", stdout: "{}" };
@@ -247,25 +247,38 @@ test("the same native failure with a recorded nonzero remote exit stays BUILD_FA
 	expect(result.compilerExit).toBe(101);
 });
 
-const DEAD: PlantedLease = { id: "rchw-dead", slots: 3 };
+const DEAD: PlantedLease = { id: "rchw-dead", slots: 1 };
 
-test("a dead-owner lease holding the pool's slots is recovered through the native call, reported reaped, and its slots return to the pool", async () => {
+test("a dead-owner lease is reported unreapable with the missing native capability named, never recovered, and a passing run stays passing", async () => {
+	const baseline = await runRchCycle(input, nativeFixture().executor);
 	const fixture = nativeFixture({ planted: [DEAD] });
 	const result = await runRchCycle(input, fixture.executor);
-	expect(fixture.recoverCalls()).toEqual(["rchw-dead"]);
-	expect(result.deadLeases).toEqual([{ wrapperId: "rchw-dead", worker: "worker-a", pid: 52001, state: "running", phase: "finalize", basis: "stale_heartbeat", outcome: "reaped" }]);
-	expect(result.before?.workers[0]?.free).toBe(1);
-	expect(result.after?.workers[0]?.free).toBe(4);
-	expect(fixture.submitted()).toBe(1);
+	expect(fixture.recoverCalls()).toEqual([]);
+	expect(result.deadLeases).toEqual([{ wrapperId: "rchw-dead", worker: "worker-a", pid: 52001, state: "running", phase: "finalize", basis: "stale_heartbeat", outcome: "unreapable", reason: DEAD_LEASE_UNREAPABLE_REASON }]);
+	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("no native rch verb retires a dead-owner lease");
+	expect([result.overall, result.reason]).toEqual([baseline.overall, baseline.reason]);
 	expect(result.overall).toBe("COMPLETE");
-	expect(result.lease).toContain("dead_leases=1 reaped=1");
+	expect(fixture.submitted()).toBe(1);
+	expect(result.lease).toContain("dead_leases=1 reap=no_native_verb");
+	expect(result.lease).not.toContain("reaped=");
 });
 
-test("a dead lease whose pid is now held by a live wrapper with a different process start time is reaped even with a fresh heartbeat; the live holder is untouched", async () => {
+test("a dead lease that holds the pool's slots is not claimed freed: the cycle refuses for capacity instead of pretending a reap", async () => {
+	const fixture = nativeFixture({ planted: [{ id: "rchw-dead", slots: 3 }] });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(fixture.recoverCalls()).toEqual([]);
+	expect(result.deadLeases?.map(lease => [lease.wrapperId, lease.outcome])).toEqual([["rchw-dead", "unreapable"]]);
+	expect(result.before?.workers[0]?.free).toBe(1);
+	expect(result.overall).toBe("REFUSED");
+	expect(result.reason).toBe("rch_capacity_unavailable");
+	expect(fixture.submitted()).toBe(0);
+});
+
+test("a dead lease whose pid is now held by a live wrapper with a different process start time is reported even with a fresh heartbeat; neither is recovered", async () => {
 	const fixture = nativeFixture({ planted: [{ id: "rchw-dead", pid: 52002, ageMs: 1_000 }, { id: "rchw-reuser", pid: 52002, birthSeconds: 9, alive: true, ownerPresence: "live", ageMs: 1_000 }] });
 	const result = await runRchCycle(input, fixture.executor);
-	expect(fixture.recoverCalls()).toEqual(["rchw-dead"]);
-	expect(result.deadLeases?.map(lease => [lease.wrapperId, lease.basis, lease.outcome])).toEqual([["rchw-dead", "pid_birth_mismatch", "reaped"]]);
+	expect(fixture.recoverCalls()).toEqual([]);
+	expect(result.deadLeases?.map(lease => [lease.wrapperId, lease.basis, lease.outcome])).toEqual([["rchw-dead", "pid_birth_mismatch", "unreapable"]]);
 });
 
 test.each([
@@ -276,7 +289,7 @@ test.each([
 	["a recent heartbeat", { ageMs: 60_000 }],
 	["a different worker", { worker: "worker-b" }],
 	["this controller's own pid", { pid: process.pid }],
-] satisfies [string, Partial<PlantedLease>][])("%s is never recovered", async (_shape, plant) => {
+] satisfies [string, Partial<PlantedLease>][])("%s is neither reported nor recovered", async (_shape, plant) => {
 	const fixture = nativeFixture({ planted: [{ id: "rchw-keep", slots: 1, ...plant }] });
 	const result = await runRchCycle(input, fixture.executor);
 	expect(fixture.recoverCalls()).toEqual([]);
@@ -284,34 +297,41 @@ test.each([
 	expect(result.overall).toBe("COMPLETE");
 });
 
-test.each(["exit", "noop"] as const)("a failed dead-lease recover (%s) is reported reap_failed and leaves a passing run passing", async recoverFails => {
-	const baseline = await runRchCycle(input, nativeFixture().executor);
-	const fixture = nativeFixture({ planted: [{ id: "rchw-dead", slots: 1 }], recoverFails });
+test("a dead lease beside a failing build leaves the build failing and is still not recovered", async () => {
+	const fixture = nativeFixture({ planted: [DEAD], nativeExit: 101, remoteExit: 101 });
 	const result = await runRchCycle(input, fixture.executor);
-	expect(fixture.recoverCalls()).toEqual(["rchw-dead"]);
-	expect(result.deadLeases?.map(lease => lease.outcome)).toEqual(["reap_failed"]);
-	expect([result.overall, result.reason]).toEqual([baseline.overall, baseline.reason]);
-	expect(result.overall).toBe("COMPLETE");
-	expect(result.lease).toContain("dead_leases=1 reaped=0");
-});
-
-test("a failed dead-lease recover leaves a failing build failing", async () => {
-	const fixture = nativeFixture({ planted: [{ id: "rchw-dead", slots: 1 }], recoverFails: "exit", nativeExit: 101, remoteExit: 101 });
-	const result = await runRchCycle(input, fixture.executor);
-	expect(result.deadLeases?.map(lease => lease.outcome)).toEqual(["reap_failed"]);
+	expect(fixture.recoverCalls()).toEqual([]);
+	expect(result.deadLeases?.map(lease => lease.outcome)).toEqual(["unreapable"]);
 	expect(result.overall).toBe("BUILD_FAILED");
 	expect(result.reason).toBe("native_remote_command_failed");
 	expect(result.compilerExit).toBe(101);
 });
 
-test("plan mode reports dead-owner leases and never calls recover or submits", async () => {
+test("plan mode reports dead-owner leases the same way and never calls recover or submits", async () => {
 	const fixture = nativeFixture({ planted: [DEAD] });
 	const result = await runRchCycle({ ...input, apply: false }, fixture.executor);
 	expect(result.overall).toBe("PLAN");
-	expect(result.deadLeases?.map(lease => [lease.wrapperId, lease.outcome])).toEqual([["rchw-dead", "plan_only"]]);
+	expect(result.deadLeases?.map(lease => [lease.wrapperId, lease.outcome])).toEqual([["rchw-dead", "unreapable"]]);
 	expect(fixture.recoverCalls()).toEqual([]);
 	expect(fixture.submitted()).toBe(0);
-	expect(result.lease).toContain("dead_leases=1 reaped=0");
+	expect(result.lease).toContain("dead_leases=1 reap=no_native_verb");
+});
+
+test("the three dead leases observed on a real host (native jobs --json, rch 2.1.34: state running, recovery present and unretired, heartbeat 3.8-12.2 days old) are all found", () => {
+	const real = (id: string, pid: number, worker: string, phase: string, heartbeat: number, exit?: number) => ({ owner_presence: "absent", wrapper_alive: false, lease: {
+		schema_version: 1, identity: { local_wrapper_id: id, remote_build_id: "30051220651508785" }, wrapper_pid: pid, state: "running", phase, worker_id: worker, heartbeat_unix_ms: heartbeat,
+		strict_remote: true, self_healing_enabled: false, command_fingerprint: "blake3:00", terminal_acknowledged: false,
+		recovery: { version: 2, wrapper_id: id, build_id: "30051220651508785", retired: false, execution_started: true, preparation_cancelled: false, exit_code: exit ?? null, sources_released: false, tree_retired: false, pair_released: false },
+	} });
+	const day = 86_400_000, now = 1_792_371_300_000;
+	const reply = { complete: true, journal_errors: [], jobs: [
+		real("rchw-bde89f64-2d44-4864-b817-b4f8a3a14f9b", 75123, "contabo-1", "execute", 1_791_652_608_087),
+		real("rchw-79569ec5-d05b-444e-b3a8-65f6cd3fc939", 4307, "contabo-2", "finalize", 1_791_313_858_219, 0),
+		real("rchw-66a2c019-01b6-4a48-9c44-e1695184bd9d", 51452, "contabo-3", "finalize", 1_792_042_969_847),
+	] };
+	const found = deadLeases(reply, { now });
+	expect(found.map(lease => [lease.worker, lease.state, lease.phase, lease.basis])).toEqual([["contabo-1", "running", "execute", "stale_heartbeat"], ["contabo-2", "running", "finalize", "stale_heartbeat"], ["contabo-3", "running", "finalize", "stale_heartbeat"]]);
+	expect(reply.jobs.map(row => (now - row.lease.heartbeat_unix_ms) / day).every(days => days > 3.8 && days < 12.3)).toBe(true);
 });
 
 test("deadLeases reads only a complete journal and honours its exclusions", () => {
