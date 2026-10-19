@@ -832,6 +832,24 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertFalse(release_reuse.final_run_matches(changed, repository=REPOSITORY, source_sha=SOURCE_SHA,
                                                             version=BASE_VERSION, train_id="810", phase="sign"))
 
+    def test_red_producer_run_never_matches_final_authority(self) -> None:
+        # BUMPCI1 (ompkit-fp72.65): a qualification whose certification is red
+        # must never become tag/promote authority. Planted: the identical run
+        # with a failure (or cancelled) conclusion, or a non-completed status,
+        # is refused for both the qualify and sign phases.
+        for phase, branch in (("qualify", "main"), ("sign", "v" + BASE_VERSION)):
+            run = dict(candidate_run(), head_branch=branch,
+                       display_title=release_reuse.release_title(phase, BASE_VERSION, SOURCE_SHA, "810"))
+            self.assertTrue(release_reuse.final_run_matches(run, repository=REPOSITORY, source_sha=SOURCE_SHA,
+                                                            version=BASE_VERSION, train_id="810", phase=phase))
+            for changed in (dict(run, conclusion="failure"), dict(run, conclusion="cancelled"),
+                            dict(run, conclusion="timed_out"), dict(run, status="in_progress"),
+                            dict(run, status="in_progress", conclusion="success")):
+                with self.subTest(phase=phase, changed={k: changed[k] for k in ("status", "conclusion")}):
+                    self.assertFalse(release_reuse.final_run_matches(changed, repository=REPOSITORY,
+                                                                     source_sha=SOURCE_SHA, version=BASE_VERSION,
+                                                                     train_id="810", phase=phase))
+
     def test_signed_final_requires_actual_installer_and_upgrade_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
