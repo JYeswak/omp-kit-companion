@@ -283,6 +283,13 @@ const infraData: DataSchema = { type: "object", required: ["overall", "command"]
 	receipt_id: { type: ["string", "null"] }, drop_path: { type: ["string", "null"] },
 	detail: { type: "string" },
 } };
+const scratchMineData: DataSchema = { type: "object", required: ["overall", "dirs", "unreleased"], properties: {
+	overall: { enum: ["OK", "FINDINGS"] }, unreleased: { type: "number" }, note: { type: "string" },
+	dirs: { type: "array", items: { type: "object", required: ["dir", "label", "state", "bin"], properties: {
+		dir: { type: "string" }, label: { type: "string" }, state: { enum: ["unreleased", "released", "held", "hold-expired"] },
+		bin: { enum: ["throwaway", "evidence", "promote", "hold", "unbinned"] },
+	} } },
+} };
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
@@ -321,6 +328,15 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 		malformedByRoot: { type: "object", additionalProperties: { type: "number" } },
 	} },
 	unownedActiveRule: { type: "string" },
+	gapReport: { type: "object", required: ["rows", "by_agent", "by_class"], properties: {
+		rows: { type: "array", items: { type: "object", required: ["dir", "label", "role", "bin", "class", "guard"], properties: {
+			dir: { type: "string" }, label: { type: "string" }, agent: { type: ["string", "null"] }, session: { type: ["string", "null"] },
+			role: { type: "string" }, bin: { type: "string" }, class: { type: "string" }, reason: { type: "string" },
+			action: { enum: ["REAP", "QUARANTINE"] }, bytes: { type: "number" }, age_s: { type: ["number", "null"] }, guard: { type: "string" },
+		} } },
+		by_agent: { type: "object", additionalProperties: { type: "number" } },
+		by_class: { type: "object" },
+	} },
 } };
 const flushPendingData: DataSchema = { type: "object", required: ["overall", "applied", "panes", "stale_steer", "frozen_turn"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE"] }, applied: { type: "boolean" },
@@ -738,8 +754,9 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
 	{ name: "scratch",
 		description: `Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: ${UNOWNED_ACTIVE_RULE}. Plan and apply JSON include per-row sizes, per-root/per-verdict totals, malformed-owner counts and the exact policy; apply also includes a reaper receipt.`,
-		usage: "scratch plan|release DIR|apply [--apply --yes]", flags: [], subcommands: [
+		usage: "scratch plan|release DIR|mine|apply [--apply --yes]", flags: [], subcommands: [
 			{ name: "plan", description: "Read-only report over all scratch roots with sized rows and per-root/per-verdict totals; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+			{ name: "mine", description: "Read-only list of the caller's own scratch dirs (owner agent and session, or the caller's pid or an ancestor) with their state (unreleased, released, held, hold-expired) and bin; exit 0, overall FINDINGS while any is unreleased or its hold expired", usage: "scratch mine", flags: [], example: "omp-kit scratch mine --json", runnable: false, dataSchema: scratchMineData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it. --bin records where the content went: throwaway needs no reference, evidence and promote need --ref to a git-tracked file in the owner's repo or a bead that br show finds", usage: "scratch release DIR [--bin throwaway|evidence|promote [--ref file:PATH|bead:ID]]", argument: "DIR", flags: [
 			{ name: "--bin", value: "throwaway|evidence|promote", description: "Disposal bin: throwaway is deleted with no reference; evidence is content committed under the owner's repo or recorded on a bead; promote is content committed to its owning repo. A hold is declared when the dir is made, not at release" },
 			{ name: "--ref", value: "file:PATH|bead:ID", description: "With --bin evidence or promote: file:PATH names a git-tracked file in the owner's repo (relative paths resolve there); bead:ID names a bead br show finds" },

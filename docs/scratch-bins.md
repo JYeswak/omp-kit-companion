@@ -60,8 +60,12 @@ A release without `--bin` still works and is counted as unbinned.
 | `class` | `never-released` (a seat owner died without releasing), `pid-keyed-owner-never-released` (no agent or session in the owner record), `released-unbinned` (released without `--bin`), `unowned`, `mismatched-owner`. |
 | `guard` | The bead whose guard should stop that class, or `NO GUARD: file one` when none exists. |
 
-A dir the owner released into a bin is not a gap. The report also counts gaps per agent and per class, so the next reap names what to fix first.
+A dir the owner released into a bin is not a gap. The report also counts gaps per agent and per class, so the next reap names what to fix first. `omp-kit scratch apply --apply --yes --json` prints it as `data.gapReport`.
+
+## What a session still owes
+
+`omp-kit scratch mine` lists the caller's own scratch dirs, read-only: those whose owner record names the caller's agent and a session it holds, or whose pid is the caller's or an ancestor's. Each row has a state (`unreleased`, `released`, `held`, `hold-expired`) and its bin. `overall` is `FINDINGS` while any dir is `unreleased` or its hold has `hold-expired`, otherwise `OK`; the exit code is 0 either way. Dirs of other owners and unowned dirs never appear.
 
 ## Scope of what exists today
 
-The owner keys, the hold rule, `scratch release --bin/--ref` and the reap gap report are in. The flag at the disposal points (the holder's close or `in_review`, and session end) and the measurement row are the remaining parts of ompkit-774u.15; the `scratch apply` CLI output does not yet print the report (it is in the library result and the reap log).
+The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`) and `scratch mine` are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: the flag at the disposal points (the holder's close or `in_review`, and session end), which starts as a warning and becomes a refusal only after a week with no false flag.

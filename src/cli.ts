@@ -62,7 +62,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3209,12 +3209,18 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				orphans: result.orphans, killed: result.killed, expired: result.expired, receipt: result.receipt,
 				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes, totals: result.totals,
 				rootMetrics: result.rootMetrics, pressure: result.pressure, quarantineBuckets: result.quarantineBuckets,
-				unownedActiveRule: result.unownedActiveRule },
+				unownedActiveRule: result.unownedActiveRule, gapReport: result.gapReport },
 			verification: "UNVERIFIED" };
+	}
+	if (sub === "mine") {
+		const rows = ownedScratch(home, deps);
+		const unreleased = rows.filter((row) => row.state === "unreleased" || row.state === "hold-expired");
+		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
+			note: "Read-only. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
-for (const subcommand of ["plan", "release", "apply"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+for (const subcommand of ["plan", "release", "apply", "mine"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
 	const repoFlag = request.flags.get("--repo");

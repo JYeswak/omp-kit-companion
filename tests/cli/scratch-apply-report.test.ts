@@ -1,0 +1,67 @@
+// ompkit-774u.15 SCRATCHBIN1 C and D through the real CLI: `scratch mine` lists the caller's own dirs and what each still
+// owes, and `scratch apply` prints the gap report.
+import { afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+const repo = resolve(import.meta.dir, "../..");
+const scratchParent = join(repo, "var", "agent-tmp");
+mkdirSync(scratchParent, { recursive: true });
+const cleanup: string[] = [];
+afterEach(() => { for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+interface Envelope { ok: boolean; data: Record<string, unknown>; errors?: { code: string }[] }
+
+function world(): { root: string; home: string; env: Record<string, string> } {
+	const root = mkdtempSync(join(scratchParent, "cli-bins-"));
+	const home = mkdtempSync(join(scratchParent, "cli-bins-home-"));
+	cleanup.push(root, home);
+	mkdirSync(join(home, "state"), { recursive: true });
+	const env = { ...process.env as Record<string, string>, HOME: home, XDG_STATE_HOME: join(home, "state"), XDG_CONFIG_HOME: join(home, "config"),
+		OMP_KIT_SCRATCH_ROOTS: root, OMP_KIT_OMP_SRC_FETCH: "0", OMP_KIT_FLEET_WATCH_CONFIG: join(home, "absent.json") };
+	return { root, home, env };
+}
+function cli(env: Record<string, string>, ...args: string[]): { code: number; envelope: Envelope } {
+	const child = Bun.spawnSync([process.execPath, "run", join(repo, "src", "cli.ts"), ...args, "--json"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	return { code: child.exitCode ?? -1, envelope: JSON.parse(child.stdout.toString()) as Envelope };
+}
+const plant = (root: string, name: string, owner: string): string => {
+	const dir = join(root, name);
+	mkdirSync(dir);
+	writeFileSync(join(dir, "work.txt"), "work");
+	writeFileSync(join(dir, ".owner"), owner);
+	return dir;
+};
+// The CLI process is a child of this test process, so a pid-keyed owner naming the test pid is the caller's own.
+const ownerOf = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-18T17:00:00Z\n${extra}`;
+
+test("scratch mine lists the caller's own dirs by pid with state and bin, reports FINDINGS while one is unreleased, and never lists another owner's", () => {
+	const { root, env } = world();
+	plant(root, "mine.1", ownerOf(process.pid, "mine"));
+	plant(root, "theirs.59302", ownerOf(59302, "theirs"));
+	const first = cli(env, "scratch", "mine");
+	expect(first.code).toBe(0);
+	expect(first.envelope.data).toMatchObject({ overall: "FINDINGS", unreleased: 1, dirs: [{ label: "mine", state: "unreleased", bin: "unbinned" }] });
+
+	const released = cli(env, "scratch", "release", join(root, "mine.1"), "--bin", "throwaway");
+	expect(released.envelope.data).toMatchObject({ action: "RELEASED", changed: true, bin: "throwaway", ref: null });
+	const second = cli(env, "scratch", "mine");
+	expect(second.envelope.data).toMatchObject({ overall: "OK", unreleased: 0, dirs: [{ label: "mine", state: "released", bin: "throwaway" }] });
+	// A hold whose expiry has passed is owed again: it is flagged, never reaped.
+	plant(root, "lapsed.59303", `pid=${process.pid}\nlabel=lapsed\nrepo=${repo}\ncreated=2026-01-01T00:00:00Z\nbin=hold\nbead=ompkit-774u.15\nexpires=2026-01-05\n`);
+	const third = cli(env, "scratch", "mine");
+	expect(third.envelope.data).toMatchObject({ overall: "FINDINGS", unreleased: 1 });
+	expect(third.envelope.data.dirs).toMatchObject([{ label: "lapsed", state: "hold-expired", bin: "hold" }, { label: "mine", state: "released" }]);
+}, 180_000);
+
+test("scratch apply prints the gap report for what it reclaimed and the CLI schema lists mine", () => {
+	const { root, env } = world();
+	const dir = plant(root, "gone.59301", ownerOf(59301, "gone"));
+	const applied = cli(env, "scratch", "apply", "--apply", "--yes");
+	const report = applied.envelope.data.gapReport as { rows: { label: string; class: string; guard: string; bin: string }[]; by_class: Record<string, { count: number }> };
+	expect(report.rows).toMatchObject([{ label: "gone", class: "pid-keyed-owner-never-released", guard: "ompkit-774u.9.3", bin: "unbinned" }]);
+	expect(report.by_class["pid-keyed-owner-never-released"]).toMatchObject({ count: 1 });
+	expect(existsSync(dir)).toBe(false);
+	const help = Bun.spawnSync([process.execPath, "run", join(repo, "src", "cli.ts"), "help", "scratch"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+	expect(help.stdout.toString()).toContain("scratch mine");
+}, 180_000);
