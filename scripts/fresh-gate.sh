@@ -188,6 +188,21 @@ select_affected_tests() {
 	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain "$@"
 }
 
+# K parallel bun workers for the affected tests: a quarter of the online cores, 2..4, unless
+# FRESH_GATE_TEST_WORKERS names a positive count.
+test_workers() {
+	case "${FRESH_GATE_TEST_WORKERS:-}" in
+		''|*[!0-9]*|0) ;;
+		*) echo "$FRESH_GATE_TEST_WORKERS"; return 0 ;;
+	esac
+	ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=4
+	case "$ncpu" in ''|*[!0-9]*) ncpu=4 ;; esac
+	k=$((ncpu / 4))
+	[ "$k" -ge 2 ] || k=2
+	[ "$k" -le 4 ] || k=4
+	echo "$k"
+}
+
 # run_affected_tests TEST...: run every selected test to completion on the exact-commit export, or
 # refuse. Nothing defers to CI: the old per-suite 25 s budget and --no-wait admission (heavy's
 # default sbh observer) turned every push on this host into a GREEN gate that ran 0 tests
@@ -217,6 +232,15 @@ run_affected_tests() {
 	[ -f "$WORK/queued.secs" ] && queued_before=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 	tests_rc=0
 	if [ "$bun_files" -gt 0 ]; then
+		# Shards: bun's own --parallel workers, K from cores (a quarter, 2..4, as CI shards core four
+		# ways; 8 workers timed out compiled-CLI tests at 120 s on this Mac, measured 2026-10-19), never
+		# more than the selected files. --timings (CI's measured per-file durations) starts the slowest
+		# files first. The whole run is one heavy job at nice 10.
+		workers=$(test_workers)
+		[ "$workers" -le "$bun_files" ] || workers=$bun_files
+		set -- --parallel="$workers" "$@"
+		[ -f "$ARCHIVE_DIR/.github/core-test-timings.json" ] && set -- --timings="$ARCHIVE_DIR/.github/core-test-timings.json" "$@"
+		echo "affected bun tests: files=$bun_files workers=$workers"
 		(
 			cd "$ARCHIVE_DIR"
 			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"

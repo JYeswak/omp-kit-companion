@@ -389,7 +389,7 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 // ---- CIGATE1 (ompkit-v66l.27.1): the push runs the tests its diff affects, or refuses ---------------
 // The real selector, disk floor, heavy and bun test run against a small exact-tree fixture; src is the
 // checkout's (heavy runs from it), the code under test lives in lib/ so the fixture owns its edits.
-const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "run_affected_tests", "changed_code", "record_run", "gate_focused"];
+const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "record_run", "gate_focused"];
 function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
 	const dir = mkdtempSync(join(base, "archive."));
 	symlinkSync(join(root, "src"), join(dir, "src"));
@@ -442,6 +442,49 @@ test.skipIf(!AMPLE)("CIGATE1 planted: a src change runs the tests importing it; 
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 120_000);
+
+test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun workers, and a failure in any shard refuses (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		for (const n of [2, 3]) writeFileSync(join(archive, `tests/cli/mod${n}.test.ts`), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("answer ${n}", () => { expect(answer() + ${n}).toBe(${42 + n}); });\n`);
+		fx.env.FRESH_GATE_TEST_WORKERS = "2";
+		const green = runFocused(fx, source, archive, "lib/mod.ts");
+		expect(green.code).toBe(0);
+		expect(green.out).toContain("affected bun tests: files=3 workers=2");
+		expect(green.out).toContain("2x PARALLEL");
+		expect(green.out).toContain("FRESH-GATE: VERDICT TESTED files=3 ran=3");
+		writeFileSync(join(archive, "tests/cli/mod3.test.ts"), `import { expect, test } from "bun:test";\ntest("broken shard", () => { expect(1).toBe(2); });\n`);
+		const red = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
+		expect(red.code).not.toBe(0);
+		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass");
+		// Mutant: without --parallel the run is one serial process.
+		const serial = source.replace('set -- --parallel="$workers" "$@"', ":");
+		expect(serial).not.toBe(source);
+		writeFileSync(join(archive, "tests/cli/mod3.test.ts"), `import { expect, test } from "bun:test";\ntest("ok", () => { expect(1).toBe(1); });\n`);
+		expect(runFocused(fx, serial, archive, "lib/mod.ts").out).not.toContain("PARALLEL");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test("CIGATE1 shards: K is a quarter of the cores, 2..4, or an explicit positive override", () => {
+	const source = readFileSync(gate, "utf8");
+	const dir = mkdtempSync(join(scratchRoot, "fresh-gate-workers-"));
+	try {
+		const probe = join(dir, "probe.sh");
+		writeFileSync(probe, `${gateFunctions(source, ["test_workers"])}test_workers\n`);
+		const k = (override: string) => Bun.spawnSync(["sh", probe], { env: { ...process.env, FRESH_GATE_TEST_WORKERS: override }, stdout: "pipe" }).stdout.toString().trim();
+		const cores = Number(Bun.spawnSync(["getconf", "_NPROCESSORS_ONLN"], { stdout: "pipe" }).stdout.toString().trim());
+		expect(k("")).toBe(String(Math.min(4, Math.max(2, Math.floor(cores / 4)))));
+		expect(k("0")).toBe(k(""));
+		expect(k("x3")).toBe(k(""));
+		expect(k("5")).toBe("5");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 test.skipIf(!AMPLE)("CIGATE1 planted: a commit breaking the test it touches is refused (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
