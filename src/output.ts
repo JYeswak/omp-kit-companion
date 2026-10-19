@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { isatty } from "node:tty";
 
 export type PresentationResult = {
-	code: 0 | 1 | 2 | 3 | 4 | 77;
+	code: 0 | 1 | 2 | 3 | 4 | 10 | 11 | 77;
 	data: Record<string, unknown>;
 	jsonl?: readonly Record<string, unknown>[];
 	errors?: readonly { code: string; message: string; remediation: string }[];

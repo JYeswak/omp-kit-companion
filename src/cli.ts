@@ -85,6 +85,7 @@ import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, 
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
+import { custodyCheckCommand } from "./custody.ts";
 import { looksSecret } from "./mcp-sources.ts";
 
 const SCHEMA_VERSION = "1";
@@ -1001,6 +1002,7 @@ registerCommandHandler("why", receiptCommand);
 registerCommandHandler("undo", receiptCommand);
 registerCommandHandler("land", landCommand);
 registerCommandHandler("converge", convergeCommand);
+registerCommandHandler("custody check", custodyCheckCommand);
 
 function rulesCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
@@ -4019,6 +4021,10 @@ export function ccActionOutcome(exitCode: number, errors?: readonly { code: stri
 	if (exitCode === 124 || exitCode === 75 || (typeof errCode === "string" && /TIMEOUT|TIMED_OUT|DEADLINE/i.test(errCode)))
 		return { outcome: "timeout", code: typeof errCode === "string" && errCode ? errCode : "TIMEOUT" };
 	if (exitCode === 0) return { outcome: "ok", code: null };
+	// CC15 custody answers (custody.py:40): 10 HELD and 11 DIRTY_UNOWNED are
+	// given answers, never failures; the verb returns them with no errors
+	// array so stdout JSON still renders, hence the exit-code-only match.
+	if (exitCode === 10 || exitCode === 11) return { outcome: "ok", code: exitCode === 10 ? "HELD" : "DIRTY_UNOWNED" };
 	if (exitCode === 2 && typeof errCode === "string" && errCode && errCode !== "HANDLER_FAILED") return { outcome: "refused", code: errCode };
 	return { outcome: "failed", code: typeof errCode === "string" && errCode ? errCode : "HANDLER_FAILED" };
 }
