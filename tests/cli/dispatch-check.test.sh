@@ -1,7 +1,7 @@
 #!/bin/sh
 # dispatch-check.test.sh — DISPATCH1 fail-closed comparator contract
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.100).
-# A stub `bv` serves canned robot-next / robot-triage payloads; every verdict
+# Stubs serve canned robot-next and br scheduler payloads; every verdict
 # comes from the script's exit code plus its complete stdout/stderr.
 set -u
 
@@ -19,13 +19,18 @@ stub_bv() {
 #!/bin/sh
 if [ "\$1" = "--robot-next" ]; then
 	printf '%s' '$BV_NEXT'
-elif [ "\$1" = "--robot-triage" ]; then
-	printf '%s' '$BV_TRIAGE'
 else
 	exit 9
 fi
 EOF
-	chmod +x "$TMP/bin/bv"
+	cat > "$TMP/bin/br" <<EOF
+#!/bin/sh
+case " \$* " in
+	*" scheduler "*) printf '%s' '$BR_SCHEDULER' ;;
+	*) exit 9 ;;
+esac
+EOF
+	chmod +x "$TMP/bin/bv" "$TMP/bin/br"
 	export PATH="$TMP/bin:/usr/bin:/bin"
 }
 
@@ -36,8 +41,12 @@ run_case() {
 	stdout=$(cat "$TMP/stdout")
 	stderr=$(cat "$TMP/stderr")
 	case "$name" in
-		match)
-			if [ "$got_rc" = "0" ] && [ "$stdout" = "CLAIM_TOP=bead-a" ]; then pass=$((pass + 1));
+		match|claimed-top-skipped|not-ready-labels-skipped)
+			if [ "$got_rc" = "0" ] && {
+				[ "$stdout" = "CLAIM_TOP=bead-a" ] ||
+					[ "$stdout" = "CLAIM_TOP=bead-a
+CLAIM_SOURCE: BV_ROBOT_NEXT bead-a" ];
+			}; then pass=$((pass + 1));
 			else fail=$((fail + 1)); printf 'FAIL %s: rc=%s out<<<%s>>> err<<<%s>>>\n' "$name" "$got_rc" "$stdout" "$stderr"; fi ;;
 		*)
 			if [ "$got_rc" = "3" ] && [ -z "$stdout" ] && printf '%s' "$stderr" | grep -q "BV_TOP_MISMATCH"; then pass=$((pass + 1));
@@ -47,35 +56,46 @@ run_case() {
 
 # 1. agreement prints the claimable top
 BV_NEXT='{"id":"bead-a","title":"A"}'
-BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[{"id":"bead-a"}]}}}'
+BR_SCHEDULER='{"recommendations":[{"issue":{"id":"bead-a","status":"open","assignee":null,"labels":[]}}]}'
 stub_bv
 run_case match 0
-
-# 2. planted admissible mismatch fails closed with no CLAIM_TOP
+# 2. a claimed global top is ignored in favor of the next admissible candidate
 BV_NEXT='{"id":"bead-a","title":"A"}'
-BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[{"id":"bead-b"}]}}}'
+BR_SCHEDULER='{"recommendations":[{"issue":{"id":"bead-claimed","status":"open","assignee":"owner","labels":[]}},{"issue":{"id":"bead-a","status":"open","assignee":null,"labels":[]}}]}'
+stub_bv
+run_case claimed-top-skipped 0
+
+# 3. each configured not-ready label is excluded from the scheduler top
+BV_NEXT='{"id":"bead-a","title":"A"}'
+BR_SCHEDULER='{"recommendations":[{"issue":{"id":"human-gate-bead","status":"open","assignee":null,"labels":["human-gate"]}},{"issue":{"id":"owner-decision-bead","status":"open","assignee":null,"labels":["owner-decision"]}},{"issue":{"id":"process-bead","status":"open","assignee":null,"labels":["kind:process"]}},{"issue":{"id":"bead-a","status":"open","assignee":null,"labels":[]}}]}'
+stub_bv
+run_case not-ready-labels-skipped 0
+
+# 4. planted admissible mismatch fails closed with no CLAIM_TOP
+BV_NEXT='{"id":"bead-a","title":"A"}'
+BR_SCHEDULER='{"recommendations":[{"issue":{"id":"bead-b","status":"open","assignee":null,"labels":[]}}]}'
 stub_bv
 run_case mismatch 3
 
-# 3. unreadable robot-next fails closed
+# 5. unreadable robot-next fails closed
 BV_NEXT='not json'
-BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[{"id":"bead-a"}]}}}'
+BR_SCHEDULER='{"recommendations":[{"issue":{"id":"bead-a","status":"open","assignee":null,"labels":[]}}]}'
 stub_bv
 run_case bad-next 3
 
-# 4. empty triage top fails closed
+# 6. empty scheduler top fails closed
 BV_NEXT='{"id":"bead-a","title":"A"}'
-BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[]}}}'
+BR_SCHEDULER='{"recommendations":[]}'
 stub_bv
-run_case empty-triage 3
+run_case empty-scheduler 3
 
-# 6. dry queue (no next id, empty triage) fails closed naming the cause
+# 7. dry queue (no next id, empty scheduler) fails closed naming the cause
 BV_NEXT='{"message":"No proven actionable item available"}'
-BV_TRIAGE='{"triage":{"quick_ref":{"top_picks":[]}}}'
+BR_SCHEDULER='{"recommendations":[]}'
 stub_bv
 run_case dry-queue 3
 
-# 5. missing --db fails closed
+# 8. missing --db fails closed
 if "$CHECK" > "$TMP/stdout" 2> "$TMP/stderr"; then
 	fail=$((fail + 1)); printf 'FAIL no-db: rc=0\n'
 else

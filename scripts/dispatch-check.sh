@@ -2,12 +2,12 @@
 # dispatch-check.sh — DISPATCH1 fail-closed dispatch comparator
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.100).
 # Compares `bv --robot-next` (what a new claimer should take) against the top
-# of `bv --robot-triage` over the claim-admissible set. On agreement prints
+# of `br scheduler` over the same claim-admissible set. On agreement prints
 # CLAIM_TOP=<id> (exit 0). On ANY disagreement or tool failure prints
-# BV_TOP_MISMATCH and exits 3: no claim may be made from robot-next's pick
-# until the rankings agree or the cause is recorded.
-# Reads nothing but bv's JSON; never writes to the tracker.
-# Usage: dispatch-check.sh --db PATH [--bv BIN]
+# disagreement or tool failure prints BV_TOP_MISMATCH and exits 3: no claim
+# may be made from robot-next's pick until the rankings agree or the cause is recorded.
+# Reads br/bv JSON; never writes to the tracker.
+# Usage: dispatch-check.sh --db PATH [--bv BIN] [--br BIN]
 set -u
 
 fail() {
@@ -17,29 +17,49 @@ fail() {
 
 DB=""
 BV="bv"
+BR="br"
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--db) DB=${2:-}; shift 2 ;;
 		--bv) BV=${2:-}; shift 2 ;;
+		--br) BR=${2:-}; shift 2 ;;
 		--) shift; break ;;
-		*) fail "BV_TOP_MISMATCH unknown argument $1 (usage: dispatch-check.sh --db PATH [--bv BIN])" ;;
+		*) fail "BV_TOP_MISMATCH unknown argument $1 (usage: dispatch-check.sh --db PATH [--bv BIN] [--br BIN])" ;;
 	esac
 done
 if [ -z "$DB" ]; then
 	fail "BV_TOP_MISMATCH --db PATH is required"
 fi
 
-next_json=$("$BV" --robot-next --db "$DB" -f json 2>/dev/null) || fail "BV_TOP_MISMATCH robot-next failed"
-triage_json=$("$BV" --robot-triage --db "$DB" -f json 2>/dev/null) || fail "BV_TOP_MISMATCH robot-triage failed"
+next_json=$("$BV" --robot-next --robot-not-ready-labels human-gate,owner-decision,kind:process --db "$DB" -f json 2>/dev/null) || fail "BV_TOP_MISMATCH robot-next failed"
+scheduler_json=$("$BR" --db "$DB" --no-auto-import --no-auto-flush scheduler --limit 0 --candidate-limit 0 --json 2>/dev/null) || fail "BV_TOP_MISMATCH br scheduler failed"
 claim_top=$(printf '%s' "$next_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id') or '')" 2>/dev/null) || fail "BV_TOP_MISMATCH robot-next JSON unreadable"
-triage_top=$(printf '%s' "$triage_json" | python3 -c "import json,sys; d=json.load(sys.stdin); picks=(d.get('triage') or {}).get('quick_ref', {}).get('top_picks') or []; print(picks[0].get('id') if picks else '')" 2>/dev/null) || fail "BV_TOP_MISMATCH robot-triage JSON unreadable"
+scheduler_top=$(printf '%s' "$scheduler_json" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+not_ready = {"human-gate", "owner-decision", "kind:process"}
+for recommendation in data.get("recommendations") or []:
+    issue = recommendation.get("issue") or {}
+    if issue.get("status") != "open":
+        continue
+    if issue.get("assignee") not in (None, "", "none"):
+        continue
+    if not_ready.intersection(issue.get("labels") or []):
+        continue
+    print(issue.get("id") or "")
+    break
+else:
+    print("")
+') || fail "BV_TOP_MISMATCH br scheduler JSON unreadable"
 if [ -z "$claim_top" ]; then
 	fail "BV_TOP_MISMATCH robot-next named no id"
 fi
-if [ -z "$triage_top" ]; then
-	fail "BV_TOP_MISMATCH robot-triage named no top pick"
+if [ -z "$scheduler_top" ]; then
+	fail "BV_TOP_MISMATCH br scheduler named no claim-admissible top"
 fi
-if [ "$claim_top" != "$triage_top" ]; then
-	fail "BV_TOP_MISMATCH next=$claim_top triage=$triage_top (no claim from robot-next until the rankings agree)"
+if [ "$claim_top" != "$scheduler_top" ]; then
+	fail "BV_TOP_MISMATCH next=$claim_top scheduler=$scheduler_top (no claim from robot-next until the rankings agree)"
 fi
 printf 'CLAIM_TOP=%s\n' "$claim_top"
