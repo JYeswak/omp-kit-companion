@@ -129,17 +129,24 @@ interface RchReturnEvidence {
 	compilerExit: number | null;
 }
 
+/** rch build ids are 64-bit and exceed Number.MAX_SAFE_INTEGER, so JSON.parse would round neighbours onto one value. Quote them before parsing and compare as exact decimal strings. */
+function exactBuildIds(result: NativeRchResult): unknown {
+	if (result.state !== "exited" || result.exit !== 0) return null;
+	try { return JSON.parse(result.stdout.replace(/("(?:remote_build_id|build_id)"\s*:\s*)([0-9]+)/g, '$1"$2"')); } catch { return null; }
+}
+
 async function returnedLease(executor: RchExecutor, id: string, worker: string): Promise<RchReturnEvidence | null> {
-	const reply = object(jsonResult(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS)));
+	const reply = object(exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS)));
 	if (reply?.complete !== true || !Array.isArray(reply.jobs) || !Array.isArray(reply.journal_errors) || reply.journal_errors.length) return null;
 	const matches = reply.jobs.map(object).filter(row => object(object(row?.lease)?.identity)?.local_wrapper_id === id);
 	if (matches.length !== 1) return null;
 	const lease = object(matches[0]?.lease), recovery = object(lease?.recovery), identity = object(lease?.identity);
-	if (!lease || lease.schema_version !== 1 || lease.worker_id !== worker || !nonnegativeInteger(identity?.remote_build_id) || identity.remote_build_id === 0) return null;
+	const buildId = identity?.remote_build_id;
+	if (!lease || lease.schema_version !== 1 || lease.worker_id !== worker || typeof buildId !== "string" || !/^[1-9][0-9]*$/.test(buildId)) return null;
 	// A wrapper that exited in running/finalize leaves a journaled lease with identity but no recovery record until `jobs recover` runs.
 	// Report it bound-but-unrecovered so the caller recovers it; it proves neither execution nor an exit code.
 	if (!recovery) return { retired: false, executionObserved: false, compilerExit: null };
-	if (recovery.wrapper_id !== id || recovery.build_id !== identity.remote_build_id) return null;
+	if (recovery.wrapper_id !== id || recovery.build_id !== buildId) return null;
 	// `cargo check` retrieves no artifact, so execution_started may never be set. A recorded exit code on a retired, sources-released,
 	// uncancelled lease can only come from a completed remote command, so it proves execution without trusting the native exit alone.
 	const observed = recovery.preparation_cancelled === false && nonnegativeInteger(recovery.exit_code) &&
