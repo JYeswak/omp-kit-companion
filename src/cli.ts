@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { cpus, loadavg, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
@@ -83,6 +84,8 @@ import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
+import { ccSpool, type CcSpool } from "./cc-spool.ts";
+import { looksSecret } from "./mcp-sources.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -3973,29 +3976,110 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 	return refusal("HANDLER_UNAVAILABLE", `${path} is documented but its safe handler is not installed`, `Run omp-kit capabilities --json to see runnable commands; no ${command.mutation ? "mutation" : "probe"} was attempted.`);
 }
 
+/** CC7b (bead ompkit-fp72.120.16.11.4): every kit verb emits action.attempt before dispatch and action.result after, plus one source.tick per invocation, via ccSpool('kit'). Emission never alters stdout/stderr/exit code and never throws: without fleet state ccSpool returns null and zero files are written. */
+const CC_AGENT_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** ctx agent only when AGENT_NAME matches the agent-name pattern custody uses (_agent_name, custody.py:116). */
+export function ccActionAgent(): string | null {
+	const name = process.env.AGENT_NAME;
+	if (!name || !CC_AGENT_NAME_PATTERN.test(name) || looksSecret(name)) return null;
+	return name;
+}
+
+/** target is the canonical realpath of --repo/--project when given, else null; never free-text args or messages. */
+export function ccActionTarget(flags: ReadonlyMap<string, string | true>): string | null {
+	for (const flag of ["--repo", "--project"]) {
+		const raw = flags.get(flag);
+		if (typeof raw !== "string" || !raw) continue;
+		try {
+			return realpathSync(raw);
+		} catch {
+			return null;
+		}
+	}
+	return null;
+}
+
+/** surface is kit: + the command path as computed in dispatch; service run NAME under OMP_KIT_JOB=NAME is its own launchd:<NAME> surface; parse failures are kit:parse_error. */
+export function ccActionSurface(parsed: ParseResult): string {
+	if (!("request" in parsed)) return "kit:parse_error";
+	const { command, parent, argument } = parsed.request;
+	if (parent?.name === "service" && command.name === "run") {
+		const job = process.env.OMP_KIT_JOB;
+		if (job && argument === job) return `launchd:${job}`;
+	}
+	return `kit:${parent ? `${parent.name} ` : ""}${command.name}`;
+}
+
+export type CcActionOutcome = { outcome: "ok" | "refused" | "failed" | "timeout"; code: string | null };
+
+/** ok on exit 0; timeout on exit 124, exit 75 (heavy deferred: queue timeout or --no-wait busy) or a timeout-marked error code; refused when usage_or_blocked (exit 2) carries a refusal code in errors[0].code (every refusal() is code 2: CONSENT_REQUIRED, ADMISSION_REFUSED, UNKNOWN_COMMAND, ...); failed otherwise. */
+export function ccActionOutcome(exitCode: number, errors?: readonly { code: string }[]): CcActionOutcome {
+	const errCode = errors?.[0]?.code;
+	if (exitCode === 124 || exitCode === 75 || (typeof errCode === "string" && /TIMEOUT|TIMED_OUT|DEADLINE/i.test(errCode)))
+		return { outcome: "timeout", code: typeof errCode === "string" && errCode ? errCode : "TIMEOUT" };
+	if (exitCode === 0) return { outcome: "ok", code: null };
+	if (exitCode === 2 && typeof errCode === "string" && errCode && errCode !== "HANDLER_FAILED") return { outcome: "refused", code: errCode };
+	return { outcome: "failed", code: typeof errCode === "string" && errCode ? errCode : "HANDLER_FAILED" };
+}
+
+/** Best-effort single-envelope emit; a telemetry fault must not change the verb's exit code. */
+function ccEmit(spool: CcSpool | null, type: string, data: Record<string, unknown>, opts: { key: string; timeMs: number; ctx?: Record<string, unknown> }): void {
+	if (!spool) return;
+	try {
+		spool.append([spool.envelope(type, data, opts)]);
+	} catch {
+		/* never alter the verb */
+	}
+}
+
 export async function runCli(args: readonly string[] = process.argv.slice(2)): Promise<number> {
+	const startPerf = performance.now();
+	const startMs = Date.now();
+	const actionId = randomBytes(16).toString("hex");
 	const parsed = parse(args);
+	const surface = ccActionSurface(parsed);
+	const target = "request" in parsed ? ccActionTarget(parsed.request.flags) : null;
+	const agent = ccActionAgent();
+	const ctx: Record<string, unknown> = { ...(agent ? { agent } : {}), ...(target ? { repo: target } : {}) };
+	const spool = ccSpool("kit");
+	ccEmit(spool, "action.attempt", { action_id: actionId, surface, target, idempotency_key: null },
+		{ key: `kit:${actionId}:attempt`, timeMs: startMs, ...(Object.keys(ctx).length ? { ctx } : {}) });
+	let exitCode: number;
+	let outcome: CcActionOutcome;
 	if ("request" in parsed && parsed.request.command.name === "heavy" && !parsed.request.flags.has("--help")) {
 		const label = parsed.request.flags.get("--label");
 		const diskObserver = parsed.request.flags.get("--disk-observer");
-		return runHeavy(parsed.request.commandArgs ?? [], {
+		exitCode = await runHeavy(parsed.request.commandArgs ?? [], {
 			...(typeof label === "string" ? { label } : {}),
 			...(typeof diskObserver === "string" ? { diskObserver } : {}),
 			noWait: parsed.request.flags.has("--no-wait"),
 		});
+		outcome = ccActionOutcome(exitCode);
+	} else {
+		const json = "request" in parsed ? parsed.request.json : parsed.json;
+		const version = kitIdentity().version;
+		let result: CliResult;
+		try {
+			result = "request" in parsed ? await dispatch(parsed.request, version) : parsed.failure;
+		} catch {
+			result = { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "HANDLER_FAILED", message: "Command failed without verified completion", remediation: "Inspect local diagnostics; no success or rollback is implied." }], verification: "UNVERIFIED" };
+		}
+		const rendered = renderOutput(result, { toolVersion: version, schemaVersion: SCHEMA_VERSION, json });
+		if (rendered.stdout) process.stdout.write(rendered.stdout);
+		if (rendered.stderr) process.stderr.write(rendered.stderr);
+		exitCode = rendered.exitCode;
+		outcome = ccActionOutcome(exitCode, result.errors);
 	}
-	const json = "request" in parsed ? parsed.request.json : parsed.json;
-	const version = kitIdentity().version;
-	let result: CliResult;
-	try {
-		result = "request" in parsed ? await dispatch(parsed.request, version) : parsed.failure;
-	} catch {
-		result = { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "HANDLER_FAILED", message: "Command failed without verified completion", remediation: "Inspect local diagnostics; no success or rollback is implied." }], verification: "UNVERIFIED" };
-	}
-	const rendered = renderOutput(result, { toolVersion: version, schemaVersion: SCHEMA_VERSION, json });
-	if (rendered.stdout) process.stdout.write(rendered.stdout);
-	if (rendered.stderr) process.stderr.write(rendered.stderr);
-	return rendered.exitCode;
+	const endMs = Date.now();
+	const durationMs = Math.max(0, Math.round(performance.now() - startPerf));
+	ccEmit(spool, "action.result", { action_id: actionId, outcome: outcome.outcome, code: outcome.code, duration_ms: durationMs },
+		{ key: `kit:${actionId}:result`, timeMs: endMs, ...(Object.keys(ctx).length ? { ctx } : {}) });
+	ccEmit(spool, "source.tick",
+		{ instance: `kit:${process.pid}-${(startMs % 4294967296).toString(16).padStart(8, "0")}`, records_seen: 0, records_emitted: 2, records_ignored: 0, records_quarantined: 0, complete_through_ms: endMs, position: 0, error_code: null, skew_ms: null,
+			coverage: [{ record_type: "action.attempt", runtime_version: "v1", disposition: "emitted", reason: null, count: 1 }, { record_type: "action.result", runtime_version: "v1", disposition: "emitted", reason: null, count: 1 }] },
+		{ key: `kit:${actionId}:tick`, timeMs: endMs });
+	return exitCode;
 }
 
 if (import.meta.main) {
