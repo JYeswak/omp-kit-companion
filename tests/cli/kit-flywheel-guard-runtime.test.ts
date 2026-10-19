@@ -132,7 +132,11 @@ test("the linked OMP plugin refuses an async timeout-zero command before it runs
 		expect(run.exitCode, output).toBe(0);
 		expect(existsSync(join(project, ".ran_bgdeadline")), output).toBe(false);
 		expect(readFileSync(join(project, ".ran_bounded"), "utf8")).toBe("bounded");
-		expect(toolResults(readFileSync(logPath, "utf8")).some(result => result.includes("FINITE_JOB_NO_DEADLINE"))).toBe(true);
+		const refusal = toolResults(readFileSync(logPath, "utf8")).find(result => result.includes("FINITE_JOB_NO_DEADLINE"));
+		expect(refusal !== undefined, output).toBe(true);
+		expect(refusal, output).toContain("deadline");
+		expect(refusal, output).toContain("owning OMP session");
+		expect(refusal, output).toContain("job");
 	} finally {
 		if (mock.exitCode === null) mock.kill("SIGTERM");
 		await mock.exited;

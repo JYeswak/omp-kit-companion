@@ -925,7 +925,22 @@ function hasServiceReadiness(ready: unknown): boolean {
 		|| typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
-function bashAdmissionRefusal(code: string, command: string, detail: string, next: string): FlywheelToolCallResult {
+/** Server-side attribution for a refused Bash admission. `job` is the native
+tool-call id; `owner` is the session env identity (BR_ACTOR/BR_AGENT_NAME/
+AGENT_NAME), never a tool-input claim, so another agent cannot spoof it. */
+export interface BashAdmissionAttribution {
+	job: string | null;
+	owner: string | null;
+}
+
+/** Owning-session cancellation route named in every deadline refusal. The
+guard itself issues no kill: only the owning OMP session may end its job
+through native async-job control (observed asyncState cancelled); a peer
+session must never kill or spoof it. */
+const ADMISSION_CANCEL_ROUTE =
+	"cancel only from the owning OMP session through its native async-job control; the guard performs no kill and no other session may end this job";
+
+function bashAdmissionRefusal(code: string, command: string, detail: string, next: string, attribution: BashAdmissionAttribution, deadline: number | "unknown" | null): FlywheelToolCallResult {
 	const executable = shellCommands(command)[0]?.[0]?.split("/").at(-1) ?? "unknown";
 	const digest = createHash("sha256").update(command).digest("hex");
 	return {
@@ -933,34 +948,58 @@ function bashAdmissionRefusal(code: string, command: string, detail: string, nex
 		reason: JSON.stringify({
 			guard: "kit-flywheel-guard",
 			code,
+			job: attribution.job,
+			owner: attribution.owner,
 			command: { executable, sha256: digest },
+			deadline,
 			detail,
 			next,
+			cancel: ADMISSION_CANCEL_ROUTE,
 		}),
 	};
 }
 
-/** Refuse finite Bash work that explicitly disables the OMP deadline. */
-export function checkBashAdmission(event: FlywheelToolCallEvent): FlywheelToolCallResult | undefined {
+/** Session owner for deadline diagnostics: first present server-side env
+identity; tool input never names the owner. */
+export function admissionOwner(env: Record<string, string | undefined>): string | null {
+	for (const name of IDENTITY_ENV) {
+		const value = env[name]?.trim();
+		if (value) return value;
+	}
+	return null;
+}
+
+/** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
+is the server-side session identity; the native tool-call id attributes the
+job. Tool input never supplies either, so a peer cannot spoof ownership. */
+export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string | null = null): FlywheelToolCallResult | undefined {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
 	if (typeof command !== "string" || command.trim().length === 0) return undefined;
+	const attribution: BashAdmissionAttribution = {
+		job: typeof event.toolCallId === "string" ? event.toolCallId : null,
+		owner,
+	};
 	const name = field(event.input, "name");
 	const service = typeof name === "string" && name.trim().length > 0;
 	const async = field(event.input, "async") === true;
 	const timeout = field(event.input, "timeout");
+	const givenDeadline = typeof timeout === "number" ? timeout : timeout === undefined ? null : "unknown" as const;
 	if (service) {
 		if (async || timeout !== undefined) return bashAdmissionRefusal(
 			"SERVICE_MODE_CONFLICT", command, "named services use readiness and lifecycle, not finite async or timeout fields",
 			"remove async and timeout, then provide a readiness condition for a long-lived service",
+			attribution, givenDeadline,
 		);
 		if (serviceCommandIsFinite(command)) return bashAdmissionRefusal(
 			"FINITE_SUITE_AS_SERVICE", command, "a recognized finite build, test, or validation command cannot use unbounded service mode",
 			"run finite work with its native positive deadline; reserve named services for long-lived commands",
+			attribution, null,
 		);
 		if (!hasServiceReadiness(field(event.input, "ready"))) return bashAdmissionRefusal(
 			"SERVICE_READINESS_REQUIRED", command, "a named service needs a log or port readiness condition and native lifecycle",
 			"provide ready.log or a valid ready.port; finite work must use the finite-command path",
+			attribution, null,
 		);
 		return undefined;
 	}
@@ -968,10 +1007,12 @@ export function checkBashAdmission(event: FlywheelToolCallEvent): FlywheelToolCa
 	if (typeof timeout !== "number" || !Number.isFinite(timeout)) return bashAdmissionRefusal(
 		"FINITE_JOB_DEADLINE_UNKNOWN", command, "the effective finite-command deadline cannot be determined",
 		"pass a positive numeric timeout or omit it to use OMP's bounded default",
+		attribution, "unknown",
 	);
 	if (timeout === 0) return bashAdmissionRefusal(
 		"FINITE_JOB_NO_DEADLINE", command, "timeout zero disables the finite-command deadline, including managed background execution",
 		"pass a positive timeout in seconds or use named service mode with readiness and lifecycle",
+		attribution, 0,
 	);
 	return undefined;
 }
@@ -1275,7 +1316,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					reason: `kit-flywheel-guard ${COMPACTION_REREAD}: ${tool} blocked until ${rereadMissing(pendingReread)} return successful results. Reading is always allowed.`,
 				};
 			}
-			const admission = checkBashAdmission(event);
+			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
 			if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");

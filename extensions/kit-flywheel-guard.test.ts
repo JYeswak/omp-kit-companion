@@ -334,6 +334,48 @@ test("BGDEADLINE1: named services need readiness and cannot disguise a finite su
 	expect(await bashInput(h, { command: "bun run dev", name: "web", ready: { port: 3000 } })).toBeUndefined();
 });
 
+test("BGDEADLINE1: timeout-zero refusal attributes job, owner, command, deadline, and owner-session cancel", async () => {
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestOwner" } });
+	const unsafe = await bashInput(h, { command: "bun test", async: true, timeout: 0 });
+	expect(unsafe?.block).toBe(true);
+	const reason = JSON.parse(unsafe?.reason ?? "{}");
+	expect(reason.guard).toBe("kit-flywheel-guard");
+	expect(reason.code).toBe("FINITE_JOB_NO_DEADLINE");
+	expect(reason.job).toBe("c1");
+	expect(reason.owner).toBe("TestOwner");
+	expect(reason.command.sha256).toBe(createHash("sha256").update("bun test").digest("hex"));
+	expect(reason.deadline).toBe(0);
+	expect(reason.cancel).toContain("owning OMP session");
+	expect(reason.cancel).not.toContain("kill -9");
+	expect(h.execs).toHaveLength(0);
+});
+
+test("BGDEADLINE1: tool input cannot spoof the refusal owner", async () => {
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestOwner" } });
+	const spoofed = await bashInput(h, { command: "bun test", async: true, timeout: 0, owner: "Pretender", actor: "Pretender", agent: "Pretender" });
+	expect(JSON.parse(spoofed?.reason ?? "{}").owner).toBe("TestOwner");
+	const anon = await createFlywheelHost(base);
+	const claimed = await bashInput(anon, { command: "bun test", async: true, timeout: 0, owner: "Pretender" });
+	expect(JSON.parse(claimed?.reason ?? "{}").owner).toBeNull();
+});
+
+test("BGDEADLINE1: unknown and service refusals carry job and deadline", async () => {
+	const h = await createFlywheelHost(base);
+	const unknown = JSON.parse((await bashInput(h, { command: "bun test", async: true, timeout: "0" }))?.reason ?? "{}");
+	expect(unknown.code).toBe("FINITE_JOB_DEADLINE_UNKNOWN");
+	expect(unknown.job).toBe("c1");
+	expect(unknown.deadline).toBe("unknown");
+	const conflict = JSON.parse((await bashInput(h, { command: "bun run dev", name: "web", ready: { port: 3000 }, timeout: 10 }))?.reason ?? "{}");
+	expect(conflict.code).toBe("SERVICE_MODE_CONFLICT");
+	expect(conflict.job).toBe("c1");
+	expect(conflict.deadline).toBe(10);
+	const unready = JSON.parse((await bashInput(h, { command: "bun run dev", name: "web" }))?.reason ?? "{}");
+	expect(unready.code).toBe("SERVICE_READINESS_REQUIRED");
+	expect(unready.job).toBe("c1");
+	expect(unready.deadline).toBeNull();
+	expect(h.execs).toHaveLength(0);
+});
+
 // --- COMPACTION_REREAD gate (ompkit-xa5s.24) ----------------------------------
 
 /** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
