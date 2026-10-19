@@ -359,6 +359,29 @@ async function admissionEvidence(c: Case): Promise<{ g2: boolean; fired: number[
 	return { g2: outcomes[0]!, ...admissionPrefixResult(c, outcomes, 1) };
 }
 
+/** Isolated admission fixtures in flight at once: enough to overlap Git process latency, few enough to keep each 2 s Git deadline far away. */
+const ADMISSION_JOBS = 4;
+
+/**
+ * Starts `run` on every item, at most `jobs` at a time, in item order. Each returned
+ * promise settles with its own item's outcome and never rejects, so a caller can
+ * consume outcomes in order and still see exactly the error a serial loop would.
+ */
+function settleBounded<T, R>(items: readonly T[], jobs: number, run: (item: T) => Promise<R>): Promise<PromiseSettledResult<R>>[] {
+	const settle: ((outcome: PromiseSettledResult<R>) => void)[] = [];
+	const outcomes = items.map(() => new Promise<PromiseSettledResult<R>>(resolve => settle.push(resolve)));
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length) {
+			const index = next++;
+			try { settle[index]!({ status: "fulfilled", value: await run(items[index]!) }); }
+			catch (reason) { settle[index]!({ status: "rejected", reason }); }
+		}
+	};
+	for (let w = 0; w < Math.min(jobs, items.length); w++) void worker();
+	return outcomes;
+}
+
 /**
  * G3: one character at a time. Returns every prefix length that fired (wire.length+1 = final
  * snapshot). astCondition rules are not swept: omp evaluates them only on the finished edit/write
@@ -482,63 +505,76 @@ async function runGate(rulesDir: string, casesFile: string, caseReporter: TestCa
 	lines.push("== G2 wire + G3 prefix sweep");
 	let quietPrefixFires = 0;
 	const firstFires: GateReport["firstFires"] = [];
-	for (const c of cases) {
-		const target = byName.get(c.rule);
-		if (!target || (!isAdmissionTarget(target) && target.cls === "always")) {
-			caseReportComplete = false;
-			continue;
-		}
-		const admission = isAdmissionTarget(target);
-		const rule = admission ? target : target.rule;
-		// A refused registration is a setup error, not a quiet case verdict.
-		let evaluated = !unavailableRules?.has(c.rule);
-		if (!evaluated) caseReportComplete = false;
-		const onUnavailable = caseReporter ? () => { evaluated = false; caseReportComplete = false; } : undefined;
-		let evidence: { g2: boolean; fired: number[]; length: number };
-		if (admission) {
-			try { evidence = await admissionEvidence(c); }
-			catch (error) {
-				if (!(error instanceof Error) || error.message !== NONDETERMINISM_ERROR) throw error;
-				const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
-				if (evaluated) caseReporter?.record(tag, "FAIL");
-				lines.push(`FAIL ${tag} | ${error.message} | ${show(c.snippet)}`);
-				failures.push(`NONDETERMINISM ${tag}: ${error.message}`);
+	// Each admission case builds its own isolated Git fixture and its evaluator reads only
+	// that fixture, so the cases are independent: they run ADMISSION_JOBS at a time here,
+	// and the loop below consumes each outcome in corpus order, as the serial loop did.
+	// Every fixture still in flight is removed before the gate returns or throws.
+	const admissionCases = cases.filter(c => { const target = byName.get(c.rule); return target !== undefined && isAdmissionTarget(target); });
+	const admissionOutcomes = settleBounded(admissionCases, ADMISSION_JOBS, admissionEvidence);
+	const admissionOutcome = new Map(admissionCases.map((c, index) => [c, admissionOutcomes[index]!]));
+	try {
+		for (const c of cases) {
+			const target = byName.get(c.rule);
+			if (!target || (!isAdmissionTarget(target) && target.cls === "always")) {
+				caseReportComplete = false;
 				continue;
 			}
-		} else evidence = { g2: await g2Fires(rule, c, onUnavailable), ...await g3Fires(rule, c, onUnavailable) };
-		const { g2, fired, length } = evidence;
-		const g2ok = g2 === (c.expect === "fire");
-		const wire = wirePayload(c);
-		let g3ok = true;
-		let g3note: string;
-		if (c.expect === "quiet") {
-			g3ok = fired.length === 0;
-			if (!g3ok) {
-				quietPrefixFires++;
-				const at = fired[0];
-				g3note =
-					at > length ? "fired at final snapshot" : `fired on prefix ${at}/${length}: …${show(wire.slice(0, at).slice(-50))}`;
-			} else g3note = admission ? "quiet at final dispatch under all chunk partitions (no partial admission)" : `quiet on all ${length} prefixes`;
-		} else {
-			if (admission) g3ok = fired.includes(length + 1);
-			g3note = admission ? (g3ok ? "fires at final dispatch under all chunk partitions" : "no final admission fire")
-				: fired.length > 0 ? `first fire at ${Math.min(fired[0], length)}/${length}` : "never fired while streaming";
+			const admission = isAdmissionTarget(target);
+			const rule = admission ? target : target.rule;
+			// A refused registration is a setup error, not a quiet case verdict.
+			let evaluated = !unavailableRules?.has(c.rule);
+			if (!evaluated) caseReportComplete = false;
+			const onUnavailable = caseReporter ? () => { evaluated = false; caseReportComplete = false; } : undefined;
+			let evidence: { g2: boolean; fired: number[]; length: number };
+			if (admission) {
+				const outcome = await admissionOutcome.get(c)!;
+				if (outcome.status === "rejected") {
+					const error = outcome.reason;
+					if (!(error instanceof Error) || error.message !== NONDETERMINISM_ERROR) throw error;
+					const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
+					if (evaluated) caseReporter?.record(tag, "FAIL");
+					lines.push(`FAIL ${tag} | ${error.message} | ${show(c.snippet)}`);
+					failures.push(`NONDETERMINISM ${tag}: ${error.message}`);
+					continue;
+				}
+				evidence = outcome.value;
+			} else evidence = { g2: await g2Fires(rule, c, onUnavailable), ...await g3Fires(rule, c, onUnavailable) };
+			const { g2, fired, length } = evidence;
+			const g2ok = g2 === (c.expect === "fire");
+			const wire = wirePayload(c);
+			let g3ok = true;
+			let g3note: string;
+			if (c.expect === "quiet") {
+				g3ok = fired.length === 0;
+				if (!g3ok) {
+					quietPrefixFires++;
+					const at = fired[0];
+					g3note =
+						at > length ? "fired at final snapshot" : `fired on prefix ${at}/${length}: …${show(wire.slice(0, at).slice(-50))}`;
+				} else g3note = admission ? "quiet at final dispatch under all chunk partitions (no partial admission)" : `quiet on all ${length} prefixes`;
+			} else {
+				if (admission) g3ok = fired.includes(length + 1);
+				g3note = admission ? (g3ok ? "fires at final dispatch under all chunk partitions" : "no final admission fire")
+					: fired.length > 0 ? `first fire at ${Math.min(fired[0], length)}/${length}` : "never fired while streaming";
+			}
+			const ok = g2ok && g3ok;
+			if (g2ok) payloadPassed++;
+			if (g3ok) {
+				prefixPassed++;
+				if (c.expect === "quiet") quietPassed++;
+			}
+			const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
+			if (evaluated) caseReporter?.record(tag, ok ? "PASS" : "FAIL");
+			lines.push(
+				`${ok ? "PASS" : "FAIL"} ${tag} | G2 ${g2 ? "fire" : "quiet"}${g2ok ? "" : " (WRONG)"} | G3 ${g3note} | ${show(c.snippet)}`,
+			);
+			if (!g2ok) failures.push(`G2 ${tag}: wanted ${c.expect}, full payload ${g2 ? "fires" : "is quiet"}: ${show(wire)}`);
+			if (!g3ok) failures.push(`G3 ${tag}: ${g3note}`);
+			firstFires.push({ rule: c.rule, line: c.line, expect: c.expect, g2: g2 ? "fire" : "quiet",
+				first_fire: fired.length > 0 ? (admission ? fired[0] : Math.min(fired[0] ?? length, length)) : null, wire_length: length });
 		}
-		const ok = g2ok && g3ok;
-		if (g2ok) payloadPassed++;
-		if (g3ok) {
-			prefixPassed++;
-			if (c.expect === "quiet") quietPassed++;
-		}
-		const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
-		if (evaluated) caseReporter?.record(tag, ok ? "PASS" : "FAIL");
-		lines.push(
-			`${ok ? "PASS" : "FAIL"} ${tag} | G2 ${g2 ? "fire" : "quiet"}${g2ok ? "" : " (WRONG)"} | G3 ${g3note} | ${show(c.snippet)}`,
-		);
-		if (!g2ok) failures.push(`G2 ${tag}: wanted ${c.expect}, full payload ${g2 ? "fires" : "is quiet"}: ${show(wire)}`);
-		if (!g3ok) failures.push(`G3 ${tag}: ${g3note}`);
-		firstFires.push({ rule: c.rule, line: c.line, expect: c.expect, g2: g2 ? "fire" : "quiet",
-			first_fire: fired.length > 0 ? (admission ? fired[0] : Math.min(fired[0] ?? length, length)) : null, wire_length: length });
+	} finally {
+		await Promise.all(admissionOutcomes);
 	}
 	if (caseReportComplete) caseReporter?.finish();
 	return {
@@ -963,14 +999,31 @@ async function admissionSelftest(tmp: string, caseReporter: TestCaseReporter | n
 		{ line: 3, rule: "scratch-is-not-a-home", expect: "quiet", source: "tool", tool: "write",
 			path: "var/agent-tmp/control.1/report.md", snippet: "Report: packet processing completed.", note: "informational markdown" },
 	];
-	for (const control of mechanicalControls) {
-		const actual = await g2Fires(mechanicalRule, control);
-		const sweep = await g3Fires(mechanicalRule, control);
-		let ok = actual === (control.expect === "fire")
-			&& (control.expect === "fire" ? sweep.fired.includes(sweep.length + 1) : sweep.fired.length === 0);
-		for (const variant of variantsFor(control, true).variants) {
-			if (await g2Fires(mechanicalRule, { ...control, ...variant, path: variant.path ?? control.path }) !== actual) ok = false;
+	// Each control, its sweep and each argument/path variant is an independent isolated
+	// fixture: they run ADMISSION_JOBS at a time and are consumed in the serial order, and
+	// all settle before the flip plant below replaces the evaluator.
+	const controlRuns = mechanicalControls.map(control => [
+		() => g2Fires(mechanicalRule, control),
+		async () => {
+			const sweep = await g3Fires(mechanicalRule, control);
+			return control.expect === "fire" ? sweep.fired.includes(sweep.length + 1) : sweep.fired.length === 0;
+		},
+		...variantsFor(control, true).variants.map(variant => () => g2Fires(mechanicalRule, { ...control, ...variant, path: variant.path ?? control.path })),
+	]);
+	const controlOutcomes = settleBounded(controlRuns.flat(), ADMISSION_JOBS, run => run());
+	let nextOutcome = 0;
+	for (const [index, control] of mechanicalControls.entries()) {
+		const verdicts: boolean[] = [];
+		for (let run = 0; run < controlRuns[index]!.length; run++) {
+			const outcome = await controlOutcomes[nextOutcome++]!;
+			if (outcome.status === "rejected") {
+				await Promise.all(controlOutcomes);
+				throw outcome.reason;
+			}
+			verdicts.push(outcome.value);
 		}
+		const [actual, sweepOk, ...variants] = verdicts;
+		const ok = actual === (control.expect === "fire") && sweepOk === true && variants.every(verdict => verdict === actual);
 		caseReporter?.record(`mechanical control ${control.rule} line ${control.line}: ${control.note}`, ok ? "PASS" : "FAIL");
 		console.log(`${ok ? "ok  " : "FAIL"} mechanical control: ${control.note}; final-only admission and argument/path equivalents`);
 		if (!ok) bad++;

@@ -33,7 +33,10 @@ interface Fixture {
 	toolName: string;
 }
 
-/** Builds one isolated real Git repository for the case; no operator repository or index is accessed. */
+/**
+ * Builds one isolated real Git repository for the case; no operator repository or index is accessed.
+ * Setup Git runs asynchronously, so independent cases may build their fixtures concurrently.
+ */
 async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fixture) => Promise<T>): Promise<T> {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mechanical-case.${process.pid}.`)));
 	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: kit, created: new Date().toISOString() });
@@ -41,19 +44,19 @@ async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fix
 		const env: Record<string, string> = {};
 		for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key]) env[key] = process.env[key]!;
 		Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
-		const git = (args: string[], input?: string): string => {
-			const result = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
-				{ env, stdout: "pipe", stderr: "pipe", timeout: 2_000,
-					...(input === undefined ? {} : { stdin: Buffer.from(input) }) });
-			if (result.exitCode !== 0) throw new Error(`mechanical Git fixture setup failed: ${result.stderr.toString()}`);
-			return result.stdout.toString().trimEnd();
+		const git = async (args: string[], input?: string): Promise<string> => {
+			const child = Bun.spawn(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
+				{ env, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe", timeout: 2_000 });
+			const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+			if (child.exitCode !== 0) throw new Error(`mechanical Git fixture setup failed: ${stderr}`);
+			return stdout.trimEnd();
 		};
-		git(["init", "--quiet"]);
+		await git(["init", "--quiet"]);
 		fs.mkdirSync(path.join(root, ".omp"));
 		fs.writeFileSync(path.join(root, ".omp/fleet.json"), '{"enabled":true}\n');
 		for (const [p, content] of Object.entries(c.reference?.tracked ?? {})) {
-			const oid = git(["hash-object", "-w", "--no-filters", "--stdin"], content);
-			git(["update-index", "--add", "--cacheinfo", `100644,${oid},${p}`]);
+			const oid = await git(["hash-object", "-w", "--no-filters", "--stdin"], content);
+			await git(["update-index", "--add", "--cacheinfo", `100644,${oid},${p}`]);
 		}
 		// Historical absolute fixture paths are projected into this real isolated
 		// repository; no operator repository or its index is accessed.
@@ -74,7 +77,7 @@ async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fix
 			: c.tool === "edit" ? { path: target, oldText: c.snippet, newText: `${c.snippet}\n` }
 			: { command: c.snippet };
 		return await use({ root, wire: JSON.stringify(input, null, c.argumentSpace ? 2 : undefined), toolName: c.tool });
-	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	} finally { await fs.promises.rm(root, { recursive: true, force: true }); }
 }
 
 /** One dispatch decodes the complete wire and re-reads production repository facts live; nothing is cached. */
