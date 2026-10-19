@@ -1861,6 +1861,92 @@ export function scratchGapReport(applied: readonly ScratchVerdict[], now: number
 	return { rows, by_agent, by_class };
 }
 
+const MAX_GAP_FILE_DIRS = 15;
+const MAX_REAP_LOG_READ_BYTES = 200 * 1024;
+
+/** Dirs already filed to a guard bead by earlier runs (ompkit-774u.15 AC3): only new dirs are filed again. */
+export function filedGapDirs(home: string, bead: string): string[] {
+	let text: string;
+	try {
+		const stat = lstatSync(reapLogPath(home));
+		if (!stat.isFile() || stat.size > 8 * MAX_REAP_LOG_READ_BYTES) return [];
+		text = readFileSync(reapLogPath(home), "utf8").slice(-MAX_REAP_LOG_READ_BYTES);
+	} catch {
+		return [];
+	}
+	const filed: string[] = [];
+	for (const line of text.split("\n")) {
+		if (!line.includes('"event":"gap_filed"')) continue;
+		try {
+			const row = JSON.parse(line) as { bead?: unknown; dirs?: unknown };
+			if (row.bead !== bead || !Array.isArray(row.dirs)) continue;
+			for (const dir of row.dirs) if (typeof dir === "string") filed.push(dir);
+		} catch { /* a partial last line is skipped */ }
+	}
+	return filed;
+}
+
+export interface GapFileRow { bead: string; class: ScratchGapClass; status: "filed" | "up-to-date" | "failed"; dirs: string[]; reason?: string }
+
+export interface FileGapsOpts { actor: string; db?: string; run: ScratchRunner; now?: number }
+
+function gapComment(bead: string, cls: ScratchGapClass, rows: ScratchGapRow[], at: string): string {
+	const listed = rows.slice(0, MAX_GAP_FILE_DIRS).map(row =>
+		`- ${row.dir} (${row.label}, agent ${row.agent ?? "UNKNOWN"}, role ${row.role}, ${row.action}, ${row.bytes} B)`);
+	const more = rows.length > listed.length ? `\n- ... and ${rows.length - listed.length} more` : "";
+	return `SCRATCH GAP (omp-kit scratch apply, ${at}): ${rows.length} reclaimed dir(s) in class ${cls} whose guard is ${bead}.\n`
+		+ `${listed.join("\n")}${more}\n`
+		+ `Each dir's owner ended without binning it. Release scratch when its work ends: \`omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]\`. Filed automatically; only dirs not filed before are listed.`;
+}
+
+type ScratchGapRow = Pick<ScratchGap, "dir" | "label" | "agent" | "role" | "action" | "bytes">;
+
+/**
+ * File each guarded gap class to its owning bead (ompkit-774u.15 AC3): one `br comments add` per bead with the dirs
+ * no earlier run filed, then a `gap_filed` row in the reap log so the next run files only the delta. Classes with
+ * no guard are never auto-filed; they come back as unfiled for the operator. A br failure is reported, never fatal.
+ */
+export function fileGapReports(home: string, report: ScratchGapReport, opts: FileGapsOpts):
+	{ filed: GapFileRow[]; unfiled: { class: ScratchGapClass; count: number; example: string }[] } {
+	const at = new Date(opts.now ?? Date.now()).toISOString();
+	const filed: GapFileRow[] = [];
+	const unfiled: { class: ScratchGapClass; count: number; example: string }[] = [];
+	const byGuard: Record<string, ScratchGap[]> = {};
+	for (const row of report.rows) {
+		if (row.guard === NO_GUARD) {
+			const entry = unfiled.find(item => item.class === row.class) ?? { class: row.class, count: 0, example: row.dir };
+			entry.count++;
+			if (!unfiled.includes(entry)) unfiled.push(entry);
+			continue;
+		}
+		(byGuard[row.guard] ??= []).push(row);
+	}
+	for (const [bead, rows] of Object.entries(byGuard)) {
+		const cls = rows[0]!.class;
+		const already = new Set(filedGapDirs(home, bead));
+		const fresh = rows.filter(row => !already.has(row.dir));
+		if (fresh.length === 0) {
+			filed.push({ bead, class: cls, status: "up-to-date", dirs: [] });
+			continue;
+		}
+		const args = ["comments", "add", bead, "-m", gapComment(bead, cls, fresh, at), "--actor", opts.actor, ...(opts.db ? ["--db", opts.db] : [])];
+		let result: ScratchRunResult;
+		try {
+			result = opts.run(["br", ...args], { timeoutMs: 30_000 });
+		} catch (error) {
+			filed.push({ bead, class: cls, status: "failed", dirs: fresh.map(row => row.dir), reason: error instanceof Error ? error.message : String(error) });
+			continue;
+		}
+		if (result.code !== 0) {
+			filed.push({ bead, class: cls, status: "failed", dirs: fresh.map(row => row.dir), reason: `br exited ${result.code}: ${result.stderr.slice(0, 200)}` });
+			continue;
+		}
+		appendLog(home, { event: "gap_filed", dir: bead, at, bead, dirs: fresh.map(row => row.dir) });
+		filed.push({ bead, class: cls, status: "filed", dirs: fresh.map(row => row.dir) });
+	}
+	return { filed, unfiled };
+}
+
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
 	const now = deps.now ?? Date.now();
 	const startedAt = new Date(now).toISOString();

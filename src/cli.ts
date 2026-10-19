@@ -62,7 +62,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3210,12 +3210,24 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
 			+ result.expired.filter(isApplyFailure).length;
+		const dbFlag = request.flags.get("--db");
+		const db = typeof dbFlag === "string" && dbFlag !== "" ? dbFlag : undefined;
+		const actor = process.env.AGENT_NAME ?? "omp-kit-scratch";
+		// AC3 files guarded gaps to their beads only with --file-gaps; otherwise the exact commands are printed.
+		const gapFiled = request.flags.has("--file-gaps")
+			? fileGapReports(home, result.gapReport, { actor, ...(db ? { db } : {}), run: scratchRunner })
+			: null;
+		const gapFileCommands = gapFiled === null
+			? Object.entries(result.gapReport.by_class).filter(([, entry]) => !entry.guard.startsWith("NO GUARD"))
+				.map(([cls, entry]) => `br comments add ${entry.guard} -m "SCRATCH GAP (<at>): ${entry.count} reclaimed dir(s) in class ${cls}" --actor ${actor}${db ? ` --db ${db}` : ""}`)
+			: [];
 		return { code: failed > 0 ? 1 : 0,
 			data: { overall: failed > 0 ? "FINDINGS" : "OK", roots: result.roots, sessions: result.applied,
 				orphans: result.orphans, killed: result.killed, expired: result.expired, receipt: result.receipt,
 				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes, totals: result.totals,
 				rootMetrics: result.rootMetrics, pressure: result.pressure, quarantineBuckets: result.quarantineBuckets,
-				unownedActiveRule: result.unownedActiveRule, gapReport: result.gapReport },
+				unownedActiveRule: result.unownedActiveRule, gapReport: result.gapReport,
+				...(gapFiled === null ? { gapFileCommands } : { gapFiled }) },
 			verification: "UNVERIFIED" };
 	}
 	if (sub === "mine") {

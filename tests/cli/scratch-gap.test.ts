@@ -4,7 +4,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { applyScratch, reapLogPath, releaseScratch, scratchGapReport, type ApplyDeps, type LivenessDeps } from "../../src/scratch.ts";
+import { applyScratch, fileGapReports, filedGapDirs, reapLogPath, releaseScratch, scratchGapReport, type ApplyDeps, type LivenessDeps, type ScratchGap, type ScratchGapReport, type ScratchRunner } from "../../src/scratch.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -103,4 +103,68 @@ test("only reaped and quarantined dirs are gaps: live, skipped and held dirs nev
 	const report = scratchGapReport(verdicts, Date.parse("2026-10-18T00:00:00Z"), home);
 	expect(report.rows.map((row) => row.dir)).toEqual(["/x/gone.3"]);
 	expect(report.rows[0]).toMatchObject({ class: "unowned", label: "gone.3", age_s: null });
+});
+
+// ompkit-774u.15 AC3: a reap files each guarded gap class to its owning bead, only dirs no earlier run filed.
+const gapRow = (dir: string, guard: string, cls: ScratchGap["class"] = "never-released"): ScratchGap => ({
+	dir, label: dir.split("/").at(-1)!, agent: "WorkerOne", session: SESSION_A, role: "UNKNOWN",
+	bin: "unbinned" as const, class: cls, reason: "owner-dead-no-open-fds", action: "REAP" as const, bytes: 10, age_s: null, guard });
+const gapReportOf = (rows: ScratchGap[]): ScratchGapReport => ({ rows,
+	by_agent: { WorkerOne: rows.length }, by_class: {} });
+
+test("a guarded class is filed to its bead with the new dirs, then up-to-date; unguarded classes are listed, never filed", () => {
+	const { home } = world();
+	const calls: string[][] = [];
+	const run: ScratchRunner = (args) => { calls.push([...args]); return { code: 0, stdout: "{}", stderr: "" }; };
+	const report = gapReportOf([gapRow("/x/a.1", "ompkit-774u.15"), gapRow("/x/b.2", "ompkit-774u.15"), gapRow("/x/c.3", "NO GUARD: file one", "unowned")]);
+	const first = fileGapReports(home, report, { actor: "TurquoiseSummit", run });
+	expect(first.filed).toMatchObject([{ bead: "ompkit-774u.15", class: "never-released", status: "filed", dirs: ["/x/a.1", "/x/b.2"] }]);
+	expect(first.unfiled).toMatchObject([{ class: "unowned", count: 1, example: "/x/c.3" }]);
+	expect(calls).toHaveLength(1);
+	expect(calls[0]!.slice(0, 4)).toEqual(["br", "comments", "add", "ompkit-774u.15"]);
+	expect(calls[0]).toContain("--actor");
+	expect(calls[0]).toContain("TurquoiseSummit");
+	expect(calls[0]!.join(" ")).toContain("/x/a.1");
+	expect(filedGapDirs(home, "ompkit-774u.15").sort()).toEqual(["/x/a.1", "/x/b.2"]);
+	// A second run with one more dir files only the delta.
+	const second = fileGapReports(home, gapReportOf([gapRow("/x/a.1", "ompkit-774u.15"), gapRow("/x/d.4", "ompkit-774u.15")]), { actor: "TurquoiseSummit", run });
+	expect(second.filed).toMatchObject([{ bead: "ompkit-774u.15", status: "filed", dirs: ["/x/d.4"] }]);
+	expect(calls).toHaveLength(2);
+	expect(calls[1]!.join(" ")).not.toContain("/x/a.1");
+	// Nothing new: up-to-date, no br call.
+	const third = fileGapReports(home, gapReportOf([gapRow("/x/a.1", "ompkit-774u.15")]), { actor: "TurquoiseSummit", run });
+	expect(third.filed).toMatchObject([{ bead: "ompkit-774u.15", status: "up-to-date", dirs: [] }]);
+	expect(calls).toHaveLength(2);
+});
+
+test("planted negatives: a br failure is reported and retried next run; an empty report files nothing", () => {
+	const { home } = world();
+	let code = 1;
+	const calls: string[][] = [];
+	const run: ScratchRunner = (args) => { calls.push([...args]); return { code, stdout: "", stderr: "locked" }; };
+	const report = gapReportOf([gapRow("/x/a.1", "ompkit-774u.15")]);
+	expect(fileGapReports(home, report, { actor: "TurquoiseSummit", run }).filed)
+		.toMatchObject([{ bead: "ompkit-774u.15", status: "failed", dirs: ["/x/a.1"] }]);
+	expect(filedGapDirs(home, "ompkit-774u.15")).toEqual([]);
+	expect(calls).toHaveLength(1);
+	code = 0;
+	expect(fileGapReports(home, report, { actor: "TurquoiseSummit", run }).filed)
+		.toMatchObject([{ bead: "ompkit-774u.15", status: "filed", dirs: ["/x/a.1"] }]);
+	expect(calls).toHaveLength(2);
+	expect(fileGapReports(home, gapReportOf([]), { actor: "TurquoiseSummit", run }).filed).toEqual([]);
+	expect(calls).toHaveLength(2);
+});
+
+test("a long class is cut at 15 dirs with a count in the filed comment", () => {
+	const { home } = world();
+	const calls: string[][] = [];
+	const run: ScratchRunner = (args) => { calls.push([...args]); return { code: 0, stdout: "{}", stderr: "" }; };
+	const rows: ScratchGap[] = Array.from({ length: 20 }, (_, index) => gapRow(`/x/d.${index}`, "ompkit-774u.15"));
+	const result = fileGapReports(home, gapReportOf(rows), { actor: "TurquoiseSummit", run });
+	expect(result.filed).toMatchObject([{ status: "filed", dirs: rows.map((row) => row.dir) }]);
+	const text = calls[0]!.join("\n");
+	expect(text).toContain("/x/d.0");
+	expect(text).toContain("/x/d.14");
+	expect(text).not.toContain("/x/d.15");
+	expect(text).toContain("and 5 more");
 });

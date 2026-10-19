@@ -1,7 +1,7 @@
 // ompkit-774u.15 SCRATCHBIN1 C and D through the real CLI: `scratch mine` lists the caller's own dirs and what each still
 // owes, and `scratch apply` prints the gap report.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -64,6 +64,26 @@ test("scratch apply prints the gap report for what it reclaimed and the CLI sche
 	expect(existsSync(dir)).toBe(false);
 	const help = Bun.spawnSync([process.execPath, "run", join(repo, "src", "cli.ts"), "help", "scratch"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
 	expect(help.stdout.toString()).toContain("scratch mine");
+}, 180_000);
+
+test("scratch apply without --file-gaps prints the exact filing commands and files nothing", () => {
+	const { root, home, env } = world();
+	plant(root, "gone.59301", ownerOf(59301, "gone"));
+	const stale = join(root, "stale.1");
+	mkdirSync(stale);
+	writeFileSync(join(stale, "work.txt"), "work");
+	const old = new Date("2026-10-01T00:00:00Z");
+	utimesSync(stale, old, old);
+	utimesSync(join(stale, "work.txt"), old, old);
+	const applied = cli(env, "scratch", "apply", "--apply", "--yes");
+	const commands = applied.envelope.data.gapFileCommands as string[];
+	expect(commands).toHaveLength(1);
+	expect(commands[0]).toContain("br comments add ompkit-774u.9.3");
+	expect(commands[0]).toContain("pid-keyed-owner-never-released");
+	expect(JSON.stringify(commands)).not.toContain("NO GUARD");
+	expect(applied.envelope.data).not.toHaveProperty("gapFiled");
+	const log = join(home, "state", "omp-kit", "scratch-reap-log.jsonl");
+	expect(readFileSync(log, "utf8")).not.toContain("gap_filed");
 }, 180_000);
 
 test("scratch mine --at logs one flag row naming only the caller's owed dirs; a plain mine, a clean mine and the session dir log nothing", () => {

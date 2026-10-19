@@ -769,9 +769,11 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--ref", value: "file:PATH|bead:ID", description: "With --bin evidence or promote: file:PATH names a git-tracked file in the owner's repo (relative paths resolve there); bead:ID names a bead br show finds" },
 		], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
 		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused and no lock is moved", usage: "scratch index-lock --repo DIR", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
-			{ name: "apply", description: "Apply the guarded plan, delete expired quarantine, then kill orphaned harness servers; the JSON response repeats the policy and totals and includes the reaper receipt", usage: "scratch apply [--apply --yes]", flags: [
+			{ name: "apply", description: "Apply the guarded plan, delete expired quarantine, then kill orphaned harness servers; the JSON response repeats the policy and totals and includes the reaper receipt and the gap report. With --file-gaps, guarded gap classes are filed to their owning beads (one br comment per bead, only dirs no earlier run filed)", usage: "scratch apply [--apply --yes [--file-gaps [--db PATH]]]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+			{ name: "--file-gaps", description: "File each guarded gap class to its owning bead; without it the exact br commands are printed and nothing is filed" },
+			{ name: "--db", value: "PATH", description: "Tracker beads.db for filing gap comments (else br auto-discovers or uses BEADS_DB)" },
 		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
 	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 	{ name: "fleet", description: "Act on the live tmux fleet", usage: "fleet flush-pending [--apply --yes]", flags: [], subcommands: [

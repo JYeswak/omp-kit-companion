@@ -72,10 +72,14 @@ A dir the owner released into a bin is not a gap. The report also counts gaps pe
 
 When a session runs `br update ID --status in_review` or `br close ID`, the kit-flywheel-guard extension runs `omp-kit scratch mine --at review` (or `--at close`) and, if dirs are owed, adds a `SCRATCH_OWED` note to that command's context naming up to five of them and the release command. It is advice only: nothing is blocked, and a missing omp-kit, a failed or timed-out run, or an unparseable answer yields no note. It becomes a refusal only after the reap log shows a week of flags with no dir the caller did not own.
 
+## Filing the gaps to their beads
+
+`omp-kit scratch apply` prints `gapFileCommands`: the exact `br comments add` lines that file each guarded gap class to its owning bead. With `--file-gaps` (and `--db PATH`, else `br` auto-discovers or uses `BEADS_DB`) it runs them: one comment per bead listing the dirs no earlier run filed (cut at 15 with a count), then a `gap_filed` row in the reap log so the next run files only the delta. A failed `br` call is reported in `data.gapFiled` and retried next run; classes with no guard are never auto-filed. Without `--file-gaps` nothing is filed.
+
 ## The session's own dir
 
 Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owner` names `bin=throwaway`. When the session that recorded that dir (the agent and omp session id of its first tool call) ends, the fleet-guard extension releases the dir into the throwaway bin; the reaper then deletes it. A subagent's end, or a seat that never recorded an agent and session, releases nothing. A respawn is not an end: `respawn_seat` writes `respawn-intent.<oldpid>.json` under `${XDG_STATE_HOME:-~/.local/state}/omp-kit-orchestration/` before it signals the old omp, and the extension skips the release while a marker for its own pid exists, names its own process start (`ps -o lstart=`) and is younger than its `ttl_s`. A marker with another start (a reused pid), an expired marker, or no readable start does not skip.
 
 ## Scope of what exists today
 
-The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine [--at]`, the session-end release of the session's own dir and the `SCRATCH_OWED` advice at `in_review` and `close` are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: promoting the advice to a refusal after a week without a false flag.
+The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine [--at]`, the session-end release of the session's own dir, the `SCRATCH_OWED` advice at `in_review` and `close`, and gap filing to guard beads (`--file-gaps`) are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: promoting the advice to a refusal after a week without a false flag.
