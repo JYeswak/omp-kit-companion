@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import { runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
+// A real remote_build_id from replay 3 (ev_30924d59) and its neighbour: both above Number.MAX_SAFE_INTEGER, both parse to the same double.
+const BIG_ID = "30068411341996668", BIG_ID_NEIGHBOUR = "30068411341996667";
+
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; bigIds?: boolean; bigMismatch?: boolean; transport?: boolean } = {}) {
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; rawIds?: [remote: string, build: string]; transport?: boolean } = {}) {
 	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0, recovered = false;
 	let finish: (value: NativeRchResult) => void = () => { throw new Error("build not started"); };
 	const status = () => ({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
@@ -22,15 +25,22 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 			else if (args[0] === "jobs") {
 				if (args[1] === "recover") recovered = true;
 				if (running && options.delayedJournal && journalReads++ === 0) return { exit: 0, state: "exited", stdout: JSON.stringify({ complete: true, journal_errors: [], jobs: [] }) };
-				value = { complete: true, journal_errors: [], jobs: [{ wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
+				// Real journals list neighbouring builds; with raw ids, plant one whose id is one below ours (both round to the same double).
+				const neighbour = { wrapper_alive: false, owner_presence: "absent", lease: {
+					schema_version: 1, wrapper_pid: 41002, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 1 } },
+					identity: { local_wrapper_id: "rchw-neighbour", remote_build_id: "NEIGHBOUR" }, worker_id: "worker-a", state: "finished",
+					recovery: { wrapper_id: "rchw-neighbour", build_id: "NEIGHBOUR", execution_started: true, preparation_cancelled: false, exit_code: 3, retired: true, sources_released: true },
+				} };
+				value = { complete: true, journal_errors: [], jobs: [...(options.rawIds ? [neighbour] : []), { wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
 					schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
-					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: options.bigIds ? "BIGREMOTE" : 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
-					...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: options.bigIds ? "BIGBUILD" : 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
+					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: options.rawIds ? "RAWREMOTE" : 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
+					...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: options.rawIds ? "RAWBUILD" : 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
 						exit_code: options.transport || remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
 				} }] };
 			} else throw new Error("Unexpected native operation");
-			// Real rch ids are 64-bit integers written as raw digits; JSON.stringify cannot produce them from a double.
-			const text = JSON.stringify(value).replace('"BIGREMOTE"', "30068411341996668").replace('"BIGBUILD"', options.bigMismatch ? "30068411341996667" : "30068411341996668");
+			// rch prints pretty JSON ("key": value). Real ids are 64-bit integers written as raw digits; JSON.stringify cannot produce them from a double.
+			let text = JSON.stringify(value, null, 2);
+			if (options.rawIds) text = text.replace('"RAWREMOTE"', options.rawIds[0]).replace('"RAWBUILD"', options.rawIds[1]).replaceAll('"NEIGHBOUR"', BIG_ID_NEIGHBOUR);
 			return { exit: 0, state: "exited", stdout: text };
 		},
 		build() {
@@ -162,16 +172,42 @@ test("a wrapper that exited in running/finalize leaves a lease with no recovery 
 	expect(result.executionObserved).toBe(true);
 });
 
-test("real 64-bit rch build ids (above Number.MAX_SAFE_INTEGER) still bind the lease and a passing check is complete", async () => {
-	const fixture = nativeFixture({ bigIds: true });
+test("a real 64-bit rch build id (above Number.MAX_SAFE_INTEGER) binds the lease: a passing check reports build_exit=0 and cleanup=complete", async () => {
+	const fixture = nativeFixture({ rawIds: [BIG_ID, BIG_ID] });
 	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
 	expect(result.overall).toBe("COMPLETE");
 	expect(result.compilerExit).toBe(0);
+	expect(result.cleanup).toBe("complete");
+	expect(result.lease).toContain("build_exit=0 cleanup=complete");
 });
 
-test("a lease whose recovery build id differs from its identity by one in the low digit is never trusted", async () => {
+test("a real 64-bit lease reports its own recorded remote exit, never the neighbouring build's", async () => {
+	// Ours records 101; the neighbour one id below records 3.
+	const fixture = nativeFixture({ rawIds: [BIG_ID, BIG_ID], nativeExit: 1, remoteExit: 101 });
+	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
+	expect(result.overall).toBe("BUILD_FAILED");
+	expect(result.reason).toBe("native_remote_command_failed");
+	expect(result.compilerExit).toBe(101);
+	expect(result.cleanup).toBe("complete");
+});
+
+test("a lease whose recovery carries the neighbouring build id (one below, past 2^53) is never trusted", async () => {
 	// 30068411341996667 and ...668 round to the same double; only an exact decimal comparison tells them apart.
-	const fixture = nativeFixture({ bigIds: true, bigMismatch: true });
+	const fixture = nativeFixture({ rawIds: [BIG_ID, BIG_ID_NEIGHBOUR] });
+	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
+	expect(result.overall).toBe("UNREADY");
+	expect(result.compilerExit).toBeNull();
+	expect(result.cleanup).toBe("unknown");
+});
+
+test.each([
+	["negative", `-${BIG_ID}`],
+	["zero", "0"],
+	["non-digit string", `"${BIG_ID}x"`],
+	["leading-zero string", `"0${BIG_ID}"`],
+	["exponent-form", "3.0068411341996668e16"],
+])("a %s rch build id is refused, so the lease proves nothing", async (_shape, token) => {
+	const fixture = nativeFixture({ rawIds: [token, token] });
 	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
 	expect(result.overall).toBe("UNREADY");
 	expect(result.compilerExit).toBeNull();
