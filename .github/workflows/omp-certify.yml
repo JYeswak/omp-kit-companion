@@ -288,6 +288,8 @@ jobs:
           else
             gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --body "Certification in progress: $RUN_URL"
           fi
+          # changelog.d/ may be absent in the checkout (e.g. recreated branch), so ensure it exists.
+          mkdir -p changelog.d
           # The fragment names the PR, so it is amended in before ci.yml runs: the tested commit is the PR head.
           printf -- '- Main CI and native certification install OMP %s, certified by omp-certify. (PR #%s)\n' "$LATEST" "$number" > "changelog.d/omp-certify-$LATEST.md"
           git add "changelog.d/omp-certify-$LATEST.md"
