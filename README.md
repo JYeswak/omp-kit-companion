@@ -39,7 +39,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 33 named scopes, opt-in guard extensions
+Around that core sit diagnostics for 35 named scopes, opt-in guard extensions
 for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Why use omp-kit
@@ -117,7 +117,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 33 diagnostic scopes
+### Doctor: 35 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -125,8 +125,6 @@ a next step. The full scope table is in the [Command reference](#command-referen
 
 ```sh
 omp-kit doctor --scope settings          # per-profile TTSR keys via native `omp config get`
-omp-kit doctor --scope extensions        # extension imports that would fail to load
-omp-kit doctor --scope services          # launchd/systemd jobs that are failing
 ```
 
 ### Secrets scan
@@ -604,6 +602,8 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope secrets` | Files holding an Infisical value, by file and vault name; `--staged` for the pre-commit hook | `omp-kit doctor --scope secrets --staged` |
 | `--scope stale-worktree` | Worktree paths that remove lines landed in HEAD, with the blamed commit and bead | `omp-kit doctor --scope stale-worktree --project PATH` |
 | `--scope plugin_release` | Linked vs latest published plugin version, per profile | `omp-kit doctor --scope plugin_release` |
+| `--scope mission` | Repos building through rch and whether their gate calls the kit lease | `omp-kit doctor --scope mission` |
+| `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus
 report without writing.

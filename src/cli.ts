@@ -77,6 +77,7 @@ import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
 import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
+import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
@@ -539,6 +540,10 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			findings = [inspectReservationAge(request)];
 		} else if (scope === "github") {
 			findings = [githubFinding(await probeGithubCapabilities({ foreignRepo: "can1357/oh-my-pi", ownedRepo: "JYeswak/omp-kit-companion" }))];
+		} else if (scope === "mission") {
+			// ompkit-5vph (TurquoiseSummit): per-repo rows carry dynamic components (mission_rch:<repo>),
+			// so the static DIAGNOSTIC_SCOPE_COMPONENTS filter cannot cover them; return them whole like fleet/ownership.
+			findings = inspectMissionRch(liveMissionRchIo());
 		} else if (typeof scope === "string") {
 			const selected = DIAGNOSTIC_SCOPE_COMPONENTS[scope] ?? [scope];
 			const scoped = allFindings.filter((item) => selected.includes(item.component));
