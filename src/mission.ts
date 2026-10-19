@@ -199,7 +199,7 @@ export function validateMissionRecord(projectRoot: string, options: { readonly m
 }
 
 const ANCHOR_DOC_CANDIDATES = ["ROADMAP.md", "MISSION.md", "docs/ROADMAP.md", ".flywheel/MISSION.md", "README.md"];
-const ANCHOR_HEADING = /^#{1,3}[ \t]+Mission\b/i;
+const ANCHOR_HEADING = /^#{1,3}[ \t]+(?:[0-9]+\.[ \t]+)?Mission\b/i;
 const ANCHOR_APPROVAL = /approved?[ \t]+by|STATE[ \t]*:[ \t]*(PROPOSED|APPROVED)|APPROVED_BY/i;
 const ANCHOR_HUMAN_TEXT = /^#[^\n]*Human text:[ \t]*(\S+)/m;
 

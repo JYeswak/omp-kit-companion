@@ -42,6 +42,18 @@ test("agree: matching doc statement and valid record", () => {
 	expect(status.record?.overall).toBe("VALID");
 });
 
+test("numbered Mission headings retain approval and wording checks", () => {
+	const doc = `# Planning Packet\n\n## 0. Mission (approved by Joshua, 2026-10-04)\n\n${IDENTITY}\n\n## 1. Problem\n`;
+	const agreed = missionAnchorStatus(fixture("numbered-agree", doc));
+	expect(agreed.verdict).toBe("AGREE");
+	expect(agreed.doc.approved).toBe(true);
+	expect(agreed.wordingAgrees).toBe(true);
+	const drift = missionAnchorStatus(fixture("numbered-drift", doc, "A different mission."));
+	expect(drift.details).toContain("ANCHOR_WORDING_DRIFT");
+	const unapproved = missionAnchorStatus(fixture("numbered-unapproved", `## 0. Mission\n\n${IDENTITY}\n`));
+	expect(unapproved.details).toContain("ANCHOR_DOC_APPROVAL_MISSING");
+});
+
 test("planted: wording drift (record identity absent from the doc) reports DRIFT", () => {
 	const status = missionAnchorStatus(fixture("wording", AGREE_DOC, "A different mission nobody wrote down."));
 	expect(status.verdict).toBe("DRIFT");
