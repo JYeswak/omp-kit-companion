@@ -188,10 +188,10 @@ import json, sys
 from pathlib import Path
 work, version, platforms = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
 assets = {p: json.loads((work / "build" / p / "asset.json").read_text()) for p in platforms}
-# Byte-for-byte native-candidate.py save(): sorted keys, compact separators, no trailing newline.
+# devid_release.py canonical_json (the published index's exact form): sorted keys, compact separators, one newline.
 with open(work / "unsigned" / "release-index.json", "x", encoding="utf-8") as out:
-    json.dump({"schema_version": 1, "version": version, "source_tag": "v" + version, "assets": assets}, out,
-              sort_keys=True, separators=(",", ":"))
+    out.write(json.dumps({"schema_version": 1, "version": version, "source_tag": "v" + version, "assets": assets},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
 PY
 for platform in "${SHIP[@]}"; do
 	python3 -I "$SRC/installer/install.py" inspect "$WORK/unsigned/release-index.json" "$VERSION" "$platform" >/dev/null ||
