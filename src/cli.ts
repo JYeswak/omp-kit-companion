@@ -394,6 +394,20 @@ async function workDoctor(request: ParsedCommand): Promise<CliResult> {
 	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }) });
 	return { code: 0, data: report, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
 }
+async function workFleetDoctor(request: ParsedCommand): Promise<CliResult> {
+	const fleet = request.flags.has("--fleet");
+	const strandedOnly = request.flags.has("--stranded-only");
+	const projectFlag = request.flags.get("--project");
+	const rootFlag = typeof projectFlag === "string" ? projectFlag : request.flags.get("--root");
+	if (fleet && (typeof projectFlag === "string" || typeof rootFlag === "string")) return refusal("CONFLICTING_FLAGS", "--fleet scans the canonical work roots and cannot be combined with --project or --root", "Use --fleet alone, or --root/--project to scope the scan.");
+	if (strandedOnly && typeof projectFlag === "string") return refusal("CONFLICTING_FLAGS", "--stranded-only cannot be combined with --project", "Use --stranded-only with --root or --fleet; a single --project repo is always reported whole.");
+	const timeoutFlag = request.flags.get("--timeout-ms");
+	const jobsFlag = request.flags.get("--jobs");
+	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;
+	const concurrency = typeof jobsFlag === "string" && Number.isFinite(Number(jobsFlag)) ? Number(jobsFlag) : undefined;
+	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }), ...(strandedOnly ? { strandedOnly: true } : {}) });
+	return { code: 0, data: { ...report, fleet, stranded_only: strandedOnly }, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
+}
 function sessionDoctor(): CliResult {
 	const report = inspectOmpSessions();
 	return { code: 0, data: report, commands: ["omp-kit doctor --scope sessions --json"], verification: "PERFORMED" };
@@ -3798,6 +3812,9 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 		if (words.length && !topic) return refusal("UNKNOWN_TOPIC", `Unknown help topic: ${request.argument}`, "Run omp-kit --help for exact topics.");
 		return { code: 0, data: { text: help(topic, words.length === 2 ? top : undefined) }, verification: "PERFORMED" };
 	}
+	if (command.name === "doctor" && flags.has("--fleet") && flags.get("--scope") !== "work") return refusal("INVALID_FLAG", "--fleet is only valid for doctor --scope work", "Use omp-kit doctor --scope work --fleet.");
+	if (command.name === "doctor" && flags.has("--stranded-only") && flags.get("--scope") !== "work") return refusal("INVALID_FLAG", "--stranded-only is only valid for doctor --scope work", "Use omp-kit doctor --scope work --stranded-only.");
+	if (command.name === "doctor" && flags.get("--scope") === "work" && (flags.has("--fleet") || flags.has("--stranded-only"))) return workFleetDoctor(request);
 	if (command.name === "doctor" && flags.get("--scope") === "work") return workDoctor(request);
 	if (command.name === "doctor" && flags.get("--scope") === "sessions") return sessionDoctor();
 	if (command.name === "doctor" && flags.get("--scope") === "load") return loadDoctor();

@@ -524,6 +524,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--staged", description: "Secrets only: scan the staged blobs of the current Git repository (the pre-commit hook)" },
 		{ name: "--timeout-ms", value: "N", description: "Work scope per-repository git command timeout in milliseconds" },
 		{ name: "--jobs", value: "N", description: "Work scope bounded repository concurrency" },
+		{ name: "--fleet", description: "Work scope: scan the canonical work roots (OMP_KIT_WORK_ROOTS or ~/Developer) with the existing bounded discovery limits; cannot be combined with --project or --root" },
+		{ name: "--stranded-only", description: "Work scope: emit only condition-bearing (stranded) repo rows; clean repos and repos with no stranded condition are omitted" },
 		{ name: "--file", value: "PATH", description: "LSP only: inspect a target file without changing session cwd" },
 		{ name: "--profile", value: "NAME", description: "Memory, MCP or context: inspect an on-disk profile, not effective runtime activation" },
 		{ name: "--sources", description: "MCP only: list MCP servers configured for other harnesses (~/.claude.json, ~/.claude/mcp.json, ~/.cursor/mcp.json, ~/.codex/config.toml, ./.mcp.json) and which OMP profiles have each; read-only, env as names only" },
