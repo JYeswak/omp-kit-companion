@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; bigIds?: boolean; bigMismatch?: boolean } = {}) {
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; bigIds?: boolean; bigMismatch?: boolean; transport?: boolean } = {}) {
 	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0, recovered = false;
 	let finish: (value: NativeRchResult) => void = () => { throw new Error("build not started"); };
 	const status = () => ({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
@@ -26,7 +26,7 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 					schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
 					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: options.bigIds ? "BIGREMOTE" : 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
 					...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: options.bigIds ? "BIGBUILD" : 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
-						exit_code: remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
+						exit_code: options.transport || remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
 				} }] };
 			} else throw new Error("Unexpected native operation");
 			// Real rch ids are 64-bit integers written as raw digits; JSON.stringify cannot produce them from a double.
@@ -176,4 +176,20 @@ test("a lease whose recovery build id differs from its identity by one in the lo
 	expect(result.overall).toBe("UNREADY");
 	expect(result.compilerExit).toBeNull();
 	expect(result.cleanup).toBe("unknown");
+});
+
+test("a bound wrapper whose native call failed with no recorded remote exit (SSH transport timeout) is UNREADY rch_transport_unavailable, never BUILD_FAILED", async () => {
+	const fixture = nativeFixture({ nativeExit: 1, transport: true });
+	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
+	expect(result.overall).toBe("UNREADY");
+	expect(result.reason).toBe("rch_transport_unavailable");
+	expect(result.compilerExit).toBeNull();
+});
+
+test("the same native failure with a recorded nonzero remote exit stays BUILD_FAILED native_remote_command_failed", async () => {
+	const fixture = nativeFixture({ nativeExit: 1, remoteExit: 101 });
+	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
+	expect(result.overall).toBe("BUILD_FAILED");
+	expect(result.reason).toBe("native_remote_command_failed");
+	expect(result.compilerExit).toBe(101);
 });

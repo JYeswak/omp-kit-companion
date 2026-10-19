@@ -218,7 +218,7 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	else if (result.compilerExit !== null && result.compilerExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_remote_command_failed"; }
 	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.wrapperId === null && result.compilerExit === null && result.executionObserved !== true) { result.overall = "REFUSED"; result.reason = "rch_capacity_unavailable"; }
 	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.executionObserved === true) { result.overall = "BUILD_FAILED"; result.reason = "artifact_return_refused"; }
-	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_return_failed"; }
+	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0) { result.overall = "UNREADY"; result.reason = "rch_transport_unavailable"; }
 	else if (result.compilerState !== "exited" || result.executionObserved !== true) { result.overall = "UNREADY"; result.reason = "native_remote_completion_not_observed"; }
 	else if (result.cleanup !== "complete" || result.nextAgentReady !== true) { result.overall = "UNREADY"; result.reason = "post_run_readiness_not_proven"; }
 	else { result.overall = "COMPLETE"; result.reason = "native_return_and_readiness_observed"; }
