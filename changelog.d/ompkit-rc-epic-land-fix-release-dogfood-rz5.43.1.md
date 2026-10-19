@@ -1,0 +1,1 @@
+- Emit bounded redacted `B10_LSP_TIMING` case evidence (platform, status, elapsed_ms, known-positive discriminator, per-call timings with status readiness polls) from the cold LSP positive control on CI, and pin isolated cold-refusal inputs as distinguishable non-PASS outcomes with retained receipts. (ompkit-rc-epic-land-fix-release-dogfood-rz5.43.1)

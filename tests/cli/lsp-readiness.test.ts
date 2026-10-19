@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
-import { probeLspReadiness } from "../../src/lsp-probe.ts";
+import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, probeLspReadiness } from "../../src/lsp-probe.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
@@ -268,6 +268,8 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 	const report = await probeLspReadiness({ ...input, readiness: inspectLspReadiness(input), timeoutMs: 60_000 });
 	expect(report.status).toBe("PASS");
 	expect(report.elapsed_ms).toBeGreaterThan(0);
+	expect(report.checks.known_positive_reference).toBe(true);
+	expect(report.checks.server_ready_after_request).toBe(true);
 	for (const marker of ["jsconfig.json", "tsconfig.json"]) {
 		expect(report.protected_input_snapshots?.before[join(f.project, marker)]).toEqual({ kind: "absent" });
 		expect(report.protected_input_snapshots?.after[join(f.project, marker)]).toEqual({ kind: "absent" });
@@ -277,6 +279,33 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 	expect(report.checks.lsp_mux_stopped).toBe(true);
 	expect(report.temporary_workspace_removed).toBe(true);
 	expect(tree(f.root)).toEqual(before);
+	if (process.env.CI === "true") {
+		const calls: Array<Record<string, unknown>> = [];
+		for (const call of report.calls) {
+			const entry: Record<string, unknown> = {
+				action: call.action,
+				elapsed_ms: call.elapsed_ms ?? null,
+			};
+			if (call.action === "status") {
+				entry.readiness = call.result.includes("Language servers: typescript-language-server (ready)") ? "ready" : "not_ready";
+			}
+			calls.push(entry);
+		}
+		const trace: Array<Record<string, unknown>> = [];
+		for (const call of report.json_rpc_trace ?? []) {
+			trace.push({ method: call.method, id: call.id, elapsed_ms: call.elapsed_ms, result_bytes: call.result_bytes });
+		}
+		const timing = {
+			platform: process.platform,
+			status: report.status,
+			elapsed_ms: report.elapsed_ms,
+			known_positive_reference: report.checks.known_positive_reference,
+			server_ready_after_request: report.checks.server_ready_after_request,
+			calls,
+			json_rpc_trace: report.json_rpc_trace ? trace : null,
+		};
+		console.log("B10_LSP_TIMING " + JSON.stringify(timing));
+	}
 }, 90_000);
 
 nativeLspTest("a non-Git parent workspace dependency binary is never launched", async () => {
@@ -384,4 +413,56 @@ test("planted: OMP_SRC clashing with a valid beside-binary source refuses mixed 
 		if (previous === undefined) delete process.env.OMP_SRC;
 		else process.env.OMP_SRC = previous;
 	}
+});
+
+test("planted: isolated cold-refusal inputs stay distinguishable and missing evidence never passes", async () => {
+	// Classifier propagation: each refusal mode maps to exactly one state.
+	expect(classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: false, immediate_exit: false, checks_passed: true })).toBe("PASS");
+	expect(classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: false, immediate_exit: false, checks_passed: false })).toBe("INCOMPLETE");
+	expect(classifyLspProbeOutcome({ timed_out: true, server_missing: false, wrong_marker: false, immediate_exit: false, checks_passed: true })).toBe("TIMEOUT");
+	expect(classifyLspProbeOutcome({ timed_out: false, server_missing: true, wrong_marker: false, immediate_exit: false, checks_passed: false })).toBe("MISSING");
+	expect(classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: true, immediate_exit: false, checks_passed: false })).toBe("WRONG_MARKER");
+	expect(classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: false, immediate_exit: true, checks_passed: false })).toBe("IMMEDIATE_EXIT");
+	// Missing evidence (no checks passed, no refusal signal) is INCOMPLETE, never PASS.
+	const missing = classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: false, immediate_exit: false, checks_passed: false });
+	expect(missing).not.toBe("PASS");
+	// Receipt propagation: refusal-shaped retained calls stay bounded, redacted, and
+	// distinguishable by method/size; PASS omits the receipt. Deleting propagation fails this test.
+	const emptyReferences = "Found 0 reference(s)\n";
+	const timeoutText = "lsp references timed out after 60000ms\n";
+	const serverExit = "server exited during initialize\n";
+	const refusalCalls = [
+		{ action: "status", elapsed_ms: 12.5, result: "Language servers: typescript-language-server (configured, not started)" },
+		{ action: "capabilities", elapsed_ms: 230.25, result: "typescript-language-server: referencesProvider=true" },
+		{ action: "references", elapsed_ms: 60123.75, result: emptyReferences },
+	];
+	for (const state of ["INCOMPLETE", "TIMEOUT", "IMMEDIATE_EXIT"] as const) {
+		const receipt = buildLspJsonRpcReceipt(state, state === "TIMEOUT"
+			? [...refusalCalls.slice(0, 2), { action: "references", elapsed_ms: 60123.75, result: timeoutText }]
+			: state === "IMMEDIATE_EXIT"
+				? [...refusalCalls.slice(0, 1), { action: "capabilities", elapsed_ms: 45.5, result: serverExit }]
+				: refusalCalls);
+		expect(receipt).toBeDefined();
+		expect(receipt!.length).toBeGreaterThan(0);
+		expect(receipt!.length).toBeLessThanOrEqual(64);
+		for (const entry of receipt!) {
+			expect(entry.method.startsWith("lsp/")).toBe(true);
+			expect(entry).not.toHaveProperty("result");
+			expect(typeof entry.result_bytes).toBe("number");
+		}
+		expect(receipt!.at(-1)).toMatchObject({ method: state === "IMMEDIATE_EXIT" ? "lsp/capabilities" : "lsp/references" });
+	}
+	const timeoutReceipt = buildLspJsonRpcReceipt("TIMEOUT", [{ action: "references", elapsed_ms: 1, result: timeoutText }]);
+	const exitReceipt = buildLspJsonRpcReceipt("IMMEDIATE_EXIT", [{ action: "capabilities", elapsed_ms: 1, result: serverExit }]);
+	expect(timeoutReceipt![0]!.result_bytes).not.toBe(exitReceipt![0]!.result_bytes);
+	expect(buildLspJsonRpcReceipt("PASS", refusalCalls)).toBeUndefined();
+	// Hermetic probe: no candidate server is MISSING, never PASS, with zeroed readiness timing.
+	const report = await probeLspReadiness({
+		home: "/nonexistent-home", ompPath: "/nonexistent-omp",
+		// A .ts file with no candidate server reaches MISSING before any filesystem use.
+		readiness: { status: "UNVERIFIED", cwd: "/tmp", file: "/tmp/lsp-probe-missing-fixture.ts", file_outside_cwd: false, config_layers: [], opaque_layers: [], servers: [], runtime: "NOT_PROBED" },
+	});
+	expect(report.status).toBe("MISSING");
+	expect(report.status).not.toBe("PASS");
+	expect(report.elapsed_ms).toBe(0);
 });

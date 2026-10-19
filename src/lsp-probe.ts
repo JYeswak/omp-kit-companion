@@ -83,7 +83,7 @@ const MAX_MODEL_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 64 * 1024;
 
-function classifyLspProbeOutcome(input: LspProbeClassification): LspProbeState {
+export function classifyLspProbeOutcome(input: LspProbeClassification): LspProbeState {
 	if (input.timed_out) return "TIMEOUT";
 	if (input.server_missing) return "MISSING";
 	if (input.wrong_marker) return "WRONG_MARKER";
