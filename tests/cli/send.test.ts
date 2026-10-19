@@ -468,7 +468,7 @@ test("SENDX1 on Tern: the native turn targets only the configured window and pan
 	expect(r.status).toBe("OK");
 	const carly = fake.runs.find((argv) => argv.includes("carly"))!;
 	expect(carly.slice(1, 6)).toEqual(["--window", "W", "ctl", "carly", "lua"]);
-	expect(carly[6]!.startsWith(`local blk = "7"\n`)).toBe(true);
+	expect(carly[6]!.startsWith(`local blk = string.char(${luaCharCodes("7")})\n`)).toBe(true);
 	expect(new Set(fake.reads)).toEqual(new Set(["/sf"]));
 });
 
@@ -556,6 +556,59 @@ test("TERN2.4 builder: block must be bare digits; payload wires as byte codes; p
 		`local pb = pi.busy`, `if pb == true then return end`, `local px = pi.exited`, `if px == nil then`]);
 	expect(lines.findIndex((line) => line.startsWith("cx.session:event("))).toBeGreaterThan(paneAt);
 	expect(lines.filter((line) => line.startsWith("cx.session:event(")).length).toBe(1);
+});
+
+// Live dock surface of an owned omp 18.12.2 scratch seat (tern 0.9.4, cx.session:surface root
+// "dock", 2026-10-19), trimmed to ids, kinds and roles plus the full editor node; keys in the order
+// tern.json.encode emits them.
+const LIVE_DOCK = `{"main":{"c":[{"id":"0","k":"row","p":{"role":"omp.hud"}},{"id":"1","k":"col"},{"id":"2","k":"col"},{"id":"3","k":"col"},{"id":"4","k":"col"},{"id":"5","k":"col"},{"id":"6","k":"col"},{"c":[{"id":"d","k":"col","p":{"role":"omp.hud.judge"}},{"id":"e","k":"col","p":{"role":"omp.hud.downloads"}}],"id":"7","k":"col"},{"id":"8","k":"col"},{"id":"9","k":"col"},{"c":[{"id":"l","k":"col"}],"id":"a","k":"col"},{"c":[{"c":[{"id":"g.context","k":"meter","p":{"role":"omp.composer.context"}},{"id":"h","k":"row","p":{"role":"omp.composer.chips"}},{"c":[{"id":"g.line/input","k":"editor","p":{"cursor":0,"maxLines":12,"placeholder":[{"s":"em","t":"\\u201cok\\u201d"}],"sendable":true,"text":""}}],"id":"g.line","k":"row","p":{"role":"omp.composer.line"}},{"c":[{"c":[{"id":"g.bar/model/icon","k":"icon"},{"id":"g.bar/model/name","k":"text"},{"id":"g.bar/model/chev","k":"icon"}],"id":"g.bar/model","k":"row","p":{"role":"omp.composer.model"}},{"c":[{"id":"g.bar/extras/git","k":"seg","p":{"role":"omp.composer.fact"}}],"id":"g.bar/extras","k":"status","p":{"role":"omp.composer.extras"}},{"id":"g.bar/usage","k":"text","p":{"role":"omp.composer.usage"}},{"id":"g.bar/send","k":"kbd","p":{"role":"omp.composer.send"}}],"id":"g.bar","k":"row","p":{"role":"omp.composer.bar"}}],"id":"g","k":"col","p":{"role":"omp.editor"}}],"id":"b","k":"col"},{"id":"c","k":"col"}],"id":"dock","k":"col"},"surface":{"id":"s:1","mode":"inline","role":"omp.session","title":"omp"}}`;
+const LIVE_LAYER = `{"main":{"id":"layer","k":"col"},"surface":{"id":"s:1","mode":"inline","role":"omp.session","title":"omp"}}`;
+const luaAvailable = spawnSync("lua", ["-v"], { encoding: "utf8" }).status === 0;
+/** Stub window: pane() resolves only a decimal-string id (live: a number finds nothing); events are printed as hex. */
+const LUA_WINDOW_STUB = `
+local events = {}
+cx = { session = {} }
+function cx.session:pane(b) if type(b) ~= "string" then return nil end return { busy = os.getenv("BUSY") == "1" } end
+function cx.session:surface(b, o) if o.root == "dock" then return { surface = { id = "s:1" }, which = "dock" } end return { which = "layer" } end
+function cx.session:event(b, ev) events[#events + 1] = ev end
+tern = { json = { encode = function(t) if t.which == "dock" then return os.getenv("DOCK") end return os.getenv("LAYER") end } }
+assert(load(os.getenv("TURN"), "turn", "t"))()
+for _, ev in ipairs(events) do print(ev.ev .. "|" .. ev.sf .. "|" .. ev.id .. "|" .. (ev.text:gsub(".", function(c) return string.format("%02x", c:byte()) end))) end
+`;
+/** Run a turn as `tern ctl` hands it to carly (lines joined, whitespace-delimited "quoted" tokens unquoted) in a stub window. */
+function runTurn(turn: string, over: { dock?: string; layer?: string; busy?: boolean } = {}): string[] {
+	const tokenized = turn.split("\n").join(" ").split(" ").map((token) => token.length > 1 && token.startsWith(`"`) && token.endsWith(`"`) && !token.slice(1, -1).includes(`"`) ? token.slice(1, -1) : token).join(" ");
+	const run = spawnSync("lua", ["-"], { input: LUA_WINDOW_STUB, encoding: "utf8",
+		env: { ...process.env, TURN: tokenized, DOCK: over.dock ?? LIVE_DOCK, LAYER: over.layer ?? LIVE_LAYER, BUSY: over.busy ? "1" : "0" } });
+	expect(run.stderr).toBe("");
+	expect(run.status).toBe(0);
+	return run.stdout.split("\n").filter((line) => line.length > 0).map((line) => {
+		const [ev, sf, id, hex] = line.split("|");
+		return `${ev}|${sf}|${id}|${Buffer.from(hex!, "hex").toString("utf8")}`;
+	});
+}
+
+test("TERN2.4 native turn has no ctl-tokenizer hazards: no whitespace-delimited quoted token, no # or --", () => {
+	const turn = buildNativeSendTurn("192380175122439", `say "hi" -- # ]] now`)!;
+	expect(turn.split(/\s+/).filter((token) => token.length > 1 && token.startsWith(`"`) && token.endsWith(`"`))).toEqual([]);
+	expect(turn.includes("#")).toBe(false);
+	expect(turn.includes("--")).toBe(false);
+});
+
+test.skipIf(!luaAvailable)("TERN2.4 native turn executed in Lua against a live dock: one send to the live editor with the exact payload when idle and empty", () => {
+	const payload = `hello "quoted" ]] world ✓\n[kit-send-abcdefabcdef]`;
+	const turn = buildNativeSendTurn("192380175122439", payload)!;
+	expect(runTurn(turn)).toEqual([`send|s:1|g.line/input|${payload}`]);
+});
+
+test.skipIf(!luaAvailable)("TERN2.4 native turn executed in Lua: busy pane, composer draft, modal layer or two eligible editors emit nothing", () => {
+	const turn = buildNativeSendTurn("192380175122439", "hello\n[kit-send-abcdefabcdef]")!;
+	expect(runTurn(turn, { busy: true })).toEqual([]);
+	expect(runTurn(turn, { dock: LIVE_DOCK.replace(`"text":""`, `"text":"draft-xyz"`) })).toEqual([]);
+	expect(runTurn(turn, { layer: `{"main":{"c":[{"id":"z.^picker","k":"picker"}],"id":"layer","k":"col"},"surface":{"id":"s:1"}}` })).toEqual([]);
+	const second = `{"id":"g.line/second","k":"editor","p":{"cursor":0,"sendable":true,"text":""}}`;
+	expect(runTurn(turn, { dock: LIVE_DOCK.replace(`{"id":"c","k":"col"}`, second) })).toEqual([]);
+	expect(runTurn(turn, { dock: LIVE_DOCK.replace(`"sendable":true`, `"sendable":false`) })).toEqual([]);
 });
 
 test("TERN2.4 luaCharCodes: byte-exact round trip incl multibyte", () => {

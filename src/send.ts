@@ -590,22 +590,22 @@ export function ternCtlBin(): string {
 
 /**
  * Encode arbitrary text as lua `string.char(...)` byte codes (AM58562-1).
- * The carly lua transport mangles several literal shapes inside source
- * (verified live 2026-10-16 against carly lua on an owned pane, each with
- * isolated passing/failing probes): `..` rejected at parse; unbalanced
- * `{`/`}`/`?`/`,` inside string literals rejected (naive pre-scan);
- * backslash escapes evaluate to nil; digit-strings containing `/` evaluate
- * as division (so the block travels as bare pane digits, never `sess/pane`);
- * `or` does not fall through on nil; `and`/`else` rejected or misbehave;
- * `#` rejected; call results used directly in conditions mis-evaluate, so
- * every call result is localized before comparison. The generated turn uses
- * only live-verified constructs (locals, if/then/end nesting, while/break,
- * ==, comparisons, string.format/char/find/sub, long-bracket literals,
- * single-dot access) and carries no payload bytes as source text at all:
- * every UTF-8 byte becomes a decimal code, so no payload (including `]]`,
- * commas, quotes or newlines) can disturb parsing. Caveat: carly last_tool
- * is a single shared channel, so verdict reads during concurrent fleet
- * probing need nonce tagging; unhashed reads are attribution-unsafe.
+ * `tern ctl` reads its arguments as one scenario command line (`tern help
+ * dev`: `#` comments, "quoted" strings, one command per line), so the Lua it
+ * hands to carly is not the bytes that were sent: lines are joined, a
+ * whitespace-delimited "quoted" token loses its quotes (`local x = "none"`
+ * becomes `local x = none`, a nil global; `local blk = "<digits>"` becomes a
+ * number), and `#` starts a comment. Verified live 2026-10-19 on an owned
+ * scratch pane: carly's own echo of the turn shows the stripped quotes, and
+ * `cx.session:pane` found the pane by decimal string but not by number. The
+ * 2026-10-16 symptoms (`..`/`#`/backslash/`or` misparses, `sess/pane`
+ * dividing) follow from the same tokenizer. The generated turn therefore
+ * contains no whitespace-delimited quoted token, no `#` and no `--`, and
+ * carries the payload and the block id only as decimal byte codes, so no
+ * text (including `]]`, commas, quotes or newlines) can disturb parsing.
+ * Caveat: carly last_tool is a single shared channel, so verdict reads during
+ * concurrent fleet probing need nonce tagging; unhashed reads are
+ * attribution-unsafe.
  */
 export function luaCharCodes(text: string): string {
 	const codes: number[] = [];
@@ -640,7 +640,7 @@ export function luaCharCodes(text: string): string {
 export function buildNativeSendTurn(block: string, payload: string): string | null {
 	if (!/^[0-9]+$/.test(block)) return null;
 	return [
-		`local blk = "${block}"`,
+		`local blk = string.char(${luaCharCodes(block)})`,
 		`local pi = cx.session:pane(blk)`,
 		`if pi == nil then return end`,
 		`local pb = pi.busy`,
@@ -661,39 +661,40 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
 		`local lc = lj:find([["c":]], 1, true)`,
 		`if lc == nil then`,
 		`local EN = 0`,
-		`local EL = "none"`,
+		`local EL = false`,
 		`local init = 1`,
 		`while true do`,
 		`local ks, ke = dj:find([["k":"editor"]], init, true)`,
 		`if ks == nil then break end`,
 		`init = ke + 1`,
-		`local eid = "none"`,
+		`local eid = false`,
 		`local pre = dj:sub(ks-1, ks-1)`,
+		`local cq = dj:sub(ks-2, ks-2)`,
 		`if pre == C then`,
-		`local vs = ks - 2`,
+		`if cq == Q then`,
+		`local vs = ks - 3`,
 		`while vs > 1 do`,
 		`local ch = dj:sub(vs, vs)`,
 		`if ch == Q then break end`,
 		`vs = vs - 1`,
 		`end`,
-		`local tag = dj:sub(vs-4, vs-1)`,
+		`local tag = dj:sub(vs-5, vs-1)`,
 		`if tag == [["id":]] then`,
-		`eid = dj:sub(vs+1, ks-2)`,
+		`eid = dj:sub(vs+1, ks-3)`,
 		`end`,
 		`end`,
-		`if eid == "none" then return end`,
-		`local klim = ke + 600`,
-		`local win = dj:sub(ke, klim)`,
+		`end`,
+		`if eid == false then return end`,
+		`local nk = dj:find([["k":]], ke, true)`,
+		`if nk == nil then nk = ke + 600 end`,
+		`local win = dj:sub(ke, nk)`,
 		`local s1 = win:find([["sendable":true]], 1, true)`,
 		`if s1 == nil then return end`,
 		`local t1 = win:find([["text":""]], 1, true)`,
 		`if t1 == nil then return end`,
-		`local k2 = win:find([["k":]], 1, true)`,
-		`if k2 == nil then`,
 		`EN = EN + 1`,
 		`if EN == 1 then EL = eid end`,
 		`if EN == 2 then return end`,
-		`end`,
 		`end`,
 		`if EN == 0 then return end`,
 		`local text = string.char(` + luaCharCodes(payload) + `)`,
