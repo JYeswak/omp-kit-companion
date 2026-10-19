@@ -215,19 +215,50 @@ test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning"
 	expect(h.notices.length).toBe(1);
 });
 
-test("LOOKUP_REFUSED: evidence-bearing close is blocked when br show fails", async () => {
+test("SELF_CLOSE_REFUSED: a close whose authorship probe fails is refused, never skipped (ompkit-xa5s.13)", async () => {
 	const project = mkdtempSync(join(base, "proj-"));
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({}) });
 	const result = await toolCall(h, project, "br close kit-404 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"");
 	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("LOOKUP_REFUSED");
+	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
 	expect(result?.reason).toContain("kit-404");
 	expect(result?.reason).toContain("Issue not found: kit-404");
+	expect(result?.reason).toContain("no close was executed");
 	const thrown = await createFlywheelHost(base, { env: { BR_ACTOR: "BlueFox" }, respond: () => { throw new Error("spawn br ENOENT"); } });
 	const crashed = await toolCall(thrown, project, "br close kit-1 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"");
 	expect(crashed?.block).toBe(true);
-	expect(crashed?.reason).toContain("LOOKUP_REFUSED");
+	expect(crashed?.reason).toContain("SELF_CLOSE_REFUSED");
+});
+
+test("SELF_CLOSE_REFUSED: garbled-probe close is refused with the s49q shape, exit 3 Issue not found (ompkit-xa5s.13)", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	// Planted negative replaying the jev s49q close sequence: the guard's own
+	// `br show` probe ran with mangled args, exited 3, and the old code let
+	// the close proceed. The probe error must refuse, never skip.
+	const garbled: Responder = call => call.command === "tmux"
+		? { stdout: "", stderr: "no server", code: 1 }
+		: {
+			stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: "Issue not found: 2>" } }),
+			stderr: "2026-10-13T00:00:00Z  INFO fsqlite::runtime: event=\"region_closed\"\n",
+			code: 3,
+		};
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: garbled });
+	const result = await toolCall(h, project, "br close s49q --reason \"jevidence\"");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+	expect(result?.reason).toContain("s49q");
+	expect(result?.reason).toContain("Issue not found: 2>");
+	expect(result?.reason).not.toContain("was allowed");
+});
+
+test("SELF_CLOSE_REFUSED negative: legit non-author close of s49q by CobaltCoyote still passes (ompkit-xa5s.13)", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const home = identityHome(project, "77", "{\"name\":\"CobaltCoyote\"}");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "s49q": bead("s49q", "BlueFox") }) });
+	expect(await toolCall(h, project, "br close s49q --reason \"bun test extensions/kit-flywheel-guard.test.ts -> pass\"")).toBeUndefined();
+	expect(h.notices).toEqual([]);
 });
 
 test("SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a warning", async () => {

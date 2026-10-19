@@ -1,0 +1,1 @@
+- The flywheel guard now refuses a close whose authorship probe fails (garbled probe args, nonzero exit, unparseable output) under SELF_CLOSE_REFUSED instead of LOOKUP_REFUSED, so a garbled probe can never skip the self-certification check and let the close proceed. (ompkit-xa5s.13)

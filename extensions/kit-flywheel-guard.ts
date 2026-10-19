@@ -54,7 +54,8 @@ import type { PullRefusal } from "../src/fleet-watch";
  * caller's identities: `--actor`/`--agent-name` on the command, BR_ACTOR /
  * BR_AGENT_NAME / AGENT_NAME, or the Agent Mail pane identity file for
  * $TMUX_PANE. Unknown caller identities and missing assignees allow the call
- * with a warning; failed or unparseable `br show` results block it.
+ * with a warning; failed or unparseable `br show` results refuse the close
+ * under SELF_CLOSE_REFUSED (fail-closed self-certification, ompkit-xa5s.13).
  *
  * CLAIM_REFUSED: native claim/start prechecks name the current holder or
  * unreadable prerequisite. br --claim remains the atomic award; an actor
@@ -1185,9 +1186,15 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 		for (const id of request.ids) {
 			const found = await readBeadState(deps.exec, request, id);
 			if (!found.ok) {
+				// ompkit-xa5s.13: a probe that errors (garbled args, exit != 0,
+				// unparseable output) fails closed as a self-certification
+				// failure, never as a skip. LOOKUP_REFUSED stays for the outer
+				// lifecycle catch below; the close path refuses invariant 9.
 				return {
 					block: true,
-					reason: `kit-flywheel-guard LOOKUP_REFUSED: cannot verify authorship of ${id}: ${found.why}. Resolve the native lookup; no close was executed.`,
+					reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: cannot verify authorship of ${id}: ${found.why}. `
+						+ "No self-certification on an unverified close (Flywheel Kernel invariant 9): resolve the native lookup "
+						+ "and let an independent verifier run the close; no close was executed.",
 				};
 			}
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
