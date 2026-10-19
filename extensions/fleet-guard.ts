@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { check as checkGit } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
 import { applyScratchEnv, check as checkScratch, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
+import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
 
@@ -21,12 +22,15 @@ interface ToolCallContext {
 interface ExtensionApi {
 	setLabel(label: string): void;
 	on(event: "tool_call", handler: (event: FleetGuardEvent, context?: ToolCallContext) => Promise<FleetGuardBlock | undefined>): void;
+	on(event: "session_shutdown", handler: (event: unknown, context?: ToolCallContext) => Promise<void>): void;
 }
 
 export interface GuardDeps {
 	cwd?: string;
 	pid?: number;
 	env?: Record<string, string | undefined>;
+	/** Test seam for the session-end disposal; defaults to ps and the kit's own release. */
+	seatEnd?: SeatEndDeps;
 }
 
 /** Ordered chain: lexical scratch, Git, repository facts, then reservations. First block wins. */
@@ -44,7 +48,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
 	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
 	// belong to a subagent session).
-	let seat: { dir: string; repo: string; created: string; recorded: boolean } | null = null;
+	let seat: { dir: string; repo: string; created: string; recorded: boolean; agent?: string; session?: string } | null = null;
 	if (initial.kind === "on") {
 		const dir = scratchDirFor(initial.root, pid);
 		const created = new Date().toISOString();
@@ -62,6 +66,8 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 		const session = agent !== undefined ? context?.sessionManager?.getSessionId?.() : undefined;
 		if (seat !== null && agent !== undefined && session) {
 			seat.recorded = true;
+			seat.agent = agent;
+			seat.session = session;
 			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
 			catch { /* the pid-only owner stays valid */ }
 		}
@@ -74,5 +80,12 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 		const artifactsDir = context?.localProtocolOptions?.getArtifactsDir?.();
 		return handleToolCall(event, { cwd: callingCwd,
 			localRoot: artifactsDir ? resolve(artifactsDir, "local") : undefined });
+	});
+	// The session that recorded the seat ends it; a respawn (marker from respawn_seat) hands the dir on instead.
+	pi.on("session_shutdown", async (_event, context) => {
+		if (seat === null) return;
+		try {
+			endSeat({ dir: seat.dir, agent: seat.agent, session: seat.session }, pid, context?.sessionManager?.getSessionId?.(), deps?.seatEnd ?? liveSeatEndDeps());
+		} catch { /* a failed disposal leaves the dir for the reaper, as before */ }
 	});
 }

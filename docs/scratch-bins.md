@@ -66,6 +66,10 @@ A dir the owner released into a bin is not a gap. The report also counts gaps pe
 
 `omp-kit scratch mine` lists the caller's own scratch dirs, read-only: those whose owner record names the caller's agent and a session it holds, or whose pid is the caller's or an ancestor's. Each row has a state (`unreleased`, `released`, `held`, `hold-expired`) and its bin. `overall` is `FINDINGS` while any dir is `unreleased` or its hold has `hold-expired`, otherwise `OK`; the exit code is 0 either way. Dirs of other owners and unowned dirs never appear.
 
+## The session's own dir
+
+Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owner` names `bin=throwaway`. When the session that recorded that dir (the agent and omp session id of its first tool call) ends, the fleet-guard extension releases the dir into the throwaway bin; the reaper then deletes it. A subagent's end, or a seat that never recorded an agent and session, releases nothing. A respawn is not an end: `respawn_seat` writes `respawn-intent.<oldpid>.json` under `${XDG_STATE_HOME:-~/.local/state}/omp-kit-orchestration/` before it signals the old omp, and the extension skips the release while a marker for its own pid exists, names its own process start (`ps -o lstart=`) and is younger than its `ttl_s`. A marker with another start (a reused pid), an expired marker, or no readable start does not skip.
+
 ## Scope of what exists today
 
-The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`) and `scratch mine` are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: the flag at the disposal points (the holder's close or `in_review`, and session end), which starts as a warning and becomes a refusal only after a week with no false flag.
+The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine` and the session-end release of the session's own dir are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: the flag at the other disposal point (the holder's close or `in_review`), which starts as a warning and becomes a refusal only after a week with no false flag.

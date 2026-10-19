@@ -3,7 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
+import { liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
+import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { parseOwnerFile } from "../src/scratch.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 mkdirSync(join(import.meta.dir, "../var/agent-tmp"), { recursive: true });
@@ -21,24 +23,28 @@ afterEach(() => {
 	}
 });
 
-type ToolCallHandler = Parameters<Parameters<typeof fleetGuard>[0]["on"]>[1];
+type ToolCallHandler = (event: FleetGuardEvent, context?: { cwd: string; localProtocolOptions?: { getArtifactsDir?: () => string | null }; sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<FleetGuardBlock | undefined>;
+type ShutdownHandler = (event: unknown, context?: { sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<void>;
 
 interface FakePi {
 	labels: string[];
 	handlers: ToolCallHandler[];
+	shutdowns: ShutdownHandler[];
 	setLabel(label: string): void;
-	on(event: "tool_call", handler: ToolCallHandler): void;
+	on(event: string, handler: (...args: never[]) => unknown): void;
 }
 
 function fakePi(): FakePi {
 	return {
 		labels: [],
 		handlers: [],
+		shutdowns: [],
 		setLabel(label: string): void {
 			this.labels.push(label);
 		},
-		on(_event: "tool_call", handler: ToolCallHandler): void {
-			this.handlers.push(handler);
+		on(event: string, handler: (...args: never[]) => unknown): void {
+			if (event === "session_shutdown") this.shutdowns.push(handler as ShutdownHandler);
+			else this.handlers.push(handler as ToolCallHandler);
 		},
 	};
 }
@@ -114,6 +120,60 @@ test("SCRATCHBIN1: a session's own dir names its bin at creation and keeps it wh
 	const recorded = ownerOf(cwd, pid);
 	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\nbin=throwaway\n`);
 	expect(parseOwnerFile(recorded)).toMatchObject({ agent: "TurquoiseSummit", session: SESSION, bin: "throwaway" });
+});
+
+const STARTED = "Mon Oct 19 01:00:00 2026";
+const seatEndDeps = (released: string[], env: Record<string, string | undefined> = {}): SeatEndDeps => ({ startOf: () => STARTED, env, now: Date.UTC(2026, 9, 19, 1, 30, 0),
+	release: (dir, agent, session) => { released.push(`${dir} ${agent} ${session}`); return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: null }; } });
+
+test("SCRATCHBIN1: the session that recorded the seat releases its dir when it ends; a subagent's end and an unrecorded seat release nothing", async () => {
+	const released: string[] = [];
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released) });
+	expect(pi.shutdowns).toHaveLength(1);
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	expect(released).toEqual([]);
+	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => "01a1502a-5647-76ba-89c5-949087f3e283" } });
+	expect(released).toEqual([]);
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	expect(released).toEqual([`${join(cwd, "var", "agent-tmp", `omp.${pid}`)} TurquoiseSummit ${SESSION}`]);
+});
+
+test("SCRATCHBIN1 planted negative: a respawn's session end leaves the dir for the successor", async () => {
+	const state = mkdtempSync(join(import.meta.dir, "../var/agent-tmp", "fleet-intent-"));
+	roots.push(state);
+	const released: string[] = [];
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released, { XDG_STATE_HOME: state }) });
+	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
+	mkdirSync(join(state, "omp-kit-orchestration"));
+	writeFileSync(join(state, "omp-kit-orchestration", `respawn-intent.${pid}.json`),
+		JSON.stringify({ pid, start: STARTED, agent: "TurquoiseSummit", session: SESSION, block: "b", at: "2026-10-19T01:29:00Z", ttl_s: 900, kind: "respawn" }));
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	expect(released).toEqual([]);
+});
+
+test("SCRATCHBIN1: with the real release, the ended session's dir carries the throwaway release marker and its owner is untouched", async () => {
+	const home = mkdtempSync(join(import.meta.dir, "../var/agent-tmp", "fleet-home-"));
+	roots.push(home);
+	const project = join(home, "Developer", "proj");
+	mkdirSync(join(project, ".omp"), { recursive: true });
+	mkdirSync(join(project, "var", "agent-tmp"), { recursive: true });
+	writeFileSync(join(project, ".omp", "fleet.json"), '{"enabled":true}\n');
+	Bun.spawnSync(["git", "-C", project, "init", "--quiet"], { stdout: "pipe", stderr: "pipe" });
+	const pi = fakePi();
+	const pid = process.pid;
+	await fleetGuard(pi, { cwd: project, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: liveSeatEndDeps(home) });
+	await pi.handlers[0]!({ toolName: "read", input: { path: join(project, "x") } } as never, { cwd: project, sessionManager: { getSessionId: () => SESSION } });
+	const dir = join(project, "var", "agent-tmp", `omp.${pid}`);
+	const owner = ownerOf(project, pid);
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	const marker = readFileSync(join(dir, ".omp-kit-release"), "utf8");
+	expect(marker).toContain("bin=throwaway\n");
+	expect(ownerOf(project, pid)).toBe(owner);
 });
 
 test("scratch fires before git and reservations in the chain", async () => {
