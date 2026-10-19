@@ -170,7 +170,7 @@ sweep_dead_extracts() {
 	[ -n "$boot" ] || boot=$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)
 	[ -n "$boot" ] || boot=0
 	for dir in "$ROOT"/var/agent-tmp/pre-push-gate.* "$ROOT"/var/agent-tmp/pre-push-gate-base.* "$ROOT"/var/agent-tmp/fresh-gate.*; do
-		[ -d "$dir" ] && [ ! -L "$dir" ] || continue
+		if [ ! -d "$dir" ] || [ -L "$dir" ]; then continue; fi
 		name=${dir##*/}
 		label=${name%%.*}
 		rest=${name#*.}
