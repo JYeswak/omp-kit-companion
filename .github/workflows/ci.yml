@@ -42,14 +42,18 @@ on:
 permissions:
   contents: read
 
+# The event name keeps the daily schedule (and a workflow_call caller's event) from queueing behind, or being
+# cancelled by, the push run of the same main SHA.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   resolve-omp-versions:
     if: github.event.repository.private == false
     runs-on: ubuntu-24.04
+    # Measured 5 s on push run 39185830559 (checkout, jq and two npm view calls).
+    timeout-minutes: 5
     outputs:
       minimum: ${{ steps.resolve.outputs.minimum }}
       certified: ${{ steps.resolve.outputs.certified }}
@@ -339,6 +343,8 @@ jobs:
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
     runs-on: ${{ matrix.os }}
+    # Result gate plus the shard coverage check (checkout, artifact download, one python run).
+    timeout-minutes: 5
     steps:
       - name: Require all CLI contract suites to pass
         env:
