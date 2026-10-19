@@ -88,6 +88,12 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 40
     strategy:
+      # B7 rz5.30.2: serialize the OMP tracks on the Intel label. Both tracks
+      # ran concurrently and the regex-budget live-stream gate (500ms ceiling)
+      # refused both under load (run 39199001547: load1 5.5-13, certified
+      # missed at 519.5ms). Serializing removes the harness's own
+      # self-interference; thresholds and continue-on-error are unchanged.
+      max-parallel: 1
       fail-fast: false
       matrix:
         track: [minimum, certified]
