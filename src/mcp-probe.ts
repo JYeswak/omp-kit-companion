@@ -12,7 +12,7 @@ import { readProfileServers, record, SERVER_NAME, type OmpProfileDir } from "./m
  * OMP and the answer matched its --expect pattern without error-shaped text; it does not prove the answer
  * is right beyond that pattern.
  */
-export type McpProbeStatus = "CALLABLE" | "ZERO_TOOLS" | "START_TIMEOUT" | "START_FAILED" | "CALL_FAILED" | "UNVERIFIED_RESULT" | "NOT_CALLED" | "NOT_CONFIGURED"
+export type McpProbeStatus = "CALLABLE" | "ZERO_TOOLS" | "START_TIMEOUT" | "START_FAILED" | "CALL_FAILED" | "CALL_TIMEOUT" | "UNVERIFIED_RESULT" | "NOT_CALLED" | "NOT_CONFIGURED"
 	| "ENV_UNSET" | "COMMAND_FAILED";
 /** `expect` is a JS RegExp source the call's result text must match. */
 export interface McpCallSpec { server: string; tool: string; args: Record<string, unknown>; expect?: string }
@@ -24,7 +24,7 @@ export interface McpProbeServer {
 	tools: number | null;
 	tool_names: string[];
 	connect_ms: number | null;
-	call: { tool: string; ms: number | null; is_error: boolean | null; result_excerpt: string; expect: string | null; error_text: boolean | null; expect_matched: boolean | null } | null;
+	call: { tool: string; ms: number | null; bound_ms: number | null; is_error: boolean | null; result_excerpt: string; expect: string | null; error_text: boolean | null; expect_matched: boolean | null } | null;
 	env: McpEnvCheck[];
 	detail: string;
 }
@@ -305,7 +305,8 @@ async function probeProfile(input: McpProbeInput, profile: OmpProfileDir, comman
 		if (planned.length) {
 			const from = session.events.length;
 			session.send({ id: "omp-kit-calls", type: "prompt", message: "omp-kit MCP probe: run the scripted calls." });
-			const ended = await session.until(event => event.type === "agent_end", (input.callTimeoutMs ?? 120_000) * planned.length + 30_000, from);
+			const bound = input.callTimeoutMs ?? 120_000;
+			const ended = await session.until(event => event.type === "agent_end", bound * planned.length + 30_000, from);
 			const window = session.events.slice(from);
 			for (const { id, spec } of planned) {
 				const row = results.get(spec.server)!;
@@ -316,11 +317,16 @@ async function probeProfile(input: McpProbeInput, profile: OmpProfileDir, comman
 				const answered = end !== undefined && isError === false && details.serverName === spec.server;
 				const text = end ? resultText(end.event.result) : "";
 				const judged = answered ? judgeResult(text, spec.expect) : null;
-				results.set(spec.server, { ...row, status: judged?.status ?? "CALL_FAILED",
-					call: { tool: spec.tool, ms: start && end ? end.at - start.at : null, is_error: isError, result_excerpt: excerpt(text),
+				const ms = start && end ? end.at - start.at : null;
+				const late = ms !== null && ms > bound;
+				const timedOut = !ended || late;
+				results.set(spec.server, { ...row, status: judged && !late ? judged.status : (timedOut ? "CALL_TIMEOUT" : "CALL_FAILED"),
+					call: { tool: spec.tool, ms, bound_ms: bound, is_error: isError, result_excerpt: excerpt(text),
 						expect: spec.expect ?? null, error_text: judged?.error_text ?? null, expect_matched: judged?.expect_matched ?? null },
-					detail: judged ? judged.detail
-						: !end ? (ended ? "OMP never executed the call" : "call did not finish within the call bound")
+					detail: judged && !late ? judged.detail
+						: late ? `the call answered after ${ms} ms, past the call bound ${bound} ms (raise with --call-timeout-ms)`
+						: timedOut ? `the call did not finish within the call bound ${bound} ms (raise with --call-timeout-ms)`
+						: !end ? "OMP never executed the call"
 						: isError ? "the call returned an error" : `the call was answered by ${String(details.serverName)}, not ${spec.server}` });
 			}
 		}

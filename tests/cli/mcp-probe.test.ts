@@ -140,3 +140,20 @@ test("call specs and OMP tool names parse the way OMP mints them", () => {
 	expect(ompMcpToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
 	expect(ompMcpToolName("s", "t".repeat(80))).toHaveLength(64);
 });
+test("a slow answer is CALL_TIMEOUT at a small bound and CALLABLE when raised, with the bound recorded", async () => {
+	const f = fixture({ slow: { mode: "slow", env: { SLOW_MS: "3000" } } });
+	const env = { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.root, "state"), TMPDIR: f.root, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` };
+	const run = (extra: string[]) => Bun.spawnSync([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json", ...extra], { cwd: f.root, stdout: "pipe", stderr: "pipe", env });
+	const callArgs = ["--call", "slow:echo:{\"text\":\"hi\"}", "--expect", "slow:^echo:hi$"];
+	const timedOut = run(["--call-timeout-ms", "1000", ...callArgs]);
+	const timedOutServer = JSON.parse(timedOut.stdout.toString()).data.mcp.profiles[0].servers[0];
+	expect(timedOutServer).toMatchObject({ server: "slow", status: "CALL_TIMEOUT" });
+	expect(String(timedOutServer.detail)).toContain("--call-timeout-ms");
+	expect(String(timedOutServer.detail)).toContain("1000");
+	const raised = run(["--call-timeout-ms", "30000", ...callArgs]);
+	const raisedServer = JSON.parse(raised.stdout.toString()).data.mcp.profiles[0].servers[0];
+	expect(raisedServer).toMatchObject({ server: "slow", status: "CALLABLE", call: { bound_ms: 30000 } });
+	const fallback = run(callArgs);
+	const fallbackServer = JSON.parse(fallback.stdout.toString()).data.mcp.profiles[0].servers[0];
+	expect(fallbackServer).toMatchObject({ server: "slow", status: "CALLABLE", call: { bound_ms: 120000 } });
+}, 120_000);

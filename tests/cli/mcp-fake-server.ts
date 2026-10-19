@@ -6,6 +6,7 @@
 //   auth       - like echo, but every call answers "FAKE_AUTH_ERROR (HTTP 401)" as normal text with isError false
 //   agent-mail      - one read-only "health_check" tool with a deterministic response
 //   agent-mail-fail - exposes "health_check" but returns a tool-call error
+//   slow       - like echo, but answers tools/call after SLOW_MS (default 3000)
 const mode = process.argv[2] ?? "echo";
 if (mode === "banner") process.stdout.write("fake-server banner: starting up\n");
 const isAgentMailMode = mode === "agent-mail" || mode === "agent-mail-fail";
@@ -40,7 +41,10 @@ process.stdin.on("data", (chunk: string) => {
 				: mode === "agent-mail-fail" ? { content: [{ type: "text", text: "fake tool call failed" }], isError: true }
 				: mode === "agent-mail" ? { content: [{ type: "text", text: "{\"ok\":true,\"version\":\"fake-agent-mail-1\"}" }] }
 				: { content: [{ type: "text", text: `echo:${text}` }] };
-			send({ jsonrpc: "2.0", id: request.id, result });
+			if (mode === "slow") {
+				const wait = Number(process.env.SLOW_MS ?? "3000");
+				setTimeout(() => send({ jsonrpc: "2.0", id: request.id, result }), Number.isSafeInteger(wait) && wait > 0 ? wait : 3000);
+			} else send({ jsonrpc: "2.0", id: request.id, result });
 		} else send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "method not found" } });
 	}
 });
