@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean } = {}) {
-	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0;
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean } = {}) {
+	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0, recovered = false;
 	let finish: (value: NativeRchResult) => void = () => { throw new Error("build not started"); };
 	const status = () => ({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
 		id: "worker-a", status: options.health ?? "healthy", total_slots: statusReads++ === 0 ? options.freeBefore ?? 4 : options.freeAfter ?? 4,
@@ -20,12 +20,13 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 			if (args[0] === "status") value = status();
 			else if (args[0] === "gc") return { exit: options.gcExit ?? 0, state: "exited", stdout: "{}" };
 			else if (args[0] === "jobs") {
+				if (args[1] === "recover") recovered = true;
 				if (running && options.delayedJournal && journalReads++ === 0) return { exit: 0, state: "exited", stdout: JSON.stringify({ complete: true, journal_errors: [], jobs: [] }) };
 				value = { complete: true, journal_errors: [], jobs: [{ wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
 					schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
 					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
-					recovery: { wrapper_id: "rchw-fixture", build_id: 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
-						exit_code: remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning },
+					...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
+						exit_code: remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
 				} }] };
 			} else throw new Error("Unexpected native operation");
 			return { exit: 0, state: "exited", stdout: JSON.stringify(value) };
@@ -149,4 +150,12 @@ test("a remote command that ran but whose artifact return was refused is BUILD_F
 	expect(result.overall).toBe("BUILD_FAILED");
 	expect(result.reason).toBe("artifact_return_refused");
 	expect(result.lease).toContain("build_exit=0");
+});
+
+test("a wrapper that exited in running/finalize leaves a lease with no recovery record; the lease is recovered and a passing check is complete", async () => {
+	const fixture = nativeFixture({ noRecovery: true });
+	const result = await runRchCycle({ ...input, command: ["cargo", "check", "--locked"] }, fixture.executor);
+	expect(result.overall).toBe("COMPLETE");
+	expect(result.compilerExit).toBe(0);
+	expect(result.executionObserved).toBe(true);
 });

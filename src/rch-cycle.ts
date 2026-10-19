@@ -135,8 +135,11 @@ async function returnedLease(executor: RchExecutor, id: string, worker: string):
 	const matches = reply.jobs.map(object).filter(row => object(object(row?.lease)?.identity)?.local_wrapper_id === id);
 	if (matches.length !== 1) return null;
 	const lease = object(matches[0]?.lease), recovery = object(lease?.recovery), identity = object(lease?.identity);
-	if (!lease || !recovery || lease.schema_version !== 1 || lease.worker_id !== worker || recovery.wrapper_id !== id ||
-		!nonnegativeInteger(identity?.remote_build_id) || identity.remote_build_id === 0 || recovery.build_id !== identity.remote_build_id) return null;
+	if (!lease || lease.schema_version !== 1 || lease.worker_id !== worker || !nonnegativeInteger(identity?.remote_build_id) || identity.remote_build_id === 0) return null;
+	// A wrapper that exited in running/finalize leaves a journaled lease with identity but no recovery record until `jobs recover` runs.
+	// Report it bound-but-unrecovered so the caller recovers it; it proves neither execution nor an exit code.
+	if (!recovery) return { retired: false, executionObserved: false, compilerExit: null };
+	if (recovery.wrapper_id !== id || recovery.build_id !== identity.remote_build_id) return null;
 	// `cargo check` retrieves no artifact, so execution_started may never be set. A recorded exit code on a retired, sources-released,
 	// uncancelled lease can only come from a completed remote command, so it proves execution without trusting the native exit alone.
 	const observed = recovery.preparation_cancelled === false && nonnegativeInteger(recovery.exit_code) &&
