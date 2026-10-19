@@ -133,6 +133,7 @@ export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
+export const NO_WAIT_REFUSED = "NO_WAIT_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 /** br 0.7.4 global/close/update options that consume a value. */
@@ -1029,6 +1030,98 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 	};
 }
 
+/** Downtime work named in every timed-wait refusal (J-2026-10-18-43). */
+const NO_WAIT_NEXT =
+	"Instead take the next downtime item: your held beads, other seats' in_review beads ready for grading, "
+	+ "bead DAG repair, /skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
+	+ "/skill:extreme-software-optimization. Nothing was executed.";
+
+/** `sleep` duration suffixes in seconds. String parsing only; no regex. */
+const SLEEP_UNIT_SECONDS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
+
+/** A `sleep` duration operand in seconds, or null for flags and non-duration words. */
+function sleepOperandSeconds(word: string): number | null {
+	if (word.length === 0 || word[0] === "-") return null;
+	let num = word;
+	let unit = "";
+	const last = word[word.length - 1]!;
+	if ((last >= "a" && last <= "z") || (last >= "A" && last <= "Z")) {
+		num = word.slice(0, -1);
+		unit = last.toLowerCase();
+	}
+	if (!(unit in SLEEP_UNIT_SECONDS) || num.length === 0) return null;
+	let dots = 0;
+	for (const ch of num) {
+		if (ch === ".") dots += 1;
+		else if (ch < "0" || ch > "9") return null;
+	}
+	if (dots > 1) return null;
+	const value = Number(num);
+	if (!Number.isFinite(value)) return null;
+	return value * SLEEP_UNIT_SECONDS[unit]!;
+}
+
+/** Interpreter basenames whose operand may be an `idle_wait.py` script path (`python3.13` matches by prefix). */
+const WAIT_SCRIPT_RUNNERS: Record<string, true> = { python: true, node: true, bun: true, deno: true };
+
+/** Effective argv lists: assignments and wrappers stripped, `sh -c` scripts followed (depth 3). */
+function noWaitArgvs(command: string, depth = 0): string[][] {
+	const found: string[][] = [];
+	for (const raw of shellCommands(command)) {
+		let at = 0;
+		while (at < raw.length && (isAssignment(raw[at]!) || WRAPPERS[raw[at]!] === true)) at += 1;
+		const argv = raw.slice(at);
+		if (argv.length === 0) continue;
+		const name = basename(argv[0]!);
+		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
+			const script = shellScript(argv);
+			if (script !== undefined) found.push(...noWaitArgvs(script, depth + 1));
+			continue;
+		}
+		found.push(argv);
+	}
+	return found;
+}
+
+/** NO_WAIT_REFUSED (J-2026-10-18-43): a fleet seat never idles on a timer. In a session with a fleet identity
+(admissionOwner), a bash call that runs idle_wait.py (directly or as an interpreter operand) or `sleep` for
+30 s or more in total (bare, chained, wrapped, or in sh -c) is refused. `sleep` under 30 s and sessions
+without a fleet identity pass untouched. */
+export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
+	if (owner === null || event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string" || command.trim().length === 0) return undefined;
+	for (const argv of noWaitArgvs(command)) {
+		const name = basename(argv[0]!);
+		if (name === "idle_wait.py"
+			|| ((WAIT_SCRIPT_RUNNERS[name] === true || name.startsWith("python3")) && argv.slice(1).some(word => basename(word) === "idle_wait.py"))) {
+			return {
+				block: true,
+				reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
+					+ "this call runs idle_wait.py. " + NO_WAIT_NEXT,
+			};
+		}
+		if (name === "sleep") {
+			let total = 0;
+			let seen = false;
+			for (const word of argv.slice(1)) {
+				const seconds = sleepOperandSeconds(word);
+				if (seconds === null) continue;
+				seen = true;
+				total += seconds;
+			}
+			if (seen && total >= 30) {
+				return {
+					block: true,
+					reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
+						+ `this call runs \`sleep\` for about ${total} s (>= 30 s). ` + NO_WAIT_NEXT,
+				};
+			}
+		}
+	}
+	return undefined;
+}
+
 /** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
 is the server-side session identity; the native tool-call id attributes the
 job. Tool input never supplies either, so a peer cannot spoof ownership. */
@@ -1378,6 +1471,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			}
 			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
 			if (goalEnd !== undefined) return goalEnd;
+			const noWait = checkNoWait(event, admissionOwner(env));
+			if (noWait !== undefined) return noWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });

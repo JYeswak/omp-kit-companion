@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compactionRereadMessage, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { checkNoWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
@@ -451,6 +452,63 @@ test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identi
 	}
 	const person = await createFlywheelHost(base, { env: {} });
 	expect(await callAs(person, cwd, "s", "bash", { command: "tern send 5 paste '/goal set x'" })).toEqual([undefined]);
+});
+
+test("NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c (J-2026-10-18-43)", async () => {
+	const cwd = mkdtempSync(join(base, "nowait-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const command of [
+		"python3 scripts/idle_wait.py --minutes 10",
+		"python3.13 /tmp/idle_wait.py",
+		"./tools/idle_wait.py",
+		"idle_wait.py && br ready --json",
+		"make build && python3 scripts/idle_wait.py",
+		"sh -c 'sleep 60'",
+		"bash -lc \"python3 idle_wait.py\"",
+		"env sleep 45",
+		"sleep 600",
+		"sleep 30",
+		"sleep 30s",
+		"sleep 5m",
+		"sleep 1h",
+		"sleep 20 20",
+		"make build && sleep 120",
+		"BR_ACTOR=X sh -c 'sleep 90'",
+	]) {
+		const [result] = await callAs(h, cwd, "w", "bash", { command });
+		expect((result as FlywheelToolCallResult)?.block).toBe(true);
+		expect((result as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("bead DAG repair");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("/skill:reality-check-for-project");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("/skill:profiling-software-performance");
+	}
+});
+
+test("NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less sessions pass", async () => {
+	const cwd = mkdtempSync(join(base, "nowait-"));
+	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const command of [
+		"sleep 2",
+		"sleep 29",
+		"sleep 0.5",
+		"sleep 10 && make test",
+		"sleep --version",
+		"echo sleep 600",
+		"echo idle_wait.py",
+		"grep -n 'sleep 600' scripts/poll.sh",
+		"grep -rn idle_wait.py docs/",
+	]) {
+		expect(await callAs(seat, cwd, "s", "bash", { command })).toEqual([undefined]);
+	}
+	const person = await createFlywheelHost(base, { env: {} });
+	expect(await callAs(person, cwd, "s", "bash", { command: "sleep 600" })).toEqual([undefined]);
+	expect(await callAs(person, cwd, "s", "bash", { command: "python3 idle_wait.py" })).toEqual([undefined]);
+});
+
+test("NO_WAIT_REFUSED seam: the pure check refuses the planted wait and passes without identity", () => {
+	const event = { toolCallId: "w", toolName: "bash", input: { command: "sleep 600" } };
+	expect(checkNoWait(event, "CopperTrout")?.block).toBe(true);
+	expect(checkNoWait(event, null)).toBeUndefined();
 });
 
 test("shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss", () => {
