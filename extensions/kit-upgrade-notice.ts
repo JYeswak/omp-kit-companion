@@ -103,6 +103,10 @@ export interface UpgradeNoticeDeps {
 	home?: string;
 	/** Override the session id (tests). */
 	session?: string;
+	/** Override TTY detection (tests). Production reads process.stdout.isTTY: a headless
+	print-mode run has piped stdio and must never receive the notice (v66l.22.2 rework:
+	it has no idle semantics, so the save-and-end-idle instruction only kills work). */
+	isTTY?: boolean;
 	/** Seams for the two filesystem reads and the marker write (tests inject fakes). */
 	readlink?: (path: string) => string;
 	readFile?: (path: string) => string | undefined;
@@ -149,7 +153,10 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			}
 			const gap = upgradeGap(loaded, installedRelease(target));
 			if (gap === null || sentMemory.has(gap.installed)) return;
+			const tty = deps.isTTY ?? process.stdout?.isTTY === true;
+			if (!tty) return; // headless print-mode run: no idle semantics, never notice, never consume the one-notice marker
 			const session = deps.session ?? ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+			if (session === "unknown-session") return; // no session identity: not a fleet seat, never notice
 			const file = join(home, ".local", "state", "omp-kit", `upgrade-notice-${sessionKey(session)}.json`);
 			const sent = readSentReleases(file, deps);
 			if (sent.includes(gap.installed)) {

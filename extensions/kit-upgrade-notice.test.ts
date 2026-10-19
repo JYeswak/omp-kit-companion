@@ -36,7 +36,7 @@ function fakePi(ctx: UpgradeNoticeContext): { api: UpgradeNoticeApi; sent: Sent[
 }
 
 function files(initial: Record<string, string> = {}): {
-	deps: Pick<UpgradeNoticeDeps, "readFile" | "writeFile" | "readlink">;
+	deps: Pick<UpgradeNoticeDeps, "readFile" | "writeFile" | "readlink" | "isTTY">;
 	store: Record<string, string>;
 	writes: string[];
 } {
@@ -46,6 +46,7 @@ function files(initial: Record<string, string> = {}): {
 		store,
 		writes,
 		deps: {
+			isTTY: true,
 			readlink: () => INSTALLED_58,
 			readFile: (path) => store[path],
 			writeFile: (path, content) => {
@@ -192,6 +193,25 @@ test("markers: corrupt JSON reads as unsent, then records the send", async () =>
 	again.handlers["session_start"]!(null, IDLE);
 	expect(again.sent.length).toBe(1);
 	expect(JSON.parse(f.store[marker]!)).toEqual(["0.2.58"]);
+});
+
+test("planted (h): a headless print-mode run never notices and never consumes the marker", async () => {
+	const f = files();
+	const { api, sent, handlers } = fakePi(IDLE);
+	await kitUpgradeNotice(api, { selfPath: LOADED, session: "seat-1", home: "/h", ...f.deps, isTTY: false });
+	handlers["session_start"]!(null, IDLE);
+	handlers["tool_execution_end"]!(null, IDLE);
+	expect(sent).toEqual([]);
+	expect(f.writes).toEqual([]);
+});
+
+test("planted (i): a run with no session identity never notices", async () => {
+	const f = files();
+	const { api, sent, handlers } = fakePi({ isIdle: () => true });
+	await kitUpgradeNotice(api, { selfPath: LOADED, home: "/h", ...f.deps, isTTY: true });
+	handlers["session_start"]!(null, { isIdle: () => true });
+	expect(sent).toEqual([]);
+	expect(f.writes).toEqual([]);
 });
 
 test("sessionKey: stable, hex, distinct per seat", () => {
