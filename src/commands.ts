@@ -425,7 +425,7 @@ export const COMMANDS: readonly Command[] = [
 			dataSchema: { type: "object", required: ["overall", "cycle", "text"], properties: { overall: { enum: ["PLAN", "REFUSED", "COMPLETE", "BUILD_FAILED", "CANCELLED", "UNREADY"] }, cycle: { type: "object" }, text: { type: "string" } } },
 		},
 	] },
-	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
+	{ name: "heavy", description: "Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when no disk observer is available (load.json disk_observer sbh|statfs|auto, optional disk_floor_pct)", usage: "heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 		{ name: "--disk-observer", value: "statfs|sbh|auto", description: "Disk observer for this call, overriding load.json; statfs admits on physical bytes (10 GiB) and never consults sbh" },
