@@ -1,0 +1,5 @@
+{
+  "$comment": "Expiring test quarantine, checked by scripts/test-quarantine.ts (ompkit-v66l.27.2). A quarantined test still runs and is reported; only its failure stops failing push CI. Each entry needs test (<file>::<describe> > <name>), category, owner, bead, quarantined, expires (at most 14 days later), evidence (CI run ids), repro, reason and remove_when. An expired entry fails CI. Never quarantine a regression: an entry is for a test whose flake is observed on green SHAs and tracked by its bead.",
+  "schema_version": 1,
+  "entries": []
+}
