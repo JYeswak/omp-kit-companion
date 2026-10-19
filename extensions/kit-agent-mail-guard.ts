@@ -30,6 +30,17 @@ import {
  *   AM_BULK_READ: a bulk read tool, even if the server ever re-exposes one.
  *   AM_INBOX_RATE: a second fetch_inbox inside 60 s from the same seat (AMSTORM1).
  *   AM_ARGS_UNREADABLE: arguments of a guarded tool that do not parse; nothing is guessed.
+ *   AM_PHANTOM_REFUSED: a send_message whose recipient is not registered under project_key. The
+ *     error names the projects where the name IS registered (a deadline-bounded roster scan), or
+ *     says it is registered nowhere; nothing is sent and no recipient is created (AMPHANTOM1).
+ *     The project key is the RECIPIENT's repo path.
+ *   AM_SENDER_COLLISION: sender_name names a different runtime's registration in the target
+ *     project (program differs from the seat's own registration): refused, naming both.
+ *   AM_ROSTER_UNAVAILABLE: the target roster cannot be read; an unchecked send could create a
+ *     phantom, so the send is refused instead of guessed.
+ *   AM_PROJECT_AMBIGUOUS (warning, sent anyway): the recipient is registered in more than one
+ *     project and the target is not the most recently active one; names each project's last
+ *     activity.
  *
  * Inert unless the repo opted into the fleet (`.omp/fleet.json` {"enabled": true}, see fleet-policy.ts);
  * a stock session touches no br, tmux or Agent Mail. An opted-in repo whose marker is unreadable refuses
@@ -50,6 +61,16 @@ export const AM_INBOX_INTERVAL_MS = 60_000;
 const MAX_BEAD_CANDIDATES = 5;
 const MAIL_PREFIX = "mcp__mcp_agent_mail_";
 const MAX_SUBJECT_SCAN = 300;
+/** `am agents list` timeout per call: a roster that cannot be read fails the send closed. */
+const AM_ROSTER_TIMEOUT_MS = 10_000;
+/** Per-fetch timeout inside the cross-project scan. */
+const AM_SCAN_FETCH_TIMEOUT_MS = 5_000;
+/** Total budget for one cross-project recipient scan; coverage past the budget is reported, not guessed. */
+const AM_SCAN_BUDGET_MS = 6_000;
+/** Target-roster cache TTL per guard instance (a just-registered name is re-read on a miss). */
+const AM_ROSTER_TTL_MS = 60_000;
+/** Completed cross-project scan cache TTL per guard instance. */
+const AM_SCAN_TTL_MS = 120_000;
 const SECRET_RULE_REL_PATH = "../rules/kit-no-plaintext-secret.md";
 
 /** Subjects that may carry ack_required: a real ask. */
@@ -74,6 +95,51 @@ export interface AgentMailGuardDeps {
 	now?: () => number;
 	/** Rule file holding the secret scanner's conditions; defaults to the one shipped beside this extension. */
 	secretRulePath?: string;
+	/** Agent Mail CLI binary; defaults to `am` on PATH. */
+	amBin?: string;
+	/** Cross-project scan budget in ms; defaults to AM_SCAN_BUDGET_MS. */
+	scanBudgetMs?: number;
+}
+
+/** One registered agent row, as `am agents list -p <key> --json` returns it. */
+interface MailRosterRow {
+	name: string;
+	program: string;
+	model: string;
+	task: string;
+	lastActive: string;
+}
+
+/** One cross-project sighting of a name: the project key plus its roster row there. */
+interface MailSight {
+	project: string;
+	program: string;
+	model: string;
+	task: string;
+	lastActive: string;
+}
+
+/** Parse an `am agents list --json` payload (a bare array) into roster rows; null when not that shape. */
+function parseRoster(payload: unknown): MailRosterRow[] | null {
+	const list = Array.isArray(payload) ? payload : prop(payload, "agents");
+	if (!Array.isArray(list)) return null;
+	const rows: MailRosterRow[] = [];
+	for (const entry of list) {
+		const name = prop(entry, "name");
+		if (typeof name !== "string" || name.trim() === "") return null;
+		const program = prop(entry, "program");
+		const model = prop(entry, "model");
+		const task = prop(entry, "task_description") ?? prop(entry, "task");
+		const lastActive = prop(entry, "last_active_ts") ?? prop(entry, "last_active");
+		rows.push({
+			name: name.trim(),
+			program: typeof program === "string" ? program : "",
+			model: typeof model === "string" ? model : "",
+			task: typeof task === "string" ? task : "",
+			lastActive: typeof lastActive === "string" ? lastActive : "",
+		});
+	}
+	return rows;
 }
 
 function prop(value: unknown, key: string): unknown {
@@ -182,6 +248,185 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		return refuse("AM_ACK_BEAD_UNRESOLVED", `no bead id in the subject resolves in this repo's tracker (${candidates.join(", ")}; last: ${why}). ack_required is for a real ask about a bead that exists.`);
 	}
+	const amBin = deps.amBin ?? "am";
+	const scanBudgetMs = deps.scanBudgetMs ?? AM_SCAN_BUDGET_MS;
+	const rosterCache = new Map<string, { at: number; rows: MailRosterRow[] }>();
+	const scanCache = new Map<string, { at: number; found: MailSight[]; checked: number; total: number }>();
+	let projectKeysCache: { at: number; keys: string[] } | null = null;
+
+	async function fetchRoster(projectKey: string, timeoutMs: number): Promise<{ ok: true; rows: MailRosterRow[] } | { ok: false; why: string }> {
+		let result;
+		try {
+			result = await pi.exec(amBin, ["agents", "list", "-p", projectKey, "--json"], { timeout: timeoutMs });
+		} catch (error) {
+			return { ok: false, why: `\`${amBin} agents list\` could not run (${error instanceof Error ? error.message : String(error)})` };
+		}
+		if (result.code !== 0 || result.killed) return { ok: false, why: `\`${amBin} agents list\` exited ${result.killed ? "after timeout" : result.code}` };
+		let payload: unknown;
+		try {
+			payload = JSON.parse(result.stdout);
+		} catch {
+			return { ok: false, why: `\`${amBin} agents list\` returned unparseable output` };
+		}
+		const rows = parseRoster(payload);
+		if (rows === null) return { ok: false, why: `\`${amBin} agents list\` returned an unexpected shape` };
+		return { ok: true, rows };
+	}
+
+	async function cachedRoster(projectKey: string, fresh = false): Promise<{ ok: true; rows: MailRosterRow[] } | { ok: false; why: string }> {
+		const hit = rosterCache.get(projectKey);
+		if (!fresh && hit !== undefined && now() - hit.at < AM_ROSTER_TTL_MS) return { ok: true, rows: hit.rows };
+		const fetched = await fetchRoster(projectKey, AM_ROSTER_TIMEOUT_MS);
+		if (fetched.ok) rosterCache.set(projectKey, { at: now(), rows: fetched.rows });
+		return fetched;
+	}
+
+	/** Project keys holding at least one agent, from `am robot projects --json` (cached). */
+	async function projectKeys(): Promise<string[] | null> {
+		if (projectKeysCache !== null && now() - projectKeysCache.at < AM_SCAN_TTL_MS) return projectKeysCache.keys;
+		let result;
+		try {
+			result = await pi.exec(amBin, ["robot", "projects", "--json"], { timeout: AM_ROSTER_TIMEOUT_MS });
+		} catch {
+			return null;
+		}
+		if (result.code !== 0 || result.killed) return null;
+		let payload: unknown;
+		try {
+			payload = JSON.parse(result.stdout);
+		} catch {
+			return null;
+		}
+		const list = prop(payload, "projects");
+		if (!Array.isArray(list)) return null;
+		const keys: string[] = [];
+		for (const entry of list) {
+			const agents = prop(entry, "agents");
+			if (typeof agents !== "number" || agents <= 0) continue;
+			const path = prop(entry, "path");
+			const slug = prop(entry, "slug");
+			const key = typeof path === "string" && path !== "" ? path : (typeof slug === "string" ? slug : "");
+			if (key !== "") keys.push(key);
+		}
+		projectKeysCache = { at: now(), keys };
+		return keys;
+	}
+
+	/**
+	 * Every project besides `excludeKey` where `lower` is registered. Deadline-bounded: past the
+	 * budget the scan stops and reports its coverage instead of guessing. Completed scans are cached.
+	 */
+	async function locateAgent(lower: string, excludeKey: string, orderHint: string): Promise<{ found: MailSight[]; checked: number; total: number; complete: boolean }> {
+		const cached = scanCache.get(lower);
+		if (cached !== undefined && now() - cached.at < AM_SCAN_TTL_MS) {
+			return { found: cached.found.filter(sight => sight.project !== excludeKey), checked: cached.checked, total: cached.total, complete: true };
+		}
+		const keys = await projectKeys();
+		if (keys === null) return { found: [], checked: 0, total: 0, complete: false };
+		const ordered = keys.filter(key => key !== excludeKey);
+		ordered.sort((a, b) => (a === orderHint ? -1 : 0) - (b === orderHint ? -1 : 0));
+		const found: MailSight[] = [];
+		let checked = 0;
+		const deadline = now() + scanBudgetMs;
+		for (const key of ordered) {
+			if (now() > deadline) return { found, checked, total: ordered.length, complete: false };
+			const roster = await cachedRoster(key);
+			if (!roster.ok) continue;
+			checked += 1;
+			for (const row of roster.rows) {
+				if (row.name.toLowerCase() === lower) {
+					found.push({ project: key, program: row.program, model: row.model, task: row.task, lastActive: row.lastActive });
+				}
+			}
+		}
+		scanCache.set(lower, { at: now(), found, checked, total: ordered.length });
+		return { found, checked, total: ordered.length, complete: true };
+	}
+
+	function describeSight(sight: MailSight): string {
+		const runtime = sight.program !== "" ? sight.program : "unknown";
+		const activity = sight.lastActive !== "" ? `last active ${sight.lastActive}` : "no recorded activity";
+		const assignment = sight.task !== "" ? `, task "${sight.task.slice(0, 80)}"` : "";
+		return `${sight.project} (program ${runtime}, ${activity}${assignment})`;
+	}
+
+	/**
+	 * AMPHANTOM1: every send_message recipient must already be registered under project_key, or the
+	 * send is refused before the server can auto-register a phantom. A refusal names the projects
+	 * where the name IS registered (deadline-bounded scan), most-recently-active first. A recipient
+	 * registered in several projects warns (sent anyway) unless the target is the most active one.
+	 * A sender_name whose target-project registration names a different program than the seat's own
+	 * registration is refused: the mail would read as from that other runtime. Task text alone never
+	 * refuses: tasks churn while the program names the runtime.
+	 */
+	async function checkRecipients(sender: string, value: unknown, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> {
+		const projectKey = prop(value, "project_key");
+		if (typeof projectKey !== "string" || projectKey.trim() === "") {
+			return refuse("AM_ARGS_UNREADABLE", "project_key is missing or not a string. The project key is the RECIPIENT's repo path.");
+		}
+		const key = projectKey.trim();
+		const recipients: string[] = [];
+		for (const fieldName of ["to", "cc"]) {
+			const fieldValue = prop(value, fieldName);
+			const list = typeof fieldValue === "string" ? [fieldValue] : (Array.isArray(fieldValue) ? fieldValue : []);
+			for (const entry of list) {
+				if (typeof entry === "string" && entry.trim() !== "") recipients.push(entry.trim());
+			}
+		}
+		if (recipients.length === 0) return refuse("AM_ARGS_UNREADABLE", "send_message names no recipient in `to` or `cc`.");
+		let roster = await cachedRoster(key);
+		if (!roster.ok) {
+			return refuse("AM_ROSTER_UNAVAILABLE", `the ${key} roster cannot be read (${roster.why}). An unchecked send could create a phantom recipient, so the send is refused instead of guessed. Restore \`${amBin} agents list\`, then retry.`);
+		}
+		const senderLower = sender.trim().toLowerCase();
+		const senderRow = roster.rows.find(row => row.name.toLowerCase() === senderLower);
+		if (senderRow !== undefined && ctx.cwd !== key) {
+			const home = await cachedRoster(ctx.cwd);
+			if (home.ok) {
+				const own = home.rows.find(row => row.name.toLowerCase() === senderLower);
+				if (own !== undefined && own.program.trim().toLowerCase() !== senderRow.program.trim().toLowerCase()) {
+					const targetSight: MailSight = { project: key, program: senderRow.program, model: senderRow.model, task: senderRow.task, lastActive: senderRow.lastActive };
+					const ownSight: MailSight = { project: ctx.cwd, program: own.program, model: own.model, task: own.task, lastActive: own.lastActive };
+					return refuse("AM_SENDER_COLLISION", `"${senderRow.name}" is registered in ${key} as ${describeSight(targetSight)}, but your own registration is ${describeSight(ownSight)}. The mail would read as from that other runtime. Send under your own project's key, or as a name registered to your runtime in ${key}.`);
+				}
+			}
+		}
+		const missing = recipients.filter(name => !roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
+		if (missing.length > 0) {
+			roster = await cachedRoster(key, true);
+			if (roster.ok) {
+				const stillMissing = recipients.filter(name => !roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
+				if (stillMissing.length === 0) return undefined;
+				return phantomRefusal(key, stillMissing[0]!, ctx.cwd);
+			}
+			return phantomRefusal(key, missing[0]!, ctx.cwd);
+		}
+		for (const name of recipients) {
+			const row = roster.rows.find(candidate => candidate.name.toLowerCase() === name.toLowerCase())!;
+			const scan = await locateAgent(name.toLowerCase(), key, ctx.cwd);
+			if (!scan.complete || scan.found.length === 0) continue;
+			const newer = scan.found.filter(sight => sight.lastActive !== "" && row.lastActive !== "" && sight.lastActive > row.lastActive);
+			if (newer.length === 0) continue;
+			const ranked = [...scan.found].sort((a, b) => (a.lastActive < b.lastActive ? 1 : -1));
+			return {
+				additionalContext: `kit-agent-mail-guard AM_PROJECT_AMBIGUOUS (warning; the send was allowed): "${row.name}" is registered in ${scan.found.length + 1} projects: ${key} (${row.lastActive !== "" ? `last active ${row.lastActive}` : "no recorded activity"}) and ${ranked.map(describeSight).join("; ")}. Most recently active in ${ranked[0]!.project}. The project key is the RECIPIENT's repo path: re-send under ${ranked[0]!.project} if the mail was meant for that seat.`,
+			};
+		}
+		return undefined;
+	}
+
+	async function phantomRefusal(key: string, name: string, orderHint: string): Promise<FlywheelToolCallResult> {
+		const scan = await locateAgent(name.toLowerCase(), key, orderHint);
+		const coverage = `checked ${scan.checked}/${scan.total} project rosters`;
+		if (scan.found.length > 0) {
+			const ranked = [...scan.found].sort((a, b) => (a.lastActive < b.lastActive ? 1 : -1));
+			return refuse("AM_PHANTOM_REFUSED", `"${name}" is not registered under project_key ${key}, so the send is refused before a phantom recipient is created${scan.complete ? "" : ` (${coverage})`}. It IS registered in: ${ranked.map(describeSight).join("; ")}. The project key is the RECIPIENT's repo path: re-send under ${ranked[0]!.project}.`);
+		}
+		if (scan.complete) {
+			return refuse("AM_PHANTOM_REFUSED", `"${name}" is not registered under project_key ${key} and is not registered in any other project (${coverage}). Register the recipient first (\`am agents register -p ${key} ...\`) or fix the spelling.`);
+		}
+		return refuse("AM_PHANTOM_REFUSED", `"${name}" is not registered under project_key ${key}, so the send is refused before a phantom recipient is created. The wider lookup is incomplete (${coverage}): confirm with \`${amBin} agents list -p <suspected-key> --json\`, or register the recipient first.`);
+	}
 
 	async function checkMessage(tool: "send_message" | "reply_message", value: unknown, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> {
 		const sender = prop(value, "sender_name");
@@ -191,6 +436,10 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) {
 			return refuse("AM_IDENTITY_MISMATCH", `sender_name ${typeof sender === "string" ? `"${sender}"` : "is missing"} is not this seat (${names.join(", ")}). Send as yourself; never as another agent.`);
+		}
+		if (tool === "send_message") {
+			const recipients = await checkRecipients(sender, value, ctx);
+			if (recipients !== undefined) return recipients;
 		}
 		const ack = prop(value, "ack_required");
 		const ackOn = ack === true || (typeof ack === "string" && ack.trim().toLowerCase() === "true");

@@ -37,12 +37,52 @@ interface Host {
 /** Known beads answer `br show`; any other id misses the way br 0.7.4 does (JSON error on stdout, exit 3). */
 function brKnows(...ids: string[]): Responder {
 	return call => {
+		// The guard also reads Agent Mail rosters; the stock backend roster answers those reads.
+		if (call.command === "am") return fleetRespond(defaultRosters())(call);
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
 		const id = call.args[1] ?? "";
 		if (call.command === "br" && call.args[0] === "show" && ids.includes(id)) {
 			return { stdout: JSON.stringify([{ id, title: "t", status: "open", assignee: null }]), stderr: "", code: 0 };
 		}
 		return { stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: `Issue not found: ${id}` } }), stderr: "", code: 3 };
+	};
+}
+
+interface TestRosterRow { name: string; program: string; model: string; task_description: string; last_active_ts: string }
+
+const mailRow = (name: string, over: Partial<TestRosterRow> = {}): TestRosterRow => ({
+	name, program: "omp", model: "muse-spark", task_description: `${name} test assignment`,
+	last_active_ts: "2026-10-19T08:00:00.000000Z", ...over,
+});
+
+const BACKEND = "/abs/path/backend";
+
+const defaultRosters = (): Record<string, TestRosterRow[]> => ({
+	[BACKEND]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")],
+});
+
+/**
+ * Agent Mail answers for the guard's roster reads. Unknown project keys miss the way `am` does
+ * (stderr, exit 1); the project list covers exactly the rostered keys. Anything else delegates to br.
+ */
+function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]): Responder {
+	const br = brKnows(...(ids.length > 0 ? ids : [BEAD]));
+	return call => {
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") {
+			const at = call.args.indexOf("-p");
+			const key = at >= 0 ? (call.args[at + 1] ?? "") : "";
+			const rows = rosters[key];
+			if (rows === undefined) return { stdout: "", stderr: `Project '${key}' not found.`, code: 1 };
+			return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
+		}
+		if (call.command === "am" && call.args[0] === "robot" && call.args[1] === "projects") {
+			const keys = Object.keys(rosters);
+			return {
+				stdout: JSON.stringify({ projects: keys.map(key => ({ slug: key, path: key, agents: rosters[key]!.length })) }),
+				stderr: "", code: 0,
+			};
+		}
+		return br(call);
 	};
 }
 
@@ -223,8 +263,11 @@ test("ack_required: an unreadable tracker fails closed (br missing, br throwing,
 		() => { throw new Error("spawn br ENOENT"); },
 		() => ({ stdout: "not json", stderr: "", code: 0 }),
 	];
+	// A `br` outage only: the roster reads stay up, so status mail still flows and asks still fail closed.
+	const mailUp = fleetRespond(defaultRosters());
 	for (const respond of down) {
-		const h = await createHost({}, respond);
+		const brOutage: Responder = call => (call.command === "am" ? mailUp(call) : respond(call));
+		const h = await createHost({}, brOutage);
 		expect(code(await h.mail(cwd, "send_message", send({ subject, ack_required: true })))).toBe("AM_ACK_BEAD_UNRESOLVED");
 		// Without ack_required the tracker is never asked, so an outage does not stop status mail.
 		expect(await h.mail(cwd, "send_message", send({ subject: `DONE ${BEAD}: x` }))).toBeUndefined();
@@ -377,4 +420,106 @@ test("bounds: adversarial long subjects and bodies are judged in bounded time", 
 	await h.mail(cwd, "send_message", send({ body_md: `${secretName.slice(0, 3)}=${"a1".repeat(AM_BODY_CAP / 2 - 3)}` }));
 	await h.mail(cwd, "send_message", send({ body_md: `Bearer ${"a".repeat(AM_BODY_CAP - 7)}` }));
 	expect(performance.now() - started).toBeLessThan(2000);
+});
+// --- phantom recipients (AMPHANTOM1, ompkit-xa5s.16) --------------------------------------------------
+
+const OMPKIT = "/Users/josh/Developer/omp-kit";
+const JEV = "/Users/josh/Developer/jev";
+const SKILL_LIB = "/Users/josh/Developer/skill-library-growth";
+const LOCALBENCH = "/Users/josh/Developer/localbench";
+
+/** Every exec the guard may issue is a read; the guard never registers, writes, or deletes. */
+function execsAreReadsOnly(execs: ExecCall[]): boolean {
+	return execs.every(call =>
+		(call.command === "am" && (call.args[1] === "list" || call.args[1] === "projects"))
+		|| call.command === "br" || call.command === "tmux");
+}
+
+test("phantom (a): a send to a name registered only elsewhere is refused naming that project; no registration happens", async () => {
+	const h = await createHost({}, fleetRespond({
+		[OMPKIT]: [mailRow("PlumRaven"), mailRow("RedMaple"), mailRow("BlueLake")],
+		[JEV]: [mailRow("PlumRaven"), mailRow("VioletLake"), mailRow("RedMaple")],
+	}));
+	const cwd = fleetRepo();
+	const refused = await h.mail(cwd, "send_message", send({ project_key: OMPKIT, to: ["VioletLake"], cc: [] }));
+	expect(code(refused)).toBe("AM_PHANTOM_REFUSED");
+	expect(refused?.reason).toContain(JEV);
+	expect(refused?.reason).toContain("RECIPIENT's repo path");
+	// The refusal is decided from roster reads alone: a mutant that skips the check is the only way
+	// this send passes, and a server that auto-registers never sees the call. Nothing was sent.
+	expect(refused?.reason).toContain("Nothing was sent");
+	expect(execsAreReadsOnly(h.execs)).toBe(true);
+});
+
+test("phantom (b): the same send under the recipient's own key is delivered", async () => {
+	const h = await createHost({}, fleetRespond({
+		[OMPKIT]: [mailRow("PlumRaven"), mailRow("RedMaple")],
+		[JEV]: [mailRow("PlumRaven"), mailRow("VioletLake")],
+	}));
+	const cwd = fleetRepo();
+	expect(await h.mail(cwd, "send_message", send({ project_key: JEV, to: ["VioletLake"], cc: [] }))).toBeUndefined();
+});
+
+test("phantom (c): a name registered nowhere is refused as registered nowhere", async () => {
+	const h = await createHost({}, fleetRespond({
+		[OMPKIT]: [mailRow("PlumRaven"), mailRow("BlueLake")],
+		[JEV]: [mailRow("PlumRaven"), mailRow("VioletLake")],
+	}));
+	const cwd = fleetRepo();
+	const refused = await h.mail(cwd, "send_message", send({ project_key: OMPKIT, to: ["ZzPlantedNobody"], cc: [] }));
+	expect(code(refused)).toBe("AM_PHANTOM_REFUSED");
+	expect(refused?.reason).toContain("not registered in any other project");
+	expect(execsAreReadsOnly(h.execs)).toBe(true);
+});
+
+test("phantom (d): a name in two projects warns naming each project's last activity unless the target is the most active", async () => {
+	const rosters = {
+		[OMPKIT]: [mailRow("PlumRaven"), mailRow("IcyBarn", { last_active_ts: "2026-10-06T22:07:55.466462Z" })],
+		[LOCALBENCH]: [mailRow("PlumRaven"), mailRow("IcyBarn", { last_active_ts: "2026-10-19T09:00:00.000000Z" })],
+	};
+	const cwd = fleetRepo();
+	const warned = await (await createHost({}, fleetRespond(rosters))).mail(cwd, "send_message", send({ project_key: OMPKIT, to: ["IcyBarn"], cc: [] }));
+	expect(warned?.block).not.toBe(true);
+	expect(warned?.additionalContext).toContain("AM_PROJECT_AMBIGUOUS");
+	expect(warned?.additionalContext).toContain(LOCALBENCH);
+	expect(warned?.additionalContext).toContain("Most recently active");
+	// The most-recently-active project sends quietly.
+	const quiet = await (await createHost({}, fleetRespond(rosters))).mail(cwd, "send_message", send({ project_key: LOCALBENCH, to: ["IcyBarn"], cc: [] }));
+	expect(quiet).toBeUndefined();
+});
+
+test("phantom (e): a sender_name naming another runtime's registration is refused naming both", async () => {
+	const cwd = fleetRepo();
+	const rosters = {
+		[SKILL_LIB]: [
+			mailRow("RedMaple", { program: "openai-codex", task_description: "Repair assigned skill-library-growth DAG edges" }),
+			mailRow("BlueLake"),
+		],
+		[cwd]: [mailRow("RedMaple", { program: "omp", task_description: "director mission alignment" })],
+	};
+	const h = await createHost({ env: { AGENT_NAME: "RedMaple" } }, fleetRespond(rosters));
+	const refused = await h.mail(cwd, "send_message", send({ project_key: SKILL_LIB, sender_name: "RedMaple", cc: [] }));
+	expect(code(refused)).toBe("AM_SENDER_COLLISION");
+	expect(refused?.reason).toContain("openai-codex");
+	expect(refused?.reason).toContain("omp");
+	// The same runtime on both sides sends quietly.
+	const same: Record<string, TestRosterRow[]> = {
+		[SKILL_LIB]: [mailRow("RedMaple", { program: "omp" }), mailRow("BlueLake")],
+		[cwd]: [mailRow("RedMaple", { program: "omp" })],
+	};
+	const h2 = await createHost({ env: { AGENT_NAME: "RedMaple" } }, fleetRespond(same));
+	expect(await h2.mail(cwd, "send_message", send({ project_key: SKILL_LIB, sender_name: "RedMaple", cc: [] }))).toBeUndefined();
+});
+
+test("phantom: an unreadable roster fails closed instead of sending unchecked", async () => {
+	const cwd = fleetRepo();
+	const rosterDown: Responder[] = [
+		fleetRespond({}),
+		() => { throw new Error("spawn am ENOENT"); },
+		() => ({ stdout: "not json", stderr: "", code: 0 }),
+	];
+	for (const respond of rosterDown) {
+		const h = await createHost({}, respond);
+		expect(code(await h.mail(cwd, "send_message", send()))).toBe("AM_ROSTER_UNAVAILABLE");
+	}
 });
