@@ -12,6 +12,9 @@ const PINNED_WORKFLOWS = [
 	".github/workflows/omp-certify.yml",
 	".github/workflows/budget-measure.yml",
 	".github/workflows/stock-extension-negative.yml",
+	".github/workflows/release.yml",
+	".github/workflows/release-train.yml",
+	".github/workflows/release-intel-probe.yml",
 ];
 type Step = { uses?: string; with?: Record<string, unknown> };
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };

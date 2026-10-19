@@ -62,6 +62,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
       # A terminal rehearsal only wakes qualified-source reconciliation.
       # Its unsigned artifacts never become production promotion authority.
       - name: Reconcile the qualified owner before waiting for a new allocation
@@ -155,6 +157,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
       - name: Verify the producer and exact final candidate before promotion
         id: candidate
         env:

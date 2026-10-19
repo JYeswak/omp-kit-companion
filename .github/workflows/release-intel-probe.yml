@@ -102,6 +102,8 @@ jobs:
           ref: ${{ needs['resolve-candidate'].outputs.source_sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
       - name: Resolve the OMP ${{ matrix.track }} version from scripts/omp-compat.json
         run: echo "OMP_VERSION=$(jq -er ".$OMP_TRACK" scripts/omp-compat.json)" >> "$GITHUB_ENV"
       - name: Install OMP ${{ matrix.track }} for native behavior
