@@ -1,0 +1,3 @@
+### Added
+
+- `scripts/install-commit-msg-bead.sh` installs a `pre-push` member (`41-omp-kit-pushed-vlevel`, byte-equal to the canonical omp-kit `scripts/pre-push-verification-level.sh`) that refuses a push whose range holds a non-exempt commit with no verification level in its subject; `--check` names it missing or stale. `rules/kit-no-shared-merge.md` and `rules/kit-skill-forbidden-instruction.md` carry the `GIT_INDEX_FILE=<same idx> git hook run commit-msg -- <msgfile>` step that private-index (`commit-tree`) landings must run before `commit-tree`, since plumbing skips the commit hooks. (ompkit-xa5s.37)

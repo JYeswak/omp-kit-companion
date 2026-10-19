@@ -211,6 +211,7 @@ if [ "$MODE" = "check" ]; then
 	stale=0
 	for pair in "hooks.d/commit-msg/40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh" \
 		"hooks.d/pre-push/30-omp-kit-on-main scripts/check-pushed-on-main.sh" \
+		"hooks.d/pre-push/41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh" \
 		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
 		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
 		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
@@ -403,6 +404,18 @@ install_on_main() {
 	printf 'installed shared-main push member: %s\n' "$member"
 }
 
+# install_pushed_vlevel: the verification-level pre-push member (VLEVEL-PUSH2,
+# ompkit-xa5s.37). The fleet's documented private-index landing (commit-tree)
+# never runs commit-msg, so commit-tree commits reach the push with no level
+# unless a pre-push member judges the range. The member is a byte-equal copy
+# of the canonical omp-kit scripts/pre-push-verification-level.sh; keep the
+# companion source byte-identical and --check names any stale installation.
+install_pushed_vlevel() {
+	member="$(chain_dir pre-push)/41-omp-kit-pushed-vlevel"
+	place "$KITROOT/scripts/pre-push-verification-level.sh" "$member" +x
+	printf 'installed pushed-verification-level member: %s\n' "$member"
+}
+
 # install_ref_txn: the plumbing backstop. commit-tree + update-ref and
 # --no-verify never run commit-msg; git runs reference-transaction for every
 # ref update. The judge sits beside the member, non-executable (see above).
@@ -521,6 +534,7 @@ install_commit_notes
 install_stale_worktree
 ensure_chain pre-push
 install_on_main
+install_pushed_vlevel
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn

@@ -285,6 +285,9 @@ ok "$?" "0" "upgrade-announced"
 #     zestroku into two histories, 1818d71, 2026-10-16)
 J=$(new_repo pushreal)
 git -C "$J" branch -M main
+# The pushed-verification-level member refuses level-less subjects, so the
+# fixture history carries a level before the push (VLEVEL-PUSH2 ompkit-xa5s.37).
+git -C "$J" commit -q --amend --allow-empty --message "[test] root"
 git init -q --bare "$TMP/pushreal-origin.git"
 git -C "$J" remote add origin "$TMP/pushreal-origin.git"
 sh "$INSTALLER" "$J" > /dev/null 2>&1
@@ -305,6 +308,7 @@ mkdir -p "$TMP/inertkit/scripts"
 for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh pysafe.py pysafe_check.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
+cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
 K=$(new_repo inert)
 git -C "$K" branch -M main
