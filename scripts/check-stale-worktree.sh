@@ -60,11 +60,20 @@ removed_lines() {
 		/^ / { old++; next }
 		/^\\/ { next }'
 }
-blame_sha() {
-	git blame --porcelain "$HEAD" -- "$1" 2>/dev/null | awk -v want="$2" '
-		/^\t/ { n++; if (n == want) { print sha; exit } next }
-		/^[0-9a-f]{40} / { sha = $1 }
-		END { exit 0 }'
+blame_lines() {
+	# $1 = path; reads its removed HEAD line numbers (ascending) on stdin and
+	# prints "<line> <sha>" for each, from ONE `git blame` restricted with -L
+	# to just those lines (consecutive numbers coalesced into ranges). Blame
+	# attributes every line independently, so -L changes no line's commit;
+	# a full blame per removed line cost O(removed x history): 7 rows of a
+	# 27 MB tracker took 230 s (ompkit-xa5s.30).
+	# Intended split: the words are only "-L" and "<n>,<m>" (digits, comma).
+	# shellcheck disable=SC2046
+	set -- "$1" $(awk 'NR == 1 { s = e = $1; next } $1 == e + 1 { e = $1; next } { printf "-L %d,%d ", s, e; s = e = $1 } END { if (NR) printf "-L %d,%d\n", s, e }')
+	[ "$#" -gt 1 ] || return 0
+	bpath=$1
+	shift
+	git blame --porcelain "$@" "$HEAD" -- "$bpath" 2>/dev/null | awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $1 }'
 }
 
 moved_lines() {
@@ -130,8 +139,9 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	moved=" $(moved_lines "$path" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
 	seen=""
+	blamed=$(removed_lines "$path" | blame_lines "$path")
 	for ln in $(removed_lines "$path"); do
-		sha=$(blame_sha "$path" "$ln") || continue
+		sha=$(printf '%s\n' "$blamed" | awk -v want="$ln" '$1 == want { print $2; exit }')
 		[ -n "$sha" ] || continue
 		subject=$(git log -1 --format=%s "$sha" 2>/dev/null)
 		cdate=$(git log -1 --format=%ct "$sha" 2>/dev/null)

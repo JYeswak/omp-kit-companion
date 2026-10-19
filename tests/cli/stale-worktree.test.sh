@@ -221,5 +221,23 @@ out=$(git -C "$R" commit --message "[test] stale move" --message "Bead: t-other"
 check "$?" "1" "badcontrol-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $A"
 check "$(git -C "$R" rev-list --count HEAD)" "1" "badcontrol-unmoved" "$out" "STALE_WORKTREE"
 
+# 14. several removed lines are judged from ONE blame per path (COMMITPERF1,
+# ompkit-xa5s.30: a blame per removed line made one 7-row tracker close take
+# 230 s). Removed lines 2, 4 and 5 (ranges 2,2 and 4,5) blame to two commits:
+# the own-bead line passes, both foreign lines refuse naming their commit, and
+# git blame runs exactly once for the path.
+R=$(new_repo blame-once)
+A=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\nkeep\nother one\nother two\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] land others" --message "Bead: t-foreign"
+B=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nkeep\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(GIT_TRACE="$TMP/blame-once.trace" git -C "$R" commit --message "[test] multi removal" --message "Bead: t-land" 2>&1)
+check "$?" "1" "blame-once-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $B (\[test\] land others) from bead t-foreign"
+check "$(printf '%s\n' "$out" | grep -c "reverts $A")" "0" "blame-once-own-line-not-named" "$out" ""
+check "$(grep -c 'built-in: git blame' "$TMP/blame-once.trace")" "1" "blame-once-one-blame" "$out" ""
+
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

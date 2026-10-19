@@ -1,0 +1,1 @@
+- The stale-worktree commit-msg hook blames each changed path once, restricted to the removed lines, instead of running a full `git blame` per removed line. A 7-row close commit on a 27 MB tracker drops from 230 s to under 3 s; verdicts are unchanged.
