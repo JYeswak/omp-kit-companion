@@ -85,7 +85,7 @@ import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runF
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
-const EXIT_CODES = { success: 0, finding: 1, usage_or_blocked: 2, unavailable: 3, retryable: 4 } as const;
+const EXIT_CODES = { success: 0, finding: 1, usage_or_blocked: 2, unavailable: 3, retryable: 4, not_run: 77 } as const;
 
 export type CliResult = PresentationResult;
 export type ParsedCommand = { command: Command; parent?: Command; flags: ReadonlyMap<string, string | true>; argument?: string; commandArgs?: readonly string[]; json: boolean; robot: boolean };

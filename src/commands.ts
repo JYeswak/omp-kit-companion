@@ -370,15 +370,20 @@ const convergeData: DataSchema = { type: "object", required: ["repo", "state", "
 	restore_skipped: { type: "array", items: { type: "string" } },
 	published_commits: { type: "number" }, remote_after: { type: "string" },
 } };
-const landData: DataSchema = { type: "object", required: ["overall", "commit", "owner", "paths", "base"], properties: {
-	overall: { enum: ["PUSHED", "SAVED_NOT_PUBLISHED", "SAVE_UNCERTAIN"] },
-	commit: { type: ["string", "null"] }, owner: { type: "string" },
+const landCheckData = { type: "object", required: ["status", "path", "sha256", "selected_executable", "selected_version", "candidate_sha", "checked_sha", "pushed_sha", "exit_code"], properties: {
+	status: { enum: ["PASS", "FAIL", "SKIP", "UNRUN"] }, path: { type: "string" }, sha256: { type: ["string", "null"] }, candidate_sha256: { type: ["string", "null"] },
+	reason: { type: "string" }, selected_executable: { type: ["string", "null"] }, selected_version: { type: ["string", "null"] },
+	candidate_sha: { type: ["string", "null"] }, checked_sha: { type: ["string", "null"] }, pushed_sha: { type: ["string", "null"] }, exit_code: { type: ["number", "null"] },
+} } as const;
+// A refusal before anything was committed carries only overall and check; the rest appears once the land got that far.
+const landData: DataSchema = { type: "object", required: ["overall", "check"], properties: {
+	overall: { enum: ["PUSHED", "REFUSED", "UNRUN"] },
+	commit: { type: ["string", "null"] }, candidate_sha: { type: ["string", "null"] }, pushed_sha: { type: ["string", "null"] }, owner: { type: "string" },
 	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
-	localMain: { type: "string" }, convergence: convergeData,
+	localMain: { type: "string" }, convergence: convergeData, check: landCheckData, phases: { type: "object" },
 }, allOf: [{
-	if: { properties: { overall: { const: "SAVE_UNCERTAIN" } } },
-	then: { properties: { commit: { type: "null" } } },
-	else: { properties: { commit: { type: "string" } } },
+	if: { properties: { overall: { const: "PUSHED" } } },
+	then: { required: ["commit", "candidate_sha", "pushed_sha", "owner", "paths", "base", "convergence"], properties: { commit: { type: "string" }, pushed_sha: { type: "string" } } },
 }] };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] },

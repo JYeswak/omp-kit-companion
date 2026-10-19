@@ -3,6 +3,57 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync,
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
+import { COMMANDS } from "../../src/commands.ts";
+
+type SchemaNode = { type?: string | string[]; required?: string[]; properties?: Record<string, SchemaNode>; items?: SchemaNode; enum?: unknown[];
+	const?: unknown; allOf?: { if: SchemaNode; then?: SchemaNode; else?: SchemaNode }[] };
+
+/** The checks the published schema makes, enough for land's data: type, enum, required, properties, items, const, if/then/else. */
+function schemaViolations(value: unknown, node: SchemaNode, at = "data"): string[] {
+	const problems: string[] = [];
+	if (node.enum && !node.enum.includes(value)) problems.push(`${at}: ${JSON.stringify(value)} not in enum`);
+	if (node.const !== undefined && value !== node.const) problems.push(`${at}: not ${JSON.stringify(node.const)}`);
+	const types = node.type === undefined ? [] : Array.isArray(node.type) ? node.type : [node.type];
+	const kind = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+	if (types.length > 0 && !types.includes(kind)) problems.push(`${at}: ${kind} is not ${types.join("|")}`);
+	if (kind === "object") {
+		const record = value as Record<string, unknown>;
+		for (const key of node.required ?? []) if (!(key in record)) problems.push(`${at}.${key}: required`);
+		for (const [key, child] of Object.entries(node.properties ?? {})) if (key in record) problems.push(...schemaViolations(record[key], child, `${at}.${key}`));
+	}
+	if (kind === "array" && node.items) (value as unknown[]).forEach((entry, index) => problems.push(...schemaViolations(entry, node.items!, `${at}[${index}]`)));
+	for (const rule of node.allOf ?? []) {
+		const matches = schemaViolations(value, rule.if, at).length === 0;
+		const branch = matches ? rule.then : rule.else;
+		if (branch) problems.push(...schemaViolations(value, branch, at));
+	}
+	return problems;
+}
+
+const landSchema = COMMANDS.find((command) => command.name === "land")?.dataSchema as unknown as SchemaNode;
+
+/** A real land response must satisfy the schema `omp-kit schema` publishes for it (ompkit-rhy9.9). */
+function expectLandSchema(data: unknown): void {
+	expect(schemaViolations(data, landSchema)).toEqual([]);
+}
+
+test("the published land schema rejects what land never emits and what a PUSHED land must carry", () => {
+	const check = { status: "PASS", path: ".omp/push-check", sha256: null, selected_executable: null, selected_version: null, candidate_sha: null, checked_sha: null, pushed_sha: null, exit_code: null };
+	const pushed = { overall: "PUSHED", commit: "a".repeat(40), candidate_sha: "a".repeat(40), pushed_sha: "a".repeat(40), owner: "x", paths: ["p"], base: "b", convergence: {}, check };
+	expect(schemaViolations({ overall: "REFUSED", check: { ...check, status: "UNRUN", reason: "not_started" } }, landSchema)).toEqual([]);
+	expect(schemaViolations({ ...pushed, overall: "SAVED_NOT_PUBLISHED" }, landSchema)).not.toEqual([]);
+	expect(schemaViolations({ ...pushed, pushed_sha: null }, landSchema)).not.toEqual([]);
+	expect(schemaViolations({ ...pushed, commit: null }, landSchema)).not.toEqual([]);
+	expect(schemaViolations({ ...pushed, check: { ...check, status: "MAYBE" } }, landSchema)).not.toEqual([]);
+	expect(schemaViolations({ overall: "UNRUN" }, landSchema)).not.toEqual([]);
+});
+test("the published grammar lists exit 77 as not_run", () => {
+	const child = spawnSync(process.execPath, ["run", cliPath, "schema", "--json"], { stdio: ["ignore", "pipe", "pipe"],
+		env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" } as NodeJS.ProcessEnv });
+	expect(child.status).toBe(0);
+	const body = JSON.parse(child.stdout.toString()) as { data: { exit_codes: Record<string, number> } };
+	expect(body.data.exit_codes).toMatchObject({ not_run: 77, success: 0, finding: 1 });
+});
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const cliPath = join(repoRoot, "src", "cli.ts");
@@ -186,6 +237,7 @@ test("checks the exact candidate with the base-registered push check before publ
 			pushed_sha: string;
 		};
 	};
+	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("PUSHED");
 	expect(data.check?.status).toBe("PASS");
 	expect(data.check?.path).toBe(".omp/push-check");
@@ -308,6 +360,7 @@ test("unavailable registered check returns UNRUN before commit or publication", 
 	expect(run.status).toBe(77);
 	expect(responseCode(run.body)).toBe("LAND_CHECK_UNRUN");
 	const data = run.body.data as { overall: string; commit: null; check: { status: string; reason: string } };
+	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("UNRUN");
 	expect(data.commit).toBeNull();
 	expect(data.check.status).toBe("UNRUN");
@@ -333,6 +386,7 @@ test("a rejecting commit-msg hook refuses before origin moves", () => {
 	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
 	const data = run.body.data as { overall: string; commit: null; check: { status: string } };
+	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("REFUSED");
 	expect(data.commit).toBeNull();
 	expect(data.check.status).toBe("SKIP");

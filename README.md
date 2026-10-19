@@ -301,7 +301,7 @@ a normal save, the rows and local commit remain available for convergence.
 never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
 unreachable vault makes the secrets scan `UNVERIFIED`; a stale CI cache is
 `UNAVAILABLE`. Exit codes are fixed: 0 success, 1 finding, 2 usage or blocked,
-3 unavailable, 4 retryable (and for `heavy`: 75 when a job is deferred, 69 when
+3 unavailable, 4 retryable, 77 when a check could not run (and for `heavy`: 75 when a job is deferred, 69 when
 no disk observer is available — strict `sbh` missing, or OS `statfs` unreadable).
 
 **Native OMP first.** Rule tests run through OMP's matcher, settings go through
