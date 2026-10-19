@@ -202,6 +202,15 @@ const ANCHOR_DOC_CANDIDATES = ["ROADMAP.md", "MISSION.md", "docs/ROADMAP.md", ".
 const ANCHOR_HEADING = /^#{1,3}[ \t]+(?:[0-9]+\.[ \t]+)?Mission\b/i;
 const ANCHOR_APPROVAL = /approved?[ \t]+by|STATE[ \t]*:[ \t]*(PROPOSED|APPROVED)|APPROVED_BY/i;
 const ANCHOR_HUMAN_TEXT = /^#[^\n]*Human text:[ \t]*(\S+)/m;
+const ANCHOR_INIT_TEMPLATE_MARKERS = [
+	"lorem ipsum",
+	"[replace",
+	"<project-name>",
+	"your mission here",
+	"describe your mission",
+	"todo:",
+	"fixme:",
+];
 
 export type MissionAnchorVerdict = "AGREE" | "DRIFT";
 
@@ -287,6 +296,7 @@ export function missionAnchorStatus(projectRoot: string, options: { readonly mis
 		try { docText = safeRead(docFile, MAX_MISSION_BYTES).toString("utf8"); }
 		catch { docErrors.push("ANCHOR_DOC_UNREADABLE"); }
 		if (docText) {
+			if (ANCHOR_INIT_TEMPLATE_MARKERS.some(marker => docText.toLowerCase().includes(marker))) docErrors.push("ANCHOR_DOC_INIT_TEMPLATE");
 			const parsed = anchorDocSection(docText);
 			heading = parsed.heading;
 			section = parsed.body;

@@ -3,9 +3,9 @@
 // negatives: every disagreement shape reports DRIFT, never AGREE.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { missionAnchorStatus } from "../../src/mission.ts";
+import { missionAnchorStatus, validateMissionRecord } from "../../src/mission.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -113,4 +113,22 @@ test("anchor heading and approval patterns: required match, rejects, bounded nea
 	expect(nearMiss.verdict).toBe("DRIFT");
 	expect(nearMiss.details).toContain("ANCHOR_DOC_APPROVAL_MISSING");
 	expect(performance.now() - started).toBeLessThan(500);
+});
+
+test("planted: init-template live doc fails the anchor", () => {
+	const doc = `# Roadmap\n\n## Mission\n\n${IDENTITY}.\n\nApproved by Joshua.\n\nLorem ipsum dolor sit amet.\n`;
+	const status = missionAnchorStatus(fixture("init-template", doc));
+	expect(status.verdict).toBe("DRIFT");
+	expect(status.details).toContain("ANCHOR_DOC_INIT_TEMPLATE");
+});
+
+test("planted: disagreeing anchors report drift when the record is unregistered", () => {
+	const root = fixture("record-drift", AGREE_DOC);
+	const missionPath = join(root, ".omp/mission.toml");
+	writeFileSync(missionPath, readFileSync(missionPath, "utf8").replace(CHECK_COMMAND, "omp-kit heavy -- bun scripts/other.ts --pillar learning"));
+	expect(validateMissionRecord(root).overall).toBe("UNREGISTERED");
+	const status = missionAnchorStatus(root);
+	expect(status.verdict).toBe("DRIFT");
+	expect(status.details).toContain("ANCHOR_RECORD_UNREGISTERED");
+	expect(status.wordingAgrees).toBeNull();
 });
