@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -130,6 +131,74 @@ function responseCode(body: Record<string, unknown>): string | undefined {
 	const first = errors[0];
 	return first !== null && typeof first === "object" && "code" in first && typeof first.code === "string" ? first.code : undefined;
 }
+
+function registerPushCheck(work: string, body: string): string {
+	mkdirSync(join(work, ".omp"), { recursive: true });
+	const path = join(work, ".omp", "push-check");
+	writeFileSync(path, body, { mode: 0o755 });
+	git(work, ["add", "--", ".omp/push-check"]);
+	git(work, ["commit", "-m", "register push check [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	return createHash("sha256").update(body).digest("hex");
+}
+
+test("checks the exact candidate with the base-registered push check before publishing", () => {
+	const { work, fakeBin } = fixture();
+	mkdirSync(join(work, ".omp"), { recursive: true });
+	const checkBody = [
+		"#!/bin/bash",
+		"set -eu",
+		'printf "%s\\n" "$OMP_LAND_CANDIDATE_SHA" > "$OMP_LAND_CHECK_SHA_FILE"',
+		'git -C "$OMP_LAND_REPOSITORY" show "$OMP_LAND_CANDIDATE_SHA:owned.txt" > "$OMP_LAND_CHECK_CONTENT_FILE"',
+	].join("\n") + "\n";
+	const checkPath = join(work, ".omp", "push-check");
+	writeFileSync(checkPath, checkBody, { mode: 0o755 });
+	git(work, ["add", "--", ".omp/push-check"]);
+	git(work, ["commit", "-m", "register push check [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+
+	writeFileSync(join(work, "owned.txt"), "candidate owned content\n");
+	writeFileSync(join(work, ".git", "hooks", "post-commit"),
+		`#!/bin/sh\nprintf 'post-commit worktree edit\\n' > '${join(work, "owned.txt")}'\n`);
+	chmodSync(join(work, ".git", "hooks", "post-commit"), 0o755);
+	const checkShaFile = join(scratch, `checked-sha-${fixtureNumber}.txt`);
+	const checkContentFile = join(scratch, `checked-content-${fixtureNumber}.txt`);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, {
+		amDir: fakeBin,
+		gitEnv: {
+			OMP_LAND_CHECK_SHA_FILE: checkShaFile,
+			OMP_LAND_REPOSITORY: work,
+			OMP_LAND_CHECK_CONTENT_FILE: checkContentFile,
+		},
+	});
+	expect(run.status).toBe(0);
+	const data = run.body.data as {
+		overall: string;
+		commit: string;
+		check?: {
+			status: string;
+			path: string;
+			sha256: string;
+			selected_executable: string;
+			selected_version: string;
+			checked_sha: string;
+			pushed_sha: string;
+		};
+	};
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check?.status).toBe("PASS");
+	expect(data.check?.path).toBe(".omp/push-check");
+	expect(data.check?.sha256).toBe(createHash("sha256").update(checkBody).digest("hex"));
+	expect(data.check?.selected_executable).toBe("/bin/bash");
+	expect(data.check?.selected_version.length).toBeGreaterThan(0);
+	expect(data.check?.checked_sha).toBe(data.commit);
+	expect(data.check?.pushed_sha).toBe(data.commit);
+	expect(readFileSync(checkShaFile, "utf8")).toBe(`${data.commit}\n`);
+	expect(readFileSync(checkContentFile, "utf8")).toBe("candidate owned content\n");
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("post-commit worktree edit\n");
+	expect(remoteHead(work)).toBe(data.commit);
+});
 test("requires explicit --yes before publishing", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
@@ -140,8 +209,136 @@ test("requires explicit --yes before publishing", () => {
 	const run = command(work, ["--paths", "owned.txt", "--message", "feat(land): require explicit confirmation [test]", "--apply"], hold, { amDir: fakeBin });
 	expect(run.status).toBe(2);
 	expect(responseCode(run.body)).toBe("CONSENT_REQUIRED");
+
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 	expect(git(work, ["ls-remote", "origin", "refs/heads/main"]).trim()).toBe(remote);
+	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\n");
+});
+test("refuses a failing registered check without moving origin", () => {
+	const { work, fakeBin } = fixture();
+	const checkSha = registerPushCheck(work, "#!/bin/bash\nexit 1\n");
+	writeFileSync(join(work, "owned.txt"), "candidate that fails check\n");
+	const base = remoteHead(work);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_CHECK_FAILED");
+	const data = run.body.data as {
+		overall: string;
+		candidate_sha: string;
+		check: { status: string; sha256: string; checked_sha: string; pushed_sha: string | null };
+	};
+	expect(data.overall).toBe("REFUSED");
+	expect(data.check.status).toBe("FAIL");
+	expect(data.check.sha256).toBe(checkSha);
+	expect(data.check.checked_sha).toBe(data.candidate_sha);
+	expect(data.check.pushed_sha).toBeNull();
+	expect(remoteHead(work)).toBe(base);
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("candidate that fails check\n");
+});
+
+test("changed check bytes are skipped and never executed in the same candidate", () => {
+	const { work, fakeBin } = fixture();
+	const checkMarker = join(scratch, `changed-check-${fixtureNumber}.txt`);
+	const registeredBody = `#!/bin/bash\nprintf 'old-check\\n' > \"$OMP_LAND_CHECK_MARKER_FILE\"\nexit 0\n`;
+	const registeredSha = registerPushCheck(work, registeredBody);
+	const changedBody = `#!/bin/bash\nprintf 'changed-check-ran\\n' > \"$OMP_LAND_CHECK_MARKER_FILE\"\nexit 0\n`;
+	writeFileSync(join(work, ".omp", "push-check"), changedBody, { mode: 0o755 });
+	writeFileSync(join(work, "owned.txt"), "owner change with check update\n");
+	const hold = [
+		{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 },
+		{ agent: "DarkFern", path: ".omp/push-check", exclusive: true, remaining_seconds: 3600 },
+	];
+	const run = command(work, landArgs("owned.txt", ".omp/push-check"), hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_MARKER_FILE: checkMarker },
+	});
+	expect(run.status).toBe(0);
+	const data = run.body.data as {
+		overall: string;
+		commit: string;
+		check: { status: string; reason: string; sha256: string; candidate_sha256: string; checked_sha: string | null; pushed_sha: string };
+	};
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check.status).toBe("SKIP");
+	expect(data.check.reason).toBe("hash_changed");
+	expect(data.check.sha256).toBe(registeredSha);
+	expect(data.check.candidate_sha256).toBe(createHash("sha256").update(changedBody).digest("hex"));
+	expect(data.check.checked_sha).toBeNull();
+	expect(data.check.pushed_sha).toBe(data.commit);
+	expect(existsSync(checkMarker)).toBe(false);
+	expect(remoteHead(work)).toBe(data.commit);
+});
+
+test("first check registration is skipped until a later landing", () => {
+	const { work, fakeBin } = fixture();
+	mkdirSync(join(work, ".omp"), { recursive: true });
+	const checkMarker = join(scratch, `new-check-${fixtureNumber}.txt`);
+	const body = `#!/bin/bash\nprintf 'new-check-ran\\n' > \"$OMP_LAND_CHECK_MARKER_FILE\"\nexit 0\n`;
+	writeFileSync(join(work, ".omp", "push-check"), body, { mode: 0o755 });
+	writeFileSync(join(work, "new-owned.txt"), "first registration\n");
+	const hold = [
+		{ agent: "DarkFern", path: "new-owned.txt", exclusive: true, remaining_seconds: 3600 },
+		{ agent: "DarkFern", path: ".omp/push-check", exclusive: true, remaining_seconds: 3600 },
+	];
+	const run = command(work, landArgs("new-owned.txt", ".omp/push-check"), hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_MARKER_FILE: checkMarker },
+	});
+	expect(run.status).toBe(0);
+	const data = run.body.data as { overall: string; commit: string; check: { status: string; reason: string; checked_sha: string | null } };
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check.status).toBe("SKIP");
+	expect(data.check.reason).toBe("unregistered");
+	expect(data.check.checked_sha).toBeNull();
+	expect(existsSync(checkMarker)).toBe(false);
+	expect(remoteHead(work)).toBe(data.commit);
+});
+
+test("unavailable registered check returns UNRUN before commit or publication", () => {
+	const { work, fakeBin } = fixture();
+	registerPushCheck(work, "#!/not/a/real/land-check-runner\nexit 0\n");
+	writeFileSync(join(work, "owned.txt"), "owner change\n");
+	const head = git(work, ["rev-parse", "HEAD"]).trim();
+	const remote = remoteHead(work);
+	const index = readFileSync(join(work, ".git", "index"));
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(77);
+	expect(responseCode(run.body)).toBe("LAND_CHECK_UNRUN");
+	const data = run.body.data as { overall: string; commit: null; check: { status: string; reason: string } };
+	expect(data.overall).toBe("UNRUN");
+	expect(data.commit).toBeNull();
+	expect(data.check.status).toBe("UNRUN");
+	expect(data.check.reason).toBe("check_interpreter_unavailable");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
+	expect(remoteHead(work)).toBe(remote);
+	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\n");
+});
+
+test("a rejecting commit-msg hook refuses before origin moves", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "owner change\n");
+	const before = remoteHead(work);
+	const head = git(work, ["rev-parse", "HEAD"]).trim();
+	const index = readFileSync(join(work, ".git", "index"));
+	const hookMarker = join(scratch, `commit-msg-${fixtureNumber}.txt`);
+	const hook = join(work, ".git", "hooks", "commit-msg");
+	writeFileSync(hook, `#!/bin/sh\nprintf 'hook-ran\\n' > '${hookMarker}'\nexit 1\n`);
+	chmodSync(hook, 0o755);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
+	const data = run.body.data as { overall: string; commit: null; check: { status: string } };
+	expect(data.overall).toBe("REFUSED");
+	expect(data.commit).toBeNull();
+	expect(data.check.status).toBe("SKIP");
+	expect(readFileSync(hookMarker, "utf8")).toBe("hook-ran\n");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
+	expect(remoteHead(work)).toBe(before);
 	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\n");
 });
@@ -274,8 +471,10 @@ test("converges an advanced origin while preserving the actual landed commit on 
 	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("new baseline\n");
 });
 
-test("reports the saved shared-main commit when a concurrent writer rejects publication", () => {
+test("refuses an origin advance after candidate check without retry or force", () => {
 	const { work, fakeBin } = fixture();
+	const checkMarker = join(scratch, `checked-before-push-${fixtureNumber}.txt`);
+	registerPushCheck(work, `#!/bin/bash\nprintf "%s\\n" "$OMP_LAND_CANDIDATE_SHA" > "$OMP_LAND_CHECK_MARKER_FILE"\nexit 0\n`);
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
 	const writer = join(scratch, `writer-${fixtureNumber}`);
 	git(scratch, ["clone", "--branch", "main", git(work, ["remote", "get-url", "origin"]).trim(), writer]);
@@ -284,21 +483,70 @@ test("reports the saved shared-main commit when a concurrent writer rejects publ
 	writeFileSync(join(writer, "untouched.txt"), "concurrent remote change\n");
 	git(writer, ["add", "untouched.txt"]);
 	git(writer, ["commit", "-m", "competing writer [test]"]);
+	const attempts = join(scratch, `push-attempts-${fixtureNumber}.txt`);
 	const hook = join(work, ".git", "hooks", "pre-push");
-	writeFileSync(hook, `#!/bin/sh\ngit -C '${writer}' push origin HEAD:refs/heads/main\nexit 1\n`);
+	writeFileSync(hook, `#!/bin/sh\nprintf 'attempt\\n' >> '${attempts}'\ngit -C '${writer}' push origin HEAD:refs/heads/main\nexit 1\n`);
 	chmodSync(hook, 0o755);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
-	const data = run.body.data as { overall: string; commit: string };
-	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
+	const run = command(work, landArgs("owned.txt"), hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_MARKER_FILE: checkMarker },
+	});
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_PUSH_REJECTED");
+	const data = run.body.data as {
+		overall: string;
+		commit: string;
+		candidate_sha: string;
+		check: { status: string; checked_sha: string; pushed_sha: string | null };
+	};
+	expect(data.overall).toBe("REFUSED");
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.checked_sha).toBe(data.candidate_sha);
+	expect(data.check.pushed_sha).toBeNull();
+	expect(readFileSync(checkMarker, "utf8")).toBe(`${data.candidate_sha}\n`);
+	expect(readFileSync(attempts, "utf8").trim().split("\n")).toEqual(["attempt"]);
+	expect(remoteHead(work)).toBe(git(writer, ["rev-parse", "HEAD"]).trim());
+	expect(remoteHead(work)).not.toBe(data.candidate_sha);
 	expect(git(work, ["merge-base", "--is-ancestor", data.commit, "refs/heads/main"])).toBe("");
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(git(work, ["rev-parse", "refs/heads/main"]).trim());
 	expect(git(work, ["show", `${data.commit}:owned.txt`])).toBe("owner change\n");
-	const remote = remoteHead(work);
-	expect(remote).toBe(git(writer, ["rev-parse", "HEAD"]).trim());
 });
+test("distinguishes a rejected push from an origin advance", () => {
+	const { work, fakeBin } = fixture();
+	const checkMarker = join(scratch, `check-before-reject-${fixtureNumber}.txt`);
+	registerPushCheck(work, `#!/bin/bash\nprintf "%s\\n" "$OMP_LAND_CANDIDATE_SHA" > "$OMP_LAND_CHECK_MARKER_FILE"\nexit 0\n`);
+	writeFileSync(join(work, "owned.txt"), "owner change\n");
+	const base = remoteHead(work);
+	const attempts = join(scratch, `rejected-push-attempts-${fixtureNumber}.txt`);
+	const hook = join(work, ".git", "hooks", "pre-push");
+	writeFileSync(hook, `#!/bin/sh\nprintf 'attempt\\n' >> '${attempts}'\nexit 1\n`);
+	chmodSync(hook, 0o755);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_MARKER_FILE: checkMarker },
+	});
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
+	const data = run.body.data as {
+		overall: string;
+		candidate_sha: string;
+		check: { status: string; checked_sha: string; pushed_sha: string | null };
+		convergence: { reason: string };
+		phases: { publication: string };
+	};
+	expect(data.overall).toBe("REFUSED");
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.checked_sha).toBe(data.candidate_sha);
+	expect(data.check.pushed_sha).toBeNull();
+	expect(data.convergence.reason).toBe("PUSH_FAILED");
+	expect(data.phases.publication).toBe("NOT_APPLIED");
+	expect(readFileSync(checkMarker, "utf8")).toBe(`${data.candidate_sha}\n`);
+	expect(readFileSync(attempts, "utf8").trim().split("\n")).toEqual(["attempt"]);
+	expect(remoteHead(work)).toBe(base);
+});
+
 test("ignores inherited Git repository overrides", () => {
 	const a = fixture();
 	const b = fixture();
@@ -319,7 +567,7 @@ test("ignores inherited Git repository overrides", () => {
 		const data = run.body.data;
 		commit = data !== null && typeof data === "object" && "commit" in data && typeof data.commit === "string" ? data.commit : "";
 	} else {
-		expect(run.status).toBe(2);
+		expect(run.status).toBe(1);
 		expect(remoteHead(a.work)).toBe(aRemote);
 		expect(git(a.work, ["rev-parse", "HEAD"]).trim()).toBe(aHead);
 	}
@@ -388,7 +636,7 @@ test("refuses detached HEAD without creating or publishing an off-main candidate
 	const index = readFileSync(join(work, ".git", "index"));
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_MAIN_REQUIRED");
 	expect(remoteHead(work)).toBe(detached);
 	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(elsewhere);
@@ -697,9 +945,9 @@ test("keeps the saved commit and peer state when both sides changed the owned pa
 	const peerEntry = git(work, ["ls-files", "-s", "--", "peer.txt"]);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(1);
 	const data = run.body.data as { overall: string; commit: string };
-	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
+	expect(data.overall).toBe("REFUSED");
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.commit);
 	expect(git(work, ["show", `${data.commit}:owned.txt`])).toBe("local owner edit\n");
 	expect(remoteHead(work)).toBe(remote);
@@ -715,7 +963,7 @@ test("refuses directory reservations rather than committing unreserved descendan
 	const index = readFileSync(join(work, ".git", "index"));
 	const hold = [{ agent: "DarkFern", path: "owned-dir", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned-dir"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_PATH_INVALID");
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 	expect(remoteHead(work)).toBe(head);
@@ -761,8 +1009,8 @@ test("a failed ordinary commit is not reported as saved or published", () => {
 	chmodSync(hook, 0o755);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
-	expect(responseCode(run.body)).toBe("COMMIT_CREATION_FAILED");
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 	expect(remoteHead(work)).toBe(head);
 	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
@@ -782,7 +1030,7 @@ test("refuses a deleted directory that expands to unreserved tracked deletions",
 	const index = readFileSync(join(work, ".git", "index"));
 	const hold = [{ agent: "DarkFern", path: "owned-dir", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned-dir"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_PATH_INVALID");
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 	expect(remoteHead(work)).toBe(head);
@@ -805,7 +1053,7 @@ test("reports commit-only phase evidence and preserves foreign state after a pos
 	chmodSync(hook, 0o755);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(77);
 	expect(responseCode(run.body)).toBe("LAND_COMMIT_INTERRUPTED");
 	const data = run.body.data as {
 		overall: string; commit: string; base: string;
@@ -815,7 +1063,7 @@ test("reports commit-only phase evidence and preserves foreign state after a pos
 			observed_local_main: string; observed_publication_head: string;
 		};
 	};
-	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
+	expect(data.overall).toBe("UNRUN");
 	expect(data.base).toBe(before);
 	expect(data.phases).toEqual({
 		candidate_sha: data.commit,
@@ -868,17 +1116,19 @@ test("reports local catch-up without claiming publication or retrying", () => {
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
 	const data = run.body.data as {
 		overall: string; commit: string; base: string; localMain: string;
+		convergence: { reason: string };
 		phases: {
 			candidate_sha: string; actual_parents: string[]; publication_ref: string;
 			construction: string; publication: string; local_catch_up: string;
 			observed_local_main: string; observed_publication_head: string;
 		};
 	};
-	expect(data.overall).toBe("SAVED_NOT_PUBLISHED");
+	expect(data.overall).toBe("REFUSED");
+	expect(data.convergence.reason).toBe("PUSH_FAILED");
 	expect(data.base).toBe(before);
 	expect(data.phases).toEqual({
 		candidate_sha: data.commit,
@@ -934,9 +1184,9 @@ test("refuses publication when inherited hook attribution is ambiguous", () => {
 	chmodSync(hook, 0o755);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
-	expect(run.status).toBe(2);
+	expect(run.status).toBe(77);
 	const data = run.body.data as { overall: string; commit: null; base: string };
-	expect(data.overall).toBe("SAVE_UNCERTAIN");
+	expect(data.overall).toBe("UNRUN");
 	expect(data.commit).toBeNull();
 	expect(data.base).toBe(before);
 	expect(responseCode(run.body)).toBe("LAND_COMMIT_UNVERIFIED");

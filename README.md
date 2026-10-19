@@ -480,6 +480,25 @@ hooks, and never adopts another writer's staged or working lesson rows.
 Check-ins without `--done` require complete native activity coverage; an
 unavailable source refuses before writing. Use repeatable `--done` for an
 explicit report rather than inventing zero activity.
+`omp-kit land` creates its commit with `git commit --only`, so configured
+`commit-msg` hooks run. Publication uses an ordinary non-force `git push`, so
+configured `pre-push` hooks remain active. An optional repo check is registered at
+`.omp/push-check`:
+the exact regular UTF-8 blob in the landing base is the registration. A check
+runs only when the exact candidate contains the same bytes; a new or changed
+check is reported `SKIP` for that landing and may become active on a later one.
+The file needs an absolute interpreter shebang; the process receives
+`OMP_LAND_REPOSITORY`, `OMP_LAND_CANDIDATE_SHA`, `OMP_LAND_CHECK_PATH`, and
+`OMP_LAND_CHECK_SHA256` for candidate inspection. Exit 0 is `PASS`, exit 77 is
+`SKIP`, and other nonzero exits are `FAIL`. If the base has no registered check
+or the candidate changes its bytes, status is `SKIP`; unavailable registered
+execution is `UNRUN`.
+`PUSHED` is reported only after the exact candidate is published by no-force
+convergence. `REFUSED` means no publication; its candidate commit may remain
+saved on local shared `main`.
+Failed admission does not publish, and an origin advance after checking
+is refused without force or retry. `UNRUN` means admission or publication could
+not be verified. `SKIP` does not prove that a full suite passed.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
@@ -508,7 +527,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
-| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit exact actively reserved paths to shared main, then converge and publish; distinguish saved-but-unpublished and uncertain saves | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
+| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit exact reserved paths, run normal `commit-msg` hooks and any unchanged base-registered `.omp/push-check` against the exact candidate, then publish via no-force convergence; return `PUSHED`, `REFUSED`, or `UNRUN` (exit 0/1/77) | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Send to a fleet pane and prove it landed | `omp-kit send omp-test %54 "status update" --json` |
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |

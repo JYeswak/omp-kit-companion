@@ -16,6 +16,7 @@ export type ConvergeOptions = {
 	push?: boolean;
 	fetch?: boolean;
 	resolutions?: Readonly<Record<string, "ours" | "theirs">>;
+	beforePush?: (candidateSha: string, baseSha: string) => { allow: boolean; reason?: string };
 };
 export type ConvergeConflict = { path: string; kind: string; detail?: string; class?: "true_divergence"; hint?: "theirs_behind" | "ours_behind" };
 export type ConvergeResult = {
@@ -424,10 +425,30 @@ export function convergeRepository(options: ConvergeOptions): ConvergeResult {
 			if (!options.push) return done();
 			const head = out(repo, ["rev-parse", "refs/heads/main"]);
 			result.published_commits = Number(out(repo, ["rev-list", "--count", `${plan.up}..${head}`]));
+			if (options.beforePush) {
+				const admission = options.beforePush(head, plan.up);
+				if (!admission.allow) {
+					result.state = "REFUSED";
+					result.reason = admission.reason ?? "PRE_PUSH_REFUSED";
+					return done();
+				}
+			}
 			const pushed = git(repo, ["push", "--porcelain", plan.remote, `${head}:refs/heads/main`]);
 			const remote = out(repo, ["ls-remote", plan.remote, "refs/heads/main"]).split("\t")[0];
 			if (remote === head) { result.pushed = true; result.remote_after = head; return done(); }
-			if (remote === plan.up) { result.reason = "PUSH_FAILED"; result.push_error = pushed.err.slice(-400); return done(); }
+			if (remote === plan.up) {
+				result.reason = "PUSH_FAILED";
+				result.push_error = pushed.err.slice(-400);
+				result.remote_after = remote;
+				return done();
+			}
+			if (options.beforePush) {
+				result.state = "REFUSED";
+				result.reason = "PUSH_REJECTED";
+				result.push_error = pushed.err.slice(-400);
+				result.remote_after = remote;
+				return done();
+			}
 		}
 		result.reason = "RETRIES_EXHAUSTED"; return done();
 	} catch (error) {
