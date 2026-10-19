@@ -495,14 +495,15 @@ def check_cmd_flags(cmd, live_flags, added=(), resume=None):
     return True, "OK"
 
 
-RESPAWN_HOLDS = ("HOLD_NO_SESSION", "HOLD_SESSION_AMBIGUOUS")
+RESPAWN_HOLDS = ("HOLD_NO_SESSION", "HOLD_SESSION_AMBIGUOUS", "HOLD_SCRATCH_OWNER")
 
 
 def respawn_row(r, saved):
     """Respawn fallback for one plan row from its save.json row: live flags +
     --resume <session file> + --advisor when the advisor was on and the profile
     config does not already enable it. None when a hold refuses respawn (no or
-    ambiguous session file). Unsaved scratch does not refuse the row."""
+    ambiguous session file, or an owned work-scratch hold: a respawn kills that
+    pid and scratch-reaper then deletes the dir)."""
     if not saved or any(h in RESPAWN_HOLDS for h in saved.get("holds", [])):
         return None
     argv, added = list(r["flags"]) + ["--resume", saved["session_file"]], []

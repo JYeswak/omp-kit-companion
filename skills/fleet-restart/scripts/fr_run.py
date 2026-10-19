@@ -157,8 +157,9 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
                 if blocking:
                     row["action"] = blocking[0]  # RESPAWN preconditions: a session file was found
         if r["action"] == "SKIP_CHIEF" and s:
-            # The operator runs this by hand, last; an unpushed-scratch hold is a warning to read, not a refusal.
-            cr = core.respawn_row(r, dict(s, holds=[h for h in s.get("holds", []) if h != "HOLD_SCRATCH_OWNER"]))
+            # The operator runs this by hand, last, and only when it is not held:
+            # an owned work-scratch hold refuses even the printed respawn command.
+            cr = core.respawn_row(r, s)
             chief_cmd = {"pane": r["pane"], "argv": core.tmux_respawn_argv(cr) if cr else None, "holds": None if cr else s.get("holds"),
                          "warnings": ["HOLD_SCRATCH_OWNER: %s" % scratch_line(s["held_scratch"])] if s.get("held_scratch") else []}
         rows.append(row)
@@ -783,8 +784,10 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
             raise RuntimeError("watchers pause refused: %s" % paused["refused"])
         ctx.run_dir = run_dir
         restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk)
-        rc_scratch, out_scratch = ctx.run_fn(["omp-kit", "scratch", "apply", "--apply", "--yes", "--json"], None)
-        ledger.add("SCRATCH_REAP", rc=rc_scratch, tail=(out_scratch or "")[-300:])
+        # No global scratch reaping: a respawn kills its owner's pid and the
+        # reaper then deletes that dir, so reaping after the sends would destroy
+        # held work scratch. Live-owner scratch is left; the preserve copy+pin
+        # is the save, explicitly not a successor pid (ompkit-774u.4.1).
     except Exception as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         ledger.add("ERROR", error=error)

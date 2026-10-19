@@ -87,6 +87,7 @@ class Pane:
 class FakeFleet:
     def __init__(self, panes, launchd):
         self.t, self.panes, self.ld, self.sends, self.boom, self.crash_sleep = 1_000_000.0, {p.id: p for p in panes}, launchd, [], set(), False
+        self.scratch_applies = 0  # global scratch/reaper effects: the run must never cause one
 
     def clock(self):
         return self.t
@@ -153,6 +154,7 @@ class FakeFleet:
                 p.badge = True
             return 0, '{"success":true}'
         if argv[:3] == ["omp-kit", "scratch", "apply"]:
+            self.scratch_applies += 1  # planted tripwire: apply_run must never reach this
             return 0, '{"ok":true}'
         if argv[:2] == ["tmux", "respawn-pane"]:
             p = self.panes[argv[argv.index("-t") + 1]]
@@ -494,11 +496,11 @@ def gate_save(case, tmp):
     row = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
     owned = {os.path.basename(s["path"]): s["newest_mtime"] for s in row["owned_scratch"]}
     case("CTL last push read from the remote-tracking reflog (`update by push`, not fetch)", row["last_push"] == 2_000_000_000, str(row["last_push"]))
-    case("NEG owned work scratch newer than the last push is recorded as lost, not a hold; other pid's scratch not owned",
-         sorted(owned) == ["jsonowner", "mine", "pushed"] and owned["mine"] == 2_000_000_100 and row["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row["holds"], json.dumps(owned))
-    case("NEG omp.<pid> (the process's own TMPDIR) plus newer work scratch -> hold names only the work dir, newest file recorded",
+    case("NEG owned work scratch newer than the last push is a HOLD_SCRATCH_OWNER hold; other pid's scratch not owned",
+         sorted(owned) == ["jsonowner", "mine", "pushed"] and owned["mine"] == 2_000_000_100 and row["held_scratch"] and row["holds"] == ["HOLD_SCRATCH_OWNER"], json.dumps(owned))
+    case("NEG omp.<pid> (the process's own TMPDIR) plus newer work scratch -> HOLD_SCRATCH_OWNER names only the work dir, newest file recorded",
          [os.path.basename(s["path"]) for s in row["held_scratch"]] == ["mine"] and row["held_scratch"][0]["newest_file"].endswith("mine/work.txt")
-         and [os.path.basename(s["path"]) for s in row["runtime_scratch"]] == ["omp.71"], json.dumps(row["held_scratch"]))
+         and [os.path.basename(s["path"]) for s in row["runtime_scratch"]] == ["omp.71"] and row["holds"] == ["HOLD_SCRATCH_OWNER"], json.dumps(row["held_scratch"]))
     for name, files, want_hold, label in [
             ("only-runtime", [("omp.71", None)], False, "CTL pane owning only omp.<pid> (newer than any push) -> no hold, listed as runtime_scratch"),
             ("other-runtime", [("omp.999", "pid=71\n")], True, "NEG omp.<otherpid> owned by this pid is work, not runtime -> HOLD_SCRATCH_OWNER")]:
@@ -513,14 +515,14 @@ def gate_save(case, tmp):
             with open(os.path.join(r2, "var/agent-tmp", sub, "cache.bin"), "w") as fh:
                 fh.write("x")
         rr = fr_save.save_pane(dict(pane, cwd=os.path.join(r2, "sub")), procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
-        ok = (bool(rr["held_scratch"]) == want_hold) and ("HOLD_SCRATCH_OWNER" not in rr["holds"])
+        ok = (bool(rr["held_scratch"]) == want_hold) and (("HOLD_SCRATCH_OWNER" in rr["holds"]) == want_hold)
         ok = ok and (bool(rr["runtime_scratch"]) != want_hold)
         case(label, ok, json.dumps({k: rr[k] for k in ("holds", "runtime_scratch", "held_scratch")}))
     row2 = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
     os.unlink(os.path.join(repo, "var/agent-tmp/mine/work.txt"))
     row3 = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
-    case("CTL owned work scratch whose files all predate the last push (or only .owner), runtime omp.<pid> newer -> no lost scratch",
-         row2["held_scratch"] and not row3["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row2["holds"], json.dumps(row3["holds"]))
+    case("NEG owned work scratch newer than the last push holds the pane; once its files predate the push the hold clears",
+         row2["held_scratch"] and "HOLD_SCRATCH_OWNER" in row2["holds"] and not row3["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row3["holds"], json.dumps(row3["holds"]))
     case("CTL save row: repo, dirt via git --no-optional-locks, profile, model, session, bun executable",
          row["repo"] == repo and row["repo_dirt_count"] == 2 and git_calls and git_calls[0][:2] == ["git", "--no-optional-locks"]
          and row["profile"] == "claude" and row["model"] == "m1" and row["session_file"] == sess and row["bun"] and row["version"] == "bun",
@@ -651,8 +653,8 @@ def gate_respawn(case, tmp, uid, good_env, plan):
     case("CTL advisor off -> no --advisor", "--advisor" not in fr.respawn_row(a, saved(a, on=False))["cmd"].split())
     sv = {"rows": [saved(a, holds=["HOLD_SCRATCH_OWNER"]), dict(saved(b), session_file=None, holds=["HOLD_NO_SESSION"])]}
     man = fr.restart_manifest(plan, mode="respawn", save=sv)
-    case("NEG HOLD_NO_SESSION gets no respawn row; a scratch hold in save.json does not block",
-         [r["pane"] for r in man["rows"]] == [a["pane"]] and [h["pane"] for h in man["held"]] == [b["pane"]], json.dumps(man["held"]))
+    case("NEG HOLD_SCRATCH_OWNER gets no respawn row (zero respawn), like HOLD_NO_SESSION",
+         [r["pane"] for r in man["rows"]] == [] and sorted(h["pane"] for h in man["held"]) == sorted([a["pane"], b["pane"]]), json.dumps(man["held"]))
     try:
         fr.restart_manifest(plan, mode="respawn")
         code = "NO_ERROR"
@@ -733,6 +735,8 @@ def gate_run(case, tmp, uid, good_env, aligned):
          and man["counts"]["versions"].get("bun") == 3 and man["counts"]["versions"].get("18.9.2") == 3, json.dumps(man["counts"]))
     case("NEG plan: typed text in a composer -> HOLD_COMPOSER; RESPAWN pane without a session file -> HOLD_NO_SESSION",
          acts["r:0.4"] == "HOLD_COMPOSER" and acts["r:0.5"] == "HOLD_NO_SESSION", json.dumps({k: acts[k] for k in ("r:0.4", "r:0.5")}))
+    case("NEG plan: RESPAWN pane owning unpushed work scratch -> HOLD_SCRATCH_OWNER, zero respawn even though preserve succeeds",
+         acts["r:0.6"] == "HOLD_SCRATCH_OWNER" and rows["r:0.6"]["holds"] == ["HOLD_SCRATCH_OWNER"], json.dumps(rows["r:0.6"]))
     ch = man["chief_respawn"]
     case("CTL chief never in the run: SKIP_CHIEF, and its exact respawn command printed for the operator",
          acts["omp-test:0.1"] == "SKIP_CHIEF" and ch and ch["argv"][:5] == ["tmux", "respawn-pane", "-k", "-t", "%3"] and "--resume" in ch["argv"][-1]
@@ -791,10 +795,11 @@ def gate_run(case, tmp, uid, good_env, aligned):
          and res["r:0.4"]["result"] == "HOLD_COMPOSER")
     md = open(os.path.join(run_dir, "report.md")).read()
     held_dir = os.path.join(root, "w", "var", "agent-tmp", "job.2061")
-    case("CTL RESPAWN pane with held scratch is sent only after preserve; report names the dir",
-         res["r:0.6"]["result"] == "VERIFIED" and fleet.count("r:0.6") == 1 and ("`%s`" % held_dir) in md
+    case("NEG work-scratch owner is HOLD_SCRATCH_OWNER with zero respawn; scratch stays at original path/ownership/content and preserve still copies it; report names the dir",
+         res["r:0.6"]["result"] == "HOLD_SCRATCH_OWNER" and fleet.count("r:0.6") == 0 and ("`%s`" % held_dir) in md
          and os.path.join(held_dir, "notes.txt") in md and fr_run.SCRATCH_ADVICE in md
          and "refuses the run" in fr_run.SCRATCH_ADVICE
+         and open(os.path.join(held_dir, "notes.txt")).read() == "x" and open(os.path.join(held_dir, ".owner")).read() == "pid=2061\n"
          and os.path.isfile(os.path.join(run_dir, "preserve", "scratch", "r:0.6", "job.2061", "notes.txt")), md[-600:])
     case("CTL RESPAWN pane owning only its runtime omp.<pid> is not held (r:0.1 respawned)",
          res["r:0.1"]["result"] == "VERIFIED" and "omp.2011" not in md, json.dumps(res["r:0.1"]))
@@ -812,9 +817,12 @@ def gate_run(case, tmp, uid, good_env, aligned):
          and rep["watchers"]["resume"]["result"] == "RESUMED" and not [x for x in ld.loaded if x.startswith(fw.DEADMAN_PREFIX)], json.dumps(ld.mutations()))
     events = [json.loads(ln)["event"] for ln in open(os.path.join(run_dir, fr_run.LEDGER))]
     events = events[len(events) - events[::-1].index("RUN_START") - 1:]  # the applied attempt; an earlier one was preflight-refused
-    case("CTL ledger order: SAVE < WATCHERS_PAUSE < SENT < SCRATCH_REAP < WATCHERS_RESUME < RUN_END; report.json + report.md written",
-         events.index("SAVE") < events.index("WATCHERS_PAUSE") < events.index("SENT") < events.index("SCRATCH_REAP") < events.index("WATCHERS_RESUME") < events.index("RUN_END")
+    case("CTL ledger order: SAVE < WATCHERS_PAUSE < SENT < WATCHERS_RESUME < RUN_END, no SCRATCH_REAP; report.json + report.md written",
+         events.index("SAVE") < events.index("WATCHERS_PAUSE") < events.index("SENT") < events.index("WATCHERS_RESUME") < events.index("RUN_END")
+         and "SCRATCH_REAP" not in events
          and os.path.isfile(os.path.join(run_dir, "report.md")) and os.path.isfile(os.path.join(run_dir, "report.json")), json.dumps(events[:12]))
+    case("NEG no global scratch/reaper effects after the sends: zero `scratch apply` calls",
+         fleet.scratch_applies == 0, json.dumps(fleet.scratch_applies))
     case("CTL canary first: the first send is the RESPAWN pane r:0.1, verified (CANARY event) before any other send; non-strict ADVISOR_FAILED (w:0.5) trips no breaker",
          fleet.sends[0][:2] == ("r:0.1", "RESPAWN") and events.index("CANARY") < [i for i, e in enumerate(events) if e == "SENT"][1]
          and rep["breaker"] is None and res["w:0.5"].get("advisor") == "ADVISOR_FAILED", json.dumps([fleet.sends[:2], rep["breaker"]]))
@@ -973,6 +981,9 @@ def gate_breaker(case, root, home, agents, good_env, uid, aligned):
          res["r:0.7"]["result"] == "VERIFIED" and fl.sends[0][:2] == ("r:0.7", "RESPAWN") and res["w:0.9"]["result"] == "VERIFIED"
          and res["w:0.10"]["result"] == "HOLD_BREAKER" and fl.count("w:0.10") == 0 and "BREAKER: w:0.8 SESSION_LOST" in md and watchers_back(fl),
          json.dumps([rep["breaker"], {k: v["result"] for k, v in res.items()}]))
+    case("NEG after a planted breaker trip there are zero global scratch/reaper effects: no SCRATCH_REAP ledger event, zero `scratch apply` calls",
+         "SCRATCH_REAP" not in [json.loads(ln)["event"] for ln in open(os.path.join(rd, fr_run.LEDGER))] and fl.scratch_applies == 0,
+         json.dumps(fl.scratch_applies))
     n = len(fl.sends)
     rep, rc = fr_run.apply_run(rd, ctx, approve(rd), resume_run=True)
     res = {p["pane"]: p for p in rep["panes"]}
@@ -1038,8 +1049,8 @@ def gate_revalidate(case, root, home, agents, good_env, uid, aligned):
     rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
     res = {p["pane"]: p for p in rep["panes"]}
     md = open(os.path.join(rd, "report.md")).read()
-    case("CTL busy pane that created work scratch during the wait is still sent",
-         res["v:0.1"]["result"] == "VERIFIED" and fl.count("v:0.1") == 1,
+    case("NEG busy pane that created work scratch during the wait is held at send time -> HOLD_SCRATCH_OWNER, zero sends",
+         res["v:0.1"]["result"] == "HOLD_SCRATCH_OWNER" and fl.count("v:0.1") == 0,
          json.dumps(res["v:0.1"]))
     case("NEG omp pid changed between save and send (run path) -> HELD_DRIFT, zero sends",
          res["v:0.2"]["result"] == "HELD_DRIFT" and fl.count("v:0.2") == 0, json.dumps(res["v:0.2"]))
@@ -1050,7 +1061,7 @@ def gate_revalidate(case, root, home, agents, good_env, uid, aligned):
 
     # manual `send` path: the same live checks; never respawn from a stale save.json row
     for label, mutate, want, sends in [("omp pid changed", new_pid, "HELD_DRIFT", 0), ("session file changed", new_session, "HOLD_SESSION_CHANGED", 0),
-                                       ("work scratch created", make_scratch, "SENT", 1), ("nothing changed", None, "SENT", 1)]:
+                                       ("work scratch created", make_scratch, "HOLD_SCRATCH_OWNER", 0), ("nothing changed", None, "SENT", 1)]:
         d = os.path.join(root, "rvm-" + label.replace(" ", "-"))
         os.makedirs(d, exist_ok=True)
         p = Pane("m:0.1", "%401", 401, d, kind="tern")

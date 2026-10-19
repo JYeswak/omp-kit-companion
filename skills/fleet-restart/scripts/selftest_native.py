@@ -401,6 +401,9 @@ def run_native(case, owned_root):
              and evidence_ok and not advisor_sends,
              json.dumps({"rc": rc, "panes": kept, "evidence": kept_evidence, "advisor_sends": advisor_sends,
                          "launchd_calls": launchd.calls}))
+        case("NATIVE isolated run boundary: zero global scratch/reaper effects after the sends",
+             not [row for row in effect_rows if row.get("kind") == "isolated-scratch-reaper-noop"],
+             json.dumps([row.get("kind") for row in effect_rows]))
 
         # Crash a child after real ntm returned /advisor on, before ADVISOR_SENT is appended.
         crash_dir = os.path.join(native, "runtime-crash-run")

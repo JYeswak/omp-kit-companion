@@ -361,7 +361,11 @@ def save_pane(pane, procs, home, lsof_fn, run_fn, dirt_cache):
     row["last_push"] = last_push(repo)
     row["owned_scratch"], row["runtime_scratch"] = owned_scratch(os.path.join(repo or pane["cwd"], "var", "agent-tmp"), agent["pid"])
     row["held_scratch"] = held_scratch(row["owned_scratch"], row["last_push"])
-    # held_scratch is a loss record. It is not a send hold.
+    if row["held_scratch"]:
+        # A respawn kills this pid and scratch-reaper then deletes the dir: an
+        # owned work-scratch hold refuses respawn. The preserve copy+pin is the
+        # save; it is explicitly not a successor pid (ompkit-774u.4.1).
+        row["holds"].append("HOLD_SCRATCH_OWNER")
     row["repo_dirt_count"] = dirt_count(repo, run_fn, dirt_cache) if repo else None
     return row
 
@@ -374,9 +378,10 @@ def held_scratch(work, push):
 def revalidate_respawn(row, inv, lsof_fn):
     """Live re-check right before a respawn send, against the row's saved facts: the
     same omp pid (HELD_DRIFT), no git child (HOLD_GIT), the saved session file still
-    open (HOLD_SESSION_CHANGED), and no other live holder of the saved session
-    (HOLD_SESSION_HOLDER: the session did not drain). Unsaved scratch is not a
-    hold. Returns (hold, detail) or (None, None)."""
+    open (HOLD_SESSION_CHANGED), no other live holder of the saved session
+    (HOLD_SESSION_HOLDER: the session did not drain), and no owned work scratch
+    (HOLD_SCRATCH_OWNER: a respawn kills that pid and scratch-reaper then deletes
+    the dir). Returns (hold, detail) or (None, None)."""
     p = next((x for x in inv["panes"] if x["pane_id"] == row["pane_id"]), None)
     agent = core.find_agent(inv["procs"], p["pane_pid"]) if p else None
     if not agent or agent["pid"] != row.get("omp_pid"):
@@ -390,6 +395,10 @@ def revalidate_respawn(row, inv, lsof_fn):
     if others:
         return "HOLD_SESSION_HOLDER", "%s still held by %s" % (
             row.get("session_file"), ", ".join("%s (pid %s)" % (h["pane"], h["omp_pid"]) for h in others))
+    base = os.path.join(row.get("repo") or (p or {}).get("cwd", ""), "var", "agent-tmp")
+    live_held = held_scratch(owned_scratch(base, agent["pid"])[0], row.get("last_push"))
+    if live_held:
+        return "HOLD_SCRATCH_OWNER", "owned work scratch: %s" % ", ".join(s["path"] for s in live_held)
     return None, None
 
 
