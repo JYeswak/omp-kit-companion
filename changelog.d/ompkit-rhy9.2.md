@@ -1,0 +1,1 @@
+- Qualify the corpus report's privacy and honest boundary: the no-egress test now observes the complete descendant tree (compiled CLI plus real matcher child) with a loopback honeypot and a direct-dial planted control through the same child runtime, and `corpus --plan` states that a fire rate is not a false-fire rate and does not establish blocking or calibration. (ompkit-rhy9.2)

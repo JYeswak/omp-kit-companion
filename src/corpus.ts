@@ -57,6 +57,7 @@ export const CORPUS_PLAN = {
 		"text blocks match as assistant text",
 	],
 	accepted_versions: ["top-level numeric version 3 (session rows)", "top-level numeric v 1 (title rows)"],
+	interpretation: "Per-rule fire rates count local matcher fires over your own transcripts; a fire rate is not a false-fire rate and does not establish blocking or calibration",
 	refuses: "unknown session schema versions refuse: any other top-level numeric version or v exits before writing partial counts",
 	writes: "one TSV beside the chosen report path (scratch) plus the JSON report itself; command text never leaves the machine and sample payloads stay out of the JSON",
 };
