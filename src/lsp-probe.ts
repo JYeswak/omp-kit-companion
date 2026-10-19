@@ -19,6 +19,16 @@ export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { a
 	const start = Math.max(0, calls.length - MAX_JSON_RPC_TRACE_ENTRIES);
 	return calls.slice(start).map((call, index) => ({ method: "lsp/" + call.action, id: String(start + index), elapsed_ms: call.elapsed_ms ?? null, result_bytes: Buffer.byteLength(call.result, "utf8") }));
 }
+// l9kv: every issued `status` call is one readiness attempt (the wait stage re-issues
+// status until the server reports ready, max five bounded polls). Elapsed per attempt is
+// recorded so the B10 report shows cold-start timing without re-running the probe.
+export function collectReadinessWaits(calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspProbeReport["readiness_waits"] {
+	return calls.filter(call => call.action === "status").map((call, index) => ({
+		attempt: index + 1,
+		elapsed_ms: call.elapsed_ms ?? null,
+		ready: call.result.includes("Language servers: typescript-language-server (ready)"),
+	}));
+}
 export type LspProbeState = "PASS" | "MISSING" | "IMMEDIATE_EXIT" | "WRONG_MARKER" | "INCOMPLETE" | "TIMEOUT" | "UNVERIFIED";
 type ProbeTreeSnapshot = Record<string, [number, number, number, string | null]>;
 
@@ -50,6 +60,7 @@ export interface LspProbeReport {
 	reason: string;
 	checks: Record<string, boolean>;
 	calls: Array<{ action: string; file?: string; line?: number; symbol?: string; query?: string; elapsed_ms?: number; result: string; result_truncated?: boolean }>;
+	readiness_waits: Array<{ attempt: number; elapsed_ms: number | null; ready: boolean }>;
 	omp_rc: number | null;
 	timed_out: boolean;
 	timeout_observation: LspTimeoutObservation | null;
@@ -236,7 +247,7 @@ function safePath(command: string, pathEnv: string, project: string): string | n
 }
 function result(state: LspProbeState, reason: string, readiness: LspReadinessReport, server: LspServerReadiness | undefined): LspProbeReport {
 	return { status: state, scope: "OMP_LSP_TOOL_ROUTE", requested_project: readiness.cwd, requested_file: readiness.file, selected_server: server?.name ?? null,
-		selected_command: server?.resolved_command ?? null, reason, checks: {}, calls: [], omp_rc: null, timed_out: false,
+		selected_command: server?.resolved_command ?? null, reason, checks: {}, calls: [], readiness_waits: [], omp_rc: null, timed_out: false,
 		timeout_observation: null, fixture_git_init_rc: null, protected_input_snapshots: null,
 		profile_template_unchanged: null, profile_template_snapshots: null,
 		fixture_project_unchanged: null, fixture_project_snapshots: null,
@@ -772,7 +783,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 	}
 	if (state === "UNVERIFIED" && failedChecks.length) state = "INCOMPLETE";
 	return { status: state, scope: "OMP_LSP_TOOL_ROUTE", requested_project: readiness.cwd, requested_file: readiness.file, selected_server: server.name, selected_command: tsls, reason,
-		checks: { ...checks, has_failed_checks: failedChecks.length > 0 }, calls, omp_rc: ompCode, timed_out: timedOut || timeoutObservation !== null,
+		checks: { ...checks, has_failed_checks: failedChecks.length > 0 }, calls, readiness_waits: collectReadinessWaits(calls), omp_rc: ompCode, timed_out: timedOut || timeoutObservation !== null,
 		timeout_observation: timeoutObservation, fixture_git_init_rc: fixtureGitRc,
 		protected_input_snapshots: protectedBefore ? { before: protectedBefore, after: protectedAfter ?? {}, unchanged: protectedUnchanged === true } : null,
 		profile_template_unchanged: profileUnchanged,

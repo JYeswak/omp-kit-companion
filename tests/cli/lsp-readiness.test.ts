@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
 import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, probeLspReadiness } from "../../src/lsp-probe.ts";
+import { collectReadinessWaits } from "../../src/lsp-probe.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
@@ -270,6 +271,17 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 	expect(report.elapsed_ms).toBeGreaterThan(0);
 	expect(report.checks.known_positive_reference).toBe(true);
 	expect(report.checks.server_ready_after_request).toBe(true);
+	// l9kv: elapsed-per-readiness-attempt is recorded on the report itself: one entry
+	// per issued status call, each carrying its measured elapsed.
+	const statusCalls = report.calls.filter(call => call.action === "status");
+	expect(report.readiness_waits.length).toBe(statusCalls.length);
+	expect(report.readiness_waits.length).toBeGreaterThan(0);
+	for (const [index, wait] of report.readiness_waits.entries()) {
+		expect(wait.attempt).toBe(index + 1);
+		expect(typeof wait.elapsed_ms).toBe("number");
+		expect(wait.elapsed_ms as number).toBeGreaterThanOrEqual(0);
+	}
+	expect(report.readiness_waits.at(-1)?.ready).toBe(true);
 	for (const marker of ["jsconfig.json", "tsconfig.json"]) {
 		expect(report.protected_input_snapshots?.before[join(f.project, marker)]).toEqual({ kind: "absent" });
 		expect(report.protected_input_snapshots?.after[join(f.project, marker)]).toEqual({ kind: "absent" });
@@ -302,11 +314,42 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 			known_positive_reference: report.checks.known_positive_reference,
 			server_ready_after_request: report.checks.server_ready_after_request,
 			calls,
+			readiness_waits: report.readiness_waits,
 			json_rpc_trace: report.json_rpc_trace ? trace : null,
 		};
 		console.log("B10_LSP_TIMING " + JSON.stringify(timing));
 	}
 }, 90_000);
+
+// l9kv planted slow-server fixture: a cold server that answers `not started` twice and
+// then `ready` still records elapsed per readiness attempt (slow but eventual PASS shape),
+// while a server that never reports ready fails the ready predicate deterministically.
+// No OMP process is launched; the fixture drives the same pure derivation the probe uses.
+test("planted: slow-to-ready and never-ready servers record elapsed per readiness attempt", () => {
+	const notReady = "Language servers: typescript-language-server (configured, not started)";
+	const ready = "Language servers: typescript-language-server (ready)";
+	const slowCalls = [
+		{ action: "status", elapsed_ms: 18.4, result: notReady },
+		{ action: "capabilities", elapsed_ms: 1094.1, result: "typescript-language-server: referencesProvider=true" },
+		{ action: "status", elapsed_ms: 22.7, result: notReady },
+		{ action: "status", elapsed_ms: 21015.3, result: ready },
+	];
+	const slowWaits = collectReadinessWaits(slowCalls);
+	expect(slowWaits.length).toBe(3);
+	expect(slowWaits.map(wait => wait.attempt)).toEqual([1, 2, 3]);
+	expect(slowWaits.map(wait => wait.elapsed_ms)).toEqual([18.4, 22.7, 21015.3]);
+	expect(slowWaits.map(wait => wait.ready)).toEqual([false, false, true]);
+	const neverCalls = [
+		{ action: "status", elapsed_ms: 15.2, result: notReady },
+		{ action: "status", elapsed_ms: 19.8, result: notReady },
+		{ action: "status", elapsed_ms: 17.1, result: notReady },
+	];
+	const neverWaits = collectReadinessWaits(neverCalls);
+	expect(neverWaits.length).toBe(3);
+	expect(neverWaits.every(wait => typeof wait.elapsed_ms === "number")).toBe(true);
+	expect(neverWaits.some(wait => wait.ready)).toBe(false);
+	expect(neverWaits.at(-1)?.ready).toBe(false);
+});
 
 nativeLspTest("a non-Git parent workspace dependency binary is never launched", async () => {
 	if (!installedOmp) throw new Error("installed OMP required");

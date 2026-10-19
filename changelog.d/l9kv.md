@@ -1,0 +1,1 @@
+- Record elapsed per LSP readiness attempt on the probe report (`readiness_waits`: one entry per issued status call with attempt, elapsed_ms, ready) and emit it in the B10_LSP_TIMING block; add a planted slow-to-ready / never-ready fixture proving the recording and the deterministic never-ready failure. (ompkit-l9kv)
