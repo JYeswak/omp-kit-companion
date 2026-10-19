@@ -121,6 +121,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Check the test quarantine registry once per run (an expired or malformed entry fails)
+        run: bun scripts/test-quarantine.ts check
       - name: Prove stock PATH and run every portable extension contract
         run: bun scripts/test-stock-extensions.ts
   mac-service-contracts:
@@ -146,7 +148,18 @@ jobs:
       - name: Verify macOS service execution, receipts, notifications and admission
         env:
           TMPDIR: ${{ runner.temp }}
-        run: bun test --timeout 120000 ./tests/cli/service.test.ts
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-service.xml" \
+            --report "$RUNNER_TEMP/test-reports/quarantine-service.json" -- bun test --timeout 120000 ./tests/cli/service.test.ts
+      - name: Retain the JUnit and quarantine reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-reports-mac-service-contracts-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-reports/
+          if-no-files-found: warn
+          retention-days: 2
   cli-contracts-suites:
     if: github.event.repository.private == false
     needs: resolve-omp-versions
@@ -257,18 +270,24 @@ jobs:
           SUITE: ${{ matrix.suite }}
           CORE_SHARDS: ${{ needs.resolve-omp-versions.outputs.core_shards }}
         # Keep the paths and ignore globs in sync with the shard coverage check in the cli-contracts job.
+        # scripts/test-quarantine.ts runs bun test once with a JUnit reporter and never retries: a quarantined
+        # test still runs and is reported, and any other failing test fails the step as before.
         run: |
           set -eu
           if [ "$SUITE" = core ]; then
-            bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts'
+            mkdir -p "$RUNNER_TEMP/test-reports"
+            bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-core.xml" \
+              --report "$RUNNER_TEMP/test-reports/quarantine-core.json" -- \
+              bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts'
           else
             shard="${SUITE#core-}"
             mkdir -p "$RUNNER_TEMP/core-shard"
-            bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts' \
-              --shard="$shard/$CORE_SHARDS" --timings=.github/core-test-timings.json \
-              --reporter=junit --reporter-outfile="$RUNNER_TEMP/core-shard/junit-$shard.attempt-$GITHUB_RUN_ATTEMPT.xml"
+            bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/core-shard/junit-$shard.attempt-$GITHUB_RUN_ATTEMPT.xml" \
+              --report "$RUNNER_TEMP/core-shard/quarantine-$SUITE.json" -- \
+              bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts' \
+              --shard="$shard/$CORE_SHARDS" --timings=.github/core-test-timings.json
           fi
-      - name: Retain this core shard's file list for the coverage check
+      - name: Retain this core shard's JUnit (file list for the coverage check) and quarantine reports
         if: always() && startsWith(matrix.suite, 'core-')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -280,15 +299,32 @@ jobs:
         if: matrix.suite == 'package-release'
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
-        run: bun test ./tests/cli/package-release.test.ts
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-package-release.xml" \
+            --report "$RUNNER_TEMP/test-reports/quarantine-package-release.json" -- bun test ./tests/cli/package-release.test.ts
       - name: Exercise kit update contracts
         if: matrix.suite == 'kit-update'
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
-        run: bun test ./tests/cli/kit-update.test.ts
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-kit-update.xml" \
+            --report "$RUNNER_TEMP/test-reports/quarantine-kit-update.json" -- bun test ./tests/cli/kit-update.test.ts
       - name: Exercise memory readiness against the installed certified OMP source
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
-        run: bun test tests/cli/memory-readiness.test.ts
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-memory-readiness.xml" \
+            --report "$RUNNER_TEMP/test-reports/quarantine-memory-readiness.json" -- bun test tests/cli/memory-readiness.test.ts
+      - name: Retain the JUnit and quarantine reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-reports-${{ matrix.os }}-${{ matrix.suite }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-reports/
+          if-no-files-found: ignore
+          retention-days: 2
       - name: Validate minimum/certified detached native receipts
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: python3 tests/cli/native_candidate_test.py
