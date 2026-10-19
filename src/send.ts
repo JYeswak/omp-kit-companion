@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
@@ -558,17 +558,19 @@ export async function proveSend(input: {
 
 /**
  * Tern verified delivery (ompkit-kdbz.2.4 TERNSEND). Observation and identity
- * come from Silver's plane-tern.ts (observeTernSeat/identifyTernSeat, owned
- * on 2.3 — imported, never reimplemented); this file owns only the send
- * envelope: gating, paste/Enter actuation via the `tern` CLI, session-file
- * marker proof, pending persistence and drop files. tmux/herdr paths above
- * are untouched.
+ * come from plane-tern.ts (observeTernSeat/identifyTernSeat, imported, never
+ * reimplemented); this file owns the send envelope: gating, one native
+ * admission turn via `tern ctl carly lua` (never paste or keys), session-file
+ * proof, pending persistence and drop files. tmux/herdr paths above are
+ * untouched.
  *
- * Proof model (no screen parsing, no API receipt — `tern pane.write` is
- * fire-and-forget): the exact marker must appear as a USER-role journal line
- * at a byte offset strictly past the pre-send cursor, in the same session
- * file. Stale (offset<=cursor), assistant-echo (role!=user) and wrong-session
- * markers never prove. See F4.
+ * Proof model (no screen parsing, no API receipt): a complete typed journal
+ * entry strictly past the pre-send cursor, in the bound session file whose
+ * pre-cursor bytes are unchanged, descending from the pre-send active leaf,
+ * whose exact content hashes to what was sent: a USER message for text, a
+ * new active goal mode_change with objective exactly BODY for `/goal set
+ * BODY`. Stale, quoted, assistant/tool echo, wrong-session, rewritten,
+ * partial and abandoned-branch entries never prove (F4).
  */
 
 export const TERN_PROOF_POLL_MS = 1000;
@@ -613,26 +615,38 @@ export function luaCharCodes(text: string): string {
 
 /**
  * ompkit-kdbz.2.4 native admission turn (AM58464, revised AM58562): one
- * carly-lua turn that reads the live dock surface, admits only a single
- * sendable editor with an empty draft and no modal layer content, then
- * emits a single evsend. Every check lives inside the turn, so a
- * BUSY/draft/modal transition between a separate read and the effect cannot
- * slip through; the OMP backend revalidates at handle time (live editor id
- * match, sendable, blank-text drop). The editor test is per-node scoped: the
- * editor id must immediately precede its `"k":"editor"` tag, sendable and
- * empty-draft markers must follow within a bounded window containing no
- * other `"k":` tag, and exactly one eligible editor may exist. `block` is
- * the bare decimal pane id (what `surface`/`event` address); anything else
- * is refused. Returns null without running anything when the block is not
- * a bare id. Residuals (unqualified, need the owned-target live leg):
- * F1 BUSY fencing and F3 incarnation compare-and-send are asserted by
- * construction here, not proven; a silent in-turn refusal leaves pending
- * retained, never auto-resent.
+ * carly-lua turn that re-reads the pane (absent, busy or exited ends the
+ * turn), reads the live dock surface, admits only a single sendable editor
+ * with an empty draft and no modal layer content, then emits a single
+ * evsend. Every check reads the window's own snapshot inside one
+ * synchronous turn, so a BUSY/draft/modal transition the window has seen
+ * before the effect cannot slip through; the OMP backend revalidates at
+ * handle time (live editor id match, sendable, blank-text drop). The editor
+ * test is per-node scoped: the editor id must immediately precede its
+ * `"k":"editor"` tag, sendable and empty-draft markers must follow within a
+ * bounded window containing no other `"k":` tag, and exactly one eligible
+ * editor may exist. `block` is the bare decimal pane id (what
+ * `pane`/`surface`/`event` address); anything else is refused. Returns null
+ * without running anything when the block is not a bare id.
+ *
+ * Residual (F1, unqualified): the window's snapshot can lag the program, and
+ * the event carries no program-side compare-and-send incarnation witness;
+ * Tern 0.9.4's plugin API (types sha 9de89a72) offers none. A program that
+ * turned busy after the window's last report journals the text as a
+ * steering entry, which the proof reports as PROVEN_STEERED instead of
+ * hiding it. A silent in-turn refusal leaves pending retained, never
+ * auto-resent.
  */
 export function buildNativeSendTurn(block: string, payload: string): string | null {
 	if (!/^[0-9]+$/.test(block)) return null;
 	return [
 		`local blk = "${block}"`,
+		`local pi = cx.session:pane(blk)`,
+		`if pi == nil then return end`,
+		`local pb = pi.busy`,
+		`if pb == true then return end`,
+		`local px = pi.exited`,
+		`if px == nil then`,
 		`local jd = cx.session:surface(blk, {root="dock", nodes=100, max_chars=16})`,
 		`if jd == nil then return end`,
 		`local dj = tern.json.encode(jd)`,
@@ -685,10 +699,9 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
 		`local text = string.char(` + luaCharCodes(payload) + `)`,
 		`cx.session:event(blk, {ev="send", sf=sf, id=EL, text=text})`,
 		`end`,
+		`end`,
 	].join("\n");
 }
-
-
 
 export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
 /** Caller-declared seat posture; any stated bad value refuses with zero sends. */
@@ -709,105 +722,319 @@ export interface TernDeliverResult {
 	detail: string;
 	code: string;
 }
-export interface TernPendingRecord {
+
+/** ASCII whitespace as String.prototype.trim and the OMP sigil checks see it (tab, LF, VT, FF, CR, space). */
+function isAsciiSpace(code: number): boolean {
+	return code === 32 || (code >= 9 && code <= 13);
+}
+
+function firstSpaceAt(text: string): number {
+	for (let i = 0; i < text.length; i++) if (isAsciiSpace(text.charCodeAt(i))) return i;
+	return -1;
+}
+
+/** Pane id of a Tern seat: exact decimal digits, optionally `tern:`-prefixed. */
+export function ternPaneId(pane: string): number | null {
+	const digits = pane.startsWith("tern:") ? pane.slice("tern:".length) : pane;
+	if (digits.length === 0) return null;
+	for (let i = 0; i < digits.length; i++) {
+		const code = digits.charCodeAt(i);
+		if (code < 48 || code > 57) return null;
+	}
+	const id = Number(digits);
+	return Number.isSafeInteger(id) ? id : null;
+}
+
+/**
+ * What a Tern payload is to the OMP composer it lands in (2.4 GOALSEND,
+ * SENDGATE1). The composer trims the submission, then runs `!cmd`/`!!cmd`
+ * as bash and `$ code`/`$$ code` as Python (input-controller.ts, omp
+ * 18.12.2), dispatches `/name` as a slash control, and journals anything
+ * else as a USER message. `/goal set BODY` replaces or starts a goal whose
+ * objective is BODY trimmed (interactive-mode.ts parseGoalSubcommand and
+ * #handleGoalSetSubcommand); its proof is a new goal mode_change, so it
+ * travels without a marker. Other slash controls have no journal proof
+ * contract here (`/goal drop` opens a confirmation picker; `/goal set` with
+ * no body opens an editor).
+ */
+export type TernPayloadKind =
+	| { kind: "message" }
+	| { kind: "goal-set"; objective: string }
+	| { kind: "slash" }
+	| { kind: "shell-escape"; command: string };
+
+export function classifyTernPayload(text: string): TernPayloadKind {
+	const trimmed = text.trim();
+	if (trimmed.startsWith("!")) return { kind: "shell-escape", command: trimmed.slice(trimmed.startsWith("!!") ? 2 : 1).trim() };
+	if (trimmed.startsWith("$")) {
+		const sigil = trimmed.startsWith("$$") ? 2 : 1;
+		if (trimmed.length > sigil && isAsciiSpace(trimmed.charCodeAt(sigil))) {
+			return { kind: "shell-escape", command: trimmed.slice(sigil).trim() };
+		}
+	}
+	if (!trimmed.startsWith("/")) return { kind: "message" };
+	const commandEnd = firstSpaceAt(trimmed);
+	if (commandEnd < 0 || trimmed.slice(0, commandEnd) !== "/goal") return { kind: "slash" };
+	const args = trimmed.slice(commandEnd).trim();
+	const verbEnd = firstSpaceAt(args);
+	if (verbEnd < 0 || args.slice(0, verbEnd) !== "set") return { kind: "slash" };
+	const objective = args.slice(verbEnd).trim();
+	return objective ? { kind: "goal-set", objective } : { kind: "slash" };
+}
+
+/** What a Tern attempt must find past its cursor to prove itself (F4). */
+export interface TernProofKey {
+	kind: "message" | "goal-set";
 	marker: string;
-	textSha256: string;
-	seatKey: string;
-	sessionSha: string;
+	/** sha256 of what the composer journals: the payload, trimmed. */
+	payloadSha256: string;
+	/** goal-set: the exact objective; "" for messages. */
+	objective: string;
+	/** goal-set: goal ids already in the prefix (a progress update of an old goal is not adoption). */
+	priorGoalIds: string[];
 	sessionId: string;
 	leafId: string;
 	cursorBytes: number;
+	/** Where the journal body starts: OMP rewrites a leading title record in place. */
+	bodyStart: number;
+	/** sha256 of journal bytes [bodyStart, cursorBytes): the pre-send prefix. */
+	prefixSha256: string;
+}
+export type TernProof =
+	| { status: "PROVEN"; offset: number; entryId: string; steering: boolean }
+	| { status: "ABSENT"; reason: string }
+	| { status: "UNCERTAIN"; reason: string };
+
+function sha256Hex(data: string | Uint8Array): string {
+	return createHash("sha256").update(data).digest("hex");
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+export function ternJournalBodyStart(bytes: Buffer): number {
+	const newline = bytes.indexOf(0x0a);
+	if (newline < 0) return 0;
+	try {
+		return recordOf(JSON.parse(bytes.subarray(0, newline).toString("utf8")))?.type === "title" ? newline + 1 : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function journalUserText(message: Record<string, unknown>): string | null {
+	if (typeof message.content === "string") return message.content;
+	if (!Array.isArray(message.content)) return null;
+	let text = "";
+	for (const raw of message.content) {
+		const block = recordOf(raw);
+		if (!block || block.type !== "text" || typeof block.text !== "string") return null;
+		text += block.text;
+	}
+	return text;
+}
+
+function goalOf(record: Record<string, unknown>): Record<string, unknown> | null {
+	if (record.type !== "mode_change" || record.mode !== "goal") return null;
+	return recordOf(recordOf(record.data)?.goal);
+}
+
+function entryProves(record: Record<string, unknown>, key: TernProofKey): { steering: boolean } | null {
+	if (key.kind === "message") {
+		const message = record.type === "message" ? recordOf(record.message) : null;
+		if (!message || message.role !== "user") return null;
+		const text = journalUserText(message);
+		if (text === null || !text.includes(key.marker) || sha256Hex(text) !== key.payloadSha256) return null;
+		return { steering: message.steering === true };
+	}
+	const goal = goalOf(record);
+	if (!goal || goal.status !== "active" || goal.objective !== key.objective
+		|| typeof goal.id !== "string" || key.priorGoalIds.includes(goal.id)) return null;
+	return { steering: false };
+}
+
+function descendsFromLeaf(parentId: string | null, leafId: string, parents: ReadonlyMap<string, string | null>): boolean {
+	let current = parentId;
+	for (let hops = 0; hops <= parents.size; hops++) {
+		if (current === null) return false;
+		if (current === leafId) return true;
+		if (!parents.has(current)) return false;
+		current = parents.get(current) ?? null;
+	}
+	return false;
+}
+
+/**
+ * F4 proof: only complete, newline-terminated, typed entries strictly past
+ * the cursor count, and only when the pre-cursor prefix is byte-identical
+ * (same session header, nothing rotated, truncated or rewritten). The entry
+ * must descend from the pre-send leaf through post-cursor entries, so a
+ * marker on another branch never proves. Transcript admission is not model
+ * consumption or an ACK.
+ */
+export function proveTernEntry(journalText: string, key: TernProofKey): TernProof {
+	const bytes = Buffer.from(journalText, "utf8");
+	if (bytes.length < key.cursorBytes) return { status: "UNCERTAIN", reason: "JOURNAL_SHRANK" };
+	if (ternJournalBodyStart(bytes) !== key.bodyStart
+		|| sha256Hex(bytes.subarray(key.bodyStart, key.cursorBytes)) !== key.prefixSha256) {
+		return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_CHANGED" };
+	}
+	const parents = new Map<string, string | null>();
+	const hits: { offset: number; parentId: string | null; id: string; steering: boolean }[] = [];
+	let partial = false;
+	let malformed = false;
+	let position = key.cursorBytes;
+	while (position < bytes.length) {
+		const newline = bytes.indexOf(0x0a, position);
+		if (newline < 0) {
+			partial = true;
+			break;
+		}
+		const start = position;
+		position = newline + 1;
+		if (newline === start) continue;
+		let record: Record<string, unknown> | null;
+		try {
+			record = recordOf(JSON.parse(bytes.subarray(start, newline).toString("utf8")));
+		} catch {
+			record = null;
+		}
+		if (!record) {
+			malformed = true;
+			continue;
+		}
+		if (typeof record.id !== "string" || !record.id) continue;
+		if (parents.has(record.id)) {
+			malformed = true;
+			continue;
+		}
+		const parentId = typeof record.parentId === "string" ? record.parentId : null;
+		parents.set(record.id, parentId);
+		const match = entryProves(record, key);
+		if (match) hits.push({ offset: start, parentId, id: record.id, steering: match.steering });
+	}
+	for (const hit of hits) {
+		if (descendsFromLeaf(hit.parentId, key.leafId, parents)) {
+			return { status: "PROVEN", offset: hit.offset, entryId: hit.id, steering: hit.steering };
+		}
+	}
+	if (hits.length > 0) return { status: "UNCERTAIN", reason: "ENTRY_OFF_ACTIVE_BRANCH" };
+	if (partial || malformed) return { status: "UNCERTAIN", reason: "PARTIAL_OR_MALFORMED_TAIL" };
+	return { status: "ABSENT", reason: "NO_MATCHING_ENTRY" };
+}
+
+/** Build the proof key for an attempt from the exact pre-send journal snapshot. */
+export function buildTernProofKey(journalText: string, journal: { sessionId: string; leafId: string },
+	sent: { kind: "message" | "goal-set"; payload: string; marker: string; objective: string }): TernProofKey {
+	const bytes = Buffer.from(journalText, "utf8");
+	const bodyStart = ternJournalBodyStart(bytes);
+	const priorGoalIds: string[] = [];
+	if (sent.kind === "goal-set") {
+		for (const line of journalText.split("\n")) {
+			if (!line.includes(`"mode_change"`)) continue;
+			try {
+				const goal = goalOf(recordOf(JSON.parse(line)) ?? {});
+				if (goal && typeof goal.id === "string" && !priorGoalIds.includes(goal.id)) priorGoalIds.push(goal.id);
+			} catch {}
+		}
+	}
+	return {
+		kind: sent.kind, marker: sent.marker, payloadSha256: sha256Hex(sent.payload.trim()), objective: sent.objective,
+		priorGoalIds, sessionId: journal.sessionId, leafId: journal.leafId, cursorBytes: bytes.length, bodyStart,
+		prefixSha256: sha256Hex(bytes.subarray(bodyStart)),
+	};
+}
+
+export interface TernPendingRecord extends TernProofKey {
+	seatKey: string;
+	sessionSha: string;
+	textSha256: string;
 	createdAt: string;
 }
 
+const TERN_PENDING_STRINGS = ["marker", "payloadSha256", "objective", "sessionId", "leafId", "prefixSha256",
+	"seatKey", "sessionSha", "textSha256", "createdAt"];
+
 function readTernPending(path: string): TernPendingRecord | null {
-	let raw: unknown;
+	let rec: Record<string, unknown> | null;
 	try {
-		raw = JSON.parse(readFileSync(path, "utf8") as string) as unknown;
+		rec = recordOf(JSON.parse(readFileSync(path, "utf8") as string));
 	} catch {
 		return null;
 	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-	const rec = raw as { [key: string]: unknown };
-	const marker = typeof rec.marker === "string" ? rec.marker : null;
-	const textSha256 = typeof rec.textSha256 === "string" ? rec.textSha256 : null;
-	const seatKey = typeof rec.seatKey === "string" ? rec.seatKey : null;
-	const sessionSha = typeof rec.sessionSha === "string" ? rec.sessionSha : null;
-	const leafId = typeof rec.leafId === "string" ? rec.leafId : null;
-	const createdAt = typeof rec.createdAt === "string" ? rec.createdAt : null;
-	const cursorBytes = typeof rec.cursorBytes === "number" && Number.isInteger(rec.cursorBytes) && rec.cursorBytes >= 0
-		? rec.cursorBytes
-		: null;
-	const sessionId = typeof rec.sessionId === "string" ? rec.sessionId : null;
-	if (marker === null || textSha256 === null || seatKey === null || sessionSha === null
-		|| sessionId === null || leafId === null || createdAt === null || cursorBytes === null) return null;
-	return { marker, textSha256, seatKey, sessionSha, sessionId, leafId, cursorBytes, createdAt };
-}
-/** Scan raw session text for the marker on a USER-role line past a cursor offset. */
-export function findTernUserMarker(text: string, marker: string, afterOffset: number): number | null {
-	let offset = 0;
-	for (const line of text.split("\n")) {
-		const start = offset;
-		offset += Buffer.byteLength(line, "utf8") + 1;
-		if (start < afterOffset || !line.includes(marker)) continue;
-		try {
-			const decoded: unknown = JSON.parse(line);
-			if (typeof decoded !== "object" || decoded === null) continue;
-			if ("role" in decoded && decoded.role === "user") return start;
-			if ("message" in decoded) {
-				const inner = decoded.message;
-				if (typeof inner === "object" && inner !== null && "role" in inner && inner.role === "user") return start;
-			}
-		} catch {
-			continue;
-		}
+	if (!rec) return null;
+	for (const field of TERN_PENDING_STRINGS) if (typeof rec[field] !== "string") return null;
+	for (const value of [rec.cursorBytes, rec.bodyStart]) {
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return null;
 	}
-	return null;
+	if (rec.kind !== "message" && rec.kind !== "goal-set") return null;
+	if (!Array.isArray(rec.priorGoalIds) || !rec.priorGoalIds.every((id) => typeof id === "string")) return null;
+	return rec as unknown as TernPendingRecord;
+}
+
+/** F5: the attempt is durable (file and directory fsynced) before any effect; false means nothing was persisted. */
+function persistTernAttempt(path: string, record: TernPendingRecord): boolean {
+	let fd: number | null = null;
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		fd = openSync(path, "wx");
+	} catch {
+		return false;
+	}
+	try {
+		writeSync(fd, JSON.stringify(record) + "\n");
+		fsyncSync(fd);
+		closeSync(fd);
+		fd = null;
+		const dirFd = openSync(dirname(path), "r");
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+		return true;
+	} catch {
+		if (fd !== null) try { closeSync(fd); } catch {}
+		try { rmSync(path, { force: true }); } catch {}
+		return false;
+	}
+}
+
+/** A later consumption or a gone incarnation changes the ledger only; nothing is ever resent. */
+function settleTernPending(pendingDir: string, name: string, rec: TernPendingRecord, status: string, offset: number | null): void {
+	try {
+		appendFileSync(join(pendingDir, "ledger.jsonl"), JSON.stringify({ at: new Date().toISOString(), status,
+			marker: rec.marker, seatKey: rec.seatKey, sessionId: rec.sessionId, offset }) + "\n");
+	} catch {}
+	try { rmSync(join(pendingDir, name), { force: true }); } catch {}
 }
 
 /**
  * Deliver text to a bound Tern seat with session-file proof (2.4 [a]).
  *
- * Flow: gate flags (incl. GOALSEND form) -> seat binding -> observe IDLE
- * (must be IDENTIFIED) -> journal eligibility (settled turn) -> sweep
- * consumed/dead-incarnation pendings (log status only, never resend) ->
- * suppress-while-pending check keyed on the stable journal session identity
- * (survives appends; AM58562-4) -> persist attempt record -> lock ->
- * re-read session file (cheap incarnation pre-filter, NOT atomicity) ->
- * ONE native carly-lua turn (surface read, typed per-editor admission,
- * single evsend) -> poll for the USER marker past the pre-send cursor
- * (default 20 s) -> capture --surfaces context note.
+ * Flow: GOALSEND form and payload class (an OMP shell escape is refused
+ * outright, SENDGATE1) -> gate flags -> exact seat binding -> observe
+ * (BUSY waits up to untilDeliveredMs, then NOT_DELIVERED with a drop file;
+ * a destructive payload to a pane not proven to run OMP is refused by rule
+ * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
+ * eligibility from the very snapshot observe hashed -> refuse slash
+ * controls with no proof contract -> sweep settled pendings (ledger only)
+ * -> suppress while an attempt on this incarnation is unproven -> persist
+ * the attempt durably -> lock -> re-read (incarnation pre-filter, not
+ * atomicity) -> ONE native admission turn -> poll for proof (default 20 s).
  *
- * Atomicity comes from the single lua turn plus the OMP backend gates
- * (backend drops sends to non-live/stale editor ids; the composer drops
- * blank text and non-sendable submissions), never from the hash re-read
- * window. Refusal paths emit zero effects. F1 BUSY fencing and F3
- * incarnation compare-and-send remain UNQUALIFIED statically: this shape
- * asserts them by construction, and only the owned-target live leg with
- * post-cursor journal proof can qualify them (AM58562-2).
+ * Statuses: OK (entry proven; offset is its byte offset in sessionFile),
+ * PENDING_CONSUME (an effect may have happened and is unproven; pending
+ * retained, never auto-resent, drop copy written), NOT_DELIVERED (nothing
+ * typed: lock contention or until-delivered exhaustion; drop copy written),
+ * REFUSED (zero effects, decided before any actuation).
  *
- * Statuses: OK (USER marker proven), PENDING_CONSUME (sent but consumption
- * unproven within the bound; pending retained, never auto-resent — a missing
- * marker is uncertainty, never known-zero admission, per ACT58506),
- * NOT_DELIVERED (send turn dispatch failed; effect unproven so pending is
- * retained, recovery copy written), REFUSED (zero effects proven before any
- * run: gates, observation, identity, eligibility, incarnation, unwireable
- * block).
- *
- * Actuation note: one `tern ctl carly lua` turn reads the live dock surface
- * and emits a single evsend (Root real TSP USER admissions, AM58464).
- * Transport lessons, verified live 2026-10-16 against carly lua on an owned
- * pane: the turn travels as one plain argv string (JSON.stringify-wrapped
- * code is rejected); the turn body uses only live-verified constructs and
- * carries the payload as `string.char(...)` byte codes, so arbitrary text
- * (commas, braces, quotes, newlines, `]]`) cannot disturb parsing —
- * literals with `..`, `#`, unbalanced `{}?`, commas, backslash escapes,
- * `/` in digit-strings, `or`-defaults, `and`/`else` all misparse or
- * mis-evaluate. The block is the bare decimal pane id (`surface`/`event`
- * address it directly; `sess/pane` fails). Proof comes from the session
- * journal (primary) with capture --surfaces as context only (never a
- * refusal oracle), never from shared last_tool. Tern binary resolves from
- * `TERN_CTL_BIN` or `$HOME/.local/bin/tern`, never a hardcoded home.
+ * Actuation transport lessons (verified live 2026-10-16 on owned panes):
+ * the turn travels as one plain argv string; the payload rides as
+ * `string.char(...)` byte codes so no text can disturb parsing; the block
+ * is the bare decimal pane id. Tern binary resolves from `TERN_CTL_BIN` or
+ * `$HOME/.local/bin/tern`.
  */
 export async function deliverToTernSeat(input: {
 	seat: TernSeatBinding;
@@ -817,8 +1044,10 @@ export async function deliverToTernSeat(input: {
 	gate?: TernSendGate;
 	pollMs?: number;
 	deadlineMs?: number;
+	/** BUSY seats are re-observed up to this bound (default 0: refuse at once); exhaustion is NOT_DELIVERED. */
+	untilDeliveredMs?: number;
 	wait?: (ms: number) => Promise<void>;
-	/** Overridable for tests; production passes Silver's plane-tern functions. */
+	/** Overridable for tests; production uses plane-tern's functions. */
 	observe?: typeof observeTernSeat;
 	identify?: typeof identifyTernSeat;
 }): Promise<TernDeliverResult> {
@@ -830,22 +1059,44 @@ export async function deliverToTernSeat(input: {
 	const fail = (code: string, detail: string): TernDeliverResult =>
 		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code });
 	const gate = input.gate ?? {};
-	// ompkit-kdbz.2.4 GOALSEND: bare /goal text is refused before any seat
-	// observation or send; goal delivery uses `/goal set BODY`.
+	// GOALSEND: bare /goal text is refused before any seat observation or
+	// send; goal delivery uses `/goal set BODY`.
 	if (isBareGoalDirective(input.text)) return fail("GOAL_REQUIRES_SET_FORM", "bare /goal directive refused: goal delivery requires /goal set BODY; zero sends");
+	if (!input.text.trim()) return fail("EMPTY_PAYLOAD", "blank text is never sent (an empty submit aborts a streaming turn); zero sends");
+	const payloadKind = classifyTernPayload(input.text);
+	if (payloadKind.kind === "shell-escape") {
+		// SENDGATE1 on the Tern plane: the OMP composer executes `!`/`$` text,
+		// so the send would bypass every command gate. Never a message.
+		const rule = refuseShellPayload(payloadKind.command);
+		return fail(rule ? rule.rule : "OMP_SHELL_ESCAPE", "payload would run as a shell/Python command in the OMP composer; zero sends");
+	}
 
 	if (gate.paused === true) return fail("GATE_PAUSED", "seat is paused; zero sends");
 	if (gate.custodyDisabled === true) return fail("GATE_CUSTODY_DISABLED", "seat custody disabled; zero sends");
 	if (gate.pullEnabled === false) return fail("GATE_PULL_DISABLED", "pullEnabled is false; zero sends");
 	if (gate.admitted === false) return fail("GATE_UNADMITTED", "seat is unadmitted; zero sends");
 	if (gate.insight === true) return fail("GATE_INSIGHT", "INSIGHT seat; zero sends");
+	const paneId = ternPaneId(input.seat.pane);
 	if (typeof input.seat.session !== "string" || !input.seat.session.trim()
-		|| typeof input.seat.windowKey !== "string" || !input.seat.windowKey.trim()) {
-		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session and explicit window key; zero sends");
+		|| typeof input.seat.windowKey !== "string" || !input.seat.windowKey.trim() || paneId === null) {
+		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session, explicit window key and exact pane id; zero sends");
 	}
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
-	const observation = await observe(input.seat, input.io);
-	if (observation.state === "BUSY") return fail("SEAT_BUSY", `seat is BUSY (${observation.reason ?? "working"}); zero sends`);
+	let observation = await observe(input.seat, input.io);
+	const busyRetries = Math.max(0, Math.ceil((input.untilDeliveredMs ?? 0) / pollMs));
+	for (let retry = 0; observation.state === "BUSY" && retry < busyRetries; retry++) {
+		await wait(pollMs);
+		observation = await observe(input.seat, input.io);
+	}
+	const shellRule = observation.fg === null ? refuseShellPayload(input.text) : null;
+	if (shellRule) return fail(shellRule.rule, "destructive payload to a pane not proven to run OMP; zero sends");
+	if (observation.state === "BUSY") {
+		if (busyRetries === 0) return fail("SEAT_BUSY", `seat is BUSY (${observation.reason ?? "working"}); zero sends`);
+		return { status: "NOT_DELIVERED", marker: "", sends: 0, sessionFile: observation.sessionFile, offset: null,
+			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, "tern-busy", input.text),
+			detail: `seat stayed BUSY for the ${input.untilDeliveredMs} ms until-delivered bound; nothing typed; recovery copy written`,
+			code: "UNTIL_DELIVERED_EXHAUSTED" };
+	}
 	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
 	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
 		const code = observation.reason === "PLANE_SEAT_UNBOUND" || observation.reason === "TERN_WINDOW_UNBOUND"
@@ -860,74 +1111,70 @@ export async function deliverToTernSeat(input: {
 		const reason = identity.status === "IDENTIFIED" ? "binding lost" : identity.reason;
 		return fail(code, `seat identity not bound (${reason}); zero sends`);
 	}
-	// ACT58584 (Jade58584 replay): the seat must not move between observe and
-	// identify. Compare the stable runtime identity fields (the codebase's
-	// sameRuntime predicate minus cwd/fg-argv, which may legitimately differ
-	// across ticks); any move refuses before eligibility, persistence or
-	// effect, with zero sends.
+	// ACT58584 + SENDX1: the seat must not move between observe and identify,
+	// and both must be the configured pane, so the effect and its proof can
+	// only ever address the bound seat and its own session file.
 	const ob = observation.runtimeBinding;
 	const ib = identity.runtimeBinding;
-	if (ob === null || ib === null) return fail("OBSERVATION_UNKNOWN", `runtime binding lost after identification; zero sends`);
 	if (ob.sessionFile !== ib.sessionFile || ob.sessionUuid !== ib.sessionUuid
 		|| ob.paneId !== ib.paneId || ob.sessionId !== ib.sessionId
 		|| ob.foregroundPid !== ib.foregroundPid || ob.foregroundStarted !== ib.foregroundStarted) {
 		return fail("SEAT_REBOUND", `observe/identify runtime bindings differ; seat moved, zero sends`);
 	}
-	if (observation.sessionFile === null) return fail("ELIGIBILITY_UNKNOWN", "no session file to prove against; zero sends");
-	const journalText = input.io.readSessionFile(observation.sessionFile);
+	if (ob.paneId !== paneId || observation.sessionFile !== ob.sessionFile) {
+		return fail("SEAT_REBOUND", `observed pane ${ob.paneId} is not configured pane ${paneId}; zero sends`);
+	}
+	const sessionFile = ob.sessionFile;
+	const journalText = input.io.readSessionFile(sessionFile);
 	if (journalText === null) return fail("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends");
+	if (sha256Hex(journalText) !== observation.sessionSha) {
+		return fail("SEAT_REBOUND", "session file changed since observation; zero sends");
+	}
 	const journal = parseSessionJournal(journalText);
 	if (journal.status !== "KNOWN" || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
 		|| journal.lastMessageRole !== "assistant") {
 		return fail("ELIGIBILITY_UNSETTLED", "turn not settled (parse, stop, pending tools or live user turn); zero sends");
 	}
-	const preCursor = Buffer.byteLength(journalText, "utf8");
-	const preSha = observation.sessionSha;
-	// A pending marker already consumed upgrades log status only: sweep every
-	// pending record for this seat against the eligibility snapshot. Records
-	// from a dead incarnation (session identity differs) are dropped without
-	// resend: their marker can never be consumed by this journal, and this
-	// function never auto-resends uncertain text. A remaining pending on THIS
-	// runtime incarnation suppresses the new send. The key is the stable
-	// journal session identity (header id, constant across appends), never
-	// the mutable whole-file content hash: an append must not release
-	// suppression for an unproven attempt (AM58562-4).
-	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
-	let pendingDirNames: string[] = [];
-	try {
-		pendingDirNames = readdirSync(pendingDir);
-	} catch {
-		pendingDirNames = [];
+	if (journal.sessionId !== ob.sessionUuid) return fail("SEAT_REBOUND", "journal session differs from the bound runtime; zero sends");
+	if (payloadKind.kind === "slash") {
+		return fail("SLASH_UNPROVABLE", "slash control has no journal proof contract (only /goal set BODY does); zero sends");
 	}
-	for (const name of pendingDirNames) {
+	// Pending records for this seat: a consumed one, or one whose incarnation
+	// is gone, is settled in the ledger (never resent); one still unproven on
+	// THIS incarnation suppresses every new send. The key is the stable
+	// journal session identity, never the mutable content hash, so appends
+	// and BUSY/IDLE flaps cannot release suppression (AM58562-4, B5).
+	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
+	let pendingNames: string[] = [];
+	try {
+		pendingNames = readdirSync(pendingDir);
+	} catch {
+		pendingNames = [];
+	}
+	for (const name of pendingNames) {
 		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
 		const rec = readTernPending(join(pendingDir, name));
 		if (rec === null) continue;
-		if (findTernUserMarker(journalText, rec.marker, rec.cursorBytes) !== null) {
-			try { rmSync(join(pendingDir, name), { force: true }); } catch {}
-		} else if (rec.sessionId !== journal.sessionId) {
-			try { rmSync(join(pendingDir, name), { force: true }); } catch {}
+		if (rec.sessionId !== journal.sessionId) {
+			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
+			continue;
 		}
+		const proof = proveTernEntry(journalText, rec);
+		if (proof.status === "PROVEN") settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
 	}
-	const pendingTag = createHash("sha256").update(journal.sessionId, "utf8").digest("hex").slice(0, 16);
-	const pendingPath = resolve(join(pendingDir, `${seatKey}.${pendingTag}.json`));
+	const pendingPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`));
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
-		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile: observation.sessionFile,
-			offset: null, drop_path: null, detail: `earlier marker unconsumed on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
+		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
+			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
 	}
-	// F5: persist the attempt BEFORE any irreversible effect; one lock per
-	// destination serializes concurrent senders.
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
-	const textSha256 = createHash("sha256").update(input.text, "utf8").digest("hex");
-	const attempt: TernPendingRecord = { marker, textSha256, seatKey, sessionSha: preSha ?? "",
-		sessionId: journal.sessionId, leafId: journal.leafId, cursorBytes: preCursor, createdAt: new Date().toISOString() };
-	try {
-		mkdirSync(dirname(pendingPath), { recursive: true });
-		writeFileSync(pendingPath, JSON.stringify(attempt) + "\n", { flag: "wx" });
-	} catch {
-		return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
-	}
+	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${input.text}\n[${marker}]`;
+	const key = buildTernProofKey(journalText, journal, { kind: payloadKind.kind, payload, marker,
+		objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
+	const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",
+		textSha256: sha256Hex(input.text), createdAt: new Date().toISOString() };
+	if (!persistTernAttempt(pendingPath, attempt)) return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
 	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.seat.session, input.seat.pane),
 		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
 	if (!releaseLock) {
@@ -937,63 +1184,53 @@ export async function deliverToTernSeat(input: {
 			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY" };
 	}
 	try {
-		// F1: the hash re-read below is a cheap incarnation pre-filter, NOT
-		// atomicity. Atomicity comes from the single native turn (all
-		// admission checks and the one evsend inside it) plus the
-		// program-side gates; never present this window as atomic.
-		const fresh = input.io.readSessionFile(observation.sessionFile);
-		const freshSha = fresh === null ? null : createHash("sha256").update(fresh, "utf8").digest("hex");
-		if (fresh === null || freshSha !== preSha) {
+		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
+		// the admission checks live inside the one native turn.
+		const fresh = input.io.readSessionFile(sessionFile);
+		if (fresh === null || sha256Hex(fresh) !== observation.sessionSha) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
-			return { status: "REFUSED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null, drop_path: null,
+			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
 		}
-		// Block is the bare decimal pane id: `surface`/`event` address it
-		// directly (verified live 2026-10-16; a `sess/pane` string makes
-		// surface fail). Anything else never reaches a turn.
-		const block = String(observation.runtimeBinding.paneId);
-		const payload = `${input.text}\n[${marker}]`;
-		const lua = buildNativeSendTurn(block, payload);
+		const lua = buildNativeSendTurn(String(paneId), payload);
 		if (lua === null) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
-			return { status: "REFUSED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null, drop_path: null,
+			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 				detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE" };
 		}
-		const ctl = [ternCtlBin(), "--window", input.seat.windowKey, "ctl", "carly", "lua", lua];
-		if (input.io.run(ctl).code !== 0) {
-			// AM58562-3: a nonzero turn dispatch does not prove zero native
-			// effects, so the attempt stays pending (never auto-resent) while
-			// a recovery copy is still written.
-			return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: observation.sessionFile, offset: null,
-				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-				detail: `native send turn dispatch failed; effect unproven, pending retained; recovery copy written`, code: "SEND_FAILED" };
+		// F5: a failed or crashed dispatch does not prove zero native effects;
+		// the attempt stays pending and proof is still reconciled below.
+		let dispatched: boolean;
+		try {
+			dispatched = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "ctl", "carly", "lua", lua]).code === 0;
+		} catch {
+			dispatched = false;
 		}
-		const started = Date.now();
-		for (;;) {
-			const current = input.io.readSessionFile(observation.sessionFile);
-			if (current !== null) {
-				const at = findTernUserMarker(current, marker, preCursor);
-				if (at !== null) {
-					try { rmSync(pendingPath, { force: true }); } catch {}
-					return { status: "OK", marker, sends: 1, sessionFile: observation.sessionFile, offset: at,
-						drop_path: null, detail: `marker proven as USER entry at offset ${at}`, code: "PROVEN" };
-				}
+		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
+		const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+		for (let poll = 0; ; poll++) {
+			const current = input.io.readSessionFile(sessionFile);
+			last = current === null ? { status: "UNCERTAIN", reason: "SESSION_FILE_UNREADABLE" } : proveTernEntry(current, key);
+			if (last.status === "PROVEN") {
+				try { rmSync(pendingPath, { force: true }); } catch {}
+				const steered = last.steering ? " as a steering entry (program was busy at handle time)" : "";
+				return { status: "OK", marker, sends: 1, sessionFile, offset: last.offset, drop_path: null,
+					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset}${steered}`,
+					code: last.steering ? "PROVEN_STEERED" : "PROVEN" };
 			}
-			if (Date.now() - started >= deadlineMs) break;
+			if (poll + 1 >= polls) break;
 			await wait(pollMs);
 		}
-		// ACT58506: a missing marker in journal and composer is NOT known-zero
-		// admission (capture can miss; the poll bound can be short). Retain
-		// pending uncertainty; refuse only when zero effects are proven before
-		// any run (gates, unwireable block). Capture here is informational
-		// context for the operator, never a refusal oracle.
-		const captureBlock = `${input.seat.session}/${observation.runtimeBinding.paneId}`;
-		const cap = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "capture", captureBlock, "--surfaces"]);
-		const capNote = cap.code !== 0 ? `capture failed (rc=${cap.code})`
-			: cap.out.includes(`[${marker}]`) ? `composer holds marker` : `composer shows no marker`;
-		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile: observation.sessionFile, offset: null,
+		let note = "";
+		if (payloadKind.kind === "message") {
+			const cap = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "capture", `${input.seat.session}/${paneId}`, "--surfaces"]);
+			note = cap.code !== 0 ? `; capture failed (rc=${cap.code})`
+				: cap.out.includes(`[${marker}]`) ? "; composer holds marker" : "; composer shows no marker";
+		}
+		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: `sent but USER marker unproven within the bound (${capNote}); pending retained, never auto-resent`, code: "PROOF_TIMEOUT" };
+			detail: `${dispatched ? "sent" : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
+			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT" };
 	} finally {
 		releaseLock();
 	}
