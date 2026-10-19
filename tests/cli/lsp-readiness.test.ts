@@ -282,6 +282,7 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 		expect(wait.elapsed_ms as number).toBeGreaterThanOrEqual(0);
 	}
 	expect(report.readiness_waits.at(-1)?.ready).toBe(true);
+	expect(report.checks.readiness_waits_elapsed_bounded).toBe(true);
 	for (const marker of ["jsconfig.json", "tsconfig.json"]) {
 		expect(report.protected_input_snapshots?.before[join(f.project, marker)]).toEqual({ kind: "absent" });
 		expect(report.protected_input_snapshots?.after[join(f.project, marker)]).toEqual({ kind: "absent" });
@@ -346,7 +347,7 @@ test("planted: slow-to-ready and never-ready servers record elapsed per readines
 	];
 	const neverWaits = collectReadinessWaits(neverCalls);
 	expect(neverWaits.length).toBe(3);
-	expect(neverWaits.every(wait => typeof wait.elapsed_ms === "number")).toBe(true);
+	expect(neverWaits.every(wait => typeof wait.elapsed_ms === "number" && (wait.elapsed_ms as number) >= 0)).toBe(true);
 	expect(neverWaits.some(wait => wait.ready)).toBe(false);
 	expect(neverWaits.at(-1)?.ready).toBe(false);
 });

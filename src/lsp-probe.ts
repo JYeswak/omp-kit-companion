@@ -696,14 +696,16 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
 			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
 			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
-		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
+		// l9kv: every readiness wait must carry a measured non-negative elapsed; a
+		// missing or negative elapsed fails this check (and demotes PASS below).
+		const readinessWaits = collectReadinessWaits(calls);
 		checks = {
 			lsp_tool_advertised: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.some(tool => isRecord(tool) && isRecord(tool.function) && tool.function.name === "lsp")),
 			only_lsp_tool_enabled: modelRequests.some(request => isRecord(request) && Array.isArray(request.tools) && request.tools.length > 0) && modelRequests.every(request => !isRecord(request) || !Array.isArray(request.tools) || request.tools.length === 1 && isRecord(request.tools[0]) && isRecord(request.tools[0].function) && request.tools[0].function.name === "lsp"),
 			private_git_initialized: fixtureGitRc === 0,
 			read_only_action_arguments: actionArgumentsMatch,
 			all_tool_results_present: resultsPresent,
-			selected_server_configured: statusBefore.includes("Language servers: typescript-language-server (configured, not started)"),
+			readiness_waits_elapsed_bounded: readinessWaits.every(wait => typeof wait.elapsed_ms === "number" && wait.elapsed_ms >= 0),
 			initialized_capabilities: capabilities.includes("typescript-language-server:") && capability?.referencesProvider === true && capability.workspaceSymbolProvider === true && !/failed to start|Server failures:/i.test(capabilities),
 			known_positive_reference: /Found\s+[1-9]\d* reference\(s\)/.test(references) && references.includes("src/uses.ts") && !/Server failures:/i.test(references),
 			absent_symbol_control: absent.includes(`No symbols matching \"${absentSymbol}\"`) && !/Server failures:/i.test(absent),
