@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
@@ -1414,17 +1415,37 @@ test("lsof snapshot: a socket open-path holds its dir", () => {
 	expect(snapshotClear(fab, "/other")).toBe(true);
 });
 
-test("lsof snapshot: a live unix socket holds its dir, a closed listener releases it", async () => {
-	// sun_path caps socket paths at 103 bytes; deeper harnesses (pre-push
-	// gate nesting) cannot bind one, so the live half is conditional while
-	// the static half above always runs.
-	const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "s"));
-	roots.push(dir);
-	const sock = join(dir, "s");
-	if (sock.length > 103) {
-		console.log(`SKIP live socket half: fixture path too long for sun_path: ${sock.length}`);
-		return;
+/** sun_path caps a bound unix socket path at 103 bytes on macOS. */
+const SUN_PATH_MAX = 103;
+
+/**
+ * A fresh realpath'd dir under which `stale.9/s` still fits sun_path. A deep checkout (pre-push
+ * gate nesting, an archive replay) falls back to an omp-* dir under the real $TMPDIR. It fails
+ * loud when neither fits: a skipped live-socket half reads as a pass, which hid RCHSOCK1's
+ * negative from its first non-author replay.
+ */
+function socketFixtureRoot(): string {
+	for (const [base, prefix] of [[join(import.meta.dir, "../../var/agent-tmp"), "rs-"], [tmpdir(), "omp-rs-"]] as const) {
+		const root = realpathSync(mkdtempSync(join(base, prefix)));
+		roots.push(root);
+		if (join(root, "stale.9", "s").length <= SUN_PATH_MAX) return root;
 	}
+	throw new Error(`no fixture root keeps a socket path within sun_path (${SUN_PATH_MAX} bytes)`);
+}
+
+async function connects(sock: string): Promise<boolean> {
+	try {
+		const client = await Bun.connect({ unix: sock, socket: { data() {}, error() {} } });
+		client.end();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+test("lsof snapshot: a live unix socket holds its dir, a closed listener releases it", async () => {
+	const dir = socketFixtureRoot();
+	const sock = join(dir, "s");
 	const server = Bun.listen({ unix: sock, socket: { data() {} } });
 	try {
 		const held = takeLsofSnapshot(defaultRunner);
@@ -1437,3 +1458,35 @@ test("lsof snapshot: a live unix socket holds its dir, a closed listener release
 	expect(released).not.toBeNull();
 	expect(snapshotClear(released, dir)).toBe(true);
 }, 60000);
+
+// RCHSOCK1 (ompkit-774u.6.4) AC2: a cleanup run over a cache dir that holds a live unix socket
+// leaves the socket in place and reports the dir skipped. The control half proves the skip comes
+// from the live listener: the identical dir, once the listener is gone, is quarantined (moved out).
+test("scratch apply over a dir holding a live unix socket skips it, and quarantines it once the listener is gone", async () => {
+	const { home, state } = cliHome();
+	const root = socketFixtureRoot();
+	const stale = join(root, "stale.9");
+	const sock = join(stale, "s");
+	mkdirSync(stale, { recursive: true });
+	writeFileSync(join(stale, "data"), "stale\n");
+	const server = Bun.listen({ unix: sock, socket: { data() {} } });
+	const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakePs().dir}:${process.env.PATH ?? ""}` };
+	try {
+		backdateTree(stale, 73 * 3600 * 1000, Date.now());
+		const held = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+		const heldRow = held.envelope.data.sessions.find((value: { dir: string }) => value.dir === stale);
+		expect(heldRow?.action).toBe("SKIP");
+		expect(heldRow?.reason).toBe("owner-released-but-open-fds-present");
+		expect(lstatSync(sock).isSocket()).toBe(true);
+		expect(existsSync(join(stale, "data"))).toBe(true);
+		expect(await connects(sock)).toBe(true);
+	} finally {
+		server.stop(true);
+	}
+	backdateTree(stale, 73 * 3600 * 1000, Date.now());
+	const released = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+	const releasedRow = released.envelope.data.sessions.find((value: { dir: string }) => value.dir.includes("/stale.9"));
+	expect(releasedRow?.action).toBe("QUARANTINE");
+	expect(releasedRow?.reason).toBe("unowned-idle-72h-quarantined");
+	expect(existsSync(stale)).toBe(false);
+}, 120000);

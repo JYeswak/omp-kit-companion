@@ -41,3 +41,28 @@ Example:
 omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2
 omp-kit rch lease --slots 2 --worker contabo-3 --apply --yes -- cargo test --locked -j 2
 ```
+
+## rchd alive but unreachable: `socket unlinked`
+
+Bead: `ompkit-774u.6.4`. `rch --json daemon status` reports `running:false` when the daemon's socket path is gone,
+even while `rchd` is alive and holds the listener, so "daemon unavailable" is a reachability fault, not missing worker
+capacity. An unscoped `omp-kit doctor` reports an `rch` finding when `rch` is installed, and separates the states:
+
+| `evidence.state` | Meaning | Status |
+|---|---|---|
+| `RUNNING` | the live rchd holds the path and the path is a socket | OK |
+| `SOCKET_UNLINKED` | rchd is alive and holds the path, but the path is missing or no longer a socket | FAIL |
+| `NOT_RUNNING` | rchd reports it is not running | OK (informational) |
+| `PID_UNKNOWN`, `LSOF_UNAVAILABLE`, `SOCKET_PATH_UNKNOWN`, `RCH_UNAVAILABLE` | not enough evidence | UNVERIFIED |
+
+Doctor inspects only; it never restarts the daemon. The canonical restore is manual:
+
+```
+rch status --jobs        # proceed only when the queue is empty, or every in-flight job is accounted for
+launchctl kickstart -k gui/$(id -u)/com.rch.daemon
+rch status               # verify: Daemon Running, workers healthy, slots available
+```
+
+The kickstart drops in-flight jobs, which is why it is never automated. A path replaced by a different socket cannot be
+told apart this way: `lsof` reports no inode for a unix socket, so only a missing or non-socket path is `SOCKET_UNLINKED`.
+The durable fix (moving the socket out of `~/Library/Caches`) is upstream rch work tracked on `ompkit-z7zj`.
