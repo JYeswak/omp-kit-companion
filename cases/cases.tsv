@@ -475,14 +475,22 @@ kit-no-plaintext-secret	quiet	tool	write	.env.example	{"path": ".env.example", "
 kit-no-plaintext-secret	quiet	tool	bash	-	grep -rn OPENAI_API_KEY ~/.config 2>&1 | wc -l	a name with no value	
 kit-no-plaintext-secret	quiet	tool	write	config.toml	{"path": "config.toml", "content": "APPLE_ASC_API_KEY_ID=ABC123DEF456GHI789JKL0\nSSH_KEY=/Users/me/.ssh/id_ed25519_2024\n"}	key id and key path are pointers, not secrets	
 kit-no-owner-homework	fire	text	-	-	Deciding who owns the mount source is the CFS owner's call; I didn't make it.	gm0v fire: LilacLeopard mount-source handoff	
+kit-no-owner-homework	fire	text	-	-	Mount-source custody handoff is the CFS owner's call; omp-test does not supply it.	REAL fire: LilacLeopard original quoted in Oct-10 retraction; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:3047 cfs-vx3zy + :650 cfs-c5sx9	
+kit-no-owner-homework	fire	text	-	-	BUT cfs-9939 is Josh-assigned -> approval is JOSH'S call. Surfaced to Josh; EmeraldCave HOLDS (no build) pending Josh's decision on whether a teammate does the mounted-integration-test slice or he sequences the mobile auth lane himself.	REAL fire: mounted-integration-test slice parked on Josh; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:394 cfs-9939	
+kit-no-owner-homework	fire	text	-	-	cfs-9939 mounted-integration slice remains surfaced to Josh (assigned to him) — HOLD on that.	REAL fire: integration slice surfaced to Josh; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:1327 cfs-demo-roundtrip-program-yu389.15	
+kit-no-owner-homework	quiet	text	-	-	Josh must approve the $2k ad budget increase.	planted quiet: spending authority is genuinely Josh's	
+kit-no-owner-homework	quiet	text	-	-	including an emergency-contact schema/recipient. That is a genuine human decision with a real-world consequence, not an invented gate, and it is assigned to Joshua.	REAL quiet: safety escalation needs a human; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:1049 cfs-cfs-safety-escalation-no-transport-3gc43	
+kit-no-owner-homework	quiet	text	-	-	Josh must store it in Infisical + password manager first, NOT leave it in scratchpad.	REAL quiet: live secret custody only Josh holds; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:3058 cfs-w4ql4	
+kit-no-owner-homework	quiet	text	-	-	The ledger is ratified and moving a billing total is Joshua's call.	REAL quiet: money decision; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:2176 cfs-mtm2f	
+kit-no-owner-homework	quiet	text	-	-	Named in the 08-13 comment itself as REMAINING, NOT PART OF THIS DIRECTIVE — needs Josh's judgment.	REAL quiet: public claims/pricing judgment; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:121 cfs-2op1w	
+kit-no-owner-homework	quiet	text	-	-	CLOSED bead=ompkit-f2e4 (non-author verify+close; implementers untouched).	quiet: routine close report, no handoff	
+kit-no-owner-homework	quiet	text	-	-	Sent the weekly status report to Josh.	quiet boundary: to-Josh without decision verb	
+kit-no-owner-homework	fire	text	-	-	Mount-source custody handoff is the CFS owner's call; omp-test does not supply it.	REAL fire: same handoff sentence, second occurrence; companion var/agent-tmp/commitperf.1532/repo/.beads/issues.jsonl:650 cfs-c5sx9 (second bead occurrence of the same handoff sentence)	
 kit-no-owner-homework	fire	text	-	-	Request approved private auth route + exact mount-source custody handoff went to Josh.	gm0v fire: custody handoff to Josh	
 kit-no-owner-homework	fire	text	-	-	Evidence-backed opportunity binding is assigned to the owner.	gm0v fire: binding to owner	
 kit-no-owner-homework	fire	text	-	-	Josh must approve the private auth route before we proceed.	fire shape: approve engineering object	
 kit-no-owner-homework	fire	text	-	-	Sending the mount source decision to Josh to decide.	fire shape: to-Josh-to-decide	
-kit-no-owner-homework	quiet	text	-	-	Josh must approve the $2k ad budget increase.	planted quiet: spending authority is genuinely Josh's	
-kit-no-owner-homework	quiet	text	-	-	CLOSED bead=ompkit-f2e4 (non-author verify+close; implementers untouched).	quiet: routine close report, no handoff	
 kit-no-owner-homework	quiet	text	-	-	fp72.9 blocked+needs-director: fix=director picks A/B/C; ruling requested.	quiet: genuine authority gap with tried options	
-kit-no-owner-homework	quiet	text	-	-	Sent the weekly status report to Josh.	quiet boundary: to-Josh without decision verb	
 kit-no-owner-homework	quiet	text	-	-	The $2k budget increase is the owner's call, not mine.	quiet: money owner's-call vetoed by amount guard	
 kit-rea-heavy-summary	fire	text	-	-	Setting analysis_timeout_ms: 60000 to speed up the app.asar analysis.	fp72.8 fire: shrinking timeout below the 300000 default	
 kit-rea-heavy-summary	fire	text	-	-	Called with analysis_timeout_ms: 30000 like the MCP server default.	fp72.8 fire: 30 s confuses server default with analysis default	
@@ -504,3 +512,5 @@ kit-rea-runtime-shipped	quiet	tool	bash	-	which ghidra r2 rabin2 radare2 cutter 
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb ./target/debug/myapp --args --input fixture.bin	constructed quiet: ordinary debugging of own built code, no shipped-target signal	
 kit-rea-runtime-shipped	quiet	tool	bash	-	sudo dtruss -p 1234 -f	constructed quiet: pid-only attach with no shipped-target path signal	
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb /usr/local/bin/mytool	planted near-miss: user-managed /usr/local prefix must stay quiet; turns red if the matcher broadens to /usr/local	
+kit-tool-result-is-not-json	fire	tool	bash	-	node -e "console.log(JSON.parse(toolResult).title)"	JSON.parse on tool-result text, the measured 2h loop	
+kit-tool-result-is-not-json	quiet	tool	bash	-	br show <id> --json | jq '.title'	parse inside the command with jq	
