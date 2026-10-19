@@ -9,8 +9,11 @@ const BIG_ID = "30068411341996668", BIG_ID_NEIGHBOUR = "30068411341996667";
 interface PlantedLease { id: string; worker?: string; pid?: number; birthSeconds?: number; alive?: boolean; ownerPresence?: string; ageMs?: number; acknowledged?: boolean; retired?: boolean; slots?: number }
 
 // The native boundary is injected: these tests must never submit remote work or mutate real caches.
-function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; rawIds?: [remote: string, build: string]; transport?: boolean; planted?: PlantedLease[] } = {}) {
+interface FixtureWorker { id: string; memPressure?: number | null; free?: number; health?: string; diskGb?: number | null }
+function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativeExit?: number; remoteExit?: number; remoteExitAfterRetry?: number; executed?: boolean; gcExit?: number; health?: string; fresh?: boolean; cancelled?: boolean; ownerPresence?: string; journalWorker?: string; delayedJournal?: boolean; executionStarted?: boolean; admissionRefused?: boolean; noRecovery?: boolean; rawIds?: [remote: string, build: string]; transport?: boolean; planted?: PlantedLease[]; memPressure?: number | null; diskGb?: number | null; moreWorkers?: FixtureWorker[] } = {}) {
 	let submitted = 0, running = false, remoteRunning = false, statusReads = 0, journalReads = 0, recovered = false;
+	let currentWorker: string | null = null;
+	const submittedWorkers: string[] = [];
 	const planted = options.planted ?? [], recoverCalls: string[] = [];
 	const plantedDone = (lease: PlantedLease) => lease.retired === true;
 	const plantedRow = (lease: PlantedLease) => ({ wrapper_alive: lease.alive ?? false, owner_presence: lease.ownerPresence ?? "absent", lease: {
@@ -20,10 +23,16 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 		recovery: { wrapper_id: lease.id, build_id: 52, execution_started: true, preparation_cancelled: false, exit_code: null, retired: plantedDone(lease), sources_released: plantedDone(lease) },
 	} });
 	let finish: (value: NativeRchResult) => void = () => { throw new Error("build not started"); };
+	const statusRow = (id: string, free: number, mem: number | null | undefined, health?: string, disk?: number | null) => ({
+		id, status: health ?? options.health ?? "healthy", total_slots: free, used_slots: 0,
+		pressure_telemetry_fresh: options.fresh ?? true, pressure_confidence: "high", pressure_state: "healthy", pressure_build_disk_free_gb: disk === undefined ? 20 : disk,
+		pressure_memory_pressure: mem === undefined ? 10 : mem,
+	});
 	const status = () => ({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
 		id: "worker-a", status: options.health ?? "healthy", total_slots: statusReads++ === 0 ? options.freeBefore ?? 4 : options.freeAfter ?? 4,
-		used_slots: planted.reduce((used, lease) => used + (plantedDone(lease) ? 0 : lease.slots ?? 0), 0), pressure_telemetry_fresh: options.fresh ?? true, pressure_confidence: "high", pressure_state: "healthy", pressure_build_disk_free_gb: 20,
-	}] } } });
+		used_slots: planted.reduce((used, lease) => used + (plantedDone(lease) ? 0 : lease.slots ?? 0), 0), pressure_telemetry_fresh: options.fresh ?? true, pressure_confidence: "high", pressure_state: "healthy", pressure_build_disk_free_gb: "diskGb" in options ? options.diskGb : 20,
+		pressure_memory_pressure: "memPressure" in options ? options.memPressure : 10,
+	}, ...(options.moreWorkers ?? []).map(row => statusRow(row.id, row.free ?? 4, row.memPressure, row.health, row.diskGb))] } } });
 	const executor: RchExecutor = {
 		async capture(args) {
 			let value: unknown;
@@ -48,24 +57,27 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 					identity: { local_wrapper_id: "rchw-neighbour", remote_build_id: "NEIGHBOUR" }, worker_id: "worker-a", state: "finished",
 					recovery: { wrapper_id: "rchw-neighbour", build_id: "NEIGHBOUR", execution_started: true, preparation_cancelled: false, exit_code: 3, retired: true, sources_released: true },
 				} };
-				value = { complete: true, journal_errors: [], jobs: [...(options.rawIds ? [neighbour] : []), ...planted.map(plantedRow), { wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
-					schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
-					identity: { local_wrapper_id: "rchw-fixture", remote_build_id: options.rawIds ? "RAWREMOTE" : 41 }, worker_id: options.journalWorker ?? "worker-a", state: running ? "running" : "finished",
-					...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: options.rawIds ? "RAWBUILD" : 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
-						exit_code: options.transport || remoteRunning ? null : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
-				} }] };
+			value = { complete: true, journal_errors: [], jobs: [...(options.rawIds ? [neighbour] : []), ...planted.map(plantedRow), { wrapper_alive: running, owner_presence: running ? options.ownerPresence ?? "live" : "absent", lease: {
+				schema_version: 1, wrapper_pid: 41001, boot_id: "fixture-boot", process_birth: { boot_id: "fixture-boot", start: { platform: "darwin", seconds: 1, microseconds: 2 } },
+				identity: { local_wrapper_id: "rchw-fixture", remote_build_id: options.rawIds ? "RAWREMOTE" : 41 }, worker_id: options.journalWorker ?? currentWorker ?? "worker-a", state: running ? "running" : "finished",
+				...(options.noRecovery && !recovered ? {} : { recovery: { wrapper_id: "rchw-fixture", build_id: options.rawIds ? "RAWBUILD" : 41, execution_started: options.executionStarted ?? options.executed ?? true, preparation_cancelled: options.executed === false,
+					exit_code: options.transport || remoteRunning ? null : submitted >= 2 && options.remoteExitAfterRetry !== undefined ? options.remoteExitAfterRetry : options.remoteExit ?? options.nativeExit ?? 0, retired: !remoteRunning, sources_released: !remoteRunning } }),
+			} }] };
 			} else throw new Error("Unexpected native operation");
 			// rch prints pretty JSON ("key": value). Real ids are 64-bit integers written as raw digits; JSON.stringify cannot produce them from a double.
 			let text = JSON.stringify(value, null, 2);
 			if (options.rawIds) text = text.replace('"RAWREMOTE"', options.rawIds[0]).replace('"RAWBUILD"', options.rawIds[1]).replaceAll('"NEIGHBOUR"', BIG_ID_NEIGHBOUR);
 			return { exit: 0, state: "exited", stdout: text };
 		},
-		build() {
+	build(args) {
 			if (options.admissionRefused) {
 				// Native admission refusal (RCH-I003/RCH-I001): no wrapper is ever journaled and nothing runs remotely.
 				return { pid: 0, alive: () => false, result: Promise.resolve({ exit: 1, state: "exited", stdout: "" } as NativeRchResult) };
 			}
-			submitted++; running = true; remoteRunning = true;
+		submitted++; running = true; remoteRunning = true;
+		const at = args.indexOf("--worker");
+		currentWorker = at >= 0 && typeof args[at + 1] === "string" ? args[at + 1] as string : null;
+		if (currentWorker) submittedWorkers.push(currentWorker);
 			const result = new Promise<NativeRchResult>(resolve => { finish = resolve; });
 			if (options.delayedJournal) {
 				// Hold completion until the identification phase ends; no wall-clock race in this model.
@@ -84,7 +96,7 @@ function nativeFixture(options: { freeBefore?: number; freeAfter?: number; nativ
 			return { pid: 41001, alive: () => running, result };
 		},
 	};
-	return { executor, submitted: () => submitted, remoteActive: () => remoteRunning, recoverCalls: () => recoverCalls };
+	return { executor, submitted: () => submitted, submittedWorkers: () => submittedWorkers, remoteActive: () => remoteRunning, recoverCalls: () => recoverCalls };
 }
 
 const input = { requiredSlots: 2, command: ["cargo", "test", "--locked", "-j", "2"], apply: true };
@@ -365,4 +377,56 @@ test("deadLeases reads only a complete journal and honours its exclusions", () =
 	expect(ids(reply([row("a"), row("b", { wrapper_pid: 60002 })]), { ...scope, excludePids: [60002] })).toEqual(["a"]);
 	expect(ids(reply([row("a"), row("b")]), { ...scope, excludeWrapperIds: ["a", "b"] })).toEqual([]);
 	expect(ids(reply([row("a"), row("b", { worker_id: "worker-b" })]), { ...scope, worker: "worker-b" })).toEqual(["b"]);
+});
+
+test("a worker at 95% memory pressure refuses admission while one at 40% admits the build", async () => {
+	const fixture = nativeFixture({ nativeExit: 0, remoteExit: 0, memPressure: 95, moreWorkers: [{ id: "worker-b", memPressure: 40 }] });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.overall).toBe("COMPLETE");
+	expect(result.worker).toBe("worker-b");
+	expect(fixture.submittedWorkers()).toEqual(["worker-b"]);
+});
+
+test("absent memory telemetry refuses admission fail-closed and never submits", async () => {
+	const fixture = nativeFixture({ memPressure: null });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.overall).toBe("REFUSED");
+	expect(result.reason).toBe("rch_capacity_unavailable");
+	expect(fixture.submitted()).toBe(0);
+});
+
+test("absent build disk telemetry refuses admission fail-closed and never submits", async () => {
+	const fixture = nativeFixture({ diskGb: null });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.overall).toBe("REFUSED");
+	expect(result.reason).toBe("rch_capacity_unavailable");
+	expect(fixture.submitted()).toBe(0);
+});
+
+test("a SIGKILLed remote build (exit 137) is reported OOM with the worker name, never a plain test failure", async () => {
+	const fixture = nativeFixture({ nativeExit: 0, remoteExit: 137 });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.worker).toBe("worker-a");
+	expect(result.compilerExit).toBe(137);
+	expect(result.overall).toBe("BUILD_FAILED");
+	expect(result.reason).toContain("oom_killed_on_worker-a");
+	expect(result.reason).not.toContain("native_remote_command_failed");
+	expect(fixture.submitted()).toBe(1);
+});
+
+test("an OOM-killed build is retried once on another worker and the retry can complete", async () => {
+	const fixture = nativeFixture({ nativeExit: 0, remoteExit: 137, remoteExitAfterRetry: 0, memPressure: 10, moreWorkers: [{ id: "worker-b", memPressure: 20 }] });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(fixture.submitted()).toBe(2);
+	expect(fixture.submittedWorkers()).toEqual(["worker-a", "worker-b"]);
+	expect(result.worker).toBe("worker-b");
+	expect(result.overall).toBe("COMPLETE");
+});
+
+test("a lone worker at 95% memory pressure refuses admission and never submits", async () => {
+	const fixture = nativeFixture({ memPressure: 95 });
+	const result = await runRchCycle(input, fixture.executor);
+	expect(result.overall).toBe("REFUSED");
+	expect(result.reason).toBe("rch_capacity_unavailable");
+	expect(fixture.submitted()).toBe(0);
 });

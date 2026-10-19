@@ -32,6 +32,8 @@ export interface RchWorker {
 	used: number;
 	free: number;
 	buildDiskFreeGb: number | null;
+	/** Native `pressure_memory_pressure` (rch 2.1.34 `status --json`); null when the daemon omits it. */
+	memoryPressure: number | null;
 }
 export interface RchStatus {
 	workers: RchWorker[];
@@ -102,6 +104,12 @@ function jsonResult(result: NativeRchResult): unknown {
 	try { return JSON.parse(result.stdout); } catch { return null; }
 }
 
+/** Kit admission policy on the native memory-pressure number (observed ~5-6 on idle healthy
+workers 2026-10-19; native units/threshold undocumented, read as percent-used: contabo-4 died at
+100% memory in the ompkit-774u.6.1 incident). A worker at or above this refuses new builds.
+Re-verify against `rch status --json` under load; upstream free-bytes telemetry plus per-build
+peak history (ompkit-z7zj follow-up) would replace this heuristic with an exact fit check. */
+export const MEMORY_PRESSURE_REFUSE = 90;
 /** Decode the installed status envelope. Absent freshness is unknown, never healthy. */
 export function parseRchStatus(value: unknown): RchStatus | null {
 	const envelope = object(value);
@@ -117,15 +125,28 @@ export function parseRchStatus(value: unknown): RchStatus | null {
 		workers.push({ id: row.id, status: typeof row.status === "string" ? row.status : "unknown", fresh: row.pressure_telemetry_fresh === true,
 			confidence: typeof row.pressure_confidence === "string" ? row.pressure_confidence : "unknown", pressure: typeof row.pressure_state === "string" ? row.pressure_state : "unknown",
 			total: row.total_slots, used: row.used_slots, free: row.total_slots - row.used_slots,
-			buildDiskFreeGb: typeof row.pressure_build_disk_free_gb === "number" && Number.isFinite(row.pressure_build_disk_free_gb) ? row.pressure_build_disk_free_gb : null });
+			buildDiskFreeGb: typeof row.pressure_build_disk_free_gb === "number" && Number.isFinite(row.pressure_build_disk_free_gb) ? row.pressure_build_disk_free_gb : null,
+			memoryPressure: typeof row.pressure_memory_pressure === "number" && Number.isFinite(row.pressure_memory_pressure) && row.pressure_memory_pressure >= 0 ? row.pressure_memory_pressure : null });
 	}
 	return { workers, active: daemon.active_builds.length, queued: daemon.queued_builds.length };
 }
 function trusted(worker: RchWorker): boolean {
 	return worker.status === "healthy" && worker.fresh && worker.confidence === "high" && (worker.pressure === "healthy" || worker.pressure === "warning");
 }
-function choose(status: RchStatus, input: RchCycleInput): RchWorker | undefined {
-	return status.workers.find(worker => (!input.worker || worker.id === input.worker) && trusted(worker) && worker.free >= input.requiredSlots);
+/** Slot count alone admitted two heavy builds onto one worker and both died (ompkit-774u.6.1).
+A worker is admissible only with known, non-exhausted build disk and known memory pressure below
+refusal; among admissible workers the least memory-pressured is chosen. Absent telemetry refuses,
+never admits: it is unknown, not free. */
+function choose(status: RchStatus, input: RchCycleInput, exclude?: ReadonlySet<string>): RchWorker | undefined {
+	let best: RchWorker | undefined, bestPressure = Infinity;
+	for (const worker of status.workers) {
+		if (input.worker && worker.id !== input.worker) continue;
+		if (exclude?.has(worker.id)) continue;
+		if (!trusted(worker) || worker.free < input.requiredSlots || worker.buildDiskFreeGb === null || !(worker.buildDiskFreeGb > 0)) continue;
+		if (worker.memoryPressure === null || worker.memoryPressure >= MEMORY_PRESSURE_REFUSE) continue;
+		if (worker.memoryPressure < bestPressure) { best = worker; bestPressure = worker.memoryPressure; }
+	}
+	return best;
 }
 function birthKey(lease: Record<string, unknown>): string | null {
 	const start = object(object(lease.process_birth)?.start);
@@ -242,66 +263,90 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	if (options.some(arg => arg === "--" || arg === "--worker" || arg.startsWith("--worker=") || arg === "--no-self-healing" || arg === "--no-hook-auto-start" || arg.includes("\0"))) return finish();
 	result.before = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
 	if (!result.before) { result.reason = "rch_status_unavailable"; return finish(); }
-	let worker = choose(result.before, input);
-	const status = result.before;
-	// Dead-owner leases hold pool slots; look on the admissible worker, or the trusted worker whose slots they may be holding.
-	const scope = worker ?? result.before.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
-	if (!input.apply) {
+	// An OOM-killed build (remote exit 137) is retried once on another worker; every other outcome
+	// settles on the first attempt. result.before stays the first snapshot; result.after the last.
+	const oomExcluded = new Set<string>();
+	let oomWorker: string | null = null;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const snapshot = attempt === 0 ? result.before : parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
+		if (!snapshot) {
+			if (attempt === 0) { result.reason = "rch_status_unavailable"; return finish(); }
+			result.overall = "BUILD_FAILED"; result.reason = `oom_killed_on_${oomWorker}_exit_137_status_unavailable_for_retry`;
+			return finish();
+		}
+		let worker = choose(snapshot, input, oomExcluded);
+		const status = snapshot;
+		// Dead-owner leases hold pool slots; look on the admissible worker, or the trusted worker whose slots they may be holding.
+		const scope = worker ?? snapshot.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
+		if (!input.apply) {
+			if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
+			result.overall = "PLAN"; result.reason = worker ? "admissible_snapshot_not_a_reservation" : "rch_capacity_unavailable";
+			result.worker = worker?.id ?? input.worker ?? null; result.nextAgentReady = Boolean(worker); return finish();
+		}
+		if (input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "cancelled_before_submit"; return finish(); }
 		if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
-		result.overall = "PLAN"; result.reason = worker ? "admissible_snapshot_not_a_reservation" : "rch_capacity_unavailable";
-		result.worker = worker?.id ?? input.worker ?? null; result.nextAgentReady = Boolean(worker); return finish();
-	}
-	if (input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "cancelled_before_submit"; return finish(); }
-	if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
-	if (!worker || worker.pressure === "warning") {
-		// Native policy decides eligibility. A zero-byte reclaim is not restored capacity.
-		const candidate = worker ?? status.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
-		if (candidate) {
-			const reclaimed = await executor.capture(["gc", "--workers", candidate.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS, input.signal);
-			if (reclaimed.state !== "exited" || reclaimed.exit !== 0) { result.reason = "rch_pre_gc_failed"; return finish(); }
-			const fresh = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
-			if (!fresh) { result.reason = "rch_status_unavailable"; return finish(); }
-			worker = choose(fresh, input);
+		if (!worker || worker.pressure === "warning") {
+			// Native policy decides eligibility. A zero-byte reclaim is not restored capacity.
+			const candidate = worker ?? status.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
+			if (candidate) {
+				const reclaimed = await executor.capture(["gc", "--workers", candidate.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS, input.signal);
+				if (reclaimed.state !== "exited" || reclaimed.exit !== 0) { result.reason = "rch_pre_gc_failed"; return finish(); }
+				const fresh = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
+				if (!fresh) { result.reason = "rch_status_unavailable"; return finish(); }
+				worker = choose(fresh, input, oomExcluded);
+			}
 		}
-	}
-	if (!worker) { result.reason = "rch_capacity_unavailable"; return finish(); }
-	result.worker = worker.id;
-	try {
-		const child = executor.build(["exec", "--worker", worker.id, ...options, "--", ...input.command], input.signal);
-		result.wrapperId = await bindOwnedWrapper(executor, child, worker.id, input.signal);
-		const compiled = await child.result;
-		result.nativeExit = compiled.exit; result.compilerState = compiled.state;
-	} finally {
-		// Recover only our bound native identity, never a PID lookup after exit or an unrelated journal row.
-		let returned = result.wrapperId ? await returnedLease(executor, result.wrapperId, worker.id) : null;
-		if (result.wrapperId && returned?.retired !== true && (result.compilerState === "cancelled" || input.signal?.aborted)) {
-			// Killing the local client is not proof that its remote command stopped.
-			const cancelled = await executor.capture(["jobs", "cancel", result.wrapperId, "--json"], CONTROL_TIMEOUT_MS);
-			if (cancelled.state === "exited" && cancelled.exit === 0) returned = await returnedLease(executor, result.wrapperId, worker.id);
+		if (!worker) {
+			if (oomWorker) { result.overall = "BUILD_FAILED"; result.reason = `oom_killed_on_${oomWorker}_exit_137_no_retry_worker`; }
+			else result.reason = "rch_capacity_unavailable";
+			return finish();
 		}
-		if (returned?.retired === false && result.wrapperId) {
-			const recovered = await executor.capture(["jobs", "recover", result.wrapperId, "--json"], GC_TIMEOUT_MS);
-			if (recovered.state === "exited" && recovered.exit === 0) returned = await returnedLease(executor, result.wrapperId, worker.id);
+		result.worker = worker.id;
+		result.wrapperId = null; result.nativeExit = null; result.compilerExit = null; result.executionObserved = null;
+		result.compilerState = "not-submitted"; result.cleanup = "not-run"; result.after = null; result.nextAgentReady = null;
+		try {
+			const child = executor.build(["exec", "--worker", worker.id, ...options, "--", ...input.command], input.signal);
+			result.wrapperId = await bindOwnedWrapper(executor, child, worker.id, input.signal);
+			const compiled = await child.result;
+			result.nativeExit = compiled.exit; result.compilerState = compiled.state;
+		} finally {
+			// Recover only our bound native identity, never a PID lookup after exit or an unrelated journal row.
+			let returned = result.wrapperId ? await returnedLease(executor, result.wrapperId, worker.id) : null;
+			if (result.wrapperId && returned?.retired !== true && (result.compilerState === "cancelled" || input.signal?.aborted)) {
+				// Killing the local client is not proof that its remote command stopped.
+				const cancelled = await executor.capture(["jobs", "cancel", result.wrapperId, "--json"], CONTROL_TIMEOUT_MS);
+				if (cancelled.state === "exited" && cancelled.exit === 0) returned = await returnedLease(executor, result.wrapperId, worker.id);
+			}
+			if (returned?.retired === false && result.wrapperId) {
+				const recovered = await executor.capture(["jobs", "recover", result.wrapperId, "--json"], GC_TIMEOUT_MS);
+				if (recovered.state === "exited" && recovered.exit === 0) returned = await returnedLease(executor, result.wrapperId, worker.id);
+			}
+			result.compilerExit = returned?.compilerExit ?? null;
+			result.executionObserved = returned?.executionObserved ?? null;
+			// Do not reclaim against an unbound or still-active remote lease.
+			if (returned?.retired === true) {
+				const reclaimed = await executor.capture(["gc", "--workers", worker.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS);
+				result.cleanup = reclaimed.state === "exited" && reclaimed.exit === 0 ? "complete" : "failed";
+			} else result.cleanup = returned === null ? "unknown" : "failed";
+			result.after = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS)));
+			result.nextAgentReady = result.after ? choose(result.after, input, oomExcluded) !== undefined : null;
 		}
-		result.compilerExit = returned?.compilerExit ?? null;
-		result.executionObserved = returned?.executionObserved ?? null;
-		// Do not reclaim against an unbound or still-active remote lease.
-		if (returned?.retired === true) {
-			const reclaimed = await executor.capture(["gc", "--workers", worker.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS);
-			result.cleanup = reclaimed.state === "exited" && reclaimed.exit === 0 ? "complete" : "failed";
-		} else result.cleanup = returned === null ? "unknown" : "failed";
-		result.after = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS)));
-		const after = result.after?.workers.find(row => row.id === worker.id);
-		result.nextAgentReady = after ? trusted(after) && after.free >= input.requiredSlots : null;
+		// Exit 137 is 128+SIGKILL: the Linux OOM killer's signature on a remote rustc (native RCH-E302
+		// remediation names the OOM killer first). The journal records exit codes, not signals, so a
+		// deliberate SIGKILL is indistinguishable here; the worker name is always attached.
+		const oomKilled = result.compilerState !== "cancelled" && !input.signal?.aborted && result.compilerExit === 137;
+		if (result.compilerState === "cancelled" || input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "native_execution_cancelled"; break; }
+		if (oomKilled && attempt === 0) { oomExcluded.add(worker.id); oomWorker = worker.id; continue; }
+		if (oomKilled) { result.overall = "BUILD_FAILED"; result.reason = `oom_killed_on_${worker.id}_exit_137_remote_sigkill`; }
+		else if (result.compilerExit !== null && result.compilerExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_remote_command_failed"; }
+		else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.wrapperId === null && result.compilerExit === null && result.executionObserved !== true) { result.overall = "REFUSED"; result.reason = "rch_capacity_unavailable"; }
+		else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.executionObserved === true) { result.overall = "BUILD_FAILED"; result.reason = "artifact_return_refused"; }
+		else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0) { result.overall = "UNREADY"; result.reason = "rch_transport_unavailable"; }
+		else if (result.compilerState !== "exited" || result.executionObserved !== true) { result.overall = "UNREADY"; result.reason = "native_remote_completion_not_observed"; }
+		else if (result.cleanup !== "complete" || result.nextAgentReady !== true) { result.overall = "UNREADY"; result.reason = "post_run_readiness_not_proven"; }
+		else { result.overall = "COMPLETE"; result.reason = "native_return_and_readiness_observed"; }
+		break;
 	}
-	if (result.compilerState === "cancelled" || input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "native_execution_cancelled"; }
-	else if (result.compilerExit !== null && result.compilerExit !== 0) { result.overall = "BUILD_FAILED"; result.reason = "native_remote_command_failed"; }
-	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.wrapperId === null && result.compilerExit === null && result.executionObserved !== true) { result.overall = "REFUSED"; result.reason = "rch_capacity_unavailable"; }
-	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0 && result.executionObserved === true) { result.overall = "BUILD_FAILED"; result.reason = "artifact_return_refused"; }
-	else if (result.compilerState === "exited" && result.nativeExit !== null && result.nativeExit !== 0) { result.overall = "UNREADY"; result.reason = "rch_transport_unavailable"; }
-	else if (result.compilerState !== "exited" || result.executionObserved !== true) { result.overall = "UNREADY"; result.reason = "native_remote_completion_not_observed"; }
-	else if (result.cleanup !== "complete" || result.nextAgentReady !== true) { result.overall = "UNREADY"; result.reason = "post_run_readiness_not_proven"; }
-	else { result.overall = "COMPLETE"; result.reason = "native_return_and_readiness_observed"; }
 	return finish();
 }
 
