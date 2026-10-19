@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
 import { readDrainStore, staleClaims } from "./drain.ts";
@@ -17,6 +17,7 @@ import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
 import { pluginPackageHash } from "./apply-plugin.ts";
 import { inspectPluginRelease, livePluginReleaseIo } from "./plugin-release.ts";
+import { inspectHooks, liveHookFreshnessIo } from "./hook-refresh.ts";
 import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
@@ -54,6 +55,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	extensions: ["extensions", "extension_imports"],
 	browsers: ["browsers"],
 	identity: ["identity"],
+	hooks: ["hooks"],
 	"regex-tools": ["regex-tools"],
 	rch: ["rch", "rch_gc_roots", "rch_workers"],
 };
@@ -569,6 +571,8 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 	const skip = new Set(policy.skipProfiles as string[]);
 	const checked: string[] = [], missing: string[] = [], drifted: string[] = [], unsafe: string[] = [], listed: string[] = [], unverified: string[] = [], skipped: string[] = [];
 	const notCovered: { profile: string; reason: string }[] = [];
+	const unversioned: { profile: string; path: string; reason: string }[] = [];
+	const shipped = new Map<string, string>();
 	const destinations: string[] = [];
 	for (const name of policy.extensions as string[]) {
 		const source = join(root, "extensions", name), destination = join(home, ".omp", "omp-extensions", name);
@@ -576,6 +580,7 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 		try {
 			if (directoryPath(root, ["extensions"]) !== "directory" || pathState(source) !== "file") throw new Error("shipped extension is missing or unsafe");
 			const expected = digest(fileBytes(source));
+			shipped.set(name, expected);
 			const state = directoryPath(home, [".omp", "omp-extensions"]);
 			const kind = state === "directory" ? pathState(destination) : state;
 			if (kind === "missing") missing.push(name);
@@ -603,15 +608,28 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 		}
 		if (destinations.every((path) => (profile.data!.extensions as string[]).includes(path))) listed.push(profile.name);
 		else missing.push(`profile:${profile.name}`);
+		for (const entry of profile.data!.extensions as string[]) {
+			if (typeof entry !== "string" || !isAbsolute(entry)) continue;
+			const expected = shipped.get(basename(entry));
+			let reason: string | null = null;
+			if (expected === undefined) reason = `NO_MANIFEST_ENTRY: ${basename(entry)} is profile-listed but no shipped extension of that name exists`;
+			else {
+				try {
+					if (pathState(entry) !== "file" || digest(fileBytes(entry)) !== expected) reason = `BYTES_DRIFTED: listed bytes differ from the shipped ${basename(entry)} copy`;
+				} catch { reason = `UNREADABLE: listed path cannot be read: ${entry}`; }
+			}
+			if (reason) unversioned.push({ profile: profile.name, path: entry, reason });
+		}
 	}
 	const uncertain = !!inventoryIssue || !!shadow.issue || !!shadow.override || unverified.length > 0 || unsafe.length > 0;
-	return finding("extensions", uncertain ? "UNVERIFIED" : missing.length || drifted.length ? "DEGRADED" : "OK",
+	return finding("extensions", uncertain ? "UNVERIFIED" : missing.length || drifted.length || unversioned.length ? "DEGRADED" : "OK",
 		shadow.override ? "Selected project overrides extensions with an empty list; opt-in guard is inactive there" :
 			uncertain ? "Extension bytes or per-profile listing cannot establish effective loading" :
-			missing.length || drifted.length ? "Opt-in extension bytes or profile listing differ from the shipped manifest" :
+			missing.length || drifted.length || unversioned.length ? "Opt-in extension bytes or profile listing differ from the shipped manifest" :
 				"Opt-in extension bytes and on-disk profile lists match; runtime loading remains unverified",
 		"Review the extension opt-in plan and project settings; never infer guard activation from installed bytes.",
 		{ matching_bytes: checked, missing, drifted, unsafe, listed_profiles: listed, unverified_profiles: unverified,
+			unversioned_extensions: unversioned,
 			skipped_profiles: skipped, ...(shadow.override ? { project_override: shadow.override } : {}),
 			not_covered_profiles: notCovered,
 			...(shadow.issue ? { project_issue: shadow.issue } : {}), ...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}) });
@@ -1998,6 +2016,10 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (wants("plugin_links")) rows.push(inspectPluginLinks(root, home));
 	// FLEETUPG1: only on an explicit scope, since it asks GitHub for the latest release.
 	if (input.scope === "plugin_release") rows.push(inspectPluginRelease(livePluginReleaseIo(home)));
+	// HOOKREFRESH1: per-repo hook members vs the active release; explicit scope
+	// only (like plugin_release): it reads every fleet repo and stays out of
+	// the unscoped inventory.
+	if (input.scope === "hooks") rows.push(...inspectHooks(liveHookFreshnessIo(home, root)));
 	if (wants("effective_rules") && input.inventoryOnly && !input.scope) {
 		rows.push(finding("effective_rules", "NOT_RUN", "Presence inventory did not probe runtime rule activation", "Run omp-kit doctor --scope rules --json for live per-profile rule evidence."));
 	} else if (wants("effective_rules") && input.ompPath && manifest && profiles) {

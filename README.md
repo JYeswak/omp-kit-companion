@@ -603,6 +603,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope stale-worktree` | Worktree paths that remove lines landed in HEAD, with the blamed commit and bead | `omp-kit doctor --scope stale-worktree --project PATH` |
 | `--scope plugin_release` | Linked vs latest published plugin version, per profile | `omp-kit doctor --scope plugin_release` |
 | `--scope mission` | Repos building through rch and whether their gate calls the kit lease | `omp-kit doctor --scope mission` |
+| `--scope hooks` | Stale hook members per fleet repo | `omp-kit doctor --scope hooks` |
 | `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus

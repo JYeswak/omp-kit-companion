@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
 import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
+import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
 export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag" | "project"> & {
@@ -30,6 +31,12 @@ export type KitUpdateJobDependencies = {
 	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
 	/** Test seam for finishing a PARTIAL receipt by its postimages. Production uses `reconcilePendingUpdate`, the `update --reconcile` path. */
 	reconcileReceipt?: (input: { stateRoot: string; prefix: string; id: string }) => KitReconcileResult;
+	/**
+	 * HOOKREFRESH1 test seam for the post-install fleet hook refresh.
+	 * Production re-runs scripts/install-commit-msg-bead.sh for every
+	 * pull-enabled fleet-watch repo; hermetic when HOME names no fleet config.
+	 */
+	refreshHooks?: (store: string, home: string) => Promise<HookRefreshReport>;
 };
 export type KitUpdateJobResult = {
 	status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "PENDING" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
@@ -38,12 +45,18 @@ export type KitUpdateJobResult = {
 	/** The release's full-test postcheck, with its reason and detail when it did not pass; it never decides the receipt. */
 	postcheck?: "PASS" | "FAIL" | "NOT_RUN"; postcheckReason?: string; postcheckDetail?: KitPostcheckDetail | null;
 	relink?: "APPLIED" | "FAILED" | "NOT_RUN"; pluginReceiptId?: string; pluginUndoCommand?: string; service?: "APPLIED" | "FAILED" | "NOT_RUN";
+	/**
+	 * HOOKREFRESH1: fleet hook refresh after a successful install.
+	 * PENDING_COMMIT counts tracked-hooks repos whose refreshed members wait
+	 * for the owning director to commit (owner route); only failed > 0 is FINDINGS.
+	 */
+	hooks?: { status: "APPLIED" | "PENDING_COMMIT" | "FAILED" | "NOT_RUN"; repos: number; refreshed: number; fresh: number; pending_commit: number; failed: number };
 };
 
-/** OK only for a clean cycle. A pending receipt, a postcheck that did not pass, or a failed relink or service reconcile is FINDINGS, even after a verified activation. */
+/** OK only for a clean cycle. A pending receipt, a postcheck that did not pass, or a failed relink, service reconcile or hook refresh is FINDINGS, even after a verified activation. */
 export function kitUpdateJobOverall(result: KitUpdateJobResult): "OK" | "FINDINGS" {
 	return result.status === "FAILED" || result.status === "PENDING" || (result.postcheck !== undefined && result.postcheck !== "PASS") ||
-		result.relink === "FAILED" || result.service === "FAILED" ? "FINDINGS" : "OK";
+		result.relink === "FAILED" || result.service === "FAILED" || (result.hooks !== undefined && result.hooks.failed > 0) ? "FINDINGS" : "OK";
 }
 
 /** owner/repo slug for OMP_KIT_UPDATE_REPO; shared by the service renderer and the CLI gate. */
@@ -285,8 +298,28 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`${findings}; kit is on ${activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
 			return record(config.stateRoot, runId, { ...activated, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
 		}
-		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}`);
-		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt });
+		// HOOKREFRESH1: the kit symlink points at the new release, so re-run the
+		// hook installer for every pull-enabled fleet repo. Tracked-hooks repos
+		// stay PENDING_COMMIT for their director; a refresh failure never un-does
+		// the update but marks the job FINDINGS. Hermetic in tests: a fixture
+		// HOME names no fleet config, so zero repos refresh.
+		const refresh = dependencies.refreshHooks ?? refreshFleetHooksLive;
+		let hooks: KitUpdateJobResult["hooks"];
+		try {
+			const report = store ? await refresh(store, config.home) : null;
+			hooks = report === null
+				? { status: "NOT_RUN" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 0 }
+				: {
+					status: report.failed > 0 ? "FAILED" as const : report.pending_commit > 0 ? "PENDING_COMMIT" as const : "APPLIED" as const,
+					repos: report.repos, refreshed: report.refreshed, fresh: report.fresh, pending_commit: report.pending_commit, failed: report.failed,
+				};
+		} catch {
+			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };
+		}
+		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
+			: `; hooks ${hooks.status}: ${hooks.refreshed} refreshed, ${hooks.fresh} fresh, ${hooks.pending_commit} pending director commit, ${hooks.failed} failed over ${hooks.repos} repo(s)`;
+		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}${hookNote}`);
+		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		await dependencies.notify?.("omp-kit update job failed: " + reason);
