@@ -1,0 +1,1 @@
+- Add a launch-constraint probe for kit LaunchAgents (`tests/e2e/svcpin-launch-constraint.sh`) and its 2026-10-18 evidence. After a kit release, each kit agent loses exactly one spawn to an AMFI launch constraint pinned to the old ad-hoc cdhash, and the next spawn recovers. The probe reports INCONCLUSIVE when Background Task Management never pins its disposable label.
