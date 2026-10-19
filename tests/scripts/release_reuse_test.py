@@ -465,7 +465,8 @@ class RollingReleaseTest(unittest.TestCase):
             args = argparse.Namespace(repository=REPOSITORY, selection=str(root / "selection.json"),
                                       notes=str(root / "notes"), publisher_id="91", publisher_attempt="1")
             def run(*, proof: Any = receipt, ref: Any = source, artifact: Any = True, sign: Any = None,
-                    rerun: Any = False, after_changed: Any = False, attempted: Any = False, prior_recovery: Any = False):
+                    rerun: Any = False, after_changed: Any = False, attempted: Any = False, prior_recovery: Any = False,
+                    devid: bool = False):
                 args.publisher_id, args.publisher_attempt = ("90", "2") if rerun else ("91", "1")
                 historical_reads = 0
                 recovery = dict(publisher, id=92, run_started_at="2026-01-01T00:03:00Z",
@@ -508,6 +509,7 @@ class RollingReleaseTest(unittest.TestCase):
                      patch.object(release_reuse, "_run_rows", side_effect=rows), \
                      patch.object(release_reuse, "_assert_main_execution"), \
                      patch.object(release_reuse, "_artifact_files", return_value={"tag-creation.json": json.dumps(proof).encode()}), \
+                     patch.object(release_reuse, "devid_protocol", return_value=devid), \
                      patch.object(release_reuse, "_native_dispatch", return_value="777") as dispatch:
                     error = None
                     try:
@@ -551,6 +553,131 @@ class RollingReleaseTest(unittest.TestCase):
                 error, dispatch = run(sign=dict(sign, status=status, conclusion=conclusion))
                 self.assertEqual(error is None, conclusion != "failure")
                 dispatch.assert_not_called()
+            # DEVID-SIGN-V1: a recovered creator never dispatches the source's signing; the local signer does.
+            error, dispatch = run(devid=True)
+            self.assertIsNone(error)
+            dispatch.assert_not_called()
+            error, dispatch = run(devid=True, attempted=True)
+            self.assertIsNone(error)
+            dispatch.assert_not_called()
+
+    def test_devid_signer_dispatches_tag_ref_signing_exactly_once_behind_a_crash_receipt(self) -> None:
+        selection = selected_owner()
+        source, version, train = selection["source_sha"], selection["version"], selection["train_run_id"]
+        qualified = dict(candidate_run(), id=int(RUN_ID), run_attempt=1, status="completed", conclusion="success",
+                         display_title=release_reuse.release_title("qualify", version, source, train))
+        sign = dict(candidate_run(), id=777, head_sha=source, head_branch=f"v{version}", status="in_progress", conclusion=None,
+                    display_title=release_reuse.release_title("sign", version, source, train), run_started_at="2026-01-01T00:00:00Z")
+        darwin = "d" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "selection.json").write_text(json.dumps(selection))
+            (root / "notes").write_bytes(b"notes")
+            args = argparse.Namespace(repository=REPOSITORY, selection=str(root / "selection.json"), notes=str(root / "notes"),
+                                      darwin_sha256=darwin, receipt_dir="")
+            def run(receipts: Path, *, listed: Any = None, devid: bool = True, ref: str = source,
+                    lost_response: bool = False, digest: str = darwin) -> tuple[Exception | None, Any]:
+                args.receipt_dir, args.darwin_sha256 = str(receipts), digest
+                def api(repository, endpoint, **kwargs):
+                    if endpoint == f"git/ref/tags/v{version}":
+                        return {"object": {"type": "commit", "sha": ref}}
+                    if endpoint == "actions/runs/777" and listed:
+                        return listed
+                    raise AssertionError(endpoint)
+                def rows(repository, workflow, event="workflow_dispatch", **kwargs):
+                    return [listed] if listed and workflow == "release.yml" else []
+                dispatched = {"side_effect": ValueError("native dispatch did not return HTTP 200 run details")} if lost_response \
+                    else {"return_value": "777"}
+                with patch.object(release_reuse, "_authorize_selection", return_value=qualified), \
+                     patch.object(release_reuse, "_api", side_effect=api), \
+                     patch.object(release_reuse, "_run_rows", side_effect=rows), \
+                     patch.object(release_reuse, "devid_protocol", return_value=devid), \
+                     patch.object(release_reuse, "_native_dispatch", **dispatched) as dispatch, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        release_reuse._dispatch_devid_sign(args)
+                    except ValueError as caught:
+                        return caught, dispatch
+                    return None, dispatch
+            receipts = root / "receipts"
+            receipts.mkdir()
+            receipt = receipts / f"sign-{version}-{source}.json"
+            error, dispatch = run(receipts)
+            self.assertIsNone(error)
+            dispatch.assert_called_once_with(REPOSITORY, "release.yml", f"v{version}", {
+                "version": version, "sha": source, "train_run_id": train, "train_attempt": selection["train_attempt"],
+                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID, "darwin_sha256": darwin})
+            self.assertEqual(json.loads(receipt.read_text())["run_id"], "777")
+            # The run is not listed yet: the receipt alone refuses a replay.
+            error, dispatch = run(receipts)
+            self.assertIn("OUTCOME_UNKNOWN", str(error))
+            dispatch.assert_not_called()
+            # Once listed, the cut reports its run; a failed run is never redispatched.
+            error, dispatch = run(receipts, listed=sign)
+            self.assertIsNone(error)
+            dispatch.assert_not_called()
+            error, dispatch = run(receipts, listed=dict(sign, status="completed", conclusion="failure"))
+            self.assertIn("never redispatch", str(error))
+            dispatch.assert_not_called()
+            # A lost POST response leaves a pending receipt that also refuses a replay.
+            lost = root / "lost"
+            lost.mkdir()
+            error, dispatch = run(lost, lost_response=True)
+            self.assertIsInstance(error, ValueError)
+            dispatch.assert_called_once()
+            self.assertIsNone(json.loads((lost / receipt.name).read_text())["run_id"])
+            error, dispatch = run(lost)
+            self.assertIn("OUTCOME_UNKNOWN", str(error))
+            dispatch.assert_not_called()
+            # Legacy sources, a tag on another commit and a malformed digest never dispatch or leave a receipt.
+            for options in ({"devid": False}, {"ref": "f" * 40}, {"digest": "D" * 64}, {"digest": "d" * 63}):
+                with self.subTest(options=options):
+                    fresh = Path(tempfile.mkdtemp(dir=directory))
+                    error, dispatch = run(fresh, **options)
+                    self.assertIsInstance(error, ValueError)
+                    dispatch.assert_not_called()
+                    self.assertEqual(list(fresh.iterdir()), [])
+
+    def test_darwin_signing_mode_comes_from_the_exact_source_and_defaults_to_adhoc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            def git(*args: str) -> str:
+                result = subprocess.run(["git", "-C", str(root), *args], env=environment, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout.strip()
+            git("init", "-q", "--initial-branch=main")
+            git("config", "user.name", "Signing Mode Fixture")
+            git("config", "user.email", "signing-mode@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("config", "core.hooksPath", "/dev/null")
+            (root / "README").write_text("before the switch\n")
+            git("add", ".")
+            git("commit", "-qm", "legacy source")
+            commits = {"absent": git("rev-parse", "HEAD")}
+            config = root / release_reuse.SIGNING_CONFIG
+            config.parent.mkdir(parents=True)
+            for name, body in (("adhoc", {"schema_version": 1, "darwin_signing": "adhoc"}),
+                               ("developer-id", {"schema_version": 1, "darwin_signing": "developer-id"}),
+                               ("unknown", {"schema_version": 1, "darwin_signing": "notarize-later"}),
+                               ("schema", {"schema_version": 2, "darwin_signing": "developer-id"})):
+                config.write_text(json.dumps(body) + "\n")
+                git("add", ".")
+                git("commit", "-qm", f"mode {name}")
+                commits[name] = git("rev-parse", "HEAD")
+            original = release_reuse._command
+            with patch.object(release_reuse, "_command", side_effect=lambda argv, **kwargs: original(argv, cwd=str(root), **kwargs)), \
+                 patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(release_reuse.darwin_signing(commits["absent"]), "adhoc")
+                self.assertEqual(release_reuse.darwin_signing(commits["adhoc"]), "adhoc")
+                self.assertFalse(release_reuse.devid_protocol(commits["adhoc"]))
+                self.assertEqual(release_reuse.darwin_signing(commits["developer-id"]), "developer-id")
+                self.assertTrue(release_reuse.devid_protocol(commits["developer-id"]))
+                for name in ("unknown", "schema"):
+                    with self.subTest(name=name), self.assertRaisesRegex(ValueError, "no valid darwin_signing"):
+                        release_reuse.darwin_signing(commits[name])
+                with self.assertRaisesRegex(ValueError, "not an exact commit"):
+                    release_reuse.darwin_signing("HEAD")
 
     def test_running_and_red_descendants_do_not_starve_eligible_green(self) -> None:
         a, b, c = "a" * 40, "b" * 40, "c" * 40
@@ -774,6 +901,7 @@ class RollingReleaseTest(unittest.TestCase):
                  patch.object(release_reuse, "_api", side_effect=api), \
                  patch.object(release_reuse, "_published", return_value={f"v{BASE_VERSION}"}) as published, \
                  patch.object(release_reuse, "_native_dispatch", return_value="9001") as dispatch, \
+                 patch.object(release_reuse, "devid_protocol", return_value=False), \
                  patch.object(release_reuse.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(release_reuse._drive(args), 0)
                 dispatch.assert_called_once_with(REPOSITORY, "release-train.yml", "main", {"candidate_run_id": "67890"})
@@ -782,8 +910,9 @@ class RollingReleaseTest(unittest.TestCase):
 
     def _watch_qualification(self, *, qualified_overrides: dict[str, Any] | None = None,
                              publisher_rows: list[dict[str, Any]] | None = None,
-                             sign_rows: list[dict[str, Any]] | None = None) -> tuple[Any, Exception | None]:
-        """Drive the real watch loop for a finished qualification; returns the dispatch mock and the terminal error."""
+                             sign_rows: list[dict[str, Any]] | None = None,
+                             devid: bool = False, tag: str | None = None) -> tuple[Any, Exception | None, str]:
+        """Drive the real watch loop for a finished qualification; returns the dispatch mock, the terminal error and stdout."""
         with tempfile.TemporaryDirectory() as directory:
             plan = {"kind": "resume", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "train_id": "810", "train_attempt": "1",
                     "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": []}
@@ -800,26 +929,51 @@ class RollingReleaseTest(unittest.TestCase):
                     return qualified
                 if endpoint == "actions/runs/9001":
                     return dict(candidate_run(), id=9001, path=release_reuse.OWNER_WORKFLOW, status="in_progress", conclusion=None)
+                if endpoint == f"git/ref/tags/v{BASE_VERSION}":
+                    if tag is None:
+                        raise ValueError("command failed (1): gh api: Not Found (HTTP 404)")
+                    return {"object": {"type": "commit", "sha": tag}}
                 raise AssertionError(endpoint)
             clock = iter([0, 1, 2, 3, 10_000])
             args = argparse.Namespace(repository=REPOSITORY, plan=str(path), stage="watch", timeout=60)
             error: Exception | None = None
+            output = io.StringIO()
             with patch.object(release_reuse, "_load_owner_authority", return_value=owner_fixture()), \
                  patch.object(release_reuse, "_run_rows", side_effect=rows), \
                  patch.object(release_reuse, "_api", side_effect=api), \
                  patch.object(release_reuse, "_native_dispatch", return_value="9001") as dispatch, \
+                 patch.object(release_reuse, "devid_protocol", return_value=devid), \
                  patch.object(release_reuse.time, "monotonic", side_effect=lambda: next(clock)), \
-                 patch.object(release_reuse.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                 patch.object(release_reuse.time, "sleep"), contextlib.redirect_stdout(output):
                 try:
                     release_reuse._drive(args)
                 except ValueError as caught:
                     error = caught
-            return dispatch, error
+            return dispatch, error, output.getvalue()
 
     def test_qualified_run_without_workflow_run_delivery_wakes_its_publisher_exactly_once(self) -> None:
-        dispatch, error = self._watch_qualification()
+        dispatch, error, _ = self._watch_qualification()
         dispatch.assert_called_once_with(REPOSITORY, "release-train.yml", "main", {"candidate_run_id": RUN_ID})
         self.assertRegex(str(error), "deadline expired")
+
+    def test_tagged_devid_cut_releases_the_train_lock_while_awaiting_the_local_signer(self) -> None:
+        title = release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810")
+        delivered = [dict(candidate_run(), id=9100, display_title=f"Publish {title}", status="completed", conclusion="success")]
+        dispatch, error, output = self._watch_qualification(publisher_rows=delivered, devid=True, tag=SOURCE_SHA)
+        self.assertIsNone(error)
+        dispatch.assert_not_called()
+        self.assertIn(f"TRAIN=awaiting-developer-id source_sha={SOURCE_SHA} version={BASE_VERSION}", output)
+        sign = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}", status="in_progress", conclusion=None,
+                    display_title=release_reuse.release_title("sign", BASE_VERSION, SOURCE_SHA, "810"),
+                    run_started_at="2026-10-17T01:11:00Z")
+        # Keep watching: before the tag exists, on another tag, for a legacy source, or once the signer has dispatched.
+        for options in ({"devid": True, "tag": None}, {"devid": True, "tag": "f" * 40}, {"devid": False, "tag": SOURCE_SHA},
+                        {"devid": True, "tag": SOURCE_SHA, "sign_rows": [sign]}):
+            with self.subTest(options=options):
+                dispatch, error, output = self._watch_qualification(publisher_rows=delivered, **options)
+                self.assertRegex(str(error), "deadline expired")
+                self.assertNotIn("awaiting-developer-id", output)
+                dispatch.assert_not_called()
 
     def test_qualification_publisher_wake_refuses_failed_fresh_delivered_or_already_signing_runs(self) -> None:
         title = release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "810")
@@ -839,7 +993,7 @@ class RollingReleaseTest(unittest.TestCase):
         }
         for name, options in cases.items():
             with self.subTest(name):
-                dispatch, error = self._watch_qualification(**options)
+                dispatch, error, _ = self._watch_qualification(**options)
                 dispatch.assert_not_called()
                 self.assertIsNotNone(error)
 
@@ -1382,7 +1536,8 @@ class RollingReleaseTest(unittest.TestCase):
             (root / ".github/workflows").mkdir(parents=True)
             for name in (".github/workflows/release.yml", ".github/workflows/ci.yml",
                          "scripts/release_reuse.py", "scripts/native-candidate.py",
-                         "tests/e2e/real-home-journey.sh"):
+                         "tests/e2e/real-home-journey.sh", "scripts/devid_release.py",
+                         "packaging/macos/omp-kit.entitlements.plist", "scripts/release-signing.json"):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# ROLLING-RELEASE-V3: fixture protocol\n")
@@ -1457,7 +1612,8 @@ class RollingReleaseTest(unittest.TestCase):
     def test_green_source_with_stale_signer_bytes_cannot_allocate_despite_unchanged_label(self) -> None:
         for path in (".github/workflows/release.yml", ".github/workflows/ci.yml",
                      "scripts/release_reuse.py", "scripts/native-candidate.py",
-                     "tests/e2e/real-home-journey.sh"):
+                     "tests/e2e/real-home-journey.sh", "scripts/devid_release.py",
+                     "packaging/macos/omp-kit.entitlements.plist", "scripts/release-signing.json"):
             with self.subTest(path=path), self.published_floor_case(signer_drift=path) as (args, root, _, dispatch):
                 self.assertEqual(release_reuse._drive(args), 0)
                 self.assertEqual(json.loads((root / "plan.json").read_text()), {"kind": "skip"})

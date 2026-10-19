@@ -307,6 +307,12 @@ jobs:
           python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
           python3 scripts/release_reuse.py promotion --repository "$GITHUB_REPOSITORY" --source-sha "$SHA" --version "$VERSION"
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
+          # DEVID-SIGN-V1: a source whose checked-in switch says developer-id is signed by the local Developer ID
+          # signer, which dispatches its signing run. Sources without the switch, and "adhoc", keep this dispatch.
+          if git cat-file -e "$SHA:scripts/release-signing.json" 2>/dev/null; then
+            mode="$(git show "$SHA:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing | select(. == "adhoc" or . == "developer-id")')"
+            if [[ "$mode" == developer-id ]]; then echo 'devid=true' >> "$GITHUB_OUTPUT"; fi
+          fi
           if git rev-parse -q --verify "refs/tags/v$VERSION"; then
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
             python3 scripts/release_reuse.py recover-tag-creation --repository "$GITHUB_REPOSITORY" \
@@ -403,10 +409,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Dispatch signing after durable creation acknowledgment
-        if: steps.authority.outputs.recovered != 'true'
+        if: steps.authority.outputs.recovered != 'true' && steps.authority.outputs.devid != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
             -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"
+      - name: Leave tag-ref signing to the local Developer ID signer
+        if: steps.authority.outputs.devid == 'true'
+        run: |
+          echo "SIGNING=awaiting-developer-id version=$VERSION source_sha=$SHA qualification=$RUN_ID"
+          echo 'Run scripts/sign-darwin-release.sh on the signing Mac (docs/release-signing.md).'

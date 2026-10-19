@@ -28,6 +28,11 @@ RELEASE_WORKFLOW = ".github/workflows/release.yml"
 CI_WORKFLOW = ".github/workflows/ci.yml"
 OWNER_WORKFLOW = ".github/workflows/release-train.yml"
 ALLOCATION_PROTOCOL = "rolling-release-allocation-v1"
+# DEVID-SIGN-V1 (docs/release-signing.md): the exact source's checked-in darwin signing mode. "developer-id" means the
+# local Developer ID signer dispatches its tag-ref signing run and the publisher only tags it; "adhoc" (and every
+# source that predates the switch) keeps the publisher-dispatched path.
+SIGNING_CONFIG = "scripts/release-signing.json"
+DARWIN_SIGNING_MODES = ("adhoc", "developer-id")
 
 
 class UnboundQualification(ValueError):
@@ -39,6 +44,23 @@ def _git_sha(value: Any) -> bool:
         char in "0123456789abcdef" for char in value
     )
 
+
+def darwin_signing(source_sha: str) -> str:
+    """The darwin signing mode the exact source declares; a source without the switch is "adhoc"."""
+    if not _git_sha(source_sha):
+        raise ValueError("signing-mode source is not an exact commit")
+    if not _command(["git", "ls-tree", source_sha, "--", SIGNING_CONFIG]):
+        return "adhoc"
+    config = json.loads(_command(["git", "show", f"{source_sha}:{SIGNING_CONFIG}"]))
+    mode = config.get("darwin_signing") if isinstance(config, dict) and config.get("schema_version") == 1 else None
+    if mode not in DARWIN_SIGNING_MODES:
+        raise ValueError(f"{SIGNING_CONFIG} at {source_sha} declares no valid darwin_signing mode")
+    return mode
+
+
+def devid_protocol(source_sha: str) -> bool:
+    """Whether the exact source's signing run waits for the local Developer ID signer."""
+    return darwin_signing(source_sha) == "developer-id"
 
 
 def stable_version(value: Any) -> bool:
@@ -1181,7 +1203,8 @@ def _drive(args: argparse.Namespace) -> int:
         # Signing runs from the eventual source tag, not this owner's main
         # checkout. Compare its implementation, never a manually bumped label.
         signer_inputs = [RELEASE_WORKFLOW, ".github/workflows/ci.yml", "scripts/release_reuse.py",
-                         "scripts/native-candidate.py", "tests/e2e/real-home-journey.sh"]
+                         "scripts/native-candidate.py", "tests/e2e/real-home-journey.sh",
+                         "scripts/devid_release.py", "packaging/macos/omp-kit.entitlements.plist", SIGNING_CONFIG]
         source_signer = _command(["git", "ls-tree", sha, "--", *signer_inputs])
         owner_signer = _command(["git", "ls-tree", head, "--", *signer_inputs])
         if len(source_signer.splitlines()) != len(signer_inputs) or source_signer != owner_signer:
@@ -1331,8 +1354,22 @@ def _watch_plan(args: argparse.Namespace) -> int:
             publisher_runs[publisher_id] = "qualify"
             plan["publisher_runs"] = publisher_runs
             _store_plan(args, plan)
+        if not signs and devid_protocol(sha) and _remote_tag_commit(repository, version) == sha:
+            # DEVID-SIGN-V1: the tagged cut waits for the local Developer ID signer, which dispatches its signing
+            # run. Release the train lock rather than expire it; the next tick resumes this same pending cut.
+            print(f"TRAIN=awaiting-developer-id source_sha={sha} version={version}")
+            return 0
         time.sleep(15)
     raise ValueError("publication outcome deadline expired; no next version allocated")
+
+
+def _remote_tag_commit(repository: str, version: str) -> str | None:
+    try:
+        ref = _api(repository, f"git/ref/tags/v{version}")
+    except ValueError:
+        return None
+    target = ref.get("object", {}) if isinstance(ref, dict) else {}
+    return target.get("sha") if target.get("type") == "commit" else None
 
 
 def _require_green(args: argparse.Namespace) -> int:
@@ -1718,17 +1755,13 @@ def _recover_tag_creation(args: argparse.Namespace) -> int:
             creators[(row["id"], int(attempt))] = checked["created_at"]
     if not creators:
         raise ValueError("OUTCOME_UNKNOWN: existing tag has no retained native creator acknowledgment")
-    signs = [row for row in _run_rows(args.repository, "release.yml")
-             if row.get("display_title") == release_title("sign", version, source, train_id)]
-    if signs:
-        sign = _api(args.repository, f"actions/runs/{max(signs, key=_attempt_order)['id']}")
-        if (not final_run_matches(dict(sign, status="completed"), repository=args.repository, source_sha=source, version=version,
-                                  train_id=train_id, phase="sign", conclusion=sign.get("conclusion"))
-                or sign.get("head_branch") != f"v{version}"
-                or sign.get("status") not in ("queued", "in_progress", "waiting", "requested", "pending", "completed")
-                or (sign["status"] == "completed" and sign.get("conclusion") != "success")):
-            raise ValueError("existing signing run is failed or has different native authority; never redispatch")
+    sign = _existing_signing_run(args.repository, version, source, train_id)
+    if sign is not None:
         print(f"TAG_RECOVERY=already-dispatched sign_run_id={sign['id']}")
+        return 0
+    if devid_protocol(source):
+        # DEVID-SIGN-V1: only the local Developer ID signer dispatches this source's tag-ref signing run.
+        print(f"TAG_RECOVERY=awaiting-developer-id source_sha={source} version={version}")
         return 0
     _require_signing_unattempted(args.repository, rows, titles, creators,
                                 (args.publisher_id, args.publisher_attempt))
@@ -1738,6 +1771,66 @@ def _recover_tag_creation(args: argparse.Namespace) -> int:
         "certified_run_id": qualified_id,
     })
     print(f"TAG_RECOVERY=dispatched sign_run_id={run_id}")
+    return 0
+
+
+def _existing_signing_run(repository: str, version: str, source: str, train_id: str) -> dict[str, Any] | None:
+    """The cut's tag-ref signing run, if any was dispatched; a failed or foreign one is never redispatched."""
+    signs = [row for row in _run_rows(repository, "release.yml")
+             if row.get("display_title") == release_title("sign", version, source, train_id)]
+    if not signs:
+        return None
+    sign = _api(repository, f"actions/runs/{max(signs, key=_attempt_order)['id']}")
+    if (not final_run_matches(dict(sign, status="completed"), repository=repository, source_sha=source, version=version,
+                              train_id=train_id, phase="sign", conclusion=sign.get("conclusion"))
+            or sign.get("head_branch") != f"v{version}"
+            or sign.get("status") not in ("queued", "in_progress", "waiting", "requested", "pending", "completed")
+            or (sign["status"] == "completed" and sign.get("conclusion") != "success")):
+        raise ValueError("existing signing run is failed or has different native authority; never redispatch")
+    return sign
+
+
+def _dispatch_devid_sign(args: argparse.Namespace) -> int:
+    """DEVID-SIGN-V1: the local signer's one non-idempotent effect, dispatched at most once per cut.
+
+    A receipt is written before the POST and completed after it. A pending receipt whose run never appears
+    is OUTCOME_UNKNOWN: the run may exist, so it is never replayed (dsr's crash-recovery receipt rule)."""
+    selection = _read_json(args.selection)
+    notes = Path(args.notes).read_bytes()
+    source, version, train_id = selection["source_sha"], selection["version"], selection["train_run_id"]
+    if not _sha256(args.darwin_sha256):
+        raise ValueError("darwin_sha256 must be the signed archive's SHA-256")
+    qualified = _authorize_selection(args.repository, selection, notes, source, version, train_id)
+    if (str(qualified.get("id")) != selection["qualification_run_id"] or qualified.get("run_attempt") != selection["qualification_attempt"]
+            or qualified.get("status") != "completed" or qualified.get("conclusion") != "success"):
+        raise ValueError("signing qualification changed or is not terminal green")
+    tag = _api(args.repository, f"git/ref/tags/v{version}")
+    if tag.get("object", {}).get("type") != "commit" or tag.get("object", {}).get("sha") != source:
+        raise ValueError("signing tag is not the exact qualified commit")
+    if not devid_protocol(source):
+        raise ValueError(f"source darwin_signing is adhoc ({SIGNING_CONFIG}); its publisher dispatches signing")
+    receipt = Path(args.receipt_dir) / f"sign-{version}-{source}.json"
+    sign = _existing_signing_run(args.repository, version, source, train_id)
+    if sign is not None:
+        print(f"DEVID_SIGN=already-dispatched sign_run_id={sign['id']}")
+        return 0
+    if receipt.exists():
+        raise ValueError(f"OUTCOME_UNKNOWN: {receipt} records an earlier dispatch whose run is not listed; "
+                         "find that run before retrying, never replay")
+    inputs = {"version": version, "sha": source, "train_run_id": train_id, "train_attempt": selection["train_attempt"],
+              "base_tag": selection["base_tag"], "certified_run_id": selection["qualification_run_id"],
+              "darwin_sha256": args.darwin_sha256}
+    record = {"schema_version": 1, "repository": args.repository, "inputs": inputs, "run_id": None,
+              "requested_at": datetime.now().astimezone().isoformat()}
+    with receipt.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(record, sort_keys=True) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+    run_id = _native_dispatch(args.repository, "release.yml", f"v{version}", inputs)
+    pending = receipt.with_suffix(".json.pending")
+    pending.write_text(json.dumps(dict(record, run_id=run_id), sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(pending, receipt)
+    print(f"DEVID_SIGN=dispatched sign_run_id={run_id} version={version} darwin_sha256={args.darwin_sha256}")
     return 0
 
 
@@ -1825,6 +1918,11 @@ def main(argv: list[str] | None = None) -> int:
     for flag in ("repository", "selection", "notes", "publisher-id", "publisher-attempt"):
         recover.add_argument(f"--{flag}", required=True)
     recover.set_defaults(func=_recover_tag_creation)
+
+    devid = commands.add_parser("dispatch-devid-sign")
+    for flag in ("repository", "selection", "notes", "darwin-sha256", "receipt-dir"):
+        devid.add_argument(f"--{flag}", required=True)
+    devid.set_defaults(func=_dispatch_devid_sign)
 
     current = commands.add_parser("require-attempt")
     current.add_argument("--repository", required=True)

@@ -1,5 +1,9 @@
 name: Unpublished release candidate
 # ROLLING-RELEASE-V3: owner-bound qualification and mandatory native signed-consumer publication.
+# DEVID-SIGN-V1: when the source's scripts/release-signing.json sets darwin_signing to developer-id, tag-ref signing is
+# dispatched by the local Developer ID signer (scripts/sign-darwin-release.sh) and attests the darwin archive only after
+# developer-id proves it is the qualified archive plus a notarized Developer ID signature (docs/release-signing.md).
+# "adhoc" (the default) keeps the qualified darwin archive unchanged.
 run-name: ${{ inputs.rehearsal && 'rehearse' || (inputs.certified_run_id != '' && 'sign' || 'qualify') }} ${{ inputs.version }} ${{ inputs.sha || github.sha }} train-${{ inputs.train_run_id || github.run_id }}
 on:
   workflow_dispatch:
@@ -28,6 +32,10 @@ on:
         description: Successful final-version qualification whose archives MUST be signed without rebuilding
         required: false
         type: string
+      darwin_sha256:
+        description: SHA-256 of the locally Developer ID signed darwin archive in the v<version> draft (signing only)
+        required: false
+        type: string
       reuse_candidate_run_id:
         description: Prior successful same-SHA rehearsal (rehearsal only)
         required: false
@@ -53,6 +61,7 @@ jobs:
       artifact_run_id: ${{ steps.identity.outputs.artifact_run_id }}
       artifact_attempt: ${{ steps.identity.outputs.artifact_attempt }}
       reuse_fast_ci: ${{ steps.identity.outputs.reuse_fast_ci }}
+      developer_id: ${{ steps.identity.outputs.developer_id }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -80,6 +89,7 @@ jobs:
           CERTIFIED_RUN_ID: ${{ inputs.certified_run_id }}
           REUSE_RUN_ID: ${{ inputs.reuse_candidate_run_id }}
           REHEARSAL: ${{ inputs.rehearsal }}
+          DARWIN_SHA256: ${{ inputs.darwin_sha256 }}
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
@@ -91,13 +101,26 @@ jobs:
           artifact_run_id=''
           artifact_attempt="$GITHUB_RUN_ATTEMPT"
           reuse_fast_ci=false
+          developer_id=false
           if [[ -n "$CERTIFIED_RUN_ID" ]]; then
             [[ "$REHEARSAL" != true && "$CERTIFIED_RUN_ID" =~ ^[0-9]+$ && -z "$REUSE_RUN_ID" ]]
+            # DEVID-SIGN-V1: the source's checked-in switch decides whether a locally signed darwin archive, named by
+            # its exact digest, replaces the qualified one before attestation.
+            mode=adhoc
+            if [[ -f product/scripts/release-signing.json ]]; then
+              mode="$(jq -er 'select(.schema_version == 1) | .darwin_signing | select(. == "adhoc" or . == "developer-id")' product/scripts/release-signing.json)"
+            fi
+            if [[ "$mode" == developer-id ]]; then
+              [[ "$DARWIN_SHA256" =~ ^[0-9a-f]{64}$ ]]
+              developer_id=true
+            else
+              [[ -z "$DARWIN_SHA256" ]]
+            fi
             [[ "$GITHUB_REF" == "refs/tags/v$VERSION" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
             [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SOURCE_SHA" ]]
             artifact_run_id="$CERTIFIED_RUN_ID"
           else
-            [[ "$GITHUB_REF" == refs/heads/main ]]
+            [[ "$GITHUB_REF" == refs/heads/main && -z "$DARWIN_SHA256" ]]
             if git rev-parse -q --verify "refs/tags/v$VERSION"; then
               echo 'qualification requires an unspent version; use certified_run_id for tag-ref recovery' >&2
               exit 4
@@ -145,8 +168,8 @@ jobs:
           fi
           if [[ -z "$BASE_TAG" ]]; then BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$SOURCE_SHA^")"; fi
           sh scripts/release-notes.sh check --base-tag "$BASE_TAG" --head "$SOURCE_SHA"
-          printf 'version=%s\nsource_sha=%s\ntrain_id=%s\nartifact_run_id=%s\nartifact_attempt=%s\nreuse_fast_ci=%s\n' \
-            "$VERSION" "$SOURCE_SHA" "$TRAIN_ID" "$artifact_run_id" "$artifact_attempt" "$reuse_fast_ci" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\nsource_sha=%s\ntrain_id=%s\nartifact_run_id=%s\nartifact_attempt=%s\nreuse_fast_ci=%s\ndeveloper_id=%s\n' \
+            "$VERSION" "$SOURCE_SHA" "$TRAIN_ID" "$artifact_run_id" "$artifact_attempt" "$reuse_fast_ci" "$developer_id" >> "$GITHUB_OUTPUT"
           if [[ -z "$CERTIFIED_RUN_ID" && "$REHEARSAL" != true ]]; then
             sh scripts/release-notes.sh source --base-tag "$BASE_TAG" --head "$SOURCE_SHA" --version "$VERSION" --output "$RUNNER_TEMP/expected-notes.md"
             cmp selection/release-notes.md "$RUNNER_TEMP/expected-notes.md"
@@ -230,10 +253,70 @@ jobs:
     permissions:
       contents: read
 
+  developer-id:
+    # DEVID-SIGN-V1: nothing is attested until the locally signed darwin archive is proved to be the qualified
+    # archive plus a notarized Developer ID signature by this team, and it executes (docs/release-signing.md).
+    needs: [validate-tag, reuse-evidence]
+    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['reuse-evidence'].result == 'success' && needs.validate-tag.outputs.developer_id == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      # A read-only token cannot see a draft release. This job downloads the signer's draft asset and never writes.
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate-tag.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unpublished-candidate-index-attempt-${{ needs.validate-tag.outputs.artifact_attempt }}
+          path: qualified/
+          run-id: ${{ needs.validate-tag.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-darwin-arm64-none-attempt-${{ needs.validate-tag.outputs.artifact_attempt }}
+          path: qualified/
+          run-id: ${{ needs.validate-tag.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+      - name: Prove the draft's darwin archive is the qualified archive plus a notarized Developer ID signature, and run it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          DARWIN_SHA256: ${{ inputs.darwin_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_reuse.py verify-archive --index qualified/release-index.json \
+            --platform darwin-arm64-none --archive-dir qualified/
+          filename="$(jq -er '.assets["darwin-arm64-none"].filename' qualified/release-index.json)"
+          mkdir -p signed final
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          asset="$(jq -er --arg tag "v$VERSION" --arg name "$filename" \
+            '[.[][] | select(.tag_name == $tag and .draft == true) | .assets[] | select(.name == $name) | .id] | select(length == 1) | .[0]' releases.json)"
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > "signed/$filename"
+          python3 scripts/devid_release.py verify --qualified-archive "qualified/$filename" \
+            --qualified-index qualified/release-index.json --signed-archive "signed/$filename" \
+            --signed-sha256 "$DARWIN_SHA256" --version "$VERSION" --execute --index-out final/release-index.json
+          cp qualified/candidate-proof.json final/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: devid-index-attempt-${{ github.run_attempt }}
+          path: final/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: devid-darwin-arm64-none-attempt-${{ github.run_attempt }}
+          path: signed/
+          if-no-files-found: error
+          retention-days: 7
+
 
   attest-platforms:
-    needs: [validate-tag, native-candidate, reuse-evidence]
-    if: ${{ always() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && (needs['native-candidate'].result == 'success' || needs['reuse-evidence'].result == 'success') }}
+    needs: [validate-tag, native-candidate, reuse-evidence, developer-id]
+    if: ${{ always() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && (needs['native-candidate'].result == 'success' || needs['reuse-evidence'].result == 'success') && (needs.validate-tag.outputs.developer_id != 'true' || needs['developer-id'].result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -249,13 +332,24 @@ jobs:
           path: candidate-index/
           run-id: ${{ needs.validate-tag.outputs.artifact_run_id || github.run_id }}
           github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: needs.validate-tag.outputs.developer_id == 'true'
+        with:
+          name: devid-index-attempt-${{ github.run_attempt }}
+          path: devid-index/
       - name: Require exact source, final version, ship set and both pinned tracks
         id: select
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
           SOURCE_SHA: ${{ needs.validate-tag.outputs.source_sha }}
+          DEVELOPER_ID: ${{ needs.validate-tag.outputs.developer_id }}
         run: |
           set -euo pipefail
+          if [[ "$DEVELOPER_ID" == true ]]; then
+            # Signing carries the Developer ID index: only its darwin digests differ (proved by developer-id).
+            cmp candidate-index/candidate-proof.json devid-index/candidate-proof.json
+            cp devid-index/release-index.json candidate-index/release-index.json
+          fi
           python3 scripts/release_reuse.py verify-index --proof candidate-index/candidate-proof.json \
             --index candidate-index/release-index.json --omp-config scripts/omp-compat.json \
             --source-sha "$SOURCE_SHA" --version "$VERSION"
@@ -288,16 +382,23 @@ jobs:
           ref: ${{ needs.validate-tag.outputs.source_sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: matrix.platform != 'darwin-arm64-none' || needs.validate-tag.outputs.developer_id != 'true'
         with:
           name: candidate-${{ matrix.platform }}-attempt-${{ needs.validate-tag.outputs.artifact_attempt }}
           path: candidate/
           run-id: ${{ needs.validate-tag.outputs.artifact_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: matrix.platform == 'darwin-arm64-none' && needs.validate-tag.outputs.developer_id == 'true'
         with:
-          name: unpublished-candidate-index-attempt-${{ needs.validate-tag.outputs.artifact_attempt }}
+          name: devid-darwin-arm64-none-attempt-${{ github.run_attempt }}
+          path: candidate/
+      # Developer ID signing: the index attest-platforms uploaded to this run; otherwise the qualified index, as before.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unpublished-candidate-index-attempt-${{ needs.validate-tag.outputs.developer_id == 'true' && github.run_attempt || needs.validate-tag.outputs.artifact_attempt }}
           path: candidate-index/
-          run-id: ${{ needs.validate-tag.outputs.artifact_run_id || github.run_id }}
+          run-id: ${{ needs.validate-tag.outputs.developer_id == 'true' && github.run_id || (needs.validate-tag.outputs.artifact_run_id || github.run_id) }}
           github-token: ${{ github.token }}
       - name: Verify the certified bytes before SBOM or signing
         env:
@@ -344,9 +445,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: unpublished-candidate-index-attempt-${{ needs.validate-tag.outputs.artifact_attempt }}
+          name: unpublished-candidate-index-attempt-${{ needs.validate-tag.outputs.developer_id == 'true' && github.run_attempt || needs.validate-tag.outputs.artifact_attempt }}
           path: candidate-index/
-          run-id: ${{ needs.validate-tag.outputs.artifact_run_id }}
+          run-id: ${{ needs.validate-tag.outputs.developer_id == 'true' && github.run_id || needs.validate-tag.outputs.artifact_run_id }}
           github-token: ${{ github.token }}
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
@@ -446,7 +547,7 @@ jobs:
   signing-complete:
     # Reuse intentionally skips native-candidate. Its skipped ancestor must not
     # suppress signing, or turn a run with no signatures/consumers green.
-    needs: [validate-tag, attest-platforms, attest, attest-index, signed-consumers]
+    needs: [validate-tag, developer-id, attest-platforms, attest, attest-index, signed-consumers]
     if: ${{ always() && !cancelled() && github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -454,6 +555,8 @@ jobs:
       - name: Require every signing and real-consumer gate to have executed successfully
         env:
           VALIDATE_RESULT: ${{ needs['validate-tag'].result }}
+          DEVELOPER_ID: ${{ needs.validate-tag.outputs.developer_id }}
+          DEVELOPER_ID_RESULT: ${{ needs['developer-id'].result }}
           PLATFORMS_RESULT: ${{ needs['attest-platforms'].result }}
           ATTEST_RESULT: ${{ needs['attest'].result }}
           INDEX_RESULT: ${{ needs['attest-index'].result }}
@@ -466,9 +569,16 @@ jobs:
               exit 1
             fi
           done
+          # DEVID-SIGN-V1: Developer ID mode requires the derivation proof; adhoc mode never runs it.
+          expected=skipped
+          if [[ "$DEVELOPER_ID" == true ]]; then expected=success; fi
+          if [[ "$DEVELOPER_ID_RESULT" != "$expected" ]]; then
+            echo "developer-id gate is $DEVELOPER_ID_RESULT, expected $expected" >&2
+            exit 1
+          fi
 
   open-p0-on-post-cert-failure:
-    needs: [validate-tag, reuse-evidence, attest-platforms, attest, attest-index, signed-consumers, signing-complete]
+    needs: [validate-tag, reuse-evidence, developer-id, attest-platforms, attest, attest-index, signed-consumers, signing-complete]
     if: ${{ always() && github.event.repository.private == false && failure() && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
