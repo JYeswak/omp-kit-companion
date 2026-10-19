@@ -1,0 +1,2 @@
+- Identity doctor keeps binding strength: `resolve-pane` results carry project, source, seat, and verified/unverified strength instead of collapsing to a bare name; only qualified live-pane `agent-mail:resolve-pane` bindings verify a sender. (ompkit-fp72.95)
+- `doctor --scope identity` evidence reports the checked/unchecked denominator (`checked_panes`/`unchecked_panes` over `live_panes`) with distinct collision/missing/stale/unverified findings; name-only, legacy-unverified, adopted-dead, and director-seat-substituted bindings stay unverified with the missing field named.

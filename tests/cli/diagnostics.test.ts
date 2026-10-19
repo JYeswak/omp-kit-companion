@@ -963,11 +963,13 @@ test("all regex tools present reports OK", () => {
 
 test("one identity on two live panes fails with both panes named", () => {
 	const row = inspectPaneIdentity({
+		project: "owned-project",
 		listPanes: () => [
 			{ session: "s", window: "0", index: "0", id: "%101" },
 			{ session: "s", window: "0", index: "1", id: "%102" },
 		],
-		resolvePane: () => "SharedName",
+		resolvePane: () => null,
+		resolvePaneBinding: () => ({ name: "SharedName", source: "agent-mail:resolve-pane", strength: "verified" as const, seat: "s" }),
 		listAgents: () => [],
 	});
 	expect(row.status).toBe("FAIL");
@@ -990,7 +992,8 @@ test("an idle registration with no live pane degrades as stale", () => {
 	const row = inspectPaneIdentity({
 		now,
 		listPanes: () => [{ session: "s", window: "0", index: "0", id: "%101" }],
-		resolvePane: () => "LiveAgent",
+		resolvePane: () => null,
+		resolvePaneBinding: () => ({ name: "LiveAgent", source: "agent-mail:resolve-pane", strength: "verified" as const, seat: "s" }),
 		listAgents: () => [
 			{ name: "LiveAgent", lastActiveMs: now - 1000 },
 			{ name: "DeadAgent", lastActiveMs: now - 8 * 24 * 3600 * 1000 },
@@ -1002,15 +1005,62 @@ test("an idle registration with no live pane degrades as stale", () => {
 
 test("distinct identities on live panes pass, unavailable tmux is unverified", () => {
 	const clean = inspectPaneIdentity({
+		project: "owned-project",
 		listPanes: () => [
 			{ session: "s", window: "0", index: "0", id: "%101" },
 			{ session: "s", window: "0", index: "1", id: "%102" },
 		],
-		resolvePane: (id) => id === "%101" ? "AgentA" : "AgentB",
+		resolvePane: () => null,
+		resolvePaneBinding: (id) => ({ name: id === "%101" ? "AgentA" : "AgentB", source: "agent-mail:resolve-pane", strength: "verified" as const, seat: "s" }),
 		listAgents: () => [],
 	});
 	expect(clean.status).toBe("OK");
+	expect(clean.evidence?.project).toBe("owned-project");
+	expect(clean.evidence?.checked_panes).toBe(2);
+	expect(clean.evidence?.unchecked_panes).toBe(0);
+	expect(clean.evidence?.seats).toEqual(["s"]);
 	expect(inspectPaneIdentity({ listPanes: () => null, resolvePane: () => null, listAgents: () => null }).status).toBe("UNVERIFIED");
+});
+
+test("name-only resolver never verifies a sender", () => {
+	const row = inspectPaneIdentity({
+		listPanes: () => [{ session: "s", window: "0", index: "0", id: "%101" }],
+		resolvePane: () => "AssertedAgent",
+		listAgents: () => [],
+	});
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.checked_panes).toBe(0);
+	expect(row.evidence?.unchecked_panes).toBe(1);
+	expect(JSON.stringify(row.evidence?.unverified ?? [])).toContain("AssertedAgent");
+});
+
+test("legacy-unverified and adopted-dead bindings never verify", () => {
+	const now = Date.now();
+	const row = inspectPaneIdentity({
+		now,
+		listPanes: () => [{ session: "s", window: "0", index: "0", id: "%101" }],
+		resolvePane: () => null,
+		resolvePaneBinding: () => ({ name: "LegacyAgent", source: "legacy-roster", strength: "unverified" as const, reason: "legacy roster entry with no live load observation" }),
+		listAgents: () => [
+			{ name: "AdoptedDead", lastActiveMs: now - 30 * 24 * 3600 * 1000 },
+		],
+	});
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.checked_panes).toBe(0);
+	expect(row.reason).toContain("legacy roster entry");
+	expect(row.reason).toContain("AdoptedDead");
+});
+
+test("director-seat override binding never verifies without qualified source", () => {
+	const row = inspectPaneIdentity({
+		listPanes: () => [{ session: "s", window: "0", index: "0", id: "%101" }],
+		resolvePane: () => null,
+		resolvePaneBinding: () => ({ name: "WorkerAgent", source: "director-seat-override", strength: "unverified" as const, reason: "director seat substituted for worker process", seat: "director-seat" }),
+		listAgents: () => [],
+	});
+	expect(row.status).toBe("DEGRADED");
+	expect(row.evidence?.checked_panes).toBe(0);
+	expect(row.reason).toContain("director seat substituted");
 });
 
 test("doctor identity scope reaches the pane finder through diagnose", async () => {

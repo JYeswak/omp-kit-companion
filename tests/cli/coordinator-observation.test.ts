@@ -71,7 +71,8 @@ test("[a] sessions report expresses no coordinator consumption field", () => {
 test("[a] identity probe reports pane binding, not coordinator decisions", () => {
 	const row = inspectPaneIdentity({
 		listPanes: () => [{ session: "omp-test", window: "1", index: "0", id: "%37" }],
-		resolvePane: () => "IndigoIsland",
+		resolvePane: () => null,
+		resolvePaneBinding: () => ({ name: "IndigoIsland", source: "agent-mail:resolve-pane", strength: "verified" as const, seat: "omp-test" }),
 		listAgents: () => [],
 	});
 	expect(row.status).toBe("OK");

@@ -796,11 +796,28 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 
 export interface PaneIdentity { session: string; window: string; index: string; id: string }
 export interface PaneIdentityAgent { name: string; lastActiveMs: number | null }
+/** How strongly a pane->agent binding is evidenced. Only qualified live-pane runtime evidence is verified. */
+export type PaneBindingStrength = "verified" | "unverified";
+export interface PaneBinding {
+	/** Resolved agent name; never inferred from legacy names or adopted-dead roster rows. */
+	name: string;
+	/** Where the binding came from, e.g. "agent-mail:resolve-pane". */
+	source: string;
+	strength: PaneBindingStrength;
+	/** Required when strength is unverified: why this binding cannot verify a sender. */
+	reason?: string;
+	/** Native seat/session observed with the binding, when the source reports one. */
+	seat?: string | null;
+}
 export interface PaneIdentityDeps {
+	/** Project key the deps were built for; retained in identity evidence. */
+	project?: string;
 	/** Live panes, or null when tmux is unavailable. */
 	listPanes(): PaneIdentity[] | null;
-	/** Agent name for a pane id, or null when no identity file matches. */
+	/** Agent name for a pane id, or null when no identity file matches. Prefer resolvePaneBinding: a bare name carries no source or strength. */
 	resolvePane(id: string): string | null;
+	/** Binding-preserving resolver; preferred over resolvePane when present. */
+	resolvePaneBinding?(id: string): PaneBinding | null;
 	/** Registered agents, or null when the roster is unreadable. */
 	listAgents(): PaneIdentityAgent[] | null;
 	now?: number;
@@ -820,7 +837,35 @@ function paneArgs(binary: string, args: readonly string[]): { code: number; out:
 }
 
 export function defaultPaneIdentity(projectKey: string): PaneIdentityDeps {
+	const resolvePaneBinding = (id: string): PaneBinding | null => {
+		const resolved = paneArgs("am", ["agents", "resolve-pane", "--project", projectKey, "--pane", id, "--json"]);
+		if (resolved.code !== 0) return null;
+		try {
+			const value: unknown = JSON.parse(resolved.out);
+			const record: unknown = Array.isArray(value) ? value[0] : value;
+			if (record !== null && typeof record === "object") {
+				let name: string | null = null;
+				for (const key of ["agent_name", "name"] as const) {
+					if (!(key in record)) continue;
+					const candidate: unknown = record[key];
+					if (typeof candidate === "string" && candidate !== "") { name = candidate; break; }
+				}
+				if (name === null) return null;
+				let seat: string | null = null;
+				for (const key of ["seat", "session", "pane"] as const) {
+					if (!(key in record)) continue;
+					const candidate: unknown = record[key];
+					if (typeof candidate === "string" && candidate !== "") { seat = candidate; break; }
+				}
+				return { name, source: "agent-mail:resolve-pane", strength: "verified", seat };
+			}
+			return null;
+		} catch {
+			return null;
+		}
+	};
 	return {
+		project: projectKey,
 		listPanes: () => {
 			const panes = paneArgs("tmux", ["list-panes", "-a", "-F", "#{session_name} #{window_index} #{pane_index} #{pane_id}"]);
 			if (panes.code !== 0) return null;
@@ -832,24 +877,8 @@ export function defaultPaneIdentity(projectKey: string): PaneIdentityDeps {
 			}
 			return rows;
 		},
-		resolvePane: (id) => {
-			const resolved = paneArgs("am", ["agents", "resolve-pane", "--project", projectKey, "--pane", id, "--json"]);
-			if (resolved.code !== 0) return null;
-			try {
-				const value: unknown = JSON.parse(resolved.out);
-				const record: unknown = Array.isArray(value) ? value[0] : value;
-				if (record !== null && typeof record === "object") {
-					for (const key of ["agent_name", "name"] as const) {
-						if (!(key in record)) continue;
-						const candidate: unknown = record[key];
-						if (typeof candidate === "string" && candidate !== "") return candidate;
-					}
-				}
-				return null;
-			} catch {
-				return null;
-			}
-		},
+		resolvePane: (id) => resolvePaneBinding(id)?.name ?? null,
+		resolvePaneBinding,
 		listAgents: () => {
 			const listed = paneArgs("am", ["agents", "list", "--project", projectKey, "--format", "json"]);
 			if (listed.code !== 0) return null;
@@ -877,15 +906,27 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 	const now = deps.now ?? Date.now();
 	const byName = new Map<string, string[]>();
 	const noFile: string[] = [];
+	const unverified: Array<{ pane: string; name: string; source: string; reason: string }> = [];
+	const seats = new Set<string>();
 	for (const pane of panes) {
-		const name = deps.resolvePane(pane.id);
-		if (name === null) {
-			noFile.push(pane.id);
+		const binding = deps.resolvePaneBinding?.(pane.id) ?? null;
+		if (binding === null) {
+			const name = deps.resolvePane(pane.id);
+			if (name === null) {
+				noFile.push(pane.id);
+				continue;
+			}
+			unverified.push({ pane: pane.id, name, source: "bare-name-resolver", reason: "resolver returned a bare name with no source or strength; name-only bindings never verify a sender" });
 			continue;
 		}
-		const ids = byName.get(name) ?? [];
+		if (binding.strength !== "verified") {
+			unverified.push({ pane: pane.id, name: binding.name, source: binding.source, reason: binding.reason ?? "binding is not qualified runtime evidence" });
+			continue;
+		}
+		if (binding.seat !== undefined && binding.seat !== null && binding.seat !== "") seats.add(binding.seat);
+		const ids = byName.get(binding.name) ?? [];
 		ids.push(pane.id);
-		byName.set(name, ids);
+		byName.set(binding.name, ids);
 	}
 	const shared = [...byName.entries()].filter(([, ids]) => ids.length > 1)
 		.map(([name, ids]) => ({ name, panes: [...ids].sort() }));
@@ -899,13 +940,15 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 			stale.push({ name: agent.name, idle_ms: now - agent.lastActiveMs });
 		}
 	}
-	const status = shared.length ? "FAIL" : noFile.length || stale.length ? "DEGRADED" : "OK";
+	const checked = [...byName.values()].reduce((total, ids) => total + ids.length, 0);
+	const unchecked = noFile.length + unverified.length;
+	const status = shared.length ? "FAIL" : noFile.length || unverified.length || stale.length ? "DEGRADED" : "OK";
 	return finding("identity", status,
-		status === "OK" ? "Every live pane resolves to exactly one registered identity" :
+		status === "OK" ? `Every live pane resolves to exactly one verified identity (${checked}/${panes.length} checked)` :
 		shared.length ? `One identity resolves on multiple live panes: ${shared.map((row) => `${row.name} (${row.panes.join(", ")})`).join("; ")}` :
-		`Pane identity gaps: ${noFile.length ? `${noFile.length} live pane(s) without an identity file` : ""}${noFile.length && stale.length ? "; " : ""}${stale.length ? `idle registration(s) with no live pane: ${stale.map((row) => row.name).join(", ")}` : ""}`,
+		`Pane identity gaps (${unchecked}/${panes.length} unchecked): ${noFile.length ? `${noFile.length} live pane(s) without an identity file` : ""}${(noFile.length && (unverified.length || stale.length)) ? "; " : ""}${unverified.length ? `${unverified.length} pane(s) with unverified bindings: ${unverified.map((row) => `${row.pane}->${row.name} (${row.reason})`).join("; ")}` : ""}${((noFile.length || unverified.length) && stale.length) ? "; " : ""}${stale.length ? `idle registration(s) with no live pane: ${stale.map((row) => row.name).join(", ")}` : ""}`,
 		"Register each pane with native Agent Mail, then project its verified own-caller identity with agent-spawn-env.sh; resolve collisions before trusting writes.",
-		{ live_panes: panes.length, no_file_panes: noFile, shared, stale });
+		{ project: deps.project ?? null, live_panes: panes.length, checked_panes: checked, unchecked_panes: unchecked, no_file_panes: noFile, shared, stale, unverified, seats: [...seats].sort() });
 }
 
 const FLYWHEEL_STATUS: Record<Grade, DiagnosticStatus> = { A: "OK", B: "DEGRADED", C: "DEGRADED", D: "FAIL", F: "FAIL", "N/A": "UNVERIFIED" };
