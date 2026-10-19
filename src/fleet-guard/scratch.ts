@@ -62,7 +62,9 @@ export function scratchDirFor(cwd: string, pid: number = process.pid): string {
 }
 
 /** `agent` and `session` come together or not at all: the durable owner of the seat dir, so a respawn (new pid) keeps it. */
-export interface ScratchOwner { pid: number; label: string; repo: string; created: string; agent?: string; session?: string }
+export interface ScratchOwner { pid: number; label: string; repo: string; created: string; agent?: string; session?: string;
+	/** Where this dir goes when its work ends (ompkit-774u.15). A session's own dir is throwaway by definition; absent means unbinned. */
+	bin?: "throwaway" }
 
 // Same shape src/scratch.ts accepts for the owner's agent and session fields.
 const AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -78,7 +80,8 @@ export function writeScratchOwner(dir: string, owner: ScratchOwner): void {
 	const temp = join(dir, `.owner.${process.pid}.tmp`);
 	const durable = owner.agent !== undefined && owner.session !== undefined && AGENT_NAME.test(owner.agent) && SESSION_ID.test(owner.session)
 		? `agent=${owner.agent}\nsession=${owner.session}\n` : "";
-	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}`, { mode: 0o644 });
+	const binned = owner.bin === "throwaway" ? "bin=throwaway\n" : "";
+	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}${binned}`, { mode: 0o644 });
 	renameSync(temp, join(dir, ".owner"));
 }
 

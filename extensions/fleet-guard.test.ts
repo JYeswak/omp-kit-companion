@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
+import { parseOwnerFile } from "../src/scratch.ts";
 // Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 mkdirSync(join(import.meta.dir, "../var/agent-tmp"), { recursive: true });
 
@@ -100,8 +101,19 @@ test("OWNERKEY1: without a host agent name, or without a session id, the seat ow
 		const { cwd, pid } = fixture();
 		await fleetGuard(pi, { cwd, pid, env });
 		await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => session } });
-		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "label", "repo", "created"]);
+		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "label", "repo", "created", "bin"]);
 	}
+});
+
+test("SCRATCHBIN1: a session's own dir names its bin at creation and keeps it when the session is recorded", async () => {
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
+	expect(ownerOf(cwd, pid)).toContain("bin=throwaway\n");
+	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
+	const recorded = ownerOf(cwd, pid);
+	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\nbin=throwaway\n`);
+	expect(parseOwnerFile(recorded)).toMatchObject({ agent: "TurquoiseSummit", session: SESSION, bin: "throwaway" });
 });
 
 test("scratch fires before git and reservations in the chain", async () => {

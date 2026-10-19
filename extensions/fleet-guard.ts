@@ -48,7 +48,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	if (initial.kind === "on") {
 		const dir = scratchDirFor(initial.root, pid);
 		const created = new Date().toISOString();
-		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created });
+		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created, bin: "throwaway" });
 		seat = { dir, repo: initial.root, created, recorded: false };
 		applyScratchEnv(dir);
 		try { await exportAgentMailStorageRoot(); }
@@ -62,7 +62,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 		const session = agent !== undefined ? context?.sessionManager?.getSessionId?.() : undefined;
 		if (seat !== null && agent !== undefined && session) {
 			seat.recorded = true;
-			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session }); }
+			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
 			catch { /* the pid-only owner stays valid */ }
 		}
 		const callingCwd = context?.cwd ?? cwd;

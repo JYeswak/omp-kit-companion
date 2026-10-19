@@ -4,3 +4,4 @@
 - `ownedScratch` (library only for now; the `scratch mine` verb and the disposal-point flag follow) lists the caller's own scratch dirs by seat or pid with their state (unreleased, released, held, hold-expired) and bin, and never another owner's.
 - The reap log records the bin on each `release` event (`unbinned` when the owner named none), so the daily scratch measurement can count releases by bin.
 - `omp-kit scratch mine` lists the caller's own scratch dirs (unreleased, released, held, hold-expired) with their bin, read-only, and `scratch apply --json` now prints the reap gap report as `data.gapReport`.
+- A session's own scratch dir (`var/agent-tmp/omp.<pid>`) now names `bin=throwaway` in its `.owner` from creation, so it is binned by declaration. Nothing is disposed at session end yet.

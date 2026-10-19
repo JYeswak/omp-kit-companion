@@ -212,6 +212,18 @@ test("OWNERKEY1: a seat owner carries agent and session together, and only when 
 	}
 });
 
+test("SCRATCHBIN1: a seat owner may name its throwaway bin, and no other bin is writable here", () => {
+	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-seat-bin-"));
+	roots.push(repo);
+	const dir = join(repo, "var", "agent-tmp", "omp.4242");
+	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
+	writeScratchOwner(dir, { ...base, bin: "throwaway" });
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\nbin=throwaway\n`);
+	// Anything else is not written: the type allows only the one bin, and the writer ignores a smuggled value.
+	writeScratchOwner(dir, { ...base, bin: "hold" as never });
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\n`);
+});
+
 test("OWNERKEY1: the host agent name is AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME, and never an unsafe value", () => {
 	expect(hostAgentName({ AGENT_NAME: "A", BR_ACTOR: "B", BR_AGENT_NAME: "C" })).toBe("A");
 	expect(hostAgentName({ BR_ACTOR: " B ", BR_AGENT_NAME: "C" })).toBe("B");
