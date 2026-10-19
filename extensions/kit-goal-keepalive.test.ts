@@ -10,7 +10,8 @@ import kitGoalKeepalive, {
 	type GoalKeepaliveApi,
 	type GoalKeepaliveContext,
 	type KeepaliveMessage,
-} from "./kit-goal-keepalive.ts";
+	type KeepaliveModeEntry,
+ } from "./kit-goal-keepalive.ts";
 
 type Handler = (e: never, ctx: GoalKeepaliveContext) => unknown;
 
@@ -31,9 +32,10 @@ interface FakeSeat {
 	emit: (event: string, e?: never) => unknown;
 }
 
-function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boolean; clock?: { at: number } } = {}): FakeSeat {
+function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boolean; clock?: { at: number }; sessionEntries?: KeepaliveModeEntry[] } = {}): FakeSeat {
 	const sent: Sent[] = [];
 	const entries: { customType: string; data: unknown }[] = [];
+	const sessionEntries = opts.sessionEntries ?? [];
 	const handlers: Record<string, Handler> = {};
 	const clock = opts.clock ?? { at: 1_000_000 };
 	let idle = opts.idle ?? true;
@@ -52,6 +54,7 @@ function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boole
 	};
 	const ctx: GoalKeepaliveContext & { fireDue: () => number; armed: () => number } = {
 		isIdle: () => idle,
+		sessionManager: { getEntries: () => sessionEntries },
 		setTimeout: (cb) => {
 			const handle = nextHandle++;
 			timers[handle] = cb;
@@ -266,4 +269,82 @@ test("message: names the seat, the idle time, and every downtime step", () => {
 	for (const item of ["(1)", "(2)", "(3)", "(4)", "(5)", "never waits"]) {
 		expect(body).toContain(item);
 	}
+});
+test("resume: session_start with a persisted active goal arms the wake with no goal_updated ever", async () => {
+	const h = fakeHost({ sessionEntries: [{ type: "mode_change", mode: "goal", data: { goal: { status: "active" } } }] });
+	await kitGoalKeepalive(h.api, { env: SEAT.env, now: () => h.clock.at });
+	h.emit("session_start");
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(h.ctx.armed()).toBe(1);
+	advance(h, IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(1);
+	expect(h.sent[0]!.deliverAs).toBe("aside");
+	expect(h.sent[0]!.content).toContain("QuietBadger");
+	expect(h.sent[0]!.content).toContain("held beads");
+});
+test("resume planted: paused, exited, empty, or malformed transcript wakes nothing", async () => {
+	const cases: KeepaliveModeEntry[][] = [
+		[{ type: "mode_change", mode: "goal_paused", data: { goal: { status: "paused" } } }],
+		[{ type: "mode_change", mode: "none" }],
+		[],
+		[{ type: "mode_change", mode: "goal" }],
+		[{ type: "user", mode: "goal" } as never],
+	];
+	for (const sessionEntries of cases) {
+		const h = fakeHost({ sessionEntries });
+		await kitGoalKeepalive(h.api, { env: SEAT.env, now: () => h.clock.at });
+		h.emit("session_start");
+		h.emit("agent_end", { messages: QUIET_TURN } as never);
+		expect(h.ctx.armed()).toBe(0);
+		advance(h, IDLE_WAKE_MS);
+		expect(h.sent).toHaveLength(0);
+	}
+});
+test("resume: the latest mode_change wins; goal_updated stays authoritative afterwards", async () => {
+	const latestPaused = fakeHost({
+		sessionEntries: [
+			{ type: "mode_change", mode: "goal", data: { goal: { status: "active" } } },
+			{ type: "mode_change", mode: "goal_paused", data: { goal: { status: "paused" } } },
+		],
+	});
+	await kitGoalKeepalive(latestPaused.api, { env: SEAT.env, now: () => latestPaused.clock.at });
+	latestPaused.emit("session_start");
+	latestPaused.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(latestPaused.ctx.armed()).toBe(0);
+	const staleThenLive = fakeHost({
+		sessionEntries: [{ type: "mode_change", mode: "goal_paused", data: { goal: { status: "paused" } } }],
+	});
+	await kitGoalKeepalive(staleThenLive.api, { env: SEAT.env, now: () => staleThenLive.clock.at });
+	staleThenLive.emit("session_start");
+	staleThenLive.emit("goal_updated", ACTIVE_GOAL);
+	staleThenLive.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(staleThenLive.ctx.armed()).toBe(1);
+	const freshThenPaused = fakeHost({
+		sessionEntries: [{ type: "mode_change", mode: "goal", data: { goal: { status: "active" } } }],
+	});
+	await kitGoalKeepalive(freshThenPaused.api, { env: SEAT.env, now: () => freshThenPaused.clock.at });
+	freshThenPaused.emit("session_start");
+	freshThenPaused.emit("goal_updated", PAUSED_GOAL);
+	freshThenPaused.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(freshThenPaused.ctx.armed()).toBe(0);
+});
+test("resume: session_switch drops stale goal state and re-learns from the new transcript", async () => {
+	const h = fakeHost({ sessionEntries: [{ type: "mode_change", mode: "none" }] });
+	await kitGoalKeepalive(h.api, { env: SEAT.env, now: () => h.clock.at });
+	h.emit("goal_updated", ACTIVE_GOAL);
+	h.emit("session_switch", { reason: "resume" } as never);
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(h.ctx.armed()).toBe(0);
+	advance(h, IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(0);
+});
+test("resume robust: an unreadable transcript stays silent and never throws", async () => {
+	const h = fakeHost();
+	const broken = { ...h.ctx, sessionManager: { getEntries: () => { throw new Error("no transcript"); } } };
+	await kitGoalKeepalive(h.api, { env: SEAT.env, now: () => h.clock.at });
+	expect(() => {
+		h.handlers["session_start"]?.(undefined as never, broken);
+		h.handlers["agent_end"]?.({ messages: QUIET_TURN } as never, broken);
+	}).not.toThrow();
+	expect(h.sent).toHaveLength(0);
 });

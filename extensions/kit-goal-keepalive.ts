@@ -11,7 +11,12 @@
  * suppressed goal seat stays silent until a human types.
  *
  * This extension does not touch the continuation logic (another builder owns
- * kit-flywheel-guard.ts). After `agent_end` it arms a contained one-shot timer
+ * kit-flywheel-guard.ts). Goal state is learned from `goal_updated`, and — since
+ * a seat whose goal was restored by a session resume may never see a
+ * `goal_updated` after this extension loads (live miss 2026-10-19: an
+ * active-goal seat idle 14+ min with no wake) — re-learned from the latest
+ * `mode_change` transcript entry on `session_start` / `session_switch`.
+ * After `agent_end` it arms a contained one-shot timer
  * (ctx.setTimeout, auto-cleared on session shutdown); if the session is still
  * idle at 120 s it sends one `deliverAs: "aside"` message — which starts a turn
  * when idle (types.ts 1728-1730) — carrying the seat's role downtime list plus
@@ -102,10 +107,19 @@ export interface GoalKeepaliveApi {
 	appendEntry(customType: string, data?: unknown): void;
 }
 
+/** A persisted mode transition, as pi's goal runtime writes it
+ * (`appendModeChange("goal" | "goal_paused" | "none", { goal })`). */
+export interface KeepaliveModeEntry {
+	type?: string;
+	mode?: string;
+	data?: { goal?: { status?: string } | null } | null;
+}
+
 export interface GoalKeepaliveContext {
 	isIdle?: () => boolean;
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number): unknown;
 	clearTimer(timer: unknown): void;
+	sessionManager?: { getEntries?: () => readonly KeepaliveModeEntry[] };
 }
 
 export interface GoalKeepaliveDeps {
@@ -188,10 +202,46 @@ export default async function kitGoalKeepalive(
 	type GoalEvent = { goal?: { status?: string } | null; state?: { enabled?: boolean } | null };
 	type EndEvent = { messages?: KeepaliveMessage[]; willContinue?: boolean };
 
+	/**
+	 * Re-learn goal state from the persisted transcript. A seat whose goal was
+	 * restored by a session resume may never see a `goal_updated` after this
+	 * extension loads, so the timer would never arm; the latest `mode_change`
+	 * entry carries the same truth the resume path restores from
+	 * (`agent-session.ts` persist: `appendModeChange(mode, { goal })`).
+	 * `goal_updated` stays authoritative afterwards: every later transition
+	 * overwrites this. Never arms, never throws.
+	 */
+	const reconcileFromSession = (ctx: GoalKeepaliveContext) => {
+		let entries: readonly KeepaliveModeEntry[];
+		try {
+			entries = ctx.sessionManager?.getEntries?.() ?? [];
+		} catch {
+			return; // unreadable transcript: keep last known state
+		}
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type !== "mode_change") continue;
+			if (entry.mode === "goal") {
+				goal = { enabled: true, status: String(entry.data?.goal?.status ?? "") };
+			} else if (entry.mode === "goal_paused") {
+				goal = { enabled: false, status: String(entry.data?.goal?.status ?? "") };
+			} else if (entry.mode === "none") {
+				goal = null;
+			}
+			return; // the latest mode_change wins; older modes are history
+		}
+	};
+	const reconcileAs = (reset: boolean) =>
+		((_e: never, ctx: GoalKeepaliveContext) => {
+			if (reset) goal = null; // a switch may land on a goal-less session
+			reconcileFromSession(ctx);
+		}) as (e: never, ctx: GoalKeepaliveContext) => unknown;
 	pi.on("goal_updated", (event: GoalEvent) => {
 		if (event.goal === undefined && event.state === undefined) return;
 		goal = { enabled: event.state?.enabled === true, status: String(event.goal?.status ?? "") };
 	});
+	pi.on("session_start", reconcileAs(false));
+	pi.on("session_switch", reconcileAs(true));
 	pi.on("agent_end", ((event: EndEvent, ctx: GoalKeepaliveContext) => {
 		if (wakePending) {
 			wakePending = false;
