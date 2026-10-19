@@ -263,6 +263,8 @@ export interface PendingReread {
 	identities: string[];
 	agentsOk: boolean;
 	beadOk: boolean;
+	/** Which observation and tracker cleared the bead flag. */
+	satisfiedBy?: string;
 }
 
 /** Missing-read fragment for the block reason, built at the gate. */
@@ -350,30 +352,89 @@ function parseBeadRow(stdout: string, id: string): { status: string; assignee: s
 	return { status, assignee: owner === "" ? null : owner };
 }
 
-/** One `br|bd show <id>` in a bash command: the executable as written, its `--db`, and whether it asked for `--json`. */
-interface BrShowTarget {
+/** One `br|bd` invocation in a bash command, with the directory it runs in (null: a `cd` the guard cannot resolve). */
+interface BrInvocation {
 	bin: string;
-	id: string;
+	rest: string[];
+	cwd: string | null;
 	db?: string;
+}
+
+/**
+ * `br|bd` invocations in a bash command. Each runs in `cwd` (the tool's
+ * effective cwd) as moved by any earlier `cd DIR` in the same command; a
+ * `cd` the guard cannot resolve literally (expansions, flags, no argument)
+ * leaves later invocations with a null cwd, which never confirms or clears.
+ */
+function brInvocations(command: string, cwd: string, home: string): BrInvocation[] {
+	const found: BrInvocation[] = [];
+	let at: string | null = cwd;
+	for (const words of shellCommands(command)) {
+		if (words[0] === "cd") {
+			const dir = words[1];
+			at = words.length === 2 && at !== null && dir !== undefined && dir !== "" && !dir.startsWith("-")
+				&& !dir.includes("$") && !dir.includes("`") ? resolve(at, expandHome(dir, home)) : null;
+			continue;
+		}
+		const parsed = simpleExecutable(words);
+		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
+		let db: string | undefined;
+		for (let i = 0; i < parsed.rest.length; i += 1) {
+			const word = parsed.rest[i]!;
+			if (word === "--db") db = parsed.rest[i + 1];
+			else if (word.startsWith("--db=")) db = word.slice("--db=".length);
+		}
+		found.push({ bin: parsed.raw, rest: parsed.rest, cwd: at, ...(db ? { db } : {}) });
+	}
+	return found;
+}
+
+/** A tracker an invocation reaches: its key (the `--db` file or the nearest `.beads` root) and how to read it. */
+export interface TrackerRef {
+	key: string;
+	bin: string;
+	cwd: string;
+	db?: string;
+}
+
+function trackerOf(call: BrInvocation, env: Record<string, string | undefined>): TrackerRef | null {
+	if (call.cwd === null) return null;
+	const ref = { bin: call.bin, cwd: call.cwd, ...(call.db ? { db: call.db } : {}) };
+	if (call.db) return { key: `db:${resolve(call.cwd, call.db)}`, ...ref };
+	const explicit = env.BEADS_DB?.trim() || env.BEADS_DIR?.trim();
+	if (explicit) return { key: `env:${resolve(call.cwd, explicit)}`, ...ref };
+	for (let dir = resolve(call.cwd); ; dir = dirname(dir)) {
+		if (rereadPathExists(join(dir, ".beads"))) return { key: `root:${dir}`, ...ref };
+		if (dirname(dir) === dir) return null;
+	}
+}
+
+/** Trackers reached by a command's br invocations (deduplicated by key). */
+export function commandTrackers(command: string, cwd: string, home: string, env: Record<string, string | undefined>): TrackerRef[] {
+	const refs = new Map<string, TrackerRef>();
+	for (const call of brInvocations(command, cwd, home)) {
+		const ref = trackerOf(call, env);
+		if (ref !== null && !refs.has(ref.key)) refs.set(ref.key, ref);
+	}
+	return [...refs.values()];
+}
+
+/** One `br|bd show <id>`: the invocation and whether it asked for `--json`. */
+interface BrShowTarget extends BrInvocation {
+	id: string;
 	json: boolean;
 }
 
-/** `br|bd show` targets named in a bash command. */
-function brShowTargets(command: string): BrShowTarget[] {
+function brShowTargets(calls: BrInvocation[]): BrShowTarget[] {
 	const targets: BrShowTarget[] = [];
-	for (const words of shellCommands(command)) {
-		const parsed = simpleExecutable(words);
-		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
-		const rest = parsed.rest;
-		let db: string | undefined;
+	for (const call of calls) {
+		const rest = call.rest;
 		let json = false;
 		let id: string | null = null;
 		let verb: string | null = null;
 		for (let at = 0; at < rest.length; at += 1) {
 			const word = rest[at]!;
 			if (word === "--json") json = true;
-			else if (word === "--db") db = rest[at + 1];
-			else if (word.startsWith("--db=")) db = word.slice("--db=".length);
 			if (word.startsWith("-") && word !== "-") {
 				const name = word.split("=")[0]!;
 				if (BR_VALUE_FLAGS[name] === true && !word.includes("=")) at += 1;
@@ -382,25 +443,46 @@ function brShowTargets(command: string): BrShowTarget[] {
 			if (verb === null) verb = word.toLowerCase();
 			else if (id === null && verb === "show" && word !== "-") id = word;
 		}
-		if (verb === "show" && id !== null) targets.push({ bin: parsed.raw, id, ...(db ? { db } : {}), json });
+		if (verb === "show" && id !== null) targets.push({ ...call, id, json });
 	}
 	return targets;
 }
 
-/** `--assignee` values named by `br|bd list` verbs in a bash command; a list without one contributes nothing. */
-function brListAssignees(command: string): string[] {
+/** `--assignee` values of a `br|bd list` invocation; a list without one contributes nothing. */
+function listAssignees(call: BrInvocation): string[] {
+	if (firstVerb(call.rest, BR_VALUE_FLAGS) !== "list") return [];
 	const assignees: string[] = [];
-	for (const words of shellCommands(command)) {
-		const parsed = simpleExecutable(words);
-		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
-		if (firstVerb(parsed.rest, BR_VALUE_FLAGS) !== "list") continue;
-		for (let at = 0; at < parsed.rest.length; at += 1) {
-			const word = parsed.rest[at]!;
-			const value = word === "--assignee" ? parsed.rest[at + 1] : word.startsWith("--assignee=") ? word.slice("--assignee=".length) : undefined;
-			if (value !== undefined && value.trim() !== "") assignees.push(value.trim());
-		}
+	for (let at = 0; at < call.rest.length; at += 1) {
+		const word = call.rest[at]!;
+		const value = word === "--assignee" ? call.rest[at + 1] : word.startsWith("--assignee=") ? word.slice("--assignee=".length) : undefined;
+		if (value !== undefined && value.trim() !== "") assignees.push(value.trim());
 	}
 	return assignees;
+}
+
+/** Owned (in_progress/rework) beads assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
+async function ownedBeadsIn(exec: FlywheelExec, tracker: TrackerRef, name: string, owns: (assignee: string) => boolean): Promise<number | null> {
+	const args = ["list", ...Object.keys(BEAD_OWNED_STATUSES).flatMap(status => ["--status", status]), "--assignee", name,
+		"--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
+	let result: FlywheelExecResult;
+	try {
+		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+	} catch {
+		return null;
+	}
+	if (result.code !== 0 || result.killed) return null;
+	try {
+		const parsed: unknown = JSON.parse(result.stdout);
+		const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
+		if (!Array.isArray(issues)) return null;
+		return issues.filter(row => {
+			const status = field(row, "status");
+			const assignee = field(row, "assignee");
+			return typeof status === "string" && BEAD_OWNED_STATUSES[status] === true && typeof assignee === "string" && owns(assignee.trim());
+		}).length;
+	} catch {
+		return null;
+	}
 }
 
 export interface RereadCall {
@@ -419,7 +501,7 @@ export interface RereadCall {
  * (see the header). Resolves true when both flags land.
  */
 export async function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string,
-	exec: FlywheelExec): Promise<boolean> {
+	exec: FlywheelExec, sessionTrackers: ReadonlyMap<string, TrackerRef> = new Map(), env: Record<string, string | undefined> = {}): Promise<boolean> {
 	const tool = call.toolName.toLowerCase();
 	if (tool === "read") {
 		if (resultTainted(result)) return false;
@@ -438,21 +520,29 @@ export async function observeRereadResult(call: RereadCall, result: unknown, pen
 			if (pending.identities.length === 0) pending.identities = [name];
 			return pending.identities.some(identity => identity.toLowerCase() === name.toLowerCase());
 		};
-		for (const target of brShowTargets(command)) {
+		const calls = brInvocations(command, call.cwd, home);
+		for (const target of brShowTargets(calls)) {
 			if (pending.beadOk) break;
 			const shown = stdout === null ? null : parseBeadRow(stdout, target.id);
 			if (shown !== null) {
-				if (BEAD_OWNED_STATUSES[shown.status] === true && shown.assignee !== null && owns(shown.assignee)) pending.beadOk = true;
+				if (BEAD_OWNED_STATUSES[shown.status] === true && shown.assignee !== null && owns(shown.assignee)) {
+					pending.beadOk = true;
+					pending.satisfiedBy = `show ${target.id} @ ${trackerOf(target, env)?.key ?? target.cwd ?? "?"}`;
+				}
 				continue;
 			}
-			if (!target.json) continue;
-			const confirmed = await readBeadState(exec, { bin: target.bin, cwd: call.cwd, db: target.db }, target.id);
+			if (!target.json || target.cwd === null) continue;
+			const confirmed = await readBeadState(exec, { bin: target.bin, cwd: target.cwd, db: target.db }, target.id);
 			if (confirmed.ok && BEAD_OWNED_STATUSES[confirmed.status] === true && confirmed.assignee !== null && owns(confirmed.assignee)) {
 				pending.beadOk = true;
+				pending.satisfiedBy = `show ${target.id} @ ${trackerOf(target, env)?.key ?? target.cwd}`;
 			}
 		}
-		const listAssignees = pending.beadOk ? [] : brListAssignees(command);
-		if (stdout !== null && listAssignees.length > 0) {
+		// One list per command: with several, the shown stdout cannot be attributed to one tracker.
+		const lists = pending.beadOk ? [] : calls.filter(item => listAssignees(item).length > 0);
+		if (stdout !== null && lists.length === 1) {
+			const list = lists[0]!;
+			const tracker = trackerOf(list, env);
 			let issues: unknown = null;
 			try {
 				const parsed: unknown = JSON.parse(stdout);
@@ -460,7 +550,23 @@ export async function observeRereadResult(call: RereadCall, result: unknown, pen
 			} catch {
 				// Non-JSON list output proves nothing; the flag stays unset.
 			}
-			if (Array.isArray(issues) && issues.length === 0 && listAssignees.some(owns)) pending.beadOk = true;
+			const name = listAssignees(list).find(owns);
+			if (tracker !== null && Array.isArray(issues) && issues.length === 0 && name !== undefined) {
+				// An empty list proves nothing about the other trackers this session used: each is read, failing closed.
+				let clear = true;
+				for (const other of sessionTrackers.values()) {
+					if (other.key === tracker.key) continue;
+					const held = await ownedBeadsIn(exec, other, name, owns);
+					if (held === null || held > 0) {
+						clear = false;
+						break;
+					}
+				}
+				if (clear) {
+					pending.beadOk = true;
+					pending.satisfiedBy = `empty list @ ${tracker.key}`;
+				}
+			}
 		}
 	}
 	return pending.agentsOk && pending.beadOk;
@@ -1122,6 +1228,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	/** Identity pinned by an identity-less session's first owned observation (self-declared; see header). */
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
+	/** Every tracker a successful br call reached this session, by key: an empty list in one never vouches for the others. */
+	const sessionTrackers = new Map<string, TrackerRef>();
 	pi.on("session_compact", async (_event, ctx) => {
 		// Arm conservatively before discovery: an I/O failure cannot bypass the gate.
 		pendingCalls.clear();
@@ -1148,7 +1256,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	pi.on("tool_call", async (event, ctx) => {
 		try {
 			if (typeof event.toolCallId === "string" && typeof event.toolName === "string") {
-				pendingCalls.set(event.toolCallId, { toolName: event.toolName, input: event.input, cwd: ctx.cwd });
+				// The bash tool's own `cwd` input is where the command runs, not the session cwd.
+				const toolCwd = event.toolName.toLowerCase() === "bash" ? field(event.input, "cwd") : undefined;
+				const cwd = typeof toolCwd === "string" && toolCwd.trim() !== "" ? resolve(ctx.cwd, expandHome(toolCwd.trim(), home)) : ctx.cwd;
+				pendingCalls.set(event.toolCallId, { toolName: event.toolName, input: event.input, cwd });
 			}
 			if (pendingReread !== null && isMutatingCall(event)) {
 				const tool = typeof event.toolName === "string" ? event.toolName : "this call";
@@ -1170,14 +1281,19 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {
-			const pending = pendingReread;
-			if (pending === null) return;
-			if (typeof _event.toolCallId !== "string" || _event.isError === true) return;
+			if (typeof _event.toolCallId !== "string") return;
 			const call = pendingCalls.get(_event.toolCallId);
 			if (call === undefined) return;
 			pendingCalls.delete(_event.toolCallId);
+			if (_event.isError === true || resultFailed(_event.result)) return;
+			const command = field(call.input, "command");
+			if (call.toolName.toLowerCase() === "bash" && typeof command === "string") {
+				for (const ref of commandTrackers(command, call.cwd, home, env)) if (!sessionTrackers.has(ref.key)) sessionTrackers.set(ref.key, ref);
+			}
+			const pending = pendingReread;
+			if (pending === null) return;
 			const identityLess = pending.identities.length === 0;
-			const done = await observeRereadResult(call, _event.result, pending, home, pi.exec);
+			const done = await observeRereadResult(call, _event.result, pending, home, pi.exec, sessionTrackers, env);
 			// A compaction during the guard's own read re-armed a fresh pending; this observation predates it.
 			if (pendingReread !== pending) return;
 			if (identityLess && pending.identities.length > 0) selfDeclared = pending.identities[0]!;

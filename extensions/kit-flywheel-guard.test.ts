@@ -810,6 +810,99 @@ test("REREAD: a failed --json show is never confirmed, and a by-path br is confi
 	expect(byPath.h.execs.find(call => call.command === "/opt/x/br")?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush", "--db", "/d/beads.db"]);
 });
 
+// --- COMPACTION_REREAD tracker scope (ompkit-xa5s.35 REREADSCOPE1, live 2026-10-19 04:50Z) ---
+// Session cwd A is a tracker where the seat holds nothing; its bead lives in repo B.
+
+/** Repo B (a tracker) and a responder: `br show` answers only in B (by cwd or B's --db); `br list` answers per tracker. */
+function repoB(show: FlywheelExecResult, listInB: FlywheelExecResult = { stdout: "[]", stderr: "", code: 0 }): { b: string; respond: Responder } {
+	const b = mkdtempSync(join(base, "repo-b-"));
+	mkdirSync(join(b, ".beads"));
+	const inB = (call: { args: string[]; options?: { cwd?: string } }) => call.options?.cwd === b || call.args.includes(join(b, ".beads", "beads.db"));
+	const respond: Responder = call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.args[0] === "list") return inB(call) ? listInB : { stdout: "[]", stderr: "", code: 0 };
+		if (call.args[0] === "show" && inB(call)) return show;
+		return { stdout: JSON.stringify({ error: { message: `Issue not found: ${call.args[1]}` } }), stderr: "", code: 3 };
+	};
+	return { b, respond };
+}
+
+async function scopedEdit(h: FakeHost, cwd: string, agents: string, bash: Record<string, unknown>, shown: unknown): Promise<boolean> {
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", bash);
+	await endAs(h, cwd, "s1", "bash", shown);
+	const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	return (after as FlywheelToolCallResult | undefined)?.block === true;
+}
+
+test("REREADSCOPE1: a truncated --json show of the bead in repo B clears via the tool cwd, a cd prefix, or --db", async () => {
+	const row = longRow("k-1", "in_progress", "TestWorker");
+	const shown = displayCuts(row.stdout)[0];
+	for (const make of [
+		(b: string) => ({ command: "br show k-1 --json", cwd: b }),
+		(b: string) => ({ command: `cd ${b} && br show k-1 --json` }),
+		(b: string) => ({ command: `cd '${b}' && br show k-1 --json | head -5` }),
+		(b: string) => ({ command: `br --db ${join(b, ".beads", "beads.db")} show k-1 --json` }),
+	]) {
+		const { b, respond } = repoB(row);
+		const { h, cwd, agents } = await rereadHost([], "TestWorker", respond);
+		expect(await scopedEdit(h, cwd, agents, make(b), shown)).toBe(false);
+		const confirm = h.execs.find(call => call.args[0] === "show");
+		expect(confirm?.options?.cwd === b || confirm?.args.includes(join(b, ".beads", "beads.db"))).toBe(true);
+	}
+});
+
+test("REREADSCOPE1: an unresolvable cd and someone else's bead in repo B never clear (planted negative)", async () => {
+	const foreign = repoB(longRow("k-9", "in_progress", "SomebodyElse"));
+	const one = await rereadHost([], "TestWorker", foreign.respond);
+	expect(await scopedEdit(one.h, one.cwd, one.agents, { command: "br show k-9 --json", cwd: foreign.b },
+		displayCuts(longRow("k-9", "in_progress", "SomebodyElse").stdout)[0])).toBe(true);
+	const mine = repoB(longRow("k-1", "in_progress", "TestWorker"));
+	const two = await rereadHost([], "TestWorker", mine.respond);
+	expect(await scopedEdit(two.h, two.cwd, two.agents, { command: "cd \"$REPO\" && br show k-1 --json" },
+		displayCuts(longRow("k-1", "in_progress", "TestWorker").stdout)[0])).toBe(true);
+	expect(two.h.execs.some(call => call.args[0] === "show")).toBe(false);
+});
+
+/** A host whose session touched repo B (a successful br call there) before compacting in A. */
+async function touchedB(respond: Responder, b: string): Promise<{ h: FakeHost; cwd: string; agents: string }> {
+	const cwd = mkdtempSync(join(base, "reread-a-"));
+	const agents = join(cwd, "AGENTS.md");
+	writeFileSync(agents, "rules\n");
+	mkdirSync(join(cwd, ".beads"));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" }, respond });
+	await callAs(h, cwd, "t1", "bash", { command: "br ready --json", cwd: b });
+	await endAs(h, cwd, "t1", "bash", native("[]"));
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	return { h, cwd, agents };
+}
+
+test("REREADSCOPE1: an empty list in A does not clear while a touched tracker B holds the agent's in-progress or rework bead (planted negative)", async () => {
+	for (const status of ["in_progress", "rework"]) {
+		const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: JSON.stringify([{ id: "k-1", status, assignee: "TestWorker" }]), stderr: "", code: 0 });
+		const { h, cwd, agents } = await touchedB(respond, b);
+		expect(await scopedEdit(h, cwd, agents, { command: "br list --status in_progress --assignee TestWorker --json" }, native("[]"))).toBe(true);
+		const probe = h.execs.find(call => call.args[0] === "list" && call.options?.cwd === b);
+		expect(probe?.args).toEqual(["list", "--status", "in_progress", "--status", "rework", "--assignee", "TestWorker", "--limit", "0",
+			"--json", "--no-auto-import", "--no-auto-flush"]);
+		expect(probe?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
+	}
+	// The guard's read of B failing keeps blocking (fail closed).
+	const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: "", stderr: "db locked", code: 5 });
+	const failed = await touchedB(respond, b);
+	expect(await scopedEdit(failed.h, failed.cwd, failed.agents, { command: "br list --assignee TestWorker --json" }, native("[]"))).toBe(true);
+});
+
+test("REREADSCOPE1: an empty list in A clears when no touched tracker holds an owned bead, and with nothing touched at all", async () => {
+	const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: JSON.stringify([{ id: "k-2", status: "in_progress", assignee: "SomebodyElse" }]), stderr: "", code: 0 });
+	const touched = await touchedB(respond, b);
+	expect(await scopedEdit(touched.h, touched.cwd, touched.agents, { command: "br list --assignee TestWorker --json" }, native("[]"))).toBe(false);
+	const bare = await rereadHost([], "TestWorker", repoB(bead("k-1", "TestWorker")).respond);
+	expect(await scopedEdit(bare.h, bare.cwd, bare.agents, { command: "br list --status in_progress --assignee TestWorker --json" }, native("[]"))).toBe(false);
+	expect(bare.h.execs.some(call => call.args[0] === "list")).toBe(false);
+});
+
 // --- SCRATCH_OWED (ompkit-774u.15 C): advice at in_review and close, never a block ---
 
 function mineAnswer(rows: { dir: string; label?: string; state: string; bin: string }[]): FlywheelExecResult {
