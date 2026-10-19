@@ -120,7 +120,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.3
+          bun-version-file: .bun-version
       - name: Prove stock PATH and run every portable extension contract
         run: bun scripts/test-stock-extensions.ts
   mac-service-contracts:
@@ -133,6 +133,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
       - name: Install the certified OMP for service receipt contracts
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
@@ -173,6 +175,8 @@ jobs:
           fetch-depth: ${{ github.event_name == 'push' && (matrix.suite == 'core' || matrix.suite == 'core-1') && '0' || '1' }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
       - name: Validate all unreleased source notes before main can become green
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (matrix.suite == 'core' || matrix.suite == 'core-1')
         env:
@@ -442,6 +446,8 @@ jobs:
           shellcheck scripts/*.sh checkers/*.sh installer/install.sh tests/cli/installer.test.sh tests/cli/install-verify.test.sh tests/e2e/real-home-journey.sh
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
       - name: Install stock OMP for the ${{ matrix.omp.track }} ladder
         env:
           OMP_VERSION: ${{ matrix.omp.version }}
@@ -500,6 +506,8 @@ jobs:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
       - name: Install the minimum OMP (package-time manifest classification parses rules with OMP)
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.minimum }}
@@ -540,6 +548,8 @@ jobs:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
       - name: Install certified OMP and TypeScript LSP for the journey
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
@@ -602,6 +612,8 @@ jobs:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
       - name: Install OMP ${{ matrix.omp.track }} for native behavior
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Install pinned TypeScript LSP for native route proof
