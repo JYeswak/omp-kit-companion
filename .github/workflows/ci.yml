@@ -54,6 +54,8 @@ jobs:
       minimum: ${{ steps.resolve.outputs.minimum }}
       certified: ${{ steps.resolve.outputs.certified }}
       matrix: ${{ steps.resolve.outputs.matrix }}
+      suites: ${{ steps.suites.outputs.suites }}
+      core_shards: ${{ steps.suites.outputs.core_shards }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -85,6 +87,24 @@ jobs:
             printf 'certified=%s\n' "$certified"
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
+      - name: Plan cli-contracts suite legs (core is sharded on push and pull_request only)
+        id: suites
+        shell: bash
+        env:
+          # Push and PR run Ubuntu only, where four core shards cut the 12.0 min p50 critical path. Schedule and
+          # workflow_call keep one core leg per OS: sharding there would multiply macOS jobs against the
+          # five-slot macOS pool (tests/cli/ci-concurrency.test.sh).
+          SHARDED: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && !inputs.reuse_fast_ci }}
+        run: |
+          set -euo pipefail
+          shards=1
+          if [[ "$SHARDED" == "true" ]]; then shards=4; fi
+          suites="$(jq -cn --argjson n "$shards" '(if $n > 1 then [range(1; $n + 1) | "core-\(.)"] else ["core"] end) + ["package-release", "kit-update"]')"
+          {
+            printf 'core_shards=%s\n' "$shards"
+            printf 'suites=%s\n' "$suites"
+          } >> "$GITHUB_OUTPUT"
+          echo "cli-contracts suite legs: $suites"
   stock-extensions:
     if: github.event.repository.private == false
     runs-on: ubuntu-24.04
@@ -128,25 +148,29 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
-        suite: [core, package-release, kit-update]
+        suite: ${{ fromJSON(needs.resolve-omp-versions.outputs.suites) }}
     runs-on: ${{ matrix.os }}
-    # Every event runs the same three groups: CLI/fleet core, package release, and kit update.
+    # Every event runs the same groups: CLI/fleet core, package release, and kit update.
     # Native br extension contracts run in the tool-equipped core fleet suite; portable extension
     # contracts run separately with no fleet tools on PATH. The former macOS 'all' job took
     # 39.2 min (test step 37.8) against this
     # 40 min cap (run 39073904994); the 25m41s the cap was first sized from was cut short by the older
     # 30 min cancellation. Ubuntu groups take 7.9-10.8 min (13 push runs). macOS groups are not yet
     # measured, so no speedup is claimed. Every check still runs; the cap is unchanged.
+    # On push and pull_request the core group runs as core-1..core-N (`bun test --shard`, balanced by the
+    # per-file durations in .github/core-test-timings.json, measured on push run 39185830559: 172 files,
+    # 562 s serial, largest file 107 s). Steps that run once per core group run on core-1 (or core); the
+    # cli-contracts summary proves the shards together ran every core test file exactly once.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.source_sha }}
-          fetch-depth: ${{ github.event_name == 'push' && matrix.suite == 'core' && '0' || '1' }}
+          fetch-depth: ${{ github.event_name == 'push' && (matrix.suite == 'core' || matrix.suite == 'core-1') && '0' || '1' }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
       - name: Validate all unreleased source notes before main can become green
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.suite == 'core'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (matrix.suite == 'core' || matrix.suite == 'core-1')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -154,7 +178,7 @@ jobs:
           base_tag="$(python3 scripts/release_reuse.py notes-floor --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA")"
           sh scripts/release-notes.sh check --base-tag "$base_tag" --head "$GITHUB_SHA"
       - name: Install bubblewrap for Linux integration containment
-        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'package-release')
+        if: runner.os == 'Linux' && (startsWith(matrix.suite, 'core') || matrix.suite == 'package-release')
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -196,7 +220,7 @@ jobs:
       - name: Generate ignored source manifest for CLI contracts
         run: sh scripts/build-manifest.sh
       - name: Exercise real Git import and hook installer contracts
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         env:
           TMPDIR: ${{ github.workspace }}/var/agent-tmp
         run: |
@@ -219,10 +243,31 @@ jobs:
             package/src/memory-backend/resolve.ts \
             package/src/config/settings.ts
       - name: Exercise the core CLI and native matcher contracts
-        if: matrix.suite == 'core'
+        if: startsWith(matrix.suite, 'core')
         env:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
-        run: bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts'
+          SUITE: ${{ matrix.suite }}
+          CORE_SHARDS: ${{ needs.resolve-omp-versions.outputs.core_shards }}
+        # Keep the paths and ignore globs in sync with the shard coverage check in the cli-contracts job.
+        run: |
+          set -eu
+          if [ "$SUITE" = core ]; then
+            bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts'
+          else
+            shard="${SUITE#core-}"
+            mkdir -p "$RUNNER_TEMP/core-shard"
+            bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts' \
+              --shard="$shard/$CORE_SHARDS" --timings=.github/core-test-timings.json \
+              --reporter=junit --reporter-outfile="$RUNNER_TEMP/core-shard/junit-$shard.attempt-$GITHUB_RUN_ATTEMPT.xml"
+          fi
+      - name: Retain this core shard's file list for the coverage check
+        if: always() && startsWith(matrix.suite, 'core-')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: core-shard-junit-${{ matrix.suite }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core-shard/
+          if-no-files-found: warn
+          retention-days: 2
       - name: Exercise package release contracts
         if: matrix.suite == 'package-release'
         env:
@@ -234,28 +279,33 @@ jobs:
           OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
         run: bun test ./tests/cli/kit-update.test.ts
       - name: Exercise memory readiness against the installed certified OMP source
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: bun test tests/cli/memory-readiness.test.ts
       - name: Validate minimum/certified detached native receipts
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: python3 tests/cli/native_candidate_test.py
       - name: Test exact-SHA release reuse validation
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: python3 tests/scripts/release_reuse_test.py
+      - name: Test the core shard coverage check against real bun shards
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: python3 tests/scripts/ci_shard_coverage_test.py
       - name: Check README currency (every command and doctor scope documented, no pinned release version)
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: bun scripts/readme-check.ts
       - name: Exercise the release train, release-bump and doc-drift contracts
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: |
           mkdir -p var/agent-tmp
           sh tests/cli/release-train.test.sh
           sh tests/cli/doc-drift.test.sh
       - name: Run differential native-vs-kit oracle
-        if: runner.os == 'Linux' && matrix.suite == 'core'
+        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'core-1')
         run: bun scripts/differential-oracle.ts
       - name: Verify differential oracle rejects a planted mismatch
-        if: runner.os == 'Linux' && matrix.suite == 'core'
+        if: runner.os == 'Linux' && (matrix.suite == 'core' || matrix.suite == 'core-1')
         shell: bash
         run: |
           set -euo pipefail
@@ -310,6 +360,25 @@ jobs:
             echo "macOS service contracts result: $MAC_SERVICE_RESULT" >&2
             exit 1
           fi
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        with:
+          pattern: core-shard-junit-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/core-shard
+      - name: Require the core shards together to run every core test file exactly once
+        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        env:
+          CORE_SHARDS: ${{ needs.resolve-omp-versions.outputs.core_shards }}
+        run: |
+          python3 scripts/ci-shard-coverage.py --shards "$CORE_SHARDS" --junit-dir "$RUNNER_TEMP/core-shard" \
+            --root tests/cli --root tests/fleet-guard \
+            --ignore '**/package-release.test.ts' --ignore '**/kit-update.test.ts'
   ladder:
     if: github.event.repository.private == false
     needs: resolve-omp-versions
