@@ -13,9 +13,7 @@
 </div>
 
 A tested rule pack, six guard extensions, four skills, and a guarded CLI for
-an existing OMP install. Every change
-the CLI makes is planned first, written with a receipt, and reversible with
-`omp-kit undo`.
+an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -29,9 +27,6 @@ sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --d
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX"
 ```
 
-Release history lives in [CHANGELOG.md](CHANGELOG.md); every release body on
-GitHub is the matching CHANGELOG section.
-
 ## TL;DR
 
 **The problem.** OMP's stream-triggered rules (TTSR) are regular expressions
@@ -44,7 +39,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 32 named scopes, opt-in guard extensions
+Around that core sit diagnostics for 33 named scopes, opt-in guard extensions
 for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Why use omp-kit
@@ -122,7 +117,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 32 diagnostic scopes
+### Doctor: 33 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -608,7 +603,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope github` | Read-only GitHub capability probes | `omp-kit doctor --scope github` |
 | `--scope secrets` | Files holding an Infisical value, by file and vault name; `--staged` for the pre-commit hook | `omp-kit doctor --scope secrets --staged` |
 | `--scope stale-worktree` | Worktree paths that remove lines landed in HEAD, with the blamed commit and bead | `omp-kit doctor --scope stale-worktree --project PATH` |
-
+| `--scope plugin_release` | Linked vs latest published plugin version, per profile | `omp-kit doctor --scope plugin_release` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus
 report without writing.

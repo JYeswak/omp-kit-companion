@@ -16,6 +16,7 @@ import { ompFingerprint, readTestReceipt } from "./omp-watch.ts";
 import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
 import { pluginPackageHash } from "./apply-plugin.ts";
+import { inspectPluginRelease, livePluginReleaseIo } from "./plugin-release.ts";
 import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
@@ -1888,6 +1889,8 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	} // Manifest-dependent inventory.
 	const profiles = wants("effective_rules", "effective_profile", "policy", "extensions") ? inspectProfiles(home) : undefined;
 	if (wants("plugin_links")) rows.push(inspectPluginLinks(root, home));
+	// FLEETUPG1: only on an explicit scope, since it asks GitHub for the latest release.
+	if (input.scope === "plugin_release") rows.push(inspectPluginRelease(livePluginReleaseIo(home)));
 	if (wants("effective_rules") && input.inventoryOnly && !input.scope) {
 		rows.push(finding("effective_rules", "NOT_RUN", "Presence inventory did not probe runtime rule activation", "Run omp-kit doctor --scope rules --json for live per-profile rule evidence."));
 	} else if (wants("effective_rules") && input.ompPath && manifest && profiles) {

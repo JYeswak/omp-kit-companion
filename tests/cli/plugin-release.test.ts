@@ -2,8 +2,11 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { diagnose } from "../../src/diagnostics.ts";
 import { compareVersions, inspectPluginRelease, livePluginReleaseIo, seatProfile, type OmpSeat, type PluginLink } from "../../src/plugin-release.ts";
+
+const repoRoot = resolve(import.meta.dir, "../..");
 
 const RELINK = Date.parse("2026-10-19T01:40:00Z");
 const link = (profile: string, version: string | null, target: string | null = version && `/opt/releases/${version}`): PluginLink =>
@@ -87,4 +90,36 @@ describe("plugin_release", () => {
 			expect(result.evidence?.stale_profiles).toEqual(["codex"]);
 		} finally { rmSync(root, { recursive: true, force: true }); }
 	});
+
+	test("doctor --scope plugin_release emits the finding from the planted home", async () => {
+		const root = mkdtempSync(join(tmpdir(), "plugin-release-doctor-"));
+		try {
+			const home = join(root, "home");
+			mkdirSync(join(root, "releases", "0.0.1"), { recursive: true });
+			mkdirSync(join(home, ".omp", "plugins", "node_modules"), { recursive: true });
+			symlinkSync(join(root, "releases", "0.0.1"), join(home, ".omp", "plugins", "node_modules", "omp-kit-companion"));
+			const rows = await diagnose({ root, home, scope: "plugin_release" });
+			expect(rows.map((row) => row.component)).toEqual(["plugin_release"]);
+			const profiles = rows[0]!.evidence?.profiles as { profile: string; linked: string; verdict: string }[];
+			expect(profiles.map((row) => [row.profile, row.linked])).toEqual([["default", "0.0.1"]]);
+			// 0.0.1 is behind any published release; offline it is UNKNOWN. Never CURRENT.
+			expect(["STALE", "UNKNOWN"]).toContain(profiles[0]!.verdict);
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	});
 });
+
+	test("doctor --scope plugin_release through the CLI accepts the scope (grammar) and reports the finding", () => {
+		const root = mkdtempSync(join(tmpdir(), "plugin-release-cli-"));
+		try {
+			const home = join(root, "home");
+			mkdirSync(join(root, "releases", "0.0.1"), { recursive: true });
+			mkdirSync(join(home, ".omp", "plugins", "node_modules"), { recursive: true });
+			symlinkSync(join(root, "releases", "0.0.1"), join(home, ".omp", "plugins", "node_modules", "omp-kit-companion"));
+			const env = { ...process.env, HOME: home, OMP_KIT_OMP_SRC_FETCH: "0" };
+			const child = Bun.spawnSync([process.execPath, "run", join(repoRoot, "src", "cli.ts"), "doctor", "--scope", "plugin_release", "--json"],
+				{ env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+			expect(child.exitCode).toBe(0);
+			const body = JSON.parse(child.stdout.toString()) as { data: { findings: { component: string }[] } };
+			expect(body.data.findings.map((row) => row.component)).toEqual(["plugin_release"]);
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	}, 120_000);

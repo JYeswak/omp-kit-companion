@@ -133,7 +133,7 @@ export function livePluginReleaseIo(home: string, env: NodeJS.ProcessEnv = proce
 	};
 }
 
-// Own entry point until doctor --scope plugin_release is wired: bun src/plugin-release.ts [HOME]; exit 1 unless OK.
+// Standalone entry point (doctor --scope plugin_release is the operator surface): bun src/plugin-release.ts [HOME]; exit 1 unless OK.
 if (import.meta.main) {
 	const result = inspectPluginRelease(livePluginReleaseIo(process.argv[2] ?? process.env.HOME ?? ""));
 	console.log(JSON.stringify(result, null, 2));
