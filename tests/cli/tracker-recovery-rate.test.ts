@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { preassignVerdict } from "../../src/fleet-watch.ts";
 import { RECOVERY_ARTIFACT_BOUND, recoverBusyTracker, recoveryFlagDirs, type TrackerRecoveryCommandResult } from "../../src/tracker-recovery.ts";
@@ -185,5 +186,43 @@ test("quarantined WAL artifacts latch writes without an active recovery marker",
 		expect(gate.text).toContain("WAL_QUARANTINE_GROWTH");
 		expect(gate.text).toContain("quarantine artifacts");
 	}
+	expect(brCalls).toEqual([]);
+});
+
+test("symlinked migration run entry refuses recovery before intervention with zero commands", () => {
+	const planted = plantedRepo();
+	plantMarker(planted.root, "20261010T000000.000000Z-9-0", T1);
+	const real = join(planted.root, "20261010T000000.000000Z-9-0");
+	const link = join(planted.root, "20261011T000000.000000Z-10-0");
+	symlinkSync(real, link);
+	const brCalls: string[][] = [];
+	const result = recoverBusyTracker(planted.repo, "omp-test", deps(T1, brCalls));
+	expect(result?.kind).toBe("RECOVERY_BLOCKED");
+	expect(result?.text).toContain("quarantine artifact inventory is unknown");
+	expect(result?.text).toContain("is a symbolic link");
+	expect(brCalls).toEqual([]);
+});
+
+test("wrong-type retained artifact refuses recovery before intervention with zero commands", () => {
+	const planted = plantedRepo();
+	plantMarker(planted.root, "20261010T000000.000000Z-9-0", T1);
+	writeFileSync(join(planted.root, "20261010T000000.000000Z-9-0", "recovery-before"), "not-a-directory\n");
+	const brCalls: string[][] = [];
+	const result = recoverBusyTracker(planted.repo, "omp-test", deps(T1, brCalls));
+	expect(result?.kind).toBe("RECOVERY_BLOCKED");
+	expect(result?.text).toContain("quarantine artifact inventory is unknown");
+	expect(result?.text).toContain("unexpected type");
+	expect(brCalls).toEqual([]);
+});
+
+test("wrong-type prepared marker refuses recovery before intervention with zero commands", () => {
+	const planted = plantedRepo();
+	const runDir = plantMarker(planted.root, "20261010T000000.000000Z-9-0", T1);
+	mkdirSync(join(runDir, "recovery-prepared.json"));
+	const brCalls: string[][] = [];
+	const result = recoverBusyTracker(planted.repo, "omp-test", deps(T1, brCalls));
+	expect(result?.kind).toBe("RECOVERY_BLOCKED");
+	expect(result?.text).toContain("quarantine artifact inventory is unknown");
+	expect(result?.text).toContain("unexpected type");
 	expect(brCalls).toEqual([]);
 });

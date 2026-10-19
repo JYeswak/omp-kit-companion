@@ -61,16 +61,19 @@ function quarantineInventory(repo: string): QuarantineInventory {
 	}
 	let migrationRuns = 0;
 	for (const entry of migrationEntries) {
-		if (!entry.isDirectory()) continue;
 		const runDir = join(migrationRoot, entry.name);
 		try {
-			if (lstatSync(runDir).isSymbolicLink()) return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration run ${entry.name} is a symbolic link` };
+			const entryInfo = lstatSync(runDir);
+			if (entryInfo.isSymbolicLink()) return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration run ${entry.name} is a symbolic link` };
+			if (!entryInfo.isDirectory()) continue;
 			let artifact = false;
 			for (const name of ["recovery-before", "recovery-prepared.json", COMPLETE_MARKER]) {
 				try {
 					const info = lstatSync(join(runDir, name));
 					if (info.isSymbolicLink()) return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration artifact ${entry.name}/${name} is a symbolic link` };
-					if (name === "recovery-before" ? info.isDirectory() : info.isFile()) artifact = true;
+					const expected = name === "recovery-before" ? info.isDirectory() : info.isFile();
+					if (expected) artifact = true;
+					else return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: `migration artifact ${entry.name}/${name} has an unexpected type` };
 				} catch (error) {
 					if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { migrationRuns, walIndexArtifacts, artifactCount: migrationRuns + walIndexArtifacts, error: errorMessage(error) };
 				}
