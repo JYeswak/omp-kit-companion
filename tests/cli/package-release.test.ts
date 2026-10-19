@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -508,3 +508,95 @@ test("oversized operator files bound the watched snapshot only where the kit cou
 	expect(bounded!.exitCode, bounded!.stdout + bounded!.stderr).toBe(1);
 	expect(JSON.parse(bounded!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
 });
+
+test("release SBOM is SPDX 2.3 and names the exact archive, runtime, binary, and every manifest file", () => {
+	const sbomPath = join(output, `${asset.filename}.sbom.spdx.json`);
+	expect(existsSync(sbomPath)).toBe(true);
+	const sbom = JSON.parse(readFileSync(sbomPath, "utf8")) as { spdxVersion: string; packages: { SPDXID: string; versionInfo?: string; checksums?: { algorithm: string; checksumValue: string }[] }[];
+		files: { fileName: string; checksums: { algorithm: string; checksumValue: string }[] }[] };
+	expect(sbom.spdxVersion).toBe("SPDX-2.3");
+	const shaOf = (pkg: { checksums?: { algorithm: string; checksumValue: string }[] }): string =>
+		pkg.checksums?.find(sum => sum.algorithm === "SHA256")?.checksumValue ?? "";
+	const byId = Object.fromEntries(sbom.packages.map(pkg => [pkg.SPDXID, pkg]));
+	expect(shaOf(byId["SPDXRef-Archive"])).toBe(asset.sha256);
+	expect(typeof byId["SPDXRef-Runtime-Bun"].versionInfo).toBe("string");
+	expect(byId["SPDXRef-Runtime-Bun"].versionInfo!.length).toBeGreaterThan(0);
+	const manifestRaw = Bun.spawnSync(["tar", "-xOf", join(output, asset.filename), "release-manifest.json"],
+		{ cwd: output, stdout: "pipe", stderr: "pipe" });
+	expect(manifestRaw.exitCode).toBe(0);
+	const manifest = JSON.parse(manifestRaw.stdout.toString()) as { files: { path: string; sha256: string }[] };
+	expect(shaOf(byId["SPDXRef-Binary"])).toBe(manifest.files.find(file => file.path === "bin/omp-kit")?.sha256);
+	expect(sbom.files).toHaveLength(manifest.files.length);
+	for (const file of manifest.files) {
+		const listed = sbom.files.find(entry => entry.fileName === file.path);
+		expect(listed, `SBOM omits bundled file ${file.path}`).toBeDefined();
+		expect(shaOf(listed!)).toBe(file.sha256);
+	}
+	const verify = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--sbom", sbomPath, "--archive", join(output, asset.filename)],
+		{ cwd: repo, stdout: "pipe", stderr: "pipe" });
+	expect(verify.exitCode, verify.stdout.toString() + verify.stderr.toString()).toBe(0);
+	expect(verify.stdout.toString()).toContain("VERIFY=ok");
+	const planted = JSON.parse(JSON.stringify(sbom));
+	planted.packages.find((pkg: { SPDXID: string }) => pkg.SPDXID === "SPDXRef-Archive").checksums[0].checksumValue = "0".repeat(64);
+	const plantedPath = join(output, "planted-tampered.spdx.json");
+	writeFileSync(plantedPath, `${JSON.stringify(planted)}\n`);
+	const refused = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--sbom", plantedPath, "--archive", join(output, asset.filename)],
+		{ cwd: repo, stdout: "pipe", stderr: "pipe" });
+	expect(refused.exitCode).toBe(1);
+	expect(refused.stderr.toString()).toContain("SBOM_ARCHIVE_MISMATCH");
+}, 60_000);
+
+test("detached signatures verify on a fresh copy; planted tampering, wrong keys, and missing sigs fail", () => {
+	const archived = join(output, "archived-source");
+	const signed = join(output, "signed-release");
+	const stranger = join(output, "stranger-release");
+	const fresh = join(output, "fresh-release");
+	for (const directory of [signed, stranger, fresh]) mkdirSync(directory, { recursive: true });
+	const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+	const { publicKey: wrongPublic } = generateKeyPairSync("ed25519");
+	const keyPath = join(signed, "release.key");
+	const pubPath = join(signed, "release.pub");
+	const wrongPubPath = join(signed, "stranger.pub");
+	writeFileSync(keyPath, privateKey.export({ format: "pem", type: "pkcs8" }));
+	writeFileSync(pubPath, publicKey.export({ format: "pem", type: "spki" }));
+	writeFileSync(wrongPubPath, wrongPublic.export({ format: "pem", type: "spki" }));
+	const built = Bun.spawnSync(["sh", join(archived, "scripts", "package-release.sh"), "--version", "9.9.9", "--platform", key, "--out", signed, "--sign-key", keyPath], {
+		cwd: output, env: { ...process.env, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
+	});
+	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
+	const receipt = JSON.parse(built.stdout.toString()) as ReleaseAsset;
+	const sbomName = `${receipt.filename}.sbom.spdx.json`;
+	const archiveSig = `${receipt.filename}.sig`;
+	const sbomSig = `${sbomName}.sig`;
+	for (const name of [receipt.filename, sbomName, archiveSig, sbomSig]) {
+		expect(existsSync(join(signed, name)), `missing sidecar ${name}`).toBe(true);
+	}
+	for (const name of [receipt.filename, sbomName, archiveSig, sbomSig, "release.pub"]) {
+		const copied = Bun.spawnSync(["cp", join(signed, name), fresh], { stdout: "pipe", stderr: "pipe" });
+		expect(copied.exitCode).toBe(0);
+	}
+	for (const [kind, name, signame] of [["archive", receipt.filename, archiveSig], ["sbom", sbomName, sbomSig]] as const) {
+		const ok = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--pubkey", join(fresh, "release.pub"),
+			"--file", join(fresh, name), "--sig", join(fresh, signame)], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		expect(ok.exitCode, `${kind}: ` + ok.stdout.toString() + ok.stderr.toString()).toBe(0);
+		expect(ok.stdout.toString()).toContain("VERIFY=ok");
+	}
+	const tampered = join(stranger, receipt.filename);
+	Bun.spawnSync(["cp", join(fresh, receipt.filename), tampered], { stdout: "pipe", stderr: "pipe" });
+	const bytes = readFileSync(tampered);
+	bytes[bytes.length - 1030] ^= 1;
+	writeFileSync(tampered, bytes);
+	Bun.spawnSync(["cp", join(fresh, archiveSig), stranger], { stdout: "pipe", stderr: "pipe" });
+	const dirty = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--pubkey", join(fresh, "release.pub"),
+		"--file", tampered, "--sig", join(stranger, archiveSig)], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+	expect(dirty.exitCode).toBe(1);
+	expect(dirty.stderr.toString()).toContain("SIGNATURE_MISMATCH");
+	const wrongKey = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--pubkey", wrongPubPath,
+		"--file", join(fresh, receipt.filename), "--sig", join(fresh, archiveSig)], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+	expect(wrongKey.exitCode).toBe(1);
+	expect(wrongKey.stderr.toString()).toContain("SIGNATURE_MISMATCH");
+	const missing = Bun.spawnSync(["sh", join(repo, "scripts", "verify-release.sh"), "--pubkey", join(fresh, "release.pub"),
+		"--file", join(fresh, receipt.filename), "--sig", join(fresh, "no-such.sig")], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+	expect(missing.exitCode).toBe(1);
+	expect(missing.stderr.toString()).toContain("SIG_NOT_FOUND");
+}, 120_000);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
@@ -143,8 +143,9 @@ function expand(directory: string, result: string[]): void {
 	}
 }
 function argumentsOf(args: string[]) {
-	if (args.length !== 6 || args[0] !== "--version" || args[2] !== "--platform" || args[4] !== "--out")
-		fail("Usage: package-release.sh --version [v]X.Y.Z --platform darwin-arm64-none|darwin-x64-none|linux-arm64-gnu|linux-x64-gnu|native --out ABSOLUTE_DIR");
+	if ((args.length !== 6 && args.length !== 8) || args[0] !== "--version" || args[2] !== "--platform" || args[4] !== "--out"
+		|| (args.length === 8 && args[6] !== "--sign-key"))
+		fail("Usage: package-release.sh --version [v]X.Y.Z --platform darwin-arm64-none|darwin-x64-none|linux-arm64-gnu|linux-x64-gnu|native --out ABSOLUTE_DIR [--sign-key ED25519_PRIVATE_PEM]");
 	const rawVersion = args[1]!;
 	// Accept an optional v prefix (dsr displays v-prefixed versions); the archive records bare.
 	const version = rawVersion.startsWith("v") ? rawVersion.slice(1) : rawVersion;
@@ -168,7 +169,12 @@ function argumentsOf(args: string[]) {
 	const key = kitTriple[rawKey] ?? (rawKey === "native" ? kitTriple[hostKey] : undefined) ?? rawKey;
 	if (!Object.hasOwn(platformTargets, key)) fail("UNSUPPORTED_PLATFORM");
 	if (!isAbsolute(out) || resolve(out) !== out || !lstatSync(out).isDirectory() || lstatSync(out).isSymbolicLink()) fail("UNSAFE_OUTPUT_DIRECTORY");
-	return { version, key, out };
+	const signKey = args.length === 8 ? args[7]! : null;
+	if (signKey !== null) {
+		const stat = lstatSync(signKey);
+		if (!stat.isFile() || stat.isSymbolicLink()) fail("UNSAFE_SIGNING_KEY");
+	}
+	return { version, key, out, signKey };
 }
 /** Packaging always regenerates from the actual rule inputs; a stale source MANIFEST.tsv is never an input. */
 export function packageRuleManifest(sourceRoot: string, temporaryRoot: string): Buffer {
@@ -181,7 +187,7 @@ export function packageRuleManifest(sourceRoot: string, temporaryRoot: string): 
 }
 
 async function run(): Promise<void> {
-	const { version, key, out } = argumentsOf(process.argv.slice(2));
+	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
 	const filename = `omp-kit-v${version}-${key}.tar`;
@@ -248,14 +254,111 @@ async function run(): Promise<void> {
 		// Publishing via hard link cannot overwrite an existing candidate, even if another build raced us.
 		linkSync(draft, output);
 		unlinkSync(draft);
+		const archiveBytes = readFileSync(output);
+		const archiveSha = sha(archiveBytes);
+		const sbomFilename = `${filename}.sbom.spdx.json`;
+		const sbom = Buffer.from(`${JSON.stringify(spdxSbom({ version, key, filename, archiveSha, bunVersion: Bun.version,
+			binarySha: sha(content.get(RELEASE_BINARY_NAME)!),
+			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) }))}\n`);
+		const sbomPath = join(out, sbomFilename);
+		const sbomFd = openSync(sbomPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o644);
+		try {
+			writeAll(sbomFd, sbom);
+			fsyncSync(sbomFd);
+		} finally { closeSync(sbomFd); }
+		if (signKey !== null) {
+			let privateKey;
+			try {
+				privateKey = createPrivateKey(readFileSync(signKey, "utf8"));
+			} catch { fail("INVALID_SIGNING_KEY"); }
+			if (privateKey.asymmetricKeyType !== "ed25519") fail("INVALID_SIGNING_KEY");
+			for (const [name, bytes] of [[filename, archiveBytes], [sbomFilename, sbom]] as const) {
+				const sigFd = openSync(join(out, `${name}.sig`), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o644);
+				try {
+					writeAll(sigFd, sign(null, bytes, privateKey));
+					fsyncSync(sigFd);
+				} finally { closeSync(sigFd); }
+			}
+		}
 		const [os, arch, libc] = key.split("-");
 		const asset: ReleaseAsset = { os: os as ReleaseAsset["os"], arch: arch as ReleaseAsset["arch"],
-			libc: libc as ReleaseAsset["libc"], filename, sha256: sha(readFileSync(output)), manifest_sha256: sha(manifest) };
+			libc: libc as ReleaseAsset["libc"], filename, sha256: archiveSha, manifest_sha256: sha(manifest) };
 		process.stdout.write(`${JSON.stringify(asset)}\n`);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
 }
+type SpdxInput = { version: string; key: string; filename: string; archiveSha: string; bunVersion: string; binarySha: string; files: { path: string; sha256: string }[] };
+/** Deterministic SPDX 2.3 document derived from the exact bytes just sealed into the archive:
+ * the archive itself, the compiled binary, the embedding Bun toolchain (the bundled runtime;
+ * this kit ships zero third-party runtime dependencies), and every bundled source file. */
+function spdxSbom(input: SpdxInput) {
+	const iso = new Date().toISOString();
+	const created = `${iso.slice(0, 19)}Z`;
+	const fileEntries = input.files.map((file, index) => ({
+		fileName: file.path,
+		SPDXID: `SPDXRef-File-${index + 1}`,
+		checksums: [{ algorithm: "SHA256", checksumValue: file.sha256 }],
+		licenseConcluded: "NOASSERTION",
+		copyrightText: "NOASSERTION",
+	}));
+	return {
+		spdxVersion: "SPDX-2.3",
+		dataLicense: "CC0-1.0",
+		SPDXID: "SPDXRef-DOCUMENT",
+		name: `omp-kit-v${input.version}-${input.key}`,
+		documentNamespace: `https://omp-kit.invalid/sbom/v${input.version}/${input.key}`,
+		creationInfo: {
+			created,
+			creators: ["Tool: omp-kit-package-release"],
+			licenseListVersion: "3.24",
+		},
+		packages: [
+			{
+				name: input.filename,
+				SPDXID: "SPDXRef-Archive",
+				versionInfo: input.version,
+				downloadLocation: "NOASSERTION",
+				filesAnalyzed: false,
+				checksums: [{ algorithm: "SHA256", checksumValue: input.archiveSha }],
+				licenseConcluded: "NOASSERTION",
+				copyrightText: "NOASSERTION",
+				primaryPackagePurpose: "ARCHIVE",
+			},
+			{
+				name: RELEASE_BINARY_NAME,
+				SPDXID: "SPDXRef-Binary",
+				versionInfo: input.version,
+				downloadLocation: "NOASSERTION",
+				filesAnalyzed: false,
+				checksums: [{ algorithm: "SHA256", checksumValue: input.binarySha }],
+				licenseConcluded: "NOASSERTION",
+				copyrightText: "NOASSERTION",
+				primaryPackagePurpose: "APPLICATION",
+				comment: "Single-file compiled binary; embeds the Bun toolchain below.",
+			},
+			{
+				name: "bun",
+				SPDXID: "SPDXRef-Runtime-Bun",
+				versionInfo: input.bunVersion,
+				downloadLocation: "NOASSERTION",
+				filesAnalyzed: false,
+				licenseConcluded: "NOASSERTION",
+				copyrightText: "NOASSERTION",
+				primaryPackagePurpose: "OTHER",
+				comment: "Bundled runtime: compiler toolchain embedded in the binary. Reported from the builder's actual Bun runtime; no third-party runtime dependencies ship in this kit.",
+			},
+		],
+		files: fileEntries,
+		relationships: [
+			{ spdxElementId: "SPDXRef-DOCUMENT", relationshipType: "DESCRIBES", relatedSpdxElement: "SPDXRef-Archive" },
+			{ spdxElementId: "SPDXRef-Archive", relationshipType: "CONTAINS", relatedSpdxElement: "SPDXRef-Binary" },
+			...fileEntries.map(file => ({ spdxElementId: "SPDXRef-Archive", relationshipType: "CONTAINS", relatedSpdxElement: file.SPDXID })),
+			{ spdxElementId: "SPDXRef-Binary", relationshipType: "GENERATED_FROM", relatedSpdxElement: "SPDXRef-Runtime-Bun" },
+		],
+	};
+}
+
 function safeCompiled(binary: string): Buffer {
 	const stat = lstatSync(binary);
 	if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail("UNSAFE_COMPILED_BINARY");
