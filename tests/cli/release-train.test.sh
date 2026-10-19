@@ -323,6 +323,19 @@ check "publish-lag: tag mismatch exits 4" 4 "$rc" "$out" "PUBLISH_LAG=tag-mismat
 out=$(GH_BIN=/nonexistent-gh-binary sh "$TRAIN" publish-lag --version 9.9.98 --sha "$LAGSHA" --repo "$LAG_FIXTURE" 2>&1); rc=$?
 check "publish-lag: no tag exits 0" 0 "$rc" "$out" "PUBLISH_LAG=no-tag"
 
+# 30. RT1 signing slice 4/4: publish job downloads per-platform SBOMs and refuses a release with none
+YMLDIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../../.github/workflows" && pwd)
+pubrange=$(sed -n '/^  publish:/,$p' "$YMLDIR/release-train.yml")
+printf '%s' "$pubrange" | grep -q 'sbom-\$platform'; rc1=$?
+check "publish: downloads per-platform SBOM artifacts" 0 "$rc1" ""
+printf '%s' "$pubrange" | grep -qF 'test -s "$sbom"'; rc2=$?
+check "publish: zero-SBOM release refused" 0 "$rc2" ""
+# 31. planted: an attest-index job signs release-index.json with the keyless identity
+idxrange=$(sed -n '/^  attest-index:/,/^# Deliberately/p' "$YMLDIR/release.yml")
+printf '%s' "$idxrange" | grep -q 'attest-build-provenance'; rc3=$?
+printf '%s' "$idxrange" | grep -q 'subject-path: candidate-index/release-index.json'; rc4=$?
+check "attest-index: release-index signed keyless" 0 "$((rc3 + rc4))" ""
+
 
 printf '%s pass, %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
