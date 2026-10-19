@@ -1,7 +1,7 @@
 // ompkit-774u.15 SCRATCHBIN1 C and D through the real CLI: `scratch mine` lists the caller's own dirs and what each still
 // owes, and `scratch apply` prints the gap report.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -64,4 +64,28 @@ test("scratch apply prints the gap report for what it reclaimed and the CLI sche
 	expect(existsSync(dir)).toBe(false);
 	const help = Bun.spawnSync([process.execPath, "run", join(repo, "src", "cli.ts"), "help", "scratch"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
 	expect(help.stdout.toString()).toContain("scratch mine");
+}, 180_000);
+
+test("scratch mine --at logs one flag row naming only the caller's owed dirs; a plain mine, a clean mine and the session dir log nothing", () => {
+	const { root, home, env } = world();
+	const log = join(home, "state", "omp-kit", "scratch-reap-log.jsonl");
+	const flags = (): Record<string, unknown>[] => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>) : [])
+		.filter((row) => row.event === "flag");
+	plant(root, "owed.1", ownerOf(process.pid, "owed"));
+	plant(root, "theirs.59304", ownerOf(59304, "theirs"));
+	plant(root, "omp.59305", ownerOf(process.pid, "omp", "bin=throwaway\n"));
+	expect(cli(env, "scratch", "mine").code).toBe(0);
+	expect(flags()).toEqual([]);
+	const flagged = cli(env, "scratch", "mine", "--at", "review");
+	expect(flagged.envelope.data).toMatchObject({ overall: "FINDINGS", unreleased: 1 });
+	expect(flags()).toMatchObject([{ point: "review", dirs: [{ dir: join(root, "owed.1"), state: "unreleased", bin: "unbinned" }] }]);
+	expect(JSON.stringify(flags())).not.toContain("theirs");
+	expect(JSON.stringify(flags())).not.toContain("omp.59305");
+	// planted negatives: an unknown point is refused without logging, and a clean caller logs nothing
+	const refused = cli(env, "scratch", "mine", "--at", "whenever");
+	expect(refused.envelope.errors?.[0]?.code).toBe("SCRATCH_MINE_POINT_INVALID");
+	expect(flags()).toHaveLength(1);
+	cli(env, "scratch", "release", join(root, "owed.1"), "--bin", "throwaway");
+	expect(cli(env, "scratch", "mine", "--at", "close").envelope.data).toMatchObject({ overall: "OK", unreleased: 0 });
+	expect(flags()).toHaveLength(1);
 }, 180_000);

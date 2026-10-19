@@ -573,7 +573,7 @@ export interface TrackerRequest {
 	db?: string;
 	/** Identities this command line itself claims (flags and inline env assignments). */
 	identities: string[];
-	operation: "close" | "claim" | "start" | "block" | "release";
+	operation: "close" | "claim" | "start" | "block" | "release" | "review";
 	/** Labels this command adds or sets (comma-split). */
 	addLabels: string[];
 	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
@@ -684,7 +684,8 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 			: subcommand === "update" && nativeStatus === "blocked" ? "block"
 				: subcommand === "update" && claim ? "claim"
 					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start"
-						: subcommand === "update" && nativeStatus === "open" ? "release" : null;
+						: subcommand === "update" && (nativeStatus === "in_review" || nativeStatus === "inreview") ? "review"
+							: subcommand === "update" && nativeStatus === "open" ? "release" : null;
 		if (operation === null) continue;
 		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force, addLabels });
 	}
@@ -1008,6 +1009,40 @@ async function checkCloseOrphansDependents(request: TrackerRequest, id: string, 
 	};
 }
 
+const SCRATCH_MINE_TIMEOUT_MS = 20_000;
+const MAX_OWED_LISTED = 5;
+
+/**
+ * SCRATCHBIN1 flag (ompkit-774u.15): at the caller's `in_review` or `close`, tell it which scratch dirs it still owns
+ * unreleased. `omp-kit scratch mine --at <point>` lists only the caller's own dirs (owner agent and held session, or its
+ * pid), excludes the live session dir, and logs one flag row for the 7-day false-flag audit. This is advice only: it
+ * never blocks, and a missing or failing omp-kit yields no note. Promotion to a refusal needs that audit to be clean.
+ */
+export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "review" | "close"): Promise<string | null> {
+	let result: FlywheelExecResult;
+	try {
+		result = await exec("omp-kit", ["scratch", "mine", "--at", point, "--json"], { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS });
+	} catch {
+		return null;
+	}
+	if (result.code !== 0 || result.killed) return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(result.stdout);
+	} catch {
+		return null;
+	}
+	const dirs = field(field(parsed, "data"), "dirs");
+	if (!Array.isArray(dirs)) return null;
+	const owed = dirs.filter(row => !(field(row, "label") === "omp" && field(row, "bin") === "throwaway")
+		&& (field(row, "state") === "unreleased" || field(row, "state") === "hold-expired") && typeof field(row, "dir") === "string");
+	if (owed.length === 0) return null;
+	const listed = owed.slice(0, MAX_OWED_LISTED).map(row => `${String(field(row, "dir"))} (${String(field(row, "state"))}, bin ${String(field(row, "bin"))})`);
+	const more = owed.length > listed.length ? ` and ${owed.length - listed.length} more` : "";
+	return `kit-flywheel-guard SCRATCH_OWED: you still own ${owed.length} scratch dir(s) you have not binned: ${listed.join("; ")}${more}. `
+		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. Warning only; nothing was blocked.";
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -1030,6 +1065,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			if (refusal !== undefined) return refusal;
 			continue;
 		}
+		if (request.operation === "review") continue;
 		if (request.operation !== "close") {
 			const refusal = await checkNativeClaim(request, deps);
 			if (refusal !== undefined) return refusal;
@@ -1070,8 +1106,13 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			}
 		}
 	}
-	if (warnings.length === 0) return undefined;
-	return { additionalContext: `kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.` };
+	const parts: string[] = [];
+	if (warnings.length > 0) parts.push(`kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.`);
+	if (requests.some(request => request.operation === "review" || request.operation === "close")) {
+		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review");
+		if (owed !== null) parts.push(owed);
+	}
+	return parts.length === 0 ? undefined : { additionalContext: parts.join(" ") };
 }
 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {

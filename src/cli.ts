@@ -62,7 +62,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3214,10 +3214,16 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			verification: "UNVERIFIED" };
 	}
 	if (sub === "mine") {
+		const atFlag = request.flags.get("--at");
+		const point = OWED_FLAG_POINTS.find((candidate) => candidate === atFlag);
+		if (atFlag !== undefined && point === undefined)
+			return refusal("SCRATCH_MINE_POINT_INVALID", `--at must be one of ${OWED_FLAG_POINTS.join("|")}`,
+				"Pass the disposal point that is asking, or omit --at for a pure read.");
 		const rows = ownedScratch(home, deps);
-		const unreleased = rows.filter((row) => row.state === "unreleased" || row.state === "hold-expired");
+		const unreleased = rows.filter(owesRelease);
+		if (point !== undefined) logOwedFlag(home, point, rows);
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
-			note: "Read-only. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
+			note: "Read-only apart from --at, which appends one flag row to the reap log. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }

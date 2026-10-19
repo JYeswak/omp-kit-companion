@@ -64,7 +64,13 @@ A dir the owner released into a bin is not a gap. The report also counts gaps pe
 
 ## What a session still owes
 
-`omp-kit scratch mine` lists the caller's own scratch dirs, read-only: those whose owner record names the caller's agent and a session it holds, or whose pid is the caller's or an ancestor's. Each row has a state (`unreleased`, `released`, `held`, `hold-expired`) and its bin. `overall` is `FINDINGS` while any dir is `unreleased` or its hold has `hold-expired`, otherwise `OK`; the exit code is 0 either way. Dirs of other owners and unowned dirs never appear.
+`omp-kit scratch mine` lists the caller's own scratch dirs: those whose owner record names the caller's agent and a session it holds, or whose pid is the caller's or an ancestor's (pid 1 is never an owner: hand-made `pid=1` owner files are nobody's). Each row has a state (`unreleased`, `released`, `held`, `hold-expired`) and its bin. `overall` is `FINDINGS` while any dir is owed, otherwise `OK`; the exit code is 0 either way. A dir is owed when it is `unreleased` or its hold has `hold-expired`, except the session's own dir (label `omp`, `bin=throwaway`), which its session releases at the end. Dirs of other owners and unowned dirs never appear. It reads the process table and the caller's session leases once per listing, so it runs in seconds over thousands of owner files.
+
+`omp-kit scratch mine --at review|close|session-end` also appends one `flag` row to the reap log (`~/.local/state/omp-kit/scratch-reap-log.jsonl`) when something is owed: the disposal point and each owed dir with its state and bin. Without `--at` it is a pure read.
+
+## The flag at in_review and close
+
+When a session runs `br update ID --status in_review` or `br close ID`, the kit-flywheel-guard extension runs `omp-kit scratch mine --at review` (or `--at close`) and, if dirs are owed, adds a `SCRATCH_OWED` note to that command's context naming up to five of them and the release command. It is advice only: nothing is blocked, and a missing omp-kit, a failed or timed-out run, or an unparseable answer yields no note. It becomes a refusal only after the reap log shows a week of flags with no dir the caller did not own.
 
 ## The session's own dir
 
@@ -72,4 +78,4 @@ Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owne
 
 ## Scope of what exists today
 
-The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine` and the session-end release of the session's own dir are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: the flag at the other disposal point (the holder's close or `in_review`), which starts as a warning and becomes a refusal only after a week with no false flag.
+The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine [--at]`, the session-end release of the session's own dir and the `SCRATCH_OWED` advice at `in_review` and `close` are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: promoting the advice to a refusal after a week without a false flag.

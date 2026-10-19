@@ -59,3 +59,44 @@ test("the caller sees its own dirs by seat or by pid, with their state and bin, 
 	expect(ownedScratch(home, deps(seat(null, []))).map((row) => row.label)).toEqual(["pid", "released"]);
 	expect(ownedScratch(home, deps(seat("CrimsonHorizon", [SESSION]))).map((row) => row.label)).toEqual(["other-agent", "pid", "released"]);
 });
+
+test("a hand-made owner with pid=1 is never the caller's, though pid 1 is an ancestor of every process; a real ancestor still is", () => {
+	const root = mkdtempSync(join(scratchParent, "mine-"));
+	const home = mkdtempSync(join(scratchParent, "mine-home-"));
+	cleanup.push(root, home);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	process.env.XDG_STATE_HOME = join(home, "state");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	for (const [name, pid] of [["placeholder.1", 1], ["ancestor.2", 4242], ["stranger.3", 4243]] as const) {
+		mkdirSync(join(root, name));
+		writeFileSync(join(root, name, ".owner"), owner(pid, name.split(".")[0]!));
+	}
+	const table = `${process.pid} 4242\n4242 1\n1 0\n`;
+	const withTable: InspectDeps = { ...deps(seat(null, [])), run: (args) => (args[0] === "ps" ? { code: 0, stdout: table, stderr: "" } : { code: 1, stdout: "", stderr: "" }) };
+	expect(ownedScratch(home, withTable).map((row) => row.label)).toEqual(["ancestor"]);
+});
+
+test("one listing reads the process table and the seat once, however many dirs it walks", () => {
+	const root = mkdtempSync(join(scratchParent, "mine-"));
+	const home = mkdtempSync(join(scratchParent, "mine-home-"));
+	cleanup.push(root, home);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	process.env.XDG_STATE_HOME = join(home, "state");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	for (let index = 0; index < 40; index++) {
+		mkdirSync(join(root, `d.${index}`));
+		writeFileSync(join(root, `d.${index}`, ".owner"), owner(60000 + index, `d${index}`, `agent=${AGENT}\nsession=${SESSION}\n`));
+	}
+	let runs = 0;
+	let seats = 0;
+	const counting: InspectDeps = { ...deps(seat(AGENT, [SESSION])), run: () => { runs++; return { code: 0, stdout: `${process.pid} 1\n1 0\n`, stderr: "" }; },
+		callerSeat: () => { seats++; return { agent: AGENT, sessions: [SESSION], main: SESSION }; } };
+	expect(ownedScratch(home, counting)).toHaveLength(40);
+	expect(seats).toBe(1);
+	expect(runs).toBeLessThanOrEqual(1);
+	// Dirs whose owner names neither this seat nor an ancestor take the process-table path for every dir, still one read.
+	for (let index = 0; index < 40; index++) writeFileSync(join(root, `d.${index}`, ".owner"), owner(60000 + index, `d${index}`));
+	runs = 0;
+	expect(ownedScratch(home, counting)).toHaveLength(0);
+	expect(runs).toBe(1);
+});

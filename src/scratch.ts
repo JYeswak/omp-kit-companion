@@ -1030,6 +1030,8 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 
 function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
 	if (ownerPid === callerPid) return true;
+	// pid 1 heads every ancestor chain, and dirs with `pid=1` (hand-made owners) are nobody's in particular.
+	if (ownerPid <= 1) return false;
 	const chain = ancestorPids(callerPid, run);
 	return chain !== null && chain.slice(1).includes(ownerPid);
 }
@@ -2003,6 +2005,20 @@ export interface OwnedScratchRow { dir: string; label: string; state: OwnedScrat
  */
 export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[] {
 	const now = deps.now ?? Date.now();
+	// One listing reads the process table and the caller's session leases once, not once per dir: a fleet repo holds
+	// thousands of owner files, and a per-dir ps and lsof made this take minutes.
+	const answers = new Map<string, ScratchRunResult>();
+	const run: ScratchRunner = (args, opts) => {
+		const key = args.join("\0");
+		let answer = answers.get(key);
+		if (answer === undefined) {
+			answer = deps.run(args, opts);
+			answers.set(key, answer);
+		}
+		return answer;
+	};
+	let seat: SeatIdentity | undefined;
+	const once: InspectDeps = { ...deps, run, callerSeat: () => (seat ??= deps.callerSeat ? deps.callerSeat() : callerSeat(run)) };
 	const rows: OwnedScratchRow[] = [];
 	for (const root of resolveScratchRoots(home)) {
 		let names: string[];
@@ -2016,7 +2032,7 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 			if (isSymlink(dir) || isSymlink(join(dir, ".owner"))) continue;
 			const text = readText(join(dir, ".owner"));
 			const owner = text === null ? null : parseOwnerFile(text);
-			if (owner === null || !(callerHoldsSeat(owner, deps) || callerIsOwnedBy(owner.pid, process.pid, deps.run))) continue;
+			if (owner === null || !(callerHoldsSeat(owner, once) || callerIsOwnedBy(owner.pid, process.pid, run))) continue;
 			const released = readReleaseRecord(dir);
 			if (released) {
 				rows.push({ dir, label: owner.label, state: "released", bin: released.bin ?? "unbinned" });
@@ -2028,6 +2044,30 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 		}
 	}
 	return rows.sort((left, right) => left.dir.localeCompare(right.dir));
+}
+
+export type OwedFlagPoint = "review" | "close" | "session-end";
+export const OWED_FLAG_POINTS: readonly OwedFlagPoint[] = ["review", "close", "session-end"];
+
+/**
+ * What a disposal point flags: an unreleased dir or an expired hold. The session's own dir (label omp, bin throwaway)
+ * is not owed before the session ends: its owner releases it at session end, so flagging it at every close would be
+ * noise, not a gap.
+ */
+export function owesRelease(row: OwnedScratchRow): boolean {
+	if (row.label === "omp" && row.bin === "throwaway") return false;
+	return row.state === "unreleased" || row.state === "hold-expired";
+}
+
+/**
+ * One audit row per flag shown at a disposal point (ompkit-774u.15 C): which of the caller's own dirs were owed,
+ * and where. The flag is a warning for 7 days and a refusal only if this log shows no flag that named a dir the caller
+ * did not own; every row here comes from `ownedScratch`, so that is checkable against the dirs' owner files.
+ */
+export function logOwedFlag(home: string, point: OwedFlagPoint, rows: readonly OwnedScratchRow[], now: number = Date.now()): void {
+	const owed = rows.filter(owesRelease);
+	if (owed.length === 0) return;
+	appendLog(home, { event: "flag", dir: owed[0]!.dir, at: new Date(now).toISOString(), point, dirs: owed.map(row => ({ dir: row.dir, state: row.state, bin: row.bin })) });
 }
 
 export function touchForAge(path: string, ageMs: number, now: number = Date.now()): void {

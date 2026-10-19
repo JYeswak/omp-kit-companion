@@ -809,3 +809,91 @@ test("REREAD: a failed --json show is never confirmed, and a by-path br is confi
 	expect(byPath.blocked).toBe(false);
 	expect(byPath.h.execs.find(call => call.command === "/opt/x/br")?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush", "--db", "/d/beads.db"]);
 });
+
+// --- SCRATCH_OWED (ompkit-774u.15 C): advice at in_review and close, never a block ---
+
+function mineAnswer(rows: { dir: string; label?: string; state: string; bin: string }[]): FlywheelExecResult {
+	return { stdout: JSON.stringify({ ok: true, data: { overall: "FINDINGS", unreleased: rows.length, dirs: rows.map(row => ({ label: "seat", ...row })) } }), stderr: "", code: 0 };
+}
+
+function scratchResponder(mine: FlywheelExecResult, beads: Record<string, FlywheelExecResult> = {}): Responder {
+	const brAnswers = brTable(beads);
+	return call => call.command === "omp-kit" ? mine : brAnswers(call);
+}
+
+const OWED = [{ dir: "/r/var/agent-tmp/probe.1", state: "unreleased", bin: "unbinned" }, { dir: "/r/var/agent-tmp/hold.2", state: "hold-expired", bin: "hold" }];
+
+test("SCRATCH_OWED: moving a bead to in_review lists the caller's unreleased dirs as advice and logs the point", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED)) });
+	const result = await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox");
+	expect(result?.block).toBeUndefined();
+	expect(result?.additionalContext).toContain("SCRATCH_OWED");
+	expect(result?.additionalContext).toContain("/r/var/agent-tmp/probe.1 (unreleased, bin unbinned)");
+	expect(result?.additionalContext).toContain("/r/var/agent-tmp/hold.2 (hold-expired, bin hold)");
+	expect(result?.additionalContext).toContain("omp-kit scratch release DIR --bin throwaway|evidence|promote");
+	const mine = h.execs.filter(call => call.command === "omp-kit");
+	expect(mine.map(call => call.args)).toEqual([["scratch", "mine", "--at", "review", "--json"]]);
+	expect(mine[0]?.options?.cwd).toBe(project);
+});
+
+test("SCRATCH_OWED: a verifier's close of another seat's bead gets the same advice, logged as close", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "Verifier" },
+		respond: scratchResponder(mineAnswer(OWED.slice(0, 1)), { "kit-2": bead("kit-2", "BlueFox") }) });
+	const result = await toolCall(h, project, "br close kit-2 --reason \"replayed\"");
+	expect(result?.block).toBeUndefined();
+	expect(result?.additionalContext).toContain("you still own 1 scratch dir(s)");
+	expect(h.execs.find(call => call.command === "omp-kit")?.args).toEqual(["scratch", "mine", "--at", "close", "--json"]);
+});
+
+test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unusable answer yields no advice", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const unusable: FlywheelExecResult[] = [
+		mineAnswer([]),
+		mineAnswer([{ dir: "/r/var/agent-tmp/omp.7", label: "omp", state: "unreleased", bin: "throwaway" }]),
+		mineAnswer([{ dir: "/r/var/agent-tmp/ok.1", state: "released", bin: "throwaway" }, { dir: "/r/var/agent-tmp/held.1", state: "held", bin: "hold" }]),
+		{ stdout: "", stderr: "omp-kit: command not found", code: 127 },
+		{ stdout: JSON.stringify({ ok: true, data: { dirs: [{ dir: "/x", label: "p", state: "unreleased", bin: "unbinned" }] } }), stderr: "", code: 0, killed: true },
+		{ stdout: "not json", stderr: "", code: 0 },
+		{ ...mineAnswer(OWED), code: 1 },
+		{ stdout: JSON.stringify({ ok: true, data: {} }), stderr: "", code: 0 },
+	];
+	for (const answer of unusable) {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(answer) });
+		expect(await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
+		expect(h.notices).toEqual([]);
+	}
+});
+
+test("SCRATCH_OWED: a thrown exec never blocks and a long list is cut with a count", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return { stdout: "", code: 127 }; } });
+	expect(await toolCall(throwing, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
+	const many = Array.from({ length: 8 }, (_, index) => ({ dir: `/r/var/agent-tmp/d.${index}`, state: "unreleased", bin: "unbinned" }));
+	const long = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(many)) });
+	const result = await toolCall(long, project, "br update kit-1 --status in_review --actor BlueFox");
+	expect(result?.additionalContext).toContain("you still own 8 scratch dir(s)");
+	expect(result?.additionalContext).toContain("and 3 more");
+	expect(result?.additionalContext).not.toContain("d.5");
+});
+
+test("SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: scratchResponder(mineAnswer(OWED), { "kit-1": bead("kit-1", "BlueFox") }) });
+	const refused = await toolCall(h, project, "br close kit-1 --reason \"x\"");
+	expect(refused?.block).toBe(true);
+	expect(h.execs.some(call => call.command === "omp-kit")).toBe(false);
+	await toolCall(h, project, "br show kit-1 --json");
+	await toolCall(h, project, "br update kit-1 --status in_progress --add-label x");
+	await toolCall(h, project, "br comments add kit-1 -f /x");
+	expect(h.execs.some(call => call.command === "omp-kit")).toBe(false);
+});
+
+test("trackerRequests: update --status in_review is a review request, in either spelling", () => {
+	const parsed = (command: string) => trackerRequests(command, "/r", "/h").map(request => [request.operation, request.ids]);
+	expect(parsed("br update kit-1 --status in_review")).toEqual([["review", ["kit-1"]]]);
+	expect(parsed("br update kit-1 --status=InReview")).toEqual([["review", ["kit-1"]]]);
+	expect(parsed("br update kit-1 --status open")).toEqual([["release", ["kit-1"]]]);
+});
