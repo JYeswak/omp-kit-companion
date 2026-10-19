@@ -696,6 +696,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
 			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
 			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
+		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
 		// l9kv: every readiness wait must carry a measured non-negative elapsed; a
 		// missing or negative elapsed fails this check (and demotes PASS below).
 		const readinessWaits = collectReadinessWaits(calls);
