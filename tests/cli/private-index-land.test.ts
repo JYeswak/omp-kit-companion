@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -242,7 +242,8 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(data.check?.status).toBe("PASS");
 	expect(data.check?.path).toBe(".omp/push-check");
 	expect(data.check?.sha256).toBe(createHash("sha256").update(checkBody).digest("hex"));
-	expect(data.check?.selected_executable).toBe("/bin/bash");
+	// land.ts records the realpath of the shebang interpreter: /bin/bash on macOS, /usr/bin/bash on usr-merged Linux.
+	expect(data.check?.selected_executable).toBe(realpathSync("/bin/bash"));
 	expect(data.check?.selected_version.length).toBeGreaterThan(0);
 	expect(data.check?.checked_sha).toBe(data.commit);
 	expect(data.check?.pushed_sha).toBe(data.commit);
