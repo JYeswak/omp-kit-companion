@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compactionRereadMessage, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait } from "./kit-flywheel-guard";
+import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
@@ -1268,4 +1269,69 @@ test("DRAIN1: ownerless start still refuses with the atomic claim route", async 
 	const refused = await drainCall({ "k-2": { status: "open", assignee: null } }, {}, "br --actor Holder update k-2 --status in_progress");
 	expect(refused?.block).toBe(true);
 	expect(JSON.parse(refused?.reason ?? "{}").refusal.next).toContain("--claim");
+});
+
+// --- BGWAIT1 (ompkit-fp72.19.1.24): seats never block their turn on their own background work ---
+
+test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1)", async () => {
+	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const input of [{}, { timeout: 120000 }]) {
+		const [result] = await callAs(h, cwd, "w", "wait", input);
+		expect((result as FlywheelToolCallResult)?.block).toBe(true);
+		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("Take the next item");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("later tool boundary");
+	}
+});
+
+test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1)", async () => {
+	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const command of [
+		"for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done",
+		"while [ ! -f rc ]; do sleep 5; done",
+		"until make ready; do sleep 10; done",
+		"sleep 20 && sleep 20",
+		"sleep 15; make test; sleep 15",
+		"python3 -c \"import time; time.sleep(30)\"",
+		"python3 -c \"import time\nwhile True:\n    time.sleep(5)\"",
+		"python3 -c \"import time\nfor i in range(10):\n    time.sleep(1)\n    poll()\"",
+	]) {
+		const [result] = await callAs(h, cwd, "w", "bash", { command });
+		expect((result as FlywheelToolCallResult)?.block).toBe(true);
+		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
+		expect((result as FlywheelToolCallResult)?.reason).toContain("Take the next item");
+	}
+	const [evaled] = await callAs(h, cwd, "e", "eval", { language: "py", code: "import time\nwhile True:\n    time.sleep(5)" });
+	expect((evaled as FlywheelToolCallResult)?.block).toBe(true);
+	expect((evaled as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
+});
+
+test("WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less sessions pass (BGWAIT1)", async () => {
+	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const input of [
+		{ command: "sleep 2" },
+		{ command: "sleep 10 && make test" },
+		{ command: "for f in *.log; do echo $f; done" },
+		{ command: "python3 -c \"import time; time.sleep(2)\"" },
+		{ command: "for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done", async: true },
+		{ command: "sleep 60", async: true },
+	]) {
+		expect(await callAs(seat, cwd, "s", "bash", input)).toEqual([undefined]);
+	}
+	expect(await callAs(seat, cwd, "e", "eval", { language: "py", code: "import time\ntime.sleep(2)" })).toEqual([undefined]);
+	const person = await createFlywheelHost(base, { env: {} });
+	expect(await callAs(person, cwd, "s", "bash", { command: "for i in $(seq 1 5); do sleep 10; done" })).toEqual([undefined]);
+	expect(await callAs(person, cwd, "w", "wait", {})).toEqual([undefined]);
+});
+
+test("WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity", () => {
+	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout")?.block).toBe(true);
+	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "while true; do sleep 1; done" } }, "CopperTrout")?.block).toBe(true);
+	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 20 && sleep 20" } }, "CopperTrout")?.block).toBe(true);
+	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "python3 -c \"import time; time.sleep(30)\"" } }, "CopperTrout")?.block).toBe(true);
+	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 2" } }, "CopperTrout")).toBeUndefined();
+	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, null)).toBeUndefined();
 });

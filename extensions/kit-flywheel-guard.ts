@@ -1129,6 +1129,7 @@ function noWaitArgvs(command: string, depth = 0): string[][] {
 without a fleet identity pass untouched. */
 export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
 	if (owner === null || event.toolName !== "bash") return undefined;
+	if (field(event.input, "async") === true) return undefined;
 	const command = field(event.input, "command");
 	if (typeof command !== "string" || command.trim().length === 0) return undefined;
 	for (const argv of noWaitArgvs(command)) {
@@ -1158,6 +1159,105 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null):
 				};
 			}
 		}
+	}
+	return undefined;
+}
+export const WAIT_REFUSED = "WAIT_REFUSED";
+
+/** Next action named in every BGWAIT1 refusal (ompkit-fp72.19.1.24): a seat never parks its turn on its own background work. */
+const BG_WAIT_NEXT =
+	"Take the next item now: your held beads, other seats' in_review beads ready for grading, bead DAG repair, "
+	+ "/skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
+	+ "/skill:extreme-software-optimization. A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
+
+/** Shell loop openers: a `sleep` inside one parks the turn, however short the single sleep. */
+const BG_LOOP_OPENERS: Record<string, true> = { for: true, while: true, until: true, do: true };
+/** Shell list keywords joining commands without a `;`/`&` separator the splitter sees: `do sleep 5`
+arrives as one word list, so the tail is evaluated as a nested command too. */
+const BG_KEYWORD_OPENERS: Record<string, true> = { do: true, then: true, else: true };
+
+/** `time.sleep(<seconds>)` durations in a code fragment, parsed without evaluation. */
+function timeSleepSeconds(fragment: string): number[] {
+	const found: number[] = [];
+	const pattern = /time\s*\.\s*sleep\s*\(\s*(\d+(?:\.\d+)?)/g;
+	let match: RegExpExecArray | null;
+	while ((match = pattern.exec(fragment)) !== null) found.push(Number(match[1]));
+	return found;
+}
+
+/** Whole-word loop keywords in a code fragment (shell loops and `while True:` / `for …:` python loops). */
+function hasLoopWord(fragment: string): boolean {
+	for (const word of fragment.split(/[^A-Za-z]+/)) {
+		if (word === "for" || word === "while" || word === "until") return true;
+	}
+	return false;
+}
+
+function bgWaitRefusal(owner: string, detail: string): FlywheelToolCallResult {
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}`,
+	};
+}
+
+/** BGWAIT1 (ompkit-fp72.19.1.24): a fleet seat never blocks its turn on its own background work. In a session
+with a fleet identity (admissionOwner), the `wait` tool is refused, as is any blocking poll: a non-async bash
+loop (for/while/until) containing `sleep`, `sleep` totalling >= 30 s across the call, and eval/python
+`time.sleep` in a loop or totalling >= 20 s. The refusal names the next action. Async bash jobs and short
+single sleeps pass untouched, as do sessions without a fleet identity. */
+export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
+	if (owner === null) return undefined;
+	const tool = typeof event.toolName === "string" ? event.toolName.toLowerCase() : "";
+	if (tool === "wait") {
+		return bgWaitRefusal(owner, "this call uses the `wait` tool.");
+	}
+	if (tool === "bash") {
+		if (field(event.input, "async") === true) return undefined;
+		const command = field(event.input, "command");
+		if (typeof command !== "string" || command.trim().length === 0) return undefined;
+		const argvs = noWaitArgvs(command);
+		let sleepTotal = 0;
+		let sleepSeen = false;
+		let loop = false;
+		for (const argv of argvs) {
+			if (BG_LOOP_OPENERS[argv[0]!] === true) loop = true;
+			const starts = argv.length > 1 && BG_KEYWORD_OPENERS[argv[0]!] === true ? [argv, argv.slice(1)] : [argv];
+			for (const words of starts) {
+				if (basename(words[0]!) !== "sleep") continue;
+				for (const word of words.slice(1)) {
+					const seconds = sleepOperandSeconds(word);
+					if (seconds === null) continue;
+					sleepSeen = true;
+					sleepTotal += seconds;
+				}
+			}
+		}
+		if (loop && sleepSeen) {
+			return bgWaitRefusal(owner, "this call parks the turn in a sleep-poll loop.");
+		}
+		if (sleepSeen && sleepTotal >= 30) {
+			return bgWaitRefusal(owner, `this call runs \`sleep\` for about ${sleepTotal} s in total (>= 30 s).`);
+		}
+		const naps = timeSleepSeconds(command);
+		if (naps.length > 0) {
+			const total = naps.reduce((a, b) => a + b, 0);
+			const looped = loop || hasLoopWord(command);
+			if (looped || total >= 20) {
+				return bgWaitRefusal(owner, `this call idles in time.sleep for about ${total} s${looped ? " in a loop" : ""} (>= 20 s or looped).`);
+			}
+		}
+		return undefined;
+	}
+	if (tool === "eval") {
+		const code = field(event.input, "code");
+		if (typeof code !== "string") return undefined;
+		const naps = timeSleepSeconds(code);
+		if (naps.length === 0) return undefined;
+		const total = naps.reduce((a, b) => a + b, 0);
+		if (hasLoopWord(code) || total >= 20) {
+			return bgWaitRefusal(owner, `this eval idles in time.sleep for about ${total} s (>= 20 s or looped).`);
+		}
+		return undefined;
 	}
 	return undefined;
 }
@@ -1568,6 +1668,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (goalEnd !== undefined) return goalEnd;
 			const noWait = checkNoWait(event, admissionOwner(env));
 			if (noWait !== undefined) return noWait;
+			const bgWait = checkBgWait(event, admissionOwner(env));
+			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
