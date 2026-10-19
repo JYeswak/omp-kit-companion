@@ -29,7 +29,7 @@ import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
-import { mechanicalVerdicts as admissionVerdicts, PARTITION_ERROR } from "../src/mechanical-admission.ts";
+import { mechanicalVerdicts as admissionVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
 
@@ -280,7 +280,7 @@ const OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH = 8 * 1024;
 // obligation name, but dispatch finished, valid tool arguments to production.
 interface AdmissionTarget {
 	readonly name: string;
-	readonly evaluate: typeof durabilityCheck;
+	evaluate: typeof durabilityCheck;
 }
 const SCRATCH_ADMISSION: AdmissionTarget = { name: "scratch-is-not-a-home", evaluate: durabilityCheck };
 type PayloadTarget = Rule | AdmissionTarget;
@@ -311,9 +311,10 @@ function evaluationTargets(rulesDir: string) {
 async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undefined)[] = [undefined]): Promise<boolean[]> {
 	const evaluator = SCRATCH_ADMISSION.evaluate;
 	if (c.rule !== SCRATCH_ADMISSION.name || typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
-	// One immutable fixture and one live dispatch per case: production repository
-	// facts are re-read on that dispatch and nothing is cached across cases. Each
-	// requested chunk partition must reassemble to the exact wire to share it.
+	// One immutable fixture and two live dispatches per case: production repository
+	// facts are re-read on each dispatch, nothing is cached across cases, and the
+	// verdicts must agree. Each requested chunk partition must reassemble to the
+	// exact wire to share the verdict.
 	return admissionVerdicts(c, chunkWidths, { kit: KIT, evaluate: evaluator });
 }
 /**
@@ -493,8 +494,19 @@ async function runGate(rulesDir: string, casesFile: string, caseReporter: TestCa
 		let evaluated = !unavailableRules?.has(c.rule);
 		if (!evaluated) caseReportComplete = false;
 		const onUnavailable = caseReporter ? () => { evaluated = false; caseReportComplete = false; } : undefined;
-		const { g2, fired, length } = admission ? await admissionEvidence(c)
-			: { g2: await g2Fires(rule, c, onUnavailable), ...await g3Fires(rule, c, onUnavailable) };
+		let evidence: { g2: boolean; fired: number[]; length: number };
+		if (admission) {
+			try { evidence = await admissionEvidence(c); }
+			catch (error) {
+				if (!(error instanceof Error) || error.message !== NONDETERMINISM_ERROR) throw error;
+				const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
+				if (evaluated) caseReporter?.record(tag, "FAIL");
+				lines.push(`FAIL ${tag} | ${error.message} | ${show(c.snippet)}`);
+				failures.push(`NONDETERMINISM ${tag}: ${error.message}`);
+				continue;
+			}
+		} else evidence = { g2: await g2Fires(rule, c, onUnavailable), ...await g3Fires(rule, c, onUnavailable) };
+		const { g2, fired, length } = evidence;
 		const g2ok = g2 === (c.expect === "fire");
 		const wire = wirePayload(c);
 		let g3ok = true;
@@ -962,6 +974,32 @@ async function admissionSelftest(tmp: string, caseReporter: TestCaseReporter | n
 		caseReporter?.record(`mechanical control ${control.rule} line ${control.line}: ${control.note}`, ok ? "PASS" : "FAIL");
 		console.log(`${ok ? "ok  " : "FAIL"} mechanical control: ${control.note}; final-only admission and argument/path equivalents`);
 		if (!ok) bad++;
+	}
+	// A guard that flips its verdict on a second call from one cwd must turn the
+	// gate RED: the single dispatch per partition width alone would not see it.
+	const rows = [
+		"scratch-is-not-a-home\tfire\ttool\twrite\tvar/agent-tmp/flip.1/report.md\t# planted\tflip fire\t",
+		"scratch-is-not-a-home\tquiet\ttool\twrite\tvar/agent-tmp/flip.1/report.md\tReport: planted\tflip quiet\t",
+	].join("\n");
+	const flipCases = path.join(tmp, "flip-cases.tsv");
+	fs.writeFileSync(flipCases, `${CASE_HEADER}\n${rows}\n`);
+	const genuine = SCRATCH_ADMISSION.evaluate;
+	const callsPerCwd = new Map<string, number>();
+	SCRATCH_ADMISSION.evaluate = async (event, context) => {
+		const call = (callsPerCwd.get(context.cwd) ?? 0) + 1;
+		callsPerCwd.set(context.cwd, call);
+		const verdict = (await genuine(event, context))?.block === true;
+		return (call === 2 ? !verdict : verdict) ? { block: true, reason: "planted flip" } : undefined;
+	};
+	let flipRep: GateReport;
+	try { flipRep = await runGate(path.join(KIT, "rules"), flipCases); }
+	finally { SCRATCH_ADMISSION.evaluate = genuine; }
+	const flipRed = flipRep.failures.filter(f => f.startsWith("NONDETERMINISM scratch-is-not-a-home "));
+	caseReporter?.record("plant flipping-admission-guard", flipRed.length === 2 ? "PASS" : "FAIL");
+	if (flipRed.length === 2) console.log(`ok   plant (flip) RED as intended: ${flipRed[0]}`);
+	else {
+		bad++;
+		console.log(`FAIL plant (flip) a guard flipping on its second call per cwd did NOT turn every admission case RED; got ${flipRed.length}/2`);
 	}
 	const external = path.join(tmp, "external-admission-name");
 	fs.mkdirSync(external);

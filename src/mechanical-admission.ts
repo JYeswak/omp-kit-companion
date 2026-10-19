@@ -89,27 +89,30 @@ export interface MechanicalOptions {
 	join?: Reassembler;
 }
 
+/** Dispatches twice on one fixture; unequal verdicts mean a single dispatch cannot stand for a case. */
+async function deterministicDispatch(fixture: Fixture, evaluate: AdmissionEvaluator): Promise<boolean> {
+	const first = await dispatch(fixture, evaluate);
+	const second = await dispatch(fixture, evaluate);
+	if (first !== second) throw new Error(NONDETERMINISM_ERROR);
+	return first;
+}
+
 /**
  * Final-only admission sees the finished arguments, so every chunk partition that
- * reassembles to the exact wire shares the one verdict of a single dispatch.
- * Guard determinism is proved separately by assertDeterministicAdmission.
+ * reassembles to the exact wire shares the one verdict of the case. That verdict
+ * is only trusted after a second dispatch on the same fixture agrees: exactly
+ * one extra dispatch per case, never one per partition.
  */
 export async function mechanicalVerdicts(c: MechanicalCase, chunkWidths: readonly (number | undefined)[], options: MechanicalOptions): Promise<boolean[]> {
 	if (c.source !== "tool") return chunkWidths.map(() => false);
 	return withFixture(c, options.kit, async fixture => {
 		assertPartitionInvariant(fixture.wire, chunkWidths, options.join);
-		const verdict = await dispatch(fixture, options.evaluate ?? durabilityCheck);
+		const verdict = await deterministicDispatch(fixture, options.evaluate ?? durabilityCheck);
 		return chunkWidths.map(() => verdict);
 	});
 }
 
-/** Dispatches twice on one fixture; unequal verdicts mean a single dispatch cannot stand for a case. */
+/** The determinism check alone, for tests that need the case verdict without partition widths. */
 export async function assertDeterministicAdmission(c: MechanicalCase, options: MechanicalOptions): Promise<boolean> {
-	return withFixture(c, options.kit, async fixture => {
-		const evaluate = options.evaluate ?? durabilityCheck;
-		const first = await dispatch(fixture, evaluate);
-		const second = await dispatch(fixture, evaluate);
-		if (first !== second) throw new Error(NONDETERMINISM_ERROR);
-		return first;
-	});
+	return withFixture(c, options.kit, fixture => deterministicDispatch(fixture, options.evaluate ?? durabilityCheck));
 }

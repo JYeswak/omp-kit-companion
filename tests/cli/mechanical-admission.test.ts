@@ -28,11 +28,11 @@ describe("mechanical admission dispatch", () => {
 		expect(quietCase).toBeDefined();
 	});
 
-	test("the real guard returns one verdict per case, dispatched once and shared by every exact partition", async () => {
+	test("the real guard returns one verdict per case, dispatched twice for the determinism check and shared by every exact partition", async () => {
 		for (const [c, expected] of [[fireCase, true], [quietCase, false]] as const) {
 			const guard = counted(durabilityCheck);
 			expect(await mechanicalVerdicts(c, WIDTHS, { kit: KIT, evaluate: guard.evaluate })).toEqual(WIDTHS.map(() => expected));
-			expect(guard.calls()).toBe(1);
+			expect(guard.calls()).toBe(2);
 		}
 	});
 
@@ -44,17 +44,31 @@ describe("mechanical admission dispatch", () => {
 		expect(guard.calls()).toBe(0);
 	});
 
-	test("the real guard is deterministic on one fixture: two dispatches agree with the corpus expectation", async () => {
-		expect(await assertDeterministicAdmission(fireCase, { kit: KIT })).toBe(true);
-		expect(await assertDeterministicAdmission(quietCase, { kit: KIT })).toBe(false);
+	test("the real guard is deterministic on every corpus admission case: two dispatches agree with the corpus expectation", async () => {
+		expect(admissionCases.length).toBeGreaterThan(2);
+		for (const c of admissionCases)
+			expect(await assertDeterministicAdmission(c, { kit: KIT }), `line ${c.line}: ${c.note}`).toBe(c.expect === "fire");
 	});
 
-	test("a planted nondeterministic evaluator fails the determinism check", async () => {
-		let flip = false;
-		const nondeterministic: AdmissionEvaluator = async (event, context) => {
-			flip = !flip;
-			return flip ? durabilityCheck(event, context) : undefined;
-		};
-		await expect(assertDeterministicAdmission(fireCase, { kit: KIT, evaluate: nondeterministic })).rejects.toThrow(NONDETERMINISM_ERROR);
+	test("the gate dispatch path checks every corpus admission case with exactly one extra dispatch", async () => {
+		for (const c of admissionCases) {
+			const guard = counted(durabilityCheck);
+			expect(await mechanicalVerdicts(c, WIDTHS, { kit: KIT, evaluate: guard.evaluate }), `line ${c.line}`).toEqual(WIDTHS.map(() => c.expect === "fire"));
+			expect(guard.calls()).toBe(2);
+		}
+	});
+
+	test("a planted evaluator that flips its verdict on the second call fails the check on every corpus admission case", async () => {
+		for (const c of admissionCases) {
+			const calls = new Map<string, number>();
+			const flipping: AdmissionEvaluator = async (event, context) => {
+				const call = (calls.get(context.cwd) ?? 0) + 1;
+				calls.set(context.cwd, call);
+				const verdict = (await durabilityCheck(event, context))?.block === true;
+				return (call === 2 ? !verdict : verdict) ? { block: true, reason: "planted flip" } : undefined;
+			};
+			await expect(assertDeterministicAdmission(c, { kit: KIT, evaluate: flipping }), `line ${c.line}`).rejects.toThrow(NONDETERMINISM_ERROR);
+			await expect(mechanicalVerdicts(c, WIDTHS, { kit: KIT, evaluate: flipping }), `line ${c.line}`).rejects.toThrow(NONDETERMINISM_ERROR);
+		}
 	});
 });
