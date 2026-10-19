@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -1406,6 +1406,108 @@ export interface RchReachabilityDeps {
 	lsofUnixSockets(pid: number): string[] | null;
 	/** lstat view of a path: socket with inode, non-socket, or missing. */
 	statSocket(path: string): { kind: "socket" | "other" | "missing"; ino: number | null };
+	/** Baseline of the socket inode from the last healthy read; absent without a state-backed store (legacy path-existence checks apply). */
+	readSocketBaseline?: () => RchSocketBaseline | null;
+	/** Persist the baseline after a healthy read; write failures never fail the finding. */
+	recordSocketBaseline?: (baseline: RchSocketBaseline) => void;
+	/** Clock for baseline timestamps; defaults to Date.now. */
+	now?: () => number;
+}
+
+/** RCHSOCK1 follow-up (ompkit-774u.6.4): the daemon socket inode baseline.
+ * `lsof` reports no inode for a unix socket, so a path replaced by a different
+ * socket is invisible to path-existence checks. The doctor records the inode it
+ * sees on a healthy (RUNNING) read and compares it on later reads. */
+export interface RchSocketBaseline { path: string; ino: number; at: string }
+export const RCH_SOCKET_BASELINE_FILE = "rch-socket-ino.json";
+/** A baseline older than this is refreshed on the next healthy read, never failed. */
+export const RCH_SOCKET_BASELINE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
+export function rchSocketBaselinePath(stateRoot: string): string {
+	return join(stateRoot, RCH_SOCKET_BASELINE_FILE);
+}
+
+export function readRchSocketBaseline(stateRoot: string): RchSocketBaseline | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(rchSocketBaselinePath(stateRoot), "utf8"));
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== "object" || parsed === null) return null;
+	const record = parsed as Record<string, unknown>;
+	if (typeof record["path"] !== "string" || record["path"] === "" ||
+		typeof record["ino"] !== "number" || !Number.isFinite(record["ino"]) ||
+		typeof record["at"] !== "string" || Number.isNaN(Date.parse(record["at"]))) return null;
+	return { path: record["path"], ino: record["ino"], at: record["at"] };
+}
+
+/** Persists the baseline into the private kit state root; false when the root is unsafe. Never throws and never fails the finding. */
+export function writeRchSocketBaseline(stateRoot: string, baseline: RchSocketBaseline): boolean {
+	try {
+		mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+	} catch {
+		return false;
+	}
+	if (inspectStateRoot(stateRoot)) return false;
+	const path = rchSocketBaselinePath(stateRoot), temp = `${path}.${process.pid}.tmp`;
+	try {
+		writeFileSync(temp, `${JSON.stringify(baseline)}\n`, { mode: 0o600 });
+		renameSync(temp, path);
+		return true;
+	} catch {
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			/* best effort */
+		}
+		return false;
+	}
+}
+
+/** File-backed baseline store for the live doctor path. */
+export function rchSocketBaselineStore(stateRoot: string, clock: () => number = Date.now): Pick<RchReachabilityDeps, "readSocketBaseline" | "recordSocketBaseline" | "now"> {
+	return {
+		readSocketBaseline: () => readRchSocketBaseline(stateRoot),
+		recordSocketBaseline: (baseline) => { writeRchSocketBaseline(stateRoot, baseline); },
+		now: clock,
+	};
+}
+
+type RchSocketView = { kind: "socket" | "other" | "missing"; ino: number | null };
+
+function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean; stat: RchSocketView; restore: string; baseline: RchSocketBaseline | null; record: (baseline: RchSocketBaseline) => void; now: () => number }): Finding {
+	const base = { socket_path: input.path };
+	const fresh = input.baseline !== null && input.baseline.path === input.path &&
+		Number.isFinite(input.baseline.ino) && !Number.isNaN(Date.parse(input.baseline.at)) &&
+		input.now() - Date.parse(input.baseline.at) <= RCH_SOCKET_BASELINE_MAX_AGE_MS;
+	const baseline = fresh ? (input.baseline as RchSocketBaseline) : null;
+	if (input.stat.kind !== "socket" || input.stat.ino === null) {
+		if (baseline !== null) {
+			return finding("rch", "FAIL", `rchd pid ${input.pid} is alive and held ${input.path} at baseline (ino ${baseline.ino}), but the path is now ${input.stat.kind === "missing" ? "missing: the socket was unlinked under the live daemon" : "not a socket: the socket was replaced under the live daemon"}`,
+				input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid, expected_ino: baseline.ino });
+		}
+		if (input.stat.kind === "missing" && input.bound) {
+			return finding("rch", "FAIL", `rchd pid ${input.pid} is alive and holds ${input.path}, but the path is missing: the socket was unlinked under the live daemon`,
+				input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid });
+		}
+		return finding("rch", "FAIL", `rchd pid ${input.pid} is alive but ${input.path} is not its bound socket (path ${input.stat.kind}${input.bound ? "" : ", not held by the daemon"})`,
+			input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid });
+	}
+	if (baseline !== null && input.stat.ino !== baseline.ino) {
+		return finding("rch", "FAIL", `rchd pid ${input.pid} is alive and holds ${input.path}, but the socket inode changed (baseline ${baseline.ino}, now ${input.stat.ino}): the socket was replaced under the live daemon`,
+			input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid, ino: input.stat.ino, expected_ino: baseline.ino });
+	}
+	if (!input.bound) {
+		return finding("rch", "FAIL", `rchd pid ${input.pid} is alive but ${input.path} is not its bound socket (path socket, not held by the daemon)`,
+			input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid, ino: input.stat.ino });
+	}
+	if (baseline === null) {
+		input.record({ path: input.path, ino: input.stat.ino, at: new Date(input.now()).toISOString() });
+		return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}; socket inode baseline just taken (ino ${input.stat.ino})`,
+			"No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "recorded" });
+	}
+	return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}`, "No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "matched" });
 }
 
 export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
@@ -1437,6 +1539,10 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	const bound = held.includes(path);
 	const stat = deps.statSocket(path);
 	const restore = rchRestoreAdvice(deps.platform, deps.uid);
+	const readBaseline = deps.readSocketBaseline, recordBaseline = deps.recordSocketBaseline;
+	if (readBaseline && recordBaseline) {
+		return inspectRchSocketIno({ path, pid, bound, stat, restore, baseline: readBaseline(), record: recordBaseline, now: deps.now ?? Date.now });
+	}
 	if (stat.kind === "missing" && bound) {
 		return finding("rch", "FAIL", `rchd pid ${pid} is alive and holds ${path}, but the path is missing: the socket was unlinked under the live daemon`,
 			restore, { ...base, state: "SOCKET_UNLINKED", pid });
@@ -1768,8 +1874,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const home = resolve(input.home);
 	if (wants("tmux_sockets")) rows.push(inspectTmuxSockets(home));
 	const scoped = Boolean(input.scope);
+	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	if (wants("rch")) {
-		const rchDeps = defaultRchReachability();
+		const rchDeps: RchReachabilityDeps = { ...defaultRchReachability(), ...rchSocketBaselineStore(stateRoot) };
 		const rch = inspectRchReachability(rchDeps);
 		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while an explicit rch scope still reports it.
 		if (scoped || rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(rch);
@@ -1913,7 +2020,6 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (wants("extension_imports")) rows.push(inspectExtensionImports(home));
 	if (wants("router")) rows.push(inspectRouter(input.jsmPath));
 	if (wants("agent_mail_guard")) rows.push(inspectAgentMailGuard());
-	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	if (wants("state_root")) {
 	const stateIssue = inspectStateRoot(stateRoot);
 	rows.push(stateIssue === null

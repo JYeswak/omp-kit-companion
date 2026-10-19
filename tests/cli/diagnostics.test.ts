@@ -4,7 +4,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
+import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
@@ -1186,6 +1186,126 @@ test("rch: path replaced by a regular file is SOCKET_UNLINKED", async () => {
 	expect(row.status).toBe("FAIL");
 	expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
 	noCapacity(row);
+});
+
+function rchInoDeps(sockPath: string, initial: RchSocketBaseline | null, over: Partial<RchReachabilityDeps> = {}): { deps: RchReachabilityDeps; written: RchSocketBaseline[] } {
+	let current = initial;
+	const written: RchSocketBaseline[] = [];
+	return {
+		written,
+		deps: rchDeps(sockPath, {
+			readSocketBaseline: () => current,
+			recordSocketBaseline: (baseline) => { current = baseline; written.push(baseline); },
+			...over,
+		}),
+	};
+}
+
+test("rch: path replaced by a different socket (same path, new ino) is SOCKET_UNLINKED", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-replaced-sock-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const { deps, written } = rchInoDeps(sock,
+			{ path: sock, ino: 11, at: new Date().toISOString() },
+			{ statSocket: () => ({ kind: "socket", ino: 22 }) });
+		const row = inspectRchReachability(deps);
+		expect(row.status).toBe("FAIL");
+		expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
+		expect(row.recommended_action).toContain("launchctl kickstart");
+		expect(written).toEqual([]);
+		noCapacity(row);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("rch: same path and same ino stays RUNNING; a stale or moved baseline is refreshed, not failed", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-ino-match-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const fresh = rchInoDeps(sock,
+			{ path: sock, ino: 7, at: new Date().toISOString() },
+			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
+		const row = inspectRchReachability(fresh.deps);
+		expect(row.status).toBe("OK");
+		expect(row.evidence?.state).toBe("RUNNING");
+		expect(fresh.written).toEqual([]);
+		noCapacity(row);
+		const stale = rchInoDeps(sock,
+			{ path: sock, ino: 7, at: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString() },
+			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
+		const refreshed = inspectRchReachability(stale.deps);
+		expect(refreshed.status).toBe("OK");
+		expect(refreshed.evidence?.state).toBe("RUNNING");
+		expect(refreshed.reason).toContain("baseline");
+		expect(stale.written).toHaveLength(1);
+		const moved = rchInoDeps(sock,
+			{ path: join(dir, "old.sock"), ino: 7, at: new Date().toISOString() },
+			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
+		const rerecorded = inspectRchReachability(moved.deps);
+		expect(rerecorded.status).toBe("OK");
+		expect(rerecorded.evidence?.state).toBe("RUNNING");
+		expect(moved.written).toHaveLength(1);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("rch: missing path after a healthy baseline is SOCKET_UNLINKED", () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-ino-missing-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const { deps, written } = rchInoDeps(sock,
+		{ path: sock, ino: 7, at: new Date().toISOString() });
+	const row = inspectRchReachability(deps);
+	expect(row.status).toBe("FAIL");
+	expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
+	expect(row.reason).toContain("unlinked");
+	expect(written).toEqual([]);
+	noCapacity(row);
+});
+
+test("rch: first healthy sight records the baseline and never fails; the next read compares", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-ino-first-"));
+	fixtures.push(dir);
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		const store = rchInoDeps(sock, null, { statSocket: () => ({ kind: "socket", ino: 7 }) });
+		const first = inspectRchReachability(store.deps);
+		expect(first.status).toBe("OK");
+		expect(first.evidence?.state).toBe("RUNNING");
+		expect(first.reason).toContain("baseline");
+		expect(store.written).toHaveLength(1);
+		expect(store.written[0]).toMatchObject({ path: sock, ino: 7 });
+		const second = inspectRchReachability(rchDeps(sock, {
+			statSocket: () => ({ kind: "socket", ino: 9 }),
+			readSocketBaseline: () => store.written[0] ?? null,
+			recordSocketBaseline: () => { throw new Error("must not re-record on a mismatch"); },
+		}));
+		expect(second.status).toBe("FAIL");
+		expect(second.evidence?.state).toBe("SOCKET_UNLINKED");
+		noCapacity(second);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("rch: socket ino baseline round-trips through the state root file; corrupt reads as absent", () => {
+	const dir = mkdtempSync(join(tmpdir(), "rch-ino-state-"));
+	fixtures.push(dir);
+	const root = join(dir, "state");
+	expect(readRchSocketBaseline(root)).toBeNull();
+	const baseline: RchSocketBaseline = { path: join(dir, "rch.sock"), ino: 42, at: new Date().toISOString() };
+	expect(writeRchSocketBaseline(root, baseline)).toBe(true);
+	expect(readRchSocketBaseline(root)).toEqual(baseline);
+	writeFileSync(join(root, "rch-socket-ino.json"), "not json\n");
+	expect(readRchSocketBaseline(root)).toBeNull();
+	expect(readRchSocketBaseline(join(root, "absent-dir"))).toBeNull();
 });
 
 test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED", async () => {

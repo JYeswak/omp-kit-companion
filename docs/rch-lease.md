@@ -51,7 +51,7 @@ capacity. An unscoped `omp-kit doctor` reports an `rch` finding when `rch` is in
 | `evidence.state` | Meaning | Status |
 |---|---|---|
 | `RUNNING` | the live rchd holds the path and the path is a socket | OK |
-| `SOCKET_UNLINKED` | rchd is alive and holds the path, but the path is missing or no longer a socket | FAIL |
+| `SOCKET_UNLINKED` | rchd is alive and holds the path, but the path is missing, no longer a socket, or a different socket (inode differs from the recorded baseline) | FAIL |
 | `NOT_RUNNING` | rchd reports it is not running | OK (informational) |
 | `PID_UNKNOWN`, `LSOF_UNAVAILABLE`, `SOCKET_PATH_UNKNOWN`, `RCH_UNAVAILABLE` | not enough evidence | UNVERIFIED |
 
@@ -63,6 +63,5 @@ launchctl kickstart -k gui/$(id -u)/com.rch.daemon
 rch status               # verify: Daemon Running, workers healthy, slots available
 ```
 
-The kickstart drops in-flight jobs, which is why it is never automated. A path replaced by a different socket cannot be
-told apart this way: `lsof` reports no inode for a unix socket, so only a missing or non-socket path is `SOCKET_UNLINKED`.
+The kickstart drops in-flight jobs, which is why it is never automated. A path replaced by a different socket IS detected: the doctor records the socket inode (`rch-socket-ino.json` in the kit state root) on a healthy read and compares later reads — a different inode is `SOCKET_UNLINKED`. `lsof` reports no inode for a unix socket, so the baseline comes from `stat`, not from lsof. A first healthy sighting only records the baseline (never FAIL); a record older than 7 days is refreshed.
 The durable fix (moving the socket out of `~/Library/Caches`) is upstream rch work tracked on `ompkit-z7zj`.
