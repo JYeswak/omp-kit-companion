@@ -2,11 +2,17 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Every setup-bun step in the CI and OMP-certification workflows installs the Bun pinned in .bun-version.
+// Every setup-bun step in these workflows installs the Bun pinned in .bun-version (at the workspace root, or in
+// the checkout directory a multi-checkout job names, e.g. budget-measure's `base/.bun-version`).
 // An unpinned setup-bun installs whatever Bun is latest at run time, so a Bun release could change CI behavior
 // between two runs of the same commit (ntm's release failed 8 of 8 runs on such a toolchain mismatch).
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-const PINNED_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/omp-certify.yml"];
+const PINNED_WORKFLOWS = [
+	".github/workflows/ci.yml",
+	".github/workflows/omp-certify.yml",
+	".github/workflows/budget-measure.yml",
+	".github/workflows/stock-extension-negative.yml",
+];
 type Step = { uses?: string; with?: Record<string, unknown> };
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 
@@ -17,8 +23,9 @@ function unpinnedSteps(workflow: Workflow): string[] {
 	for (const [name, job] of Object.entries(workflow.jobs)) {
 		(job.steps ?? []).forEach((step, index) => {
 			if (!isSetupBun(step)) return;
-			const inputs = step.with ?? {};
-			if (inputs["bun-version-file"] !== ".bun-version" || "bun-version" in inputs) found.push(`${name} step ${index}`);
+			const file = String(step.with?.["bun-version-file"] ?? "");
+			const pinned = file === ".bun-version" || file.endsWith("/.bun-version");
+			if (!pinned || "bun-version" in (step.with ?? {})) found.push(`${name} step ${index}`);
 		});
 	}
 	return found;
@@ -37,7 +44,7 @@ test(".bun-version names one exact Bun version", () => {
 	for (const loose of ["latest", "1.4.x", "1.4", "v1.4.3", "1.4.3-canary", "1..3"]) expect(isExactVersion(loose)).toBe(false);
 });
 
-test("every setup-bun step in the CI and OMP-certification workflows reads .bun-version", () => {
+test("every setup-bun step in the pinned workflows reads .bun-version", () => {
 	for (const relative of PINNED_WORKFLOWS) {
 		const workflow = Bun.YAML.parse(readFileSync(join(REPO_ROOT, relative), "utf8")) as Workflow;
 		expect(Object.values(workflow.jobs).flatMap(job => job.steps ?? []).filter(isSetupBun).length).toBeGreaterThan(0);
@@ -45,9 +52,10 @@ test("every setup-bun step in the CI and OMP-certification workflows reads .bun-
 	}
 });
 
-test("a planted unpinned, latest or inline-pinned setup-bun step is found", () => {
+test("a planted unpinned, latest, inline-pinned or wrong-file setup-bun step is found", () => {
 	const source = readFileSync(join(REPO_ROOT, PINNED_WORKFLOWS[0]!), "utf8");
-	for (const plant of [undefined, { "bun-version": "latest" }, { "bun-version-file": ".bun-version", "bun-version": "1.4.3" }]) {
+	for (const plant of [undefined, { "bun-version": "latest" }, { "bun-version-file": ".bun-version", "bun-version": "1.4.3" },
+		{ "bun-version-file": "package.json" }, { "bun-version-file": "base/x.bun-version" }]) {
 		const planted = Bun.YAML.parse(source) as Workflow;
 		const step = planted.jobs["stock-extensions"]!.steps!.find(isSetupBun)!;
 		step.with = plant;

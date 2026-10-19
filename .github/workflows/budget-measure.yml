@@ -42,6 +42,9 @@ jobs:
           fetch-depth: 0
           path: base
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          # Both trees run under main's pinned Bun, so only the compared source differs.
+          bun-version-file: base/.bun-version
       - name: Install stock OMP latest
         env:
           TMPDIR: ${{ runner.temp }}
