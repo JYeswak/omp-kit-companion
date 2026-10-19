@@ -1206,6 +1206,116 @@ test("reports local catch-up without claiming publication or retrying", () => {
 	expect(readFileSync(attempts, "utf8").trim().split("\n")).toEqual(["attempt"]);
 
 });
+test("recovery after interruption never overwrites foreign postimages changed before retry", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "owned first save\n");
+	writeFileSync(join(work, "peer.txt"), "foreign staged v1\n");
+	git(work, ["add", "--", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "foreign worktree v1\n");
+	const hook = join(work, ".git", "hooks", "post-commit");
+	writeFileSync(hook, '#!/bin/sh\nkill -TERM "$PPID"\nexit 0\n');
+	chmodSync(hook, 0o755);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const interrupted = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(interrupted.status).toBe(77);
+	expect(responseCode(interrupted.body)).toBe("LAND_COMMIT_INTERRUPTED");
+	const firstData = interrupted.body.data as { commit: string };
+	const first = firstData.commit;
+	// The interrupted candidate must contain only the owned path even though a
+	// foreign change was staged; otherwise --only was lost and foreign work leaked in.
+	expect(git(work, ["diff-tree", "--no-commit-id", "--name-only", "-r", first]).trim()).toBe("owned.txt");
+	// A foreign actor changes F before recovery: the staged index entry and the
+	// worktree bytes both move on after the interruption was reported.
+	writeFileSync(join(work, "peer.txt"), "foreign staged v2\n");
+	git(work, ["add", "--", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "foreign worktree v2\n");
+	const stagedPostimage = git(work, ["ls-files", "-s", "--", "peer.txt"]);
+	// The faulty hook is repaired before recovery; the saved commit is kept, not undone.
+	unlinkSync(hook);
+	writeFileSync(join(work, "owned.txt"), "owned second save\n");
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(0);
+	const runData = run.body.data as { overall: string; commit: string };
+	expect(runData.overall).toBe("PUSHED");
+	expect(git(work, ["diff-tree", "--no-commit-id", "--name-only", "-r", runData.commit]).trim()).toBe("owned.txt");
+	expect(git(work, ["merge-base", "--is-ancestor", first, runData.commit]).length).toBe(0);
+	expect(git(work, ["ls-files", "-s", "--", "peer.txt"])).toBe(stagedPostimage);
+	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("foreign staged v2\n");
+	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("foreign worktree v2\n");
+	expect(git(work, ["diff", "--name-only", "--", "untouched.txt"]).trim()).toBe("untouched.txt");
+	expect(remoteHead(work)).toBe(runData.commit);
+}, 60_000);
+
+test("lost publication observability stays UNKNOWN instead of a false zero-effects claim", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "owned save\n");
+	writeFileSync(join(work, "untouched.txt"), "foreign unstaged postimage\n");
+	const foreignWorktree = readFileSync(join(work, "untouched.txt"));
+	const before = remoteHead(work);
+	git(work, ["remote", "remove", "origin"]);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const runData = run.body.data as {
+		overall: string; commit: string; base: string;
+		phases: {
+			candidate_sha: string; actual_parents: string[]; publication_ref: string;
+			construction: string; publication: string; local_catch_up: string;
+			observed_local_main: string | null; observed_publication_head: string | null;
+		};
+	};
+	// Only the dependent publication is blocked; the save itself is real and kept.
+	expect(run.status).toBe(1);
+	expect(runData.overall).toBe("REFUSED");
+	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(runData.base).toBe(before);
+	expect(runData.phases.candidate_sha).toBe(runData.commit);
+	expect(runData.phases.actual_parents).toEqual([before]);
+	expect(runData.phases.publication_ref).toBe("refs/heads/main");
+	expect(runData.phases.construction).toBe("APPLIED");
+	// Publication observability is gone, so this must stay explicitly UNKNOWN:
+	// a NOT_APPLIED here would be a false zero-effects claim about origin.
+	expect(runData.phases.publication).toBe("UNKNOWN");
+	expect(runData.phases.observed_publication_head).toBeNull();
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(runData.commit);
+	expect(git(work, ["show", `${runData.commit}:owned.txt`])).toBe("owned save\n");
+	expect(readFileSync(join(work, "untouched.txt"))).toEqual(foreignWorktree);
+}, 60_000);
+
+test("an already-published candidate is confirmed, never published twice", () => {
+	const { work, fakeBin } = fixture();
+	const baseCount = Number(git(work, ["rev-list", "--count", "HEAD"]).trim());
+	writeFileSync(join(work, "owned.txt"), "owned save\n");
+	const attempts = join(work, "pre-push-count.txt");
+	const prePush = join(work, ".git", "hooks", "pre-push");
+	writeFileSync(prePush, `#!/bin/sh\nprintf 'attempt\\n' >> '${attempts}'\nexit 0\n`);
+	chmodSync(prePush, 0o755);
+	// The candidate reaches origin out-of-band from the save hook before land's
+	// own convergence runs, so the publication phase must observe it, not redo it.
+	const postCommit = join(work, ".git", "hooks", "post-commit");
+	writeFileSync(postCommit, '#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\ngit push -q --no-verify origin main\n');
+	chmodSync(postCommit, 0o755);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(0);
+	const runData = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: string;
+		phases: { candidate_sha: string; construction: string; publication: string; local_catch_up: string };
+	};
+	expect(runData.overall).toBe("PUSHED");
+	expect(runData.pushed_sha).toBe(runData.commit);
+	expect(runData.phases.candidate_sha).toBe(runData.commit);
+	expect(runData.phases.construction).toBe("APPLIED");
+	// Independently observed on the publication ref: applied, not assumed, not retried.
+	expect(runData.phases.publication).toBe("APPLIED");
+	expect(remoteHead(work)).toBe(runData.commit);
+	// Exactly one push attempt for one candidate and exactly one new origin
+	// commit: no blind retry loop and no duplicate publication of the candidate.
+	expect(readFileSync(attempts, "utf8").trim().split("\n")).toEqual(["attempt"]);
+	expect(Number(git(work, ["rev-list", "--count", "refs/remotes/origin/main"]).trim())).toBe(baseCount + 1);
+	const originCommits = git(work, ["rev-list", "refs/remotes/origin/main"]).trim().split("\n");
+	expect(originCommits.filter((sha) => sha === runData.commit)).toHaveLength(1);
+}, 60_000);
+
 
 test("attributes the actual owned commit when a peer advances HEAD before Git returns", () => {
 	const { work, fakeBin } = fixture();
