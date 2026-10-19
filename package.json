@@ -15,6 +15,7 @@
       "extensions/kit-callback.ts",
       "extensions/kit-flywheel-guard.ts",
       "extensions/kit-loop-guard.ts",
+      "extensions/kit-upgrade-notice.ts",
       "extensions/kit-agent-mail-guard.ts"
     ]
   }
