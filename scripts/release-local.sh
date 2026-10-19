@@ -13,6 +13,8 @@
 #                 notarize, and prove with scripts/devid_release.py verify --execute, as sign-darwin-release.sh
 #                 does; the final index changes only the darwin digests.
 #   4. checksum   SHA256SUMS over release-index.json and the archives.
+#   4b. rule-gate the postcheck's ttsr coverage gate (every rule needs fire+quiet
+#                 fixtures) on the exact-commit source; refusal exits 4, nothing remote written.
 #   --dry-run stops here: no tag, no draft, no dispatch, no remote write.
 #   5. tag        push the lightweight tag v<version> -> source (never forced, never re-tagged).
 #   6. draft      create the draft release with the notes from release-notes.sh and require GitHub's recorded
@@ -256,6 +258,19 @@ done
 cat "$DIST/SHA256SUMS"
 (cd "$ROOT" && bounded 300 sh "$SRC/scripts/release-notes.sh" source --base-tag "$BASE_TAG" --head "$SOURCE" --version "$VERSION" \
 	--output "$WORK/release-notes.md") || die "release-notes.sh source failed"
+
+# ----------------------------------------------------------------- 4b. rule gate
+# The kit-update postcheck runs this same ttsr coverage gate against the installed
+# pack and fails the update when a rule ships with no fire/quiet fixtures (KITPOST1:
+# v0.2.58 shipped zero fixtures for kit-tool-result-is-not-json and the postcheck
+# failed after the tag). Refuse here, before the tag, in both dry-run and real runs.
+stage rule-gate
+bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --gate-json --rules "$SRC/rules" \
+	--cases "$SRC/cases/cases.tsv" >"$WORK/rule-gate.json" 2>"$WORK/rule-gate.stderr" ||
+	die "ttsr-harness --gate-json failed on the release source; refusing release (see $WORK/rule-gate.stderr)"
+[ "$(jq -er '.status' "$WORK/rule-gate.json")" = PASS ] ||
+	die "ttsr coverage gate FAIL on the release source: $(jq -c '.failures' "$WORK/rule-gate.json")"
+say "rule gate PASS: $(jq -c '.counts' "$WORK/rule-gate.json")"
 
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
