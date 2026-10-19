@@ -578,13 +578,62 @@ cleanup() {
 		rm -rf "$WORK" 2>/dev/null || true
 	fi
 }
+# GATESCR1 (ompkit-fp72.40): HUP/INT/TERM stop every process this gate started (the descendants of
+# this shell, snapshotted before any signal, plus any process group one of them leads), KILL what
+# survives a 5 s grace, then remove WORK. Without it a signalled gate left its WORK dir behind, and a
+# hung suite kept the trap from ever running. Same contract as stop_descendants in pre-push-gate.sh.
+# shellcheck disable=SC2329,SC2317
+stop_descendants() {
+	tree=$(ps -A -o pid= -o ppid= -o pgid= 2>/dev/null | awk -v root="$$" '
+		{ n++; pid[n] = $1; parent[$1] = $2; group[$1] = $3 }
+		END {
+			mine[root] = 1; grew = 1
+			while (grew) { grew = 0; for (i = 1; i <= n; i++) { p = pid[i]; if (!(p in mine) && (parent[p] in mine)) { mine[p] = 1; grew = 1 } } }
+			for (p in mine) if (p != root) print p, group[p]
+		}')
+	[ -n "$tree" ] || return 0
+	own_group=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+	pids=""
+	while read -r p g; do
+		pids="$pids $p"
+		kill -s TERM "$p" 2>/dev/null || :
+		if [ "$g" = "$p" ] && [ "$g" != "$own_group" ]; then kill -s TERM -- "-$g" 2>/dev/null || :; fi
+	done <<EOF
+$tree
+EOF
+	grace=0
+	while [ "$grace" -lt 50 ]; do
+		running=$(ps -A -o pid= -o stat= 2>/dev/null | awk -v want="$pids" '
+			BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) set[w[i]] = 1 }
+			($1 in set) && $2 !~ /Z/ { print $1 }')
+		[ -z "$running" ] && return 0
+		sleep 0.1
+		grace=$((grace + 1))
+	done
+	for p in $running; do kill -s KILL "$p" 2>/dev/null || :; done
+	return 0
+}
+# shellcheck disable=SC2329,SC2317
+on_signal() {
+	trap - EXIT
+	trap '' HUP INT TERM
+	stop_descendants
+	cleanup
+	exit "$1"
+}
+# The traps are set before WORK exists, and WORK's name carries this shell's pid (with .owner), so a
+# SIGKILLed gate leaves a dir the next pre-push gate's start-up sweep can attribute and remove.
 make_work() {
 	WORK_PARENT="$ROOT/var/agent-tmp"
 	mkdir -p "$WORK_PARENT"
-	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.XXXXXX")
-	printf 'pid=%s\nlabel=fresh-gate\nrepo=%s\ncreated=%s\n' "$$" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$WORK/.owner"
+	trap cleanup EXIT
+	trap 'on_signal 129' HUP
+	trap 'on_signal 130' INT
+	trap 'on_signal 143' TERM
 	OWN_WORK=1
-	trap cleanup EXIT HUP INT TERM
+	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.$$.XXXXXX")
+	start=$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+	printf 'pid=%s\nprocess_start=%s\nlabel=fresh-gate\nrepo=%s\ncreated=%s\n' "$$" "$start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$WORK/.owner"
 }
 
 selftest() {
@@ -629,6 +678,8 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
+# GATESCR1: no step reads stdin, and no suite may block on it: every check gets /dev/null.
+exec </dev/null
 require_gate_functions
 if [ -z "$ARCHIVE_DIR" ]; then
 	make_work
@@ -660,24 +711,31 @@ if [ -z "${FRESH_GATE_LEDGER+set}" ]; then
 	ledger_git=$(git -C "$OMP_KIT_CASE_CWD" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
 	FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
 fi
-disk_pressure_flag
-started=$(date +%s)
-run_step manifest gate_manifest || exit 1
-run_step cli-compile gate_cli_compile || exit 1
-run_step harness-gate gate_harness || exit 1
-run_step notes gate_notes || exit 1
-run_step readme gate_readme || exit 1
-run_step focused gate_focused || exit 1
-elapsed=$(($(date +%s) - started))
-# The affected tests' own run time is reported, not judged against the 180 s machinery budget.
-tests=0
-if [ -f "$WORK/tests.secs" ]; then
-	tests=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/tests.secs")
-fi
-# Heavy queue wait behind another agent's job is not this gate's work (2026-10-18: a
-# 748 s RED was ten minutes queued behind one stuck job).
-queued=0
-if [ -f "$WORK/queued.secs" ]; then
-	queued=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
-fi
-judge_budget "$elapsed" "$tests" "$queued" || exit 1
+# GATESCR1: the steps run in the background and this shell waits, because a POSIX shell defers a
+# trap until its foreground job ends; with a hung suite in the foreground, HUP/INT/TERM never ran
+# the handler. `wait` returns on the signal, so the handler stops the tree and removes WORK.
+run_gate() {
+	disk_pressure_flag
+	started=$(date +%s)
+	run_step manifest gate_manifest || exit 1
+	run_step cli-compile gate_cli_compile || exit 1
+	run_step harness-gate gate_harness || exit 1
+	run_step notes gate_notes || exit 1
+	run_step readme gate_readme || exit 1
+	run_step focused gate_focused || exit 1
+	elapsed=$(($(date +%s) - started))
+	# The affected tests' own run time is reported, not judged against the 180 s machinery budget.
+	tests=0
+	if [ -f "$WORK/tests.secs" ]; then
+		tests=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/tests.secs")
+	fi
+	# Heavy queue wait behind another agent's job is not this gate's work (2026-10-18: a
+	# 748 s RED was ten minutes queued behind one stuck job).
+	queued=0
+	if [ -f "$WORK/queued.secs" ]; then
+		queued=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
+	fi
+	judge_budget "$elapsed" "$tests" "$queued" || exit 1
+}
+run_gate &
+wait "$!" || exit $?

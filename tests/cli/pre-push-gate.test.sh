@@ -455,5 +455,214 @@ else
 	fail=$((fail + 1)); printf 'FAIL real-git-regexploit-refused: base_push_rc=%s push_rc=%s before=%s after=%s out<<<%s>>>\n' "$base_push_rc" "$push_rc" "$origin_before" "$origin_after" "$out"
 fi
 
+# GATESCR1 (ompkit-fp72.40): every per-push extract is removed on every exit path, now, not later.
+# An extract is a gate dir holding anything besides .owner and gate.log (the red record a refused or
+# interrupted push keeps). Each case below names the mutant it fails on.
+extracts() {
+	n=0
+	for d in "$1"/var/agent-tmp/pre-push-gate.* "$1"/var/agent-tmp/pre-push-gate-base.* "$1"/var/agent-tmp/fresh-gate.*; do
+		[ -d "$d" ] || continue
+		find "$d" -mindepth 1 -maxdepth 1 ! -name .owner ! -name gate.log | grep -q . && n=$((n + 1))
+	done
+	printf '%s' "$n"
+}
+alive() { s=$(ps -o stat= -p "$1" 2>/dev/null) || return 1; case "$s" in *Z*|'') return 1 ;; esac; }
+# wait_gone PID TICKS: status 0 once PID has exited, polling every 0.1 s for at most TICKS polls.
+wait_gone() { i=0; while alive "$1" && [ "$i" -lt "$2" ]; do sleep 0.1; i=$((i + 1)); done; ! alive "$1"; }
+wait_files() { i=0; for f; do while [ ! -s "$f" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; done; }
+reap() { for f; do [ -s "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null; done; return 0; }
+# The hanging base gate: a plain child, plus a child that leads its own process group and leaves an
+# orphan in that group (reparented to init, so only the process-group stop reaches it).
+cat > "$TMP/orphan.py" <<'PYEOF'
+import os, sys, time
+os.setpgid(0, 0)
+if os.fork() == 0:
+    if os.fork() == 0:
+        open(sys.argv[1] + ".tmp", "w").write(str(os.getpid()))
+        os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+        time.sleep(300)
+    os._exit(0)
+time.sleep(300)
+PYEOF
+HANG="echo \$\$ > \"\$GATE_PIDFILE\"; python3 '$TMP/orphan.py' \"\$ORPHAN_PIDFILE\" & echo \$! > \"\$ORPHAN_PIDFILE.leader\"; sleep 300 & echo \$! > \"\$SLEEP_PIDFILE\"; wait"
+# start_hanging NAME [setsid]: run the adapter on a fresh hanging repo in the background; sets repo,
+# hpid (the adapter) and the pidfiles under $TMP/NAME.*. A background job of this shell inherits an
+# ignored SIGINT, which a shell cannot trap, so the launcher restores the default disposition a
+# terminal push has; setsid gives the adapter its own process group, as git_converge spawns git.
+start_hanging() {
+	repo=$(mkrepo "$1" "$HANG" 'echo HEAD-GATE')
+	printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/$1.in"
+	rm -f "$TMP/$1.gate" "$TMP/$1.orphan" "$TMP/$1.orphan.leader" "$TMP/$1.sleep"
+	( cd -- "$repo" && GATE_PIDFILE="$TMP/$1.gate" ORPHAN_PIDFILE="$TMP/$1.orphan" SLEEP_PIDFILE="$TMP/$1.sleep" SETSID="${2:-}" \
+		exec python3 -c 'import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+if os.environ.pop("SETSID") == "setsid":
+    os.setsid()
+os.execvp("sh", ["sh"] + sys.argv[1:])' "$ADAPTER" ) < "$TMP/$1.in" > "$TMP/$1.out" 2>&1 &
+	hpid=$!
+	wait_files "$TMP/$1.gate" "$TMP/$1.orphan" "$TMP/$1.orphan.leader" "$TMP/$1.sleep"
+	sleep 0.3
+}
+# judge_signalled NAME RC [PROCS]: the adapter exited within 15 s with RC, every listed gate process
+# is gone (default: the stub, its plain child, the group leader and its orphan), and no extract is left.
+judge_signalled() {
+	prompt=1; wait_gone "$hpid" 150 || prompt=0
+	[ "$prompt" = 1 ] || kill -9 "$hpid" 2>/dev/null
+	wait "$hpid" 2>/dev/null
+	src=$?
+	survivors=""
+	for f in ${3:-gate sleep orphan.leader orphan}; do alive "$(cat "$TMP/$1.$f" 2>/dev/null || echo 0)" && survivors="$survivors $f"; done
+	reap "$TMP/$1.gate" "$TMP/$1.orphan" "$TMP/$1.orphan.leader" "$TMP/$1.sleep"
+	left=$(extracts "$repo")
+	if [ "$prompt" = 1 ] && [ "$src" = "$2" ] && [ -z "$survivors" ] && [ "$left" = "0" ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL %s: prompt=%s rc=%s (want %s) survivors=<%s> extracts=%s out<<<%s>>>\n' "$1" "$prompt" "$src" "$2" "$survivors" "$left" "$(cat "$TMP/$1.out")"
+	fi
+}
+# Mutants: the pre-fix foreground body (trap deferred: not prompt), no stop_descendants (children
+# survive), no process-group stop (the orphan survives), no trap for the signal (extracts stay).
+start_hanging scr-term; kill -s TERM "$hpid"; judge_signalled scr-term 143
+start_hanging scr-hup; kill -s HUP "$hpid"; judge_signalled scr-hup 129
+# Ctrl-C reaches the hook shell; the backgrounded body ignores SIGINT, so the handler must stop it.
+start_hanging scr-int; kill -s INT "$hpid"; judge_signalled scr-int 130
+# A timeout (timeout(1), a harness deadline) TERMs the whole process group at once. The orphan's
+# group is not judged here: its leader's parent (the stub shell) dies on that same signal before the
+# handler snapshots the tree, so nothing left in the tree names that group (a residual of
+# group-wide signals that no handler can close).
+start_hanging scr-timeout setsid; kill -s TERM -- "-$hpid"; judge_signalled scr-timeout 143 "gate sleep"
+
+# Success and failure leave 0 extracts (a red keeps only its .owner + gate.log record).
+repo=$(mkrepo scr-green 'echo BASE-GATE' 'echo HEAD-GATE')
+grc=$(run_adapter "$repo"); gleft=$(extracts "$repo")
+repo=$(mkrepo scr-red 'echo BASE-GATE-FAIL; exit 5' 'echo HEAD-GATE')
+rrc=$(run_adapter "$repo"); rleft=$(extracts "$repo")
+if [ "$grc" = "0" ] && [ "$gleft" = "0" ] && [ "$rrc" = "5" ] && [ "$rleft" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scr-green-red-zero-extracts: green rc=%s extracts=%s red rc=%s extracts=%s\n' "$grc" "$gleft" "$rrc" "$rleft"
+fi
+
+# SIGKILL skips every trap, so the extracts stay; while a process still holds one the next run's
+# sweep keeps it (mutant: held() always false), and once nothing holds it the sweep removes it
+# (mutant: no sweep call). The kept red record (.owner + gate.log) is not an extract.
+start_hanging scr-kill
+kill -9 "$hpid" 2>/dev/null; reap "$TMP/scr-kill.gate" "$TMP/scr-kill.orphan" "$TMP/scr-kill.orphan.leader" "$TMP/scr-kill.sleep"
+wait "$hpid" 2>/dev/null
+i=0; while [ "$(extracts "$repo")" = "0" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+sleep 0.5
+kleft=$(extracts "$repo")
+ktree=$(find "$repo/var/agent-tmp" -maxdepth 1 -name "pre-push-gate.$hpid.*")
+# The holder keeps an open descriptor on a file inside the extract, as a still-running test would.
+# shellcheck disable=SC2217
+sleep 60 < "$ktree/tree/scripts/fresh-gate.sh" &
+holder=$!
+printf '#!/bin/sh\necho BASE-GATE\n' > "$repo/scripts/fresh-gate.sh"
+git -C "$repo" commit -qam "[test] green base"
+git -C "$repo" commit -q --allow-empty -m "[test] green head"
+hrc=$(run_adapter "$repo"); hout=$(cat "$TMP/out"); hleft=$(extracts "$repo")
+htree=0; [ -d "$ktree/tree" ] && htree=1
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+src=$(run_adapter "$repo"); sout=$(cat "$TMP/out"); sleft=$(extracts "$repo")
+if [ "$kleft" -ge 1 ] && [ -n "$ktree" ] && [ "$hrc" = "0" ] && [ "$hleft" -ge 1 ] && [ "$htree" = 1 ] \
+	&& printf '%s' "$hout" | grep -q "gate-sweep: kept $ktree" \
+	&& [ "$src" = "0" ] && [ "$sleft" = "0" ] && printf '%s' "$sout" | grep -q "gate-sweep: removed extract $ktree" \
+	&& [ -f "$ktree/.owner" ] && [ -f "$ktree/gate.log" ] && [ ! -d "$ktree/tree" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scr-kill-held-then-swept: killed=%s tree=%s kept=<%s> held rc=%s left=%s swept rc=%s left=%s held<<<%s>>> swept<<<%s>>>\n' "$kleft" "$ktree" "$( [ -d "$ktree" ] && (cd "$ktree" && find . | sort | tr '\n' ' '))" "$hrc" "$hleft" "$src" "$sleft" "$hout" "$sout"
+fi
+
+# A live gate's extract is never swept, even with nothing holding it (mutant: owner_running always
+# false); a recorded pid that now names a different process (process_start differs: pid reuse) is
+# not that gate, so its extract goes (mutant: owner_running ignores process_start).
+repo=$(mkrepo scr-live 'echo BASE-GATE' 'echo HEAD-GATE')
+sleep 120 &
+livepid=$!
+livestart=$(ps -p "$livepid" -o lstart= | sed 's/^ *//;s/ *$//')
+mkdir -p "$repo/var/agent-tmp/pre-push-gate.$livepid.LIVE01/tree" "$repo/var/agent-tmp/pre-push-gate-base.$livepid.REUSE1/tree"
+printf 'x\n' > "$repo/var/agent-tmp/pre-push-gate.$livepid.LIVE01/tree/f"
+printf 'x\n' > "$repo/var/agent-tmp/pre-push-gate-base.$livepid.REUSE1/tree/f"
+printf 'pid=%s\nprocess_start=%s\nlabel=pre-push-gate\n' "$livepid" "$livestart" > "$repo/var/agent-tmp/pre-push-gate.$livepid.LIVE01/.owner"
+printf 'pid=%s\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=pre-push-gate-base\n' "$livepid" > "$repo/var/agent-tmp/pre-push-gate-base.$livepid.REUSE1/.owner"
+lrc=$(run_adapter "$repo"); lout=$(cat "$TMP/out")
+kill "$livepid" 2>/dev/null; wait "$livepid" 2>/dev/null
+if [ "$lrc" = "0" ] && [ -f "$repo/var/agent-tmp/pre-push-gate.$livepid.LIVE01/tree/f" ] \
+	&& [ ! -e "$repo/var/agent-tmp/pre-push-gate-base.$livepid.REUSE1" ] \
+	&& ! printf '%s' "$lout" | grep -q "LIVE01"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scr-live-kept-reused-swept: rc=%s out<<<%s>>>\n' "$lrc" "$lout"
+fi
+
+# stdin: a base gate that reads stdin to EOF (omp -p's readPipedInput shape). Fed through a pipe
+# whose writer stays open (a harness with pty off), the pre-fix gate blocks until the writer goes;
+# with stdin closed it finishes at once. Mutant: the pre-fix body (foreground, inheriting stdin).
+# Control: a writerless pipe (the writer already closed, as git's chain runner leaves it) reads EOF
+# and finishes either way, so it is not what wedged a push.
+repo=$(mkrepo scr-stdin 'cat >/dev/null; echo STDIN-EOF' 'echo HEAD-GATE')
+line=$(printf 'refs/heads/main %s refs/heads/main %s' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)")
+kill_tree() {
+	for p in $(ps -A -o pid= -o ppid= | awk -v r="$1" '{ p[$1] = $2 } END { m[r] = 1; g = 1; while (g) { g = 0; for (x in p) if (!(x in m) && (p[x] in m)) { m[x] = 1; g = 1 } } for (x in m) print x }'); do
+		kill -9 "$p" 2>/dev/null
+	done
+	return 0
+}
+rm -f "$TMP/stdin.pid"
+# shellcheck disable=SC2016
+( { printf '%s\n' "$line"; sleep 20; } | sh -c 'echo $$ > "$1"; cd -- "$2" && exec sh "$3"' sh "$TMP/stdin.pid" "$repo" "$ADAPTER" > "$TMP/stdin-open.out" 2>&1 ) &
+spid=$!
+wait_files "$TMP/stdin.pid"
+sdone=1; wait_gone "$(cat "$TMP/stdin.pid")" 100 || sdone=0
+kill_tree "$spid"
+wait "$spid" 2>/dev/null
+printf '%s\n' "$line" | (cd -- "$repo" && exec sh "$ADAPTER") > "$TMP/stdin-closed.out" 2>&1
+crc=$?
+if [ "$sdone" = 1 ] && grep -q STDIN-EOF "$TMP/stdin-open.out" && [ "$crc" = "0" ] && grep -q STDIN-EOF "$TMP/stdin-closed.out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scr-stdin-open-writer: finished=%s writerless rc=%s open<<<%s>>>\n' "$sdone" "$crc" "$(cat "$TMP/stdin-open.out")"
+fi
+
+# fresh-gate.sh itself: its WORK dir is pid-named with .owner, traps are set before it exists, a
+# TERM mid-run stops its tree promptly and removes WORK (mutants: foreground steps, trap after
+# mktemp); a SIGKILLed fresh-gate leaves WORK, which the next push's sweep removes.
+repo=$(mkrepo scr-fresh 'echo BASE-GATE' 'echo HEAD-GATE')
+mkdir -p "$repo/tools" "$TMP/fg-archive/scripts" "$TMP/fg-archive/.git"
+cp "$KITREPO/scripts/fresh-gate.sh" "$repo/tools/fresh-gate.sh"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\necho $$ > "$FG_PIDFILE"\nsleep 300 &\necho $! > "$FG_SLEEPFILE"\nwait\n' > "$TMP/fg-archive/scripts/build-manifest.sh"
+: > "$TMP/fg-archive/scripts/ttsr-harness.ts"
+fg_run() {
+	rm -f "$TMP/fg.pid" "$TMP/fg.sleep"
+	( cd -- "$repo" && FG_PIDFILE="$TMP/fg.pid" FG_SLEEPFILE="$TMP/fg.sleep" FRESH_GATE_LEDGER='' \
+		exec sh "$repo/tools/fresh-gate.sh" --archive-dir "$TMP/fg-archive" --changed-file README.md ) > "$TMP/fg.out" 2>&1 &
+	fgpid=$!
+	wait_files "$TMP/fg.pid" "$TMP/fg.sleep"
+	sleep 0.3
+}
+fg_run
+fgwork=$(find "$repo/var/agent-tmp" -maxdepth 1 -name "fresh-gate.$fgpid.*")
+fgowner=$(grep -c "^pid=$fgpid\$" "$fgwork/.owner" 2>/dev/null)
+kill -s TERM "$fgpid"
+fprompt=1; wait_gone "$fgpid" 150 || fprompt=0
+[ "$fprompt" = 1 ] || kill -9 "$fgpid" 2>/dev/null
+wait "$fgpid" 2>/dev/null
+frc=$?
+fsleep=0; alive "$(cat "$TMP/fg.sleep")" && fsleep=1
+reap "$TMP/fg.pid" "$TMP/fg.sleep"
+fleft=$(extracts "$repo")
+fg_run
+kill -9 "$fgpid"; reap "$TMP/fg.pid" "$TMP/fg.sleep"; wait "$fgpid" 2>/dev/null
+sleep 0.3
+kwork=$(find "$repo/var/agent-tmp" -maxdepth 1 -name "fresh-gate.$fgpid.*")
+wrc=$(run_adapter "$repo"); wout=$(cat "$TMP/out")
+if [ -n "$fgwork" ] && [ "$fgowner" = "1" ] && [ "$fprompt" = 1 ] && [ "$frc" = "143" ] && [ "$fsleep" = 0 ] && [ "$fleft" = "0" ] \
+	&& [ -n "$kwork" ] && [ "$wrc" = "0" ] && [ ! -e "$kwork" ] && printf '%s' "$wout" | grep -q "gate-sweep: removed extract $kwork"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL scr-fresh-gate-work: work=%s owner=%s prompt=%s rc=%s sleep_alive=%s left=%s killed_work=%s sweep rc=%s out<<<%s>>> sweep<<<%s>>>\n' "$fgwork" "$fgowner" "$fprompt" "$frc" "$fsleep" "$fleft" "$kwork" "$wrc" "$(cat "$TMP/fg.out")" "$wout"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

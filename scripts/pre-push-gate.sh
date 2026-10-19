@@ -13,6 +13,11 @@ done
 IFS=' '
 read -r local_ref local_sha remote_ref remote_sha || exit 0
 : "${remote_ref:-}"
+# GATESCR1 (ompkit-fp72.40): the ref line above is the only stdin the gate reads. Every step after
+# it, every checker contract and every suite fresh-gate runs, gets /dev/null: a test that reads
+# stdin (omp -p's readPipedInput, a prompt, a credential helper) then sees EOF instead of blocking
+# forever on a pipe whose writer never closes (a harness with pty off, a hand-fed hook).
+exec </dev/null
 # An inherited FRESH_GATE_SKIP_REGEX must never leak into a main judgment: a
 # caller-side export would otherwise skip the regex budget on main. Clear it
 # first, then set it only for scratch measurement refs.
@@ -74,46 +79,138 @@ cleanup() {
 		find "$dir" -depth -type d -empty -delete 2>/dev/null || true
 	done
 }
-# ompkit-fp72.40: an interrupted run is red, not clean. The INT/TERM handlers mark the run red
-# BEFORE cleanup, so the failed parent keeps exactly .owner + gate.log (AC3) while the extract
-# tree is removed (AC2). Owned pipeline children are shut down first so nothing recreates the
-# tree after cleanup; shutdown is TERM-only, never KILL.
+# GATESCR1 (ompkit-fp72.40): an interrupted run is red, not clean. The HUP/INT/TERM handler marks
+# the run red BEFORE cleanup, so the failed parent keeps exactly .owner + gate.log while the
+# extract tree is removed. Every descendant (fresh-gate, omp-kit heavy, bun and their children,
+# including any that lead their own process group) is stopped first, so nothing recreates or holds
+# the tree after cleanup and the handler finishes instead of waiting on a hung suite.
+# stop_descendants: TERM the whole tree under this shell, snapshotted before any signal (a parent
+# that dies first reparents its children to init, out of reach), plus every separate process group
+# one of them leads; after a 5 s grace, KILL what is still running. Only processes this gate
+# started are touched: the tree is rooted at $$ and the shell's own group (git's) is never signaled.
 # shellcheck disable=SC2329,SC2317
-kill_owned_children() {
+stop_descendants() {
+	tree=$(ps -A -o pid= -o ppid= -o pgid= 2>/dev/null | awk -v root="$$" '
+		{ n++; pid[n] = $1; parent[$1] = $2; group[$1] = $3 }
+		END {
+			mine[root] = 1; grew = 1
+			while (grew) { grew = 0; for (i = 1; i <= n; i++) { p = pid[i]; if (!(p in mine) && (parent[p] in mine)) { mine[p] = 1; grew = 1 } } }
+			for (p in mine) if (p != root) print p, group[p]
+		}')
+	[ -n "$tree" ] || return 0
+	own_group=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+	pids=""
+	while read -r p g; do
+		pids="$pids $p"
+		kill -s TERM "$p" 2>/dev/null || :
+		if [ "$g" = "$p" ] && [ "$g" != "$own_group" ]; then kill -s TERM -- "-$g" 2>/dev/null || :; fi
+	done <<EOF
+$tree
+EOF
 	grace=0
-	for child in $(ps -o pid= -o ppid= 2>/dev/null | awk -v me="$$" '$2 == me && $1 != me { print $1 }'); do
-		kill -TERM "$child" 2>/dev/null || true
-	done
-	while [ "$grace" -lt 30 ]; do
-		alive=""
-		for child in $(ps -o pid= -o ppid= 2>/dev/null | awk -v me="$$" '$2 == me && $1 != me { print $1 }'); do
-			alive="$alive $child"
-		done
-		[ -z "$alive" ] && return 0
+	while [ "$grace" -lt 50 ]; do
+		running=$(ps -A -o pid= -o stat= 2>/dev/null | awk -v want="$pids" '
+			BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) set[w[i]] = 1 }
+			($1 in set) && $2 !~ /Z/ { print $1 }')
+		[ -z "$running" ] && return 0
 		sleep 0.1
 		grace=$((grace + 1))
 	done
+	for p in $running; do kill -s KILL "$p" 2>/dev/null || :; done
 	return 0
 }
 # shellcheck disable=SC2329,SC2317
-on_int() {
-	trap - EXIT HUP INT TERM
+on_signal() {
+	trap - EXIT
+	trap '' HUP INT TERM
 	gate_red=1
-	kill_owned_children
+	stop_descendants
 	cleanup
-	exit 130
+	exit "$1"
+}
+# GATESCR1 start-up sweep: a gate killed by SIGKILL (or by its parent before the handler finished)
+# leaves its extract behind. Each run first removes the extracts in this repo's var/agent-tmp whose
+# recorded gate pid is no longer that process AND that no process holds open (lsof +D, bounded),
+# logging each removal. Only the gate's own naming class is considered (pre-push-gate.<pid>.*,
+# pre-push-gate-base.<pid>.*, fresh-gate.*), with the pid from .owner, or from the name when a run
+# died before writing .owner; ownerless dirs without a pid stay with the scratch reaper. A pid
+# recorded before this boot is not trusted as alive (pid reuse): such a dir goes only on the
+# no-holder test plus the naming class. A red record (.owner + gate.log, no extract) is kept.
+SWEEP_LSOF_TICKS=${OMP_KIT_GATE_SWEEP_LSOF_TICKS:-300}
+# shellcheck disable=SC2329,SC2317
+epoch_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf '0\n'; }
+# shellcheck disable=SC2329,SC2317
+owner_running() {
+	ps -p "$1" >/dev/null 2>&1 || return 1
+	if [ -n "$2" ]; then
+		[ "$(ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')" = "$2" ]
+		return
+	fi
+	[ "$3" -ge "$boot" ]
+}
+# held DIR: status 0 when a process has a file or cwd under DIR, or lsof did not finish in time.
+# shellcheck disable=SC2329,SC2317
+held() {
+	command -v lsof >/dev/null 2>&1 || return 0
+	res=$(
+		lsof -t +D "$1" 2>/dev/null &
+		lp=$!
+		( t=0; while [ "$t" -lt "$SWEEP_LSOF_TICKS" ] && kill -0 "$lp" 2>/dev/null; do sleep 0.1; t=$((t + 1)); done; [ "$t" -lt "$SWEEP_LSOF_TICKS" ] || kill -s TERM "$lp" 2>/dev/null ) >/dev/null 2>&1 &
+		# This subshell runs under set -e: lsof's "nothing open" status 1 must not end it.
+		lrc=0
+		wait "$lp" || lrc=$?
+		wait
+		printf 'rc=%s\n' "$lrc"
+	)
+	[ "$res" != "rc=1" ]
 }
 # shellcheck disable=SC2329,SC2317
-on_term() {
-	trap - EXIT HUP INT TERM
-	gate_red=1
-	kill_owned_children
-	cleanup
-	exit 143
+sweep_dead_extracts() {
+	boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
+	[ -n "$boot" ] || boot=$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)
+	[ -n "$boot" ] || boot=0
+	for dir in "$ROOT"/var/agent-tmp/pre-push-gate.* "$ROOT"/var/agent-tmp/pre-push-gate-base.* "$ROOT"/var/agent-tmp/fresh-gate.*; do
+		[ -d "$dir" ] && [ ! -L "$dir" ] || continue
+		name=${dir##*/}
+		label=${name%%.*}
+		rest=${name#*.}
+		name_pid=${rest%%.*}
+		[ "$name_pid" != "$rest" ] || name_pid=
+		case "$name_pid" in *[!0-9]*) name_pid= ;; esac
+		if [ -f "$dir/.owner" ]; then
+			pid=$(sed -n 's/^pid=//p' "$dir/.owner" | head -n 1)
+			start=$(sed -n 's/^process_start=//p' "$dir/.owner" | head -n 1)
+			[ "$(sed -n 's/^label=//p' "$dir/.owner" | head -n 1)" = "$label" ] || continue
+			[ -z "$name_pid" ] || [ "$name_pid" = "$pid" ] || continue
+			created=$(epoch_of "$dir/.owner")
+		else
+			pid=$name_pid
+			start=
+			created=$(epoch_of "$dir")
+		fi
+		case "$pid" in ''|*[!0-9]*) continue ;; esac
+		owner_running "$pid" "$start" "$created" && continue
+		find "$dir" -mindepth 1 -maxdepth 1 ! -name .owner ! -name gate.log | grep -q . || continue
+		if held "$dir"; then
+			printf 'gate-sweep: kept %s: owner pid %s is gone but a process holds it (or lsof timed out)\n' "$dir" "$pid" >&2
+			continue
+		fi
+		kib=$(du -sk "$dir" 2>/dev/null | cut -f1)
+		chmod -R u+w "$dir" 2>/dev/null || :
+		if [ "$label" = pre-push-gate ] && [ -f "$dir/.owner" ] && [ -f "$dir/gate.log" ]; then
+			find "$dir" ! -type d ! -path "$dir/gate.log" ! -path "$dir/.owner" -delete 2>/dev/null || :
+		else
+			find "$dir" ! -type d -delete 2>/dev/null || :
+		fi
+		find "$dir" -depth -type d -empty -delete 2>/dev/null || :
+		printf 'gate-sweep: removed extract %s (%s KiB): owner pid %s is gone and no process holds it\n' "$dir" "${kib:-?}" "$pid" >&2
+	done
 }
-trap cleanup EXIT HUP
-trap on_int INT
-trap on_term TERM
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+sweep_dead_extracts || :
 archive_root=$(owned_dir pre-push-gate) || { printf 'pre-push-gate: cannot stage archive\n' >&2; exit 1; }
 # Both owned dirs are made here, in the shell that owns the trap: the body below runs in a subshell,
 # and cleanup must know every dir it has to remove.
@@ -256,7 +353,11 @@ sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 # list, so `( gate_body ) || st=$?` would let a failing early checker fall through. set +e is
 # scoped to this group only; the subshell re-enables set -e for every step of the body. The status
 # goes through a file because a pipeline reports tee's.
-{ set +e; ( set -e; gate_body ); printf '%s\n' "$?" >"$archive_root/gate.rc"; } 2>&1 | tee "$archive_root/gate.log"
+# GATESCR1: the body runs in the background and the shell waits for it, because a POSIX shell defers
+# a trap until its foreground job ends: with a hung suite in the foreground, HUP/INT/TERM never ran
+# the handler and the extract stayed (pids 4475, 2964, 2026-10-18). `wait` returns on the signal.
+{ set +e; ( set -e; gate_body ); printf '%s\n' "$?" >"$archive_root/gate.rc"; } 2>&1 | tee "$archive_root/gate.log" &
+wait "$!" || :
 gate_rc=$(cat "$archive_root/gate.rc" 2>/dev/null) || gate_rc=1
 case "$gate_rc" in ''|*[!0-9]*) gate_rc=1 ;; esac
 [ "$gate_rc" = 0 ] || gate_red=1
