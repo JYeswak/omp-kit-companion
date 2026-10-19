@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
-import { inspectLspReadiness, planLspSetup, type LspReadinessReport } from "../../src/lsp-readiness.ts";
+import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
 import { probeLspReadiness } from "../../src/lsp-probe.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
@@ -34,7 +34,15 @@ function realDefaultsSource(): string {
 	}
 	throw new Error("no complete OMP defaults.json found (bun-global or npm-global OMP package required); refusing a fabricated subset");
 }
-function sourceTreeFor(root: string, ompPath: string): string {
+function sourceTreeFor(root: string, ompPath: string): string | null {
+	// An npm-installed launcher (CI) already has its package source beside it. Adding OMP_SRC
+	// there is the mixed identity the product refuses (planted test below), so only a
+	// binary-only launcher gets the hermetic tree.
+	const beside = process.env.OMP_SRC === undefined ? resolveOmpDefaults(ompPath) : null;
+	if (beside !== null) {
+		console.log(`OMP_SRC-UNNEEDED source=${beside.root} server=typescript-language-server`);
+		return null;
+	}
 	const probed = Bun.spawnSync([ompPath, "--version"], { stdout: "pipe", stderr: "pipe" });
 	const version = /(\d+\.\d+\.\d+)/.exec(probed.stdout.toString())?.[1];
 	if (!version) throw new Error(`cannot read omp version from ${ompPath}; refusing an unversioned OMP_SRC`);
