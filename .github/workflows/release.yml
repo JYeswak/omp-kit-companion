@@ -4,7 +4,14 @@ name: Unpublished release candidate
 # dispatched by the local Developer ID signer (scripts/sign-darwin-release.sh) and attests the darwin archive only after
 # developer-id proves it is the qualified archive plus a notarized Developer ID signature (docs/release-signing.md).
 # "adhoc" (the default) keeps the qualified darwin archive unchanged.
-run-name: ${{ inputs.rehearsal && 'rehearse' || (inputs.certified_run_id != '' && 'sign' || 'qualify') }} ${{ inputs.version }} ${{ inputs.sha || github.sha }} train-${{ inputs.train_run_id || github.run_id }}
+# LOCAL-RELEASE-V1 (ompkit-v66l.27.11, J-2026-10-18-30): the `mode` input gates this workflow. Its only trigger is
+# workflow_dispatch (no push, tag-push, schedule or workflow_run), and its default `local-attest` runs ONLY the
+# one-runner attest-local job: it attests and publishes a draft that scripts/release-local.sh built, Developer ID
+# signed, notarized and checksummed on the signing Mac. Every other job (qualification, the macOS/Linux native
+# matrix via ci.yml, signing, signed consumers) carries `inputs.mode == 'ci-pipeline'` in its `if`, so it runs only
+# when a dispatcher passes mode=ci-pipeline explicitly (release_reuse.py's train dispatches do). Enabling this
+# workflow therefore cannot start the expensive pipeline. tests/cli/release-local.test.ts pins this.
+run-name: ${{ inputs.mode == 'local-attest' && 'attest-local' || (inputs.rehearsal && 'rehearse' || (inputs.certified_run_id != '' && 'sign' || 'qualify')) }} ${{ inputs.version }} ${{ inputs.sha || github.sha }} train-${{ inputs.train_run_id || github.run_id }}
 on:
   workflow_dispatch:
     inputs:
@@ -45,13 +52,19 @@ on:
         required: false
         default: false
         type: boolean
+      mode:
+        description: "local-attest (default): attest + publish the scripts/release-local.sh draft at --ref v<version>. ci-pipeline: the full qualify/sign pipeline, only when passed explicitly"
+        required: false
+        default: local-attest
+        type: choice
+        options: [local-attest, ci-pipeline]
 permissions:
   contents: read
   actions: read
 
 jobs:
   validate-tag:
-    if: github.event.repository.private == false
+    if: inputs.mode == 'ci-pipeline' && github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -185,7 +198,7 @@ jobs:
 
   reuse-evidence:
     needs: validate-tag
-    if: github.event.repository.private == false && needs.validate-tag.outputs.artifact_run_id != ''
+    if: inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs.validate-tag.outputs.artifact_run_id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -243,7 +256,7 @@ jobs:
 
   native-candidate:
     needs: validate-tag
-    if: github.event.repository.private == false && needs.validate-tag.outputs.artifact_run_id == '' && inputs.certified_run_id == ''
+    if: inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs.validate-tag.outputs.artifact_run_id == '' && inputs.certified_run_id == ''
     uses: ./.github/workflows/ci.yml
     with:
       version: ${{ needs.validate-tag.outputs.version }}
@@ -257,7 +270,7 @@ jobs:
     # DEVID-SIGN-V1: nothing is attested until the locally signed darwin archive is proved to be the qualified
     # archive plus a notarized Developer ID signature by this team, and it executes (docs/release-signing.md).
     needs: [validate-tag, reuse-evidence]
-    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['reuse-evidence'].result == 'success' && needs.validate-tag.outputs.developer_id == 'true' }}
+    if: ${{ always() && !cancelled() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['reuse-evidence'].result == 'success' && needs.validate-tag.outputs.developer_id == 'true' }}
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
@@ -316,7 +329,7 @@ jobs:
 
   attest-platforms:
     needs: [validate-tag, native-candidate, reuse-evidence, developer-id]
-    if: ${{ always() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && (needs['native-candidate'].result == 'success' || needs['reuse-evidence'].result == 'success') && (needs.validate-tag.outputs.developer_id != 'true' || needs['developer-id'].result == 'success') }}
+    if: ${{ always() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs['validate-tag'].result == 'success' && (needs['native-candidate'].result == 'success' || needs['reuse-evidence'].result == 'success') && (needs.validate-tag.outputs.developer_id != 'true' || needs['developer-id'].result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -364,7 +377,7 @@ jobs:
 
   attest:
     needs: [validate-tag, attest-platforms]
-    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' }}
+    if: ${{ always() && !cancelled() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -434,7 +447,7 @@ jobs:
   attest-index:
     # Preserve the index-signing rider as well as per-platform archive signing.
     needs: [validate-tag, attest-platforms]
-    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
+    if: ${{ always() && !cancelled() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest-platforms'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -457,7 +470,7 @@ jobs:
     # Public installation needs the real tag and Sigstore authority. It is
     # mandatory after signing, never faked during tagless qualification.
     needs: [validate-tag, attest, attest-index]
-    if: ${{ always() && !cancelled() && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest'].result == 'success' && needs['attest-index'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
+    if: ${{ always() && !cancelled() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && needs['validate-tag'].result == 'success' && needs['attest'].result == 'success' && needs['attest-index'].result == 'success' && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -548,7 +561,7 @@ jobs:
     # Reuse intentionally skips native-candidate. Its skipped ancestor must not
     # suppress signing, or turn a run with no signatures/consumers green.
     needs: [validate-tag, developer-id, attest-platforms, attest, attest-index, signed-consumers]
-    if: ${{ always() && !cancelled() && github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal }}
+    if: ${{ always() && !cancelled() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -579,7 +592,7 @@ jobs:
 
   open-p0-on-post-cert-failure:
     needs: [validate-tag, reuse-evidence, developer-id, attest-platforms, attest, attest-index, signed-consumers, signing-complete]
-    if: ${{ always() && github.event.repository.private == false && failure() && inputs.certified_run_id != '' && !inputs.rehearsal }}
+    if: ${{ always() && inputs.mode == 'ci-pipeline' && github.event.repository.private == false && failure() && inputs.certified_run_id != '' && !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -599,4 +612,135 @@ jobs:
           sh scripts/candidate-failure.sh --repo "$GITHUB_REPOSITORY" --version "$VERSION" \
             --sha "$SHA" --run-id "$GITHUB_RUN_ID"
 
-# Publication remains exclusively in release-train.yml after exact signed-byte verification.
+  attest-local:
+    # LOCAL-RELEASE-V1: the only job mode=local-attest runs. Dispatch at --ref v<version> so the provenance's source
+    # digest is the tag commit the installer and updater pin (installer/install.py verify_attestation). It never
+    # builds: it proves the draft's bytes against the draft's SHA256SUMS and release-index.json, attests them,
+    # verifies them with the consumer's own verifier, attaches SBOMs and only then publishes the draft.
+    if: inputs.mode == 'local-attest' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: release-attest-local
+      cancel-in-progress: false
+    permissions:
+      contents: write # a read-only token cannot see a draft; SBOM upload and publication write the release
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the tag ref, a Developer ID source on main, and exactly one draft whose bytes match its checksums
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version must be X.Y.Z' >&2; exit 4; }
+          [[ "$GITHUB_REF" == "refs/tags/v$VERSION" ]] || { echo "dispatch with --ref v$VERSION, not $GITHUB_REF" >&2; exit 4; }
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > tag.json
+          [[ "$(jq -r .object.type tag.json)" == commit && "$(jq -r .object.sha tag.json)" == "$GITHUB_SHA" ]] || { echo 'tag is not a lightweight tag of this commit' >&2; exit 4; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo 'tag commit is not on main' >&2; exit 4; }
+          [[ "$(git show "$GITHUB_SHA:scripts/release-signing.json" | jq -er '.darwin_signing')" == developer-id ]] || { echo 'source is not a developer-id release' >&2; exit 4; }
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' > releases.json
+          [[ "$(jq length releases.json)" == 1 && "$(jq -r '.[0].draft' releases.json)" == true ]] || { echo "v$VERSION must have exactly one draft release" >&2; exit 4; }
+          ship=(darwin-arm64-none linux-arm64-gnu linux-x64-gnu)
+          want=(SHA256SUMS release-index.json)
+          for platform in "${ship[@]}"; do want+=("omp-kit-v$VERSION-$platform.tar"); done
+          # A rerun may find SBOMs an earlier attempt attached; they are never re-downloaded, compared or clobbered.
+          [[ "$(jq -r '[.[0].assets[].name | select((startswith("sbom-") and endswith(".spdx.json")) | not)] | sort | join(" ")' releases.json)" == "$(printf '%s\n' "${want[@]}" | sort | paste -sd ' ' -)" ]] \
+            || { echo "draft assets are not exactly: ${want[*]} (plus optional SBOMs)" >&2; exit 4; }
+          mkdir dist
+          while read -r id name digest; do
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "dist/$name"
+            [[ "sha256:$(sha256sum "dist/$name" | cut -d' ' -f1)" == "$digest" ]] || { echo "$name differs from GitHub's recorded digest $digest" >&2; exit 4; }
+          done < <(jq -r '.[0].assets[] | select((.name | startswith("sbom-") and endswith(".spdx.json")) | not) | "\(.id) \(.name) \(.digest)"' releases.json)
+          [[ "$(cut -d' ' -f3 dist/SHA256SUMS | sort | paste -sd ' ' -)" == "$(printf '%s\n' "${want[@]}" | grep -vx SHA256SUMS | sort | paste -sd ' ' -)" ]] \
+            || { echo 'SHA256SUMS does not list exactly the release files' >&2; exit 4; }
+          (cd dist && sha256sum --strict -c SHA256SUMS)
+          jq -e --arg v "$VERSION" '.version == $v and .source_tag == ("v" + $v)
+            and ((.assets | keys) == ["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"])' dist/release-index.json > /dev/null \
+            || { echo 'release-index.json does not bind this version and ship set' >&2; exit 4; }
+          for platform in "${ship[@]}"; do
+            python3 -I installer/install.py inspect dist/release-index.json "$VERSION" "$platform" > /dev/null
+            python3 scripts/release_reuse.py verify-archive --index dist/release-index.json --platform "$platform" --archive-dir dist/
+            mkdir -p "sbom-in/$platform"
+            cp "dist/omp-kit-v$VERSION-$platform.tar" "sbom-in/$platform/"
+          done
+      - name: SBOM darwin-arm64-none
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          path: sbom-in/darwin-arm64-none/
+          format: spdx-json
+          output-file: ${{ github.workspace }}/sbom/sbom-darwin-arm64-none.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: SBOM linux-arm64-gnu
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          path: sbom-in/linux-arm64-gnu/
+          format: spdx-json
+          output-file: ${{ github.workspace }}/sbom/sbom-linux-arm64-gnu.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: SBOM linux-x64-gnu
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          path: sbom-in/linux-x64-gnu/
+          format: spdx-json
+          output-file: ${{ github.workspace }}/sbom/sbom-linux-x64-gnu.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Attest build provenance for the archives and the index at the tag ref
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: |
+            dist/*.tar
+            dist/release-index.json
+      - name: Attest the darwin SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
+        with:
+          subject-path: dist/omp-kit-v${{ inputs.version }}-darwin-arm64-none.tar
+          sbom-path: ${{ github.workspace }}/sbom/sbom-darwin-arm64-none.spdx.json
+      - name: Attest the linux-arm64 SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
+        with:
+          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-arm64-gnu.tar
+          sbom-path: ${{ github.workspace }}/sbom/sbom-linux-arm64-gnu.spdx.json
+      - name: Attest the linux-x64 SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
+        with:
+          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-x64-gnu.tar
+          sbom-path: ${{ github.workspace }}/sbom/sbom-linux-x64-gnu.spdx.json
+      - name: Verify every archive with the consumer's own verifier, as omp-kit update fetches it
+        run: |
+          set -euo pipefail
+          for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
+            archive="dist/omp-kit-v$VERSION-$platform.tar"
+            digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+            gh api --hostname github.com "repos/$GITHUB_REPOSITORY/attestations/sha256:$digest" --jq '.attestations[].bundle | tojson' > "$archive.sigstore.json"
+            python3 -I -c "$(cat installer/install.py)" attestation "$archive" "$VERSION" unused
+            echo "CONSUMER_VERIFY=ok platform=$platform sha256=$digest"
+          done
+          gh attestation verify dist/release-index.json --repo "$GITHUB_REPOSITORY" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" --predicate-type https://slsa.dev/provenance/v1
+      - name: Attach the SBOMs and publish the draft without regressive Latest
+        run: |
+          set -euo pipefail
+          attached="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for sbom in sbom/sbom-*.spdx.json; do
+            grep -qxF "$(basename "$sbom")" <<<"$attached" || gh release upload "v$VERSION" --repo "$GITHUB_REPOSITORY" "$sbom"
+          done
+          latest_flag="$(python3 scripts/release_reuse.py latest-flag --repository "$GITHUB_REPOSITORY" --version "$VERSION")"
+          # shellcheck disable=SC2086
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false $latest_flag
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,url --jq '"PUBLISHED draft=\(.isDraft) url=\(.url)"'
+
+# Publication remains exclusively in release-train.yml after exact signed-byte verification, except LOCAL-RELEASE-V1's
+# attest-local job, which publishes only a draft whose exact bytes it has checked, attested and consumer-verified.

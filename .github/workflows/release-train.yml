@@ -414,7 +414,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f version="$VERSION" -f sha="$SHA" \
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION" -f mode=ci-pipeline -f version="$VERSION" -f sha="$SHA" \
             -f train_run_id="$TRAIN_ID" -f train_attempt="$TRAIN_ATTEMPT" -f base_tag="$BASE_TAG" -f certified_run_id="$RUN_ID"
       - name: Leave tag-ref signing to the local Developer ID signer
         if: steps.authority.outputs.devid == 'true'

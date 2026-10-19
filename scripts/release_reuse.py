@@ -25,6 +25,8 @@ SHIPPING_PLATFORMS = (
 )
 NATIVE_TRACKS = ("minimum", "certified")
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
+# LOCAL-RELEASE-V1: release.yml runs its qualify/sign pipeline only for this explicit mode; its default runs attest-local.
+RELEASE_PIPELINE_MODE = "ci-pipeline"
 CI_WORKFLOW = ".github/workflows/ci.yml"
 OWNER_WORKFLOW = ".github/workflows/release-train.yml"
 ALLOCATION_PROTOCOL = "rolling-release-allocation-v1"
@@ -1021,7 +1023,7 @@ def _dispatch_allocation(args: argparse.Namespace) -> int:
         raise ValueError("dispatch mode differs from immutable owner allocation")
     inputs = {"version": allocation["version"], "sha": allocation["source_sha"], "base_tag": allocation["base_tag"],
               "train_run_id": allocation["train_run_id"], "train_attempt": allocation["train_attempt"],
-              "rehearsal": allocation["rehearsal"]}
+              "rehearsal": allocation["rehearsal"], "mode": RELEASE_PIPELINE_MODE}
     run_id = _native_dispatch(args.repository, "release.yml", "main", inputs)
     qualification = {"schema_version": 1, "train_run_id": plan["train_id"], "train_attempt": plan["train_attempt"],
                      "allocation_artifact_id": str(artifact["id"]), "allocation_sha256": hashlib.sha256(files["allocation.json"]).hexdigest(),
@@ -1768,7 +1770,7 @@ def _recover_tag_creation(args: argparse.Namespace) -> int:
     run_id = _native_dispatch(args.repository, "release.yml", f"v{version}", {
         "version": version, "sha": source, "train_run_id": train_id,
         "train_attempt": selection["train_attempt"], "base_tag": selection["base_tag"],
-        "certified_run_id": qualified_id,
+        "certified_run_id": qualified_id, "mode": RELEASE_PIPELINE_MODE,
     })
     print(f"TAG_RECOVERY=dispatched sign_run_id={run_id}")
     return 0
@@ -1819,7 +1821,7 @@ def _dispatch_devid_sign(args: argparse.Namespace) -> int:
                          "find that run before retrying, never replay")
     inputs = {"version": version, "sha": source, "train_run_id": train_id, "train_attempt": selection["train_attempt"],
               "base_tag": selection["base_tag"], "certified_run_id": selection["qualification_run_id"],
-              "darwin_sha256": args.darwin_sha256}
+              "darwin_sha256": args.darwin_sha256, "mode": RELEASE_PIPELINE_MODE}
     record = {"schema_version": 1, "repository": args.repository, "inputs": inputs, "run_id": None,
               "requested_at": datetime.now().astimezone().isoformat()}
     with receipt.open("x", encoding="utf-8") as output:

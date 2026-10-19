@@ -237,3 +237,34 @@ created a run: find that run in the Actions list before you delete the receipt.
 
 Revert: set `darwin_signing` back to `adhoc` (see the flip procedure). Reverting the whole
 DEVID-SIGN-V1 change is safe while the switch is `adhoc`.
+
+## Local release without the CI pipeline (LOCAL-RELEASE-V1)
+
+While J-2026-10-18-30 suspends the CI pipeline ("signed releases skipping ci like jeff"),
+`scripts/release-local.sh` cuts a release on the signing Mac (bead `ompkit-v66l.27.11`). The switch
+is `developer-id` since that bead. The consumers' trust root is unchanged: the installer and
+`omp-kit update` (`installer/install.py` `verify_attestation`, `src/kit-update.ts`
+`authenticateUpdateArchive`, `src/kit-update-job.ts` `pollPublishedRelease`) still require a
+GitHub Actions OIDC SLSA provenance from `release.yml` at the tag's source digest. So one small
+GitHub job remains, and it never builds anything.
+
+1. `scripts/release-local.sh --dry-run`: preflight (source on `origin/main`, version unused,
+   signer proven), build the ship set from an exact-commit `git archive` export with
+   `scripts/package-release.sh` (bun cross-compiles the linux targets), Developer ID sign and
+   notarize the darwin binary through `devid_release.py`, checksum (`SHA256SUMS`). It prints
+   a receipt with the digests, the notarization submission and each stage's wall time. Nothing
+   remote is written.
+2. `scripts/release-local.sh [--version X.Y.Z]`: the same, then push the lightweight tag
+   `vX.Y.Z` (never forced), create the draft release with every asset and check GitHub's
+   digests. It then dispatches `release.yml` with `mode=local-attest` at `--ref vX.Y.Z`. The
+   `attest-local` job re-checks the draft against `SHA256SUMS` and the index, attests SLSA
+   provenance and SBOMs with the workflow's OIDC identity, runs the consumer's own verifier on
+   every archive, attaches the SBOMs and publishes the draft (Latest only if it is the newest).
+   Finally the driver downloads every asset from the public URL, re-runs the consumer verifier
+   exactly as `omp-kit update` does, and checks Gatekeeper on the darwin binary.
+
+`release.yml`'s only trigger is `workflow_dispatch`, and its `mode` input defaults to
+`local-attest`. Every qualification, native-matrix and signing job requires
+`inputs.mode == 'ci-pipeline'`, which the train's dispatches (`release_reuse.py`) pass
+explicitly. Enabling `release.yml` therefore cannot start the expensive pipeline. A failure
+after the tag keeps the tag and the draft. Fix it and redispatch `attest-local`; never re-tag.

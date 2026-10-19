@@ -521,7 +521,7 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertIsNone(error)
             dispatch.assert_called_once_with(REPOSITORY, "release.yml", f"v{version}", {
                 "version": version, "sha": source, "train_run_id": train, "train_attempt": selection["train_attempt"],
-                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID})
+                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID, "mode": "ci-pipeline"})
             error, dispatch = run(rerun=True)
             self.assertIsNone(error)
             dispatch.assert_called_once()
@@ -606,7 +606,7 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertIsNone(error)
             dispatch.assert_called_once_with(REPOSITORY, "release.yml", f"v{version}", {
                 "version": version, "sha": source, "train_run_id": train, "train_attempt": selection["train_attempt"],
-                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID, "darwin_sha256": darwin})
+                "base_tag": selection["base_tag"], "certified_run_id": RUN_ID, "darwin_sha256": darwin, "mode": "ci-pipeline"})
             self.assertEqual(json.loads(receipt.read_text())["run_id"], "777")
             # The run is not listed yet: the receipt alone refuses a replay.
             error, dispatch = run(receipts)

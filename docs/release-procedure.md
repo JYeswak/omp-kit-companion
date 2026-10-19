@@ -327,7 +327,7 @@ A tag cannot be rebound. Rehearse before an intentional cut, without spending
 its real version:
 
 ```sh
-gh workflow run release.yml --ref main -f version=X.Y.Z -f rehearsal=true
+gh workflow run release.yml --ref main -f mode=ci-pipeline -f version=X.Y.Z -f rehearsal=true
 ```
 
 The rehearsal runs changelog coverage, full native candidate certification,

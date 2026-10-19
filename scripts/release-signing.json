@@ -1,4 +1,4 @@
 {
   "schema_version": 1,
-  "darwin_signing": "adhoc"
+  "darwin_signing": "developer-id"
 }
