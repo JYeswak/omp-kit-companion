@@ -326,8 +326,10 @@ check "publish-lag: no tag exits 0" 0 "$rc" "$out" "PUBLISH_LAG=no-tag"
 # 30. RT1 signing slice 4/4: publish job downloads per-platform SBOMs and refuses a release with none
 YMLDIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../../.github/workflows" && pwd)
 pubrange=$(sed -n '/^  publish:/,$p' "$YMLDIR/release-train.yml")
+# shellcheck disable=SC2016 # literal $platform in the workflow text
 printf '%s' "$pubrange" | grep -q 'sbom-\$platform'; rc1=$?
 check "publish: downloads per-platform SBOM artifacts" 0 "$rc1" ""
+# shellcheck disable=SC2016 # literal $sbom in the workflow text
 printf '%s' "$pubrange" | grep -qF 'test -s "$sbom"'; rc2=$?
 check "publish: zero-SBOM release refused" 0 "$rc2" ""
 # 31. planted: an attest-index job signs release-index.json with the keyless identity
