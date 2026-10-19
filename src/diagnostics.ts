@@ -1132,7 +1132,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			const versionMismatch = pluginRules.length > 0 && input.kitVersion !== null && pluginVersion !== input.kitVersion;
 			const status = missing.length || legacy.length || versionMismatch || alwaysMissing.length || !pluginRules.length && !overlays.length ? "DEGRADED" : "OK";
 			if (status !== "OK") failed = true;
-			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing, always_apply: { rules: [...alwaysRules], missing: alwaysMissing, method: "plugin-rules-dir" } }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
+			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, ...(versionMismatch ? { versionMismatch: `${pluginVersion} vs ${input.kitVersion}` } : {}), omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing, always_apply: { rules: [...alwaysRules], missing: alwaysMissing, method: "plugin-rules-dir" } }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
 		} catch (error) {
 			failed = true;
 			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });

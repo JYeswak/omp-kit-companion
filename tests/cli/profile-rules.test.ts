@@ -43,6 +43,18 @@ test("names an older kit plugin version", () => {
 	expect(codex).toMatchObject({ status: "DEGRADED", plugin_version: "0.2.4" });
 });
 
+test("STAMP1: a plugin lock of 0.2.15 against installed 0.2.19 names versionMismatch; a matching profile stays OK", () => {
+	const stale = inspectEffectiveRules({ ...input({ default: { plugin: true, version: "0.2.19" }, codex: { plugin: true, version: "0.2.15" }, claude: { plugin: true, version: "0.2.19" } }), kitVersion: "0.2.19" });
+	const rows = stale.evidence?.profiles as Array<{ profile: string; status: string; versionMismatch?: string }>;
+	expect(stale.status).toBe("DEGRADED");
+	expect(rows.find(row => row.profile === "codex")).toMatchObject({ status: "DEGRADED", versionMismatch: "0.2.15 vs 0.2.19" });
+	expect(rows.find(row => row.profile === "default")).toMatchObject({ status: "OK" });
+	expect(rows.find(row => row.profile === "default")?.versionMismatch).toBeUndefined();
+	const matching = inspectEffectiveRules({ ...input({ default: { plugin: true, version: "0.2.19" }, codex: { plugin: true, version: "0.2.19" }, claude: { plugin: true, version: "0.2.19" } }), kitVersion: "0.2.19" });
+	expect(matching.status).toBe("OK");
+	expect((matching.evidence?.profiles as Array<{ versionMismatch?: string }>).every(row => row.versionMismatch === undefined)).toBe(true);
+});
+
 test("accepts a native overlay and lists it as an overlay", () => {
 	const finding = inspectEffectiveRules(input({ default: { plugin: true }, codex: { plugin: true, overlay: "kit-a" }, claude: { plugin: true } }));
 	expect(finding.status).toBe("OK");
