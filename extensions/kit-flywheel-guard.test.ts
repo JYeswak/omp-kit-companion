@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compactionRereadMessage, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { compactionRereadMessage, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 
 const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
@@ -306,7 +306,7 @@ test("BGDEADLINE1: named services need readiness and cannot disguise a finite su
 // --- COMPACTION_REREAD gate (ompkit-xa5s.24) ----------------------------------
 
 /** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
-async function rereadHost(extra: string[] = [], identity: string | null = "TestWorker"): Promise<{ h: FakeHost; cwd: string; agents: string }> {
+async function rereadHost(extra: string[] = [], identity: string | null = "TestWorker", respond?: Responder): Promise<{ h: FakeHost; cwd: string; agents: string }> {
 	const cwd = mkdtempSync(join(base, "reread-"));
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
@@ -314,7 +314,7 @@ async function rereadHost(extra: string[] = [], identity: string | null = "TestW
 	mkdirSync(join(cwd, ".beads"));
 	const env: Record<string, string> = { PATH: brPath(cwd) };
 	if (identity !== null) env.BR_ACTOR = identity;
-	const h = await createFlywheelHost(base, { env });
+	const h = await createFlywheelHost(base, { env, ...(respond ? { respond } : {}) });
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	return { h, cwd, agents };
 }
@@ -725,4 +725,87 @@ test("REREAD: br list --json clears with the empty array and with br's {issues: 
 		const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
 		expect((after as FlywheelToolCallResult | undefined)?.block === true).toBe(!clears);
 	}
+});
+
+// --- COMPACTION_REREAD presentation truncation (ompkit-xa5s.24, live 0.2.49 seat 2026-10-19 01:15Z) ---
+
+/** One `br show --json` row over 768 bytes: a bead with a long description, like ompkit-v66l.22's 18.5 KB line. */
+function longRow(id: string, status: string, assignee: string | null): FlywheelExecResult {
+	const stdout = JSON.stringify([{ id, title: "long bead", status, assignee, description: "d".repeat(4000) }]);
+	return { stdout, stderr: "", code: 0 };
+}
+
+/** The two native display cuts: a line cut to 768 bytes (meta.limits.columnTruncated) and whole-output truncation. */
+function displayCuts(stdout: string): unknown[] {
+	return [
+		native(`${stdout.slice(0, 768)}…`, { meta: { limits: { columnTruncated: { maxColumn: 768, unit: "bytes" } } } }),
+		native(stdout.slice(0, 768), { truncation: { truncated: true } }),
+	];
+}
+
+async function showThenEdit(respond: Responder, command: string, shown: unknown): Promise<{ h: FakeHost; cwd: string; blocked: boolean }> {
+	const { h, cwd, agents } = await rereadHost([], "TestWorker", respond);
+	await callAs(h, cwd, "r1", "read", { path: agents });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command });
+	await endAs(h, cwd, "s1", "bash", shown);
+	const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	return { h, cwd, blocked: (after as FlywheelToolCallResult | undefined)?.block === true };
+}
+
+test("REREAD: an owned bead whose --json row arrives display-truncated clears through the guard's own br show", async () => {
+	const row = longRow("k-1", "in_progress", "TestWorker");
+	expect(row.stdout.length).toBeGreaterThan(768);
+	for (const shown of displayCuts(row.stdout)) {
+		const { h, cwd, blocked } = await showThenEdit(brTable({ "k-1": row }), "br show k-1 --json --no-auto-import --no-auto-flush", shown);
+		expect(blocked).toBe(false);
+		const confirm = h.execs.find(call => call.command === "br" && call.args[0] === "show");
+		expect(confirm?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush"]);
+		expect(confirm?.options?.cwd).toBe(cwd);
+		expect(confirm?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
+	}
+});
+
+test("REREAD: a display-truncated foreign or closed bead never clears, even confirmed (planted negative)", async () => {
+	for (const [status, assignee] of [["in_progress", "SomebodyElse"], ["closed", "TestWorker"], ["in_progress", null]] as const) {
+		const row = longRow("k-9", status, assignee);
+		for (const shown of displayCuts(row.stdout)) {
+			const { h, blocked } = await showThenEdit(brTable({ "k-9": row }), "br show k-9 --json", shown);
+			expect(blocked).toBe(true);
+			expect(h.execs.some(call => call.command === "br" && call.args[1] === "k-9")).toBe(true);
+		}
+	}
+});
+
+test("REREAD: the guard's own br show failing, timing out, throwing or unparseable keeps blocking", async () => {
+	const shown = displayCuts(longRow("k-1", "in_progress", "TestWorker").stdout)[0];
+	const failures: Responder[] = [
+		brTable({}),
+		() => ({ stdout: "", stderr: "", code: 0, killed: true }),
+		() => { throw new Error("spawn br ENOENT"); },
+		() => ({ stdout: "[{\"id\":\"k-1\",\"status\":", stderr: "", code: 0 }),
+	];
+	for (const respond of failures) {
+		const { blocked } = await showThenEdit(respond, "br show k-1 --json", shown);
+		expect(blocked).toBe(true);
+	}
+});
+
+test("REREAD: plain-text br show never asks the guard to confirm, so it never clears (planted negative)", async () => {
+	const row = longRow("k-1", "in_progress", "TestWorker");
+	const { h, blocked } = await showThenEdit(brTable({ "k-1": row }), "br show k-1",
+		native("◐ k-1 · long bead   [● P0 · IN_PROGRESS]\nAssignee: TestWorker\n"));
+	expect(blocked).toBe(true);
+	expect(h.execs.some(call => call.args[0] === "show")).toBe(false);
+});
+
+test("REREAD: a failed --json show is never confirmed, and a by-path br is confirmed by that same path with its --db", async () => {
+	const row = longRow("k-1", "in_progress", "TestWorker");
+	const failed = await showThenEdit(brTable({ "k-1": row }), "br show k-1 --json", { ...(displayCuts(row.stdout)[0] as object), details: { exitCode: 1 } });
+	expect(failed.blocked).toBe(true);
+	expect(failed.h.execs.some(call => call.args[0] === "show")).toBe(false);
+	const byPath = await showThenEdit(call => call.command === "/opt/x/br" ? row : { stdout: "", code: 127 },
+		"/opt/x/br --db /d/beads.db show k-1 --json", displayCuts(row.stdout)[0]);
+	expect(byPath.blocked).toBe(false);
+	expect(byPath.h.execs.find(call => call.command === "/opt/x/br")?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush", "--db", "/d/beads.db"]);
 });

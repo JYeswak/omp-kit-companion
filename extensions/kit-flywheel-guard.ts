@@ -16,12 +16,20 @@ import type { PullRefusal } from "../src/fleet-watch";
  * update/close/comments, git commit/push, classified by the exported pure
  * function `isMutatingCall`). Only observed successful `tool_execution_end`
  * results clear the flag: a read of exactly the named AGENTS.md with
- * non-empty content, and a `br show` whose parsed output is in_progress (or
+ * non-empty content, and a `br show --json` of a bead that is in_progress (or
  * rework) and assigned to a session identity (or a `br list --assignee <a
  * session identity> --json` that returns no issues; a list without
  * `--assignee`, or for another name, never clears it). Call arguments,
  * echoes, failures, wrong paths and foreign/closed beads never clear it.
  * Nothing else in a turn makes it speak.
+ *
+ * Ownership does not depend on presentation: when a successful
+ * `br show <id> --json` result cannot be parsed as shown (OMP cuts long lines
+ * to 768 bytes, so a bead with a long description arrives as broken JSON),
+ * the guard confirms it with its own bounded `br show <id> --json` in the
+ * call's cwd and clears only for an owned bead in an owned status. That
+ * confirmation failing, timing out or returning unparseable output keeps the
+ * gate blocked. Plain-text `br show` never triggers it and never clears.
  *
  * Self-declared identity: a session with no host identity (no BR_ACTOR /
  * BR_AGENT_NAME / AGENT_NAME and no Agent Mail pane identity) pins one from
@@ -215,12 +223,12 @@ function firstVerb(words: string[], valueFlags: Record<string, true>): string | 
 	return null;
 }
 
-function simpleExecutable(words: string[]): { exe: string; rest: string[] } | null {
+function simpleExecutable(words: string[]): { exe: string; raw: string; rest: string[] } | null {
 	let at = 0;
 	while (at < words.length && (isAssignment(words[at]!) || WRAPPERS[words[at]!.toLowerCase()] === true)) at += 1;
 	const first = words[at];
 	if (first === undefined) return null;
-	return { exe: first.slice(first.lastIndexOf("/") + 1).toLowerCase(), rest: words.slice(at + 1) };
+	return { exe: first.slice(first.lastIndexOf("/") + 1).toLowerCase(), raw: first, rest: words.slice(at + 1) };
 }
 
 /**
@@ -297,8 +305,21 @@ function stringField(value: unknown, keys: readonly string[]): string | null {
 }
 
 
+/** A non-zero exit code anywhere in a result envelope: the command itself failed. */
+function resultFailed(result: unknown): boolean {
+	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
+	for (const source of [field(record, "details"), record]) {
+		for (const key of ["code", "exitCode"]) {
+			const code = field(source, key);
+			if (typeof code === "number" && code !== 0) return true;
+		}
+	}
+	return false;
+}
+
 /** Failure/truncation/refusal markers anywhere in a result envelope. */
 function resultTainted(result: unknown): boolean {
+	if (resultFailed(result)) return true;
 	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
 	const details = record !== null && typeof record["details"] === "object" && record["details"] !== null
 		? record["details"] as Record<string, unknown> : null;
@@ -306,10 +327,6 @@ function resultTainted(result: unknown): boolean {
 		if (source === null) continue;
 		for (const key of ["truncated", "isTruncated", "partial"]) {
 			if (source[key] === true) return true;
-		}
-		for (const key of ["code", "exitCode"]) {
-			const code = source[key];
-			if (typeof code === "number" && code !== 0) return true;
 		}
 	}
 	// Native read truncation arrives nested as `details.truncation.truncated`.
@@ -333,33 +350,41 @@ function parseBeadRow(stdout: string, id: string): { status: string; assignee: s
 	return { status, assignee: owner === "" ? null : owner };
 }
 
-/** Ids named by `br|bd show` verbs in a bash command. */
-function brShowIds(command: string): string[] {
-	const ids: string[] = [];
+/** One `br|bd show <id>` in a bash command: the executable as written, its `--db`, and whether it asked for `--json`. */
+interface BrShowTarget {
+	bin: string;
+	id: string;
+	db?: string;
+	json: boolean;
+}
+
+/** `br|bd show` targets named in a bash command. */
+function brShowTargets(command: string): BrShowTarget[] {
+	const targets: BrShowTarget[] = [];
 	for (const words of shellCommands(command)) {
 		const parsed = simpleExecutable(words);
 		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
-		let at = 0;
 		const rest = parsed.rest;
-		while (at < rest.length) {
+		let db: string | undefined;
+		let json = false;
+		let id: string | null = null;
+		let verb: string | null = null;
+		for (let at = 0; at < rest.length; at += 1) {
 			const word = rest[at]!;
-			if (!word.startsWith("-") || word === "-") break;
-			const name = word.split("=")[0]!;
-			at += BR_VALUE_FLAGS[name] === true && !word.includes("=") ? 2 : 1;
-		}
-		if (rest[at]?.toLowerCase() !== "show") continue;
-		at += 1;
-		while (at < rest.length) {
-			const word = rest[at]!;
-			if (!word.startsWith("-") || word === "-") {
-				if (word !== "-") ids.push(word);
-				break;
+			if (word === "--json") json = true;
+			else if (word === "--db") db = rest[at + 1];
+			else if (word.startsWith("--db=")) db = word.slice("--db=".length);
+			if (word.startsWith("-") && word !== "-") {
+				const name = word.split("=")[0]!;
+				if (BR_VALUE_FLAGS[name] === true && !word.includes("=")) at += 1;
+				continue;
 			}
-			const name = word.split("=")[0]!;
-			at += BR_VALUE_FLAGS[name] === true && !word.includes("=") ? 2 : 1;
+			if (verb === null) verb = word.toLowerCase();
+			else if (id === null && verb === "show" && word !== "-") id = word;
 		}
+		if (verb === "show" && id !== null) targets.push({ bin: parsed.raw, id, ...(db ? { db } : {}), json });
 	}
-	return ids;
+	return targets;
 }
 
 /** `--assignee` values named by `br|bd list` verbs in a bash command; a list without one contributes nothing. */
@@ -387,14 +412,17 @@ export interface RereadCall {
 /**
  * Observe one successful tool result against the pending reread. Only
  * observed results count: call arguments, echoes, failures, wrong paths and
- * foreign/closed beads never set a flag. An identity-less pending pins the
- * first owned assignee it observes (see the header). Returns true when both
- * flags land.
+ * foreign/closed beads never set a flag. A successful `br show <id> --json`
+ * whose shown text does not parse (display truncation) is confirmed with the
+ * guard's own bounded `br show <id> --json`; that read failing keeps the flag
+ * unset. An identity-less pending pins the first owned assignee it observes
+ * (see the header). Resolves true when both flags land.
  */
-export function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string): boolean {
-	if (resultTainted(result)) return false;
+export async function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string,
+	exec: FlywheelExec): Promise<boolean> {
 	const tool = call.toolName.toLowerCase();
 	if (tool === "read") {
+		if (resultTainted(result)) return false;
 		const raw = field(call.input, "path");
 		if (typeof raw === "string" && pending.agentsPath !== null
 			&& resolve(call.cwd, expandHome(raw.trim(), home)) === pending.agentsPath) {
@@ -403,29 +431,36 @@ export function observeRereadResult(call: RereadCall, result: unknown, pending: 
 		}
 	} else if (tool === "bash") {
 		const command = field(call.input, "command");
-		const stdout = typeof command === "string" ? stringField(result, READ_CONTENT_KEYS) : null;
-		if (stdout !== null && typeof command === "string") {
-			const owns = (name: string): boolean => {
-				if (pending.identities.length === 0) pending.identities = [name];
-				return pending.identities.some(identity => identity.toLowerCase() === name.toLowerCase());
-			};
-			for (const id of brShowIds(command)) {
-				const row = parseBeadRow(stdout, id);
-				if (row !== null && BEAD_OWNED_STATUSES[row.status] === true && row.assignee !== null && owns(row.assignee)) {
-					pending.beadOk = true;
-				}
+		if (typeof command !== "string" || resultFailed(result)) return pending.agentsOk && pending.beadOk;
+		// Presentation-truncated text is never parsed; a --json show is confirmed by the guard's own read instead.
+		const stdout = resultTainted(result) ? null : stringField(result, READ_CONTENT_KEYS);
+		const owns = (name: string): boolean => {
+			if (pending.identities.length === 0) pending.identities = [name];
+			return pending.identities.some(identity => identity.toLowerCase() === name.toLowerCase());
+		};
+		for (const target of brShowTargets(command)) {
+			if (pending.beadOk) break;
+			const shown = stdout === null ? null : parseBeadRow(stdout, target.id);
+			if (shown !== null) {
+				if (BEAD_OWNED_STATUSES[shown.status] === true && shown.assignee !== null && owns(shown.assignee)) pending.beadOk = true;
+				continue;
 			}
-			const listAssignees = pending.beadOk ? [] : brListAssignees(command);
-			if (listAssignees.length > 0) {
-				let issues: unknown = null;
-				try {
-					const parsed: unknown = JSON.parse(stdout);
-					issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
-				} catch {
-					// Non-JSON list output proves nothing; the flag stays unset.
-				}
-				if (Array.isArray(issues) && issues.length === 0 && listAssignees.some(owns)) pending.beadOk = true;
+			if (!target.json) continue;
+			const confirmed = await readBeadState(exec, { bin: target.bin, cwd: call.cwd, db: target.db }, target.id);
+			if (confirmed.ok && BEAD_OWNED_STATUSES[confirmed.status] === true && confirmed.assignee !== null && owns(confirmed.assignee)) {
+				pending.beadOk = true;
 			}
+		}
+		const listAssignees = pending.beadOk ? [] : brListAssignees(command);
+		if (stdout !== null && listAssignees.length > 0) {
+			let issues: unknown = null;
+			try {
+				const parsed: unknown = JSON.parse(stdout);
+				issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
+			} catch {
+				// Non-JSON list output proves nothing; the flag stays unset.
+			}
+			if (Array.isArray(issues) && issues.length === 0 && listAssignees.some(owns)) pending.beadOk = true;
 		}
 	}
 	return pending.agentsOk && pending.beadOk;
@@ -713,7 +748,7 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 
 export type BeadState = { ok: true; id: string; status: string; assignee: string | null } | { ok: false; why: string };
 
-export async function readBeadState(exec: FlywheelExec, request: TrackerRequest, id: string): Promise<BeadState> {
+export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerRequest, "bin" | "cwd" | "db">, id: string): Promise<BeadState> {
 	const args = ["show", id, "--json", "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])];
 	let result: FlywheelExecResult;
 	try {
@@ -1092,17 +1127,20 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			return { block: true, reason: warning };
 		}
 	});
-	pi.on("tool_execution_end", (_event, ctx) => {
+	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {
-			if (pendingReread === null) return;
+			const pending = pendingReread;
+			if (pending === null) return;
 			if (typeof _event.toolCallId !== "string" || _event.isError === true) return;
 			const call = pendingCalls.get(_event.toolCallId);
 			if (call === undefined) return;
 			pendingCalls.delete(_event.toolCallId);
-			const identityLess = pendingReread.identities.length === 0;
-			const done = observeRereadResult(call, _event.result, pendingReread, home);
-			if (identityLess && pendingReread.identities.length > 0) selfDeclared = pendingReread.identities[0]!;
-			if (done && pendingReread.agentsOk && pendingReread.beadOk) pendingReread = null;
+			const identityLess = pending.identities.length === 0;
+			const done = await observeRereadResult(call, _event.result, pending, home, pi.exec);
+			// A compaction during the guard's own read re-armed a fresh pending; this observation predates it.
+			if (pendingReread !== pending) return;
+			if (identityLess && pending.identities.length > 0) selfDeclared = pending.identities[0]!;
+			if (done && pending.agentsOk && pending.beadOk) pendingReread = null;
 		} catch (error) {
 			// Fail closed: the flags stay unset, so the gate keeps blocking.
 			ctx.ui?.notify(`kit-flywheel-guard ${COMPACTION_REREAD}: reread observation failed (${error instanceof Error ? error.message : String(error)}); still blocked.`, "warning");

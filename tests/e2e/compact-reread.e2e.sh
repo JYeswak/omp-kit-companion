@@ -7,7 +7,13 @@
 #   1. after compaction a write is BLOCKED with the COMPACTION_REREAD reason;
 #   2. planted negative: reading AGENTS.md plus PLAIN-TEXT `br show` keeps it blocked;
 #   3. `br show <id> --json` (fake br in a private bin dir, called by path) clears it; the write is allowed.
-# It records false blocks (pre-compaction writes refused) and startup ms.
+#      The fake row carries a 4000-byte description, so OMP shows it cut to 768 bytes:
+#      the clear must come from the guard's own `br show --json` confirmation (br.calls).
+# It records false blocks (pre-compaction writes refused) and startup ms. Each write
+# step re-prompts up to 3 times until the model actually issues a write call. A step
+# with no write call, or an armed-gate probe whose write came after the model already
+# reread (obeying the guard's reminder can clear the gate first), exercised nothing
+# and makes the run INCONCLUSIVE, never PASS; a PASS requires a blocked write call.
 #
 # Usage: sh tests/e2e/compact-reread.e2e.sh [--work-dir ABS] [--guard ABS.ts]
 #   --work-dir: scratch root (default <repo>/var/agent-tmp/compact-reread.<pid>,
@@ -16,7 +22,7 @@
 # Env: OMP_E2E_PROFILE, OMP_E2E_MODEL pass --profile / --model to omp (optional).
 # Needs omp, bun, git. Real model turns: costs tokens, takes minutes.
 #
-# Exit: 0 PASS; 1 FAIL; 2 usage error; 77 SKIP (omp or bun absent).
+# Exit: 0 PASS; 1 FAIL; 2 usage error; 3 INCONCLUSIVE (no write call issued); 77 SKIP (omp or bun absent).
 
 set -u
 
@@ -51,7 +57,7 @@ case "$GUARD" in /*) ;; *) echo "--guard must be absolute" >&2; exit 2 ;; esac
 mkdir -p "$WORK/bin" "$WORK/proj" || exit 2
 export TMPDIR="$WORK"
 
-# Fake br: JSON row only under --json; plain text otherwise (the planted negative).
+# Fake br: a JSON row over 768 bytes only under --json; plain text otherwise (the planted negative).
 cat >"$WORK/bin/br" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$(dirname "$0")/br.calls"
@@ -60,7 +66,8 @@ for a in "$@"; do [ "$a" = "--json" ] && json=1; done
 case "$1" in
 	show)
 		if [ "$json" = 1 ]; then
-			printf '[{"id":"%s","title":"native probe bead","status":"in_progress","assignee":"NativeProbe"}]\n' "$2"
+			desc=$(printf 'd%.0s' $(seq 1 4000))
+			printf '[{"id":"%s","title":"native probe bead","status":"in_progress","assignee":"NativeProbe","description":"%s"}]\n' "$2" "$desc"
 		else
 			printf '%s  [in_progress]  native probe bead\nAssignee: NativeProbe\n' "$2"
 		fi ;;
@@ -71,9 +78,10 @@ EOF
 chmod +x "$WORK/bin/br"
 : >"$WORK/bin/br.calls"
 
+# Neutral fixture rules: nothing here invites the model to refuse the harness's writes.
 cat >"$WORK/proj/AGENTS.md" <<'EOF'
 # Fixture AGENTS.md
-Rule: you are NativeProbe. Edits to target.txt are allowed only after rereading this file.
+Rule: you are NativeProbe, a test fixture. Follow the user's tool instructions exactly.
 EOF
 i=1
 : >"$WORK/proj/big.txt"
@@ -85,5 +93,5 @@ done
 
 PATH="$WORK/bin:$PATH" nice -n 10 bun "$REPO/tests/e2e/compact-reread.drive.ts" "$WORK" "$GUARD" "$WORK/bin/br"
 rc=$?
-[ "$rc" = 0 ] || rc=1
+case "$rc" in 0|3) ;; *) rc=1 ;; esac
 exit "$rc"
