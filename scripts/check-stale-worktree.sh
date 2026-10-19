@@ -107,6 +107,7 @@ mvrm="$root/.git/stale-worktree-removed.$$"
 mvhit="$root/.git/stale-worktree-hit.$$"
 git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" 2>/dev/null | awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' | sort > "$mvadd_sorted"
 : > "$mvused"
+newest=""
 git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r path; do
 	[ -n "$path" ] || continue
 	case "$path" in */*..*|..*|*"$nl"*) continue ;; esac
@@ -138,6 +139,17 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	comm -23 "$mvadd_sorted" "$mvused" > "$mvavail"
 	moved=" $(moved_lines "$path" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
+	# No blame when no rule can refuse this path (ompkit-xa5s.30: closing an
+	# old tracker row cost one 32 s blame). Rule (b) needs a message bead and
+	# a path outside the loss-free export exemption. Rule (a) needs a blamed
+	# commit dated after the worktree file; every blamed commit is HEAD or an
+	# ancestor, so a file no older than the newest of those cannot be stale.
+	# An unreadable history keeps the blame (fail closed).
+	if [ "$export_ok" -eq 1 ] || [ -z "$bead" ]; then
+		[ -n "$mt" ] || continue
+		[ -n "$newest" ] || newest=$(git log --format=%ct "$HEAD" 2>/dev/null | sort -n | tail -n 1)
+		case "$newest" in '' | *[!0-9]*) ;; *) [ "$newest" -gt "$mt" ] || continue ;; esac
+	fi
 	seen=""
 	blamed=$(removed_lines "$path" | blame_lines "$path")
 	for ln in $(removed_lines "$path"); do

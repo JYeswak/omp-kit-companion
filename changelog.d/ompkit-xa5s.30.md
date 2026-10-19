@@ -1,1 +1,2 @@
 - The stale-worktree commit-msg hook blames each changed path once, restricted to the removed lines, instead of running a full `git blame` per removed line. A 7-row close commit on a 27 MB tracker drops from 230 s to under 3 s; verdicts are unchanged.
+- The stale-worktree hook skips the blame entirely when no rule can refuse the path: a loss-free tracker export or a message with no `Bead:` trailer, on a worktree file no older than the newest commit in HEAD's history. Closing an old tracker row no longer costs a 32 s blame; a stale worktree is still blamed and refused.

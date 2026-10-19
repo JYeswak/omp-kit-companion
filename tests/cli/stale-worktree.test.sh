@@ -239,5 +239,48 @@ check "$?" "1" "blame-once-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $B 
 check "$(printf '%s\n' "$out" | grep -c "reverts $A")" "0" "blame-once-own-line-not-named" "$out" ""
 check "$(grep -c 'built-in: git blame' "$TMP/blame-once.trace")" "1" "blame-once-one-blame" "$out" ""
 
+# 15. a loss-free tracker close with a fresh worktree runs no blame at all
+# (ompkit-xa5s.30: closing an old row cost one 32 s blame): rule (b) skips
+# the export path and no ancestor is newer than the file, so nothing can refuse.
+R=$(new_export_repo export-close-noblame)
+printf '%s\n' '{"id":"t-1","title":"one"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
+printf '%s\n' '{"id":"t-1","title":"one","status":"closed"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+out=$(GIT_TRACE="$TMP/export-close-noblame.trace" git -C "$R" commit --message "[test] close t-1" --message "Bead: t-other" 2>&1)
+check "$?" "0" "export-close-noblame-passes" "$out" ""
+check "$(grep -c 'built-in: git blame' "$TMP/export-close-noblame.trace")" "0" "export-close-noblame-no-blame" "$out" ""
+
+# 16. the same close on a STALE worktree still blames and refuses via rule (a)
+R=$(new_export_repo export-close-stale)
+printf '%s\n' '{"id":"t-1","title":"one"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
+S=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' '{"id":"t-1","title":"one","status":"closed"}' '{"id":"t-2","title":"two"}' > "$R/.beads/issues.jsonl"
+backdate "$R/.beads/issues.jsonl"
+git -C "$R" add .beads/issues.jsonl
+out=$(git -C "$R" commit --message "[test] close t-1 on a stale file" --message "Bead: t-other" 2>&1)
+check "$?" "1" "export-close-stale-refused" "$out" "STALE_WORKTREE .beads/issues.jsonl reverts $S"
+
+# 17. a message with no Bead: trailer and a fresh worktree runs no blame
+# (rule (b) needs the message bead; rule (a) cannot fire on a fresh file)
+R=$(new_repo beadless-noblame)
+printf 'base line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(GIT_TRACE="$TMP/beadless-noblame.trace" git -C "$R" commit --message "[test] drop L, no bead trailer" 2>&1)
+check "$?" "0" "beadless-noblame-passes" "$out" ""
+check "$(grep -c 'built-in: git blame' "$TMP/beadless-noblame.trace")" "0" "beadless-noblame-no-blame" "$out" ""
+
+# 18. the same bead-less removal on a STALE worktree still refuses via rule (a)
+R=$(new_repo beadless-stale)
+A=$(git -C "$R" rev-parse HEAD)
+printf 'base line\n' > "$R/pkg/f.txt"
+backdate "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] drop L on a stale file, no bead trailer" 2>&1)
+check "$?" "1" "beadless-stale-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $A"
+
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
