@@ -464,8 +464,38 @@ function listAssignees(call: BrInvocation): string[] {
 	return assignees;
 }
 
-/** Owned (in_progress/rework) beads assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
-async function ownedBeadsIn(exec: FlywheelExec, tracker: TrackerRef, name: string, owns: (assignee: string) => boolean): Promise<number | null> {
+/** Owned (in_progress/rework) bead ids assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
+export async function ownedBeadIds(exec: FlywheelExec, tracker: TrackerRef, name: string): Promise<string[] | null> {
+	const args = ["list", ...Object.keys(BEAD_OWNED_STATUSES).flatMap(status => ["--status", status]), "--assignee", name,
+		"--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
+	let result: FlywheelExecResult;
+	try {
+		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+	} catch {
+		return null;
+	}
+	if (result.code !== 0 || result.killed) return null;
+	try {
+		const parsed: unknown = JSON.parse(result.stdout);
+		const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
+		if (!Array.isArray(issues)) return null;
+		const held: string[] = [];
+		for (const row of issues) {
+			const status = field(row, "status");
+			const assignee = field(row, "assignee");
+			const id = field(row, "id");
+			if (typeof status === "string" && BEAD_OWNED_STATUSES[status] === true && typeof assignee === "string"
+				&& assignee.trim().toLowerCase() === name.trim().toLowerCase()
+				&& typeof id === "string" && id !== "") held.push(id);
+		}
+		return held;
+	} catch {
+		return null;
+	}
+}
+
+ /** Owned (in_progress/rework) beads assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
+ async function ownedBeadsIn(exec: FlywheelExec, tracker: TrackerRef, name: string, owns: (assignee: string) => boolean): Promise<number | null> {
 	const args = ["list", ...Object.keys(BEAD_OWNED_STATUSES).flatMap(status => ["--status", status]), "--assignee", name,
 		"--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
 	let result: FlywheelExecResult;
@@ -688,7 +718,14 @@ export interface TrackerRequest {
 	addLabels: string[];
 	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
 	actor: string | null;
+	/** `--assignee` value: null when omitted, "" when explicitly cleared. */
 	assignee: string | null;
+	/** `--if-unchanged` expected revision: null when the write is unguarded. */
+	ifUnchanged: string | null;
+	/** Requested `--status` value, lowercased; null when no status flag. */
+	status: string | null;
+	/** Raw argv words after wrapper/inline-env stripping, for the refusal ledger. */
+	argv: string[];
 	force: boolean;
 }
 
@@ -766,6 +803,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		let claim = false;
 		let force = false;
 		let readOnly = false;
+		let ifUnchanged: string | null = null;
 		const ids: string[] = [];
 		let optionsDone = false;
 		for (let index = 1; index < argv.length; index += 1) {
@@ -786,6 +824,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 				if (flag === "--db") db = expandHome(value, home);
 				if (flag === "--actor") actor = value;
 				if (flag === "--assignee") assignee = value;
+				if (flag === "--if-unchanged") ifUnchanged = value;
 				if (flag === "--status" || flag === "-s") status = value;
 				if (flag === "--add-label" || flag === "--set-labels" || flag === "--labels") addLabels.push(...value.split(",").map(label => label.trim()).filter(label => label !== ""));
 				continue;
@@ -802,7 +841,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 						: subcommand === "update" && (nativeStatus === "in_review" || nativeStatus === "inreview") ? "review"
 							: subcommand === "update" && nativeStatus === "open" ? "release" : null;
 		if (operation === null) continue;
-		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, force, addLabels });
+		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, argv, force, addLabels });
 	}
 	return requests;
 }
@@ -862,7 +901,7 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 	return names;
 }
 
-export type BeadState = { ok: true; id: string; status: string; assignee: string | null } | { ok: false; why: string };
+export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
 
 export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerRequest, "bin" | "cwd" | "db">, id: string): Promise<BeadState> {
 	const args = ["show", id, "--json", "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])];
@@ -894,7 +933,8 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 			return { ok: false, why: `${id} returned no qualified native issue/owner record` };
 		}
 		const owner = typeof assignee === "string" ? assignee.trim() : "";
-		return { ok: true, id: canonical, status, assignee: owner === "" ? null : owner };
+		const revised = field(row, "updated_at");
+		return { ok: true, id: canonical, status, assignee: owner === "" ? null : owner, updatedAt: typeof revised === "string" ? revised : null };
 	} catch {
 		return { ok: false, why: `\`${request.bin} show ${id} --json\` returned unparseable output` };
 	}
@@ -1215,6 +1255,18 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 			next: `use br update ${found.id} --claim --actor ${actor}; a status update alone does not atomically award ownership`,
 		});
 	}
+	if (request.operation === "claim") {
+		const held = await ownedBeadIds(deps.exec, request, actor);
+		if (held === null) return refuseClaim({
+			class: "tool_read_failure", bead: request.ids[0] ?? null, actor,
+			next: `the guard could not list active claims for ${actor}; restore the native lookup before claiming a second bead`,
+		});
+		const other = held.find(id => !request.ids.some(wanted => wanted.toLowerCase() === id.toLowerCase()));
+		if (other !== undefined) return refuseClaim({
+			class: "unsafe_custody", bead: request.ids[0] ?? null, actor,
+			next: `${actor} already holds active ${other}; release it (br update ${other} --status open --assignee "" --if-unchanged <updated_at>) or land it before claiming another implementation`,
+		});
+	}
 	return undefined;
 }
 
@@ -1344,6 +1396,45 @@ export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "r
 		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. Warning only; nothing was blocked.";
 }
 
+export const PARTIAL_RELEASE_REFUSED = "PARTIAL_RELEASE_REFUSED";
+
+function refuseRelease(request: TrackerRequest, detail: string): FlywheelToolCallResult {
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${PARTIAL_RELEASE_REFUSED}: ${detail} argv \`${request.argv.join(" ")}\`. Nothing was changed.`,
+	};
+}
+
+/**
+ * DRAIN1 (ompkit-kdbz.1.1) atomic parking: releasing a live held claim
+ * (in_progress/rework with an assignee) must write OPEN plus a cleared
+ * assignee under the seen revision in one call, by the holder. A bare
+ * `--status open` that preserves a stale assignee, or omits the revision the
+ * writer saw, is refused before mutation so status/assignee cannot split.
+ * Repairs of ownerless or already-open beads pass untouched.
+ */
+async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	if (request.ids.length === 0) return refuseRelease(request, "name an explicit bead id; a last-touched release cannot be verified as atomic.");
+	const actor = (request.actor ?? deps.env.BR_ACTOR)?.trim() || null;
+	for (const id of request.ids) {
+		const found = await readBeadState(deps.exec, request, id);
+		if (!found.ok) return refuseRelease(request, `cannot verify ${id} before parking: ${found.why}.`);
+		const live = (found.status === "in_progress" || found.status === "rework") && found.assignee !== null;
+		if (!live) continue;
+		const before = `${found.id} is ${found.status}/${found.assignee} at revision ${found.updatedAt ?? "unknown"}`;
+		if (actor === null || actor.toLowerCase() !== found.assignee.toLowerCase()) {
+			return refuseRelease(request, `${before}: only the holder parks a live claim; a third-party half-park is refused, route the transfer through ${found.assignee}.`);
+		}
+		if (request.assignee !== "") {
+			return refuseRelease(request, `${before}: parking must clear the assignee atomically (--assignee ""); omitting it preserves a stale owner on an open bead.`);
+		}
+		if (request.ifUnchanged === null) {
+			return refuseRelease(request, `${before}: parking must name the seen revision (--if-unchanged ${found.updatedAt ?? "<updated_at>"}); an unguarded write can discard the other writer's revision.`);
+		}
+	}
+	return undefined;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -1360,7 +1451,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const warnings: string[] = [];
 	const released = new Set(requests.filter(request => request.operation === "release").flatMap(request => request.ids));
 	for (const request of requests) {
-		if (request.operation === "release") continue;
+		if (request.operation === "release") {
+			const refusal = await checkRelease(request, deps);
+			if (refusal !== undefined) return refusal;
+			continue;
+		}
 		if (request.operation === "block") {
 			const refusal = await checkBlockedHasFix(request, deps);
 			if (refusal !== undefined) return refusal;

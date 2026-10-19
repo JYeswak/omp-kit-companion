@@ -1188,3 +1188,84 @@ test("trackerRequests: update --status in_review is a review request, in either 
 	expect(parsed("br update kit-1 --status=InReview")).toEqual([["review", ["kit-1"]]]);
 	expect(parsed("br update kit-1 --status open")).toEqual([["release", ["kit-1"]]]);
 });
+// --- DRAIN1 (ompkit-kdbz.1.1): atomic parking + one-active claim ---------------
+
+interface DrainRow { id?: string; status: string; assignee: string | null; updatedAt?: string }
+
+/** `br show` rows plus `br list --assignee` answers, shaped like br 0.7.4. */
+function drainResponder(shows: Record<string, DrainRow>, lists: Record<string, DrainRow[]> = {}): Responder {
+	return call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.args[0] === "list") {
+			const flag = call.args.indexOf("--assignee");
+			const name = flag >= 0 ? call.args[flag + 1] ?? "" : "";
+			const rows = lists[name] ?? [];
+			return { stdout: JSON.stringify({ issues: rows.map(row => ({ id: row.id ?? "", status: row.status, assignee: row.assignee })), total: rows.length }), stderr: "", code: 0 };
+		}
+		const id = call.args[1] ?? "";
+		const row = shows[id];
+		if (row === undefined) {
+			return { stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: `Issue not found: ${id}` } }), stderr: "", code: 3 };
+		}
+		return { stdout: JSON.stringify([{ id, title: "t", status: row.status, assignee: row.assignee, updated_at: row.updatedAt ?? "2026-10-19T19:00:00Z" }]), stderr: "", code: 0 };
+	};
+}
+
+async function drainCall(shows: Record<string, DrainRow>, lists: Record<string, DrainRow[]>, command: string, actor = "Holder"): Promise<FlywheelToolCallResult | undefined> {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: actor }, respond: drainResponder(shows, lists) });
+	return toolCall(h, project, command);
+}
+
+const LIVE = { "k-1": { status: "in_progress", assignee: "Holder" } };
+const ATOMIC = 'br update k-1 --status open --assignee "" --if-unchanged 2026-10-19T19:00:00Z';
+
+test("DRAIN1: bare release of a live held claim is refused until it clears assignee under revision", async () => {
+	const refused = await drainCall(LIVE, {}, "br update k-1 --status open");
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("PARTIAL_RELEASE_REFUSED");
+	expect(refused?.reason).toContain("k-1 is in_progress/Holder at revision 2026-10-19T19:00:00Z");
+	const noClear = await drainCall(LIVE, {}, "br update k-1 --status open --if-unchanged 2026-10-19T19:00:00Z");
+	expect(noClear?.block).toBe(true);
+	expect(noClear?.reason).toContain('--assignee ""');
+	const noRev = await drainCall(LIVE, {}, 'br update k-1 --status open --assignee ""');
+	expect(noRev?.block).toBe(true);
+	expect(noRev?.reason).toContain("--if-unchanged");
+});
+
+test("DRAIN1: third-party park of a live claim is refused; holder atomic release passes", async () => {
+	const foreign = await drainCall(LIVE, {}, ATOMIC, "Intruder");
+	expect(foreign?.block).toBe(true);
+	expect(foreign?.reason).toContain("only the holder parks a live claim");
+	expect(await drainCall(LIVE, {}, ATOMIC)).toBeUndefined();
+});
+
+test("DRAIN1: repair releases of ownerless or already-open beads pass untouched", async () => {
+	expect(await drainCall({ "k-9": { status: "in_progress", assignee: null } }, {}, "br update k-9 --status open")).toBeUndefined();
+	expect(await drainCall({ "k-9": { status: "open", assignee: "Holder" } }, {}, "br update k-9 --status open")).toBeUndefined();
+});
+
+test("DRAIN1: second active claim is refused naming the held id; re-claim of the held bead passes", async () => {
+	const shows = { "k-1": { status: "in_progress", assignee: "Holder" }, "k-2": { status: "open", assignee: null } };
+	const lists = { Holder: [{ id: "k-1", status: "in_progress", assignee: "Holder" }] };
+	const second = await drainCall(shows, lists, "br --actor Holder update k-2 --claim");
+	expect(second?.block).toBe(true);
+	expect(JSON.parse(second?.reason ?? "{}").refusal.next).toContain("already holds active k-1");
+	expect(await drainCall(shows, lists, "br --actor Holder update k-1 --claim")).toBeUndefined();
+	const fresh: Record<string, DrainRow[]> = {};
+	expect(await drainCall(shows, fresh, "br --actor Holder update k-2 --claim")).toBeUndefined();
+});
+
+test("DRAIN1: claim on a stale-held bead stays refused; nonauthor review still passes", async () => {
+	const shows = { "k-2": { status: "open", assignee: null }, "k-3": { status: "in_progress", assignee: "Ghost" } };
+	const stale = await drainCall(shows, {}, "br --actor Holder update k-3 --claim");
+	expect(stale?.block).toBe(true);
+	expect(JSON.parse(stale?.reason ?? "{}").refusal.next).toContain("Ghost retains k-3");
+	expect(await drainCall(shows, {}, "br --actor Holder update k-2 --status in_review")).toBeUndefined();
+});
+
+test("DRAIN1: ownerless start still refuses with the atomic claim route", async () => {
+	const refused = await drainCall({ "k-2": { status: "open", assignee: null } }, {}, "br --actor Holder update k-2 --status in_progress");
+	expect(refused?.block).toBe(true);
+	expect(JSON.parse(refused?.reason ?? "{}").refusal.next).toContain("--claim");
+});
