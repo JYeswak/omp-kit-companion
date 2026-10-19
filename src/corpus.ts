@@ -61,6 +61,9 @@ export const CORPUS_PLAN = {
 	writes: "one TSV beside the chosen report path (scratch) plus the JSON report itself; command text never leaves the machine and sample payloads stay out of the JSON",
 };
 
+/** Structural-vs-syntax distinction (ompkit-rhy9.1): invalid-schema and invalid-record refusals. */
+CORPUS_PLAN.refuses += "; structurally invalid rows refuse separately from JSON syntax: a syntactically valid header declaring a non-numeric version/v schema shape exits as an invalid-schema refusal, and a recognized assistant/toolCall record with the wrong required shape (non-array content, non-string tool name) exits as an invalid-record refusal; malformed/truncated JSON lines only count as parse_errors and valid unrelated event types are ignored";
+
 /** Wilson score 95% interval for fires/scanned. */
 export function wilsonInterval(fires: number, scanned: number): { low: number; high: number } {
 	if (!Number.isSafeInteger(fires) || !Number.isSafeInteger(scanned) || fires < 0 || scanned <= 0 || fires > scanned) {
@@ -185,6 +188,14 @@ export async function runCorpus(input: CorpusInput): Promise<CorpusReport> {
 		const result = await runBundled(HARNESS,
 			["--corpus", "--sessions-root", input.sessionsDir, "--out", tsv], input.root, input.executablePath);
 		if (result.code !== 0) {
+			if (result.code === 2 && result.stderr.includes("invalid session schema")) {
+				throw new CorpusInputError("INVALID_SESSION_SCHEMA",
+					`Session transcripts declare a structurally invalid schema shape; no counts were written: ${result.stderr.trim().split("\n").pop() ?? ""}`);
+			}
+			if (result.code === 2 && result.stderr.includes("invalid session record")) {
+				throw new CorpusInputError("INVALID_SESSION_RECORD",
+					`Session transcripts hold a structurally invalid assistant/toolCall record; no counts were written: ${result.stderr.trim().split("\n").pop() ?? ""}`);
+			}
 			if (result.code === 2 && result.stderr.includes("unknown session schema versions")) {
 				throw new CorpusInputError("UNKNOWN_SESSION_SCHEMA",
 					`Session transcripts use an unknown schema version; no counts were written: ${result.stderr.trim().split("\n").pop() ?? ""}`);

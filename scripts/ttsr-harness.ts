@@ -1261,6 +1261,8 @@ async function corpus(limitFiles: number, outFile: string, sessionsRoot: string 
 	let parseErrors = 0;
 	const versionsSeen = new Set<string>();
 	const unknownVersions = new Set<string>();
+	const invalidSchema = new Set<string>();
+	const invalidRecords = new Set<string>();
 	const started = Date.now();
 	for (const [fi, file] of scanFiles.entries()) {
 		for await (const line of jsonlLines(file)) {
@@ -1272,6 +1274,14 @@ async function corpus(limitFiles: number, outFile: string, sessionsRoot: string 
 				parseErrors++;
 				continue;
 			}
+			if ("version" in entry && typeof entry.version !== "number") {
+				invalidSchema.add(`version:${typeof entry.version}:${String(entry.version).slice(0, 32)}`);
+				continue;
+			}
+			if ("v" in entry && typeof entry.v !== "number") {
+				invalidSchema.add(`v:${typeof entry.v}:${String(entry.v).slice(0, 32)}`);
+				continue;
+			}
 			if (typeof entry.version === "number") {
 				versionsSeen.add(`version:${entry.version}`);
 				if (entry.version !== 3) unknownVersions.add(`version:${entry.version}`);
@@ -1280,9 +1290,26 @@ async function corpus(limitFiles: number, outFile: string, sessionsRoot: string 
 				versionsSeen.add(`v:${entry.v}`);
 				if (entry.v !== 1) unknownVersions.add(`v:${entry.v}`);
 			}
+			if (entry.type === "message" && entry.message?.role === "assistant" && entry.message.content !== undefined && !Array.isArray(entry.message.content)) {
+				invalidRecords.add(`${path.basename(file)}: assistant content is not an array`);
+				continue;
+			}
 			if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+			let badRecord = false;
+			for (const raw of entry.message.content as unknown[]) {
+				if (raw !== null && typeof raw === "object") {
+					const probe = raw as Record<string, unknown>;
+					if (probe.type === "toolCall" && typeof probe.name !== "string") {
+						invalidRecords.add(`${path.basename(file)}: toolCall name is not a string`);
+						badRecord = true;
+						break;
+					}
+				}
+			}
+			if (badRecord) continue;
 			lineCount++;
 			for (const block of entry.message.content as Record<string, unknown>[]) {
+				if (block === null || typeof block !== "object") continue;
 				if (block.type === "text" && typeof block.text === "string" && /\S/.test(block.text)) {
 					kindCounts.text = (kindCounts.text ?? 0) + 1;
 					await evaluate(block.text, { source: "text" }, "text");
@@ -1338,6 +1365,14 @@ async function corpus(limitFiles: number, outFile: string, sessionsRoot: string 
 			}
 		}
 		if ((fi + 1) % 200 === 0) console.error(`corpus: ${fi + 1}/${scanFiles.length} files, ${lineCount} assistant messages`);
+	}
+	if (invalidSchema.size > 0) {
+		console.error(`corpus: invalid session schema: ${[...invalidSchema].sort().join(", ")}; refusing with no partial counts`);
+		return 2;
+	}
+	if (invalidRecords.size > 0) {
+		console.error(`corpus: invalid session record: ${[...invalidRecords].sort().join("; ")}; refusing with no partial counts`);
+		return 2;
 	}
 	if (unknownVersions.size > 0) {
 		console.error(`corpus: unknown session schema versions: ${[...unknownVersions].sort().join(", ")} (seen ${[...versionsSeen].sort().join(", ") || "none"}); refusing with no partial counts`);

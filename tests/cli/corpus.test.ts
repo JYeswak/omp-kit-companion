@@ -154,6 +154,9 @@ test("corpus --plan prints the schema without reading anything", () => {
 	expect(plan?.reads?.length).toBeGreaterThan(0);
 	expect(plan?.accepted_versions).toContain("top-level numeric version 3 (session rows)");
 	expect(plan?.refuses).toContain("unknown session schema version");
+	expect(plan?.refuses).toContain("invalid-schema refusal");
+	expect(plan?.refuses).toContain("invalid-record refusal");
+	expect(plan?.refuses).toContain("parse_errors");
 }, 120_000);
 
 test("CORPUS_SCHEMA_PLANT: an unknown session schema version refuses with no counts", () => {
@@ -169,6 +172,42 @@ test("CORPUS_SCHEMA_PLANT: an unknown session schema version refuses with no cou
 	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("UNKNOWN_SESSION_SCHEMA");
 	expect(envelope.data).not.toHaveProperty("corpus");
 	expect(existsSync(out)).toBe(false);
+}, 300_000);
+
+test("CORPUS_SCHEMA_PLANT: a string-shaped session version refuses as invalid-schema", () => {
+	const badDir = join(base, "bad-shape-sessions");
+	mkdirSync(badDir, { recursive: true });
+	writeFileSync(join(badDir, "s9.jsonl"), [
+		`{"type":"session","version":"3","id":"s9","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,
+		toolCall("c9", "bash", { command: "echo zzzz_systemwide_canary_9c42" }),
+	].join("\n") + "\n");
+	const out = join(base, "invalid-schema-report.json");
+	const { exitCode, envelope } = runCli(["corpus", "--sessions", badDir, "--out", out, "--json"]);
+	expect(exitCode).toBe(2);
+	expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("INVALID_SESSION_SCHEMA");
+	expect(envelope.data).not.toHaveProperty("corpus");
+	expect(existsSync(out)).toBe(false);
+}, 300_000);
+
+test("CORPUS_RECORD_PLANT: structurally invalid assistant records refuse as invalid-record", () => {
+	const variants: { dir: string; line: string }[] = [
+		{ dir: join(base, "bad-content-sessions"), line: `{"type":"message","id":"c9","timestamp":"2026-09-30T10:01:00.000Z","message":{"role":"assistant","content":{"type":"text","text":"not an array"}}}` },
+		{ dir: join(base, "bad-toolname-sessions"), line: `{"type":"message","id":"c9","timestamp":"2026-09-30T10:01:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":7,"arguments":{"command":"echo hi"}}]}}` },
+	];
+	for (const variant of variants) {
+		mkdirSync(variant.dir, { recursive: true });
+		writeFileSync(join(variant.dir, "s9.jsonl"), [
+			`{"type":"session","version":3,"id":"s9","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,
+			variant.line,
+		].join("\n") + "\n");
+		const out = join(base, "invalid-record-report.json");
+		rmSync(out, { force: true });
+		const { exitCode, envelope } = runCli(["corpus", "--sessions", variant.dir, "--out", out, "--json"]);
+		expect(exitCode, variant.dir).toBe(2);
+		expect((envelope.errors as { code?: string }[] | undefined)?.[0]?.code, JSON.stringify(envelope.errors)).toBe("INVALID_SESSION_RECORD");
+		expect(envelope.data).not.toHaveProperty("corpus");
+		expect(existsSync(out)).toBe(false);
+	}
 }, 300_000);
 
 test("corpus producer errors keep kit-relative module paths", () => {
