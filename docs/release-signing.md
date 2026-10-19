@@ -152,8 +152,8 @@ without push access. A failed signing run is terminal for its cut, as before.
 
 - **The key never leaves the keychain.** Nothing exports it, and CI holds no Apple
   credential: no certificate, p12, password or App Store Connect key. Notary
-  authentication uses the keychain profile (`zscast`, override with
-  `OMP_KIT_NOTARY_PROFILE`). The identity is selected by SHA-1
+  authentication uses the profile `omp-kit-notary`, stored in the signing keychain itself
+  (override with `OMP_KIT_NOTARY_PROFILE`), so it works while the screen is locked. The identity is selected by SHA-1
   (`OMP_KIT_DEVID_SHA1`, discovered when unset) and must name the expected certificate.
 - **CI never trusts the signer's bytes.** The signer uploads with the maintainer's own
   GitHub credentials, so the attestation would be worthless if CI attested whatever was
@@ -210,18 +210,21 @@ scripts/sign-darwin-release.sh [--version 0.2.60]
 
 Scratch goes under `$TMPDIR` (set it to an owned directory first); each run keeps its work
 directory as evidence. Environment: `OMP_KIT_DEVID_SHA1` (identity), `OMP_KIT_NOTARY_PROFILE`
-(default `zscast`), `OMP_KIT_SIGNING_KEYCHAIN` (default `~/Library/Keychains/uds-signing.keychain-db`),
+(default `omp-kit-notary`), `OMP_KIT_SIGNING_KEYCHAIN` (default `~/Library/Keychains/uds-signing.keychain-db`),
 `OMP_KIT_SIGNING_KEYCHAIN_PASSWORD` (the uds lane's password file, default
 `~/.config/uds/signing-keychain.pw`), `OMP_KIT_REPO` (default `JYeswak/omp-kit-companion`) and
 `OMP_KIT_DEVID_STATE` (dispatch receipts and the `main` mirror, default
 `~/.local/state/omp-kit/devid-sign`).
 
-Open prerequisite (2026-10-19): the notary keychain profile `zscast` is in neither the
-login keychain nor `uds-signing.keychain-db` (that keychain holds only the Developer ID
-identity), so the preflight refuses with `No Keychain password item found for profile:
-zscast`. Store the App Store Connect API key credentials once in the signing keychain:
-`xcrun notarytool store-credentials zscast --keychain <uds-signing keychain> ...`. Then
-rerun `--dry-run`.
+Notary credential (resolved 2026-10-19): an App Store Connect API key dedicated to notarization
+(Key ID `USMDATPK89`, team `XGL9CXRCT5`) is stored as the notarytool profile `omp-kit-notary`
+inside `uds-signing.keychain-db`, which the signer unlocks from the uds password file. A
+profile stored the default way (`store-credentials` without `--keychain`) lives in the
+data-protection keychain, which can't be read while the screen is locked, and that is why an
+unattended run failed with `No Keychain password item found`. To rotate the key, create a new
+one in App Store Connect, unlock the signing keychain, run
+`xcrun notarytool store-credentials omp-kit-notary --key <p8> --key-id <id> --issuer <team issuer> --keychain <signing keychain>`
+(it validates with Apple before saving), re-lock the keychain, revoke the old key, then rerun `--dry-run`.
 
 The train releases one cut at a time, so while a tagged cut waits for the signer, no newer
 version is allocated: releases pause until the signer runs. A cut must be signed within the

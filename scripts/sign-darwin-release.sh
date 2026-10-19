@@ -15,7 +15,7 @@
 # Environment:
 #   TMPDIR                  an owned scratch directory (required); the run keeps its evidence there
 #   OMP_KIT_DEVID_SHA1      codesigning identity SHA-1 (default: the unique identity named below)
-#   OMP_KIT_NOTARY_PROFILE  notarytool keychain profile (default: zscast)
+#   OMP_KIT_NOTARY_PROFILE  notarytool profile stored in the signing keychain (default: omp-kit-notary)
 #   OMP_KIT_REPO            GitHub repository (default: JYeswak/omp-kit-companion)
 #   OMP_KIT_DEVID_STATE     dispatch receipts and a blobless main mirror (default: ${XDG_STATE_HOME:-~/.local/state}/omp-kit/devid-sign)
 #   OMP_KIT_SIGNING_KEYCHAIN           dedicated signing keychain (default: ~/Library/Keychains/uds-signing.keychain-db)
@@ -26,7 +26,7 @@ REPO="${OMP_KIT_REPO:-JYeswak/omp-kit-companion}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLATFORM=darwin-arm64-none
 AUTHORITY='Developer ID Application: Joshua Nowak (XGL9CXRCT5)'
-NOTARY_PROFILE="${OMP_KIT_NOTARY_PROFILE:-zscast}"
+NOTARY_PROFILE="${OMP_KIT_NOTARY_PROFILE:-omp-kit-notary}"
 STATE="${OMP_KIT_DEVID_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omp-kit/devid-sign}"
 KEYCHAIN="${OMP_KIT_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/uds-signing.keychain-db}"
 KEYCHAIN_PASSWORD="${OMP_KIT_SIGNING_KEYCHAIN_PASSWORD:-$HOME/.config/uds/signing-keychain.pw}"
