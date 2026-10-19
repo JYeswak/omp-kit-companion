@@ -187,6 +187,20 @@ grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/48-omp-kit-s
 ok "$?" "0" "check-missing-staged-regexploit-named"
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "check-missing-staged-reinstall-rc"
+# 5e. --check names a missing staged-pysafe member and a stale checker copy
+rm -f "$A/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe"
+printf '# drift\n' >> "$A/.git/hooks/hooks.d/pre-commit/pysafe_check.py"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-pysafe" 2>&1
+ok "$?" "3" "check-missing-staged-pysafe-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" "$TMP/o-missing-pysafe"
+ok "$?" "0" "check-missing-staged-pysafe-named"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-commit/pysafe_check.py" "$TMP/o-missing-pysafe"
+ok "$?" "0" "check-stale-pysafe-checker-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-pysafe-reinstall-rc"
+modes=1
+[ -x "$A/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe.py" ] && modes=0
+ok "$modes" "0" "pysafe-helpers-not-executable"
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
@@ -288,7 +302,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh pysafe.py pysafe_check.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"

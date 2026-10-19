@@ -23,7 +23,7 @@ for (const file of RELEASE_DATA_FILES) {
 	if (directory !== ".") roots.add(directory);
 }
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
-	"scripts/receipt.py",
+	"scripts/receipt.py", "scripts/pysafe.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",

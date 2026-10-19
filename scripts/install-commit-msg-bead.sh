@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
-# repo's hook chains, plus the staged-imports, staged-fragments and
-# staged-regexploit pre-commit members.
+# repo's hook chains, plus the staged-imports, staged-fragments,
+# staged-regexploit and staged-pysafe pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
@@ -18,6 +18,10 @@
 # The staged-regexploit member (scripts/check-staged-regexploit.sh) is always
 # installed: it refuses a commit whose staged JS/TS/Python files fail the
 # repo's own scripts/regexploit-gate.py (passes where the repo has none).
+# The staged-pysafe member (scripts/check-staged-pysafe.sh, with pysafe.py and
+# pysafe_check.py beside it) is always installed: it refuses a commit whose
+# staged .py files add a hang-prone call (no timeout, inherited stdin,
+# unbounded wait, read or loop) that HEAD does not already have.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -216,7 +220,10 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh" \
 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
 		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
-		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh"; do
+		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
+		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
+		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
+		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
@@ -444,6 +451,17 @@ install_staged_regexploit() {
 	printf 'installed staged-regexploit member: %s\n' "$member"
 }
 
+# install_staged_pysafe: the checker and its runner sit beside the member,
+# non-executable, so the chain runner never runs them arg-less.
+install_staged_pysafe() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/49-omp-kit-staged-pysafe"
+	place "$KITROOT/scripts/pysafe.py" "$dir/pysafe.py" -x
+	place "$KITROOT/scripts/pysafe_check.py" "$dir/pysafe_check.py" -x
+	place "$KITROOT/scripts/check-staged-pysafe.sh" "$member" +x
+	printf 'installed staged-pysafe member: %s\n' "$member"
+}
+
 # install_commit_notes: the commit-msg member applies the push notes gate's
 # trailer+fragment rule to the staged tree; it runs after the bead-id member.
 install_commit_notes() {
@@ -510,6 +528,7 @@ ensure_chain pre-commit
 install_staged_imports
 install_staged_fragments
 install_staged_regexploit
+install_staged_pysafe
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
 # Verify the whole installed chain (any failure rolls every mutation back):

@@ -250,6 +250,9 @@ jobs:
           sh tests/cli/commit-imports.test.sh
           sh tests/cli/check-staged-imports.test.sh
           sh tests/cli/install-commit-msg-bead.test.sh
+          sh tests/cli/check-staged-pysafe.test.sh
+          python3 tests/scripts/pysafe_test.py
+          python3 tests/scripts/pysafe_check_test.py
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
         shell: bash
         run: |
@@ -475,6 +478,21 @@ jobs:
             python3.11 scripts/regexploit-gate.py --head "$HEAD_SHA"
           fi
           python3.11 tests/scripts/regexploit-gate_test.py
+      - name: Refuse changed Python that adds hang-prone calls (pysafe ratchet)
+        env:
+          # Same range as the ReDoS step: a finding is new when the changed file holds more
+          # copies of it than the base did, so pre-existing findings never fail this step.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.source_sha || github.sha }}
+          TMPDIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${BASE_SHA:-}" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            python3.11 scripts/pysafe_check.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          else
+            python3.11 scripts/pysafe_check.py --head "$HEAD_SHA"
+          fi
       - name: Lint shell and workflow
         if: runner.os == 'Linux'
         run: |

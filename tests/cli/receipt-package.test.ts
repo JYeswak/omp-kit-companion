@@ -56,3 +56,25 @@ test("receipt CLI is integrity-covered, executable, and usable from the extracte
 	expect(rejected.exitCode).toBe(1);
 	expect(rejected.stderr.toString()).toContain("$.evidence_id");
 });
+
+test("pysafe runner, checker and pre-commit member ship byte-identical and run from the extracted release archive", () => {
+	for (const name of ["scripts/pysafe.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh"]) {
+		const shipped = join(archiveRoot, name);
+		expect(existsSync(shipped), name).toBe(true);
+		expect(hash(readFileSync(shipped)), name).toBe(hash(readFileSync(join(repo, name))));
+	}
+	expect(statSync(join(archiveRoot, "scripts/check-staged-pysafe.sh")).mode & 0o111).toBeGreaterThan(0);
+	// Consumers outside the companion import the released module (scripts/pysafe.py docstring).
+	const imported = Bun.spawnSync(["python3", "-B", "-c",
+		"import sys; sys.path.insert(0, sys.argv[1]); import pysafe; r = pysafe.run_bounded(['sh', '-c', 'echo ok'], 10); print(r.outcome, r.stdout.decode().strip())",
+		join(archiveRoot, "scripts")], { cwd: output, env: { ...process.env, TMPDIR: output }, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+	expect(imported.exitCode, imported.stderr.toString()).toBe(0);
+	expect(imported.stdout.toString().trim()).toBe("OK ok");
+	const planted = join(output, "planted.py");
+	writeFileSync(planted, "import subprocess\nsubprocess.run(['x'], stdin=subprocess.DEVNULL)\n");
+	const judged = Bun.spawnSync(["python3", "-B", join(archiveRoot, "scripts/pysafe_check.py"), planted], {
+		cwd: output, env: { ...process.env, TMPDIR: output }, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 60_000,
+	});
+	expect(judged.exitCode, judged.stderr.toString()).toBe(1);
+	expect(judged.stdout.toString()).toContain("planted.py:2:1: subprocess-no-timeout");
+});
