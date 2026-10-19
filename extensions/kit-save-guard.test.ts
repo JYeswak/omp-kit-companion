@@ -433,6 +433,29 @@ test("third stop attempt warns once and shutdown remains a backstop", async () =
 	await shutdown(fake);
 	expect(fake.notices).toHaveLength(1);
 });
+test("an unchanged finding is not re-demanded on the next wake", async () => {
+	const root = repo({ remote: true });
+	const file = join(root, "wake-dedup.txt");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	await claimFixture(fake);
+	await emitPathToolCall(fake, "write", file, "write-1");
+	writeFileSync(file, "unsaved\n");
+	await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }));
+
+	expect(await stop(fake, false)).toMatchObject({ decision: "block" });
+	expect(await stop(fake, true)).toMatchObject({ decision: "block" });
+	expect(await stop(fake, true)).toBeUndefined();
+	expect(fake.notices).toHaveLength(1);
+	// A new wake with the same unsaved bytes must not restart the demand cycle.
+	expect(await stop(fake, false)).toBeUndefined();
+	expect(fake.notices).toHaveLength(1);
+	// Positive control: new own bytes re-arm the demand on the next wake.
+	await emitPathToolCall(fake, "write", file, "write-2");
+	writeFileSync(file, "unsaved plus more\n");
+	await fake.emit("tool_execution_end", writeEvent("write", { resolvedPath: file }, false, "write-2"));
+	expect(await stop(fake, false)).toMatchObject({ decision: "block" });
+});
 
 test("shutdown warns about owned dirty work when no stop hook runs", async () => {
 	const root = repo({ remote: true });
@@ -1225,3 +1248,63 @@ test("offered per-bead recipe saves a new own file without restaging tracked or 
 	expect(sh(root, "hash-object", "--", peerUntrackedFile).stdout).toBe(peerUntracked);
 	expect(sh(root, "status", "--porcelain=v1", "--", peerUntrackedFile).stdout).toBe(`?? ${peerUntrackedFile}\n`);
 });
+
+// ompkit-774u.15 P0: the save path refuses to complete while the session holds an undisposed dir.
+const mineAnswer = (unreleased: number, labels: string[]) => JSON.stringify({ data: { overall: unreleased > 0 ? "FINDINGS" : "OK",
+	unreleased, dirs: labels.map((label) => ({ dir: `/x/${label}.1`, label, state: "unreleased", bin: "unbinned", bytes: 10, budget: null, overBudget: false })) } });
+
+function scratchFake(root: string, answer: { code: number; stdout: string } | Error): FakeSaveGuard {
+	const fake = fakePi(root);
+	const realExec = fake.pi.exec.bind(fake.pi);
+	fake.pi.exec = ((command: string, args: string[], options?: { cwd?: string; timeout?: number }) =>
+		command === "omp-kit" && args[0] === "scratch"
+			? (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer))
+			: realExec(command, args, options)) as SaveGuardApi["exec"];
+	return fake;
+}
+
+test("session_stop blocks while scratch mine reports an undisposed dir, and ends clean once it is binned", async () => {
+	const root = repo();
+	const fake = scratchFake(root, { code: 0, stdout: mineAnswer(1, ["owed"]) });
+	await kitSaveGuard(fake.pi);
+	await fake.emit("session_start", { type: "session_start" });
+	const blocked = await stop(fake);
+	expect(blocked).toMatchObject({ decision: "block" });
+	expect(reasonOf(blocked)).toContain("undisposed scratch");
+	expect(reasonOf(blocked)).toContain("owed");
+	expect(reasonOf(blocked)).toContain("omp-kit scratch release DIR");
+	const clean = scratchFake(root, { code: 0, stdout: mineAnswer(0, []) });
+	await kitSaveGuard(clean.pi);
+	await clean.emit("session_start", { type: "session_start" });
+	expect(await stop(clean)).toBeUndefined();
+}, 30_000);
+
+test("planted negatives: a failed, timed-out-shaped, or unparseable mine never blocks the session end", async () => {
+	for (const answer of [{ code: 1, stdout: "" }, { code: 0, stdout: "" }, { code: 0, stdout: "{}" },
+		{ code: 0, stdout: JSON.stringify({ data: { unreleased: "many" } }) }, new Error("spawn ENOENT")]) {
+		const root = repo();
+		const fake = scratchFake(root, answer);
+		await kitSaveGuard(fake.pi);
+		await fake.emit("session_start", { type: "session_start" });
+		expect(await stop(fake), JSON.stringify(answer)).toBeUndefined();
+	}
+}, 30_000);
+
+test("binning one dir and leaving another restarts the retry budget with the new demand", async () => {
+	const root = repo();
+	const fake = scratchFake(root, { code: 0, stdout: mineAnswer(1, ["first"]) });
+	await kitSaveGuard(fake.pi);
+	await fake.emit("session_start", { type: "session_start" });
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+	expect(await stop(fake)).toMatchObject({ decision: "block" });
+	expect(await stop(fake)).toBeUndefined();
+	const second = { code: 0, stdout: mineAnswer(1, ["second"]) };
+	fake.pi.exec = ((command: string, args: string[], options?: { cwd?: string; timeout?: number }) =>
+		command === "omp-kit" && args[0] === "scratch"
+			? Promise.resolve(second)
+			: Promise.resolve({ code: 127, stdout: "" })) as SaveGuardApi["exec"];
+	const reblocked = await stop(fake);
+	expect(reblocked).toMatchObject({ decision: "block" });
+	expect(reasonOf(reblocked)).toContain("second");
+	expect(reasonOf(reblocked)).not.toContain("first");
+}, 30_000);

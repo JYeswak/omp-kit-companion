@@ -72,6 +72,10 @@ A dir the owner released into a bin is not a gap. The report also counts gaps pe
 
 When a session runs `br update ID --status in_review` or `br close ID`, the kit-flywheel-guard extension runs `omp-kit scratch mine --at review` (or `--at close`) and, if dirs are owed, adds a `SCRATCH_OWED` note to that command's context naming up to five of them and the release command. It is advice only: nothing is blocked, and a missing omp-kit, a failed or timed-out run, or an unparseable answer yields no note. It becomes a refusal only after the reap log shows a week of flags with no dir the caller did not own.
 
+## The save refusal at session end
+
+`kit-save-guard` reads `omp-kit scratch mine --json` at `session_stop` and blocks the end while the session holds an undisposed dir, naming up to five labels and the release command; binning a dir restarts the retry budget with the new demand. A missing or failing `omp-kit`, a timeout, or an unparseable answer never blocks: only a positive owed reading demands disposal. Over-budget alone does not block.
+
 ## Filing the gaps to their beads
 
 `omp-kit scratch apply` prints `gapFileCommands`: the exact `br comments add` lines that file each guarded gap class to its owning bead. With `--file-gaps` (and `--db PATH`, else `br` auto-discovers or uses `BEADS_DB`) it runs them: one comment per bead listing the dirs no earlier run filed (cut at 15 with a count), then a `gap_filed` row in the reap log so the next run files only the delta. A failed `br` call is reported in `data.gapFiled` and retried next run; classes with no guard are never auto-filed. Without `--file-gaps` nothing is filed.

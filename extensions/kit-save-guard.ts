@@ -129,6 +129,7 @@ interface SessionState {
 	rePrompts: number;
 	warningEmitted: boolean;
 	lastOmissions: string;
+	lastDemandKey?: string;
 	activeBead?: NativeBead;
 	pendingClaims: Map<string, TrackerRequest[]>;
 }
@@ -920,6 +921,83 @@ function formatWarning(findings: SaveGuardFinding[]): string {
 	return `kit-save-guard: turn-end save retry limit reached; ${findings.map(formatFinding).join("; ")}`;
 }
 
+/**
+ * Identity of one save demand across wakes: the sorted owned roots, demanded and
+ * shared paths, retired/omitted paths, and the current working-tree blob of each
+ * demanded path. Ahead counts and publication text are excluded on purpose: peer
+ * commits change them without changing what this session still holds unsaved.
+ * An identical key on the next wake means nothing changed, so the retry budget
+ * must not restart.
+ */
+async function demandKeyFor(
+	exec: SaveGuardApi["exec"],
+	findings: SaveGuardFinding[],
+): Promise<string> {
+	const parts: string[] = [];
+	const ordered = findings.slice().sort((left, right) => left.root < right.root ? -1 : 1);
+	for (const finding of ordered) {
+		const keyed = [...finding.paths, ...(finding.sharedPaths ?? [])].sort();
+		const blobs: string[] = [];
+		for (const repoPath of keyed) {
+			blobs.push(`${repoPath}=${JSON.stringify(await workingBlob(exec, finding.root, repoPath))}`);
+		}
+		parts.push([
+			finding.root,
+			JSON.stringify(finding.paths.slice().sort()),
+			JSON.stringify((finding.sharedPaths ?? []).slice().sort()),
+			JSON.stringify((finding.retiredPaths ?? []).slice().sort()),
+			JSON.stringify((finding.omittedPaths ?? []).map(item => `${item.path}:${item.reason}`).sort()),
+			...blobs,
+		].join("|"));
+	}
+	return parts.join("; ");
+}
+
+/** Undisposed scratch the session still owns (ompkit-774u.15 P0): dirs `scratch mine` reports as owed. */
+export interface ScratchOwed { unreleased: number; labels: string[] }
+
+const SAVE_GUARD_SCRATCH_TIMEOUT_MS = 10_000;
+const SAVE_GUARD_SCRATCH_SHOWN = 5;
+
+/**
+ * Read-only disposal check through the installed CLI. Null when omp-kit is
+ * missing, fails, times out, or answers unparseably: a broken measuring tool
+ * never blocks a session end (advice-era behavior); only a positive owed
+ * reading demands disposal.
+ */
+export async function checkScratchOwed(
+	exec: SaveGuardApi["exec"],
+	cwd: string,
+): Promise<ScratchOwed | null> {
+	let result: SaveGuardExecResult;
+	try {
+		result = await exec("omp-kit", ["scratch", "mine", "--json"], { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS });
+	} catch {
+		return null;
+	}
+	if (result.code !== 0) return null;
+	let data: unknown;
+	try {
+		data = JSON.parse(result.stdout);
+	} catch {
+		return null;
+	}
+	if (typeof data !== "object" || data === null) return null;
+	const envelope = data as { data?: unknown };
+	if (typeof envelope.data !== "object" || envelope.data === null) return null;
+	const mine = envelope.data as { unreleased?: unknown; dirs?: unknown };
+	if (typeof mine.unreleased !== "number" || !Array.isArray(mine.dirs)) return null;
+	const labels: string[] = [];
+	for (const row of mine.dirs) {
+		if (typeof row !== "object" || row === null) return null;
+		const dir = row as { label?: unknown; state?: unknown };
+		if (typeof dir.label !== "string") return null;
+		if (dir.state === "unreleased" || dir.state === "hold-expired") labels.push(dir.label);
+	}
+	return { unreleased: mine.unreleased, labels: labels.slice(0, SAVE_GUARD_SCRATCH_SHOWN) };
+}
+
+
 export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 	const sessions = new Map<string, SessionState>();
 	pi.on("session_start", async (_event, ctx) => {
@@ -1009,18 +1087,35 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const state = sessions.get(sessionId);
 		if (!state) return;
 		await waitForToolPathWork(state);
-		if (!event.stop_hook_active) {
-			state.rePrompts = 0;
-			state.warningEmitted = false;
-		}
-
 		const findings: SaveGuardFinding[] = [];
 		for (const repository of state.repositories.values()) {
 			const finding = await checkSaveState(pi.exec.bind(pi), repository);
 			if (finding) findings.push(finding);
 		}
-		if (findings.length === 0) return;
-		if (findings.every(finding => finding.paths.length === 0)) {
+		const scratch = await checkScratchOwed(pi.exec.bind(pi), ctx.cwd);
+		const scratchOwed = scratch !== null && scratch.unreleased > 0;
+		if (findings.length === 0 && !scratchOwed) {
+			state.lastDemandKey = undefined;
+			return;
+		}
+		// The retry budget restarts only when the demand itself changes. OMP resets
+		// stop_hook_active on every wake, so a per-wake reset re-demands an
+		// identical finding forever; the key below carries blob-level identity.
+		// Undisposed scratch joins the key by label: binning a dir restarts the budget.
+		const scratchKey = scratch === null ? "tool-missing" : scratch.labels.slice().sort().join(",");
+		const demandKey = `${await demandKeyFor(pi.exec.bind(pi), findings)}|scratch:${scratchKey}`;
+		if (demandKey !== state.lastDemandKey) {
+			state.lastDemandKey = demandKey;
+			state.rePrompts = 0;
+			state.warningEmitted = false;
+		}
+		const named = scratch === null ? [] : scratch.labels.map(label => JSON.stringify(label));
+		const more = scratch !== null && scratch.unreleased > scratch.labels.length
+			? ` and ${scratch.unreleased - scratch.labels.length} more` : "";
+		const scratchPrompt = scratch !== null && scratch.unreleased > 0
+			? `kit-save-guard: ${scratch.unreleased} undisposed scratch dir(s) (${named.join(", ")}${more}). Bin each with \`omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]\` before ending; the session ends only when it holds no undisposed dir.`
+			: "";
+		if (findings.every(finding => finding.paths.length === 0) && !scratchOwed) {
 			const omissions = findings.map(formatFinding).join("; ");
 			if (omissions !== state.lastOmissions) {
 				state.lastOmissions = omissions;
@@ -1028,13 +1123,15 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 			}
 			return;
 		}
+		const reasons = [findings.some(finding => finding.paths.length > 0) ? formatSavePrompt(findings) : "", scratchPrompt]
+			.filter(reason => reason !== "");
 		if (state.rePrompts < MAX_REPROMPTS_PER_TURN) {
 			state.rePrompts += 1;
-			return { decision: "block", reason: formatSavePrompt(findings) };
+			return { decision: "block", reason: reasons.join(" ") };
 		}
 		if (!state.warningEmitted) {
 			state.warningEmitted = true;
-			ctx.ui.notify(formatWarning(findings), "warning");
+			ctx.ui.notify(`kit-save-guard: turn-end save retry limit reached; ${[...findings.map(formatFinding), scratchPrompt].filter(part => part !== "").join("; ")}`, "warning");
 		}
 	});
 
