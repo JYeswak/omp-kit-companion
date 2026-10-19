@@ -379,6 +379,64 @@ async function checkHotRenewal(
 	return undefined;
 }
 
+interface BashReservationCall { kind: "reserve" | "renew"; event: ReservationEvent }
+
+/**
+ * `am file_reservations reserve|renew` CLI calls in a bash command, parsed
+ * source-aware (only an UNQUOTED `am file_reservations <verb>` head counts, so
+ * echoed text never triggers). reserve: PROJECT AGENT PATHS... with --ttl
+ * seconds (CLI default 3600) and --exclusive/--shared; a call without --shared
+ * is judged exclusive (cap-safe: only >30 min on a hot path is refused).
+ * renew: PROJECT AGENT with --extend-seconds (default 1800), --paths, --ids.
+ * Each call is mapped onto the MCP argument shape so the MCP route's checks run.
+ */
+function bashReservationCalls(command: string): BashReservationCall[] {
+	const tokens = shellTokens(command);
+	const calls: BashReservationCall[] = [];
+	for (let i = 0; i + 2 < tokens.length; i++) {
+		const head = tokens[i]!;
+		if (head.quoted || (head.text !== "am" && !head.text.endsWith("/am"))) continue;
+		if (tokens[i + 1]!.quoted || tokens[i + 1]!.text !== "file_reservations") continue;
+		const verb = tokens[i + 2]!;
+		if (verb.quoted || (verb.text !== "reserve" && verb.text !== "renew")) continue;
+		const positionals: string[] = [];
+		let ttl: number | undefined;
+		let extend: number | undefined;
+		let shared = false;
+		const named: string[] = [];
+		const ids: number[] = [];
+		let j = i + 3;
+		for (; j < tokens.length; j++) {
+			const word = tokens[j]!.text;
+			if (!tokens[j]!.quoted && /^(;|&&|\|\||\||&|\n)$/.test(word)) break;
+			const eq = !tokens[j]!.quoted && word.startsWith("--") ? word.indexOf("=") : -1;
+			const flag = eq >= 0 ? word.slice(0, eq) : word;
+			const inline = eq >= 0 ? word.slice(eq + 1) : undefined;
+			if (!tokens[j]!.quoted && ["--ttl", "--extend-seconds", "--reason", "--paths", "--ids"].includes(flag)) {
+				const value = inline ?? tokens[++j]?.text ?? "";
+				if (flag === "--ttl") ttl = Number(value);
+				else if (flag === "--extend-seconds") extend = Number(value);
+				else if (flag === "--paths") named.push(...value.split(",").map((item) => item.trim()).filter(Boolean));
+				else if (flag === "--ids") ids.push(...value.split(",").map(Number).filter((item) => Number.isFinite(item)));
+				continue;
+			}
+			if (!tokens[j]!.quoted && flag === "--shared") { shared = true; continue; }
+			if (!tokens[j]!.quoted && word.startsWith("-")) continue;
+			positionals.push(word);
+		}
+		i = j - 1;
+		const [project, agent, ...rest] = positionals;
+		if (verb.text === "reserve") {
+			const seconds = ttl !== undefined && Number.isFinite(ttl) ? ttl : 3600;
+			calls.push({ kind: "reserve", event: { arguments: { project_key: project, agent_name: agent, paths: rest, exclusive: !shared, ttl_seconds: seconds } } });
+		} else {
+			const seconds = extend !== undefined && Number.isFinite(extend) ? extend : 1800;
+			calls.push({ kind: "renew", event: { arguments: { project_key: project, agent_name: agent, paths: named, exclusive: named.length > 0, extend_seconds: seconds, ...(ids.length ? { file_reservation_ids: ids } : {}) } } });
+		}
+	}
+	return calls;
+}
+
 export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> {
 	// A release retires holds: drop cached allows so the next edit re-queries
 	// instead of seeing a stale lock. Releases are never blocked.
@@ -396,6 +454,12 @@ export async function check(event: ReservationEvent, context: ReservationCheckCo
 			const scope = bashReleaseScope(command);
 			if (scope === "ambiguous") clearReservationCache();
 			else if (scope !== undefined) dropCachedLookups(scope.project, scope.agent);
+		}
+		if (command !== undefined) {
+			for (const call of bashReservationCalls(command)) {
+				const block = await checkHotReservation(call.event, context, call.kind);
+				if (block) return block;
+			}
 		}
 		return undefined;
 	}

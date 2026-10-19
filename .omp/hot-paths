@@ -2,3 +2,5 @@
 # One project-relative path per line; a trailing / matches a directory tree.
 src/cli.ts
 src/commands.ts
+README.md
+package.json

@@ -224,3 +224,38 @@ test("id-only renewal of the hot hold is still refused with a sibling hold prese
 	expect(block?.block).toBe(true);
 	expect(block?.reason).toContain("hold 7");
 });
+const amCmd = (command: string) => ({ toolName: "bash", arguments: { command } });
+
+test("bash: am file_reservations reserve --ttl 8820 --exclusive on a hot path is refused", async () => {
+	const root = hotRepo();
+	const block = await check(amCmd("am file_reservations reserve /p PlumRaven src/cli.ts --ttl 8820 --exclusive --reason x"), { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+	expect(block?.reason).toContain("30 min cap");
+	expect(block?.reason).toContain("src/cli.ts");
+});
+
+test("bash: 20-min hot, 147-min non-hot, shared hot, echo-quoted all pass", async () => {
+	const root = hotRepo();
+	const ctx = { cwd: root, repoRoot: root };
+	expect(await check(amCmd("am file_reservations reserve /p PlumRaven src/cli.ts --ttl 1200 --exclusive"), ctx)).toBeUndefined();
+	expect(await check(amCmd("am file_reservations reserve /p PlumRaven src/other.ts --ttl 8820 --exclusive"), ctx)).toBeUndefined();
+	expect(await check(amCmd("am file_reservations reserve /p PlumRaven src/cli.ts --ttl 8820 --shared"), ctx)).toBeUndefined();
+	expect(await check(amCmd("echo 'am file_reservations reserve /p PlumRaven src/cli.ts --ttl 8820 --exclusive'"), ctx)).toBeUndefined();
+});
+
+test("bash: reserve without --ttl uses the 3600s CLI default and is refused on a hot path", async () => {
+	const root = hotRepo();
+	const block = await check(amCmd("cd x && am file_reservations reserve /p PlumRaven 'src/commands.ts' --exclusive"), { cwd: root, repoRoot: root });
+	expect(block?.block).toBe(true);
+});
+
+test("bash: renew --extend-seconds 8820 --paths on a hot path is refused; hold-age renewal is refused", async () => {
+	const root = hotRepo();
+	const ctx = { cwd: root, repoRoot: root };
+	expect((await check(amCmd("am file_reservations renew /p PlumRaven --extend-seconds 8820 --paths src/cli.ts"), ctx))?.block).toBe(true);
+	const now = 10_000_000_000;
+	const hold = { id: 7, agent_name: "PlumRaven", path_pattern: "src/cli.ts", exclusive: true, granted_ms: now - 40 * 60_000, expires_ms: now + 60_000, granted_ts: "", expires_ts: "", bead: "" } as never;
+	const aged = await check(amCmd("am file_reservations renew /p PlumRaven --ids 7"), { ...ctx, now: () => now, activeHolds: [hold] });
+	expect(aged?.block).toBe(true);
+	expect(await check(amCmd("am file_reservations renew /p PlumRaven --extend-seconds 600 --paths src/other.ts"), ctx)).toBeUndefined();
+});
