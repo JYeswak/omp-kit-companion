@@ -713,7 +713,7 @@ export interface TrackerRequest {
 	db?: string;
 	/** Identities this command line itself claims (flags and inline env assignments). */
 	identities: string[];
-	operation: "close" | "claim" | "start" | "block" | "release" | "review";
+	operation: "close" | "claim" | "start" | "block" | "release" | "review" | "custody";
 	/** Labels this command adds or sets (comma-split). */
 	addLabels: string[];
 	/** Effective command-line BR_ACTOR/--actor selection, not --agent-name attribution. */
@@ -756,7 +756,7 @@ function shellScript(argv: string[]): string | undefined {
 	return flag > 0 ? argv[flag + 1] : undefined;
 }
 
-/** Supported close/claim/start/block mutations, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
+/** Supported close/claim/start/block/release/review mutations, plus bare custody writes (`update --assignee` without a classified status), with the cwd selected by leading cd commands; `sh -c` strings are followed. */
 export function trackerRequests(command: string, cwd: string, home: string, depth = 0): TrackerRequest[] {
 	const requests: TrackerRequest[] = [];
 	let current = cwd;
@@ -839,7 +839,8 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 				: subcommand === "update" && claim ? "claim"
 					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start"
 						: subcommand === "update" && (nativeStatus === "in_review" || nativeStatus === "inreview") ? "review"
-							: subcommand === "update" && nativeStatus === "open" ? "release" : null;
+							: subcommand === "update" && nativeStatus === "open" ? "release"
+								: subcommand === "update" && assignee !== null ? "custody" : null;
 		if (operation === null) continue;
 		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, argv, force, addLabels });
 	}
@@ -1535,6 +1536,35 @@ async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps):
 	return undefined;
 }
 
+/**
+ * DRAIN1 follow-up (ompkit-kdbz.1.1 AC2): a bare custody write (`br update
+ * <id> --assignee ...` with no classified status) on a live held claim is
+ * refused before mutation. Clearing the assignee without parking the status
+ * leaves an ownerless in_progress bead -- the genuine BuildNext3
+ * ompkit-fp72.95 shape (assignee_changed BuildNext3 -> None, status
+ * untouched) -- and reassigning outside claim/park splits custody from the
+ * one-active check. Repairs of ownerless or already-open beads pass.
+ */
+async function checkCustody(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	if (request.ids.length === 0) return refuseRelease(request, "name an explicit bead id; an id-less custody write cannot be verified as atomic.");
+	const actor = (request.actor ?? deps.env.BR_ACTOR)?.trim() || null;
+	for (const id of request.ids) {
+		const found = await readBeadState(deps.exec, request, id);
+		if (!found.ok) return refuseRelease(request, `cannot verify ${id} before the custody write: ${found.why}.`);
+		const live = (found.status === "in_progress" || found.status === "rework") && found.assignee !== null;
+		if (!live) continue;
+		const before = `${found.id} is ${found.status}/${found.assignee} at revision ${found.updatedAt ?? "unknown"}`;
+		if (actor === null || actor.toLowerCase() !== found.assignee.toLowerCase()) {
+			return refuseRelease(request, `${before}: only the holder changes custody of a live claim; a third-party custody write is refused, route the transfer through ${found.assignee}.`);
+		}
+		if (request.assignee === "") {
+			return refuseRelease(request, `${before}: clearing the assignee without parking the status leaves an ownerless ${found.status} bead; park atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) instead.`);
+		}
+		return refuseRelease(request, `${before}: reassigning a live claim outside claim/park splits custody from the one-active check; the holder parks atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) and the next worker claims with --claim instead.`);
+	}
+	return undefined;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -1553,6 +1583,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	for (const request of requests) {
 		if (request.operation === "release") {
 			const refusal = await checkRelease(request, deps);
+			if (refusal !== undefined) return refusal;
+			continue;
+		}
+		if (request.operation === "custody") {
+			const refusal = await checkCustody(request, deps);
 			if (refusal !== undefined) return refusal;
 			continue;
 		}

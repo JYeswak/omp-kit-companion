@@ -1271,6 +1271,26 @@ test("DRAIN1: ownerless start still refuses with the atomic claim route", async 
 	expect(JSON.parse(refused?.reason ?? "{}").refusal.next).toContain("--claim");
 });
 
+test("DRAIN1 custody: bare assignee clear on a live held claim is refused (fp72.95 shape)", async () => {
+	const parsed = trackerRequests('br update k-1 --assignee ""', "/r", "/h").map(request => [request.operation, request.ids]);
+	expect(parsed).toEqual([["custody", ["k-1"]]]);
+	const holder = await drainCall(LIVE, {}, 'br update k-1 --assignee ""');
+	expect(holder?.block).toBe(true);
+	expect(holder?.reason).toContain("PARTIAL_RELEASE_REFUSED");
+	expect(holder?.reason).toContain("leaves an ownerless in_progress bead");
+	const foreign = await drainCall(LIVE, {}, 'br update k-1 --assignee ""', "Intruder");
+	expect(foreign?.block).toBe(true);
+	expect(foreign?.reason).toContain("only the holder changes custody");
+	const reassign = await drainCall(LIVE, {}, "br update k-1 --assignee Next");
+	expect(reassign?.block).toBe(true);
+	expect(reassign?.reason).toContain("splits custody from the one-active check");
+});
+
+test("DRAIN1 custody: repairs on ownerless or open beads pass", async () => {
+	expect(await drainCall({ "k-9": { status: "in_progress", assignee: null } }, {}, 'br update k-9 --assignee ""')).toBeUndefined();
+	expect(await drainCall({ "k-9": { status: "open", assignee: null } }, {}, "br update k-9 --assignee Next")).toBeUndefined();
+});
+
 // --- BGWAIT1 (ompkit-fp72.19.1.24): seats never block their turn on their own background work ---
 
 test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1)", async () => {
