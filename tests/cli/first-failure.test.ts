@@ -60,7 +60,8 @@ test("unremovable quarantine target fails with dir, errno and summary naming it"
 	expect(existsSync(stuck)).toBe(true);
 	const rows = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
 	const row = rows.find(entry => entry.event === "failure" && entry.dir === stuck);
-	expect(row?.error).toBe("atomic-quarantine-failed");
+	expect(row?.reason).toBe("atomic-quarantine-failed");
+	expect(row?.error ?? "").toMatch(/EACCES/);
 	const summary = `scratch-reaper had 1 failed action(s)${firstFailure({ applied: result.applied, killed: result.killed })}`;
 	expect(summary).toContain(stuck);
 	expect(summary).toContain("atomic-quarantine-failed");

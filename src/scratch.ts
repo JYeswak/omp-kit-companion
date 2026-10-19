@@ -378,18 +378,30 @@ function readText(path: string): string | null {
 		return null;
 	}
 }
+
 export type ScratchAction = "REAP" | "QUARANTINE" | "DELETE" | "LIVE" | "SKIP";
 
-export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number; cause?: "permission" | "immutable-flag" | "open-fd" | "lsof-unavailable" | "unknown" | "delete-leftover" }
+export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number; cause?: "permission" | "immutable-flag" | "open-fd" | "lsof-unavailable" | "unknown" | "delete-leftover";
+	/** The OS error that failed this action (e.g. "EACCES: permission denied, mkdir '/...'"). Present only on failed mutations; a refusal never carries one. */
+	error?: string }
 
-const APPLY_FAILURE_REASONS: Record<string, true> = {
-	"owner-changed-after-initial-check": true, "owner-release-changed-after-initial-check": true,
-	"inode-proof-unavailable": true, "lsof-evidence-unavailable": true, "owner-released-but-open-fds-present": true,
-	"quarantine-create-failed": true, "atomic-quarantine-failed": true,
-	"delete-quarantine-failed": true, "quarantine-ttl-config-invalid": true, "quarantine-read-failed": true,
-	"final-delete-recheck-failed": true, "delete-failed": true,
-	"idle-proof-unavailable": true,
-};
+/** An OS error as a stable verdict string: the errno plus the platform message (which already names the syscall and path). */
+export function osErrorText(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException)?.code;
+	const message = error instanceof Error ? error.message : String(error);
+	return typeof code === "string" && message.startsWith(`${code}:`) ? message
+		: typeof code === "string" ? `${code}: ${message}` : message;
+}
+
+ const APPLY_FAILURE_REASONS: Record<string, true> = {
+ "owner-changed-after-initial-check": true, "owner-release-changed-after-initial-check": true,
+ "inode-proof-unavailable": true, "lsof-evidence-unavailable": true, "owner-released-but-open-fds-present": true,
+ "quarantine-create-failed": true, "atomic-quarantine-failed": true,
+"quarantine-rollback-failed": true,
+ "delete-quarantine-failed": true, "quarantine-ttl-config-invalid": true, "quarantine-read-failed": true,
+ "final-delete-recheck-failed": true, "delete-failed": true,
+ "idle-proof-unavailable": true,
+ };
 
 /** A final-recheck refusal is an expected safety SKIP, not a failed run. */
 export function isApplyFailure(verdict: ScratchVerdict): boolean {
@@ -1236,7 +1248,15 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 
 /** Move an owner-released session to quarantine without requiring its process to exit. */
 function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
-	const fail = (reason: string): ScratchVerdict => ({ ...verdict, action: "SKIP", reason });
+	const at = new Date(deps.now ?? Date.now()).toISOString();
+	const fail = (reason: string, error?: unknown, dirOverride?: string): ScratchVerdict => {
+		const failed = { ...verdict, action: "SKIP" as const, reason,
+			...(dirOverride === undefined ? {} : { dir: dirOverride }),
+			...(error === undefined ? {} : { error: osErrorText(error) }) };
+		appendLog(deps.home, { event: reason === "final-recheck-refused" ? "skip" : "failure", dir: failed.dir, at,
+			action: failed.action, reason, error: failed.error ?? reason });
+		return failed;
+	};
 	const released = readReleaseRecord(dir);
 	if (!released || dirname(dir) !== root || (released.legacy && basename(dir) !== released.legacyName))
 		return fail("owner-release-changed-after-initial-check");
@@ -1245,19 +1265,18 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 	if (identity === null) return fail("inode-proof-unavailable");
 	const clearBefore = lsofClearDir(deps, dir);
 	if (clearBefore !== true) return fail(clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present");
-	const at = new Date(deps.now ?? Date.now()).toISOString();
 	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return fail("quarantine-create-failed");
+	} catch (error) {
+		return fail("quarantine-create-failed", error);
 	}
 	const moved = join(qt, entry);
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return fail("atomic-quarantine-failed");
+	} catch (error) {
+		return fail("atomic-quarantine-failed", error);
 	}
 	const afterMove = readReleaseRecord(moved);
 	const clearAfter = lsofClearDir(deps, moved);
@@ -1266,8 +1285,8 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 		clearAfter !== true) {
 		try {
 			renameSync(moved, dir);
-		} catch {
-			return { ...verdict, dir: moved, action: "SKIP", reason: "final-recheck-refused" };
+		} catch (error) {
+			return fail("quarantine-rollback-failed", error, moved);
 		}
 		return fail("final-recheck-refused");
 	}
@@ -1284,10 +1303,12 @@ function ownerSnapshot(owner: ScratchOwner): string {
 export function applyReap(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
-	const fail = (reason: string): ScratchVerdict => {
-		const failed = { ...verdict, action: "SKIP" as const, reason };
+	const fail = (reason: string, error?: unknown, dirOverride?: string): ScratchVerdict => {
+		const failed = { ...verdict, action: "SKIP" as const, reason,
+			...(dirOverride === undefined ? {} : { dir: dirOverride }),
+			...(error === undefined ? {} : { error: osErrorText(error) }) };
 		appendLog(deps.home, { event: reason === "final-recheck-refused" ? "skip" : "failure", dir: failed.dir, at,
-			action: failed.action, reason, error: reason });
+			action: failed.action, reason, error: failed.error ?? reason });
 		return failed;
 	};
 	if (!verdict.owner) return fail("owner-changed-after-initial-check");
@@ -1299,14 +1320,14 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return fail("quarantine-create-failed");
+	} catch (error) {
+		return fail("quarantine-create-failed", error);
 	}
 	const moved = join(qt, entry);
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return fail("atomic-quarantine-failed");
+	} catch (error) {
+		return fail("atomic-quarantine-failed", error);
 	}
 	if (isSymlink(moved)) return { ...verdict, dir: moved, action: "SKIP", reason: "path-replaced-with-non-directory" };
 	if (inodeOf(moved) !== identity) return { ...verdict, dir: moved, action: "SKIP", reason: "inode-changed-before-delete" };
@@ -1314,8 +1335,8 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	if (recheck.action !== "REAP" || !recheck.owner || ownerSnapshot(recheck.owner) !== expected) {
 		try {
 			renameSync(moved, dir);
-		} catch {
-			return { ...verdict, dir: moved, action: "SKIP", reason: "final-recheck-refused" };
+		} catch (error) {
+			return fail("quarantine-rollback-failed", error, moved);
 		}
 		return fail("final-recheck-refused");
 	}
@@ -1341,47 +1362,63 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	return { ...verdict, action: "REAP", reason: `${verdict.reason}-applied` };
 }
 
+/**
+ * The recorded quarantine reason keeps the plan's class: a would-quarantine preview becomes its
+ * quarantined twin, and an unparseable owner file that rode the unowned path is named malformed.
+ */
+function quarantineTerminalReason(plannedReason: string | undefined, ownerBefore: string | null, currentOwner: ScratchOwner | null): string {
+	if (ownerBefore !== null && currentOwner === null) return "malformed-owner-idle-72h-quarantined";
+	if (plannedReason !== undefined && plannedReason.endsWith("-would-quarantine"))
+		return `${plannedReason.slice(0, -"-would-quarantine".length)}-quarantined`;
+	return "unowned-idle-72h-quarantined";
+}
 /** Unowned entry lifecycle: idle 72h -> quarantine, configured TTL -> delete (with rechecks). */
 export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned?: ScratchVerdict): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
 	const base: ScratchVerdict = { dir, action: "SKIP", reason: "unknown", owner: planned?.owner ?? null, sizeBytes: 0 };
-	if (isSymlink(dir)) return { ...base, reason: "session-is-symlink" };
+	// A refusal is an expected safety SKIP; a mutation failure carries its OS error. The run-level
+	// receipt (applyScratch) logs every terminal SKIP, so every failure lands in the JSONL with its error.
+	const stop = (reason: string, error?: unknown, dirOverride?: string, extra?: Partial<ScratchVerdict>): ScratchVerdict =>
+		({ ...base, reason, ...(dirOverride === undefined ? {} : { dir: dirOverride }),
+			...(error === undefined ? {} : { error: osErrorText(error) }), ...extra });
+	if (isSymlink(dir)) return stop("session-is-symlink");
 	const freshest = idleSince(dir, now);
-	if (freshest === null) return { ...base, reason: "idle-proof-unavailable" };
-	if (freshest >= now - QUARANTINE_IDLE_MS) return { ...base, action: "LIVE", reason: "unowned-but-active" };
+	if (freshest === null) return stop("idle-proof-unavailable");
+	if (freshest >= now - QUARANTINE_IDLE_MS) return stop("unowned-but-active", undefined, undefined, { action: "LIVE" });
 	const ownerBefore = readText(join(dir, ".owner"));
 	const currentOwner = ownerBefore === null ? null : parseOwnerFile(ownerBefore);
 	if (planned && (planned.owner === null ? currentOwner !== null :
 		currentOwner === null || ownerSnapshot(planned.owner) !== ownerSnapshot(currentOwner))) {
-		return { ...base, owner: currentOwner, reason: "final-recheck-refused" };
+		return stop("final-recheck-refused", undefined, undefined, { owner: currentOwner });
 	}
 	if (currentOwner) {
 		if (!ownerMatchesScratchRoot(currentOwner, root, dir, deps)) {
-			return { ...base, owner: currentOwner, reason: "owner-repo-outside-scratch-root" };
+			return stop("owner-repo-outside-scratch-root", undefined, undefined, { owner: currentOwner });
 		}
 		if (inspectOne(dir, root, deps)?.action !== "QUARANTINE") {
-			return { ...base, owner: currentOwner, reason: "final-recheck-refused" };
+			return stop("final-recheck-refused", undefined, undefined, { owner: currentOwner });
 		}
 	}
 	const entry = quarantineEntryFor(dir.slice(root.length + 1));
 	const qt = quarantineDir(deps.home);
 	try {
 		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch {
-		return { ...base, reason: "quarantine-create-failed" };
+	} catch (error) {
+		return stop("quarantine-create-failed", error);
 	}
 	const identity = inodeOf(dir);
-	if (identity === null) return { ...base, reason: "inode-proof-unavailable" };
+	if (identity === null) return stop("inode-proof-unavailable");
 	const clearBefore = lsofClearDir(deps, dir);
-	if (clearBefore !== true) return { ...base,
-		reason: clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
-		...(clearBefore === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) };
+	if (clearBefore !== true) return stop(
+		clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
+		undefined, undefined,
+		{ ...(clearBefore === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
 	const moved = join(qt, entry);
 	try {
 		renameSync(dir, moved);
-	} catch {
-		return { ...base, reason: "atomic-quarantine-failed" };
+	} catch (error) {
+		return stop("atomic-quarantine-failed", error);
 	}
 	const ownerAfter = readText(join(moved, ".owner"));
 	if (inodeOf(moved) !== identity || ownerAfter !== ownerBefore ||
@@ -1389,15 +1426,15 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned
 		lsofClearDir(deps, moved) !== true) {
 		try {
 			renameSync(moved, dir);
-		} catch {
-			return { ...base, dir: moved, reason: "final-recheck-refused" };
+		} catch (error) {
+			return stop("quarantine-rollback-failed", error, moved);
 		}
-		return { ...base, reason: "final-recheck-refused" };
+		return stop("final-recheck-refused");
 	}
-	appendLog(deps.home, { event: "quarantine", dir, at, entry, sizeBytes: dirSize(moved) });
-	const mismatch = planned?.reason === "mismatched-owner-idle-72h-would-quarantine";
+	appendLog(deps.home, { event: "quarantine", dir, at, entry, sizeBytes: dirSize(moved),
+		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner) });
 	return { ...base, dir: moved, action: "QUARANTINE",
-		reason: mismatch ? "mismatched-owner-idle-72h-quarantined" : "unowned-idle-72h-quarantined", sizeBytes: dirSize(moved) };
+		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner), sizeBytes: dirSize(moved) };
 }
 
 /** Expired quarantine entries are deleted after owner-release or lsof rechecks. */
@@ -1678,6 +1715,30 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 		// A live or unproven owner stays SKIP. Only a dead, fd-clear owner can age into quarantine.
 		if (proof.action !== "REAP") return verdict;
 		quarantineCandidate = proof;
+	}
+	if (verdict.action === "SKIP" && verdict.reason === "owner-label-invalid" && verdict.owner !== null) {
+		// The label rule only guards the directory name; liveness decides the terminal path.
+		// A live or unproven owner stays SKIP. Only a dead, fd-clear, 72 h-idle owner ages into quarantine.
+		const labeled = verdict.owner;
+		let dead: boolean;
+		if (!hasProcessIdentity(labeled)) {
+			if (deps.liveness.signalAlive(labeled.pid) || deps.liveness.psVisible(labeled.pid)) {
+				dead = reuseAfterCreated(labeled, deps.liveness) === true;
+			} else dead = true;
+		} else {
+			const state = probeOwner(labeled.pid, labeled.processStart, deps.liveness);
+			if (state !== "dead" && state !== "reused") return verdict;
+			dead = true;
+		}
+		if (dead && lsofClearDir(deps, dir) === true) {
+			const nowMs = deps.now ?? Date.now();
+			const freshest = idleSince(dir, nowMs);
+			if (freshest !== null && freshest < nowMs - QUARANTINE_IDLE_MS) {
+				return { dir, action: "QUARANTINE", reason: "owner-label-invalid-idle-72h-would-quarantine",
+					owner: labeled, sizeBytes: dirSize(dir) };
+			}
+		}
+		return verdict;
 	}
 	if (mismatch || (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
 		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete"))) {
@@ -1998,7 +2059,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		}
 		applied.push(terminal);
 		if (terminal.action === "SKIP") appendLog(home, { event: isApplyFailure(terminal) ? "failure" : "skip",
-			dir: terminal.dir, at: new Date(now).toISOString(), action: terminal.action, reason: terminal.reason, error: terminal.reason });
+			dir: terminal.dir, at: new Date(now).toISOString(), action: terminal.action, reason: terminal.reason,
+			error: terminal.error ?? terminal.reason });
 		deps.onProgress?.(terminal, { done: index + 1, total: planned.length });
 	}
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));

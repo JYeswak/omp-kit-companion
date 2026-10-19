@@ -1490,3 +1490,188 @@ test("scratch apply over a dir holding a live unix socket skips it, and quaranti
 	expect(releasedRow?.reason).toBe("unowned-idle-72h-quarantined");
 	expect(existsSync(stale)).toBe(false);
 }, 120000);
+
+// REAPSKIP1 (ompkit-3tgm): every SKIP class has a terminal path. An owner-label-invalid
+// dir whose owner is dead, fd-clear and 73 h idle quarantines; a live one stays SKIP.
+test("an invalid owner label still reaches quarantine once its owner is dead and idle", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const dead = deadPid();
+  const dir = sessionDir(root, "bad label", dead);
+  writeFileSync(join(dir, ".owner"), ownerText(deadFields("bad label", dead)));
+  writeFileSync(join(dir, "payload"), "keep\n");
+  backdateTree(dir, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  expect(inspectSession(dir, root, deps)).toMatchObject({ action: "SKIP", reason: "owner-label-invalid" });
+  const planned = inspectOne(dir, root, deps);
+  expect(planned).toMatchObject({ action: "QUARANTINE", reason: "owner-label-invalid-idle-72h-would-quarantine" });
+  const applied = applyUnowned(dir, root, deps, planned!);
+  expect(applied).toMatchObject({ action: "QUARANTINE", reason: "owner-label-invalid-idle-72h-quarantined" });
+  expect(existsSync(dir)).toBe(false);
+  expect(readFileSync(join(applied.dir, "payload"), "utf8")).toBe("keep\n");
+
+  const liveDir = sessionDir(root, "also bad", process.pid);
+  writeFileSync(join(liveDir, ".owner"), ownerText(liveFields("also bad")));
+  expect(inspectOne(liveDir, root, deps)).toMatchObject({ action: "SKIP", reason: "owner-label-invalid" });
+  expect(existsSync(liveDir)).toBe(true);
+});
+
+// REAPSKIP1 (ompkit-3tgm): the recorded quarantine reason keeps the plan's class, so a
+// malformed owner that rode the unowned path is named malformed, not unowned.
+test("an idle malformed owner quarantines under a malformed reason", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const malformed = join(root, "malformed.3");
+  mkdirSync(malformed, { recursive: true });
+  writeFileSync(join(malformed, ".owner"), "pid=not-an-integer\n");
+  writeFileSync(join(malformed, "data"), "retain\n");
+  backdateTree(malformed, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(malformed, root, deps);
+  expect(planned).toMatchObject({ action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine" });
+  const applied = applyUnowned(malformed, root, deps, planned!);
+  expect(applied).toMatchObject({ action: "QUARANTINE", reason: "malformed-owner-idle-72h-quarantined" });
+  expect(existsSync(malformed)).toBe(false);
+  expect(readFileSync(join(applied.dir, "data"), "utf8")).toBe("retain\n");
+});
+
+// REAPSKIP1 (ompkit-3tgm) positive: an induced quarantine-creation failure names the exact
+// path, action and OS error on the verdict and fails the run instead of vanishing.
+test("a blocked quarantine dir fails the action with its OS error recorded", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const dead = join(root, "stranded");
+  mkdirSync(dead, { recursive: true });
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("stranded", deadPid())));
+  writeFileSync(join(dead, "data"), "dead\n");
+  backdateTree(dead, 73 * 3600 * 1000, now);
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  chmodSync(qt, 0o555);
+  try {
+    const deps = { ...depsFor({ now }), home, now };
+    const planned = inspectOne(dead, root, deps);
+    expect(planned?.reason).toBe("mismatched-owner-idle-72h-would-quarantine");
+    const applied = applyUnowned(dead, root, deps, planned!);
+    expect(applied).toMatchObject({ dir: dead, action: "SKIP", reason: "atomic-quarantine-failed" });
+    expect(applied.error ?? "").toMatch(/EACCES/);
+    expect(isApplyFailure(applied)).toBe(true);
+    expect(existsSync(dead)).toBe(true);
+  } finally {
+    chmodSync(qt, 0o755);
+  }
+});
+
+// REAPSKIP1 (ompkit-3tgm) positive: a quarantine dir that cannot be created fails with
+// the OS error instead of an empty refusal.
+test("a file blocking the quarantine dir fails creation with its OS error recorded", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const dead = sessionDir(root, "gone", deadPid());
+  const pid = Number(dead.split(".").at(-1));
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", pid)));
+  backdateTree(dead, 73 * 3600 * 1000, now);
+  mkdirSync(quarantineDir(home), { recursive: true });
+  rmSync(quarantineDir(home), { recursive: true, force: true });
+  writeFileSync(quarantineDir(home), "not a directory\n");
+  const deps = { ...depsFor({ now }), home, now };
+  const verdict = inspectSession(dead, root, deps);
+  expect(verdict.action).toBe("REAP");
+  const applied = applyReap(dead, root, verdict, deps);
+  expect(applied).toMatchObject({ action: "SKIP", reason: "quarantine-create-failed" });
+  expect(applied.error ?? "").toMatch(/EEXIST|ENOTDIR/);
+  expect(isApplyFailure(applied)).toBe(true);
+  expect(existsSync(dead)).toBe(true);
+});
+
+// REAPSKIP1 (ompkit-3tgm) negative: an unexpected OS failure on the rollback rename is a
+// recorded failure (quarantine-rollback-failed), never swallowed as a refusal. The lsof
+// hook poisons only quarantine paths: it reports an open fd (forcing the rollback) and
+// plants a file where the dir stood (failing the rollback rename).
+test("a failed quarantine rollback is a failure with its OS error, not a refusal", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const qt = quarantineDir(home);
+  const dead = sessionDir(root, "gone", deadPid());
+  const pid = Number(dead.split(".").at(-1));
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", pid)));
+  writeFileSync(join(dead, "payload"), "preserve me\n");
+  const run = (args: readonly string[]) => {
+    const target = args[args.length - 1] ?? "";
+    if (args[0] === "lsof" && target.startsWith(`${qt}/`)) {
+      writeFileSync(dead, "rollback blocker\n");
+      return { code: 0, stdout: `sh 999 test ${target}/payload`, stderr: "" };
+    }
+    return clearRun();
+  };
+  const deps = { ...depsFor({ run }), home };
+  const verdict = inspectSession(dead, root, deps);
+  expect(verdict.action).toBe("REAP");
+  const applied = applyReap(dead, root, verdict, deps);
+  expect(applied).toMatchObject({ action: "SKIP", reason: "quarantine-rollback-failed" });
+  expect(applied.error ?? "").toMatch(/ENOTDIR|EEXIST|EPERM/);
+  expect(isApplyFailure(applied)).toBe(true);
+  expect(applied.dir.startsWith(`${qt}/`)).toBe(true);
+  expect(readFileSync(join(applied.dir, "payload"), "utf8")).toBe("preserve me\n");
+});
+
+// REAPSKIP1 (ompkit-3tgm) positive, CLI: a real apply whose quarantine rename is refused
+// by permissions exits nonzero with the path, action and OS error on stderr and the receipt.
+test("scratch apply names a permission failure on stderr and the receipt and exits nonzero", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const dead = sessionDir(root, "gone", deadPid());
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
+  writeFileSync(join(dead, "data"), "dead\n");
+  backdateTree(dead, 73 * 3600 * 1000, Date.now());
+  const qt = join(state, "omp-kit", "scratch-quarantine");
+  mkdirSync(qt, { recursive: true });
+  chmodSync(qt, 0o555);
+  try {
+    const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+    const result = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+    expect(result.code).toBe(1);
+    const row = result.envelope.data.sessions.find((value: { dir: string }) => value.dir === dead);
+    expect(row).toMatchObject({ action: "SKIP", reason: "atomic-quarantine-failed" });
+    expect(row.error ?? "").toMatch(/EACCES/);
+    expect(result.envelope.data.receipt).toMatchObject({ failed_count: 1, refused_count: 0 });
+    expect(result.stderr).toContain(`SKIP ${dead} (atomic-quarantine-failed)`);
+    // The `error: <errno …>` suffix on that stderr line rides the held-back cli.ts
+    // follow-up (ompkit-3tgm DONE report); the envelope and receipt already carry it.
+    expect(existsSync(dead)).toBe(true);
+  } finally {
+    chmodSync(qt, 0o755);
+  }
+}, 30000);
+
+// REAPSKIP1 (ompkit-3tgm) negative, CLI: a run whose only refused action is a correctly
+// refused quarantine expiry (owner provably alive) exits 0 with correct counts.
+test("scratch apply with only a correctly refused expiry exits 0 with refused counts", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const qt = join(state, "omp-kit", "scratch-quarantine");
+  mkdirSync(qt, { recursive: true });
+  const entry = quarantineEntryFor("held.1", new Date(Date.now() - 25 * 3600 * 1000));
+  const held = join(qt, entry);
+  mkdirSync(held, { recursive: true });
+  writeFileSync(join(held, ".owner"), ownerText(liveFields("held")));
+  writeFileSync(join(held, "data"), "live\n");
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const result = cli(["scratch", "apply", "--apply", "--yes"], home, env);
+  expect(result.code).toBe(0);
+  expect(result.envelope.data.receipt).toMatchObject({ failed_count: 0, refused_count: 1 });
+  expect(result.envelope.data.expired).toContainEqual(
+    expect.objectContaining({ dir: held, action: "SKIP", reason: "quarantine-owner-active" }));
+  expect(existsSync(join(held, "data"))).toBe(true);
+}, 30000);
