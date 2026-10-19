@@ -88,10 +88,8 @@ function configCandidates(home: string, cwd: string): string[] {
 		...[".gemini", ".codex", ".claude", ".omp"].map(dir => join(cwd, dir)), cwd];
 	return locations.flatMap(dir => [...FILENAMES].reverse().map(file => join(dir, file)));
 }
-function defaults(ompPath: string | undefined): { path: string; servers: Record<string, unknown> } | null {
-	if (!ompPath) return null;
+function packageSource(root: string): { path: string; servers: Record<string, unknown> } | null {
 	try {
-		const root = dirname(dirname(realpathSync(ompPath)));
 		const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as unknown;
 		if (!isRecord(metadata) || metadata.name !== "@oh-my-pi/pi-coding-agent") return null;
 		const path = join(root, "src", "lsp", "defaults.json");
@@ -99,6 +97,44 @@ function defaults(ompPath: string | undefined): { path: string; servers: Record<
 		const servers = JSON.parse(readFileSync(path, "utf8")) as unknown;
 		return isRecord(servers) ? { path, servers } : null;
 	} catch { return null; }
+}
+function ompSourceRoot(ompPath: string | undefined): string | null {
+	if (!ompPath) return null;
+	try { return dirname(dirname(realpathSync(ompPath))); } catch { return null; }
+}
+function ompSourceOverride(): string | null {
+	const raw = process.env.OMP_SRC;
+	if (!raw) return null;
+	try {
+		const root = realpathSync(resolve(raw));
+		if (!lstatSync(root).isDirectory()) return null;
+		return root;
+	} catch { return null; }
+}
+function isOmpSourceRoot(root: string): boolean {
+	try {
+		const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as unknown;
+		if (!isRecord(metadata) || metadata.name !== "@oh-my-pi/pi-coding-agent") return false;
+		return readableFile(join(root, "src", "lsp", "defaults.json"));
+	} catch { return false; }
+}
+/** Source root backing an OMP launcher: beside-binary guess plus a validated OMP_SRC
+ * override, refusing mixed identities where both resolve differently. Shared by the
+ * readiness check and the deep probe so both see the same defaults. */
+export function resolveOmpDefaults(ompPath: string | undefined): { root: string; path: string } | null {
+	const beside = ompSourceRoot(ompPath);
+	const override = ompSourceOverride();
+	const besideOk = beside !== null && isOmpSourceRoot(beside);
+	const overrideOk = override !== null && isOmpSourceRoot(override);
+	if (besideOk && overrideOk && beside !== override) return null;
+	const root = overrideOk ? override! : besideOk ? beside! : null;
+	if (root === null) return null;
+	return { root, path: join(root, "src", "lsp", "defaults.json") };
+}
+function defaults(ompPath: string | undefined): { path: string; servers: Record<string, unknown> } | null {
+	const resolved = resolveOmpDefaults(ompPath);
+	if (resolved === null) return null;
+	return packageSource(resolved.root);
 }
 function markersAtCwd(cwd: string, markers: string[]): boolean {
 	let entries: string[] | null = null;

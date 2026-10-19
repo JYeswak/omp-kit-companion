@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { LspReadinessReport, LspServerReadiness } from "./lsp-readiness.ts";
+import { resolveOmpDefaults } from "./lsp-readiness.ts";
 import { isRecord } from "./type-guards.ts";
 
 export interface LspJsonRpcTraceEntry {
@@ -389,10 +390,9 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 	try {
 		omp = realpathSync(input.ompPath);
 		if ((inside(project, omp) || isWorkspaceExecutablePath(omp))) return result("UNVERIFIED", "Workspace-local OMP launchers are not run by deep doctor.", readiness, server);
-		const packageRoot = dirname(dirname(omp));
-		const metadata: unknown = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-		if (!isRecord(metadata) || metadata.name !== "@oh-my-pi/pi-coding-agent") throw new Error("OMP launcher package identity mismatch");
-		defaultsPath = join(packageRoot, "src", "lsp", "defaults.json");
+		const resolved = resolveOmpDefaults(input.ompPath);
+		if (resolved === null) throw new Error("OMP launcher has no source-backed package (beside-binary guess plus validated OMP_SRC)");
+		defaultsPath = resolved.path;
 		const parsed: unknown = JSON.parse(readFileSync(defaultsPath, "utf8"));
 		if (!isRecord(parsed) || !isRecord(parsed["typescript-language-server"])) throw new Error("OMP TypeScript LSP defaults are unavailable");
 		defaults = parsed;

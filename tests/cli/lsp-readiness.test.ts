@@ -7,6 +7,50 @@ import { probeLspReadiness } from "../../src/lsp-probe.ts";
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const ompSrcRestores: Array<() => void> = [];
+afterEach(() => { for (const restore of ompSrcRestores.splice(0)) restore(); });
+/** Hermetic source tree for binary-only launchers (ompkit-fp72.36): version is read
+ * from the launcher itself so a substituted version fails loudly instead of silently. */
+/** Hermetic source tree for binary-only launchers: version is read from the
+ * launcher itself so a substituted version fails loudly instead of silently.
+ * The defaults are the COMPLETE real server inventory (copied from a resolved
+ * OMP package), never a fabricated subset: the probe disables every non-target
+ * server named there, so a truncated map would fan workspace/symbol out to
+ * undisabled servers and fail the absent-symbol control. */
+function realDefaultsSource(): string {
+	const candidates = [
+		join(process.env.HOME ?? "/Users/josh", ".bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src/lsp/defaults.json"),
+	];
+	try {
+		const npmRoot = Bun.spawnSync(["npm", "root", "-g"], { stdout: "pipe", stderr: "pipe" }).stdout.toString().trim().split("\n")[0];
+		if (npmRoot) candidates.push(join(npmRoot, "@oh-my-pi/pi-coding-agent/src/lsp/defaults.json"));
+	} catch { /* npm lookup is best-effort; candidates already held. */ }
+	for (const candidate of candidates) {
+		try {
+			const text = readFileSync(candidate, "utf8");
+			const parsed: unknown = JSON.parse(text);
+			if (parsed && typeof parsed === "object" && (parsed as Record<string, unknown>)["typescript-language-server"]) return candidate;
+		} catch { /* try the next candidate. */ }
+	}
+	throw new Error("no complete OMP defaults.json found (bun-global or npm-global OMP package required); refusing a fabricated subset");
+}
+function sourceTreeFor(root: string, ompPath: string): string {
+	const probed = Bun.spawnSync([ompPath, "--version"], { stdout: "pipe", stderr: "pipe" });
+	const version = /(\d+\.\d+\.\d+)/.exec(probed.stdout.toString())?.[1];
+	if (!version) throw new Error(`cannot read omp version from ${ompPath}; refusing an unversioned OMP_SRC`);
+	const dir = join(root, "ompsrc");
+	mkdirSync(join(dir, "src", "lsp"), { recursive: true });
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+	writeFileSync(join(dir, "src", "lsp", "defaults.json"), readFileSync(realDefaultsSource(), "utf8"));
+	const previous = process.env.OMP_SRC;
+	process.env.OMP_SRC = dir;
+	ompSrcRestores.push(() => {
+		if (previous === undefined) delete process.env.OMP_SRC;
+		else process.env.OMP_SRC = previous;
+	});
+	console.log(`OMP_SRC-RESOLVED version=${version} server=typescript-language-server`);
+	return dir;
+}
 
 function fixture(base = scratch) {
 	const root = mkdtempSync(join(base, "lsp-readiness-"));
@@ -205,6 +249,7 @@ const nativeLspTest = installedOmp && Bun.which("typescript-language-server") &&
 nativeLspTest("one alternative root marker permits a real cold request and preserves absent alternatives", async () => {
 	if (!installedOmp) throw new Error("installed OMP required");
 	const f = fixture();
+	sourceTreeFor(f.root, installedOmp);
 	writeFileSync(join(f.project, "package.json"), "{}");
 	const file = join(f.project, "index.ts");
 	writeFileSync(file, "export const value = 1;\n");
@@ -235,6 +280,7 @@ nativeLspTest("a non-Git parent workspace dependency binary is never launched", 
 		parent = located.stdout.toString().trim();
 	}
 	const f = fixture(realpathSync(parent));
+	sourceTreeFor(f.root, installedOmp);
 	for (let directory = f.root;;) {
 		expect(existsSync(join(directory, ".git"))).toBe(false);
 		const ancestor = dirname(directory);
@@ -261,4 +307,73 @@ nativeLspTest("a non-Git parent workspace dependency binary is never launched", 
 	expect(report.omp_rc).toBeNull();
 	expect(existsSync(marker)).toBe(false);
 	expect(tree(f.root)).toEqual(before);
+});
+test("OMP_SRC supplies the source tree for a binary-only launcher", () => {
+	const f = fixture();
+	const macho = join(f.bin, "omp-macho");
+	writeFileSync(macho, `#!/bin/sh\nexit 0\n`);
+	chmodSync(macho, 0o755);
+	const source = join(f.root, "ompsrc");
+	mkdirSync(join(source, "src", "lsp"), { recursive: true });
+	writeFileSync(join(source, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.10.0" }));
+	writeFileSync(join(source, "src", "lsp", "defaults.json"), JSON.stringify({
+		"typescript-language-server": { command: "typescript-language-server", fileTypes: [".ts"], rootMarkers: ["package.json"] },
+	}));
+	writeFileSync(join(f.project, "package.json"), "{}");
+	writeFileSync(join(f.project, "index.ts"), "export const value = 1;\n");
+	f.binary("typescript-language-server");
+	const previous = process.env.OMP_SRC;
+	process.env.OMP_SRC = source;
+	try {
+		const report = inspectLspReadiness({ home: f.home, project: f.project, file: join(f.project, "index.ts"), ompPath: macho, pathEnv: f.bin });
+		expect(report.opaque_layers).toEqual([]);
+		expect(server(report, "typescript-language-server").eligible).toBe(true);
+		const usedVersion = JSON.parse(readFileSync(join(source, "package.json"), "utf8")).version;
+		expect(usedVersion).toBe("18.10.0");
+		console.log(`OMP_SRC-RESOLVED version=${usedVersion} server=typescript-language-server`);
+	} finally {
+		if (previous === undefined) delete process.env.OMP_SRC;
+		else process.env.OMP_SRC = previous;
+	}
+});
+
+test("planted: OMP_SRC at a wrong package, or clashing with a beside-binary source, refuses", () => {
+	const f = fixture();
+	const macho = join(f.bin, "omp-macho");
+	writeFileSync(macho, `#!/bin/sh\nexit 0\n`);
+	chmodSync(macho, 0o755);
+	writeFileSync(join(f.project, "package.json"), "{}");
+	const previous = process.env.OMP_SRC;
+	const other = join(f.root, "other-src");
+	mkdirSync(join(other, "src", "lsp"), { recursive: true });
+	writeFileSync(join(other, "package.json"), JSON.stringify({ name: "something-else", version: "1.0.0" }));
+	writeFileSync(join(other, "src", "lsp", "defaults.json"), JSON.stringify({}));
+	process.env.OMP_SRC = other;
+	try {
+		const wrong = inspectLspReadiness({ home: f.home, project: f.project, ompPath: macho, pathEnv: f.bin });
+		expect(wrong.opaque_layers.length).toBeGreaterThan(0);
+	} finally {
+		if (previous === undefined) delete process.env.OMP_SRC;
+		else process.env.OMP_SRC = previous;
+	}
+});
+
+test("planted: OMP_SRC clashing with a valid beside-binary source refuses mixed identities", () => {
+	const f = fixture();
+	const other = join(f.root, "other-src");
+	mkdirSync(join(other, "src", "lsp"), { recursive: true });
+	writeFileSync(join(other, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "9.9.9" }));
+	writeFileSync(join(other, "src", "lsp", "defaults.json"), JSON.stringify({
+		"typescript-language-server": { command: "typescript-language-server", fileTypes: [".ts"], rootMarkers: ["package.json"] },
+	}));
+	writeFileSync(join(f.project, "package.json"), "{}");
+	const previous = process.env.OMP_SRC;
+	process.env.OMP_SRC = other;
+	try {
+		const report = inspectLspReadiness({ home: f.home, project: f.project, ompPath: join(f.root, "omp", "dist", "cli.js"), pathEnv: f.bin });
+		expect(report.opaque_layers.length).toBeGreaterThan(0);
+	} finally {
+		if (previous === undefined) delete process.env.OMP_SRC;
+		else process.env.OMP_SRC = previous;
+	}
 });
