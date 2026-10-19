@@ -14,6 +14,63 @@ import { Database } from "bun:sqlite";
  */
 
 export const OVERLAP_EXIT = 4;
+/**
+ * CC14 daemon one-instance lock. A daemon (`service run cc`) holds an open
+ * SQLite IMMEDIATE transaction on `<jobs>/<name>.lock` for its whole life;
+ * the kernel releases the file lock with the fd on death (even SIGKILL), so
+ * no stale lock can strand the next start. A second concurrent holder gets
+ * HELD, which the run wiring maps to exit 75 ALREADY_RUNNING. Fail-closed:
+ * any unusable directory, unsafe file, or busy database is HELD, never a
+ * grant. This module owns the lock mechanics only.
+ */
+export const DAEMON_HELD_EXIT = 75;
+export type DaemonAcquire = { status: "ACQUIRED"; lock: RunLock } | { status: "HELD" };
+const DAEMON_JOB_PATTERN = /^[A-Za-z0-9._-]+$/;
+export function acquireDaemonLock(jobsDir: string, job: string): DaemonAcquire {
+	if (!DAEMON_JOB_PATTERN.test(job) || job === "." || job === "..") return { status: "HELD" };
+	try {
+		mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+	} catch {
+		return { status: "HELD" };
+	}
+	const path = join(jobsDir, `${job}.lock`);
+	let fd: number | undefined;
+	let db: Database | undefined;
+	try {
+		fd = openSync(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+		const opened = fstatSync(fd);
+		if (!opened.isFile() || opened.nlink !== 1 || (opened.mode & 0o077) !== 0
+			|| (process.getuid !== undefined && opened.uid !== process.getuid())) return { status: "HELD" };
+		db = new Database(path);
+		db.exec("PRAGMA busy_timeout = 0");
+		try {
+			db.exec("BEGIN IMMEDIATE");
+		} catch {
+			try { db.close(); } catch { /* A failed BEGIN holds nothing; close the handle. */ }
+			db = undefined;
+			return { status: "HELD" };
+		}
+	} catch {
+		if (db !== undefined) {
+			try { db.close(); } catch { /* Best effort; the failed handle holds no lock. */ }
+			db = undefined;
+		}
+		return { status: "HELD" };
+	} finally {
+		// The pre-lock fd verified identity only; the Database connection
+		// holds the live lock from here on.
+		if (fd !== undefined) closeSync(fd);
+	}
+	if (db === undefined) return { status: "HELD" };
+	const held = db;
+	let released = false;
+	return { status: "ACQUIRED", lock: { release: () => {
+		if (released) return;
+		released = true;
+		try { held.exec("ROLLBACK"); } catch { /* Lock effects are unknown, never permission to steal. */ }
+		try { held.close(); } catch { /* Close failure leaves the fd to process exit. */ }
+	} } };
+}
 
 export interface RunLock {
 	release(): void;

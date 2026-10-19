@@ -1,0 +1,13 @@
+[Unit]
+Description=omp-kit scratch-reaper
+
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+ExecStart=/fixture/user-home/test-op/.local/bin/omp-kit service run scratch-reaper
+Environment=HOME="/fixture/user-home/test-op"
+Environment=XDG_STATE_HOME="/fixture/user-home/test-op/.local/state"
+Environment=PATH="/fixture/user-home/test-op/.local/bin:/fixture/user-home/test-op/.bun/bin:/fixture/user-home/test-op/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Environment=TMPDIR="/fixture/user-home/test-op/.local/state/omp-kit/service-tmp"
+Environment=OMP_KIT_JOB="scratch-reaper"
+WorkingDirectory=/fixture/user-home/test-op

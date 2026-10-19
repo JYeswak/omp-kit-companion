@@ -74,12 +74,32 @@ function secretEnvKey(env: Record<string, string>): string | null {
  */
 export function checkPlistContract(jobName: string, text: string): ServiceCheck[] {
 	const checks: ServiceCheck[] = [];
+	// Daemon shape: neither a StartInterval cadence nor a WatchPaths trigger.
+	// Only a daemon plist may run at load with KeepAlive; interval/watch jobs
+	// keep the historical RunAtLoad-false contract below.
+	const isDaemon = !/<key>StartInterval<\/key>/.test(text) && !/<key>WatchPaths<\/key>/.test(text);
 	const runAtLoad = plistFlag(text, "RunAtLoad");
-	checks.push(runAtLoad === false
-		? pass("contract-run-at-load", "RunAtLoad is false; the job never fires at boot")
-		: fail("contract-run-at-load",
-			runAtLoad === null ? "RunAtLoad key is missing" : "RunAtLoad is true; the job fires at every boot",
-			`Render ${jobName} with RunAtLoad false (SVC1 contract); boot-time stampedes are what the load gate cannot catch.`));
+	if (isDaemon) {
+		checks.push(runAtLoad === true
+			? pass("contract-run-at-load", "RunAtLoad is true for the daemon; launchd starts it at load")
+			: fail("contract-run-at-load",
+				runAtLoad === null ? "Daemon plist is missing RunAtLoad" : "Daemon plist has RunAtLoad false; the server would never start",
+				`Render ${jobName} with RunAtLoad true (CC14 daemon contract).`));
+		const keepAlive = text.match(/<key>KeepAlive<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+		const successfulExitFalse = keepAlive !== null && /<key>SuccessfulExit<\/key>\s*<false\/>/.test(keepAlive[1] ?? "");
+		checks.push(successfulExitFalse
+			? pass("contract-daemon-keepalive", "KeepAlive restarts the daemon unless it exits cleanly")
+			: fail("contract-daemon-keepalive",
+				keepAlive === null ? "Daemon plist has no KeepAlive dict; a crashed server would stay down" : "KeepAlive dict does not set SuccessfulExit false; clean exits would relaunch the server",
+				`Render ${jobName} with KeepAlive { SuccessfulExit = false } (CC14 daemon contract); ThrottleInterval bounds the restart.`));
+	} else {
+		checks.push(runAtLoad === false
+			? pass("contract-run-at-load", "RunAtLoad is false; the job never fires at boot")
+			: fail("contract-run-at-load",
+				runAtLoad === null ? "RunAtLoad key is missing" : "RunAtLoad is true; the job fires at every boot",
+				`Render ${jobName} with RunAtLoad false (SVC1 contract); boot-time stampedes are what the load gate cannot catch.`));
+		checks.push(pass("contract-daemon-keepalive", "Interval/watch job; no KeepAlive required"));
+	}
 	const processType = plistString(text, "ProcessType");
 	checks.push(processType === "Background"
 		? pass("contract-processtype", "ProcessType is Background")
@@ -167,11 +187,27 @@ export function checkSystemdContract(jobName: string, service: string): ServiceC
 			`Environment entry ${secretKey} is secret-named or secret-shaped`,
 			`Remove ${secretKey} from omp-kit-${jobName}.service (SVC1/PUB1). The value is never printed.`));
 	const typeLine = service.match(/^Type=(\S+)$/m)?.[1] ?? null;
-	checks.push(typeLine === "oneshot"
-		? pass("contract-systemd-oneshot", "Type is oneshot; the job cannot linger as a daemon")
+	const restart = service.match(/^Restart=(\S+)$/m)?.[1] ?? null;
+	const restartSec = service.match(/^RestartSec=(\d+)$/m)?.[1] ?? null;
+	// Daemon shape: a long-running service that restarts itself instead of a
+	// oneshot job driven by a timer/path trigger.
+	const isDaemon = typeLine !== null && typeLine !== "oneshot";
+	checks.push(typeLine === "oneshot" || (isDaemon && restart === "on-failure")
+		? pass("contract-systemd-oneshot", typeLine === "oneshot"
+			? "Type is oneshot; the job cannot linger as a daemon"
+			: "Type is a daemon service with Restart=on-failure; the restart bound is asserted by contract-daemon-lock")
 		: fail("contract-systemd-oneshot",
-			typeLine === null ? "Type line is missing" : `Type is ${typeLine}, not oneshot`,
-			`Render omp-kit-${jobName}.service with Type=oneshot.`));
+			typeLine === null ? "Type line is missing" : `Type is ${typeLine} without a daemon restart policy`,
+			`Render omp-kit-${jobName}.service with Type=oneshot, or a daemon Type with Restart=on-failure.`));
+	checks.push(!isDaemon
+		? pass("contract-daemon-lock", "Oneshot job; no daemon restart policy required")
+		: restart === "on-failure" && restartSec === "60"
+			? pass("contract-daemon-lock", "Daemon restarts on failure with a 60 s backoff; no crash-loop CPU burn")
+			: fail("contract-daemon-lock",
+				restart === null ? "Daemon unit has no Restart line; a crashed server would stay down"
+					: restartSec === null ? `Daemon unit Restart=${restart} without RestartSec; restarts would spin`
+						: `Daemon unit Restart=${restart} RestartSec=${restartSec}; expected Restart=on-failure RestartSec=60`,
+				`Render omp-kit-${jobName}.service with Restart=on-failure and RestartSec=60 (CC14 daemon contract).`));
 	const timeout = service.match(/^TimeoutStartSec=(\d+)$/m)?.[1] ?? null;
 	checks.push(timeout !== null
 		? pass("contract-systemd-timeout", `TimeoutStartSec is ${timeout}; a hung start is killed`)

@@ -699,8 +699,9 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit examples", runnable: true, dataSchema: textData },
 	{ name: "service", description: "Manage operator service jobs (launchd/systemd); reads foreign jobs, never rewrites them", usage: "service list|install|uninstall|status|doctor|logs|run", flags: [], subcommands: [
 		{ name: "list", description: "List known jobs with installed and loaded state", usage: "service list", flags: [], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--apply --yes] [--replace]", argument: "JOB", flags: [
+		{ name: "install", description: "Install a job: render, diff, backup, bootstrap, verify; refuses a label loaded from a different plist unless --replace", usage: "service install JOB [--dry-run] [--plan] [--apply --yes] [--replace]", argument: "JOB", flags: [
 			{ name: "--dry-run", description: "Render the plist, diff and commands without changing anything" },
+			{ name: "--plan", description: "Render the install plan (label, diff, plist) without changing anything" },
 			{ name: "--apply", description: "Request guarded install" },
 			{ name: "--yes", description: "Confirm the install in noninteractive mode" },
 			{ name: "--replace", description: "Take over a label already loaded from a different plist (a backup is kept)" },

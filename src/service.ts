@@ -7,6 +7,7 @@ import { censusLoad, writeCensus } from "./load-doctor.ts";
 import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 import { classifyScratchPressure, type ScratchPressure } from "./scratch.ts";
+import { fleetWatchRepos } from "./scratch.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -67,7 +68,7 @@ export async function superviseScratchJob(argv: readonly string[], env: NodeJS.P
 	return promise;
 }
 
-export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval"; intervalSeconds: number; runAtLoad?: boolean }
+export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
@@ -79,7 +80,11 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
  	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-flush": { name: "fleet-flush", label: "com.omp-kit.fleet-flush", kind: "interval", intervalSeconds: 60, runAtLoad: false },
- };
+	// CC14 (.18.1 scaffolding for .18.2): the command-center server. Daemon
+	// kind only; the serve exec and heartbeat land in .18.2, which extends
+	// this entry rather than duplicating it.
+	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0 },
+};
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 
@@ -117,6 +122,45 @@ export function serviceLabel(name: string): string {
 	if (namespace === undefined || namespace === "") return `com.omp-kit.${name}`;
 	if (!TEST_NAMESPACE_PATTERN.test(namespace)) throw new Error(`refusing to build a service label from OMP_KIT_TEST_LABEL_NAMESPACE=${namespace}`);
 	return `${namespace}.${name}`;
+}
+/**
+ * CC14 daemon fleet adapter. A daemon job (the `cc` server) runs from the
+ * omp-kit checkout like sitrep.sh, so install/run resolve that checkout the
+ * same way CC15:custody-verb does: explicit `OMP_KIT_FLEET_ROOT` first, else
+ * the repos fleet-watch.json names, first one holding the adapter file wins.
+ * The adapter must be a user-owned regular file (never a symlink); absent
+ * means the shipped companion stays inert (FLEET_ADAPTER_ABSENT), never a
+ * crash or a fake grant. Pure reads only.
+ */
+export const CC_SERVICE_ADAPTER = "scripts/cc/cc.py";
+export type FleetAdapter = { ok: true; root: string; adapter: string } | { ok: false; reason: string };
+function adapterFileOk(path: string): boolean {
+	try {
+		const link = lstatSync(path);
+		if (!link.isFile() || link.isSymbolicLink()) return false;
+		const stat = statSync(path);
+		if (!stat.isFile() || stat.nlink !== 1) return false;
+		if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
+		return true;
+	} catch {
+		return false;
+	}
+}
+export function resolveFleetAdapter(home: string, adapterRel: string = CC_SERVICE_ADAPTER): FleetAdapter {
+	const candidates: string[] = [];
+	const envRoot = process.env.OMP_KIT_FLEET_ROOT;
+	if (typeof envRoot === "string" && envRoot !== "" && isAbsolute(envRoot)) candidates.push(envRoot);
+	for (const entry of fleetWatchRepos(home)) candidates.push(entry.repo);
+	const seen: Record<string, true> = {};
+	for (const root of candidates) {
+		if (seen[root]) continue;
+		seen[root] = true;
+		const adapter = join(root, adapterRel);
+		if (adapterFileOk(adapter)) return { ok: true, root, adapter };
+	}
+	return { ok: false, reason: candidates.length === 0
+		? "No fleet checkout names the adapter: OMP_KIT_FLEET_ROOT is unset and fleet-watch.json names no repos."
+		: `No fleet checkout holds ${adapterRel}: checked ${candidates.join(", ")}.` };
 }
 
 export interface ScratchPressureTriggerResult {
@@ -361,7 +405,9 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t<string>${xml(join(home, "Library", "Logs", "omp-kit", `${job.name}.out.log`))}</string>`,
 		`\t<key>StandardErrorPath</key>`,
 		`\t<string>${xml(join(home, "Library", "Logs", "omp-kit", `${job.name}.err.log`))}</string>`,
-		...(job.kind === "watch" && watchPath
+		...(job.kind === "daemon"
+			? ["\t<key>KeepAlive</key>", "\t<dict>", "\t\t<key>SuccessfulExit</key>", "\t\t<false/>", "\t</dict>", "\t<key>RunAtLoad</key>", "\t<true/>"]
+			: job.kind === "watch" && watchPath
 			? ["\t<key>WatchPaths</key>", "\t<array>", `\t\t<string>${xml(watchPath)}</string>`, "\t</array>", "\t<key>RunAtLoad</key>", "\t<false/>"]
 			: ["\t<key>StartInterval</key>", `\t<integer>${job.intervalSeconds}</integer>`, "\t<key>RunAtLoad</key>", job.runAtLoad ? "\t<true/>" : "\t<false/>"]),
 		"\t<key>ThrottleInterval</key>",
@@ -399,7 +445,20 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
-	const service = [
+	const service = job.kind === "daemon" ? [
+		"[Unit]",
+		`Description=omp-kit ${job.name}`,
+		"",
+		"[Service]",
+		"Type=simple",
+		"TimeoutStartSec=600",
+		`ExecStart=${launcher} service run ${job.name}`,
+		...env,
+		`WorkingDirectory=${home}`,
+		"Restart=on-failure",
+		"RestartSec=60",
+		"",
+	].join("\n") : [
 		"[Unit]",
 		`Description=omp-kit ${job.name}`,
 		"",
@@ -751,7 +810,8 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 export interface SystemdState { enabled: boolean; active: boolean; fragmentPath: string | null }
 
 export function systemctlState(job: ServiceJobDef, run: ServiceRunner): SystemdState {
-	const trigger = `omp-kit-${job.name}.${job.kind === "watch" ? "path" : "timer"}`;
+	// Daemons have no timer/path trigger: the service unit itself is enabled.
+	const trigger = job.kind === "daemon" ? `omp-kit-${job.name}.service` : `omp-kit-${job.name}.${job.kind === "watch" ? "path" : "timer"}`;
 	const enabled = run(["systemctl", "--user", "is-enabled", trigger]);
 	const active = run(["systemctl", "--user", "is-active", trigger]);
 	const show = run(["systemctl", "--user", "show", `omp-kit-${job.name}.service`, "-p", "FragmentPath", "--value"]);
@@ -762,8 +822,11 @@ export function systemctlState(job: ServiceJobDef, run: ServiceRunner): SystemdS
 export function installSystemd(home: string, job: ServiceJobDef, units: RenderedSystemd, run: ServiceRunner, replace = false): LifecycleResult {
 	const dir = join(home, ".config", "systemd", "user");
 	const serviceFile = join(dir, `omp-kit-${job.name}.service`);
+	// Daemons have no timer/path trigger: the service unit itself is enabled
+	// and restarted. renderSystemdUnits returns timer/path null for daemons.
+	const isDaemon = job.kind === "daemon";
 	const triggerFile = units.path ? join(dir, `omp-kit-${job.name}.path`) : join(dir, `omp-kit-${job.name}.timer`);
-	const triggerUnit = units.path ? `omp-kit-${job.name}.path` : `omp-kit-${job.name}.timer`;
+	const triggerUnit = isDaemon ? `omp-kit-${job.name}.service` : (units.path ? `omp-kit-${job.name}.path` : `omp-kit-${job.name}.timer`);
 	const have = readText(serviceFile);
 	const loaded = systemctlState(job, run);
 	if (loaded.fragmentPath !== null && loaded.fragmentPath !== serviceFile && !replace) {
@@ -784,7 +847,10 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 	mkdirSync(dir, { recursive: true, mode: 0o755 });
 	const triggerText = units.path ?? systemdTimer(job);
 	let backup: string | null = null;
-	for (const [dest, text] of [[serviceFile, units.service], [triggerFile, triggerText]] as const) {
+	const pairs: (readonly [string, string])[] = isDaemon
+		? [[serviceFile, units.service]]
+		: [[serviceFile, units.service], [triggerFile, triggerText]];
+	for (const [dest, text] of pairs) {
 		const have = readText(dest);
 		if (have !== null && have !== text) {
 			if (!backup) {
@@ -801,7 +867,7 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 		renameSync(temp, dest);
 	};
 	stamp(units.service, serviceFile);
-	stamp(triggerText, triggerFile);
+	if (!isDaemon) stamp(triggerText, triggerFile);
 	const reload = run(["systemctl", "--user", "daemon-reload"]);
 	if (reload.code !== 0) return { ok: false, changed: true, backup, detail: `daemon-reload failed: ${reload.stderr.trim() || reload.stdout.trim()}` };
 	const enable = run(["systemctl", "--user", "enable", triggerUnit]);
@@ -818,6 +884,7 @@ export function uninstallSystemd(home: string, job: ServiceJobDef, run: ServiceR
 	const files = [join(dir, `omp-kit-${job.name}.service`), join(dir, `omp-kit-${job.name}.path`), join(dir, `omp-kit-${job.name}.timer`)].filter(path => existsSync(path));
 	run(["systemctl", "--user", "disable", "--now", `omp-kit-${job.name}.path`]);
 	run(["systemctl", "--user", "disable", "--now", `omp-kit-${job.name}.timer`]);
+	if (job.kind === "daemon") run(["systemctl", "--user", "disable", "--now", `omp-kit-${job.name}.service`]);
 	run(["systemctl", "--user", "stop", `omp-kit-${job.name}.service`]);
 	if (files.length === 0) {
 		return { ok: true, changed: false, backup: null, alreadyAbsent: true, detail: "Already absent." };

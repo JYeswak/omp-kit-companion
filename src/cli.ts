@@ -61,7 +61,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { matchesBounded } from "./regex-guards.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
@@ -80,7 +80,7 @@ import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
-import { acquireRunLock, claimIncarnation, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 
@@ -2288,12 +2288,24 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (sub === "install") {
 		const dry = request.flags.has("--dry-run");
-		if (!dry && !request.flags.has("--apply")) {
+		const wantPlan = request.flags.has("--plan");
+		if (!dry && !wantPlan && !request.flags.has("--apply")) {
 			return refusal("INSTALL_REQUIRES_APPLY", `service install ${names[0]} replaces the plist and bootstraps it`,
 				"Re-run with --apply --yes, or add --dry-run to preview the render without changing anything.");
 		}
 		const [name] = names;
 		const { job, launcher, watch } = resolveJob(name!);
+		// CC14: daemon jobs are only offered when their fleet adapter
+		// resolves; otherwise the shipped companion stays inert. This gate
+		// runs before any plan render so `service install cc --plan` refuses
+		// on adapter-absent hosts instead of previewing a dead install.
+		if (job.kind === "daemon") {
+			const adapter = resolveFleetAdapter(home, CC_SERVICE_ADAPTER);
+			if (!adapter.ok) {
+				return refusal("FLEET_ADAPTER_ABSENT", `Daemon job ${job.name} needs the fleet checkout holding ${CC_SERVICE_ADAPTER}: ${adapter.reason}`,
+					"Run on the fleet host with the omp-kit checkout present (OMP_KIT_FLEET_ROOT or fleet-watch.json); the shipped companion stays inert without it.");
+			}
+		}
 		if (job.name === "fleet-watch") {
 			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
 			let configFile = false;
@@ -2323,6 +2335,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (platform === "linux") {
 			const units = renderSystemdUnits(home, job, launcher, watch);
 			if (dry) return { code: 0, data: { overall: "UNVERIFIED", job: job.name, dry_run: true, service: units.service, timer: units.timer, path: units.path }, verification: "UNVERIFIED" };
+			if (wantPlan) return { code: 0, data: { overall: "UNVERIFIED", job: job.name, plan: true, service: units.service, timer: units.timer, path: units.path }, verification: "UNVERIFIED" };
 			const result = installSystemd(home, job, units, defaultRunner, request.flags.has("--replace"));
 			return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, ...result }, verification: "UNVERIFIED",
 				errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check systemctl output and rerun." }] };
@@ -2331,6 +2344,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		if (dry) {
 			const plan = planInstall(home, job, launcher, watch, installed);
 			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, dry_run: true, changed: !plan.alreadyInstalled, backup: plan.backup, diff: plan.diff, plist: plan.plist }, verification: "UNVERIFIED" };
+		}
+		if (wantPlan) {
+			const rendered = planInstall(home, job, launcher, watch, installed);
+			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, plan: true, changed: !rendered.alreadyInstalled, backup: rendered.backup, diff: rendered.diff, plist: rendered.plist }, verification: "UNVERIFIED" };
 		}
 		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
 		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
@@ -2441,10 +2458,28 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const root = receiptStateRoot();
 		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
 		// SVC1 run gates, in order: off switch, single-flight, load gate. The
-		// time cap applies where the job body runs below.
+		// time cap applies where the job body runs below. Daemons take a
+		// separate path: one-instance flock for the process lifetime, with
+		// the second concurrent holder refused ALREADY_RUNNING (exit 75).
 		const off = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
 		if (off.disabled) {
 			return { code: 0, data: { overall: "OK", job: job.name, status: "OFF", ...(off.reason ? { reason: off.reason } : {}) }, verification: "UNVERIFIED" };
+		}
+		if (job.kind === "daemon") {
+			const adapter = resolveFleetAdapter(home, CC_SERVICE_ADAPTER);
+			if (!adapter.ok) {
+				return refusal("FLEET_ADAPTER_ABSENT", `Daemon job ${job.name} needs the fleet checkout holding ${CC_SERVICE_ADAPTER}: ${adapter.reason}`,
+					"Run on the fleet host with the omp-kit checkout present (OMP_KIT_FLEET_ROOT or fleet-watch.json); the shipped companion stays inert without it.");
+			}
+			const held = acquireDaemonLock(jobsDir, job.name);
+			if (held.status !== "ACQUIRED") {
+				return { code: DAEMON_HELD_EXIT, data: { overall: "BUSY", job: job.name, status: "ALREADY_RUNNING" },
+					errors: [{ code: "ALREADY_RUNNING", message: `Another ${job.name} instance holds the one-instance lock`,
+						remediation: "Do not start a second instance; inspect the running one." }], verification: "UNVERIFIED" };
+			}
+			held.lock.release();
+			return refusal("SERVICE_BODY_UNIMPLEMENTED", `No service body is implemented for ${job.name}`,
+				"Do not activate this job until its producer is wired; no matcher was substituted.");
 		}
 		const scratchClaim = process.env.OMP_KIT_SCRATCH_CLAIM;
 		if (scratchClaim !== undefined) {
