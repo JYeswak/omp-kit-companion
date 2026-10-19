@@ -29,7 +29,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_readme gate_focused; do
+	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -160,69 +160,133 @@ gate_cli_compile() {
 	)
 }
 
-# judge_budget ELAPSED DEFERRED QUEUED: the gate judges only the time its own work ran.
+# judge_budget ELAPSED TESTS QUEUED: the 180 s budget judges the gate's own machinery. The affected
+# tests' run time (TESTS) scales with the diff, not with the gate, and is reported beside it; heavy
+# queue wait behind another agent's job (QUEUED) is not this gate's work either.
 judge_budget() {
 	judged=$(($1 - $2 - $3))
 	if [ "$judged" -ge 180 ]; then
-		fail "elapsed=${1}s (deferred to CI ${2}s, heavy queue wait ${3}s, judged ${judged}s) exceeds 180s"
+		fail "elapsed=${1}s (affected tests ${2}s, heavy queue wait ${3}s, judged ${judged}s) exceeds 180s"
 		return 1
 	fi
-	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s deferred=${2}s queued=${3}s judged=${judged}s"
+	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s tests=${2}s queued=${3}s judged=${judged}s"
 }
 
 append_changed() {
 	CHANGED="$CHANGED
 $1"
 }
-run_bun_suite() {
-	suite=$1
-	budget="${FRESH_GATE_SUITE_BUDGET_SECS:-25}"
-	python3 - "$ARCHIVE_DIR" "$suite" "$budget" "$WORK/deferred.secs" <<'PY'
-import os
-import signal
-import subprocess
-import sys
 
-archive, suite, budget, deferred_log = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
-env = os.environ.copy()
-env["BUN_CONFIG_FILE"] = os.path.join(archive, "bunfig.toml")
-proc = subprocess.Popen(
-    ["bun", "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--label", "fresh-gate-" + suite, "--no-wait", "--", "bun", "--config=" + os.path.join(archive, "bunfig.toml"), "test", "--timeout=120000", "--path-ignore-patterns", "var/agent-tmp/**", "./" + suite],
-    cwd=archive,
-    env=env,
-    start_new_session=True,
-)
-try:
-    rc = proc.wait(timeout=budget)
-except subprocess.TimeoutExpired:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-    # The suite waited its whole budget: that wait is deferral, not gate work, so the
-    # 180 s judgment subtracts it (admission deferral below costs no wait and is not logged).
-    with open(deferred_log, "a") as fh:
-        fh.write(f"{budget:g}\n")
-    print("deferred to CI: " + suite)
-    raise SystemExit(124)
-if rc == 75:
-    print("deferred to CI: heavy-work admission: " + suite)
-    raise SystemExit(124)
-raise SystemExit(rc)
-PY
-	rc=$?
-	if [ "$rc" -eq 124 ]; then
-		return 0
+# CIGATE1 (ompkit-v66l.27.1): the bun tests a push runs are the ones its diff affects: changed test
+# files, plus tests whose static import graph reaches a changed path or that name a changed file
+# (scripts/affected-tests.ts, from the gate's own tree). Prints one path per line.
+select_affected_tests() {
+	set --
+	for file in $CHANGED; do
+		[ -n "$file" ] && set -- "$@" --changed-file "$file"
+	done
+	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain "$@"
+}
+
+# run_affected_tests TEST...: run every selected test to completion on the exact-commit export, or
+# refuse. Nothing defers to CI: the old per-suite 25 s budget and --no-wait admission (heavy's
+# default sbh observer) turned every push on this host into a GREEN gate that ran 0 tests
+# (2026-10-19: "disk low: sbh check --need 10G reports pressure" with 108 GB free). Below the hard
+# physical floor the gate refuses with a typed reason (scripts/gate-disk-floor.ts); above it heavy
+# admits on statfs (SAVEFIRST1), waits for a slot instead of skipping, and runs the suite at nice 10.
+run_affected_tests() {
+	(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/gate-disk-floor.ts" "$ARCHIVE_DIR") || return $?
+	files=$#
+	tests_out="$WORK/tests.out"
+	scripts_out="$WORK/scripts.out"
+	: >"$tests_out"
+	: >"$scripts_out"
+	# bun reads a bare argument as a name filter; ./PATH names the file. Shell and python suites run
+	# as CI runs them (`sh FILE`, `python3 FILE`).
+	bun_files=0
+	script_files=
+	for test_file in "$@"; do
+		case "$test_file" in
+			*.test.sh|*.py) script_files="$script_files $test_file" ;;
+			*) set -- "$@" "./$test_file"; bun_files=$((bun_files + 1)) ;;
+		esac
+		shift
+	done
+	tests_started=$(date +%s)
+	queued_before=0
+	[ -f "$WORK/queued.secs" ] && queued_before=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
+	tests_rc=0
+	if [ "$bun_files" -gt 0 ]; then
+		(
+			cd "$ARCHIVE_DIR"
+			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"
+			heavy_step tests bun --config="$ARCHIVE_DIR/bunfig.toml" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@"
+		) >"$tests_out" 2>&1 || tests_rc=$?
+		cat "$tests_out"
 	fi
-	return "$rc"
+	if [ -n "$script_files" ]; then
+		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
+		script_rc=0
+		# Intentional word splitting: newline/space-separated repo paths with no spaces.
+		# shellcheck disable=SC2086,SC2016
+		(
+			cd "$ARCHIVE_DIR"
+			export TMPDIR="$ARCHIVE_DIR/var/agent-tmp"
+			heavy_step script-tests sh -c 'ran=0; failed=0
+				for suite; do
+					case "$suite" in *.py) runner=python3 ;; *) runner=sh ;; esac
+					if "$runner" "$suite"; then echo "GREEN script-suite $suite"; else echo "RED script-suite $suite rc=$?"; failed=$((failed + 1)); fi
+					ran=$((ran + 1))
+				done
+				echo "script suites: ran=$ran fail=$failed"
+				[ "$failed" -eq 0 ]' sh $script_files
+		) >"$scripts_out" 2>&1 || script_rc=$?
+		cat "$scripts_out"
+		[ "$tests_rc" -ne 0 ] || tests_rc=$script_rc
+	fi
+	queued_after=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
+	echo "$(($(date +%s) - tests_started - (queued_after - queued_before)))" >>"$WORK/tests.secs"
+	# bun's summary: " N pass", " N fail", "Ran N test(s) across M file(s)." A bun selection that ran
+	# no test is not a pass, whatever its exit status. Each shell or python suite counts as one run.
+	bun_ran=$(awk '$1 == "Ran" && ($3 == "test" || $3 == "tests") && $4 == "across" { print $2 }' "$tests_out" | tail -n 1)
+	failed=$(awk 'NF == 2 && $2 == "fail" { print $1 }' "$tests_out" | tail -n 1)
+	script_ran=$(awk '$1 == "script" && $2 == "suites:" { sub("ran=", "", $3); print $3 }' "$scripts_out" | tail -n 1)
+	ran=$((${bun_ran:-0} + ${script_ran:-0}))
+	echo "affected tests: files=$files ran=$ran fail=${failed:-0} rc=$tests_rc"
+	record_run "$ran" "$files" "$tests_rc"
+	if [ "$tests_rc" -ne 0 ]; then
+		echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
+		return "$tests_rc"
+	fi
+	if [ "$bun_files" -gt 0 ] && [ "${bun_ran:-0}" -eq 0 ]; then
+		echo "FRESH-GATE: RED: $bun_files affected bun test files were selected but bun reported no test run" >&2
+		return 1
+	fi
+	echo "FRESH-GATE: VERDICT TESTED files=$files ran=$ran"
+}
+
+# Product code a change touches: source, shell or python outside tests/ that is still in the tree.
+# A push that changes product code and selects no test is refused (CIGATE1): a gate that ran nothing
+# never passes code. Test-tree material (helpers, e2e drivers) is judged by the suites that use it.
+changed_code() {
+	for file in $CHANGED; do
+		case "$file" in
+			tests/*) ;;
+			*.ts|*.tsx|*.mts|*.cts|*.js|*.mjs|*.cjs|*.sh|*.py)
+				[ -e "$ARCHIVE_DIR/$file" ] && printf '%s\n' "$file" ;;
+		esac
+	done
+	return 0
+}
+
+# One JSON line per gate that reaches test selection, in the pushing repo's git dir, so a run of
+# pushes shows how many tests each gate ran (CIGATE1 live acceptance). Off when FRESH_GATE_LEDGER is
+# empty (fixture probes, a stock clone without a git dir).
+record_run() {
+	[ -n "${FRESH_GATE_LEDGER:-}" ] || return 0
+	mkdir -p "$(dirname "$FRESH_GATE_LEDGER")" 2>/dev/null || return 0
+	printf '{"ts":"%s","commit":"%s","base":"%s","changed":%s,"selected_files":%s,"tests_ran":%s,"rc":%s}\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COMMIT" "${BASE:-}" "$(printf '%s\n' "$CHANGED" | grep -c .)" "$2" "$1" "$3" >>"$FRESH_GATE_LEDGER" 2>/dev/null || true
 }
 
 gate_notes() {
@@ -240,7 +304,6 @@ gate_readme() {
 
 gate_focused() {
 	focus_tests=
-	needs_cli=0
 	needs_shell=0
 	needs_actionlint=0
 	needs_regex=0
@@ -250,19 +313,13 @@ gate_focused() {
 		case "$file" in
 			tests/cli/migrate.test.ts)
 				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
-			tests/cli/migrate-history.test.ts|tests/cli/*.test.ts|tests/fleet-guard/*.test.ts)
-				# A range that deletes a suite has nothing to run for it.
-				if [ -e "$ARCHIVE_DIR/$file" ]; then
-					focus_tests="$focus_tests $file"
-				else
-					echo "focused: $file deleted in range; not run"
-				fi ;;
 			src/migrate.ts)
 				focus_tests="$focus_tests tests/cli/migrate-history.test.ts" ;;
 			src/kit-update.ts)
 				focus_tests="$focus_tests tests/cli/kit-update.test.ts" ;;
-			src/*|extensions/*)
-				needs_cli=1 ;;
+			*.test.ts)
+				# A range that deletes a suite has nothing to run for it; a kept one is selected below.
+				[ -e "$ARCHIVE_DIR/$file" ] || echo "focused: $file deleted in range; not run" ;;
 			scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
 				needs_shell=1 ;;
 			.github/workflows/*.yml|.github/workflows/*.yaml)
@@ -390,7 +447,11 @@ fi
 			echo "live coverage: only pre-existing gaps outside the pushed range"
 		fi
 	fi
-	if { [ -n "$focus_tests" ] || [ "$needs_cli" = 1 ]; } && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
+	affected=$(select_affected_tests) || { echo "focused: affected-test selection failed" >&2; return 1; }
+	# Explicit mappings above join the import-scan selection; each runs once.
+	# shellcheck disable=SC2086
+	focus_tests=$(printf '%s\n' $affected $focus_tests | sort -u)
+	if [ -n "$focus_tests" ] && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (
 			cd "$ARCHIVE_DIR"
 			sh scripts/build-manifest.sh --stdout >MANIFEST.tsv
@@ -404,17 +465,20 @@ fi
 		# CI tests a source checkout; contributor-only paths (the Bun fallback in
 		# runtime-adapter.sh) require .git, so the focused suites get one too.
 		[ -e "$ARCHIVE_DIR/.git" ] || git -C "$ARCHIVE_DIR" init -q
-		# Each suite has an independent budget; a timeout is a visible CI deferral, never a silent skip.
 		# Intentional word splitting turns newline-separated test paths into argv entries.
 		# shellcheck disable=SC2086
-		set -- $focus_tests
-		for suite in "$@"; do
-			run_bun_suite "$suite" || return $?
-		done
-	elif [ "$needs_cli" = 1 ]; then
-		run_bun_suite tests/cli || return $?
+		run_affected_tests $focus_tests || return $?
 	else
 		echo "focused suites: none selected for changed paths"
+		code=$(changed_code)
+		if [ -n "$code" ]; then
+			record_run 0 0 1
+			# shellcheck disable=SC2086
+			echo "FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=$(printf '%s\n' $code | paste -sd , -): the push changes product code and no test reaches it; add or name a test that exercises it" >&2
+			return 1
+		fi
+		record_run 0 0 0
+		echo "FRESH-GATE: VERDICT DOCS_ONLY: no product code changed; no suite to run"
 	fi
 }
 
@@ -499,6 +563,12 @@ fi
 # archive lives under var/agent-tmp, so without this every case path looks like scratch.
 : "${OMP_KIT_CASE_CWD:=$ROOT}"
 export OMP_KIT_CASE_CWD
+# CIGATE1 ledger: the pushing checkout's own git dir (never committed, never shared). An explicit
+# FRESH_GATE_LEDGER (including empty, which turns it off) wins.
+if [ -z "${FRESH_GATE_LEDGER+set}" ]; then
+	ledger_git=$(git -C "$OMP_KIT_CASE_CWD" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
+	FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
+fi
 disk_pressure_flag
 started=$(date +%s)
 run_step manifest gate_manifest || exit 1
@@ -508,12 +578,10 @@ run_step notes gate_notes || exit 1
 run_step readme gate_readme || exit 1
 run_step focused gate_focused || exit 1
 elapsed=$(($(date +%s) - started))
-# A large unpublished range changes many suites; each one that defers to CI waited its full
-# budget. Judge the time the gate spent verifying, not the deferral waits (69-commit backlog,
-# 2026-10-16: 252 s elapsed, 150 s of it six deferred suites, so no range could ever pass).
-deferred=0
-if [ -f "$WORK/deferred.secs" ]; then
-	deferred=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/deferred.secs")
+# The affected tests' own run time is reported, not judged against the 180 s machinery budget.
+tests=0
+if [ -f "$WORK/tests.secs" ]; then
+	tests=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/tests.secs")
 fi
 # Heavy queue wait behind another agent's job is not this gate's work (2026-10-18: a
 # 748 s RED was ten minutes queued behind one stuck job).
@@ -521,4 +589,4 @@ queued=0
 if [ -f "$WORK/queued.secs" ]; then
 	queued=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 fi
-judge_budget "$elapsed" "$deferred" "$queued" || exit 1
+judge_budget "$elapsed" "$tests" "$queued" || exit 1

@@ -105,10 +105,6 @@ test("scratch skip prints NOT JUDGED while other skips keep SKIPPED", () => {
 
 test("focused selection skips suites and shell files the range deleted, and still runs modified ones", () => {
 	const script = readFileSync(gate, "utf8");
-	const start = script.indexOf("gate_focused() {");
-	expect(start).toBeGreaterThan(-1);
-	const end = script.indexOf("\n}\n", start);
-	expect(end).toBeGreaterThan(start);
 	const dir = fixture();
 	try {
 		mkdirSync(join(dir, "tests/cli"), { recursive: true });
@@ -122,9 +118,10 @@ test("focused selection skips suites and shell files the range deleted, and stil
 	writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate the pinned shellcheck image by delegating to the fake shellcheck.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  echo \"DOCKER-SHELLCHECK $file\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
-		writeFileSync(probe, `run_bun_suite() { [ -e "$ARCHIVE_DIR/$1" ] || { echo "bun test: missing $1" >&2; return 1; }; echo "RAN $1"; }\n${script.slice(start, end + 3)}\ngate_focused\n`);
+		// The real selector and gate_focused; only the bun test run is a stand-in that checks its argv exists.
+		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, CHANGED: changed },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "" },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const deleted = focused("tests/cli/gone.test.ts\nscripts/gone.sh");
@@ -147,14 +144,13 @@ test("focused selection skips suites and shell files the range deleted, and stil
 
 test("focused shellcheck refuses an A && B || C guard through the pinned runner", () => {
 	const script = readFileSync(gate, "utf8");
-	const start = script.indexOf("gate_focused() {");
-	expect(start).toBeGreaterThan(-1);
-	const end = script.indexOf("\n}\n", start);
-	expect(end).toBeGreaterThan(start);
 	const dir = fixture();
 	try {
 		writeFileSync(join(dir, "scripts/bad.sh"), "#!/bin/sh\nset -u\nx=\"${1:-}\"\ny=\"${2:-}\"\n[ -n \"$x\" ] && [ -n \"$y\" ] || { echo \"need x and y\" >&2; exit 2; }\n");
 		writeFileSync(join(dir, "scripts/good.sh"), "#!/bin/sh\nexit 0\n");
+		// good.sh is product code: a suite that names it keeps the push from NO_AFFECTED_TESTS.
+		mkdirSync(join(dir, "tests/cli"), { recursive: true });
+		writeFileSync(join(dir, "tests/cli/good.test.sh"), "#!/bin/sh\nsh \"$ROOT/scripts/good.sh\"\n");
 		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		const fakeBin = join(dir, "bin");
 		mkdirSync(fakeBin);
@@ -163,9 +159,9 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 		chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
-		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_bun_suite() { [ -e "$ARCHIVE_DIR/$1" ] || { echo "bun test: missing $1" >&2; return 1; }; echo "RAN $1"; }\n${script.slice(start, end + 3)}\ngate_focused\n`);
+		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, CHANGED: changed },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "" },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const bad = focused("scripts/bad.sh");
@@ -373,11 +369,14 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 	try {
 		const queuedLong = runProbe(fx, source, "judge_budget 200 0 30");
 		expect(queuedLong.code).toBe(0);
-		expect(queuedLong.out).toContain("FRESH-GATE: GREEN commit=HEAD elapsed=200s deferred=0s queued=30s judged=170s");
+		expect(queuedLong.out).toContain("FRESH-GATE: GREEN commit=HEAD elapsed=200s tests=0s queued=30s judged=170s");
 		const slowWork = runProbe(fx, source, "judge_budget 200 0 15");
 		expect(slowWork.code).toBe(1);
-		expect(slowWork.out).toContain("FRESH-GATE: RED: elapsed=200s (deferred to CI 0s, heavy queue wait 15s, judged 185s) exceeds 180s");
-		expect(runProbe(fx, source, "judge_budget 200 30 0").code).toBe(0);
+		expect(slowWork.out).toContain("FRESH-GATE: RED: elapsed=200s (affected tests 0s, heavy queue wait 15s, judged 185s) exceeds 180s");
+		// CIGATE1: the affected tests' own run time is reported beside the machinery budget, not judged by it.
+		const testsLong = runProbe(fx, source, "judge_budget 200 30 0");
+		expect(testsLong.code).toBe(0);
+		expect(testsLong.out).toContain("FRESH-GATE: GREEN commit=HEAD elapsed=200s tests=30s queued=0s judged=170s");
 		// Mutant: queue wait judged as gate time fails the push queued behind a stuck job.
 		const mutant = source.replace("judged=$(($1 - $2 - $3))", "judged=$(($1 - $2))");
 		expect(mutant).not.toBe(source);
@@ -386,3 +385,189 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 });
+
+// ---- CIGATE1 (ompkit-v66l.27.1): the push runs the tests its diff affects, or refuses ---------------
+// The real selector, disk floor, heavy and bun test run against a small exact-tree fixture; src is the
+// checkout's (heavy runs from it), the code under test lives in lib/ so the fixture owns its edits.
+const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "run_affected_tests", "changed_code", "record_run", "gate_focused"];
+function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
+	const dir = mkdtempSync(join(base, "archive."));
+	symlinkSync(join(root, "src"), join(dir, "src"));
+	mkdirSync(join(dir, "lib"));
+	mkdirSync(join(dir, "tests/cli"), { recursive: true });
+	mkdirSync(join(dir, "docs"));
+	writeFileSync(join(dir, "bunfig.toml"), "[test]\ntimeout = 120000\n");
+	writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
+	// A docs path in source text is a help pointer, not a dependency.
+	writeFileSync(join(dir, "lib/mod.ts"), `// see docs/notes.md\nexport const answer = (): number => ${answer};\n`);
+	writeFileSync(join(dir, "tests/cli/mod.test.ts"), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("answer", () => { expect(answer()).toBe(${expected}); });\n`);
+	writeFileSync(join(dir, "docs/notes.md"), "# notes\n");
+	return dir;
+}
+function runFocused(fx: SaveFixture, source: string, archive: string, changed: string) {
+	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
+	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
+	const started = Date.now();
+	const result = Bun.spawnSync(["sh", probe], {
+		env: { ...process.env, ...fx.env, ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		stdout: "pipe", stderr: "pipe",
+	});
+	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };
+}
+function ledger(fx: SaveFixture): Array<Record<string, unknown>> {
+	const path = join(fx.dir, "runs.jsonl");
+	return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
+}
+
+test.skipIf(!AMPLE)("CIGATE1 planted: a src change runs the tests importing it; breaking it refuses the push (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const green = runFocused(fx, source, affectedArchive(fx, 42, 42), "lib/mod.ts");
+		expect(green.code).toBe(0);
+		expect(green.out).toContain("affected: tests/cli/mod.test.ts <- lib/mod.ts");
+		expect(green.out).toContain("disk-floor: OK");
+		expect(green.out).toContain("affected tests: files=1 ran=1 fail=0 rc=0");
+		const broken = affectedArchive(fx, 41, 42);
+		const red = runFocused(fx, source, broken, "lib/mod.ts");
+		expect(red.code).not.toBe(0);
+		expect(red.out).toContain("affected tests: files=1 ran=1 fail=1 rc=1");
+		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass (exit 1); the push is refused");
+		expect(ledger(fx).map((row) => [row.selected_files, row.tests_ran, row.rc])).toEqual([[1, 1, 0], [1, 1, 1]]);
+		// Mutant: a gate that ignores the suite's status passes the broken push.
+		const ignoresFailure = source.replace('\t\treturn "$tests_rc"\n', "\t\treturn 0\n");
+		expect(ignoresFailure).not.toBe(source);
+		expect(runFocused(fx, ignoresFailure, broken, "lib/mod.ts").code).toBe(0);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test.skipIf(!AMPLE)("CIGATE1 planted: a commit breaking the test it touches is refused (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const red = runFocused(fx, source, affectedArchive(fx, 42, 43), "tests/cli/mod.test.ts");
+		expect(red.code).not.toBe(0);
+		expect(red.out).toContain("affected: tests/cli/mod.test.ts <- tests/cli/mod.test.ts");
+		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test("CIGATE1 planted: a docs-only commit runs no suites and passes fast", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const docs = runFocused(fx, source, affectedArchive(fx, 41, 42), "docs/notes.md");
+		expect(docs.code).toBe(0);
+		expect(docs.out).toContain("focused suites: none selected for changed paths");
+		expect(docs.out).toContain("FRESH-GATE: VERDICT DOCS_ONLY: no product code changed");
+		expect(docs.out).not.toContain("affected tests:");
+		expect(docs.seconds).toBeLessThan(15);
+		expect(ledger(fx).map((row) => [row.selected_files, row.tests_ran, row.rc])).toEqual([[0, 0, 0]]);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 60_000);
+
+test("CIGATE1 planted: a product-code change that no test reaches is refused, never a bare pass", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		writeFileSync(join(archive, "lib/orphan.ts"), "export const orphan = 1;\n");
+		const refused = runFocused(fx, source, archive, "lib/orphan.ts\ndocs/notes.md");
+		expect(refused.code).toBe(1);
+		expect(refused.out).toContain("FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=lib/orphan.ts:");
+		expect(refused.out).not.toContain("VERDICT");
+		expect(ledger(fx).map((row) => [row.selected_files, row.tests_ran, row.rc])).toEqual([[0, 0, 1]]);
+		// Mutant: a gate that cannot tell code from docs passes the untested change as DOCS_ONLY.
+		const blind = source.replace(`\t\t\t\t[ -e "$ARCHIVE_DIR/$file" ] && printf '%s\\n' "$file" ;;`, "\t\t\t\t: ;;");
+		expect(blind).not.toBe(source);
+		const passed = runFocused(fx, blind, archive, "lib/orphan.ts");
+		expect(passed.code).toBe(0);
+		expect(passed.out).toContain("VERDICT DOCS_ONLY");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 60_000);
+
+test.skipIf(!AMPLE)("CIGATE1 planted: a shell suite naming a changed script runs, and its failure refuses the push (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		mkdirSync(join(archive, "scripts"));
+		writeFileSync(join(archive, "scripts/tool.sh"), "#!/bin/sh\necho tool-ok\n");
+		writeFileSync(join(archive, "tests/cli/tool.test.sh"), '#!/bin/sh\nROOT=$(pwd)\nout=$(sh "$ROOT/scripts/tool.sh")\n[ "$out" = tool-ok ] || { echo "tool said $out" >&2; exit 1; }\necho "tool: 1 pass 0 fail"\n');
+		const green = runFocused(fx, source, archive, "scripts/tool.sh");
+		expect(green.code).toBe(0);
+		expect(green.out).toContain("affected: tests/cli/tool.test.sh <- scripts/tool.sh");
+		expect(green.out).toContain("GREEN script-suite tests/cli/tool.test.sh");
+		expect(green.out).toContain("FRESH-GATE: VERDICT TESTED files=1 ran=1");
+		writeFileSync(join(archive, "scripts/tool.sh"), "#!/bin/sh\necho tool-broken\n");
+		const red = runFocused(fx, source, archive, "scripts/tool.sh");
+		expect(red.code).not.toBe(0);
+		expect(red.out).toContain("RED script-suite tests/cli/tool.test.sh rc=1");
+		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test.skipIf(!AMPLE)("CIGATE1 planted: sbh pressure with ample bytes runs the affected tests; the old admission refuses, never passes silently (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(1, { slots: 8, max_wait_s: 1 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		const ran = runFocused(fx, source, archive, "lib/mod.ts");
+		expect(ran.code).toBe(0);
+		expect(ran.out).toContain("affected tests: files=1 ran=1 fail=0 rc=0");
+		// Mutant: 2026-10-19's admission (heavy's default observer, which takes sbh's verdict). The plant
+		// now refuses with heavy's reason where the old gate printed "deferred to CI" and went GREEN.
+		const sbhVeto = source.replace('heavy --label "fresh-gate-$step" --disk-observer statfs --', 'heavy --label "fresh-gate-$step" --no-wait --');
+		expect(sbhVeto).not.toBe(source);
+		const refused = runFocused(fx, sbhVeto, archive, "lib/mod.ts");
+		expect(refused.code).toBe(75);
+		expect(refused.out).toContain("disk low: sbh check --need 10G reports pressure");
+		expect(refused.out).toContain("FRESH-GATE: RED: heavy refused admission for tests (exit 75)");
+		expect(refused.out).not.toContain("deferred to CI");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test("CIGATE1: the disk floor reads statfs and refuses unreadable space with a typed reason", () => {
+	const floor = (dir: string) => Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", join(root, "scripts/gate-disk-floor.ts"), dir], { stdout: "pipe", stderr: "pipe" });
+	const missing = floor(join(scratchRoot, `no-such-dir-${process.pid}`));
+	expect(missing.exitCode).toBe(69);
+	expect(missing.stderr.toString()).toContain("FRESH-GATE: REFUSED reason=DISK_OBSERVER_UNAVAILABLE observer=statfs");
+	const here = floor(root);
+	if (AMPLE) {
+		expect(here.exitCode).toBe(0);
+		expect(here.stdout.toString()).toContain("disk-floor: OK free_bytes=");
+	} else {
+		expect(here.exitCode).toBe(1);
+		expect(here.stderr.toString()).toContain("reason=DISK_BELOW_FLOOR need=10G");
+	}
+});
+
+test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor the gate refuses naming the space needed, and no test runs", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 1 });
+	const low = mkdtempSync(join(LOW_BASE as string, "fresh-gate-lowfs."));
+	try {
+		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
+		expect(freeBytes(low)).toBeLessThan(NEED_BYTES);
+		const refused = runFocused(fx, source, affectedArchive(fx, 42, 42, low), "lib/mod.ts");
+		expect(refused.code).toBe(1);
+		expect(refused.out).toMatch(/FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G need_bytes=10737418240 free_bytes=[0-9]+ observer=statfs/);
+		expect(refused.out).not.toContain("affected tests:");
+		expect(refused.out).not.toContain("GREEN");
+	} finally {
+		rmSync(low, { recursive: true, force: true });
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 60_000);
