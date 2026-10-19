@@ -1,0 +1,1 @@
+- test(package-release): the installed fast-proof and oversized-files tests install their candidates concurrently in `beforeAll` and run their independent CLI checks concurrently in separate pristine homes; each now takes ~2.2-2.4 s (was 4.8-5.9 s, at bun's 5000 ms limit) with every assertion kept.

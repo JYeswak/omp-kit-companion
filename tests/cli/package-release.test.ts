@@ -232,16 +232,47 @@ test("SourceStamp stays outside the closed release manifest schema", () => {
 	expect(() => validateReleaseManifest({ ...legacy, source_revision: sourceRevision, extra: true })).toThrow("INVALID_RELEASE_MANIFEST");
 });
 
-function installCandidate(name: string): { home: string; installedRoot: string; installedBinary: string } {
+type Candidate = { home: string; installedRoot: string; installedBinary: string };
+function installArgs(name: string): { home: string; prefix: string; command: string[]; options: { cwd: string; env: Record<string, string | undefined> } } {
 	const home = join(output, name);
 	mkdirSync(home);
 	const prefix = join(home, ".local", "opt", "omp-kit");
-	const installed = Bun.spawnSync(["sh", join(repo, "installer", "install.sh"), "--version", "1.2.3",
-		"--index", indexPath, "--offline", join(output, asset.filename), "--prefix", prefix], {
-		cwd: output, env: { ...process.env, PATH: authorityPath, HOME: home, TMPDIR: output, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" }, stdout: "pipe", stderr: "pipe",
-	});
+	return { home, prefix, command: ["sh", join(repo, "installer", "install.sh"), "--version", "1.2.3",
+		"--index", indexPath, "--offline", join(output, asset.filename), "--prefix", prefix],
+	options: { cwd: output, env: { ...process.env, PATH: authorityPath, HOME: home, TMPDIR: output, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" } } };
+}
+function installCandidate(name: string): Candidate {
+	const { home, prefix, command, options } = installArgs(name);
+	const installed = Bun.spawnSync(command, { ...options, stdout: "pipe", stderr: "pipe" });
 	expect(installed.exitCode, installed.stdout.toString() + installed.stderr.toString()).toBe(0);
 	return { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") };
+}
+type Run = { exitCode: number | null; stdout: string; stderr: string };
+async function run(command: string[], options: { cwd: string; env: Record<string, string | undefined> }): Promise<Run> {
+	const child = Bun.spawn(command, { ...options, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+	return { exitCode, stdout, stderr };
+}
+// Each candidate below needs its own pristine install; the installs are independent, so they
+// run concurrently once here instead of serially inside the per-test time budget.
+const PREINSTALLED = ["operator-home", "drift-home", "bounded-home", "bounded-watched-home"] as const;
+const preinstalled = new Map<string, Candidate>();
+beforeAll(async () => {
+	await Promise.all(PREINSTALLED.map(async name => {
+		const { home, prefix, command, options } = installArgs(name);
+		const installed = await run(command, options);
+		expect(installed.exitCode, installed.stdout + installed.stderr).toBe(0);
+		preinstalled.set(name, { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") });
+	}));
+}, 30_000);
+function candidate(name: (typeof PREINSTALLED)[number]): Candidate {
+	const found = preinstalled.get(name);
+	expect(found, `preinstalled candidate ${name}`).toBeDefined();
+	return found!;
+}
+function candidateEnv(home: string, extra: Record<string, string> = {}): Record<string, string | undefined> {
+	return { ...process.env, ...nativeCacheEnv, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
+		XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", ...extra };
 }
 
 function installerBoundary(name: string, substitute: boolean): { root: string; environment: Record<string, string>; binary: string } {
@@ -425,32 +456,29 @@ test("installed integrations run packaged mock-model fire and quiet turns throug
 	expect(guard?.quiet?.outcome).toBe("ALLOWED");
 }, 300_000);
 
-test("installed candidate fast proof and planted rule drift fail the full check without live execution or mutation", () => {
-	const { home, installedRoot, installedBinary } = installCandidate("operator-home");
-	const fast = Bun.spawnSync([installedBinary, "test", "--json"], {
-		cwd: output, env: { ...process.env, ...nativeCacheEnv, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_CASE_CWD: caseCwd },
-		stdout: "pipe", stderr: "pipe",
-	});
-	expect(fast.exitCode, fast.stdout.toString() + fast.stderr.toString()).toBe(0);
+test("installed candidate fast proof and planted rule drift fail the full check without live execution or mutation", async () => {
+	// The fast proof needs a pristine candidate and the full check a drifted one; two installs of
+	// the same archive let the two independent runs proceed concurrently.
+	const { home, installedRoot, installedBinary } = candidate("operator-home");
+	const drifted = candidate("drift-home");
+	appendFileSync(join(drifted.installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
+	const [fast, red] = await Promise.all([
+		run([installedBinary, "test", "--json"], { cwd: output, env: candidateEnv(home, { OMP_KIT_CASE_CWD: caseCwd }) }),
+		run([drifted.installedBinary, "test", "--full", "--json"], { cwd: output, env: candidateEnv(drifted.home, { OMP_KIT_CASE_CWD: caseCwd }) }),
+	]);
+	expect(fast.exitCode, fast.stdout + fast.stderr).toBe(0);
 	const corpus = countCaseRows(readFileSync(join(installedRoot, "cases", "cases.tsv"), "utf8"));
 	const ruleCount = readdirSync(join(installedRoot, "rules")).filter((name) => name.endsWith(".md")).length;
 	expect(ruleCount).toBeGreaterThan(0);
-	expect(JSON.parse(fast.stdout.toString()).data.test.proofs).toMatchObject({
+	expect(JSON.parse(fast.stdout).data.test.proofs).toMatchObject({
 		G1_registration: { status: "PASS", observed_rules: ruleCount },
 		G2_payload: { status: "PASS", expected_cases: corpus.cases, observed_cases: corpus.cases },
 		G3_quiet_prefix: { status: "PASS", expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,
 			observed_cases: corpus.cases, observed_quiet_cases: corpus.quietCases, quiet_prefix_fires: 0 },
 		G4_live: { status: "NOT_RUN" },
 	});
-	appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
-	const red = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
-		cwd: output, env: { ...process.env, ...nativeCacheEnv, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-			XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_CASE_CWD: caseCwd },
-		stdout: "pipe", stderr: "pipe",
-	});
-	expect(red.exitCode, red.stdout.toString() + red.stderr.toString()).toBe(1);
-	const report = JSON.parse(red.stdout.toString()).data.test;
+	expect(red.exitCode, red.stdout + red.stderr).toBe(1);
+	const report = JSON.parse(red.stdout).data.test;
 	expect(report.status).toBe("FAIL");
 	expect(report.proofs.G4_live.status).toBe("NOT_RUN");
 	expect(report.snapshots.release).toEqual({ unchanged: true, complete: true });
@@ -458,22 +486,25 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	expect(report.snapshots.home.complete).toBe(true);
 });
 
-test("oversized operator files bound the watched snapshot only where the kit could write", () => {
-	const { home, installedRoot, installedBinary } = installCandidate("bounded-home");
-	appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
-	const env = { ...process.env, ...nativeCacheEnv, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-		XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
-	const unwatched = join(home, "large-private-file");
-	writeFileSync(unwatched, "");
-	truncateSync(unwatched, 600 * 1024 * 1024);
-	const ignored = Bun.spawnSync([installedBinary, "test", "--full", "--json"], { cwd: output, env, stdout: "pipe", stderr: "pipe" });
-	expect(ignored.exitCode, ignored.stdout.toString() + ignored.stderr.toString()).toBe(1);
-	expect(JSON.parse(ignored.stdout.toString()).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: true, incomplete_paths: [] });
-	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
-	const watched = join(home, ".agents", "rules", "oversized.md");
+test("oversized operator files bound the watched snapshot only where the kit could write", async () => {
+	// Two drifted candidates: one holds only the unwatched oversized file, the other holds it
+	// plus an oversized watched file, so both bounded snapshots are observed concurrently.
+	const homes = [candidate("bounded-home"), candidate("bounded-watched-home")];
+	for (const { home, installedRoot } of homes) {
+		appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
+		const unwatched = join(home, "large-private-file");
+		writeFileSync(unwatched, "");
+		truncateSync(unwatched, 600 * 1024 * 1024);
+	}
+	const watchedHome = homes[1]!.home;
+	mkdirSync(join(watchedHome, ".agents", "rules"), { recursive: true });
+	const watched = join(watchedHome, ".agents", "rules", "oversized.md");
 	writeFileSync(watched, "");
 	truncateSync(watched, 512 * 1024 * 1024 + 1);
-	const bounded = Bun.spawnSync([installedBinary, "test", "--full", "--json"], { cwd: output, env, stdout: "pipe", stderr: "pipe" });
-	expect(bounded.exitCode, bounded.stdout.toString() + bounded.stderr.toString()).toBe(1);
-	expect(JSON.parse(bounded.stdout.toString()).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
+	const [ignored, bounded] = await Promise.all(homes.map(({ home, installedBinary }) =>
+		run([installedBinary, "test", "--full", "--json"], { cwd: output, env: candidateEnv(home) })));
+	expect(ignored!.exitCode, ignored!.stdout + ignored!.stderr).toBe(1);
+	expect(JSON.parse(ignored!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: true, incomplete_paths: [] });
+	expect(bounded!.exitCode, bounded!.stdout + bounded!.stderr).toBe(1);
+	expect(JSON.parse(bounded!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
 });
