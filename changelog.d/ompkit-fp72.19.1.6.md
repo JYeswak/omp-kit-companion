@@ -1,1 +1,2 @@
 - kit-flywheel-guard refuses the goal tool's `drop` and `complete` in fleet seats (`GOAL_END_REFUSED`, J-2026-10-18-44): a seat never ends its own goal; directors and chiefs change goals with `/goal set` (arm_seat.py --set), which never reaches the tool hook, and sessions without a fleet identity are untouched.
+- kit-flywheel-guard refuses a raw `/goal` line typed into any pane from a fleet seat (`GOAL_SEND_REFUSED`, J-2026-10-18-45): goals change only through arm_seat.py --set, which sets stamped prompts only; identity-less sessions pass.

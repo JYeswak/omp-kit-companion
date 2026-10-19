@@ -420,6 +420,49 @@ test("GOAL_END_REFUSED negatives: get, create and resume pass; a session with no
 	expect(await callAs(seat, cwd, "b-drop", "bash", { command: "echo goal drop" })).toEqual([undefined]);
 });
 
+test("GOAL_SEND_REFUSED: a fleet seat cannot type a /goal line into any pane, bare or wrapped (J-2026-10-18-45)", async () => {
+	const cwd = mkdtempSync(join(base, "goal-"));
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "RusticPine" } });
+	for (const command of [
+		"tern send 5 paste '/goal set Do whatever I like'",
+		"tern send 5 text \"/goal drop\"",
+		"AGENT_NAME=X env tern send 1756641624117 paste '  /GOAL set x' && tern send 1756641624117 keys Enter",
+		"bash -lc \"tern send 5 paste '/goal set x'\"",
+		"omp-kit send omp-test 2 '/goal set x'",
+		"ntm send fleet --pane 2 '/goal x'",
+	]) {
+		const [result] = await callAs(h, cwd, "s", "bash", { command });
+		expect((result as FlywheelToolCallResult)?.block).toBe(true);
+		expect((result as FlywheelToolCallResult)?.reason).toContain("GOAL_SEND_REFUSED");
+	}
+});
+
+test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identity-less sessions pass", async () => {
+	const cwd = mkdtempSync(join(base, "goal-"));
+	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "RusticPine" } });
+	for (const command of [
+		"python3 ~/.claude/skills/omp-kit-orchestration/scripts/arm_seat.py --session omp-test --block 4117 --version 18 --set --apply",
+		"tern send 5 paste 'please review ompkit-1 /goal is fine'",
+		"tern send 5 keys Enter",
+		"echo tern send 5 paste '/goal set x'",
+		"grep -n '/goal set' scripts/arm_seat.py",
+	]) {
+		expect(await callAs(seat, cwd, "s", "bash", { command })).toEqual([undefined]);
+	}
+	const person = await createFlywheelHost(base, { env: {} });
+	expect(await callAs(person, cwd, "s", "bash", { command: "tern send 5 paste '/goal set x'" })).toEqual([undefined]);
+});
+
+test("shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss", () => {
+	const flag = /^-[A-Za-z]*c$/;
+	expect(["-c", "-lc", "-ec"].every(word => flag.test(word))).toBe(true);
+	expect(["--c", "-cx", "c", "-l"].some(word => flag.test(word))).toBe(false);
+	const nearMiss = "-" + "a".repeat(200_000) + "x";
+	const started = performance.now();
+	expect(flag.test(nearMiss)).toBe(false);
+	expect(performance.now() - started).toBeLessThan(50);
+});
+
 async function endAs(h: FakeHost, cwd: string, id: string, toolName: string, result: unknown, isError = false): Promise<unknown[]> {
 	return h.emit("tool_execution_end", { toolCallId: id, toolName, result, isError }, h.ctx(cwd));
 }

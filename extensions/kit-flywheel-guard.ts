@@ -132,6 +132,7 @@ export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
+export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 /** br 0.7.4 global/close/update options that consume a value. */
@@ -711,6 +712,12 @@ function isAssignment(word: string): boolean {
 const SHELL_WRAPPERS: Record<string, true> = { sh: true, bash: true, zsh: true, dash: true };
 const MAX_SHELL_DEPTH = 3;
 
+/** The script string of a `sh -c <script>` (or `-lc`, `-ec`, ...) argv, or undefined. */
+function shellScript(argv: string[]): string | undefined {
+	const flag = argv.findIndex((word, index) => index > 0 && /^-[A-Za-z]*c$/.test(word));
+	return flag > 0 ? argv[flag + 1] : undefined;
+}
+
 /** Supported close/claim/start/block mutations, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
 export function trackerRequests(command: string, cwd: string, home: string, depth = 0): TrackerRequest[] {
 	const requests: TrackerRequest[] = [];
@@ -740,8 +747,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		}
 		const name = basename(argv[0]!);
 		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
-			const flag = argv.findIndex((word, index) => index > 0 && /^-[A-Za-z]*c$/.test(word));
-			const script = flag > 0 ? argv[flag + 1] : undefined;
+			const script = shellScript(argv);
 			if (script !== undefined) {
 				for (const nested of trackerRequests(script, current, home, depth + 1)) {
 					requests.push({ ...nested, identities: [...identities, ...nested.identities], actor: nested.actor ?? inlineActor });
@@ -983,6 +989,43 @@ export function checkGoalEnd(event: FlywheelToolCallEvent, owner: string | null)
 		reason: `kit-flywheel-guard ${GOAL_END_REFUSED}: ${owner} may not ${op} its own goal (J-2026-10-18-44). `
 			+ "Only your director or a chief changes your goal, with /goal set. Keep working your goal: if nothing is claimable, "
 			+ "take the next downtime item. Nothing was changed.",
+	};
+}
+
+const SENDERS: Record<string, true> = { tern: true, "omp-kit": true, ntm: true };
+
+/** True when a command types a `/goal` line into any pane: `tern send`, `omp-kit send` or `ntm send` with an argument
+that starts with `/goal` (after whitespace), through env assignments, wrappers and nested `sh -c` (depth 3). */
+export function sendsGoalLine(command: string, depth = 0): boolean {
+	for (const raw of shellCommands(command)) {
+		let at = 0;
+		while (at < raw.length && (isAssignment(raw[at]!) || WRAPPERS[raw[at]!] === true)) at += 1;
+		const argv = raw.slice(at);
+		if (argv.length === 0) continue;
+		const name = basename(argv[0]!);
+		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
+			const script = shellScript(argv);
+			if (script !== undefined && sendsGoalLine(script, depth + 1)) return true;
+			continue;
+		}
+		if (SENDERS[name] !== true || argv[1] !== "send") continue;
+		if (argv.slice(2).some(word => word.trimStart().toLowerCase().startsWith("/goal"))) return true;
+	}
+	return false;
+}
+
+/** GOAL_SEND_REFUSED (J-2026-10-18-45): in a fleet seat, a raw `/goal` line typed into any pane is refused, so the
+only goal path is arm_seat.py (--set), which sets only a stamped, approved store prompt proven by an exact round trip,
+and logs it. Its own `tern send` runs in a child process the hook never sees. Sessions without a fleet identity pass. */
+export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
+	if (owner === null || event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string" || !sendsGoalLine(command)) return undefined;
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${GOAL_SEND_REFUSED}: ${owner} may not type a /goal line into a pane (J-2026-10-18-45). `
+			+ "Goals change only through python3 ~/.claude/skills/omp-kit-orchestration/scripts/arm_seat.py --set "
+			+ "(stamped prompts only). Nothing was sent.",
 	};
 }
 
@@ -1333,7 +1376,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					reason: `kit-flywheel-guard ${COMPACTION_REREAD}: ${tool} blocked until ${rereadMissing(pendingReread)} return successful results. Reading is always allowed.`,
 				};
 			}
-			const goalEnd = checkGoalEnd(event, admissionOwner(env));
+			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
 			if (goalEnd !== undefined) return goalEnd;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
