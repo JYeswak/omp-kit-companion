@@ -32,6 +32,7 @@ test("attest-local verifies the draft and the consumer policy before it publishe
 	const scripts = steps.map(step => step.run ?? "").join("\n");
 	expect(scripts).toContain('[[ "$GITHUB_REF" == "refs/tags/v$VERSION" ]]');
 	expect(scripts).toContain("sha256sum --strict -c SHA256SUMS");
+	expect(scripts).toContain("mkdir dist sbom"); // v0.2.56's attest-local died on ENOENT writing sbom/ (run 39205018538)
 	expect(scripts).toContain('python3 -I -c "$(cat installer/install.py)" attestation "$archive" "$VERSION" unused');
 	expect(scripts).toContain("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/release.yml\"");
 	expect(scripts).not.toContain("--clobber");

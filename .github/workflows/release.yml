@@ -654,7 +654,8 @@ jobs:
           # A rerun may find SBOMs an earlier attempt attached; they are never re-downloaded, compared or clobbered.
           [[ "$(jq -r '[.[0].assets[].name | select((startswith("sbom-") and endswith(".spdx.json")) | not)] | sort | join(" ")' releases.json)" == "$(printf '%s\n' "${want[@]}" | sort | paste -sd ' ' -)" ]] \
             || { echo "draft assets are not exactly: ${want[*]} (plus optional SBOMs)" >&2; exit 4; }
-          mkdir dist
+          # anchore/sbom-action writes output-file without creating its directory.
+          mkdir dist sbom
           while read -r id name digest; do
             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "dist/$name"
             [[ "sha256:$(sha256sum "dist/$name" | cut -d' ' -f1)" == "$digest" ]] || { echo "$name differs from GitHub's recorded digest $digest" >&2; exit 4; }
