@@ -131,6 +131,7 @@ export interface FlywheelGuardDeps {
 export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
+export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 /** br 0.7.4 global/close/update options that consume a value. */
@@ -969,6 +970,22 @@ export function admissionOwner(env: Record<string, string | undefined>): string 
 	return null;
 }
 
+/** GOAL_END_REFUSED (J-2026-10-18-44): a fleet seat never ends its own goal. In a session with a fleet identity
+(admissionOwner), the goal tool's `drop` and `complete` ops are refused; `create`, `get` and `resume` pass. A chief or
+director changes a seat's goal with omp's `/goal set` slash command (arm_seat.py --set), which never reaches the tool
+hook, and a person can still type `/goal drop`. Sessions without a fleet identity pass untouched. */
+export function checkGoalEnd(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
+	if (owner === null || event.toolName !== "goal") return undefined;
+	const op = field(event.input, "op");
+	if (op !== "drop" && op !== "complete") return undefined;
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${GOAL_END_REFUSED}: ${owner} may not ${op} its own goal (J-2026-10-18-44). `
+			+ "Only your director or a chief changes your goal, with /goal set. Keep working your goal: if nothing is claimable, "
+			+ "take the next downtime item. Nothing was changed.",
+	};
+}
+
 /** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
 is the server-side session identity; the native tool-call id attributes the
 job. Tool input never supplies either, so a peer cannot spoof ownership. */
@@ -1316,6 +1333,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					reason: `kit-flywheel-guard ${COMPACTION_REREAD}: ${tool} blocked until ${rereadMissing(pendingReread)} return successful results. Reading is always allowed.`,
 				};
 			}
+			const goalEnd = checkGoalEnd(event, admissionOwner(env));
+			if (goalEnd !== undefined) return goalEnd;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });

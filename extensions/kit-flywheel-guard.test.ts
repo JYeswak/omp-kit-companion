@@ -396,6 +396,30 @@ async function callAs(h: FakeHost, cwd: string, id: string, toolName: string, in
 	return h.emit("tool_call", { toolCallId: id, toolName, input }, h.ctx(cwd));
 }
 
+test("GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-2026-10-18-44)", async () => {
+	const cwd = mkdtempSync(join(base, "goal-"));
+	for (const env of [{ AGENT_NAME: "CopperTrout" }, { BR_ACTOR: "CopperTrout" }]) {
+		const h = await createFlywheelHost(base, { env });
+		for (const op of ["drop", "complete"]) {
+			const [result] = await callAs(h, cwd, `g-${op}`, "goal", { op });
+			expect((result as FlywheelToolCallResult)?.block).toBe(true);
+			expect((result as FlywheelToolCallResult)?.reason).toContain("GOAL_END_REFUSED");
+			expect((result as FlywheelToolCallResult)?.reason).toContain(`may not ${op} its own goal`);
+		}
+	}
+});
+
+test("GOAL_END_REFUSED negatives: get, create and resume pass; a session with no fleet identity may drop", async () => {
+	const cwd = mkdtempSync(join(base, "goal-"));
+	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	for (const input of [{ op: "get" }, { op: "create", objective: "x" }, { op: "resume" }]) {
+		expect(await callAs(seat, cwd, `g-${input.op}`, "goal", input)).toEqual([undefined]);
+	}
+	const person = await createFlywheelHost(base, { env: {} });
+	expect(await callAs(person, cwd, "g-drop", "goal", { op: "drop" })).toEqual([undefined]);
+	expect(await callAs(seat, cwd, "b-drop", "bash", { command: "echo goal drop" })).toEqual([undefined]);
+});
+
 async function endAs(h: FakeHost, cwd: string, id: string, toolName: string, result: unknown, isError = false): Promise<unknown[]> {
 	return h.emit("tool_execution_end", { toolCallId: id, toolName, result, isError }, h.ctx(cwd));
 }
