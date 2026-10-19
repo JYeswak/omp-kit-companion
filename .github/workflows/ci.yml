@@ -370,19 +370,20 @@ jobs:
             echo "macOS service contracts result: $MAC_SERVICE_RESULT" >&2
             exit 1
           fi
+      # The coverage check runs even when a suite failed, so a red run still shows whether every core file ran.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        if: ${{ !cancelled() && needs.resolve-omp-versions.outputs.core_shards != '1' }}
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        if: ${{ !cancelled() && needs.resolve-omp-versions.outputs.core_shards != '1' }}
         with:
           pattern: core-shard-junit-*
           merge-multiple: true
           path: ${{ runner.temp }}/core-shard
       - name: Require the core shards together to run every core test file exactly once
-        if: needs.resolve-omp-versions.outputs.core_shards != '1'
+        if: ${{ !cancelled() && needs.resolve-omp-versions.outputs.core_shards != '1' }}
         env:
           CORE_SHARDS: ${{ needs.resolve-omp-versions.outputs.core_shards }}
         run: |
