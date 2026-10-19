@@ -1,13 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies } from "../../src/kit-update-job.ts";
+import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
+import type { KitUpdateResult } from "../../src/kit-update.ts";
+import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 const dirs: string[] = [];
+const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function config(enabled = true): KitUpdateJobConfig {
 	const root = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "l8-job-"))); dirs.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=ompkit-fp72.22-test\nrepo=${join(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
-	return { enabled, prefix: root, stateRoot: join(root, "state"), home: root, platform: { os: "darwin", arch: "arm64", libc: "none" }, project: root, pollRelease: async () => ({ indexPath: join(root, "index.json"), archivePath: join(root, "kit.tar"), version: "1.2.4", sourceTag: "v1.2.4" }) };
+	return { enabled, prefix: root, stateRoot: join(root, "state"), home: root, platform: { os: "darwin", arch: "arm64", libc: "none" }, pollRelease: async () => ({ indexPath: join(root, "index.json"), archivePath: join(root, "kit.tar"), version: "1.2.4", sourceTag: "v1.2.4" }) };
 }
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function pluginLink(home: string, profile: string): string {
@@ -98,7 +102,7 @@ esac
 	writeFileSync(join(nativePackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
 	const exec: NonNullable<KitUpdateJobDependencies["exec"]> = async argv => {
 		const result = Bun.spawnSync([...argv], {
-			cwd: value.project,
+			cwd: value.home,
 			env: {
 				...process.env,
 				HOME: value.home,
@@ -212,18 +216,117 @@ test("planted: an OMP no-op cannot claim a complete update when a profile remain
 	});
 });
 
+/** What applyKitUpdate leaves before its postcheck: the stable link on 1.2.4, a pending kit receipt and its READY activation record. */
+function activate(value: KitUpdateJobConfig, recordedBinary?: Buffer): string {
+	rmSync(join(value.prefix, "bin", "omp-kit"));
+	installSymlink(value.prefix, "1.2.4");
+	mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+	chmodSync(value.stateRoot, 0o700);
+	const lock = acquireKitUpdateLock(value.stateRoot);
+	let id: string;
+	try { id = beginKitUpdateReceipt(value.stateRoot, lock, { scope: "kit", identitySha256: "a".repeat(64), kitVersion: "1.2.3", ompVersion: null, channel: null }).id; }
+	finally { lock.release(); }
+	const binary = (version: string) => join(value.prefix, "releases", version, "bin", "omp-kit");
+	const path = join(value.stateRoot, `kit-activation-${id}.json`);
+	writeFileSync(path, JSON.stringify({ schema_version: 1, id,
+		before: { version: "1.2.3", sha256: "a".repeat(64), target: "../releases/1.2.3/bin/omp-kit", binary: binary("1.2.3") },
+		after: { version: "1.2.4", sha256: sha(recordedBinary ?? readFileSync(binary("1.2.4"))), target: "../releases/1.2.4/bin/omp-kit", binary: binary("1.2.4") },
+		state: "READY" }), { mode: 0o600 });
+	chmodSync(path, 0o600);
+	return id;
+}
 
-test("postcheck failure reports UNDONE, notifies and never relinks", async () => {
-	const value = config(); const notes: string[] = []; let relinked = false;
-	const result = await runKitUpdateJob(value, {
-		plan: async () => ({ status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
-		apply: async () => ({ status: "PARTIAL", exitCode: 1, receiptId: "r2", activeVersion: "1.2.3", postcheck: { status: "FAIL", matcher: "PASS", live: "FAIL" }, provenance: "INTEGRITY_ONLY" }),
-		notify: message => { notes.push(message); },
-		relink: async () => { relinked = true; return { ok: true, detail: "", receiptId: "plugin-r2", undoCommand: "omp-kit undo plugin-r2 --yes" }; },
+/** A full-test postcheck that failed only because a live fleet agent wrote the kit state root while it ran. */
+function contaminatedPostcheck(changed: string): KitUpdateResult["postcheck"] {
+	return { status: "FAIL", matcher: "PASS", live: "PASS", reason: "KIT_POSTCHECK_FAILED", report: {
+		status: "FAIL", omp_version: "18.12.1", fast: { status: "PASS" }, current_stage: null, cause: null,
+		stages: { "e2e-live": { status: "PASS", producer_rc: 0, duration_ms: 1 } },
+		proofs: { G4_live: { status: "PASS", expected_scenarios: 110, observed_scenarios: 110, plant: "PASS" } },
+		snapshots: { home: { changed_paths: [changed] }, project: { changed_paths: [] } },
+		failures: [`Operator file changed during isolated test: ${changed}`],
+	} as never };
+}
+
+test("a postcheck the live fleet contaminated cannot strand a verified activation: RECONCILED, plugins relinked, reason kept", async () => {
+	await withPollEnv(null, async () => {
+		const value = config();
+		const { newStore, exec } = preparePluginUpdate(value);
+		installSymlink(value.prefix, "1.2.3");
+		let receiptId = "";
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => {
+				receiptId = activate(value);
+				// A live agent's send-drop lands in the kit state root mid-postcheck, as at 16:05Z on 2026-10-18.
+				mkdirSync(join(value.stateRoot, "send-drop"));
+				writeFileSync(join(value.stateRoot, "send-drop", "cfsios-1.json"), "{}");
+				return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", postcheck: contaminatedPostcheck("~/state/send-drop/cfsios-1.json"), provenance: "SIGSTORE_VERIFIED" };
+			},
+			exec,
+			reconcile: async () => ({ ok: true, detail: "" }),
+			notify: () => {},
+		});
+		const detail = result.postcheckDetail;
+		expect(result).toMatchObject({ status: "UPDATED", receiptId, activeVersion: "1.2.4", receipt: "RECONCILED", postcheck: "FAIL",
+			postcheckReason: "KIT_POSTCHECK_FAILED", relink: "APPLIED", service: "APPLIED" });
+		expect(detail).toMatchObject({ changed_operator_paths: ["~/state/send-drop/cfsios-1.json"], failures: ["Operator file changed during isolated test: ~/state/send-drop/cfsios-1.json"] });
+		expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+		expect(auditMutations(value.stateRoot)).toEqual(expect.arrayContaining([expect.objectContaining({ id: receiptId, status: "RECONCILED" })]));
+		for (const profile of ["default", "claude", "codex", "muse"]) expect(readlinkSync(pluginLink(value.home, profile))).toBe(newStore);
+		const records = readdirSync(value.stateRoot).filter(name => name.startsWith("kit-update-job-"));
+		expect(records).toHaveLength(1);
+		expect(JSON.parse(readFileSync(join(value.stateRoot, records[0]!), "utf8"))).toMatchObject({ receipt: "RECONCILED",
+			postcheckReason: "KIT_POSTCHECK_FAILED", postcheckDetail: { changed_operator_paths: ["~/state/send-drop/cfsios-1.json"] } });
 	});
-	expect(result).toMatchObject({ status: "UNDONE", receiptId: "r2", notification: true, relink: "NOT_RUN" });
-	expect(relinked).toBe(false); expect(notes[0]).toContain("automatic undo");
-	expect(existsSync(join(value.stateRoot, readdirSync(value.stateRoot)[0]!))).toBe(true);
+});
+
+test("planted: a live install that does not match its activation record stays PENDING and never relinks", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		mkdirSync(join(value.prefix, "releases", "1.2.4", "bin"), { recursive: true });
+		writeFileSync(join(value.prefix, "releases", "1.2.4", "bin", "omp-kit"), "#!/bin/sh\n", { mode: 0o755 });
+		const notes: string[] = []; let receiptId = ""; let relinked = false;
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => {
+				receiptId = activate(value, Buffer.from("bytes the activation recorded, not the live binary"));
+				return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", postcheck: contaminatedPostcheck("~/state/send-drop/cfsios-1.json"), provenance: "SIGSTORE_VERIFIED" };
+			},
+			relink: async () => { relinked = true; return { ok: true, detail: "", receiptId: "plugin-r2", undoCommand: "omp-kit undo plugin-r2 --yes" }; },
+			reconcile: async () => { throw new Error("service reconcile must not run for a pending receipt"); },
+			notify: message => { notes.push(message); },
+		});
+		expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "PENDING_RECOVERY", postcheck: "FAIL",
+			postcheckReason: "KIT_POSTCHECK_FAILED", relink: "NOT_RUN", service: "NOT_RUN", notification: true });
+		expect(relinked).toBe(false);
+		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+		expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain(`omp-kit undo ${receiptId} --yes`);
+		expect(notes[0]).not.toContain("automatic undo");
+	});
+});
+
+test("the job never hands a project to plan or apply, even when its config carries one", async () => {
+	const value = config(); const seen: object[] = [];
+	await runKitUpdateJob({ ...value, project: value.home } as KitUpdateJobConfig, {
+		plan: async input => { seen.push(input); return { ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never; },
+		apply: async plan => { seen.push(plan); return { status: "UPDATED", exitCode: 0, receiptId: "r9", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "SIGSTORE_VERIFIED" }; },
+		relink: async () => ({ ok: true, detail: "", receiptId: "plugin-r9", undoCommand: "omp-kit undo plugin-r9 --yes" }),
+		reconcile: async () => ({ ok: true, detail: "" }),
+	});
+	expect(seen).toHaveLength(2);
+	for (const input of seen) expect(Object.keys(input)).not.toContain("project");
+});
+
+test("a failed relink, service reconcile or postcheck after a verified activation is FINDINGS, never OK", () => {
+	const activated: KitUpdateJobResult = { status: "UPDATED", receiptId: "r", activeVersion: "1.2.4", notification: true, receipt: "RECONCILED", postcheck: "PASS", relink: "APPLIED", service: "APPLIED" };
+	expect(kitUpdateJobOverall(activated)).toBe("OK");
+	expect(kitUpdateJobOverall({ ...activated, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED" })).toBe("FINDINGS");
+	expect(kitUpdateJobOverall({ ...activated, reason: "SERVICE_RECONCILE_FAILED", service: "FAILED" })).toBe("FINDINGS");
+	expect(kitUpdateJobOverall({ ...activated, postcheck: "FAIL" })).toBe("FINDINGS");
+	expect(kitUpdateJobOverall({ status: "CURRENT", receiptId: null, activeVersion: "1.2.4", notification: false, relink: "NOT_RUN" })).toBe("OK");
 });
 
 test("planted: relink failure keeps the update, reports BLOCKED and keeps the receipt", async () => {
@@ -236,6 +339,7 @@ test("planted: relink failure keeps the update, reports BLOCKED and keeps the re
 	});
 	expect(result).toMatchObject({ status: "UPDATED", receiptId: "r3", activeVersion: "1.2.4", notification: true, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", pluginReceiptId: "plugin-r3", pluginUndoCommand: "omp-kit undo plugin-r3 --yes" });
 	expect(notes).toHaveLength(1); expect(notes[0]).toContain("BLOCKED"); expect(notes[0]).toContain("r3"); expect(notes[0]).toContain("plugin-r3"); expect(notes[0]).toContain("omp-kit undo plugin-r3 --yes");
+	expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
 });
 
 test("planted: reconcile failure keeps the update, reports BLOCKED and keeps the receipt", async () => {
@@ -300,6 +404,69 @@ test("poll downloads a newer published release into one directory", async () => 
 		expect(readFileSync(`${tuple!.archivePath}.sigstore.json`, "utf8")).toBe('{"fixture":true}\n');
 		expect(calls[2]).toContain("api");
 		expect(calls[0]).toContain("view");
+		expect(calls[1]).not.toContain("--clobber");
+	});
+});
+
+const POLLED_ASSET = "omp-kit-v1.2.4-darwin-arm64-none.tar";
+/** Writes the published index for `published` archive bytes into `dir`. */
+function writePolledIndex(dir: string, published: string): void {
+	writeFileSync(join(dir, "release-index.json"), JSON.stringify({ schema_version: 1, version: "1.2.4", source_tag: "v1.2.4", assets: {
+		"darwin-arm64-none": { os: "darwin", arch: "arm64", libc: "none", filename: POLLED_ASSET, sha256: sha(published), manifest_sha256: "b".repeat(64) },
+	} }));
+}
+/** gh as it behaves: `release download` refuses an existing target file unless --clobber, then writes the published bytes. */
+function publishedGh(calls: string[][], published: string): NonNullable<KitUpdateJobDependencies["exec"]> {
+	return async argv => {
+		calls.push([...argv]);
+		if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+		if (argv[1] === "api") return { exit: 0, stdout: '{"fresh":true}\n', stderr: "" };
+		const dir = argv[argv.indexOf("--dir") + 1]!;
+		for (const name of ["release-index.json", POLLED_ASSET])
+			if (existsSync(join(dir, name)) && !argv.includes("--clobber"))
+				return { exit: 1, stdout: "", stderr: `${join(dir, name)} already exists (use \`--clobber\` to overwrite file or \`--skip-existing\` to skip file)` };
+		writePolledIndex(dir, published);
+		writeFileSync(join(dir, POLLED_ASSET), published);
+		return { exit: 0, stdout: "", stderr: "" };
+	};
+}
+/** The poll directory a cycle interrupted mid-poll leaves: the published index, `archive` bytes and a stale bundle. */
+function interruptedPoll(stateRoot: string, published: string, archive: string): string {
+	const dir = join(stateRoot, "poll-1.2.4");
+	mkdirSync(dir, { recursive: true });
+	writePolledIndex(dir, published);
+	writeFileSync(join(dir, POLLED_ASSET), archive);
+	writeFileSync(join(dir, `${POLLED_ASSET}.sigstore.json`), "stale");
+	return join(dir, POLLED_ASSET);
+}
+
+test("an interrupted poll directory whose index and archive verify is reused: no download, a fresh bundle", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		const archivePath = interruptedPoll(value.stateRoot, "archive", "archive");
+		const calls: string[][] = [];
+		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive") });
+		expect(tuple).toMatchObject({ version: "1.2.4", sourceTag: "v1.2.4", archivePath });
+		expect(calls.some(argv => argv[2] === "download")).toBe(false);
+		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
+		expect(readFileSync(`${archivePath}.sigstore.json`, "utf8")).toBe('{"fresh":true}\n');
+		expect(readdirSync(dirname(archivePath)).sort()).toEqual([POLLED_ASSET, `${POLLED_ASSET}.sigstore.json`, "release-index.json"].sort());
+	});
+});
+
+test("planted: a corrupted archive in an interrupted poll directory is re-downloaded with --clobber, never reused", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		const archivePath = interruptedPoll(value.stateRoot, "archive", "archive cut short by a reboot");
+		const calls: string[][] = [];
+		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive") });
+		const downloads = calls.filter(argv => argv[2] === "download");
+		expect(downloads).toHaveLength(1);
+		expect(downloads[0]).toContain("--clobber");
+		expect(tuple?.archivePath).toBe(archivePath);
+		expect(readFileSync(archivePath, "utf8")).toBe("archive");
+		// The bundle is fetched for the published bytes, never for the corrupted ones.
+		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
 	});
 });
 

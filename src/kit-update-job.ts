@@ -1,11 +1,13 @@
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { applyKitUpdate, planKitUpdate, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
+import { parseReleaseIndexJson } from "./kit-release.ts";
+import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 
-export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag"> & {
+/** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
+export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag" | "project"> & {
 	enabled: boolean;
 	/**
 	 * Certified static fallback; null when the job is poll-only (no local
@@ -26,8 +28,23 @@ export type KitUpdateJobDependencies = {
 	relink?: (binary: string, store: string) => Promise<PluginRelinkResult>;
 	/** Test seam for the new binary's `service install kit-update --apply --yes`. Production uses spawnSync. */
 	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
+	/** Test seam for finishing a PARTIAL receipt by its postimages. Production uses `reconcilePendingUpdate`, the `update --reconcile` path. */
+	reconcileReceipt?: (input: { stateRoot: string; prefix: string; id: string }) => KitReconcileResult;
 };
-export type KitUpdateJobResult = { status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "UNDONE" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string; relink?: "APPLIED" | "FAILED" | "NOT_RUN"; pluginReceiptId?: string; pluginUndoCommand?: string; service?: "APPLIED" | "FAILED" | "NOT_RUN" };
+export type KitUpdateJobResult = {
+	status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "PENDING" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
+	/** How the kit receipt ended: RECONCILED once its postimages verified, PENDING when they did not. */
+	receipt?: "RECONCILED" | "PENDING";
+	/** The release's full-test postcheck, with its reason and detail when it did not pass; it never decides the receipt. */
+	postcheck?: "PASS" | "FAIL" | "NOT_RUN"; postcheckReason?: string; postcheckDetail?: KitPostcheckDetail | null;
+	relink?: "APPLIED" | "FAILED" | "NOT_RUN"; pluginReceiptId?: string; pluginUndoCommand?: string; service?: "APPLIED" | "FAILED" | "NOT_RUN";
+};
+
+/** OK only for a clean cycle. A pending receipt, a postcheck that did not pass, or a failed relink or service reconcile is FINDINGS, even after a verified activation. */
+export function kitUpdateJobOverall(result: KitUpdateJobResult): "OK" | "FINDINGS" {
+	return result.status === "FAILED" || result.status === "PENDING" || (result.postcheck !== undefined && result.postcheck !== "PASS") ||
+		result.relink === "FAILED" || result.service === "FAILED" ? "FINDINGS" : "OK";
+}
 
 /** owner/repo slug for OMP_KIT_UPDATE_REPO; shared by the service renderer and the CLI gate. */
 export const KIT_UPDATE_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -135,6 +152,8 @@ export type PublishedTuple = Pick<KitUpdateInput, "indexPath" | "archivePath" | 
  * same-directory index/archive). Returns null when nothing newer is
  * published, so the caller falls back to the configured static tuple.
  * A failed postcheck never reaches here; apply/undo semantics are unchanged.
+ * Idempotent: an earlier cycle's poll directory (a reboot or kill mid-poll) is
+ * reused only when its index and archive verify; otherwise they are replaced.
  */
 export async function pollPublishedRelease(prefix: string, stateRoot: string, platform: KitUpdateInput["platform"], dependencies: KitUpdateJobDependencies = {}): Promise<PublishedTuple | null> {
 	if (process.env.OMP_KIT_UPDATE_POLL !== "github") return null;
@@ -154,22 +173,44 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 	const dir = join(stateRoot, `poll-${version}`);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const asset = `omp-kit-v${version}-${target}.tar`;
-	const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo, "--pattern", asset, "--pattern", "release-index.json", "--dir", dir]);
-	if (dl.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + dl.stderr.trim().slice(0, 200));
 	const indexPath = join(dir, "release-index.json");
 	const archivePath = join(dir, asset);
-	for (const path of [indexPath, archivePath]) {
-		const stat = lstatSync(path, { throwIfNoEntry: false });
-		if (!stat || !stat.isFile() || resolve(path) !== path || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
+	if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
+	if (!pollTupleVerified(indexPath, archivePath, version, target)) {
+		// Leftover bytes that did not verify are replaced through gh's own overwrite flag, never trusted.
+		const leftover = [indexPath, archivePath].some(path => lstatSync(path, { throwIfNoEntry: false }) !== undefined);
+		const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo, "--pattern", asset, "--pattern", "release-index.json", "--dir", dir, ...(leftover ? ["--clobber"] : [])]);
+		if (dl.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + dl.stderr.trim().slice(0, 200));
+		for (const path of [indexPath, archivePath]) {
+			const stat = lstatSync(path, { throwIfNoEntry: false });
+			if (!stat || !stat.isFile()) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
+		}
 	}
 	// Bundles are published in GitHub's attestation store, not necessarily release assets.
-	// Fetch by the downloaded bytes' digest; applyKitUpdate authenticates the bundle before extraction.
+	// Fetch by the archive bytes' digest on every cycle; applyKitUpdate authenticates the bundle before extraction.
 	const digest = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
 	const bundle = await exec(["gh", "api", "--hostname", "github.com", `repos/${repo}/attestations/sha256:${digest}`, "--jq", ".attestations[].bundle | tojson"]);
 	if (bundle.exit !== 0 || !bundle.stdout.trim() || Buffer.byteLength(bundle.stdout) > 16 * 1024 * 1024)
 		throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + bundle.stderr.trim().slice(0, 1000));
-	writeFileSync(`${archivePath}.sigstore.json`, bundle.stdout, { mode: 0o600, flag: "wx" });
+	// Replace atomically: a bundle left by an interrupted cycle must neither block nor be half-read.
+	const bundlePath = `${archivePath}.sigstore.json`, staged = `${bundlePath}.${randomUUID()}.tmp`;
+	writeFileSync(staged, bundle.stdout, { mode: 0o600, flag: "wx" });
+	renameSync(staged, bundlePath);
 	return { indexPath, archivePath, version, sourceTag: `v${version}` };
+}
+
+/**
+ * True when `indexPath` is this release's index for `assetKey` and `archivePath` hashes to its digest:
+ * the check `planKitUpdate` applies before any activation. A missing, partial or tampered file is false.
+ */
+function pollTupleVerified(indexPath: string, archivePath: string, version: string, assetKey: string): boolean {
+	try {
+		for (const path of [indexPath, archivePath]) if (!lstatSync(path).isFile()) return false;
+		const index = parseReleaseIndexJson(readFileSync(indexPath, "utf8"));
+		const asset = index.assets[assetKey];
+		return index.version === version && index.source_tag === `v${version}` && asset?.filename === basename(archivePath) &&
+			createHash("sha256").update(readFileSync(archivePath)).digest("hex") === asset.sha256;
+	} catch { return false; }
 }
 
 /** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
@@ -184,6 +225,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const out = (ran.stdout + ran.stderr).trim().slice(-500);
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});
+	const reconcileReceipt = dependencies.reconcileReceipt ?? reconcilePendingUpdate;
 	let runId = randomUUID();
 	try {
 		// Install-on-publish: a newer published release replaces the static tuple.
@@ -192,17 +234,35 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const source = published ?? await config.pollRelease();
 		// Poll-only with nothing newer: nothing to install, nothing to refuse.
 		if (!source) return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" });
-		const preview = await plan({ ...config, ...source });
+		// Never a project: launchd runs the job from HOME, and watching HOME's .omp/.agents/.claude as one made every live postcheck fail.
+		const preview = await plan({ prefix: config.prefix, stateRoot: config.stateRoot, home: config.home, platform: config.platform, ...source });
 		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" });
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
 		const result = await apply(preview);
-		if (result.status === "PARTIAL") { await dependencies.notify?.("omp-kit update postcheck failed; automatic undo completed"); return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "NOT_RUN" }); }
-		if (result.status !== "UPDATED") return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false, relink: "NOT_RUN" });
+		if (result.status !== "UPDATED" && result.status !== "PARTIAL") return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false, relink: "NOT_RUN" });
+		const postcheck: Pick<KitUpdateJobResult, "postcheck" | "postcheckReason" | "postcheckDetail"> = result.status === "UPDATED"
+			? { postcheck: result.postcheck.status }
+			: { postcheck: result.postcheck.status, postcheckReason: result.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+				postcheckDetail: kitPostcheckDetail(result.postcheck, [config.home, config.stateRoot, config.prefix]) };
+		let activeVersion = result.activeVersion;
+		if (result.status === "PARTIAL") {
+			// The postcheck runs on a machine the live fleet keeps writing, so it never decides the receipt. The kit's
+			// own postimages do, exactly as `update --reconcile` verifies them: the stable link target and binary sha.
+			let verified: KitReconcileResult | null = null, refusal = "KIT_RECEIPT_INVALID";
+			try { if (result.receiptId) verified = reconcileReceipt({ stateRoot: config.stateRoot, prefix: config.prefix, id: result.receiptId }); }
+			catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+			if (!verified) {
+				await dependencies.notify?.(`omp-kit update PENDING: postcheck ${postcheck.postcheckReason} and the live install does not match the recorded postimage (${refusal}); kit receipt ${result.receiptId} stays pending. Inspect \`omp-kit audit --json\`, then run \`omp-kit undo ${result.receiptId} --yes\``);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion, notification: true, reason: refusal, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+			}
+			activeVersion = verified.activeVersion;
+		}
+		const findings = result.status === "PARTIAL" ? `; postimage verified but postcheck ${postcheck.postcheckReason} (detail in the job record); undo the kit with \`omp-kit undo ${result.receiptId} --yes\`` : "";
 		// The kit symlink now points at the new release; relink every covered OMP
 		// profile to that exact store and retain the plugin receipt for recovery.
 		const binary = join(config.prefix, "bin", "omp-kit");
-		const store = result.activeVersion && SEMVER.test(result.activeVersion)
-			? join(config.prefix, "releases", result.activeVersion)
+		const store = activeVersion && SEMVER.test(activeVersion)
+			? join(config.prefix, "releases", activeVersion)
 			: null;
 		const link: PluginRelinkResult = store
 			? await relink(binary, store)
@@ -210,22 +270,23 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const pluginReceipt = link.receiptId
 			? { pluginReceiptId: link.receiptId, ...(link.undoCommand ? { pluginUndoCommand: link.undoCommand } : {}) }
 			: {};
+		const activated = { status: "UPDATED" as const, receiptId: result.receiptId, activeVersion, notification: true, receipt: "RECONCILED" as const, ...postcheck };
 		if (!link.ok) {
 			const recovery = link.receiptId && link.undoCommand
 				? `; plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\``
 				: "";
-			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${result.activeVersion ?? "unknown version"} (kit receipt ${result.receiptId})${recovery}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
-			return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", ...pluginReceipt });
+			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${activeVersion ?? "unknown version"} (kit receipt ${result.receiptId})${recovery}${findings}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
+			return record(config.stateRoot, runId, { ...activated, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", ...pluginReceipt });
 		}
 		// The new release may carry a new tick interval: re-render the installed
 		// plist with the new binary itself so StartInterval tracks the code.
 		const reconciled = await reconcile(binary);
 		if (!reconciled.ok) {
-			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${result.activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; kit is on ${result.activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
-			return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
+			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`${findings}; kit is on ${activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
+			return record(config.stateRoot, runId, { ...activated, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
 		}
-		await dependencies.notify?.(`omp-kit updated to ${result.activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied`);
-		return record(config.stateRoot, runId, { status: "UPDATED", receiptId: result.receiptId, activeVersion: result.activeVersion, notification: true, relink: "APPLIED", service: "APPLIED", ...pluginReceipt });
+		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}`);
+		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		await dependencies.notify?.("omp-kit update job failed: " + reason);

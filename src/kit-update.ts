@@ -370,12 +370,20 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
  } finally { heldLock.release(); }
 }
 
-/** The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act. */
-export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
- const report = outcome.postcheck.report;
- const originalCause = report?.cause ?? outcome.postcheck.cause;
- const cause = originalCause ? redactFullTestCause(originalCause, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]) : null;
- const postcheckDetail = report ? {
+/** A postcheck's named failed stages, changed operator paths, cause and first failures; null when nothing was reported. */
+export type KitPostcheckDetail =
+ | { status: FullTestReport["status"]; omp_version: string | null; live: FullTestReport["proofs"]["G4_live"]; failed_stages: string[];
+  current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; failures: string[] }
+ | { current_stage: null; cause: FullTestCause; failures: string[] };
+/**
+ * The detail of `postcheck`, redacted under `roots`, capped at 20 failures.
+ * Shared by the `update --apply` envelope and the kit-update job record, so a failed unattended cycle keeps its reason.
+ */
+export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly string[]): KitPostcheckDetail | null {
+ const report = postcheck.report;
+ const originalCause = report?.cause ?? postcheck.cause;
+ const cause = originalCause ? redactFullTestCause(originalCause, roots) : null;
+ return report ? {
   status: report.status, omp_version: report.omp_version, live: report.proofs.G4_live,
   failed_stages: [
    ...Object.entries(report.stages).filter(([, stage]) => stage.status === "FAIL").map(([name]) => name),
@@ -387,6 +395,11 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
   failures: report.failures.slice(0, 20),
  } : cause ? { current_stage: null, cause, failures: [] } : null;
+}
+
+/** The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act. */
+export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
+ const postcheckDetail = kitPostcheckDetail(outcome.postcheck, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
  const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
  return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
   scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,

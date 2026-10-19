@@ -40,7 +40,7 @@ import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./s
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
-import { KIT_UPDATE_REPO_PATTERN, relinkKitPlugin, runKitUpdateJob } from "./kit-update-job.ts";
+import { KIT_UPDATE_REPO_PATTERN, kitUpdateJobOverall, relinkKitPlugin, runKitUpdateJob } from "./kit-update-job.ts";
 import { claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
@@ -2608,9 +2608,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const identity = kitIdentity();
 			if (!identity.release.root) { lock.release(); return refusal("KIT_UPDATE_JOB_UNAVAILABLE", "An installed kit release is required for kit-update", "Install a certified kit release before enabling the job."); }
 			const platform = { os: process.platform === "darwin" ? "darwin" as const : "linux" as const, arch: process.arch === "arm64" ? "arm64" as const : "x64" as const, libc: process.platform === "darwin" ? "none" as const : "gnu" as const };
-			const result = await runKitUpdateJob({ enabled, prefix: dirname(dirname(identity.release.root)), stateRoot: receiptStateRoot() ?? "", home: process.env.HOME ?? "", project: process.cwd(), platform, pollRelease: async () => (staticConfigured ? { indexPath: indexPath!, archivePath: archivePath!, version: version!, sourceTag: sourceTag! } : null) }, { notify: message => notifyJobFailure({ title: "omp-kit update", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
+			const result = await runKitUpdateJob({ enabled, prefix: dirname(dirname(identity.release.root)), stateRoot: receiptStateRoot() ?? "", home: process.env.HOME ?? "", platform, pollRelease: async () => (staticConfigured ? { indexPath: indexPath!, archivePath: archivePath!, version: version!, sourceTag: sourceTag! } : null) }, { notify: message => notifyJobFailure({ title: "omp-kit update", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
 			lock.release();
-			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall: result.status === "FAILED" ? "FINDINGS" : "OK", job: job.name, ...result }, verification: "UNVERIFIED" };
+			const overall = kitUpdateJobOverall(result);
+			return { code: overall === "FINDINGS" || result.status === "REFUSED" ? 1 : 0, data: { overall, job: job.name, ...result }, verification: "UNVERIFIED" };
 		}
 		if (job.name === "fleet-flush") {
 			const report = flushPending(liveFleetIo(), true);

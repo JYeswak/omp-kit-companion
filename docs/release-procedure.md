@@ -166,8 +166,10 @@ parallel installer or a second activation authority.
   publication, downloaded-but-unverified, and eligible update are different states.
   A network/auth failure is not `CURRENT`.
 - **Retryable staging:** a prior `poll-V` directory or attestation sidecar can
-  survive failure. Reuse only validated matching bytes or a new owned staging
-  attempt; never blindly overwrite unverified files.
+  survive failure. The job reuses it only when its index names this version and
+  platform and the archive hashes to the indexed digest; anything else is
+  re-downloaded with gh's own `--clobber`. The attestation bundle is refetched by
+  that digest on every tick and replaced atomically. Unverified bytes are never reused.
 - **Installation:** a retained release directory does not prove activation.
   Recover using the original receipt, exact postimages and declared undo/reconcile
   path. Keep the prior verified version available.
@@ -179,8 +181,12 @@ parallel installer or a second activation authority.
   hosted consumers. Missing scenario results still fail.
 - **Compensation truth:** `applyKitUpdate` may return PARTIAL with the new CLI
   still active. `undoKitUpdate` is a separate, receipt/postimage-checked action.
-  The job currently labels PARTIAL as UNDONE without calling that action; neither
-  the label nor its notification proves the old link was restored.
+  The job does not call it and no longer says it did: after PARTIAL it checks the
+  kit's own postimages as `update --reconcile` does (stable-link target and binary
+  sha). If they match, the receipt ends RECONCILED, the profiles are relinked and
+  the job reports FINDINGS with the postcheck reason. If they do not, the job
+  reports PENDING and the receipt stays pending. Both notifications name
+  `omp-kit undo RECEIPT --yes`.
 - **Postcheck:** require the candidate manifest's complete expected named-result
   set, not a fixed scenario-count constant. In this incident, 109/110 was a failure.
   Attribute effects using isolated state and an adversarial foreign-write control;
@@ -204,18 +210,19 @@ parallel installer or a second activation authority.
 
 Source-only branches are distinguished below from the observed old-harness failure:
 
-1. The job maps `applyKitUpdate` PARTIAL to UNDONE and says undo completed, but
-   the apply path returns PARTIAL without compensation and the job never calls
-   separate `undoKitUpdate`. Verify actual active-link/receipt postimages; fix
-   the missing effect or the false status before claiming automatic rollback.
+1. Fixed (FLEETUPG1): the job mapped `applyKitUpdate` PARTIAL to UNDONE and said
+   undo completed, though nothing was undone. It now finishes the receipt by its
+   postimages (RECONCILED, or PENDING on a mismatch) and never claims an undo.
 2. The job returns CURRENT before pending-recovery, profile and service
    reconciliation when no newer CLI is found. A partial update can leave the
    latest CLI active with unresolved recovery; CURRENT must not hide that state.
-   The normal relink path is reached only after UPDATED.
-3. A relink or service-reconcile failure returns UPDATED with a failure reason;
-   the service dispatcher maps that status to OK/exit 0. That is not full uptake.
-4. Fixed per-version poll staging, non-clobbering downloads and exclusive-create
-   bundle files need a real failed-attempt/repeated-tick recovery proof.
+   The normal relink path is reached only after UPDATED or a verified PARTIAL.
+3. Fixed (FLEETUPG1): a relink, service-reconcile or postcheck failure after a
+   verified activation is overall FINDINGS with exit 1, no longer OK/exit 0.
+4. Fixed (FLEETUPG1): per-version poll staging is idempotent (see Retryable staging).
+   The job also no longer passes its service cwd (HOME) as a project. Doing so
+   made the postcheck watch all of `~/.omp`, `~/.agents` and `~/.claude`, which
+   live sessions write and which overflow the snapshot's entry cap.
 5. The local scheduler was observed unloaded. Manual CLI/profile recovery and
    one quiet-window check do not prove automatic updates under normal fleet load.
 6. The actual old updater ran candidate checks through old runtime code, producing
@@ -375,7 +382,10 @@ For an eligible pending READY receipt only, `omp-kit update --reconcile RECEIPT 
 rescans the active kit link, release bytes and recorded postimages. It marks
 RECONCILED only when those match. This records state consistency, not a passing
 missing scenario or a repaired health regression. Fix or explicitly undo a real
-failed postcheck; do not use receipt reconciliation to relabel it healthy.
+failed postcheck; do not use receipt reconciliation to relabel it healthy. The
+`kit-update` job runs this same check after a PARTIAL apply. Its record keeps the
+failed postcheck (`postcheck`, `postcheckReason`, `postcheckDetail`: failed stages,
+changed operator paths, first failures) and its overall stays FINDINGS.
 
 The prefix is derived from the receipt; an explicit relocated `--prefix PATH`
 must match the same postimages. A mismatch stays pending. A receipt already
@@ -476,10 +486,10 @@ Install on publish (existing `kit-update` service, no new daemon):
   downloaded (index plus platform archive into one private directory)
   and applied under the existing update receipt and reconcile path
   (`src/kit-update-job.ts`, covered by `tests/cli/kit-update-job.test.ts`).
-- After UPDATED, direct CLI and job source can relink selected profiles and retain
-  the plugin receipt; the job additionally reconciles the service. PARTIAL does
-  not itself restore the prior link, despite the job's current UNDONE label.
-  Relink/reconcile failures remain incomplete uptake even if a result says UPDATED.
+- After UPDATED, or after PARTIAL when the kit's own postimages verify, the job
+  relinks selected profiles, keeps the plugin receipt and reconciles the service.
+  A postimage that does not match its activation record stays PENDING and nothing is relinked.
+  Relink, reconcile or postcheck failures report overall FINDINGS, even when the result says UPDATED.
   The 300-second tick is a configured interval, not loaded-state or latency proof.
   CURRENT-version reconciliation, repeated-tick recovery and actual loaded-version
   readback must pass the end-to-end contract above.
