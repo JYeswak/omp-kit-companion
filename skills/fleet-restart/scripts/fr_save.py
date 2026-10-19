@@ -63,6 +63,46 @@ def session_candidates(lsof_text):
             out.append(path)
     return out
 
+FORK_MOVED_MARKER = "Session moved to a new file"
+FORK_READ_HEAD = 8192
+FORK_READ_TAIL = 262144
+
+
+def _read_fork_scan(session_file):
+    """Head + tail bytes of a session file: the header carries parentSession,
+    a fork appends its move record at the tail. Bounded; None when unreadable."""
+    with open(session_file, "rb") as fh:
+        head = fh.read(FORK_READ_HEAD)
+        try:
+            fh.seek(-FORK_READ_TAIL, os.SEEK_END)
+            tail = fh.read(FORK_READ_TAIL)
+        except OSError:
+            tail = b""
+    return (head + b"\n" + tail).decode("utf-8", "replace")
+
+
+def fork_evidence(session_file):
+    """None when the saved session shows no fork; else a named reason.
+    A forked OMP session logs its move (reason=open-elsewhere) and the new
+    file's header carries parentSession: the old file is no longer the live
+    conversation, so verification of it must fail (ompkit-m5gs)."""
+    if not session_file:
+        return None
+    try:
+        text = _read_fork_scan(session_file)
+    except (OSError, ValueError):
+        return None
+    if FORK_MOVED_MARKER in text:
+        return "SESSION_MOVED_TO_NEW_FILE: %s logs %r" % (session_file, FORK_MOVED_MARKER)
+    first = text.splitlines()[0] if text.splitlines() else ""
+    try:
+        meta = json.loads(first) if first.lstrip().startswith("{") else {}
+    except ValueError:
+        meta = {}
+    if isinstance(meta, dict) and meta.get("parentSession"):
+        return "PARENT_SESSION %s in %s header" % (meta["parentSession"], session_file)
+    return None
+
 
 def executable(lsof_text):
     """The running executable: the first name after an `ftxt` field in `lsof -Fn` output
@@ -334,8 +374,9 @@ def held_scratch(work, push):
 def revalidate_respawn(row, inv, lsof_fn):
     """Live re-check right before a respawn send, against the row's saved facts: the
     same omp pid (HELD_DRIFT), no git child (HOLD_GIT), the saved session file still
-    open (HOLD_SESSION_CHANGED). Unsaved scratch is not a hold. Returns (hold, detail)
-    or (None, None)."""
+    open (HOLD_SESSION_CHANGED), and no other live holder of the saved session
+    (HOLD_SESSION_HOLDER: the session did not drain). Unsaved scratch is not a
+    hold. Returns (hold, detail) or (None, None)."""
     p = next((x for x in inv["panes"] if x["pane_id"] == row["pane_id"]), None)
     agent = core.find_agent(inv["procs"], p["pane_pid"]) if p else None
     if not agent or agent["pid"] != row.get("omp_pid"):
@@ -345,13 +386,18 @@ def revalidate_respawn(row, inv, lsof_fn):
         return "HOLD_GIT", "git child pid %s" % git["pid"]
     if row.get("session_file") not in session_candidates(lsof_fn(agent["pid"])):
         return "HOLD_SESSION_CHANGED", "%s is no longer the open session" % row.get("session_file")
+    others = session_holders(row.get("session_file"), inv, lsof_fn, exclude_pid=agent["pid"])
+    if others:
+        return "HOLD_SESSION_HOLDER", "%s still held by %s" % (
+            row.get("session_file"), ", ".join("%s (pid %s)" % (h["pane"], h["omp_pid"]) for h in others))
     return None, None
 
 
 def respawn_revalidator(inventory_fn, lsof_fn):
-    """revalidate_fn for fleet_restart.send: a fresh inventory per respawn row."""
+    """revalidate_fn for fleet_restart.send: a fresh full inventory per respawn
+    row (holder scan needs every pane, not just the row's own)."""
     def check(row):
-        return revalidate_respawn(row, inventory_fn({row["pane_id"]}), lsof_fn)
+        return revalidate_respawn(row, inventory_fn(), lsof_fn)
     return check
 
 
@@ -372,6 +418,30 @@ def save(inv, home, lsof_fn, run_fn):
 
 def session_kept(lsof_text, session_file):
     return session_file in session_candidates(lsof_text)
+
+def session_exact(lsof_text, session_file):
+    """The admitted pid holds exactly the saved session file: one candidate,
+    and it is the saved one. `in` alone passes a pane that also holds a
+    forked or foreign session (ompkit-m5gs)."""
+    return session_candidates(lsof_text) == [session_file]
+
+
+def session_holders(session_file, inv, lsof_fn, exclude_pid=None):
+    """Live panes (other than exclude_pid) whose omp process holds
+    session_file. A second holder means the session did not drain: respawn
+    must refuse until the holder is gone (ompkit-m5gs)."""
+    holders = []
+    for p in inv.get("panes", []):
+        agent = core.find_agent(inv.get("procs", []), p.get("pane_pid"))
+        if not agent or agent["pid"] == exclude_pid:
+            continue
+        try:
+            cands = session_candidates(lsof_fn(agent["pid"]))
+        except (StopIteration, KeyError, OSError, RuntimeError):
+            continue
+        if session_file in cands:
+            holders.append({"pane": p["pane"], "pane_id": p["pane_id"], "omp_pid": agent["pid"]})
+    return holders
 
 
 def watchdog_drift(save_doc):

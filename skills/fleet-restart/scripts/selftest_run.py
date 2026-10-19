@@ -68,12 +68,14 @@ class FakeLaunchd:
 class Pane:
     """kind: target (compiled omp already on TARGET) | tern (older versioned build) | bun."""
     def __init__(self, name, pid, n, cwd, advisor="off", flags="--profile claude", kind="target", session=True, badge_ok=True,
-                 busy_until=None, lose_session=False, drop_restart=False, composer="", stale=False, model="Opus 5.5", launch_model=None, on_idle=None):
+                 busy_until=None, lose_session=False, drop_restart=False, composer="", stale=False, model="Opus 5.5", launch_model=None, on_idle=None,
+                 extra_after_restart=False, mirror_session=None):
         self.name, self.id, self.shell, self.omp, self.cwd, self.advisor, self.kind = name, pid, n * 10, n * 10 + 1, cwd, advisor, kind
         self.flags = flags + (" --advisor" if advisor == "flag" else "")
         self.session = os.path.join(cwd, "sessions", "-w", "S%d.jsonl" % n) if session else None
         self.badge_ok, self.busy_until, self.lose_session, self.drop_restart = badge_ok, busy_until, lose_session, drop_restart
         self.composer, self.stale, self.model, self.launch_model, self.on_idle = composer, stale, model, launch_model, on_idle
+        self.extra_after_restart, self.mirror_session = extra_after_restart, mirror_session
         self.badge, self.restarts, self.mcp_pid, self.suffix, self.next_pid = advisor != "off", 0, n * 10 + 2, "", n * 1000
         self.exe = TARGET if kind == "target" else BUN if kind == "bun" else TERN + "18.9.2"
 
@@ -120,6 +122,12 @@ class FakeFleet:
         if p.session:
             f = p.session.replace(".jsonl", "-new.jsonl") if p.lose_session and p.restarts else p.session
             out += "f38\nn%s\nf39\nn%s\n" % (f, f[:-len(".jsonl")] + "/__advisor.jsonl")
+            if p.extra_after_restart and p.restarts and not p.lose_session:
+                out += "f40\nn%s\n" % f.replace(".jsonl", "-new.jsonl")
+            if p.mirror_session:
+                out += "f41\nn%s\n" % p.mirror_session
+        elif p.mirror_session:
+            out += "f41\nn%s\n" % p.mirror_session
         return out
 
     def run(self, argv, env):
@@ -833,6 +841,7 @@ def gate_run(case, tmp, uid, good_env, aligned):
     gate_breaker(case, root, home, agents, good_env, uid, aligned)
     gate_revalidate(case, root, home, agents, good_env, uid, aligned)
     gate_model(case, root, home, agents, good_env, uid, aligned)
+    gate_session_fork(case, root, home, agents, good_env, uid, aligned)
 
     cwd = os.path.join(root, "w")
     ld3 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
@@ -1068,6 +1077,108 @@ def gate_model(case, root, home, agents, good_env, uid, aligned):
          rep["warnings"] == ["MODEL_CHANGED m:0.1: GPT-6-Luna -> Muse Spark 1.3"] and "MODEL_CHANGED m:0.1: GPT-6-Luna -> Muse Spark 1.3" in md
          and res["m:0.1"]["result"] == "VERIFIED" and not rep["failed"] and rep["breaker"] is None and rc == 0 and "model_changed" not in res["m:0.2"],
          json.dumps([rep["warnings"], res["m:0.1"].get("result"), rc]))
+
+
+# ---------- m5gs: forked sessions fail verify; undrained sessions hold respawn ----------
+
+def gate_session_fork(case, root, home, agents, good_env, uid, aligned):
+    def cwd(name):
+        d = os.path.join(root, name)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    sess = "/h/.omp/agent/sessions/-w/2026-10-13T00-00-00-000Z_abc.jsonl"
+    one = "p1\nftxt\nn/x/omp\nf38\nn%s\n" % sess
+    two = one + "f40\nn/h/.omp/agent/sessions/-w/2026-10-13T00-00-00-000Z_abc-new.jsonl\n"
+    case("CTL one open session file is exact", fr_save.session_exact(one, sess) is True, json.dumps(fr_save.session_candidates(one)))
+    case("NEG saved file plus a second open session file is not exact", fr_save.session_exact(two, sess) is False, json.dumps(fr_save.session_candidates(two)))
+
+    c = cwd("fork-unit")
+    clean = os.path.join(c, "clean.jsonl")
+    moved = os.path.join(c, "moved.jsonl")
+    parented = os.path.join(c, "parented.jsonl")
+    with open(clean, "w") as fh:
+        fh.write('{"sessionId":"abc","cwd":"/w"}\n{"role":"user","text":"hi"}\n')
+    with open(moved, "w") as fh:
+        fh.write('{"sessionId":"abc","cwd":"/w"}\n{"role":"user","text":"hi"}\n{"type":"system","text":"Session moved to a new file (reason=open-elsewhere)"}\n')
+    with open(parented, "w") as fh:
+        fh.write('{"sessionId":"def","parentSession":"abc","cwd":"/w"}\n')
+    case("CTL clean session file shows no fork", fr_save.fork_evidence(clean) is None)
+    case("NEG 'Session moved to a new file' record names the fork",
+         (fr_save.fork_evidence(moved) or "").startswith("SESSION_MOVED_TO_NEW_FILE"), fr_save.fork_evidence(moved))
+    case("NEG parentSession header names the fork",
+         (fr_save.fork_evidence(parented) or "").startswith("PARENT_SESSION"), fr_save.fork_evidence(parented))
+    case("CTL missing session file is no fork evidence (never a false failure)", fr_save.fork_evidence(os.path.join(c, "gone.jsonl")) is None)
+    case("CTL no session file is no fork evidence", fr_save.fork_evidence(None) is None)
+
+    # run path: the saved session forked before verify -> SESSION_FORKED, a failure
+    c = cwd("fork-run")
+    panes = [Pane("w:0.1", "%101", 101, c), Pane("w:0.2", "%102", 102, c)]
+    for p in panes:
+        os.makedirs(os.path.dirname(p.session), exist_ok=True)
+        with open(p.session, "w") as fh:
+            fh.write('{"sessionId":"%s","cwd":%s}\n' % (os.path.basename(p.session)[:8], json.dumps(c)))
+    with open(panes[0].session, "a") as fh:
+        fh.write('{"type":"system","text":"Session moved to a new file (reason=open-elsewhere)"}\n')
+    fl, ctx, rd, _ = small_run(root, "fork-run", panes, home, agents, good_env, uid, aligned, wave=2)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    md = open(os.path.join(rd, "report.md")).read()
+    case("NEG forked session (Session moved event) -> SESSION_FORKED failure, exit non-zero",
+         res["w:0.1"]["result"] == "SESSION_FORKED" and res["w:0.1"]["session"] == "SESSION_FORKED" and "w:0.1" in rep["failed"]
+         and rc == fr_run.EXIT_FAILED and "Session moved to a new file" in " ".join(res["w:0.1"]["why"]), json.dumps(res["w:0.1"]))
+    case("NEG SESSION_FORKED trips the breaker: next wave HOLD_BREAKER, zero sends, watchers back",
+         res["w:0.2"]["result"] == "HOLD_BREAKER" and fl.count("w:0.2") == 0 and "BREAKER: w:0.1 SESSION_FORKED" in md and watchers_back(fl),
+         json.dumps(rep["breaker"]))
+
+    # real `verify` command path with --save sessions: the fork fails ...
+    # (w:0.2 never restarted: the fork tripped the breaker, so scope to SENT)
+    plan = json.load(open(os.path.join(rd, "plan.json")))
+    saved = {r["pane_id"]: r for r in json.load(open(os.path.join(rd, "save.json")))["rows"]}
+    sessions = {k: r["session_file"] for k, r in saved.items() if r.get("session_file")}
+    vres = fr.verify(plan, fl.inventory(), {}, sent={"w:0.1"}, sessions=sessions, lsof_fn=fl.lsof, fork_fn=fr_save.fork_evidence)
+    by = {r["pane"]: r for r in vres["rows"]}
+    case("NEG real verify path with --save: forked session FAILED (exit non-zero)",
+         by["w:0.1"]["result"] == "FAILED" and any("SESSION_FORKED" in w for w in by["w:0.1"]["why"])
+         and vres["verified"] != vres["total"], json.dumps(by["w:0.1"]))
+    # ... and a clean run verifies through the same path
+    c = cwd("fork-clean")
+    panes = [Pane("w:0.1", "%101", 101, c), Pane("w:0.2", "%102", 102, c)]
+    fl2, _, rd2, _ = small_run(root, "fork-clean", panes, home, agents, good_env, uid, aligned, wave=2)
+    rep2, rc2 = fr_run.apply_run(rd2, ctx_for(fl2, home, agents, good_env, uid, aligned), approve(rd2))
+    plan2 = json.load(open(os.path.join(rd2, "plan.json")))
+    saved2 = {r["pane_id"]: r for r in json.load(open(os.path.join(rd2, "save.json")))["rows"]}
+    sessions2 = {k: r["session_file"] for k, r in saved2.items() if r.get("session_file")}
+    vres2 = fr.verify(plan2, fl2.inventory(), {}, sessions=sessions2, lsof_fn=fl2.lsof, fork_fn=fr_save.fork_evidence)
+    by2 = {r["pane"]: r for r in vres2["rows"]}
+    case("CTL real verify path with --save: unforked panes VERIFIED",
+         rc2 == 0 and vres2["verified"] == vres2["total"]
+         and all(r["result"] == "VERIFIED" for r in vres2["rows"]), json.dumps(by2))
+
+    # run path: a second session file opens mid-run -> SESSION_LOST, never SESSION_KEPT
+    c = cwd("fork-extra")
+    fl, ctx, rd, _ = small_run(root, "fork-extra", [Pane("w:0.1", "%101", 101, c, extra_after_restart=True)],
+                               home, agents, good_env, uid, aligned)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("NEG extra session file open after /restart -> SESSION_LOST even though the saved file is still open",
+         res["w:0.1"]["result"] == "SESSION_LOST" and "w:0.1" in rep["failed"] and rc == fr_run.EXIT_FAILED
+         and "expected exactly" in " ".join(res["w:0.1"]["why"]), json.dumps(res["w:0.1"]))
+
+    # run path: another live pane still holds the session -> HOLD_SESSION_HOLDER, zero sends.
+    # The holder is a busy pane: never sent, but still in the inventory holding pa's
+    # session file, so the session never drained and pa's respawn must refuse.
+    c = cwd("fork-holder")
+    pa = Pane("r:0.7", "%207", 207, c, kind="tern")
+    pb = Pane("w:0.9", "%109", 109, c, busy_until=1e12, mirror_session=pa.session)
+    pc = Pane("r:0.8", "%208", 208, c, kind="tern")
+    fl, ctx, rd, _ = small_run(root, "fork-holder", [pc, pa, pb], home, agents, good_env, uid, aligned, wave=3)
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("NEG session still held by another live pane -> HOLD_SESSION_HOLDER, zero sends (drain refused)",
+         res["r:0.7"]["result"] == "HOLD_SESSION_HOLDER" and fl.count("r:0.7") == 0, json.dumps(res["r:0.7"]))
+    case("CTL unshared session respawns while the shared one holds",
+         res["r:0.8"]["result"] == "VERIFIED" and fl.count("r:0.8", "RESPAWN") == 1, json.dumps(res["r:0.8"]))
 
 
 # ---------- VERDICT: the only terminal ledger event on --resume-run ----------

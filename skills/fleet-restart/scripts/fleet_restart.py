@@ -677,8 +677,14 @@ def send(manifest, apply, approval, env, uid, capture_fn, run_fn, role=None, rev
 
 # ---------- verify ----------
 
-def verify(plan, inv_after, expect_mcp, mode="restart", sent=None):
-    """`sent`: pane names the send log marks SENT; verify only what was restarted."""
+def verify(plan, inv_after, expect_mcp, mode="restart", sent=None, sessions=None, lsof_fn=None, fork_fn=None):
+    """`sent`: pane names the send log marks SENT; verify only what was restarted.
+    `sessions`: pane_id -> expected session file with `lsof_fn(pid) -> lsof -Fn`
+    text and `fork_fn(path) -> reason|None`. When given, a pane also fails on a
+    forked session (SESSION_FORKED: a "Session moved to a new file" event or a
+    parentSession header) and on any open session other than the expected one
+    (SESSION_LOST): the zestroku:0.3 fork verified clean because only pid, flags
+    and screen were checked (ompkit-m5gs). Without sessions the check is off."""
     panes = {p["pane_id"]: p for p in inv_after["panes"]}
     rows = []
     for r in plan["rows"]:
@@ -704,6 +710,18 @@ def verify(plan, inv_after, expect_mcp, mode="restart", sent=None):
             for name, ver in (expect_mcp or {}).items():
                 if agent["mcp"].get(name) != ver:
                     why.append("mcp %s=%s != %s" % (name, agent["mcp"].get(name), ver))
+            expected = (sessions or {}).get(r["pane_id"])
+            if expected and lsof_fn is not None:
+                import fr_save
+                text = lsof_fn(agent["pid"])
+                if fork_fn is not None:
+                    fork = fork_fn(expected)
+                    if fork:
+                        why.append("SESSION_FORKED: %s" % fork)
+                if expected not in fr_save.session_candidates(text):
+                    why.append("SESSION_LOST: %s not open (open: %s)" % (expected, fr_save.session_candidates(text)))
+                elif not fr_save.session_exact(text, expected):
+                    why.append("SESSION_LOST: expected exactly [%s], open: %s" % (expected, fr_save.session_candidates(text)))
         state = parse_screen(p.get("screen", []))["state"]
         if state != "IDLE":
             why.append("screen %s, not idle prompt" % state)
@@ -872,6 +890,7 @@ def main(argv):
     v.add_argument("--expect-mcp", action="append", default=[], help="name=version, e.g. rea-agents=6.4.0")
     v.add_argument("--mode", choices=["restart", "respawn"], default="restart")
     v.add_argument("--sent-log", help="send --log output; verify only panes it marks SENT")
+    v.add_argument("--save", help="save.json; checks each pane holds exactly its saved session file and the file shows no fork")
     h = sub.add_parser("handoff")
     h.add_argument("--run", help="run dir: plan.json and the stage-1 snapshot from its run manifest")
     h.add_argument("--plan")
@@ -1020,7 +1039,7 @@ def main(argv):
     if args.cmd == "send":
         man = load(args.manifest)
         import fr_save
-        revalidate = fr_save.respawn_revalidator(lambda only: live_inventory(env, only=only), fr_save.lsof_live(run))
+        revalidate = fr_save.respawn_revalidator(lambda only=None: live_inventory(env, only=only), fr_save.lsof_live(run))
         res = send(man, args.apply, read_approval(args.approval), env, uid, capture_live(env), run, role=args.role, revalidate_fn=revalidate)
         dump(res, args.log)
         return 0 if not res.get("refused") and all(r["result"] in ("SENT", "WOULD_SEND") for r in res["rows"]) else 4
@@ -1029,7 +1048,13 @@ def main(argv):
         inv = load(args.inventory) if args.inventory else live_inventory(env)
         expect = dict(x.split("=", 1) for x in args.expect_mcp)
         sent = {r["pane"] for r in load(args.sent_log)["rows"] if r.get("result") == "SENT"} if args.sent_log else None
-        res = verify(plan, inv, expect, mode=args.mode, sent=sent)
+        sessions, lsof_fn, fork_fn = None, None, None
+        if args.save:
+            import fr_save
+            saved = {r["pane_id"]: r for r in load(args.save).get("rows", [])}
+            sessions = {k: r["session_file"] for k, r in saved.items() if r.get("session_file")}
+            lsof_fn, fork_fn = fr_save.lsof_live(run), fr_save.fork_evidence
+        res = verify(plan, inv, expect, mode=args.mode, sent=sent, sessions=sessions, lsof_fn=lsof_fn, fork_fn=fork_fn)
         dump(res)
         return 0 if res["verified"] == res["total"] else 5
     if args.cmd == "handoff":

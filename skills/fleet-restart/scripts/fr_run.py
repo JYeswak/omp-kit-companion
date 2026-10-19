@@ -14,7 +14,7 @@ preflight -> save -> watchers pause -> canary panes (RESPAWN preferred) ->
 idle panes in waves (send, verify: pid, flags, VERSION_OK, SESSION_KEPT;
 advisor re-apply) -> busy panes at their turn boundary -> watchers resume
 (always, in `finally`) -> WATCHDOG drift -> report.json/report.md. A failed
-canary, or any FAILED/SESSION_LOST/VERSION_STALE verdict (ADVISOR_FAILED with
+canary, or any FAILED/SESSION_LOST/SESSION_FORKED/VERSION_STALE verdict (ADVISOR_FAILED with
 strict_advisor), trips the breaker: no new sends start, in-flight panes finish.
 The chief pane is never touched: the report prints its respawn command. Every
 action appends to ledger.jsonl; --resume-run continues from it. The only
@@ -39,7 +39,7 @@ RUN_MANIFEST = "run-manifest.json"
 LEDGER = "ledger.jsonl"
 STAGES = ["preflight", "save", "watchers-pause", "canary", "idle-waves", "busy-turn-boundary", "watchers-resume", "watchdog-drift", "report"]
 CANDIDATES = ("RESTART", "QUEUE_BUSY")
-FAILURES = ("FAILED", "SESSION_LOST", "VERSION_STALE")
+FAILURES = ("FAILED", "SESSION_LOST", "SESSION_FORKED", "VERSION_STALE")
 SEND_HOLDS = {"HELD_COMPOSER": "HOLD_COMPOSER", "HELD_UNKNOWN_STATE": "HOLD_UNKNOWN_STATE"}
 EXIT_REFUSED, EXIT_FAILED = 7, 6
 
@@ -336,6 +336,7 @@ def verify_pane(ctx, row, saved, target, ledger):
     single = {"rows": [dict(row, action="RESTART", flags=row["flags"] + row.get("added", []))]}
     ctx.sleep(ctx.verify_settle)
     deadline = ctx.clock() + ctx.verify_timeout
+    text = None
     while True:
         inv = ctx.inventory_fn({row["pane_id"]})
         v = core.verify(single, inv, {}, mode=mode.lower())["rows"][0]
@@ -361,7 +362,16 @@ def verify_pane(ctx, row, saved, target, ledger):
         out["model_changed"] = {"before": before, "after": after}
         ledger.add("MODEL_CHANGED", pane=row["pane"], before=before, after=after)
     if v["result"] == "VERIFIED":
-        out["session"] = "SESSION_UNKNOWN" if kept is None else "SESSION_KEPT" if kept else "SESSION_LOST"
+        fork = fr_save.fork_evidence(saved.get("session_file")) if saved.get("session_file") else None
+        exact = fr_save.session_exact(text, saved["session_file"]) if (agent and text is not None and saved.get("session_file")) else None
+        if fork:
+            out["session"] = "SESSION_FORKED"
+            out["result"] = "SESSION_FORKED"
+            out["why"].append(fork)
+        else:
+            out["session"] = "SESSION_UNKNOWN" if kept is None else "SESSION_KEPT" if (kept and exact) else "SESSION_LOST"
+            if kept and not exact:
+                out["why"].append("open sessions %s, expected exactly [%s]" % (fr_save.session_candidates(text), saved.get("session_file")))
         ledger.add("SESSION", pane=row["pane"], result=out["session"], session_file=saved.get("session_file"))
         ledger.add("VERSION", pane=row["pane"], result=out["version"], exe=exe, target=target.get("path"))
         if out["session"] == "SESSION_LOST":
@@ -369,7 +379,7 @@ def verify_pane(ctx, row, saved, target, ledger):
         elif not version_ok:
             out["result"] = "VERSION_STALE"
             out["why"].append("running %s, target %s" % (exe, target.get("path")))
-    ledger.add("VERDICT", pane=row["pane"], result=out["result"], mode=mode, session=out.get("session"), version=out["version"], why=out["why"],
+    ledger.add("VERDICT", pane=row["pane"], result=out["result"], mode=mode, session=out.get("session"), version=out.get("version"), why=out["why"],
                model_changed=out.get("model_changed"))
     return out
 
@@ -482,7 +492,7 @@ def process_wave(ctx, rows, saved, target, approval, ledger, results, brk, canar
     for r in sent:
         s = saved.get(r["pane_id"]) or {}
         res = verify_pane(ctx, r, s, target, ledger)
-        if res["result"] in ("VERIFIED", "SESSION_LOST", "VERSION_STALE"):
+        if res["result"] in ("VERIFIED", "SESSION_LOST", "SESSION_FORKED", "VERSION_STALE"):
             res["advisor"] = advisor_step(ctx, r, s, approval, ledger, may_send=brk["sends"])
         results[r["pane"]] = res
         if canary:
@@ -629,7 +639,7 @@ def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk
                    "session": verdict.get("session"), "version": verdict.get("version"), "why": verdict.get("why") or []}
             if verdict.get("model_changed"):
                 res["model_changed"] = verdict["model_changed"]
-            if verdict["result"] in ("VERIFIED", "SESSION_LOST", "VERSION_STALE"):
+            if verdict["result"] in ("VERIFIED", "SESSION_LOST", "SESSION_FORKED", "VERSION_STALE"):
                 res["advisor"] = st["advisor"] if "advisor" in st else advisor_step(
                     ctx, r, saved.get(r["pane_id"]) or {}, approval, ledger, may_send=brk["sends"], prior=st)
             results[r["pane"]] = res
