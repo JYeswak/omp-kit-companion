@@ -443,6 +443,14 @@ def gate_save(case, tmp):
     case("CTL closed-eye 🙈 (advisors yielded the turn) after the model -> on, model name clean",
          fr.advisor_badge(closed) is True and fr.parse_screen(closed) == {"state": "IDLE", "model": "Sonnet 5.5"}, json.dumps(fr.parse_screen(closed)))
     case("CTL badge does not leak into the parsed model name", fr.parse_screen(on) == {"state": "BUSY", "model": "Opus 5.5"}, json.dumps(fr.parse_screen(on)))
+    case("CTL v18.12 `π-<profile>` prompt prefix -> IDLE with badge and clean model",
+         fr.parse_screen(screen_of(glyph="π-flag", badge=True)) == {"state": "IDLE", "model": "Opus 5.5"}
+         and fr.advisor_badge(screen_of(glyph="π-flag", badge=True)) is True,
+         json.dumps(fr.parse_screen(screen_of(glyph="π-flag", badge=True))))
+    case("NEG `π-<profile>` prompt without badge -> IDLE but advisor off",
+         fr.parse_screen(screen_of(glyph="π-runtime")) == {"state": "IDLE", "model": "Opus 5.5"}
+         and fr.advisor_badge(screen_of(glyph="π-runtime")) is False,
+         json.dumps(fr.parse_screen(screen_of(glyph="π-runtime"))))
     adir = lambda p: fr_save.agent_dir(home, p)  # noqa: E731
     case("CTL --advisor in live argv -> source flag", fr_save.advisor_state(on, ["--profile", "claude", "--advisor"], adir("claude"))["source"] == "flag")
     case("CTL profile config.yml advisor.enabled (nested) -> source config", fr_save.advisor_state(on, ["--profile", "cfgp"], adir("cfgp"))["source"] == "config")

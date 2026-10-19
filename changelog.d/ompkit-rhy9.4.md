@@ -1,0 +1,2 @@
+- Make advisor restoration crash-safe: persist pre-send intent and WATCHDOG hashes, reconcile on resume without duplicate `/advisor on`, and report failed restoration.
+- Track the v18.12 status bar (`π-<profile>` idle prompt) so badge/source parsing stays live; native harness skips the multi-page setup wizard to reach isolated panes.

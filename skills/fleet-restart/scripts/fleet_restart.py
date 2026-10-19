@@ -227,9 +227,10 @@ def composer_text(lines):
 
 
 def parse_screen(lines):
-    """IDLE when the bottom status bar starts with the prompt glyph π; BUSY on a
-    braille spinner; UNKNOWN otherwise (fail closed). Plain splits, no regex:
-    screen lines are untrusted text."""
+    """IDLE when the bottom status bar starts with the prompt glyph π, optionally
+    suffixed with the profile (`π-flag`, v18.12); BUSY on a braille spinner;
+    UNKNOWN otherwise (fail closed). Plain splits, no regex: screen lines are
+    untrusted text."""
     line = status_line(lines)
     if line is None:
         return {"state": "UNKNOWN", "model": ""}
@@ -241,7 +242,7 @@ def parse_screen(lines):
     for mark in ADVISOR_MARKS:
         model = model.replace(mark, "")
     model = model.strip()
-    if tok == "π":
+    if tok == "π" or tok.startswith("π-"):
         return {"state": "IDLE", "model": model}
     if tok and "\u2800" <= tok[0] <= "\u28ff":
         return {"state": "BUSY", "model": model}
