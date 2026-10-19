@@ -3240,6 +3240,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		const unreleased = rows.filter(owesRelease);
 		if (point !== undefined) logOwedFlag(home, point, rows);
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
+			overBudget: rows.filter(row => row.overBudget).length,
 			note: "Read-only apart from --at, which appends one flag row to the reap log. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");

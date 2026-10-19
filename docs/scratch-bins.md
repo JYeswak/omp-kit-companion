@@ -76,10 +76,14 @@ When a session runs `br update ID --status in_review` or `br close ID`, the kit-
 
 `omp-kit scratch apply` prints `gapFileCommands`: the exact `br comments add` lines that file each guarded gap class to its owning bead. With `--file-gaps` (and `--db PATH`, else `br` auto-discovers or uses `BEADS_DB`) it runs them: one comment per bead listing the dirs no earlier run filed (cut at 15 with a count), then a `gap_filed` row in the reap log so the next run files only the delta. A failed `br` call is reported in `data.gapFiled` and retried next run; classes with no guard are never auto-filed. Without `--file-gaps` nothing is filed.
 
+## The byte budget
+
+Creation declares a byte budget (`budget=<bytes>` in `.owner`, via `createScratch`): absent means unbounded, and zero, negative or non-integer budgets are refused before anything is created. `scratch mine` reports each own dir's live bytes, budget and `overBudget`, with a count; the reap gap report marks reclaimed dirs past their budget. Over-budget is a flag, never a reap reason: the dir is still binned, held or reaped only by the ordinary rules.
+
 ## The session's own dir
 
 Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owner` names `bin=throwaway`. When the session that recorded that dir (the agent and omp session id of its first tool call) ends, the fleet-guard extension releases the dir into the throwaway bin; the reaper then deletes it. A subagent's end, or a seat that never recorded an agent and session, releases nothing. A respawn is not an end. The respawn-intent marker is built and owned by `respawn_seat.py` (~/.claude 4bf70a30, the only contract): before the old omp is signalled it writes `respawn-intent.<oldpid>.json` next to handoffs.jsonl (`${XDG_STATE_HOME:-~/.local/state}/omp-kit-orchestration/`), atomically (temp plus rename), shaped `{"pid", "start" (ps lstart of the old pid), "agent", "session", "block", "at" (UTC ISO), "ttl_s": 900, "kind": "respawn"}`; it is removed in a finally once rehome_scratch is done and on every failed or aborted apply path, and dry runs write nothing. The extension skips disposal only when pid and start both match the exiting process and the marker is younger than `ttl_s`. No marker, a stale marker, or a start mismatch (a reused pid) means dispose.
 
 ## Scope of what exists today
 
-The owner keys, the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`), `scratch mine [--at]`, the session-end release of the session's own dir, the `SCRATCH_OWED` advice at `in_review` and `close`, and gap filing to guard beads (`--file-gaps`) are in. The daily measurement is a sitrep row (`scratch_waste`) in the private tracker. Still to come in ompkit-774u.15: promoting the advice to a refusal after a week without a false flag.
+The owner keys (with byte budget), the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`),

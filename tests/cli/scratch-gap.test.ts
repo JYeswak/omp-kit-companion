@@ -105,10 +105,28 @@ test("only reaped and quarantined dirs are gaps: live, skipped and held dirs nev
 	expect(report.rows[0]).toMatchObject({ class: "unowned", label: "gone.3", age_s: null });
 });
 
+test("a reclaimed dir past its declared budget is marked over-budget; unbounded and fitting dirs are not", () => {
+	const ownerOf = (budget: number | null) => ({ pid: 1, processStart: null, label: "x", repo: "/r",
+		createdAt: "2026-10-18T00:00:00Z", argv0: null, agent: "WorkerOne", session: SESSION_A,
+		bin: null, purpose: null, bead: null, expires: null, budget });
+	const verdicts = [
+		{ dir: "/x/over.1", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: ownerOf(5), sizeBytes: 100 },
+		{ dir: "/x/fit.2", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: ownerOf(1000), sizeBytes: 100 },
+		{ dir: "/x/free.3", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: ownerOf(null), sizeBytes: 100 },
+	];
+	const home = mkdtempSync(join(scratchParent, "gap-budget-"));
+	cleanup.push(home);
+	const report = scratchGapReport(verdicts, Date.parse("2026-10-18T00:00:00Z"), home);
+	const byDir = Object.fromEntries(report.rows.map((row) => [row.dir, row]));
+	expect(byDir["/x/over.1"]).toMatchObject({ overBudget: true, bytes: 100 });
+	expect(byDir["/x/fit.2"]).toMatchObject({ overBudget: false });
+	expect(byDir["/x/free.3"]).toMatchObject({ overBudget: false });
+});
+
 // ompkit-774u.15 AC3: a reap files each guarded gap class to its owning bead, only dirs no earlier run filed.
 const gapRow = (dir: string, guard: string, cls: ScratchGap["class"] = "never-released"): ScratchGap => ({
 	dir, label: dir.split("/").at(-1)!, agent: "WorkerOne", session: SESSION_A, role: "UNKNOWN",
-	bin: "unbinned" as const, class: cls, reason: "owner-dead-no-open-fds", action: "REAP" as const, bytes: 10, age_s: null, guard });
+	bin: "unbinned" as const, class: cls, reason: "owner-dead-no-open-fds", action: "REAP" as const, bytes: 10, age_s: null, guard, overBudget: false });
 const gapReportOf = (rows: ScratchGap[]): ScratchGapReport => ({ rows,
 	by_agent: { WorkerOne: rows.length }, by_class: {} });
 

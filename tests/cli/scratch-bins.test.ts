@@ -102,6 +102,22 @@ test("createScratch records the bin group and refuses an invalid one before crea
 	expect(existsSync(join(root, "var", "agent-tmp", `other.${process.pid}`))).toBe(false);
 });
 
+test("createScratch records a declared byte budget and refuses zero, negative and non-integer budgets", () => {
+	const root = mkdtempSync(join(scratchParent, "bins-budget-"));
+	cleanup.push(root);
+	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
+	const ok = createScratch("probe", root, deps({ liveness: live }), { budgetBytes: 1000 });
+	expect(ok).toMatchObject({ ok: true, reason: "created" });
+	expect(parseOwnerFile(readFileSync(join(ok.dir, ".owner"), "utf8"))).toMatchObject({ budget: 1000 });
+	for (const [name, budgetBytes] of [["zero", 0], ["negative", -5], ["fraction", 10.5], ["nan", Number.NaN]] as const) {
+		const bad = createScratch(`bad-${name}`, root, deps({ liveness: live }), { budgetBytes });
+		expect(bad, name).toMatchObject({ ok: false, reason: "budget-invalid" });
+		expect(existsSync(join(root, "var", "agent-tmp", `bad-${name}.${process.pid}`))).toBe(false);
+	}
+	expect(parseOwnerFile("pid=1\nlabel=x\nrepo=/r\ncreated=2026-10-19T00:00:00Z\nbudget=0")).toBeNull();
+	expect(parseOwnerFile("pid=1\nlabel=x\nrepo=/r\ncreated=2026-10-19T00:00:00Z\nbudget=100")).toMatchObject({ budget: 100 });
+});
+
 test("release --bin throwaway records the bin with no reference, and the release still moves the dir to quarantine", () => {
 	const { dir, root, home } = fixture(ownerText(process.pid));
 	expect(releaseScratch(dir, home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });

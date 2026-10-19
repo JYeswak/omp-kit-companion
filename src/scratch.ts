@@ -26,13 +26,17 @@ export interface ScratchOwner { pid: number; processStart: string | null; label:
 	/** The durable owner: the agent and its omp session id. Both or neither; a pid alone is only an attribute of the current process. */
 	agent: string | null; session: string | null;
 	/** Where the dir goes when its work ends (ompkit-774u.15): absent means unbinned. A hold carries the bead that justifies it and an expiry within 14 days of creation. */
-	bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null }
+	bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null;
+	/** Declared byte budget (ompkit-774u.15 P0): absent means unbounded. An over-budget live dir is flagged, never reaped for size alone. */
+	budget: number | null }
 
 const OWNER_FIELDS = ["pid", "process_start", "label", "repo", "created_at", "argv0"] as const;
 const LEGACY_OWNER_FIELDS = ["pid", "label", "repo", "created"] as const;
 const SEAT_FIELDS = ["agent", "session"] as const;
 const BIN_FIELDS = ["bin", "purpose", "bead", "expires"] as const;
-const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS];
+const BUDGET_FIELDS = ["budget"] as const;
+const BUDGET_PATTERN = /^[1-9][0-9]{0,14}$/;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS, ...BUDGET_FIELDS];
 const AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SESSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const PURPOSE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
@@ -116,8 +120,9 @@ function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null 
 	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
 	if (seat.length === 1) return null;
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
+	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
-		Object.keys(seen).length === fields.length + seat.length + binned.length;
+		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length;
 	const complete = base(OWNER_FIELDS);
 	const legacy = base(LEGACY_OWNER_FIELDS);
 	if (!complete && !legacy) return null;
@@ -126,9 +131,11 @@ function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null 
 	const createdAt = seen.created_at ?? seen.created!;
 	const bins = binned.length === 0 ? NO_BIN : parseBinFields(seen, createdAt);
 	if (bins === null) return null;
+	if (budgeted.length === 1 && !BUDGET_PATTERN.test(seen.budget!)) return null;
 	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
 		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
-		agent: seen.agent ?? null, session: seen.session ?? null, ...bins };
+		agent: seen.agent ?? null, session: seen.session ?? null, ...bins,
+		budget: budgeted.length === 1 ? Number(seen.budget) : null };
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
 	return owner.processStart !== null && owner.argv0 !== null;
@@ -1176,7 +1183,7 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 }
 export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string }
 
-export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: string; expires?: string }
+export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: string; expires?: string; budgetBytes?: number }
 
 /**
  * Canonical scratch create: <repo>/var/agent-tmp/<label>.<pid>/ with a valid
@@ -1202,7 +1209,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const durable = seat?.agent && seat.main ? `agent=${seat.agent}\nsession=${seat.main}\n` : "";
 	const binned = [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]]
 		.filter((pair): pair is [string, string] => pair[1] !== undefined).map(([key, value]) => `${key}=${value}\n`).join("");
-	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}${binned}`;
+	if (bins.budgetBytes !== undefined && (!Number.isInteger(bins.budgetBytes) || !BUDGET_PATTERN.test(String(bins.budgetBytes))))
+		return { ok: false, dir: "", exportLine: "", reason: "budget-invalid" };
+	const budgeted = bins.budgetBytes !== undefined ? `budget=${bins.budgetBytes}\n` : "";
+	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}${binned}${budgeted}`;
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -1785,7 +1795,9 @@ export type ScratchGapClass = "never-released" | "pid-keyed-owner-never-released
 
 /** One reclaimed dir that its owner failed to bin, with the seat that left it and the guard that should have stopped it (ompkit-774u.15 D). */
 export interface ScratchGap { dir: string; label: string; agent: string | null; session: string | null; role: string; bin: ScratchBin | "unbinned";
-	class: ScratchGapClass; reason: string; action: "REAP" | "QUARANTINE"; bytes: number; age_s: number | null; guard: string }
+	class: ScratchGapClass; reason: string; action: "REAP" | "QUARANTINE"; bytes: number; age_s: number | null; guard: string;
+	/** Whether the dir exceeded its declared budget at reclaim time (null budget means unbounded, never over). */
+	overBudget: boolean }
 
 export interface ScratchGapReport { rows: ScratchGap[]; by_agent: Record<string, number>; by_class: Record<string, { count: number; bytes: number; guard: string }> }
 
@@ -1847,7 +1859,7 @@ export function scratchGapReport(applied: readonly ScratchVerdict[], now: number
 		rows.push({ dir: verdict.dir, label: owner?.label ?? original, agent: owner?.agent ?? null, session: owner?.session ?? null,
 			role: owner?.agent != null && owner.agent === chief ? "chief" : "UNKNOWN", bin, class: cls, reason: verdict.reason,
 			action: verdict.action, bytes: verdict.sizeBytes, age_s: Number.isFinite(created) ? Math.max(0, Math.round((now - created) / 1000)) : null,
-			guard: GAP_GUARDS[cls] ?? NO_GUARD });
+			guard: GAP_GUARDS[cls] ?? NO_GUARD, overBudget: owner?.budget != null && verdict.sizeBytes > owner.budget });
 	}
 	const by_agent: Record<string, number> = {};
 	const by_class: ScratchGapReport["by_class"] = {};
@@ -2082,7 +2094,9 @@ export function applyScratchForPressure(home: string, deps: ApplyDeps):
 export type OwnedScratchState = "unreleased" | "released" | "held" | "hold-expired";
 
 /** One dir the caller owns and where it stands: the list a disposal-point guard shows an owner that has not binned its work. */
-export interface OwnedScratchRow { dir: string; label: string; state: OwnedScratchState; bin: ScratchBin | "unbinned" }
+export interface OwnedScratchRow { dir: string; label: string; state: OwnedScratchState; bin: ScratchBin | "unbinned";
+	/** Live bytes on disk, the declared budget (null when unbounded), and whether the dir exceeds it. */
+	bytes: number; budget: number | null; overBudget: boolean }
 
 /**
  * The caller's own scratch dirs across the scratch roots (ompkit-774u.15 C): those whose owner record names the caller's
@@ -2120,12 +2134,15 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 			const owner = text === null ? null : parseOwnerFile(text);
 			if (owner === null || !(callerHoldsSeat(owner, once) || callerIsOwnedBy(owner.pid, process.pid, run))) continue;
 			const released = readReleaseRecord(dir);
+			const bytes = dirSize(dir);
+			const budget = owner.budget;
+			const overBudget = budget !== null && bytes > budget;
 			if (released) {
-				rows.push({ dir, label: owner.label, state: "released", bin: released.bin ?? "unbinned" });
+				rows.push({ dir, label: owner.label, state: "released", bin: released.bin ?? "unbinned", bytes, budget, overBudget });
 			} else if (owner.bin === "hold" && owner.expires !== null) {
-				rows.push({ dir, label: owner.label, state: Date.parse(owner.expires) > now ? "held" : "hold-expired", bin: "hold" });
+				rows.push({ dir, label: owner.label, state: Date.parse(owner.expires) > now ? "held" : "hold-expired", bin: "hold", bytes, budget, overBudget });
 			} else {
-				rows.push({ dir, label: owner.label, state: "unreleased", bin: owner.bin ?? "unbinned" });
+				rows.push({ dir, label: owner.label, state: "unreleased", bin: owner.bin ?? "unbinned", bytes, budget, overBudget });
 			}
 		}
 	}

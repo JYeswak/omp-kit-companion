@@ -86,6 +86,19 @@ test("scratch apply without --file-gaps prints the exact filing commands and fil
 	expect(readFileSync(log, "utf8")).not.toContain("gap_filed");
 }, 180_000);
 
+test("scratch mine counts over-budget dirs: a dir past its declared budget is flagged, an unbounded or fitting dir is not", () => {
+	const { root, env } = world();
+	plant(root, "over.1", ownerOf(process.pid, "over", "budget=10\n"));
+	plant(root, "fit.2", ownerOf(process.pid, "fit", "budget=100000\n"));
+	plant(root, "free.3", ownerOf(process.pid, "free"));
+	const mined = cli(env, "scratch", "mine");
+	expect(mined.envelope.data).toMatchObject({ overBudget: 1 });
+	const byLabel = Object.fromEntries((mined.envelope.data.dirs as { label: string; overBudget: boolean; budget: number | null }[]).map((row) => [row.label, row]));
+	expect(byLabel.over).toMatchObject({ overBudget: true, budget: 10 });
+	expect(byLabel.fit).toMatchObject({ overBudget: false, budget: 100000 });
+	expect(byLabel.free).toMatchObject({ overBudget: false, budget: null });
+}, 180_000);
+
 test("scratch mine --at logs one flag row naming only the caller's owed dirs; a plain mine, a clean mine and the session dir log nothing", () => {
 	const { root, home, env } = world();
 	const log = join(home, "state", "omp-kit", "scratch-reap-log.jsonl");
