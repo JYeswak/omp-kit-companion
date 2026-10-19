@@ -119,9 +119,9 @@ test("focused selection skips suites and shell files the range deleted, and stil
 	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		// The real selector and gate_focused; only the bun test run is a stand-in that checks its argv exists.
-		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "" },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const deleted = focused("tests/cli/gone.test.ts\nscripts/gone.sh");
@@ -159,9 +159,9 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 		chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
-		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "" },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const bad = focused("scripts/bad.sh");
@@ -389,7 +389,7 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 // ---- CIGATE1 (ompkit-v66l.27.1): the push runs the tests its diff affects, or refuses ---------------
 // The real selector, disk floor, heavy and bun test run against a small exact-tree fixture; src is the
 // checkout's (heavy runs from it), the code under test lives in lib/ so the fixture owns its edits.
-const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "record_run", "gate_focused"];
+const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
 function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
 	const dir = mkdtempSync(join(base, "archive."));
 	symlinkSync(join(root, "src"), join(dir, "src"));
@@ -404,12 +404,12 @@ function affectedArchive(fx: SaveFixture, answer: number, expected: number, base
 	writeFileSync(join(dir, "docs/notes.md"), "# notes\n");
 	return dir;
 }
-function runFocused(fx: SaveFixture, source: string, archive: string, changed: string) {
+function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = join(root, "scripts")) {
 	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
 	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
 	const started = Date.now();
 	const result = Bun.spawnSync(["sh", probe], {
-		env: { ...process.env, ...fx.env, ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		env: { ...process.env, ...fx.env, ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };
@@ -614,3 +614,90 @@ test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 60_000);
+
+// ---- CIGATE1 CI-only manifest: explicit, printed exclusions that turn the verdict PARTIAL ----------
+function gateTree(fx: SaveFixture, manifest: string): string {
+	const dir = mkdtempSync(join(fx.dir, "gate."));
+	mkdirSync(join(dir, "scripts"));
+	symlinkSync(join(root, "src"), join(dir, "src"));
+	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
+	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);
+	return join(dir, "scripts");
+}
+const MANIFEST_HEADER = "path\tkind\tbead\texpires\treason\n";
+function isoDay(offsetDays: number): string {
+	return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+}
+
+test.skipIf(!AMPLE)("CIGATE1 manifest: a CI-only test is excluded and printed, and the verdict is PARTIAL naming it (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		writeFileSync(join(archive, "tests/cli/live.test.ts"), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("needs a live service", () => { expect(answer()).toBe(0); });\n`);
+		const scripts = gateTree(fx, `${MANIFEST_HEADER}tests/cli/live.test.ts\tci-only\tompkit-test.1\t-\tneeds a live service\n`);
+		const partial = runFocused(fx, source, archive, "lib/mod.ts", scripts);
+		expect(partial.code).toBe(0);
+		expect(partial.out).toContain("focused: excluded tests/cli/live.test.ts (ci-only ompkit-test.1: needs a live service); CI runs it");
+		expect(partial.out).toContain("FRESH-GATE: VERDICT PARTIAL files=1 ran=1 deferred=tests/cli/live.test.ts: CI runs the deferred files");
+		expect(partial.out).not.toContain("VERDICT TESTED");
+		// Mutant: no manifest filter runs the CI-only test here, and its live dependency refuses the push.
+		const unfiltered = source.replace("\tfocus_tests=$(apply_ci_only $focus_tests) || return $?\n", "");
+		expect(unfiltered).not.toBe(source);
+		expect(runFocused(fx, unfiltered, archive, "lib/mod.ts", scripts).code).not.toBe(0);
+		// Every test reaching changed code CI-only: refused, never a pass that ran nothing.
+		const onlyLive = runFocused(fx, source, archive, "lib/mod.ts", gateTree(fx, `${MANIFEST_HEADER}tests/cli/live.test.ts\tci-only\tompkit-test.1\t-\tlive\ntests/cli/mod.test.ts\tci-only\tompkit-test.2\t-\tlive\n`));
+		expect(onlyLive.code).toBe(1);
+		expect(onlyLive.out).toContain("FRESH-GATE: REFUSED reason=NO_LOCAL_TESTS code=lib/mod.ts ci_only=tests/cli/live.test.ts,tests/cli/mod.test.ts");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test("CIGATE1 manifest: hermeticity rows expire within 14 days; an expired row runs; malformed rows refuse", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const probe = join(fx.dir, "manifest-probe.sh");
+		writeFileSync(probe, `${gateFunctions(source, ["apply_ci_only"])}apply_ci_only tests/cli/a.test.ts tests/cli/b.test.ts\n`);
+		const filter = (manifest: string) => {
+			const scripts = gateTree(fx, manifest);
+			const result = Bun.spawnSync(["sh", probe], { env: { ...process.env, SCRIPT_DIR: scripts, WORK: fx.env.WORK }, stdout: "pipe", stderr: "pipe" });
+			return { code: result.exitCode, kept: result.stdout.toString().split("\n").filter(Boolean), err: result.stderr.toString() };
+		};
+		const live = filter(`${MANIFEST_HEADER}tests/cli/a.test.ts\thermeticity\tompkit-test.3\t${isoDay(13)}\tHOME race\n`);
+		expect(live.code).toBe(0);
+		expect(live.kept).toEqual(["tests/cli/b.test.ts"]);
+		const expired = filter(`${MANIFEST_HEADER}tests/cli/a.test.ts\thermeticity\tompkit-test.3\t${isoDay(-1)}\tHOME race\n`);
+		expect(expired.kept).toEqual(["tests/cli/a.test.ts", "tests/cli/b.test.ts"]);
+		expect(expired.err).toContain(`ci-only manifest row for tests/cli/a.test.ts (ompkit-test.3) EXPIRED ${isoDay(-1)}; it runs`);
+		for (const [manifest, why] of [
+			[`${MANIFEST_HEADER}tests/cli/a.test.ts\thermeticity\tompkit-test.3\t${isoDay(30)}\tHOME race\n`, "a hermeticity row expires by"],
+			[`${MANIFEST_HEADER}tests/cli/a.test.ts\thermeticity\tompkit-test.3\t-\tHOME race\n`, "a hermeticity row expires by"],
+			[`${MANIFEST_HEADER}tests/cli/a.test.ts\tci-only\t\t-\tno bead\n`, "needs 5 non-empty tab-separated fields"],
+			[`${MANIFEST_HEADER}tests/cli/a.test.ts\tskip\tompkit-test.3\t-\twhy\n`, "kind is ci-only or hermeticity"],
+			["tests/cli/a.test.ts\tci-only\tompkit-test.3\t-\tno header\n", "line 1 is not the header"],
+		] as const) {
+			const bad = filter(manifest);
+			expect(bad.code).toBe(3);
+			expect(bad.kept).toEqual([]);
+			expect(bad.err).toContain("FRESH-GATE: REFUSED reason=CI_ONLY_MANIFEST_INVALID");
+			expect(bad.err).toContain(why);
+		}
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+});
+
+test("CIGATE1 manifest: the checked-in manifest is valid and names only existing tests", () => {
+	const manifest = readFileSync(join(root, "scripts/gate-ci-only.tsv"), "utf8").trim().split("\n");
+	expect(manifest[0]).toBe("path\tkind\tbead\texpires\treason");
+	for (const row of manifest.slice(1)) {
+		const [path, kind, bead, expires, reason] = row.split("\t");
+		expect(existsSync(join(root, path as string))).toBe(true);
+		expect(["ci-only", "hermeticity"]).toContain(kind as string);
+		expect(bead).toStartWith("ompkit-");
+		expect(reason?.length ?? 0).toBeGreaterThan(10);
+		if (kind === "ci-only") expect(expires).toBe("-");
+	}
+});

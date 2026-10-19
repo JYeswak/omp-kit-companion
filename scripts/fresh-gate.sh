@@ -286,7 +286,11 @@ run_affected_tests() {
 		echo "FRESH-GATE: RED: $bun_files affected bun test files were selected but bun reported no test run" >&2
 		return 1
 	fi
-	echo "FRESH-GATE: VERDICT TESTED files=$files ran=$ran"
+	if [ -s "$WORK/excluded" ]; then
+		echo "FRESH-GATE: VERDICT PARTIAL files=$files ran=$ran deferred=$(paste -sd , - <"$WORK/excluded"): CI runs the deferred files"
+	else
+		echo "FRESH-GATE: VERDICT TESTED files=$files ran=$ran"
+	fi
 }
 
 # Product code a change touches: source, shell or python outside tests/ that is still in the tree.
@@ -301,6 +305,45 @@ changed_code() {
 		esac
 	done
 	return 0
+}
+
+# CI-only manifest (scripts/gate-ci-only.tsv, read from the gate's own tree like every gate script):
+# tests that cannot be hermetic on a dev Mac. Each row: path, kind, bead, expires, reason. kind is
+# ci-only (expires -) or hermeticity (a test bug, expiring within 14 days, like the quarantine);
+# an expired row no longer excludes. Every exclusion is printed and turns the verdict PARTIAL.
+# apply_ci_only TEST...: kept tests on stdout, exclusions on stderr and in $WORK/excluded.
+apply_ci_only() {
+	manifest="$SCRIPT_DIR/gate-ci-only.tsv"
+	: >"$WORK/excluded"
+	if [ ! -f "$manifest" ]; then
+		printf '%s\n' "$@"
+		return 0
+	fi
+	today=$(date -u +%Y-%m-%d)
+	horizon=$(date -u -v+14d +%Y-%m-%d 2>/dev/null || date -u -d '+14 days' +%Y-%m-%d)
+	printf '%s\n' "$@" | awk -v manifest="$manifest" -v today="$today" -v horizon="$horizon" -v excluded="$WORK/excluded" '
+		BEGIN {
+			header = "path\tkind\tbead\texpires\treason"
+			while ((getline line < manifest) > 0) {
+				n++
+				if (n == 1) { if (line != header) { bad = "line 1 is not the header path, kind, bead, expires, reason"; break } continue }
+				if (line == "") continue
+				if (split(line, f, "\t") != 5 || f[1] == "" || f[3] == "" || f[5] == "") { bad = "line " n " needs 5 non-empty tab-separated fields"; break }
+				if (f[2] == "ci-only") {
+					if (f[4] != "-") { bad = "line " n ": a ci-only row expires -, got " f[4]; break }
+				} else if (f[2] == "hermeticity") {
+					if (length(f[4]) != 10 || substr(f[4], 5, 1) != "-" || substr(f[4], 8, 1) != "-" || f[4] > horizon) { bad = "line " n ": a hermeticity row expires by " horizon " (14 days), got " f[4]; break }
+					if (f[4] < today) { print "focused: ci-only manifest row for " f[1] " (" f[3] ") EXPIRED " f[4] "; it runs" > "/dev/stderr"; continue }
+				} else { bad = "line " n ": kind is ci-only or hermeticity, got " f[2]; break }
+				row[f[1]] = f[2] " " f[3] ": " f[5]
+			}
+			if (n == 0) bad = "the manifest is empty or unreadable"
+			if (bad != "") { print "FRESH-GATE: REFUSED reason=CI_ONLY_MANIFEST_INVALID " manifest ": " bad > "/dev/stderr"; exit 3 }
+		}
+		$0 == "" { next }
+		($0 in row) { print "focused: excluded " $0 " (" row[$0] "); CI runs it" > "/dev/stderr"; print $0 >> excluded; next }
+		{ print }
+	'
 }
 
 # One JSON line per gate that reaches test selection, in the pushing repo's git dir, so a run of
@@ -475,6 +518,8 @@ fi
 	# Explicit mappings above join the import-scan selection; each runs once.
 	# shellcheck disable=SC2086
 	focus_tests=$(printf '%s\n' $affected $focus_tests | sort -u)
+	# shellcheck disable=SC2086
+	focus_tests=$(apply_ci_only $focus_tests) || return $?
 	if [ -n "$focus_tests" ] && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (
 			cd "$ARCHIVE_DIR"
@@ -497,12 +542,21 @@ fi
 		code=$(changed_code)
 		if [ -n "$code" ]; then
 			record_run 0 0 1
-			# shellcheck disable=SC2086
-			echo "FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=$(printf '%s\n' $code | paste -sd , -): the push changes product code and no test reaches it; add or name a test that exercises it" >&2
+			if [ -s "$WORK/excluded" ]; then
+				# shellcheck disable=SC2086
+				echo "FRESH-GATE: REFUSED reason=NO_LOCAL_TESTS code=$(printf '%s\n' $code | paste -sd , -) ci_only=$(paste -sd , - <"$WORK/excluded"): every test reaching this code is CI-only; add a hermetic test that exercises it" >&2
+			else
+				# shellcheck disable=SC2086
+				echo "FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=$(printf '%s\n' $code | paste -sd , -): the push changes product code and no test reaches it; add or name a test that exercises it" >&2
+			fi
 			return 1
 		fi
 		record_run 0 0 0
-		echo "FRESH-GATE: VERDICT DOCS_ONLY: no product code changed; no suite to run"
+		if [ -s "$WORK/excluded" ]; then
+			echo "FRESH-GATE: VERDICT PARTIAL files=0 ran=0 deferred=$(paste -sd , - <"$WORK/excluded"): only CI-only tests changed; CI runs them"
+		else
+			echo "FRESH-GATE: VERDICT DOCS_ONLY: no product code changed; no suite to run"
+		fi
 	fi
 }
 
