@@ -341,6 +341,24 @@ def main():
     case("CTL herdr session file comes from argv when agent_session is empty",
          argv_resume[0]["session_file"] == "/s.jsonl" and argv_resume[0]["action"] == "CURRENT")
 
+    # --- 2026-10-11 flag-loss replay (ompkit-fp72.19 AC [b]): handoff
+    # docs/handoffs/fleet-restart-20261011.md ("What was restarted", step-1
+    # defect) in omp-kit. Seven commands rebuilt from the on-screen model
+    # dropped live flags; six carried an omp argv, the seventh
+    # (uds--burn-down:0.1) a worker-daemon argv that is never an agent.
+    replay_rows = [("uds--burn-down:0.%d" % i, ["--profile", "codex", "--model", "openai-codex/gpt-6-luna", "--thinking", "high"])
+                    for i in range(2, 7)]
+    replay_rows.append(("zestroku:0.1", ["--profile", "claude", "--model", "anthropic/claude-sonnet-5-5"]))
+    for pane, live in replay_rows:
+        model = live[live.index("--model") + 1]
+        ok, code = fr.check_cmd_flags("cd /_UNUSED_ && omp --model " + model, live)
+        case("REPLAY 1011 %s screen-built cmd refused" % pane, not ok and code == "FLAGS_NOT_FROM_LIVE_ARGS", code)
+        ok, code = fr.check_cmd_flags("cd /_UNUSED_ && omp " + " ".join(live), live)
+        case("CTL 1011 %s live flags accepted" % pane, ok, code)
+    case("REPLAY 1011 uds--burn-down:0.1 worker argv is not an agent", fr.omp_match(WORKER) is None)
+    case("REPLAY 1011 uds--burn-down:0.1 find_agent finds no agent",
+         fr.find_agent([{"pid": 900, "ppid": 111, "args": WORKER},
+                        {"pid": 901, "ppid": 900, "args": "node mcp-server.js rea-agents"}], 111) is None)
     import selftest_run  # noqa: E402  (watchers, save, advisor, respawn, autonomous run gates)
     selftest_run.gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE)
 
