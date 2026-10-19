@@ -1032,7 +1032,7 @@ function body(): void {
 	const title = blockedFiles.length
 		? `OMP ${reviewed.to}: memory semantics changed in ${blockedFiles.map(file => file.path).join(", ")}`
 		: `OMP ${reviewed.to}: certification blocked (${reasons.map(reason => reason.split(":")[0]).join("; ")})`;
-	const issue: string[] = [ISSUE_MARKER, `Certification of OMP ${reviewed.to} (from ${reviewed.from}) did not qualify. PR #${pr} (branch \`omp-certify/${reviewed.to}\`) stays open with label \`agent-fix\`; push the fix to that branch, or land it on main (the next hourly run re-certifies when the pins on main change). This issue closes itself when a certification merges. Run: ${runUrl}`, "", "## Why", ""];
+	const issue: string[] = [ISSUE_MARKER, `Certification of OMP ${reviewed.to} (from ${reviewed.from}) did not qualify. PR #${pr} (branch \`omp-certify/${reviewed.to}\`) stays open with label \`agent-fix\`; push the fix to that branch, or land it on main (the next nightly or dispatched run re-certifies when the pins on main change). This issue closes itself when a certification merges. Run: ${runUrl}`, "", "## Why", ""];
 	for (const reason of reasons) issue.push(`- ${oneLine(reason, 600)}`);
 	issue.push("", "## What to change", "");
 	for (const gate of blockedGates) issue.push(`- **${gate}** (${ROLE[gate]}): ${codePaths(gate).join(", ") || "see the gate's pins"}. Confirm the semantics against the diff below, adapt the consumer code if they changed, then add the ${reviewed.to} tuple.`);

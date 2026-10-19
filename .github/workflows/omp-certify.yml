@@ -2,7 +2,10 @@ name: OMP certification
 
 # OMP releases several times a day and UCA updates the operator's OMP every three hours. Main CI installs
 # only scripts/omp-compat.json `minimum` and `certified`; this workflow is the one path that moves `certified`.
-# Hourly, when npm latest is newer than `certified`, it certifies ONLY that latest release. Skipping
+# Nightly (and on dispatch, e.g. right after an OMP release that must not wait for the night), when npm latest
+# is newer than `certified`, it certifies ONLY that latest release. It ran hourly until 2026-10-19: every OMP
+# release then started its own full certification (three 90-min-capped macOS differential legs), 26 full runs
+# in 8 days, 22 of them red (ompkit-v66l.27.3). Skipping
 # intermediate releases is intended: a certification says "the latest release at time T works"; a machine
 # still on an intermediate release sees UNVERIFIED memory in doctor, which is informational, not red.
 # OMP's release notes are read for every release in between, though: a breaking change in any of them counts.
@@ -31,7 +34,8 @@ name: OMP certification
 # GET /v1/models and come from different model families.
 on:
   schedule:
-    - cron: "41 * * * *"
+    # 06:41 UTC: before the daily CI schedule (09:17) needs the shared macOS runner pool.
+    - cron: "41 6 * * *"
   workflow_dispatch:
     inputs:
       force:
