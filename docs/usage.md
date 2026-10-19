@@ -275,7 +275,9 @@ private copy of the report. Exclusions are added only to named profiles, unioned
 with their existing `ttsr.disabledRules`; the default profile's policy is never changed.
 
 The report records host load averages; stream timings are raw and are not
-load-normalized.
+load-normalized. The report also measures a write/edit stream in addition to
+the bash stream, so path-scoped rules (tool:write/edit) get a real budget
+instead of a vacuous pass; both streams share the 500 ms ceiling.
 
 Run `bun "$KIT_SOURCE/src/cli.ts" undo RECEIPT_ID --yes` to restore each
 verified profile's previous plugin package, lock file, and named-profile policy.
