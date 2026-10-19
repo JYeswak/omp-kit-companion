@@ -1,3 +1,4 @@
 ### Added
 - `omp-kit doctor --scope mission` lists every repo the fleet works in that builds through rch and whether its gate calls `omp-kit rch lease`; a repo-local lease script is a finding naming the file. The repo set is the fleet-watch registry until the Mission Protocol registry (MP6) exists.
 - `omp-kit doctor --scope rch` is accepted by the scope grammar (the `rch_gc_roots` and worker-health findings already existed).
+- `omp-kit rch lease` pre-build gc failure is pinned: when no slot is free and the pre-build `rch gc` fails, the cycle is `REFUSED rch_pre_gc_failed` and nothing is submitted, even if a later status read would admit (planted fixtures in `tests/cli/rch-cycle.test.ts`; the post-build side was already pinned: a failing post-build gc keeps a passing build at `UNREADY`, never `COMPLETE`).

@@ -112,6 +112,23 @@ test.each([0, 101])("post-GC failure preserves remote compiler exit %s without c
 	expect(result.overall).toBe(compilerExit === 0 ? "UNREADY" : "BUILD_FAILED");
 });
 
+test("a pre-build gc failure refuses without submitting anything", async () => {
+const fixture = nativeFixture({ freeBefore: 0, freeAfter: 0, gcExit: 1 });
+const result = await runRchCycle(input, fixture.executor);
+expect(result.overall).toBe("REFUSED");
+expect(result.reason).toBe("rch_pre_gc_failed");
+expect(fixture.submitted()).toBe(0);
+});
+
+test("a pre-build gc failure never becomes a pass even when a later read would admit", async () => {
+const fixture = nativeFixture({ freeBefore: 0, freeAfter: 4, gcExit: 1 });
+const result = await runRchCycle(input, fixture.executor);
+expect(result.overall).toBe("REFUSED");
+expect(result.reason).toBe("rch_pre_gc_failed");
+expect(result.compilerExit).toBeNull();
+expect(fixture.submitted()).toBe(0);
+});
+
 test("a returned successful job still refuses a next-agent readiness claim when disk pressure removes its slots", async () => {
 	const fixture = nativeFixture({ freeAfter: 0 });
 	const result = await runRchCycle(input, fixture.executor);
