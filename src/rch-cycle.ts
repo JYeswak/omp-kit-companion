@@ -5,6 +5,8 @@ const GC_TIMEOUT_MS = 960_000; // Native GC's 900 s per-worker bound, plus shutd
 const BUILD_IDLE_TIMEOUT_MS = 1_800_000; // Existing fleet no-progress bound; output rearms it.
 const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 const NATIVE_SAFETY = ["--no-self-healing", "--no-hook-auto-start"] as const;
+// A dead owner must also have stopped heartbeating this long ago, so a wrapper whose journal row was published moments ago is never reaped on one racy liveness read.
+const DEAD_LEASE_STALE_MS = 900_000;
 
 export interface NativeRchResult {
 	exit: number | null;
@@ -45,6 +47,28 @@ export interface RchCycleInput {
 	apply: boolean;
 	signal?: AbortSignal;
 }
+/** A journaled lease whose holder is provably gone: native liveness says absent and the lease neither heartbeats nor retires. */
+export interface DeadLease {
+	wrapperId: string;
+	worker: string;
+	pid: number;
+	state: string;
+	phase: string | null;
+	/** `stale_heartbeat`: no heartbeat within the stale bound. `pid_birth_mismatch`: a live wrapper now holds this pid with a different process start time (pid reuse). */
+	basis: "stale_heartbeat" | "pid_birth_mismatch";
+}
+export interface DeadLeaseReport extends DeadLease {
+	/** `plan_only`: plan mode reports but never recovers. `reap_failed`: the native recover failed or the re-read did not show the lease retired. */
+	outcome: "reaped" | "reap_failed" | "plan_only";
+}
+export interface DeadLeaseScope {
+	now: number;
+	/** Only leases on this worker are candidates. */
+	worker?: string;
+	excludePids?: readonly number[];
+	excludeWrapperIds?: readonly string[];
+	staleMs?: number;
+}
 export interface RchCycleResult {
 	overall: "PLAN" | "REFUSED" | "COMPLETE" | "BUILD_FAILED" | "CANCELLED" | "UNREADY";
 	reason: string;
@@ -59,6 +83,8 @@ export interface RchCycleResult {
 	before: RchStatus | null;
 	after: RchStatus | null;
 	wrapperId: string | null;
+	/** Dead-owner leases on the selected worker; null when the native journal could not be read or no worker was in scope. */
+	deadLeases: DeadLeaseReport[] | null;
 	lease: string;
 	noClaim: string;
 }
@@ -98,6 +124,69 @@ function trusted(worker: RchWorker): boolean {
 }
 function choose(status: RchStatus, input: RchCycleInput): RchWorker | undefined {
 	return status.workers.find(worker => (!input.worker || worker.id === input.worker) && trusted(worker) && worker.free >= input.requiredSlots);
+}
+function birthKey(lease: Record<string, unknown>): string | null {
+	const start = object(object(lease.process_birth)?.start);
+	return start && typeof start.platform === "string" && nonnegativeInteger(start.seconds) && nonnegativeInteger(start.microseconds) ? `${start.platform}:${start.seconds}:${start.microseconds}` : null;
+}
+/** Null when the reply is not a complete, error-free journal listing: absence of evidence reaps nothing. */
+function scanDeadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] | null {
+	const envelope = object(reply);
+	if (envelope?.complete !== true || !Array.isArray(envelope.jobs) || !Array.isArray(envelope.journal_errors) || envelope.journal_errors.length) return null;
+	const rows = envelope.jobs.map(object);
+	const liveBirths = new Map<number, Set<string>>();
+	const idCounts = new Map<string, number>();
+	for (const row of rows) {
+		const lease = object(row?.lease), id = object(lease?.identity)?.local_wrapper_id;
+		if (typeof id === "string") idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+		if (row?.wrapper_alive !== true || row.owner_presence !== "live" || !lease || !nonnegativeInteger(lease.wrapper_pid)) continue;
+		const key = birthKey(lease);
+		if (key) liveBirths.set(lease.wrapper_pid, (liveBirths.get(lease.wrapper_pid) ?? new Set<string>()).add(key));
+	}
+	const staleMs = scope.staleMs ?? DEAD_LEASE_STALE_MS;
+	const found: DeadLease[] = [];
+	for (const row of rows) {
+		const lease = object(row?.lease), id = object(lease?.identity)?.local_wrapper_id, recovery = object(lease?.recovery);
+		// Only a native-confirmed absent owner qualifies; live and unknown owners are never touched.
+		if (!row || !lease || row.wrapper_alive !== false || row.owner_presence !== "absent" || lease.schema_version !== 1) continue;
+		const pid = lease.wrapper_pid, worker = lease.worker_id;
+		if (typeof id !== "string" || !id || idCounts.get(id) !== 1 || typeof worker !== "string" || !nonnegativeInteger(pid)) continue;
+		if ((scope.worker !== undefined && worker !== scope.worker) || scope.excludePids?.includes(pid) || scope.excludeWrapperIds?.includes(id)) continue;
+		if (lease.terminal_acknowledged === true || recovery?.retired === true) continue;
+		const own = birthKey(lease), births = liveBirths.get(pid);
+		const reused = own !== null && births !== undefined && !births.has(own);
+		const stale = nonnegativeInteger(lease.heartbeat_unix_ms) && scope.now - lease.heartbeat_unix_ms >= staleMs;
+		if (!reused && !stale) continue;
+		found.push({ wrapperId: id, worker, pid, state: typeof lease.state === "string" ? lease.state : "unknown", phase: typeof lease.phase === "string" ? lease.phase : null, basis: reused ? "pid_birth_mismatch" : "stale_heartbeat" });
+	}
+	return found;
+}
+/** Leases in a native `jobs --json` reply whose holder is provably dead. Pure; an unreadable reply yields none. */
+export function deadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] {
+	return scanDeadLeases(reply, scope) ?? [];
+}
+function leaseRetired(reply: unknown, id: string): boolean {
+	const envelope = object(reply);
+	if (envelope?.complete !== true || !Array.isArray(envelope.jobs)) return false;
+	const rows = envelope.jobs.map(object).filter(row => object(object(row?.lease)?.identity)?.local_wrapper_id === id);
+	if (rows.length === 0) return true; // no longer journaled, so it holds no slot
+	if (rows.length > 1) return false;
+	const recovery = object(object(rows[0]?.lease)?.recovery);
+	return recovery?.retired === true && recovery.sources_released === true;
+}
+/** Reap dead-owner leases through the native `jobs recover` only; a failure is reported and never changes the cycle's outcome. */
+async function reapDeadLeases(executor: RchExecutor, worker: string, apply: boolean, signal?: AbortSignal): Promise<DeadLeaseReport[] | null> {
+	const dead = scanDeadLeases(exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS, signal)), { now: Date.now(), worker, excludePids: [process.pid] });
+	if (dead === null) return null;
+	if (!apply) return dead.map(lease => ({ ...lease, outcome: "plan_only" }));
+	const recovered = new Set<string>();
+	for (const lease of dead) {
+		if (signal?.aborted) break;
+		const native = await executor.capture(["jobs", "recover", lease.wrapperId, "--json"], GC_TIMEOUT_MS, signal);
+		if (native.state === "exited" && native.exit === 0) recovered.add(lease.wrapperId);
+	}
+	const reread = recovered.size ? exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS, signal)) : null;
+	return dead.map(lease => ({ ...lease, outcome: recovered.has(lease.wrapperId) && leaseRetired(reread, lease.wrapperId) ? "reaped" : "reap_failed" }));
 }
 
 /** Only bind while our unreaped child is still alive; a later reused PID is not our wrapper. */
@@ -157,9 +246,10 @@ async function returnedLease(executor: RchExecutor, id: string, worker: string):
 /** Delegate reclaim to native policy; no custom pool deleter, cache scanner, lease database, daemon restart or local fallback. */
 export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): Promise<RchCycleResult> {
 	const result: RchCycleResult = { overall: "REFUSED", reason: "invalid_input", worker: null, nativeExit: null, compilerExit: null, executionObserved: null, compilerState: "not-submitted", cleanup: "not-run", nextAgentReady: null,
-		before: null, after: null, wrapperId: null, lease: "", noClaim: "Bounds native admission and post-run readiness; does not prove compiler correctness or retire shared warm caches." };
+		before: null, after: null, wrapperId: null, deadLeases: null, lease: "", noClaim: "Bounds native admission and post-run readiness; does not prove compiler correctness or retire shared warm caches." };
 	const finish = () => {
-		result.lease = `LEASE worker=${result.worker ?? "none"} native_exit=${result.nativeExit ?? "none"} build_exit=${result.compilerExit ?? "unknown"} cleanup=${result.cleanup} next_agent_ready=${result.nextAgentReady ?? "unknown"} overall=${result.overall} reason=${result.reason}`;
+		const reaped = result.deadLeases?.filter(lease => lease.outcome === "reaped").length ?? 0;
+		result.lease = `LEASE worker=${result.worker ?? "none"} native_exit=${result.nativeExit ?? "none"} build_exit=${result.compilerExit ?? "unknown"} cleanup=${result.cleanup} next_agent_ready=${result.nextAgentReady ?? "unknown"} overall=${result.overall} reason=${result.reason} dead_leases=${result.deadLeases?.length ?? "unknown"} reaped=${reaped}`;
 		return result;
 	};
 	if (!Number.isSafeInteger(input.requiredSlots) || input.requiredSlots < 1 || !input.command.length || input.command.some(arg => typeof arg !== "string" || arg.includes("\0"))) return finish();
@@ -168,14 +258,26 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 	result.before = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
 	if (!result.before) { result.reason = "rch_status_unavailable"; return finish(); }
 	let worker = choose(result.before, input);
+	let status = result.before;
+	// Dead-owner leases hold pool slots; look on the admissible worker, or the trusted worker whose slots they may be holding.
+	const scope = worker ?? result.before.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
 	if (!input.apply) {
+		if (scope) result.deadLeases = await reapDeadLeases(executor, scope.id, false, input.signal);
 		result.overall = "PLAN"; result.reason = worker ? "admissible_snapshot_not_a_reservation" : "rch_capacity_unavailable";
 		result.worker = worker?.id ?? input.worker ?? null; result.nextAgentReady = Boolean(worker); return finish();
 	}
 	if (input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "cancelled_before_submit"; return finish(); }
+	if (scope) {
+		result.deadLeases = await reapDeadLeases(executor, scope.id, true, input.signal);
+		if (result.deadLeases?.some(lease => lease.outcome === "reaped")) {
+			// Freed slots only count once the native status shows them; an unreadable re-read keeps the earlier admission.
+			const freed = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
+			if (freed) { status = freed; worker = choose(freed, input); }
+		}
+	}
 	if (!worker || worker.pressure === "warning") {
 		// Native policy decides eligibility. A zero-byte reclaim is not restored capacity.
-		const candidate = worker ?? result.before.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
+		const candidate = worker ?? status.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
 		if (candidate) {
 			const reclaimed = await executor.capture(["gc", "--workers", candidate.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS, input.signal);
 			if (reclaimed.state !== "exited" || reclaimed.exit !== 0) { result.reason = "rch_pre_gc_failed"; return finish(); }
