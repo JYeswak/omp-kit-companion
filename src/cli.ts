@@ -3330,7 +3330,8 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		// reaper-grade rechecks; any doubt keeps the marked dir for the reaper (ok, now-held-* reason).
 		const now = request.flags.has("--now");
 		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}) });
-		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED", `Scratch release refused: ${released.reason}`,
+		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED",
+			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 			"Use the exact owned task directory from its owner process; no directory was quarantined.");
 		releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",

@@ -49,23 +49,37 @@ const MAX_QUARANTINE_TTL_HOURS = 168;
 const ORPHAN_MIN_AGE_S = 3600;
 export const HARNESS_SERVER_PATTERNS = ["mock-model.mjs", "external-live.mjs"];
 
+export interface OwnerFailure { field: string | null; problem: string }
+
+type OwnerParseResult = { owner: ScratchOwner } | { failure: OwnerFailure };
+
 export function parseOwnerFile(text: string): ScratchOwner | null {
+	const parsed = parseOwnerFileEx(text);
+	return "owner" in parsed ? parsed.owner : null;
+}
+
+/** Same accept set as parseOwnerFile, but the refusal names the first failing field (ompkit-774u.15.1). */
+export function parseOwnerFileEx(text: string): OwnerParseResult {
 	const trimmed = text.trim();
+	if (trimmed === "") return { failure: { field: null, problem: "owner file holds no fields" } };
 	if (trimmed.startsWith("{")) {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch {
-			return null;
+			return { failure: { field: null, problem: "owner is not valid JSON" } };
 		}
-		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+			return { failure: { field: null, problem: "owner JSON must be an object of string fields" } };
 		const seen: Record<string, string> = {};
 		for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
-			if (typeof value !== "number" && typeof value !== "string") return null;
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key))
+				return { failure: { field: key, problem: "is not an accepted owner field" } };
+			if (typeof value !== "number" && typeof value !== "string")
+				return { failure: { field: key, problem: "must be a string or number" } };
 			seen[key] = String(value);
 		}
-		return validateOwnerFields(seen);
+		return validateOwnerFieldsEx(seen);
 	}
 	const seen: Record<string, string> = {};
 	const contentLines = text.split("\n").filter(line => line !== "");
@@ -73,14 +87,16 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 	if (tokens !== null && tokens.length > 1) {
 		for (const token of tokens) {
 			const eq = token.indexOf("=");
-			if (eq < 0) return null;
+			if (eq < 0) return { failure: { field: null, problem: `owner token '${token}' is not key=value` } };
 			const key = token.slice(0, eq);
 			const value = token.slice(eq + 1);
-			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
-			if (value === "" || seen[key] !== undefined) return null;
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key))
+				return { failure: { field: key, problem: "is not an accepted owner field" } };
+			if (value === "" || seen[key] !== undefined)
+				return { failure: { field: key, problem: "must carry a non-empty value exactly once" } };
 			seen[key] = value;
 		}
-		return validateOwnerFields(seen);
+		return validateOwnerFieldsEx(seen);
 	}
 	for (const line of text.split("\n")) {
 		if (line === "") continue;
@@ -89,65 +105,121 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 		if (eq >= 0) {
 			key = line.slice(0, eq);
 			value = line.slice(eq + 1);
-			if (value === "" || /[\t\r\n]/.test(value)) return null;
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key))
+				return { failure: { field: key, problem: "is not an accepted owner field" } };
+			if (value === "" || /[\t\r\n]/.test(value))
+				return { failure: { field: key, problem: "must carry a non-empty value with no tabs" } };
 		} else {
 			// Legacy text owners use `key: value` lines (e.g. `agent: X`, `bead: ompkit-yyy`).
 			const colon = line.indexOf(": ");
-			if (colon < 0) return null;
+			if (colon < 0) return { failure: { field: null, problem: `owner line '${line}' is neither key=value nor 'key: value'` } };
 			key = line.slice(0, colon);
 			value = line.slice(colon + 2);
-			if (key === "" || value === "" || /[\t\r\n]/.test(value)) return null;
+			if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key))
+				return { failure: { field: key, problem: "is not an accepted owner field" } };
+			if (key === "" || value === "" || /[\t\r\n]/.test(value))
+				return { failure: { field: key === "" ? null : key, problem: "must carry a non-empty value with no tabs" } };
 		}
-		if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
-		if (seen[key] !== undefined) return null;
+		if (seen[key] !== undefined)
+			return { failure: { field: key, problem: "is repeated; each owner field appears once" } };
 		seen[key] = value;
 	}
-	return validateOwnerFields(seen);
+	return validateOwnerFieldsEx(seen);
 }
 
 interface BinFields { bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null }
 const NO_BIN: BinFields = { bin: null, purpose: null, bead: null, expires: null };
 
-/** The optional bin group of an owner record, or null when it is malformed. A hold needs a bead and an expiry no later than 14 days after creation. */
+/** The optional bin group of an owner record, or the first failing field. A hold needs a bead and an expiry no later than 14 days after creation. */
 function parseBinFields(seen: Record<string, string>, createdAt: string): BinFields | null {
+	const parsed = parseBinFieldsEx(seen, createdAt);
+	return "bins" in parsed ? parsed.bins : null;
+}
+
+function parseBinFieldsEx(seen: Record<string, string>, createdAt: string): { bins: BinFields } | { failure: OwnerFailure } {
+	// Value checks come before the bin key itself so a bad value names its own
+	// field even when the group key is missing (ompkit-774u.15.1 planted negative).
+	if (seen.purpose !== undefined && !PURPOSE_PATTERN.test(seen.purpose))
+		return { failure: { field: "purpose", problem: `is '${seen.purpose}', want 1-40 chars of A-Za-z0-9._- with no spaces` } };
+	if (seen.bead !== undefined && !AGENT_PATTERN.test(seen.bead))
+		return { failure: { field: "bead", problem: `is '${seen.bead}', want 1-64 chars of A-Za-z0-9._-` } };
+	if (seen.expires !== undefined && (seen.bin !== "hold" || !EXPIRES_PATTERN.test(seen.expires) || !Number.isFinite(Date.parse(seen.expires))))
+		return { failure: { field: "expires", problem: seen.bin !== "hold"
+			? "needs bin 'hold'; only a hold carries an expiry"
+			: `is '${seen.expires}', want YYYY-MM-DD[THH:MM[:SS[.mmm]]Z]` } };
 	const bin = SCRATCH_BINS.find(candidate => candidate === seen.bin);
-	if (bin === undefined) return null;
-	if (seen.purpose !== undefined && !PURPOSE_PATTERN.test(seen.purpose)) return null;
-	if (seen.bead !== undefined && !AGENT_PATTERN.test(seen.bead)) return null;
-	if (seen.expires !== undefined) {
-		if (bin !== "hold" || !EXPIRES_PATTERN.test(seen.expires) || !Number.isFinite(Date.parse(seen.expires))) return null;
-	}
+	if (bin === undefined)
+		return { failure: { field: "bin", problem: seen.bin === undefined
+			? "is missing; an owner that names bin fields needs a bin value"
+			: `is '${seen.bin}', want one of ${[...SCRATCH_BINS].join("|")}` } };
 	if (bin === "hold") {
-		if (seen.bead === undefined || seen.expires === undefined) return null;
+		if (seen.bead === undefined) return { failure: { field: "bead", problem: "is required when bin is 'hold'" } };
+		if (seen.expires === undefined) return { failure: { field: "expires", problem: "is required when bin is 'hold'" } };
 		const lifetime = Date.parse(seen.expires) - Date.parse(createdAt);
-		if (!Number.isFinite(lifetime) || lifetime <= 0 || lifetime > HOLD_MAX_MS) return null;
+		if (!Number.isFinite(lifetime) || lifetime <= 0 || lifetime > HOLD_MAX_MS)
+			return { failure: { field: "expires", problem: "must be after creation and within 14 days of it" } };
 	}
-	return { bin, purpose: seen.purpose ?? null, bead: seen.bead ?? null, expires: seen.expires ?? null };
+	return { bins: { bin, purpose: seen.purpose ?? null, bead: seen.bead ?? null, expires: seen.expires ?? null } };
 }
 
 function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null {
+	const parsed = validateOwnerFieldsEx(seen);
+	return "owner" in parsed ? parsed.owner : null;
+}
+
+function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
-	if (seat.length === 1) return null;
+	if (seat.length === 1)
+		return { failure: { field: seat[0]!, problem: "needs both 'agent' and 'session' to name the owning seat" } };
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
 		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length;
 	const complete = base(OWNER_FIELDS);
 	const legacy = base(LEGACY_OWNER_FIELDS);
-	if (!complete && !legacy) return null;
-	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!)) return null;
-	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) return null;
+	if (!complete && !legacy) {
+		const want = (seen.process_start !== undefined || seen.created_at !== undefined || seen.argv0 !== undefined)
+			? OWNER_FIELDS : LEGACY_OWNER_FIELDS;
+		const missing = want.find(field => seen[field] === undefined) ?? "pid";
+		return { failure: { field: missing, problem: "is missing from the owner record" } };
+	}
+	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!))
+		return { failure: { field: "pid", problem: `is '${seen.pid}', want 1-6 digits with no leading zero` } };
+	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) {
+		const bad = !AGENT_PATTERN.test(seen.agent!) ? "agent" : "session";
+		return { failure: { field: bad, problem: `is '${seen[bad]}', want 1-64 chars of A-Za-z0-9._-` } };
+	}
 	const createdAt = seen.created_at ?? seen.created!;
 	const loneBead = binned.length === 1 && seen.bin === undefined && seen.bead !== undefined;
-	if (loneBead && !AGENT_PATTERN.test(seen.bead!)) return null;
-	const bins = binned.length === 0 || loneBead ? NO_BIN : parseBinFields(seen, createdAt);
-	if (bins === null) return null;
-	if (budgeted.length === 1 && !BUDGET_PATTERN.test(seen.budget!)) return null;
-	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
+	if (loneBead && !AGENT_PATTERN.test(seen.bead!))
+		return { failure: { field: "bead", problem: `is '${seen.bead}', want 1-64 chars of A-Za-z0-9._-` } };
+	let final: BinFields;
+	if (binned.length === 0 || loneBead) {
+		final = NO_BIN;
+	} else {
+		const checked = parseBinFieldsEx(seen, createdAt);
+		if ("failure" in checked) return checked;
+		final = checked.bins;
+	}
+	if (budgeted.length === 1 && !BUDGET_PATTERN.test(seen.budget!))
+		return { failure: { field: "budget", problem: `is '${seen.budget}', want a positive integer byte count` } };
+	return { owner: { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
 		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
-		agent: seen.agent ?? null, session: seen.session ?? null, ...bins,
-		bead: bins.bead ?? (loneBead ? seen.bead! : null),
-		budget: budgeted.length === 1 ? Number(seen.budget) : null };
+		agent: seen.agent ?? null, session: seen.session ?? null, ...final,
+		bead: final.bead ?? (loneBead ? seen.bead! : null),
+		budget: budgeted.length === 1 ? Number(seen.budget) : null } };
+}
+
+const OWNER_FIELD_SETS = "pid,process_start,label,repo,created_at,argv0 or pid,label,repo,created";
+
+/** One-line refusal detail naming the first failing owner field plus the accepted field sets (ompkit-774u.15.1). Null when the owner parses. */
+export function diagnoseOwnerFailure(ownerText: string | null): string | null {
+	if (ownerText === null) return `owner file is missing or unreadable; accepted owner field sets: ${OWNER_FIELD_SETS}`;
+	const parsed = parseOwnerFileEx(ownerText);
+	if ("owner" in parsed) return null;
+	const { field, problem } = parsed.failure;
+	const head = field === null ? "owner file" : `owner field '${field}'`;
+	return `${head} ${problem}; accepted owner field sets: ${OWNER_FIELD_SETS}`;
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
 	return owner.processStart !== null && owner.argv0 !== null;
@@ -1230,7 +1302,9 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
 }
 
-export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
+export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null;
+	/** Refusal detail naming the first failing owner field plus the accepted field sets (ompkit-774u.15.1). */
+	detail?: string }
 
 export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string; now?: boolean }
 
@@ -1369,10 +1443,11 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number, ino: number,
 	ownerText: string | null, opts: ScratchReleaseOptions): ScratchReleaseResult {
 	const reason = opts.reason?.trim() ?? "";
-	if (opts.now === true) return { ok: false, changed: false, dir, reason: "now-needs-structured-owner", ownerPid: null };
-	if (opts.bin !== undefined || opts.ref !== undefined) return { ok: false, changed: false, dir, reason: "bin-needs-structured-owner", ownerPid: null };
+	const detail = diagnoseOwnerFailure(ownerText) ?? undefined;
+	if (opts.now === true) return { ok: false, changed: false, dir, reason: "now-needs-structured-owner", ownerPid: null, ...(detail ? { detail } : {}) };
+	if (opts.bin !== undefined || opts.ref !== undefined) return { ok: false, changed: false, dir, reason: "bin-needs-structured-owner", ownerPid: null, ...(detail ? { detail } : {}) };
 	if (opts.legacyOwner !== true || reason === "")
-		return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
+		return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null, ...(detail ? { detail } : {}) };
 	if (/[\r\n\t]/.test(reason) || /[\r\n]/.test(basename(dir)))
 		return { ok: false, changed: false, dir, reason: "release-reason-invalid", ownerPid: null };
 	if (ownerText === null) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };

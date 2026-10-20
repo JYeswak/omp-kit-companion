@@ -5,7 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reapLogPath } from "../../src/scratch.ts";
-import { createScratch, inspectOne, inspectSession, parseOwnerFile, releaseScratch, SCRATCH_BINS,
+import { createScratch, diagnoseOwnerFailure, inspectOne, inspectSession, parseOwnerFile, parseOwnerFileEx, releaseScratch, SCRATCH_BINS,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -197,3 +197,29 @@ test("scratch release rejects an unknown --bin through the real CLI before touch
 	expect(out, child.stderr.toString()).toContain("SCRATCH_RELEASE_BIN_INVALID");
 	expect(child.exitCode).not.toBe(0);
 }, 120_000);
+
+test("OWNERMSG1: a binned release on a one-bad-field JSON owner names the field and the accepted sets; valid legacy still releases", () => {
+	const SETS = "pid,process_start,label,repo,created_at,argv0 or pid,label,repo,created";
+	// Planted negative: the fleet-context form whose purpose contains a space.
+	const spaced = JSON.stringify({ pid: process.pid, label: "work", repo, created: CREATED,
+		purpose: "ompkit-774u.15.1 measurement scratch", bead: "ompkit-774u.15.1" });
+	expect(parseOwnerFile(spaced)).toBeNull();
+	expect(parseOwnerFileEx(spaced)).toMatchObject({ failure: { field: "purpose" } });
+	expect(diagnoseOwnerFailure(spaced)).toContain("owner field 'purpose'");
+	expect(diagnoseOwnerFailure(spaced)).toContain(SETS);
+	const bad = fixture(spaced);
+	const refused = releaseScratch(bad.dir, bad.home, deps(), { bin: "throwaway" });
+	expect(refused).toMatchObject({ ok: false, changed: false, reason: "bin-needs-structured-owner" });
+	expect(refused.detail).toContain("owner field 'purpose'");
+	expect(refused.detail).toContain(SETS);
+	expect(existsSync(join(bad.dir, ".omp-kit-release"))).toBe(false);
+	// The no-bin refusal names the field too.
+	const plain = fixture(JSON.stringify({ pid: 42, label: "w", repo, created: CREATED, purpose: "has space" }));
+	const invalid = releaseScratch(plain.dir, plain.home, deps());
+	expect(invalid).toMatchObject({ ok: false, reason: "owner-file-invalid" });
+	expect(invalid.detail).toContain("owner field 'purpose'");
+	// A valid legacy owner still releases with a bin.
+	const legacy = fixture(ownerText(process.pid));
+	expect(releaseScratch(legacy.dir, legacy.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });
+	expect(diagnoseOwnerFailure(ownerText(42))).toBeNull();
+});
