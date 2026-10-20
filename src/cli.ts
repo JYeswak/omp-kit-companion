@@ -73,7 +73,7 @@ import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClaims } from "./drain.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
-import { observeSendRecipient, proveSend, proveTernCliSend, readSendPause, routeSendTarget } from "./send.ts";
+import { proveSend } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
@@ -2917,86 +2917,19 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Pass --until-delivered <seconds>; nothing was sent.");
 		untilDeliveredMs = Number(untilFlag) * 1000;
 	}
-	// SEND1 tern route: an explicit `tern:<id>` pane addresses the verified
-	// native Tern delivery (proveTernCliSend), never the tmux/ntm path that
-	// can never land on a Tern seat (LIVE MISS 2026-10-19). A malformed
-	// `tern:` address refuses here with zero sends.
-	const ternRoute = routeSendTarget(pane);
-	if (ternRoute.route === "refused") {
-		return refusal(ternRoute.code, ternRoute.detail, "Fix the pane address to tern:<decimal block id>; nothing was sent.");
-	}
-	if (ternRoute.route === "tern") {
-		const cwdFlag = request.flags.get("--cwd");
-		if (typeof cwdFlag === "string" && !isAbsolute(cwdFlag)) {
-			return refusal("INVALID_CWD", "The Tern seat repo needs a canonical absolute path",
-				"Pass an absolute --cwd pointing at the seat's repository; nothing was sent.");
-		}
-		const windowFlag = request.flags.get("--window-key");
-		const ternResult = await proveTernCliSend({ session, pane, message: messageParts.join(" "),
-			dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
-			...(typeof cwdFlag === "string" ? { cwd: cwdFlag } : {}),
-			...(typeof windowFlag === "string" ? { windowKey: windowFlag } : {}),
-			...(typeof reasonFlag === "string" ? { noBeadReason: reasonFlag } : {}),
-			...(untilDeliveredMs !== undefined ? { untilDeliveredMs } : {}),
-		});
-		const ternBeads = { bead_ids: [] as string[], no_bead_reason: null as string | null };
-		if (ternResult.status === "REFUSED") {
-			const remediation = ternResult.code === "BEAD_REQUIRED"
-				? "Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\"."
-				: "Nothing was sent: fix the refusal reason and retry.";
-			return refusal(ternResult.code, ternResult.detail, remediation);
-		}
-		if (ternResult.status === "OK") {
-			return { code: 0, data: { overall: "OK", session, pane, status: ternResult.status, marker: ternResult.marker,
-				sends: ternResult.sends, drop_path: null, detail: ternResult.detail, ...ternBeads,
-				session_file: ternResult.sessionFile, offset: ternResult.offset, tern_code: ternResult.code }, verification: "UNVERIFIED" };
-		}
-		if (ternResult.status === "PENDING_CONSUME") {
-			return { code: 1, data: { overall: "PENDING_CONSUME", session, pane, status: ternResult.status, marker: ternResult.marker,
-				sends: ternResult.sends, drop_path: ternResult.drop_path, detail: ternResult.detail, ...ternBeads,
-				session_file: ternResult.sessionFile, offset: null, tern_code: ternResult.code }, verification: "UNVERIFIED",
-				errors: [{ code: "PENDING_CONSUME", message: ternResult.detail,
-					remediation: ternResult.drop_path ? `The effect is unproven and retained, never auto-resent; the full text is at ${ternResult.drop_path}.` : "The effect is unproven and retained, never auto-resent." }] };
-		}
-		return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: ternResult.status, marker: ternResult.marker,
-			sends: ternResult.sends, drop_path: ternResult.drop_path, detail: ternResult.detail, ...ternBeads,
-			session_file: ternResult.sessionFile, offset: null, tern_code: ternResult.code }, verification: "UNVERIFIED",
-			errors: [{ code: "NOT_DELIVERED", message: ternResult.detail,
-				remediation: ternResult.drop_path ? `Relay the message manually; the full text is at ${ternResult.drop_path}.` : "Retry the send; no drop file was written." }] };
-	}
-	// ompkit-bj08.5 [d]: the admission snapshot is the final observation,
-	// read from runtime sources — never constants. Authority comes from the
-	// operator pause declaration read (readSendPause); both generations
-	// come from the live recipient observation (observeSendRecipient).
-	// authorityConfirmed is the outcome of those two reads, not an
-	// assumption. When the recipient is unobservable (no live tmux) the
-	// snapshot is withheld and proveSend takes the legacy truthful
-	// unresolved path (NOT_DELIVERED with a drop copy). Residual, named:
-	// this branch has no OFF/PROTECTED source, so those refusals stay
-	// unreachable here; unconfirmed maps to the withheld-snapshot path.
-	const sendPaused = readSendPause(process.env);
-	// Same targeting proveSend resolves to (bare %id passes through,
-	// qualified targets pass through, anything else is session:pane), so
-	// the final observation names the same recipient the boundary recheck
-	// will re-observe. Pane-id grammar is pinned by observeSendRecipient.
-	const sendTarget = /^%\d+$/.test(pane) || pane.includes(":") ? pane : `${session}:${pane}`;
-	const sendRecipient = observeSendRecipient((argv) => {
-		const probed = defaultRunner(["tmux", ...argv]);
-		return { code: probed.code, out: probed.stdout };
-	}, sendTarget);
 	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
 		untilDeliveredMs,
 		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
-		...(sendRecipient === null ? {} : { admission: {
+		admission: {
 			launcherBinding: "none",
-			authority: sendPaused ? "PAUSED" : "ACTIVE",
+			authority: "ACTIVE",
 			authorityConfirmed: true,
-			authorityGeneration: sendRecipient,
+			authorityGeneration: `send/${session}/${pane}`,
 			launchers: [],
 			keeper: null,
-			packet: { action: "send", ownedAction: "send", generation: sendRecipient },
+			packet: { action: "send", ownedAction: "send", generation: `send/${session}/${pane}` },
 			governedActions: ["send"],
-		} }) });
+		} });
 	if (result.status === "BEAD_REQUIRED") {
 		return refusal("BEAD_REQUIRED", "A work dispatch must cite a bead id (kernel inv 4: beads are the execution substrate)",
 			"Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\".");
