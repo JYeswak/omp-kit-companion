@@ -348,3 +348,51 @@ test("resume robust: an unreadable transcript stays silent and never throws", as
 	}).not.toThrow();
 	expect(h.sent).toHaveLength(0);
 });
+
+test("rearm planted: wake at T, quiet turn ends at T+3 min -> exactly one more wake at T+10 min (fails on the no-rearm mutant)", async () => {
+	const h = fakeHost();
+	await idleSeat(h);
+	advance(h, IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(1);
+	const t0 = h.clock.at; // lastWakeAt: the first wake
+	// Capture the delay each timer is armed with: the fake fires on demand,
+	// so the scheduled delay is the not-before evidence.
+	const delays: number[] = [];
+	const innerSetTimeout = h.ctx.setTimeout;
+	h.ctx.setTimeout = ((cb: (...args: unknown[]) => void, ms?: number) => {
+		delays.push(ms ?? 0);
+		return innerSetTimeout(cb, ms);
+	}) as GoalKeepaliveContext["setTimeout"];
+	// The seat's next turn ends quietly 3 min after the wake; its 120 s
+	// timer fires 5 min after the wake, inside the 10-min window.
+	h.clock.at += 3 * 60_000;
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	expect(h.ctx.armed()).toBe(1);
+	advance(h, IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(1); // throttled: no early second wake
+	expect(h.ctx.armed()).toBe(1); // re-armed, not dropped (mutant: 0)
+	expect(delays.at(-1)).toBe(t0 + MIN_WAKE_INTERVAL_MS - h.clock.at);
+	// No new turn ever comes; the re-armed timer lands on the interval edge.
+	h.clock.at = t0 + MIN_WAKE_INTERVAL_MS;
+	h.ctx.fireDue();
+	expect(h.sent).toHaveLength(2);
+	expect(h.sent[1]!.deliverAs).toBe("aside");
+});
+
+test("rearm control: a seat that starts a turn before T+10 min gets no wake", async () => {
+	const h = fakeHost();
+	await idleSeat(h);
+	advance(h, IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(1);
+	h.clock.at += 3 * 60_000;
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	advance(h, IDLE_WAKE_MS); // throttled fire re-arms for the remainder
+	expect(h.sent).toHaveLength(1);
+	expect(h.ctx.armed()).toBe(1);
+	h.clock.at += 2 * 60_000; // a new turn starts before the edge: cancel
+	h.emit("agent_start");
+	expect(h.ctx.armed()).toBe(0);
+	h.clock.at += MIN_WAKE_INTERVAL_MS;
+	h.ctx.fireDue();
+	expect(h.sent).toHaveLength(1);
+});

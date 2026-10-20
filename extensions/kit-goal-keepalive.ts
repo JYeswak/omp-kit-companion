@@ -171,7 +171,22 @@ export default async function kitGoalKeepalive(
 		if (ctx === null || !eligible()) return;
 		if (ctx.isIdle?.() === false) return; // busy: that turn's agent_end re-arms
 		const at = now();
-		if (at - lastWakeAt < MIN_WAKE_INTERVAL_MS) return;
+		if (at - lastWakeAt < MIN_WAKE_INTERVAL_MS) {
+			// Throttled, but the seat is still idle and no later agent_end may
+			// ever come: re-arm for the remainder so the wake lands at the
+			// interval edge instead of never (RusticPine/QuietBadger 2026-10-20
+			// HOLDING-turn idles: the 120 s timer fired inside the 10-min
+			// window, returned, and nothing was armed again).
+			const delay = lastWakeAt + MIN_WAKE_INTERVAL_MS - at;
+			timerCtx = ctx;
+			try {
+				timer = ctx.setTimeout(fire, delay);
+			} catch {
+				timer = null; // timer unwired: stay silent, never throw out of fire
+				timerCtx = null;
+			}
+			return;
+		}
 		const seat = seatIdentity(env);
 		if (seat === null) return;
 		pi.sendMessage(
