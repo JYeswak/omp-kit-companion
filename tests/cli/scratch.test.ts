@@ -844,6 +844,28 @@ test("scratch apply preserves 73-hour unowned dirs on open-fd and unknown lsof e
 	}
 });
 
+test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)", () => {
+	// Literals only: 60h sits strictly between a 48h constant-drift mutant and the real
+	// 72h rule, so this passes on current source and MUST fail (QUARANTINE, not LIVE)
+	// against a 48h QUARANTINE_IDLE_MS mutant. No UNOWNED_ACTIVE_RULE import.
+	const { home, state } = cliHome();
+	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-midbound-"));
+	roots.push(root);
+	const mid = join(root, "mid.9");
+	mkdirSync(mid, { recursive: true });
+	writeFileSync(join(mid, "data"), "mid\n");
+	backdateTree(mid, 60 * 3600 * 1000, Date.now());
+	const planned = cli(["scratch", "plan"], home, {
+		OMP_KIT_SCRATCH_ROOTS: root,
+		XDG_STATE_HOME: state,
+		PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}`,
+	});
+	const row = planned.envelope.data.sessions.find((value: { dir: string }) => value.dir === mid);
+	expect(row?.action).toBe("LIVE");
+	expect(row?.reason).toBe("unowned-but-active");
+	expect(String(planned.envelope.data.unownedActiveRule)).toContain("72h");
+});
+
 test("service run applies scratch reaping and writes a receipt", () => {
   const { home, state } = cliHome();
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
