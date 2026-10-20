@@ -147,6 +147,10 @@ def _context(config, *, mask_badge_reads=0):
         version=config["kit_version"],
     )
     ctx.herdr_fn = lambda target, chief: {"ok": True, "rows": []}
+    # ompkit-rhy9.6: the run approval binds exact executable bytes (rhy9.5), so
+    # the native harness reports them too; additive wrapper, no landed line touched.
+    _native_target_fn = ctx.target_fn
+    ctx.target_fn = lambda: dict(_native_target_fn(), bytes_sha256=fr_save.sha256_file(_native_target_fn()["path"]))
     return ctx, launchd
 
 

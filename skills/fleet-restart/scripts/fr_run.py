@@ -276,7 +276,7 @@ def gated(ctx, row, approval):
     mini = {"kind": "run-" + row["kind"], "rows": [row]}
     ap = {"manifest_sha256": core.manifest_sha(mini), "approved_by": approval["approved_by"], "quote": approval["quote"]}
     res = core.send(mini, True, ap, ctx.env, ctx.uid, ctx.capture_fn, ctx.run_fn,
-                    revalidate_fn=fr_save.respawn_revalidator(ctx.inventory_fn, ctx.lsof_fn))
+                    revalidate_fn=fr_save.respawn_revalidator(ctx.inventory_fn, ctx.lsof_fn, ctx.run_fn, ctx.home))
     if res.get("refused"):
         raise RuntimeError("send refused: %s %s" % (res["refused"], res.get("why", "")))
     return res["rows"][0]
@@ -306,8 +306,8 @@ def ledger_state(events):
             s["verify"] = e["result"]
         elif e["event"] == "VERDICT":
             s["verdict"] = e
-        elif e["event"] == "SEND_LOST":
-            s["send_lost"] = True
+        elif e["event"] == "SEND_INTENT":
+            s["send_intent"] = e
         elif e["event"] == "ADVISOR_INTENT":
             s["advisor_intent"] = e
         elif e["event"] == "ADVISOR_SENT":
@@ -487,6 +487,14 @@ def action_row(r, saved):
     return row, None
 
 
+def send_intent_id(ctx, r):
+    """Deterministic identity of one pane's send in this run dir. The fsynced
+    SEND_INTENT precedes the native delivery, so a resume that finds a dangling
+    intent (no SENT yet) reconciles native receive/effect identity instead of
+    blindly resending."""
+    return "%s|%s|%s" % (os.path.abspath(ctx.run_dir or "."), r["pane_id"], r.get("mode") or "RESTART")
+
+
 def held(r, result, why=None):
     out = {"pane": r["pane"], "pane_id": r["pane_id"], "mode": r.get("mode"), "result": result, "sends": 0}
     if why:
@@ -514,6 +522,8 @@ def process_wave(ctx, rows, saved, target, approval, ledger, results, brk, canar
             ledger.add("HELD", pane=r["pane"], result=hold)
             conclude(ledger, results, held(r, hold))
             continue
+        ledger.add("SEND_INTENT", durable=True, pane=r["pane"], intent_id=send_intent_id(ctx, r), mode=r.get("mode"),
+                   kind=row.get("kind"), text=row.get("text"))
         out = gated(ctx, row, approval)
         if out["result"] == "SENT":
             ledger.add("SENT", pane=r["pane"], mode=r.get("mode"), argv=out.get("argv"), canary=canary)
@@ -587,6 +597,7 @@ def pane_main(payload):
     progress("PANE_START", pane=payload["row"]["pane"], pid=os.getpid())
     ctx = live_ctx(payload["env"], payload["home"], payload["releases"], payload.get("version"))
     ctx.parallel = False
+    ctx.run_dir = payload["run_dir"]
     ctx.cancel_path = payload["cancel"]
     ctx.preflight_fn = lambda: (True, "already passed")
     ledger = Ledger(payload["ledger"], time.time)
@@ -659,7 +670,7 @@ def parallel_panes(ctx, rows, saved, target, approval, ledger, results, brk):
     return busy
 
 
-def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk):
+def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk, authorized_retry=False):
     saved = {r["pane_id"]: r for r in save_doc["rows"]}
     target = man["target"]
     prior = ledger_state(ledger.events()) if resume_run else {}
@@ -690,19 +701,30 @@ def restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk
         p = panes.get(r["pane_id"])
         agent = core.find_agent(inv["procs"], p["pane_pid"]) if p else None
         row = dict(r)
-        if agent and st.get("sent"):
-            if acted(r, agent):
+        if agent and (st.get("sent") or st.get("send_intent")):
+            if acted(r, agent):  # native effect proves receipt: re-verify, never re-send
                 reverify.append(dict(row, already_sent=True))
                 continue
-            if st.get("send_lost"):
-                res = held(r, "FAILED", "SEND_LOST twice")
-                conclude(ledger, results, res)
-                check_trip(ledger, brk, res)
-                continue
             if not brk["sends"]:
-                conclude(ledger, results, held(r, "HOLD_BREAKER", "SEND_LOST, not retried after a breaker stop"))
+                conclude(ledger, results, held(r, "HOLD_BREAKER", "ambiguous send, not resolved after a breaker stop"))
                 continue
-            ledger.add("SEND_LOST", pane=r["pane"], why="SENT without VERIFY and no effect observed; retrying once")
+            if authorized_retry:
+                # Explicit operator re-authorization (continue-after-breaker in
+                # this resume's approval), not a blind resend: one more attempt
+                # after the operator has had the chance to reconcile natively.
+                ledger.add("SEND_RETRY_AUTHORIZED", pane=r["pane"], sent=st.get("sent", 0),
+                           intent_id=(st.get("send_intent") or {}).get("intent_id"),
+                           why="continue-after-breaker approved: one authorized retry of an ambiguous send")
+            else:
+                # No-effect observation is not proof of non-delivery: delayed
+                # consumption is not non-receipt. Hold for native
+                # reconciliation, never blindly resend.
+                ledger.add("SEND_AMBIGUOUS", pane=r["pane"], sent=st.get("sent", 0),
+                           intent_id=(st.get("send_intent") or {}).get("intent_id"),
+                           why="SENT/intent without VERIFY and no effect observed; held pending native reconciliation, not retried")
+                conclude(ledger, results, held(r, "HOLD_AMBIGUOUS_SEND",
+                                              "ambiguous delivery: SENT/intent without VERIFY and no observed effect; held pending native reconciliation"))
+                continue
         if not agent or agent["pid"] != r["omp_pid"]:
             ledger.add("HELD", pane=r["pane"], result="HELD_DRIFT", why="omp pid changed since the plan")
             conclude(ledger, results, held(r, "HELD_DRIFT"))
@@ -866,7 +888,7 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
         if paused.get("refused"):
             raise RuntimeError("watchers pause refused: %s" % paused["refused"])
         ctx.run_dir = run_dir
-        restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk)
+        restart_stage(ctx, man, save_doc, approval, ledger, results, resume_run, brk, authorized_retry=bool(continue_after_breaker))
         # No global scratch reaping: a respawn kills its owner's pid and the
         # reaper then deletes that dir, so reaping after the sends would destroy
         # held work scratch. Live-owner scratch is left; the preserve copy+pin

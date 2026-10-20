@@ -721,6 +721,100 @@ def gate_save(case, tmp):
     row3 = fr_save.save_pane(pane, procs, home, lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess), run, {})
     case("NEG owned work scratch newer than the last push holds the pane; once its files predate the push the hold clears",
          row2["held_scratch"] and "HOLD_SCRATCH_OWNER" in row2["holds"] and not row3["held_scratch"] and "HOLD_SCRATCH_OWNER" not in row3["holds"], json.dumps(row3["holds"]))
+    # --- ompkit-774u.4.1 AC4: seat-owned scratch carries over the respawn ---
+    sid = "abcdef12"
+    sess2 = "/h/.omp/agent/sessions/-Developer-x/2026-10-13T00-00-00-000Z_%s.jsonl" % sid
+    lsof2 = lambda pid: "p71\nftxt\nn%s\nf9\nn%s\n" % (BUN, sess2)  # noqa: E731
+    case("CTL owner seat parses JSON, key=value and legacy 'key: value'; pid-only and half seats are no seat",
+         fr_save.owner_seat('{"pid": 71, "agent": "TestAgent", "session": "%s"}' % sid) == ("TestAgent", sid)
+         and fr_save.owner_seat("pid=71\nagent=TestAgent\nsession=%s\n" % sid) == ("TestAgent", sid)
+         and fr_save.owner_seat("pid: 71\nagent: TestAgent\nsession: %s" % sid) == ("TestAgent", sid)
+         and fr_save.owner_seat("pid=71 agent=TestAgent session=%s" % sid) == ("TestAgent", sid)
+         and fr_save.owner_seat("pid=71\n") == (None, None)
+         and fr_save.owner_seat('{"pid": 71, "agent": "TestAgent"}') == (None, None)
+         and fr_save.owner_seat("pid=71\nagent=TestAgent\nsession=abc_defgh\n") == (None, None)
+         and fr_save.owner_seat("not an owner") == (None, None)
+         and fr_save.owner_seat("") == (None, None), "")
+    case("CTL session id from a main transcript path; short ids, advisor-nested and bare paths are None",
+         fr_save.session_id_of(sess2) == sid and fr_save.session_id_of(sess) is None
+         and fr_save.session_id_of("/h/.omp/agent/sessions/slug/%s/FleetWorker.jsonl" % sid) is None
+         and fr_save.session_id_of("/tmp/x.jsonl") is None, "")
+    repo2 = os.path.join(root, "repo2")
+    os.makedirs(os.path.join(repo2, ".git/logs/refs/remotes/origin"))
+    os.makedirs(os.path.join(repo2, "sub"))
+    seat_dir = os.path.join(repo2, "var/agent-tmp/seat")
+    legacy_dir = os.path.join(repo2, "var/agent-tmp/legacy")
+    other_dir = os.path.join(repo2, "var/agent-tmp/other")
+    for d in (seat_dir, legacy_dir, other_dir):
+        os.makedirs(d)
+    with open(os.path.join(seat_dir, ".owner"), "w") as fh:
+        fh.write('{"pid": 71, "agent": "TestAgent", "session": "%s"}' % sid)
+    with open(os.path.join(legacy_dir, ".owner"), "w") as fh:
+        fh.write("pid=71\n")
+    with open(os.path.join(other_dir, ".owner"), "w") as fh:
+        fh.write('{"pid": 71, "agent": "TestAgent", "session": "ffffffff"}')
+    for d in (seat_dir, legacy_dir, other_dir):
+        path = os.path.join(d, "work.txt")
+        with open(path, "w") as fh:
+            fh.write("x")
+        os.utime(path, (2_000_000_100, 2_000_000_100))
+    with open(os.path.join(repo2, ".git/logs/refs/remotes/origin/main"), "w") as fh:
+        fh.write("%s %s Josh <j@x> 2000000000 -0600\tupdate by push\n" % ("1" * 40, "2" * 40))
+    lease_dir = os.path.join(home, ".omp", "run", "session-owners")
+    os.makedirs(lease_dir)
+    with open(os.path.join(lease_dir, sid + ".lock"), "w") as fh:
+        fh.write("")
+    with open(os.path.join(lease_dir, "ffffffff.lock"), "w") as fh:
+        fh.write("")
+    live = {"lease": True, "version": "omp-kit 0.2.61\n"}
+
+    def run2(argv, env):
+        if argv[:2] == ["omp-kit", "--version"]:
+            return 0, live["version"]
+        if argv[:2] == ["lsof", "-t"]:
+            return (0, "4242\n") if live["lease"] else (1, "")
+        return run(argv, env)
+    pane2 = dict(pane, cwd=os.path.join(repo2, "sub"))
+    carried = fr_save.save_pane(pane2, procs, home, lsof2, run2, {})
+    case("CTL seat-owned scratch on a live session lease carries over: the hold narrows to pid-only and foreign-seat dirs; the seat dir is named in carried_scratch",
+         carried["session_file"] == sess2 and carried["carried_scratch"] == [seat_dir]
+         and sorted(os.path.basename(s["path"]) for s in carried["held_scratch"]) == ["legacy", "other"]
+         and carried["holds"] == ["HOLD_SCRATCH_OWNER"], json.dumps({k: carried[k] for k in ("holds", "carried_scratch", "held_scratch")}))
+    live["lease"] = False
+    unheld = fr_save.save_pane(pane2, procs, home, lsof2, run2, {})
+    case("NEG a provably unheld session lease does not carry over: HOLD_SCRATCH_OWNER names the seat dir too",
+         "HOLD_SCRATCH_OWNER" in unheld["holds"]
+         and sorted(os.path.basename(s["path"]) for s in unheld["held_scratch"]) == ["legacy", "other", "seat"], json.dumps(unheld["holds"]))
+    live["lease"] = True
+    os.unlink(os.path.join(lease_dir, sid + ".lock"))
+    nolock = fr_save.save_pane(pane2, procs, home, lsof2, run2, {})
+    case("NEG a missing session-lease lock does not carry over: HOLD_SCRATCH_OWNER stays",
+         "HOLD_SCRATCH_OWNER" in nolock["holds"], json.dumps(nolock["holds"]))
+    with open(os.path.join(lease_dir, sid + ".lock"), "w") as fh:
+        fh.write("")
+    def run_old(argv, env):  # noqa: E306
+        if argv[:2] == ["omp-kit", "--version"]:
+            return 0, "omp-kit 0.2.48\n"
+        return run2(argv, env)
+    oldkit = fr_save.save_pane(pane2, procs, home, lsof2, run_old, {})
+    case("NEG a kit predating seat liveness does not carry over: HOLD_SCRATCH_OWNER stays",
+         "HOLD_SCRATCH_OWNER" in oldkit["holds"] and oldkit["carried_scratch"] == [], json.dumps(oldkit["holds"]))
+    os.unlink(os.path.join(legacy_dir, "work.txt"))
+    os.unlink(os.path.join(other_dir, "work.txt"))
+    inv2 = {"panes": [dict(pane2, pane_pid=70)], "procs": procs}
+    row_live = fr_save.save_pane(pane2, procs, home, lsof2, run2, {})
+    case("CTL once only carried scratch is newer than the push the hold clears",
+         row_live["held_scratch"] == [] and row_live["holds"] == [] and row_live["carried_scratch"] == [seat_dir],
+         json.dumps(row_live["holds"]))
+    case("CTL live re-check before the send drops the hold for carried scratch",
+         fr_save.revalidate_respawn(row_live, inv2, lsof2, run2, home) == (None, None),
+         json.dumps(fr_save.revalidate_respawn(row_live, inv2, lsof2, run2, home)))
+    case("NEG live re-check without run/home keeps today's rule: carried scratch still holds",
+         fr_save.revalidate_respawn(row_live, inv2, lsof2)[0] == "HOLD_SCRATCH_OWNER", "")
+    live["lease"] = False
+    case("NEG live re-check with a dead lease holds on the seat dir",
+         fr_save.revalidate_respawn(row_live, inv2, lsof2, run2, home)[0] == "HOLD_SCRATCH_OWNER", "")
+    live["lease"] = True
     case("CTL save row: repo, dirt via git --no-optional-locks, profile, model, session, bun executable",
          row["repo"] == repo and row["repo_dirt_count"] == 2 and git_calls and git_calls[0][:2] == ["git", "--no-optional-locks"]
          and row["profile"] == "claude" and row["model"] == "m1" and row["session_file"] == sess and row["bun"] and row["version"] == "bun",
@@ -1078,10 +1172,11 @@ def gate_run(case, tmp, uid, good_env, aligned):
          rc == fr_run.EXIT_FAILED and "simulated ntm crash" in (rep["error"] or "") and "com.omp-kit.fleet-watch" in ld4.loaded
          and not [x for x in ld4.loaded if x.startswith(fw.DEADMAN_PREFIX)] and ev.index("ERROR") < ev.index("WATCHERS_RESUME"), json.dumps(ev))
 
-    for kind, drop, label, want in [("target", True, "/restart SEND_LOST (no re-exec) -> exactly one retry, then VERIFIED", 2),
-                                    ("target", False, "/restart re-exec visible -> no resend, verified from the live process", 1),
-                                    ("tern", True, "respawn SEND_LOST (pane still on the old omp pid) -> exactly one re-respawn, then VERIFIED", 2),
-                                    ("tern", False, "respawn took effect (new pid) -> no second respawn, straight to VERIFY", 1)]:
+    for kind, drop, label, want, want_result in [
+            ("target", True, "/restart sent but no re-exec observed -> HOLD_AMBIGUOUS_SEND, never retried", 1, "HOLD_AMBIGUOUS_SEND"),
+            ("target", False, "/restart re-exec visible -> no resend, verified from the live process", 1, "VERIFIED"),
+            ("tern", True, "respawn sent but pane still on the old omp pid -> HOLD_AMBIGUOUS_SEND, never re-respawned", 1, "HOLD_AMBIGUOUS_SEND"),
+            ("tern", False, "respawn took effect (new pid) -> no second respawn, straight to VERIFY", 1, "VERIFIED")]:
         ld5 = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
         p5 = Pane("w:0.1", "%101", 101, cwd, drop_restart=drop, kind=kind)
         fl5 = FakeFleet([p5], ld5)
@@ -1095,8 +1190,62 @@ def gate_run(case, tmp, uid, good_env, aligned):
         ev = [json.loads(ln)["event"] for ln in open(os.path.join(rd, fr_run.LEDGER))]
         sends = fl5.count(text="/restart") + fl5.count(text="RESPAWN")
         case("CTL --resume-run after a crash: %s" % label,
-             sends == want and rep["panes"][0]["result"] == "VERIFIED" and (("SEND_LOST" in ev) == drop) and rc == 0,
+             sends == want and rep["panes"][0]["result"] == want_result and "SEND_LOST" not in ev
+             and (("SEND_AMBIGUOUS" in ev) == drop) and rc == 0,
              "sends=%d %s" % (sends, json.dumps(rep["panes"])))
+
+    # NEG crash after actual native receipt but before the SENT ledger: the
+    # fsynced SEND_INTENT plus the observed native effect reconcile to exactly
+    # one send across the resume (re-verify, never re-send).
+    ld5b = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    p5b = Pane("w:0.1", "%101", 101, cwd, kind="target")
+    fl5b = FakeFleet([p5b], ld5b)
+    ctx5b = ctx_for(fl5b, home, agents, good_env, uid, aligned)
+    rd = os.path.join(root, "r5-intent-crash")
+    fr_run.plan_run(rd, ctx5b, "%3", fr.DEFAULT_PROTECT, wave=1)
+    restore = crash_on("SENT")
+    try:
+        rep0, rc0 = fr_run.apply_run(rd, ctx5b, approve(rd))
+    finally:
+        restore()
+    ev = [json.loads(ln) for ln in open(os.path.join(rd, fr_run.LEDGER))]
+    intents = [e for e in ev if e["event"] == "SEND_INTENT"]
+    case("NEG crash between native receipt and SENT ledger leaves the durable intent with zero SENT rows",
+         "simulated crash before SENT" in (rep0.get("error") or "") and len(intents) == 1 and not [e for e in ev if e["event"] == "SENT"]
+         and fl5b.count(text="/restart") == 1 and intents[0].get("intent_id", "").endswith("|%101|RESTART"),
+         json.dumps({"error": rep0.get("error"), "intents": intents, "sends": fl5b.count(text="/restart")}))
+    rep, rc = fr_run.apply_run(rd, ctx5b, approve(rd), resume_run=True)
+    n = fl5b.count(text="/restart")
+    rep2, rc2 = fr_run.apply_run(rd, ctx5b, approve(rd), resume_run=True)
+    case("NEG resume reconciles the dangling intent against the native effect: VERIFIED with one send across two resumes",
+         rep["panes"][0]["result"] == "VERIFIED" and n == 1 and fl5b.count(text="/restart") == 1
+         and rep2["panes"][0].get("from_ledger") and rc == 0 and rc2 == 0,
+         json.dumps({"first": rep["panes"], "second": rep2["panes"], "sends": fl5b.count(text="/restart")}))
+
+    # NEG delayed consume: SENT is on the ledger but the effect is not observable
+    # at resume time. Absent effect is not proof of non-delivery, so the resume
+    # holds explicitly instead of resending; the hold is terminal across resumes.
+    ld5c = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    p5c = Pane("w:0.1", "%101", 101, cwd, drop_restart=True, kind="target")
+    fl5c = FakeFleet([p5c], ld5c)
+    ctx5c = ctx_for(fl5c, home, agents, good_env, uid, aligned)
+    rd = os.path.join(root, "r5-delayed-consume")
+    fr_run.plan_run(rd, ctx5c, "%3", fr.DEFAULT_PROTECT, wave=1)
+    restore = crash_on("VERIFY")
+    try:
+        fr_run.apply_run(rd, ctx5c, approve(rd))
+    finally:
+        restore()
+    p5c.drop_restart = False  # the consume lands late: still nothing observable at resume inventory
+    rep, rc = fr_run.apply_run(rd, ctx5c, approve(rd), resume_run=True)
+    ev = [json.loads(ln)["event"] for ln in open(os.path.join(rd, fr_run.LEDGER))]
+    rep2, rc2 = fr_run.apply_run(rd, ctx5c, approve(rd), resume_run=True)
+    case("NEG delayed consume (SENT, no VERIFY, no effect) -> HOLD_AMBIGUOUS_SEND with one send across two resumes, never SEND_LOST",
+         rep["panes"][0]["result"] == "HOLD_AMBIGUOUS_SEND" and fl5c.count(text="/restart") == 1
+         and "SEND_LOST" not in ev and "SEND_AMBIGUOUS" in ev
+         and rep2["panes"][0]["result"] == "HOLD_AMBIGUOUS_SEND" and rep2["panes"][0].get("from_ledger")
+         and fl5c.count(text="/restart") == 1,
+         json.dumps({"first": rep["panes"], "second": rep2["panes"], "sends": fl5c.count(text="/restart")}))
 
     gate_verdict_resume(case, root, home, agents, good_env, uid, aligned)
 
