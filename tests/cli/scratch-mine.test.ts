@@ -60,7 +60,7 @@ test("the caller sees its own dirs by seat or by pid, with their state and bin, 
 	expect(ownedScratch(home, deps(seat("CrimsonHorizon", [SESSION]))).map((row) => row.label)).toEqual(["other-agent", "pid", "released"]);
 });
 
-test("a hand-made owner with pid=1 is never the caller's, though pid 1 is an ancestor of every process; a real ancestor still is", () => {
+test("ancestor and sibling owners are excluded from exact caller disposal accounting", () => {
 	const root = mkdtempSync(join(scratchParent, "mine-"));
 	const home = mkdtempSync(join(scratchParent, "mine-home-"));
 	cleanup.push(root, home);
@@ -73,7 +73,7 @@ test("a hand-made owner with pid=1 is never the caller's, though pid 1 is an anc
 	}
 	const table = `${process.pid} 4242\n4242 1\n1 0\n`;
 	const withTable: InspectDeps = { ...deps(seat(null, [])), run: (args) => (args[0] === "ps" ? { code: 0, stdout: table, stderr: "" } : { code: 1, stdout: "", stderr: "" }) };
-	expect(ownedScratch(home, withTable).map((row) => row.label)).toEqual(["ancestor"]);
+	expect(ownedScratch(home, withTable).map((row) => row.label)).toEqual([]);
 });
 
 test("one listing reads the process table and the seat once, however many dirs it walks", () => {
@@ -94,9 +94,9 @@ test("one listing reads the process table and the seat once, however many dirs i
 	expect(ownedScratch(home, counting)).toHaveLength(40);
 	expect(seats).toBe(1);
 	expect(runs).toBeLessThanOrEqual(1);
-	// Dirs whose owner names neither this seat nor an ancestor take the process-table path for every dir, still one read.
+	// Dirs whose owner names neither this seat nor the caller pid are excluded without ancestry attribution.
 	for (let index = 0; index < 40; index++) writeFileSync(join(root, `d.${index}`, ".owner"), owner(60000 + index, `d${index}`));
 	runs = 0;
 	expect(ownedScratch(home, counting)).toHaveLength(0);
-	expect(runs).toBe(1);
+	expect(runs).toBe(0);
 });
