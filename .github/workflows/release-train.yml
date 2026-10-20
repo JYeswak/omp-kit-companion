@@ -306,6 +306,10 @@ jobs:
             | jq '{workflow_runs: [.[].workflow_runs[]]}' > source-ci.json
           python3 scripts/release_reuse.py require-green --ci-runs source-ci.json --source-sha "$SHA"
           python3 scripts/release_reuse.py promotion --repository "$GITHUB_REPOSITORY" --source-sha "$SHA" --version "$VERSION"
+          # VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
+          # release version in package.json (.version and .omp.version); a
+          # mismatch refuses the tag (exit 4), never a silent mislabel.
+          sh scripts/release-train.sh version-match --version "$VERSION" --sha "$SHA"
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
           # DEVID-SIGN-V1: a source whose checked-in switch says developer-id is signed by the local Developer ID
           # signer, which dispatches its signing run. Sources without the switch, and "adhoc", keep this dispatch.

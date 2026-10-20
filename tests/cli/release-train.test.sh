@@ -339,5 +339,29 @@ printf '%s' "$idxrange" | grep -q 'subject-path: candidate-index/release-index.j
 check "attest-index: release-index signed keyless" 0 "$((rc3 + rc4))" ""
 
 
+# 31b. the tag-qualified authority step gates the tag on package.json stating the version
+authrange=$(sed -n '/Revalidate exact qualified authority/,/Create only the exact qualified tag/p' "$YMLDIR/release-train.yml")
+printf '%s' "$authrange" | grep -qF 'release-train.sh version-match --version "$VERSION" --sha "$SHA"'; rc5=$?
+check "tag-qualified: version-match gates tag creation" 0 "$rc5" ""
+# 32. version-match: package.json at the SHA states the tag version
+out=$(sh "$TRAIN" version-match --version 0.2.21 --sha "$bump" --repo "$R" 2>&1); rc=$?
+check "version-match: equal versions pass" 0 "$rc" "$out" "VERSION_MATCH=exact version=0.2.21"
+# 33. planted: stale package.json (0.2.21 tree, 0.2.63 tag) refuses the tag
+out=$(sh "$TRAIN" version-match --version 0.2.63 --sha "$bump" --repo "$R" 2>&1); rc=$?
+check "version-match: stale package.json refuses tag" 4 "$rc" "$out" "refusing tag" "0.2.21"
+# 34. planted: top-level bumped but .omp.version stale refuses the tag
+jq '.version = "9.9.9"' "$R/package.json" > "$TMP/pkg-split" && cp "$TMP/pkg-split" "$R/package.json"
+git -C "$R" commit -q -am "chore: split versions [test]"
+split=$(git -C "$R" rev-parse HEAD)
+out=$(sh "$TRAIN" version-match --version 9.9.9 --sha "$split" --repo "$R" 2>&1); rc=$?
+check "version-match: split .omp.version refuses tag" 4 "$rc" "$out" "refusing tag"
+# 35. planted: missing package.json at the SHA fails closed, never a tag
+git -C "$R" rm -q package.json && git -C "$R" commit -q -m "chore: drop manifest [test]"
+nopkg=$(git -C "$R" rev-parse HEAD)
+out=$(sh "$TRAIN" version-match --version 9.9.9 --sha "$nopkg" --repo "$R" 2>&1); rc=$?
+check "version-match: missing package.json fails closed" 4 "$rc" "$out" "missing" "refusing tag"
+# 36. bad usage fails loud
+out=$(sh "$TRAIN" version-match --version 9.9.9 2>&1); rc=$?
+check "version-match: missing sha exits 2" 2 "$rc" "$out" "required"
 printf '%s pass, %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

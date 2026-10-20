@@ -41,9 +41,15 @@
 #     parent of a release bump commit whose only changes are the CHANGELOG
 #     promotion, removed changelog.d fragments and the two package.json
 #     version fields (anything more gets no inherited evidence).
+#   version-match --version V --sha SHA [--repo DIR]
+#     Tag gate (ompkit-fp72.135.1.14): package.json at SHA must state V in
+#     both .version and .omp.version. Match prints VERSION_MATCH and exits 0;
+#     mismatch refuses with exit 4, never a tag. Unparseable or missing
+#     package.json fails closed (exit 4); bad usage exits 2, missing jq exits 3.
+
 set -u
 
-usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|publish-lag|latest-flag|wait-release-idle|bump|evidence-sha ..." >&2; exit 2; }
+usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|publish-lag|latest-flag|wait-release-idle|bump|evidence-sha|version-match ..." >&2; exit 2; }
 
 cmd=${1:-}; [ -n "$cmd" ] || usage; shift
 
@@ -314,6 +320,26 @@ evidence-sha)
 	fi
 	if [ "$shape" = ok ]; then printf 'EVIDENCE_SHA=%s REASON=release-bump-parent bump=%s\n' "$parent" "$sha"; exit 0; fi
 	printf 'EVIDENCE_SHA=%s REASON=bump-shape-mismatch\n' "$sha"; exit 0
+	;;
+version-match)
+	version=""; sha=""; repo="."
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--version) version=${2:-}; shift 2 ;;
+			--sha) sha=${2:-}; shift 2 ;;
+			--repo) repo=${2:-}; shift 2 ;;
+			*) echo "version-match: unknown argument: $1" >&2; exit 2 ;;
+		esac
+	done
+	if ! { [ -n "$version" ] && [ -n "$sha" ]; }; then echo "version-match: --version and --sha are required" >&2; exit 2; fi
+	case "$sha" in *[!0-9a-f]*|"" ) echo "version-match: --sha must be a hex commit" >&2; exit 2 ;; esac
+	case "$version" in *[!0-9.]*|""|.*|*.|*..* ) echo "version-match: --version must be X.Y.Z" >&2; exit 2 ;; esac
+	command -v jq >/dev/null 2>&1 || { echo "version-match: jq is required" >&2; exit 3; }
+	pkg=$(git -C "$repo" show "$sha:package.json" 2>/dev/null) || { echo "version-match: package.json is missing at $sha; refusing tag v$version" >&2; exit 4; }
+	printf '%s' "$pkg" | jq -e --arg v "$version" '.version == $v and ((has("omp") | not) or .omp.version == $v)' >/dev/null 2>&1 ||
+		{ top=$(printf '%s' "$pkg" | jq -r '.version // "unparseable"' 2>/dev/null); sub=$(printf '%s' "$pkg" | jq -r '.omp.version // "absent"' 2>/dev/null);
+			echo "version-match: package.json states ${top} / omp ${sub}, not v$version at $sha; refusing tag" >&2; exit 4; }
+	printf 'VERSION_MATCH=exact version=%s sha=%s\n' "$version" "$sha"; exit 0
 	;;
 *) usage ;;
 esac

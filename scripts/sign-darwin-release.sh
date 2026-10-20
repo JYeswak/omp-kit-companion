@@ -204,6 +204,10 @@ if [ "$DRY_RUN" = 1 ]; then
 	exit 0
 fi
 
+# VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
+# release version in package.json (`gh release create --verify-tag` below
+# creates the tag); a mismatch refuses, never a silent mislabel.
+sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" || die "package.json version does not match v$VERSION at $SOURCE; refusing tag"
 # 9. Draft: create it or require the existing one to be this cut's draft; upload without ever clobbering.
 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" |
 	jq --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' >"$WORK/releases.json"

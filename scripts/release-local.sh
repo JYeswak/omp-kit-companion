@@ -296,6 +296,10 @@ if [ "$DRY_RUN" = 1 ]; then
 	exit 0
 fi
 
+# VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
+# release version in package.json; a mismatch refuses the tag, never a
+# silent mislabel.
+sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" || die "package.json version does not match v$VERSION at $SOURCE; refusing tag"
 # ----------------------------------------------------------------------------------------------------- 5. tag
 stage tag
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
