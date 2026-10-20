@@ -499,14 +499,17 @@ function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string,
 /** A legacy text owner without a pid (`agent: X` / `label: Y` / `bead: Z` lines). Null when the text is not that shape. */
 export interface TextOwner { agent: string | null; label: string; repo: string | null; bead: string | null; created: string | null }
 export function parseTextOwner(text: string): TextOwner | null {
+	// Single-line pipe format (`agent: X | label: Y | bead: Z`) is the same record with a different separator.
+	const normalized = text.includes("\n") ? text : text.split("|").join("\n");
 	const seen: Record<string, string> = {};
 	let lines = 0;
-	for (const line of text.split("\n")) {
-		if (line === "") continue;
+	for (const line of normalized.split("\n")) {
+		if (line.trim() === "") continue;
 		lines++;
-		const colon = line.indexOf(": ");
+		const trimmed = line.trim();
+		const colon = trimmed.indexOf(": ");
 		if (colon < 0) return null;
-		const key = line.slice(0, colon), value = line.slice(colon + 2);
+		const key = trimmed.slice(0, colon), value = trimmed.slice(colon + 2);
 		if (key === "" || value === "" || /[\t\r\n]/.test(value)) return null;
 		if (!["agent", "label", "repo", "bead", "created"].includes(key)) return null;
 		if (seen[key] !== undefined) return null;
@@ -574,6 +577,13 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 			if (clear === null) return sized("SKIP", "text-owner-lsof-unavailable");
 			if (!clear) return sized("LIVE", "text-owner-open-fds-present");
 			if (text.bead === null) return sized("REAP", "text-owner-no-bead-no-fds");
+			if (text.repo === null) return sized("REAP", "text-owner-no-repo-no-fds");
+			let repoDir: string | null = null;
+			try {
+				const resolved = resolve(text.repo);
+				repoDir = statSync(resolved).isDirectory() ? resolved : null;
+			} catch { /* unresolvable owner repo: context is gone */ }
+			if (repoDir === null) return sized("REAP", "text-owner-repo-gone-no-fds");
 			const closed = beadClosed(text.bead, text.repo, deps.run);
 			if (closed === true) return sized("REAP", "text-owner-bead-closed-no-fds");
 			if (closed === false) return sized("LIVE", "text-owner-bead-open");

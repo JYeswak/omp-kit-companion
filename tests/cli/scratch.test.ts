@@ -1768,4 +1768,16 @@ test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (p
 	expect(exportCommitToScratch(fixtureRepo, head.stdout.trim(), made.dir, defaultRunner)).toBeNull();
 	expect(existsSync(join(made.dir, "package.json"))).toBe(true);
 	expect(exportCommitToScratch(fixtureRepo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
+}, 60000);
+
+test("SCRATCHLEAK1: pipe-format single-line text owners parse", () => {
+	expect(parseTextOwner("agent: X | label: t | repo: omp-kit | bead: ompkit-1 | created: 2026-10-18"))
+		.toMatchObject({ agent: "X", label: "t", bead: "ompkit-1" });
+	expect(parseTextOwner("label: t | bogus: 1")).toBeNull();
+});
+
+test("SCRATCHLEAK1: text owner with gone repo reaps when clear", () => {
+	const gone = textFixture(`agent: X\nlabel: t\nrepo: /no/such/repo-xyz\nbead: ompkit-1\ncreated: 2026-10-18\n`);
+	expect(inspectSession(gone.dir, gone.root, depsFor({ run: textRun(false, null) as never })))
+		.toMatchObject({ action: "REAP", reason: "text-owner-repo-gone-no-fds" });
 });
