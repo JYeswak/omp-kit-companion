@@ -773,6 +773,7 @@ test("BLOCK_REFUSED: blocked with no blocks edge is refused, with an open blocks
 	expect(refused?.block).toBe(true);
 	expect(refused?.reason).toContain("BLOCK_REFUSED");
 	expect(refused?.reason).toContain("kit-9 has no open blocks edge to a fix");
+	expect(refused?.reason).toContain("A decision owed by a director, chief or owner is an assigned bead with the decision as its next action");
 	expect(await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED)).toBeUndefined();
 	expect(await blockCall({ edges: [{ type: "blocks", status: "in_progress" }] }, "br update kit-9 -s blocked")).toBeUndefined();
 });
