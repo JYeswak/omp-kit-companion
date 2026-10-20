@@ -70,6 +70,7 @@ const PRODUCER_OWNERS: Record<string, string> = {
 const TYPE_VERSIONS: Record<string, number> = {
 	"action.attempt": 1,
 	"action.result": 1,
+	"bead.status": 1,
 	"source.tick": 1,
 	"cc.unknown": 1,
 };
@@ -171,6 +172,9 @@ function checkDataShape(type: string, data: Record<string, unknown>): void {
 			typeof (d as Record<string, unknown>).action_id === "string" &&
 			typeof (d as Record<string, unknown>).outcome === "string" &&
 			typeof (d as Record<string, unknown>).duration_ms === "number",
+		"bead.status": (d) =>
+			typeof (d as Record<string, unknown>).to_status === "string" &&
+			typeof (d as Record<string, unknown>).observation === "string",
 		"source.tick": (d) =>
 			typeof (d as Record<string, unknown>).instance === "string" &&
 			typeof (d as Record<string, unknown>).records_seen === "number",

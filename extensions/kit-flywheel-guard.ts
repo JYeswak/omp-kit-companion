@@ -3,6 +3,7 @@ import { accessSync, constants, lstatSync, readFileSync, statSync } from "node:f
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type { PullRefusal } from "../src/fleet-watch";
+import { ccSpool } from "../src/cc-spool.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -725,6 +726,8 @@ export interface TrackerRequest {
 	ifUnchanged: string | null;
 	/** Requested `--status` value, lowercased; null when no status flag. */
 	status: string | null;
+	/** `--reason` text; null when omitted. Receipt evidence ids are parsed from it. */
+	reason: string | null;
 	/** Raw argv words after wrapper/inline-env stripping, for the refusal ledger. */
 	argv: string[];
 	force: boolean;
@@ -800,6 +803,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		let actor: string | null = null;
 		let assignee: string | null = null;
 		let status: string | null = null;
+		let reason: string | null = null;
 		const addLabels: string[] = [];
 		let claim = false;
 		let force = false;
@@ -827,6 +831,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 				if (flag === "--assignee") assignee = value;
 				if (flag === "--if-unchanged") ifUnchanged = value;
 				if (flag === "--status" || flag === "-s") status = value;
+				if (flag === "--reason") reason = value;
 				if (flag === "--add-label" || flag === "--set-labels" || flag === "--labels") addLabels.push(...value.split(",").map(label => label.trim()).filter(label => label !== ""));
 				continue;
 			}
@@ -836,6 +841,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		if (readOnly) continue;
 		const nativeStatus = status?.toLowerCase();
 		const operation = subcommand === "close" ? "close"
+			: subcommand === "update" && nativeStatus === "closed" ? "close"
 			: subcommand === "update" && nativeStatus === "blocked" ? "block"
 				: subcommand === "update" && claim ? "claim"
 					: subcommand === "update" && (nativeStatus === "in_progress" || nativeStatus === "inprogress") ? "start"
@@ -843,7 +849,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 							: subcommand === "update" && nativeStatus === "open" ? "release"
 								: subcommand === "update" && assignee !== null ? "custody" : null;
 		if (operation === null) continue;
-		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, argv, force, addLabels });
+		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, reason, argv, force, addLabels });
 	}
 	return requests;
 }
@@ -1567,7 +1573,171 @@ async function checkCustody(request: TrackerRequest, deps: TrackerMutationDeps):
 	return undefined;
 }
 
-export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+// --- CC4b guard receipts (bead ompkit-fp72.120.16.7.2) ---------------------------
+//
+// A non-author `br close`/`bd close` (or `update --status closed`) that the guard
+// allows is proven at the write boundary with a bead.status receipt
+// (observation 'receipt') from the `closeguard` producer: from_status is the
+// pre-close status the guard already read, actor/verifier is the caller (a
+// non-author closer is the verifier, Q20), evidence holds ev_ ids parsed from
+// --reason. A planted self-close refused under SELF_CLOSE_REFUSED is recorded
+// as action.result outcome=refused instead; no receipt with to_status closed
+// is ever emitted for it. Spool failure never blocks the close; an inert
+// spool (no fleet state) stays silent and raises U-coverage downstream.
+export const CLOSEGUARD_PRODUCER = "closeguard";
+export const SPOOL_WRITE_FAILED = "CC_SPOOL_WRITE_FAILED";
+
+/** Evidence ids (`ev_` + alphanumerics, e.g. ev_d2d42c18) cited in a close --reason. */
+export function parseEvidenceIds(reason: string | null | undefined): string[] {
+	if (typeof reason !== "string" || reason === "") return [];
+	return [...new Set(reason.match(/\bev_[A-Za-z0-9]+\b/g) ?? [])];
+}
+
+/**
+ * Caller identity for a receipt: explicit --actor/BR_ACTOR first, then
+ * command-line attribution, env, and Agent Mail pane identity. Null when the
+ * caller is unresolved (the receipt carries actor/verifier null and the
+ * ingester raises U-source; closes made outside omp stay U-source too).
+ */
+export function resolveCloseActor(request: Pick<TrackerRequest, "actor" | "identities">,
+	envIdentities: readonly string[], pane: readonly string[]): string | null {
+	for (const candidate of [request.actor, request.identities[0], envIdentities[0], pane[0]]) {
+		if (typeof candidate === "string" && candidate.trim() !== "") return candidate.trim();
+	}
+	return null;
+}
+
+/** One attempted close observed at tool_call time, with pre-close state. */
+export interface CloseAttempt {
+	id: string;
+	fromStatus: string | null;
+	assignee: string | null;
+	actor: string | null;
+	evidence: string[];
+	bin: string;
+	db?: string;
+	cwd: string;
+	reason: string | null;
+}
+
+async function gitToplevel(exec: FlywheelExec, cwd: string): Promise<string | null> {
+	try {
+		const result = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+		if (result.code !== 0 || result.killed) return null;
+		const top = result.stdout.trim();
+		return top === "" ? null : top;
+	} catch {
+		return null;
+	}
+}
+
+export interface CloseGuardEmit {
+	exec: FlywheelExec;
+	notify?: (message: string, kind?: string) => void;
+	clock?: () => number;
+}
+
+function closeguardSpool() {
+	try {
+		return ccSpool(CLOSEGUARD_PRODUCER);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Emit one bead.status receipt per allowed close. Never throws and never
+ * blocks: an inert spool returns 0 silently, a failed append notifies
+ * CC_SPOOL_WRITE_FAILED. Position keys the receipt to its tool call and bead
+ * (`<repo>:<id>:<toolCallId>:closed`): the bead text's `position=toolCallId`
+ * alone would collide when one call closes several beads (the envelope id
+ * hashes producer/position/type only), so the bead id joins the key.
+ */
+export async function emitCloseReceipts(env: CloseGuardEmit, attempts: readonly CloseAttempt[],
+	toolCallId: string): Promise<{ emitted: number; failed: number }> {
+	const spool = closeguardSpool();
+	if (spool === null) return { emitted: 0, failed: 0 };
+	const now = (env.clock ?? Date.now)();
+	const repos = new Map<string, string | null>();
+	const built: Array<Record<string, unknown>> = [];
+	for (const attempt of attempts) {
+		if (attempt.fromStatus === null) continue;
+		let repo = repos.get(attempt.cwd);
+		if (repo === undefined) {
+			repo = await gitToplevel(env.exec, attempt.cwd);
+			repos.set(attempt.cwd, repo);
+		}
+		if (repo === null) {
+			env.notify?.(`kit-flywheel-guard: receipt skipped for ${attempt.id}: repo unresolved (not a git checkout); the close stands without a receipt.`, "warning");
+			continue;
+		}
+		try {
+			built.push(spool.envelope("bead.status", {
+				from_status: attempt.fromStatus,
+				to_status: "closed",
+				assignee: attempt.assignee,
+				actor: attempt.actor,
+				verifier: attempt.actor,
+				evidence: attempt.evidence.length > 0 ? attempt.evidence : null,
+				observation: "receipt",
+			}, {
+				key: `${repo}:${attempt.id}:${toolCallId}:closed`,
+				timeMs: now,
+				ctx: { repo, bead: attempt.id },
+			}));
+		} catch (error) {
+			env.notify?.(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: receipt for ${attempt.id} could not be built (${error instanceof Error ? error.message : String(error)}); the close stands.`, "warning");
+		}
+	}
+	if (built.length === 0) return { emitted: 0, failed: 0 };
+	const written = spool.append(built);
+	if (written < built.length) {
+		env.notify?.(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: spool append wrote ${written}/${built.length} closeguard receipt(s); the close stands.`, "warning");
+	}
+	return { emitted: written, failed: built.length - written };
+}
+
+/**
+ * Record each refused self-close as action.result outcome=refused (code
+ * SELF_CLOSE_REFUSED) with the bead and caller in ctx. Never throws.
+ */
+export async function emitRefusedCloseRecords(env: CloseGuardEmit, attempts: readonly CloseAttempt[],
+	toolCallId: string, durationMs: number): Promise<number> {
+	const spool = closeguardSpool();
+	if (spool === null || attempts.length === 0) return 0;
+	const now = (env.clock ?? Date.now)();
+	const repos = new Map<string, string | null>();
+	const built: Array<Record<string, unknown>> = [];
+	for (const attempt of attempts) {
+		let repo = repos.get(attempt.cwd);
+		if (repo === undefined) {
+			repo = await gitToplevel(env.exec, attempt.cwd);
+			repos.set(attempt.cwd, repo);
+		}
+		try {
+			built.push(spool.envelope("action.result", {
+				action_id: (`refused-${toolCallId}-${attempt.id}`.replace(/[^A-Za-z0-9_.-]/g, "-").replace(/^\.+/, "").slice(0, 64) || "unknown"),
+				outcome: "refused",
+				code: SELF_CLOSE_REFUSED,
+				duration_ms: Math.max(0, Math.floor(durationMs)),
+			}, {
+				key: `${attempt.id}:${toolCallId}:refused`,
+				timeMs: now,
+				ctx: { ...(repo === null ? {} : { repo }), bead: attempt.id, ...(attempt.actor === null ? {} : { agent: attempt.actor }) },
+			}));
+		} catch (error) {
+			env.notify?.(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: refused-close record for ${attempt.id} could not be built (${error instanceof Error ? error.message : String(error)}).`, "warning");
+		}
+	}
+	if (built.length === 0) return 0;
+	const written = spool.append(built);
+	if (written < built.length) {
+		env.notify?.(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: spool append wrote ${written}/${built.length} refused-close record(s).`, "warning");
+	}
+	return written;
+}
+
+export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
 	const cwd = field(event.input, "cwd");
@@ -1611,11 +1781,14 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 		}
 		for (const id of request.ids) {
 			const found = await readBeadState(deps.exec, request, id);
+			const actor = resolveCloseActor(request, envIdentities, pane);
+			const evidence = parseEvidenceIds(request.reason);
 			if (!found.ok) {
 				// ompkit-xa5s.13: a probe that errors (garbled args, exit != 0,
 				// unparseable output) fails closed as a self-certification
 				// failure, never as a skip. LOOKUP_REFUSED stays for the outer
 				// lifecycle catch below; the close path refuses invariant 9.
+				attempts.push({ id, fromStatus: null, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				return {
 					block: true,
 					reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: cannot verify authorship of ${id}: ${found.why}. `
@@ -1628,14 +1801,17 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			const assignee = found.assignee?.trim();
 			if (!assignee) {
 				warnings.push(`self-close check skipped: ${id} has no assignee`);
+				attempts.push({ id: found.id, fromStatus: found.status, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				continue;
 			}
 			if (identities.length === 0) {
 				warnings.push(`self-close check skipped for ${id}: caller identity unknown (no --actor/--agent-name, BR_ACTOR, BR_AGENT_NAME, AGENT_NAME, or Agent Mail pane identity for TMUX_PANE)`);
+				attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				continue;
 			}
 			const self = identities.find(name => name.toLowerCase() === assignee.toLowerCase());
 			if (self !== undefined) {
+				attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				return {
 					block: true,
 					reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id} is assigned to ${assignee}, which is you. `
@@ -1643,6 +1819,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 						+ "and let the director or an independent verifier run the close.",
 				};
 			}
+			attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 		}
 	}
 	const parts: string[] = [];
@@ -1665,11 +1842,14 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	/** Identity pinned by an identity-less session's first owned observation (self-declared; see header). */
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
+	/** Allowed closes awaiting their tool_execution_end, keyed by toolCallId for receipt emission. */
+	const closeIntents = new Map<string, CloseAttempt[]>();
 	/** Every tracker a successful br call reached this session, by key: an empty list in one never vouches for the others. */
 	const sessionTrackers = new Map<string, TrackerRef>();
 	pi.on("session_compact", async (_event, ctx) => {
 		// Arm conservatively before discovery: an I/O failure cannot bypass the gate.
 		pendingCalls.clear();
+		closeIntents.clear();
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
 		pendingReread = { agentsPath: null, identities: envIdentities, agentsOk: false, beadOk: false };
 		try {
@@ -1713,7 +1893,23 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
-			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
+			const started = Date.now();
+			const attempts: CloseAttempt[] = [];
+			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd }, attempts);
+			if (typeof event.toolCallId === "string" && attempts.length > 0) {
+				if (result?.block === true) {
+					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {
+						try {
+							await emitRefusedCloseRecords({ exec: pi.exec, notify: (message) => ctx.ui?.notify(message, "warning") },
+								attempts, event.toolCallId, Date.now() - started);
+						} catch (error) {
+							ctx.ui?.notify(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: refused-close recording failed (${error instanceof Error ? error.message : String(error)}); the refusal stands.`, "warning");
+						}
+					}
+				} else {
+					closeIntents.set(event.toolCallId, attempts);
+				}
+			}
 			if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
 			return result;
 		} catch (error) {
@@ -1732,6 +1928,16 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const command = field(call.input, "command");
 			if (call.toolName.toLowerCase() === "bash" && typeof command === "string") {
 				for (const ref of commandTrackers(command, call.cwd, home, env)) if (!sessionTrackers.has(ref.key)) sessionTrackers.set(ref.key, ref);
+			}
+			const closes = closeIntents.get(_event.toolCallId);
+			if (closes !== undefined) closeIntents.delete(_event.toolCallId);
+			if (closes !== undefined && closes.length > 0) {
+				try {
+					await emitCloseReceipts({ exec: pi.exec, notify: (message) => ctx.ui?.notify(message, "warning") },
+						closes, _event.toolCallId);
+				} catch (error) {
+					ctx.ui?.notify(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: receipt emission failed (${error instanceof Error ? error.message : String(error)}); the close stands.`, "warning");
+				}
 			}
 			const pending = pendingReread;
 			if (pending === null) return;
