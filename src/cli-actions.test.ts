@@ -12,7 +12,7 @@ mkdirSync(scratchRoot, { recursive: true });
 const scratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of scratchDirs) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-});
+}, 120000);
 
 function freshState(): string {
 	const dir = mkdtempSync(join(scratchRoot, "cli-actions-test." + process.pid + "."));
@@ -240,11 +240,14 @@ test("output_parity_with_and_without_spool", async () => {
 }, 180_000);
 
 // inert_without_state: with no fleet state dir the wrapper writes zero spool
-// files (the verb's own xdg/home dirs are pre-existing verb behavior, not ours).
 test("inert_without_state", async () => {
 	const missing = join(scratchRoot, "cli-actions-missing." + process.pid);
-	const run = await spawnCli(["capabilities", "--json"], { STATE: missing });
-	expect(run.exitCode).toBe(0);
-	expect(JSON.parse(run.stdout).ok).toBe(true);
-	expect(existsSync(join(missing, "spool"))).toBe(false);
+	try {
+		const run = await spawnCli(["capabilities", "--json"], { STATE: missing });
+		expect(run.exitCode).toBe(0);
+		expect(JSON.parse(run.stdout).ok).toBe(true);
+		expect(existsSync(join(missing, "spool"))).toBe(false);
+	} finally {
+		try { rmSync(missing, { recursive: true, force: true }); } catch { /* best effort */ }
+	}
 }, 120_000);
