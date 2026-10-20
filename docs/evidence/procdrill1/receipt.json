@@ -1,0 +1,30 @@
+{
+  "receipt_id": "PROCDRILL1-canonical-2026-10-20T23:51:00Z",
+  "bead": "ompkit-fp72.120.16.29.7.3",
+  "root": "/Users/josh/Developer/omp-kit-companion",
+  "agent": "GraySpire",
+  "model": "openai-codex/gpt-5.6-luna",
+  "provider": "openai-codex",
+  "status": "BLOCKED_SOURCE_RUNBOOKS_ABSENT",
+  "commands": [
+    {"label":"P1-python","command":"command -v python3","exit":0},
+    {"label":"P1-git","command":"command -v git","exit":0},
+    {"label":"P1-curl","command":"command -v curl","exit":0},
+    {"label":"P1-home","command":"env HOME=TMP_HOME sh -c 'test -n \"$HOME\"'","exit":0},
+    {"label":"P1-installer-help","command":"sh installer/install.sh --help","exit":0},
+    {"label":"P1-dry-run","command":"env HOME=TMP_HOME sh installer/install.sh --version 0.1.1 --index /nonexistent/release-index.json --prefix TMP_HOME/.local/opt/omp-kit --dry-run","exit":2,"output":"installer: --offline ARCHIVE is required with a local index"},
+    {"label":"R1-release-dry-run","command":"sh scripts/release-local.sh --help","exit":0},
+    {"label":"O5-tool","command":"command -v omp-kit","exit":0},
+    {"label":"O10-br","command":"command -v br","exit":0},
+    {"label":"O10-doctor","command":"br doctor health","exit":0},
+    {"label":"runbooks-dir","command":"test -d docs/runbooks","exit":1},
+    {"label":"receipt-dir","command":"test -d docs/evidence/procdrill1","exit":1},
+    {"label":"clean-check","command":"git status --porcelain","exit":0,"output_nonempty":true}
+  ],
+  "blockers": [
+    "Canonical product root contains no docs/runbooks directory; original runbook source is absent, so P1-P4/P6-P8/R1/O5/O6/O10 literal procedure drill cannot be truthfully completed.",
+    "No verified release index/archive was supplied. P1 dry-run correctly refused local index without --offline ARCHIVE (exit 2).",
+    "Worktree has pre-existing concurrent changes; no release apply, tag, push, rollback, or destructive cleanup attempted.",
+    "No mocks or fabricated passes used."
+  ]
+}
