@@ -199,14 +199,14 @@ test("attempt_written_for_usage_error", async () => {
 	process.env.AGENT_NAME = "TestCustody";
 	try {
 		// A PATH positional without --repo parses to the command, so the
-		// handler-level usage refusal (exit 2) carries surface kit:custody check.
+		// handler-level usage refusal (exit 2) carries the contract-safe surface kit-custody-check (ccCode folding, 16.11.9).
 		const code = await runCli(["custody", "check", "--json", "doc/a.md"]);
 		expect(code).toBe(2);
 		const day = new Date().toISOString().slice(0, 10);
 		const lines = readFileSync(join(state, "spool", "kit", `${day}.jsonl`), "utf8")
 			.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 		const attempts = lines.filter((line) => line.type === "action.attempt"
-			&& (line.data as Record<string, unknown>).surface === "kit:custody check");
+			&& (line.data as Record<string, unknown>).surface === "kit-custody-check");
 		expect(attempts.length).toBe(1);
 		void captured;
 	} finally {

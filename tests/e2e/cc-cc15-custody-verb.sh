@@ -172,7 +172,8 @@ else
 fi
 
 # 6. denominator: every call (incl. 2 and 3) wrote exactly one action.attempt.
-GOT="$(attempts_for 'kit:custody check')"
+# Surface is the contract-safe folded form kit-custody-check (ccCode, 16.11.9).
+GOT="$(attempts_for 'kit-custody-check')"
 if [ "$GOT" = "$CALLS" ]; then
 	pass "attempt_denominator" "attempts=$CALLS" "attempts=$GOT"
 else
