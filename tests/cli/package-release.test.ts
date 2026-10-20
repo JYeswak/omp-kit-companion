@@ -7,6 +7,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { packageSourceRevision } from "../../scripts/package-release.ts";
+import { checkPackagedExtensionLoads } from "../../scripts/package-release.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
@@ -600,3 +601,28 @@ test("detached signatures verify on a fresh copy; planted tampering, wrong keys,
 	expect(missing.exitCode).toBe(1);
 	expect(missing.stderr.toString()).toContain("SIG_NOT_FOUND");
 }, 120_000);
+
+test("GUARDLOAD1: shipped kit-flywheel-guard is bundled with no ../src/ escape and loads from the staged tree", () => {
+	const staged = join(output, "archived-source");
+	const shipped = readFileSync(join(staged, "extensions", "kit-flywheel-guard.ts"), "utf8");
+	expect(shipped).not.toContain("../src/");
+	expect(shipped).toContain("export");
+	const failures = checkPackagedExtensionLoads(staged);
+	expect(failures.map(failure => failure.file)).not.toContain("extensions/kit-flywheel-guard.ts");
+});
+
+test("GUARDLOAD1: extension load gate fails a ../src/ escape naming file and module, passes a bundled tree", () => {
+	const broken = mkdtempSync(join(output, "gate-broken-"));
+	const fixed = mkdtempSync(join(output, "gate-fixed-"));
+	for (const root of [broken, fixed]) mkdirSync(join(root, "extensions"), { recursive: true });
+	writeFileSync(join(broken, "extensions", "kit-flywheel-guard.ts"),
+		'import { ccSpool } from "../src/cc-spool.ts";\nexport const guard = ccSpool;\n');
+	writeFileSync(join(broken, "extensions", "kit-flywheel-guard.test.ts"),
+		'import { expect, test } from "bun:test";\ntest("skip", () => { expect(1).toBe(1); });\n');
+	writeFileSync(join(fixed, "extensions", "kit-flywheel-guard.ts"),
+		'export function ccSpool(): null { return null; }\nexport const guard = ccSpool;\n');
+	const brokenFailures = checkPackagedExtensionLoads(broken);
+	expect(brokenFailures.map(failure => failure.file)).toEqual(["extensions/kit-flywheel-guard.ts"]);
+	expect(brokenFailures[0]?.error ?? "").toContain("../src/cc-spool.ts");
+	expect(checkPackagedExtensionLoads(fixed)).toEqual([]);
+});

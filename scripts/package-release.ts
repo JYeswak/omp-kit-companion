@@ -31,6 +31,7 @@ const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/bu
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
+	"extensions/kit-flywheel-guard.ts": "FLYWHEEL_GUARD_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
 };
@@ -185,6 +186,36 @@ export function packageRuleManifest(sourceRoot: string, temporaryRoot: string): 
  if (built.stdout.length === 0) fail("EMPTY_GENERATED_MANIFEST");
  return built.stdout;
 }
+/**
+ * GUARDLOAD1 (bead ompkit-v66l.31): refuse to seal a package whose shipped
+ * extensions do not all import from the packaged tree. v0.2.61 shipped
+ * extensions/kit-flywheel-guard.ts with `import ... from "../src/cc-spool.ts"`
+ * but no src/ directory, so the flywheel, save and agent-mail guards failed
+ * to load on every seat. The gate imports every non-test extensions/*.ts
+ * file with the staged root as cwd and reports each failure with its
+ * resolution message. Pure filesystem + subprocess probe: safe to run against
+ * any expanded tree (staged package, installed release, fixture).
+ */
+export function checkPackagedExtensionLoads(stagedRoot: string): { file: string; error: string }[] {
+	const failures: { file: string; error: string }[] = [];
+	let entries: string[];
+	try {
+		entries = readdirSync(join(stagedRoot, "extensions"));
+	} catch {
+		return [{ file: "extensions/", error: "MISSING_EXTENSIONS_DIR" }];
+	}
+	for (const entry of entries.sort()) {
+		if (!entry.endsWith(".ts") || entry.endsWith(".test.ts")) continue;
+		const probed = Bun.spawnSync([process.execPath, "-e", `import("./extensions/${entry}")`], {
+			cwd: stagedRoot, stdout: "pipe", stderr: "pipe",
+		});
+		if (probed.exitCode !== 0) {
+			const detail = `${probed.stdout.toString()}${probed.stderr.toString()}`.trim().split("\n").slice(0, 3).join(" | ");
+			failures.push({ file: `extensions/${entry}`, error: detail.slice(0, 300) || `EXIT_${probed.exitCode}` });
+		}
+	}
+	return failures;
+}
 
 async function run(): Promise<void> {
 	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
@@ -223,6 +254,20 @@ async function run(): Promise<void> {
 			} else if (name === "package.json") continue;
 			else content.set(name, safeSource(name));
 		}
+		// GUARDLOAD1 (bead ompkit-v66l.31): load every packaged extension from
+		// the exact bytes about to be sealed, with no checkout src/ to fall
+		// back on. A packaged extension that resolves outside the package
+		// (e.g. ../src/cc-spool.ts in v0.2.61) refuses the build here.
+		const loadStage = join(directory, "load-gate");
+		mkdirSync(loadStage, { recursive: true, mode: 0o700 });
+		for (const [name, bytes] of content) {
+			const staged = join(loadStage, name);
+			mkdirSync(dirname(staged), { recursive: true, mode: 0o700 });
+			const stageFd = openSync(staged, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+			try { writeAll(stageFd, bytes); } finally { closeSync(stageFd); }
+		}
+		const loadFailures = checkPackagedExtensionLoads(loadStage);
+		if (loadFailures.length > 0) fail(`EXTENSION_LOAD_FAILED: ${loadFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
 		// Reobserve after compilation and resource reads. This detects an observed
 		// changed/dirty HEAD, not transient edit-and-revert or authenticated source binding.
 		const finalSourcePackage = safeSource("package.json");

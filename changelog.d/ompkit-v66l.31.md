@@ -1,0 +1,1 @@
+- Release packager now bundles `extensions/kit-flywheel-guard.ts` (resolving its `../src/cc-spool.ts` import at build time, same precedent as `fleet-guard`) so the flywheel, save and agent-mail guards load from the installed tree, and refuses to seal any build whose packaged extensions do not all import from the packaged tree (`EXTENSION_LOAD_FAILED` names the file and module).
