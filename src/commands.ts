@@ -438,9 +438,10 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--ours", value: "PATH", repeatable: true, description: "Explicit owner decision to keep the integrated local path" },
 		{ name: "--theirs", value: "PATH", repeatable: true, description: "Explicit owner decision to take the origin path" },
 	], example: "omp-kit converge --repo . --json", runnable: false, mutation: true, dataSchema: convergeData },
-	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes", flags: [
-		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file" },
-		{ name: "--message", value: "MSG", description: "Commit message for the shared-main commit" },
+	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes | land --patch FILE --message MSG --apply --yes", flags: [
+		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file (path mode; refused with --patch)" },
+		{ name: "--patch", value: "FILE", description: "Caller-produced unified diff whose selected hunks are reconstructed onto fresh origin/main (patch mode; refused with --paths)" },
+		{ name: "--message", value: "MSG", aliases: ["-m"], description: "Commit message for the shared-main commit" },
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },

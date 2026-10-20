@@ -1358,3 +1358,253 @@ test("refuses publication when inherited hook attribution is ambiguous", () => {
 	expect(git(work, ["show", "HEAD:owned.txt"])).toBe("owned save\n");
 	expect(remoteHead(work)).toBe(before);
 });
+
+/** Selected-hunk patch mode (ompkit-rhy9.8): caller patch, peer advance, stale checkout. */
+const SERVICE_BASE = Array.from({ length: 30 }, (_, index) => `line${String(index + 1).padStart(2, "0")}`).join("\n") + "\n";
+
+function numberedLines(from: number, to: number): string[] {
+	const out: string[] = [];
+	for (let i = from; i <= to; i++) out.push(`line${String(i).padStart(2, "0")}`);
+	return out;
+}
+
+function writeServiceLines(work: string, mutate: (lines: string[]) => void): void {
+	const lines = readFileSync(join(work, "service.txt"), "utf8").split("\n");
+	mutate(lines);
+	writeFileSync(join(work, "service.txt"), lines.join("\n"));
+}
+
+type HunkSetup = { work: string; fakeBin: string; bare: string; base: string; patch: string; checkContent: string; checkAdded: string };
+
+function hunkSetup(peer: "shift" | "conflict" | "none"): HunkSetup {
+	const { work, fakeBin } = fixture();
+	const bare = git(work, ["remote", "get-url", "origin"]).trim();
+	const checkContent = join(scratch, `patch-check-content-${fixtureNumber}.txt`);
+	const checkAdded = join(scratch, `patch-check-added-${fixtureNumber}.txt`);
+	registerPushCheck(work, [
+		"#!/bin/bash",
+		"set -eu",
+		'git -C "$OMP_LAND_REPOSITORY" show "$OMP_LAND_CANDIDATE_SHA:service.txt" > "$OMP_LAND_CHECK_CONTENT_FILE"',
+		'git -C "$OMP_LAND_REPOSITORY" show "$OMP_LAND_CANDIDATE_SHA:feature/added.txt" > "$OMP_LAND_CHECK_ADDED_FILE"',
+		"exit 0",
+	].join("\n") + "\n");
+	writeFileSync(join(work, "service.txt"), SERVICE_BASE);
+	git(work, ["add", "service.txt"]);
+	git(work, ["commit", "-m", "service base [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	const caller = join(scratch, `caller-${fixtureNumber}`);
+	git(scratch, ["clone", "--branch", "main", bare, caller]);
+	git(caller, ["config", "user.name", "caller"]);
+	git(caller, ["config", "user.email", "caller@example.invalid"]);
+	if (peer !== "none") {
+		const peerDir = join(scratch, `peer-${fixtureNumber}`);
+		git(scratch, ["clone", "--branch", "main", bare, peerDir]);
+		git(peerDir, ["config", "user.name", "peer"]);
+		git(peerDir, ["config", "user.email", "peer@example.invalid"]);
+		writeServiceLines(peerDir, (lines) => {
+			lines.unshift("peer header 1", "peer header 2", "peer header 3");
+			if (peer === "shift") {
+				lines[19] = "peer changed line17";
+				lines[23] = "peer changed region";
+			} else {
+				lines[10] = "peer other A11"; lines[11] = "peer other A12"; lines[12] = "peer other A13"; lines[13] = "peer other A14"; lines[14] = "peer other A15";
+			}
+		});
+		git(peerDir, ["add", "service.txt"]);
+		git(peerDir, ["commit", "-m", "peer advance [test]"]);
+		git(peerDir, ["push", "origin", "HEAD:refs/heads/main"]);
+	}
+	writeServiceLines(caller, (lines) => {
+		lines[10] = "caller new A11"; lines[11] = "caller new A12"; lines[12] = "caller new A13"; lines[13] = "caller new A14"; lines[14] = "caller new A15";
+	});
+	mkdirSync(join(caller, "feature"), { recursive: true });
+	writeFileSync(join(caller, "feature", "added.txt"), "caller added file\n");
+	git(caller, ["add", "service.txt", join("feature", "added.txt")]);
+	git(caller, ["commit", "-m", "caller selection [test]"]);
+	const patch = join(scratch, `caller-${fixtureNumber}.patch`);
+	writeFileSync(patch, git(caller, ["diff", base, "HEAD"]));
+	return { work, fakeBin, bare, base, patch, checkContent, checkAdded };
+}
+
+function patchHold(): unknown[] {
+	return [
+		{ agent: "DarkFern", path: "service.txt", exclusive: true, remaining_seconds: 3600 },
+		{ agent: "DarkFern", path: "feature/added.txt", exclusive: true, remaining_seconds: 3600 },
+	];
+}
+
+const EXPECTED_SERVICE = ["peer header 1", "peer header 2", "peer header 3", ...numberedLines(1, 10),
+	"caller new A11", "caller new A12", "caller new A13", "caller new A14", "caller new A15",
+	"line16", "peer changed line17", "line18", "line19", "line20", "peer changed region", ...numberedLines(22, 30)].join("\n") + "\n";
+
+test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
+	const setup = hunkSetup("shift");
+	const { work, fakeBin, bare, base, patch } = setup;
+	const fresh = remoteHead(work);
+	expect(fresh).not.toBe(base);
+	// Without three-way reconstruction this exact specimen cannot land: the peer
+	// advance shifted the caller hunk and changed its trailing context.
+	const checker = join(scratch, `plain-check-${fixtureNumber}`);
+	git(scratch, ["clone", "--branch", "main", bare, checker]);
+	const plain = spawnSync("git", ["apply", "--check", patch], { cwd: checker, encoding: "utf8", timeout: 10_000 });
+	expect(plain.status).not.toBe(0);
+	expect(String(plain.stderr)).toContain("service.txt");
+	// The shared checkout stays stale with unrelated staged and worktree bytes.
+	writeFileSync(join(work, "peer.txt"), "staged peer bytes\n");
+	git(work, ["add", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "unstaged worktree bytes\n");
+	const stagedOid = git(work, ["rev-parse", ":peer.txt"]).trim();
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	const run = command(work, ["--patch", patch, "-m", "feat(land): selected hunks [test]", "--apply", "--yes"], patchHold(), {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
+	});
+	expect(run.status).toBe(0);
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: string; owner: string; paths: string[];
+		base: string; localMain: string; check: { status: string; sha256: string; checked_sha: string; pushed_sha: string };
+		convergence: { state: string; reason: string | null; applied: boolean; pushed: boolean; published_commits: number; remote_after: string };
+		phases: { construction: string; publication: string; observed_publication_head: string };
+	};
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.base).toBe(fresh);
+	expect(data.localMain).toBe(base);
+	expect([...data.paths].sort()).toEqual(["feature/added.txt", "service.txt"]);
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.checked_sha).toBe(data.commit);
+	expect(data.check.pushed_sha).toBe(data.commit);
+	expect(data.convergence.state).toBe("FAST_FORWARD");
+	expect(data.convergence.reason).toBeNull();
+	expect(data.convergence.applied).toBe(false);
+	expect(data.convergence.pushed).toBe(true);
+	expect(data.convergence.published_commits).toBe(1);
+	expect(data.convergence.remote_after).toBe(data.commit);
+	expect(data.phases.construction).toBe("APPLIED");
+	expect(data.phases.publication).toBe("APPLIED");
+	expect(data.phases.observed_publication_head).toBe(data.commit);
+	expect(git(work, ["show", "-s", "--format=%P", data.commit]).trim()).toBe(fresh);
+	expect(remoteHead(work)).toBe(data.commit);
+	expect(git(work, ["diff", "--name-only", fresh, data.commit]).trim().split("\n").sort()).toEqual(["feature/added.txt", "service.txt"]);
+	expect(git(work, ["show", `${data.commit}:service.txt`])).toBe(EXPECTED_SERVICE);
+	expect(git(work, ["show", `${data.commit}:feature/added.txt`])).toBe("caller added file\n");
+	expect(readFileSync(setup.checkContent, "utf8")).toBe(EXPECTED_SERVICE);
+	expect(readFileSync(setup.checkAdded, "utf8")).toBe("caller added file\n");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(git(work, ["rev-parse", ":peer.txt"]).trim()).toBe(stagedOid);
+	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("staged peer bytes\n");
+	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("unstaged worktree bytes\n");
+	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(SERVICE_BASE);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("refuses a true three-way conflict naming the file and hunks", () => {
+	const setup = hunkSetup("conflict");
+	const { work, fakeBin, base, patch } = setup;
+	const originBefore = remoteHead(work);
+	expect(originBefore).not.toBe(base);
+	const refsBefore = git(work, ["for-each-ref", "refs/heads"]);
+	const treesBefore = git(work, ["worktree", "list", "--porcelain"]);
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	const run = command(work, ["--patch", patch, "--message", "feat(land): conflicting selection [test]", "--apply", "--yes"], patchHold(), { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("PATCH_CONFLICT");
+	const data = run.body.data as { overall: string; commit: null; base: string; check: { status: string }; phases: { construction: string; publication: string } };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("REFUSED");
+	expect(data.commit).toBeNull();
+	expect("candidate_sha" in data).toBe(false);
+	expect(data.base).toBe(originBefore);
+	expect(data.check.status).toBe("UNRUN");
+	expect(data.phases.construction).toBe("NOT_APPLIED");
+	expect(data.phases.publication).toBe("UNKNOWN");
+	const message = (run.body.errors as { message: string }[])[0]?.message ?? "";
+	expect(message).toContain("service.txt");
+	expect(message).toContain("@@");
+	expect(remoteHead(work)).toBe(originBefore);
+	// Patch mode fetches fresh origin/main by design, so only local branches must be untouched.
+	expect(git(work, ["for-each-ref", "refs/heads"])).toBe(refsBefore);
+	expect(git(work, ["rev-parse", "refs/remotes/origin/main"]).trim()).toBe(originBefore);
+	expect(git(work, ["worktree", "list", "--porcelain"])).toBe(treesBefore);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("refuses origin movement during construction without publishing", () => {
+	const setup = hunkSetup("none");
+	const { work, fakeBin, bare, base, patch } = setup;
+	const writer = join(scratch, `writer-${fixtureNumber}`);
+	git(scratch, ["clone", "--branch", "main", bare, writer]);
+	git(writer, ["config", "user.name", "writer"]);
+	git(writer, ["config", "user.email", "writer@example.invalid"]);
+	writeFileSync(join(writer, "untouched.txt"), "concurrent remote change\n");
+	git(writer, ["add", "untouched.txt"]);
+	git(writer, ["commit", "-m", "competing writer [test]"]);
+	const writerSha = git(writer, ["rev-parse", "HEAD"]).trim();
+	const commitMsg = join(work, ".git", "hooks", "commit-msg");
+	// The reconstruction commit runs in a linked scratch worktree, whose absolute
+	// GIT_DIR would otherwise capture the nested push into the wrong repository.
+	writeFileSync(commitMsg, `#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE\ngit -C '${writer}' push origin HEAD:refs/heads/main\nexit 0\n`);
+	chmodSync(commitMsg, 0o755);
+	const attempts = join(scratch, `patch-push-attempts-${fixtureNumber}.txt`);
+	const prePush = join(work, ".git", "hooks", "pre-push");
+	writeFileSync(prePush, `#!/bin/sh\nprintf 'attempt\\n' >> '${attempts}'\nexit 0\n`);
+	chmodSync(prePush, 0o755);
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	const run = command(work, ["--patch", patch, "--message", "feat(land): moved origin [test]", "--apply", "--yes"], patchHold(), {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
+	});
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_ORIGIN_MOVED");
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: null; base: string;
+		check: { status: string; checked_sha: string; pushed_sha: null }; phases: { publication: string };
+		convergence: { state: string; reason: string | null; pushed: boolean; remote_after: string };
+	};
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("REFUSED");
+	expect(data.base).toBe(base);
+	expect(data.candidate_sha).toBe(data.commit);
+	expect(data.pushed_sha).toBeNull();
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.checked_sha).toBe(data.candidate_sha);
+	expect(data.check.pushed_sha).toBeNull();
+	expect(data.phases.publication).toBe("NOT_APPLIED");
+	expect(data.convergence.state).toBe("REFUSED");
+	expect(data.convergence.reason).toBe("ORIGIN_MOVED");
+	expect(data.convergence.pushed).toBe(false);
+	expect(data.convergence.remote_after).toBe(writerSha);
+	expect(remoteHead(work)).toBe(writerSha);
+	expect(remoteHead(work)).not.toBe(data.candidate_sha);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(existsSync(attempts)).toBe(false);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("refuses a patch naming a path outside the owner reservation", () => {
+	const setup = hunkSetup("shift");
+	const { work, fakeBin, base, patch } = setup;
+	const originBefore = remoteHead(work);
+	const hold = [{ agent: "DarkFern", path: "peer.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, ["--patch", patch, "--message", "feat(land): uncovered selection [test]", "--apply", "--yes"], hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("RESERVATION_REQUIRED");
+	const errors = run.body.errors as { message: string }[];
+	expect(errors[0]?.message ?? "").toContain("service.txt");
+	expect(remoteHead(work)).toBe(originBefore);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+});
+
+test("refuses worktree paths combined with a patch file", () => {
+	const setup = hunkSetup("none");
+	const { work, fakeBin, base, patch } = setup;
+	const originBefore = remoteHead(work);
+	const run = command(work, ["--paths", "service.txt", "--patch", patch, "--message", "feat(land): mixed modes [test]", "--apply", "--yes"], patchHold(), { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_PATCH_EXCLUSIVE");
+	expect(remoteHead(work)).toBe(originBefore);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+});

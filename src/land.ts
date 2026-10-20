@@ -1,8 +1,9 @@
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
+import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
 
 
@@ -330,11 +331,344 @@ function normalizePaths(value: string | true | undefined, repo: string): string[
 	return paths;
 }
 
+const MAX_PATCH_BYTES = 4 * 1024 * 1024;
+
+type PatchSelection = { path: string; renamed: boolean; hunks: string[] };
+
+function isOctalDigit(ch: string): boolean {
+	return ch >= "0" && ch <= "7";
+}
+
+function unquoteGitPath(raw: string): string {
+	const text = raw.trim();
+	if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) return text;
+	const bytes: number[] = [];
+	const body = text.slice(1, -1);
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i] ?? "";
+		if (ch !== "\\" || i + 1 >= body.length) {
+			for (const byte of Buffer.from(ch, "utf8")) bytes.push(byte);
+			continue;
+		}
+		const next = body[i + 1] ?? "";
+		if (next === "n") { bytes.push(0x0a); i++; }
+		else if (next === "t") { bytes.push(0x09); i++; }
+		else if (next === "\\" || next === '"') { for (const byte of Buffer.from(next, "utf8")) bytes.push(byte); i++; }
+		else if (next >= "0" && next <= "7" && i + 4 <= body.length && isOctalDigit(body[i + 1] ?? "") && isOctalDigit(body[i + 2] ?? "") && isOctalDigit(body[i + 3] ?? "")) { bytes.push(parseInt(body.slice(i + 1, i + 4), 8)); i += 3; }
+		else { for (const byte of Buffer.from(next, "utf8")) bytes.push(byte); i++; }
+	}
+	return Buffer.from(bytes).toString("utf8");
+}
+
+function splitGitDiffSides(rest: string): [string, string] | null {
+	const sides: string[] = [];
+	let cursor = rest.trimStart();
+	for (let n = 0; n < 2; n++) {
+		if (!cursor) return null;
+		if (cursor.startsWith('"')) {
+			let i = 1;
+			while (i < cursor.length) {
+				if (cursor[i] === "\\") i += 2;
+				else if (cursor[i] === '"') break;
+				else i++;
+			}
+			if (i >= cursor.length) return null;
+			sides.push(cursor.slice(0, i + 1));
+			cursor = cursor.slice(i + 1).trimStart();
+		} else {
+			const spaceIndex = cursor.indexOf(" ");
+			const tabIndex = cursor.indexOf("\t");
+			const space = spaceIndex < 0 ? tabIndex : tabIndex < 0 ? spaceIndex : Math.min(spaceIndex, tabIndex);
+			if (space < 0) { sides.push(cursor); cursor = ""; }
+			else { sides.push(cursor.slice(0, space)); cursor = cursor.slice(space).trimStart(); }
+		}
+	}
+	if (sides.length !== 2 || cursor.length > 0) return null;
+	return [sides[0] ?? "", sides[1] ?? ""];
+}
+
+function parsePatchSelection(text: string): PatchSelection[] | null {
+	const files: PatchSelection[] = [];
+	let current: PatchSelection | null = null;
+	for (const line of text.split("\n")) {
+		if (line.startsWith("diff --git ")) {
+			const sides = splitGitDiffSides(line.slice("diff --git ".length));
+			if (!sides) return null;
+			const a = unquoteGitPath(sides[0]);
+			const b = unquoteGitPath(sides[1]);
+			if (!a.startsWith("a/") || !b.startsWith("b/")) return null;
+			current = { path: b.slice(2), renamed: a.slice(2) !== b.slice(2), hunks: [] };
+			files.push(current);
+			continue;
+		}
+		if (line.startsWith("rename from ") || line.startsWith("rename to ") || line.startsWith("copy from ") || line.startsWith("copy to ")) {
+			if (!current) return null;
+			current.renamed = true;
+			continue;
+		}
+		if (line.startsWith("@@ ") && current && current.hunks.length < 8) current.hunks.push(line.slice(0, 120));
+	}
+	return files;
+}
+
+function normalizePatchPaths(paths: string[], repo: string): string[] | CliResult {
+	if (paths.length === 0) return refused("LAND_PATCH_EMPTY", "The patch selects no files", "Pass a unified diff that names at least one repository-relative file; nothing was published.");
+	if (new Set(paths).size !== paths.length) return refused("LAND_PATH_DUPLICATE", "Duplicate patch entries are not allowed", "Name each repository-relative path once; nothing was published.");
+	for (const path of paths) {
+		if (path.length === 0 || path.includes("\\") || isAbsolute(path) || path !== normalize(path) || path === "." || path.split("/").includes("..") || path.split("/").includes(".git") ||
+			relative(repo, resolve(repo, path)).startsWith(`..${sep}`) || isAbsolute(relative(repo, resolve(repo, path))))
+			return refused("LAND_PATH_INVALID", `Patch names an invalid repository-relative file: ${path}`, "Pass normalized repository-relative file paths outside .git; nothing was published.");
+	}
+	return paths;
+}
+
+function patchFailureFiles(stderr: string): string[] {
+	const files: string[] = [];
+	for (const raw of stderr.split("\n")) {
+		const line = raw.trim();
+		let rest: string | null = null;
+		if (line.startsWith("error: patch failed: ")) rest = line.slice("error: patch failed: ".length);
+		else if (line.startsWith("error: ") && line.endsWith(": patch does not apply")) rest = line.slice("error: ".length, -": patch does not apply".length);
+		else if (line.startsWith("error: ") && line.endsWith(": already exists in working directory")) rest = line.slice("error: ".length, -": already exists in working directory".length);
+		if (rest === null) continue;
+		const colon = rest.lastIndexOf(":");
+		const suffix = colon >= 0 ? rest.slice(colon + 1) : "";
+		const lineNumber = colon > 0 && suffix.length > 0 && suffix.split("").every((ch) => ch >= "0" && ch <= "9");
+		const file = unquoteGitPath(lineNumber ? rest.slice(0, colon) : rest);
+		if (file && !files.includes(file)) files.push(file);
+	}
+	return files;
+}
+
+function patchUnrun(repo: string, code: string, message: string, remediation: string, owner: string, paths: string[], base: string | null, sha256: string | null): CliResult {
+	const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
+	return {
+		code: 77,
+		data: { overall: "UNRUN", commit: null, owner, paths, ...(base ? { base } : {}), check: pushCheckResult("UNRUN", "construction_unavailable", sha256), phases },
+		errors: [{ code, message, remediation }],
+		verification: "UNVERIFIED",
+	};
+}
+
+function patchConvergence(repo: string, state: "FAST_FORWARD" | "REFUSED", reason: string | null, pushed: boolean, base: string, candidate: string | null, remoteAfter: string | null, publishedCommits: number, elapsedS: number): ConvergeResult {
+	// Patch mode never integrates local main, so applied stays false: the only
+	// mutation is the exact candidate fast-forwarding origin/main. old/up name
+	// the fetched origin/main the candidate was reconstructed on.
+	return {
+		repo, state, reason, applied: false, pushed, conflicts: [], elapsed_s: elapsedS,
+		old: base, up: base, ...(candidate ? { new_head: candidate } : {}),
+		published_commits: publishedCommits, ...(remoteAfter ? { remote_after: remoteAfter } : {}),
+	};
+}
+
+
+function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
+	const started = performance.now();
+	const elapsed = (): number => Math.round(performance.now() - started) / 1000;
+	const message = request.flags.get("--message");
+	if (typeof message !== "string" || message.trim().length === 0) return refused("LAND_MESSAGE_REQUIRED", "land needs a nonempty --message", "Pass the commit message; nothing was published.");
+	const patchValue = request.flags.get("--patch");
+	if (typeof patchValue !== "string" || patchValue.length === 0) return refused("LAND_PATCH_REQUIRED", "patch mode needs a --patch FILE value", "Pass the caller-produced unified diff; nothing was published.");
+	if (request.flags.get("--paths") !== undefined) return refused("LAND_PATCH_EXCLUSIVE", "land takes either --paths worktree files or one --patch file, never both", "Run patch mode without --paths, or path mode without --patch; nothing was published.");
+	const patchPath = isAbsolute(patchValue) ? patchValue : resolve(process.cwd(), patchValue);
+	let patchStat;
+	try { patchStat = lstatSync(patchPath); }
+	catch { return refused("LAND_PATCH_UNREADABLE", `The patch file could not be read: ${patchValue}`, "Pass a readable unified diff file; nothing was published."); }
+	if (!patchStat.isFile()) return refused("LAND_PATCH_UNREADABLE", `The patch is not a regular file: ${patchValue}`, "Pass a readable unified diff file; nothing was published.");
+	if (patchStat.size > MAX_PATCH_BYTES) return refused("LAND_PATCH_TOO_LARGE", "The patch file exceeds the 4 MiB construction budget", "Land a smaller caller selection; nothing was published.");
+	let patchBytes: Buffer;
+	try { patchBytes = readFileSync(patchPath); }
+	catch { return refused("LAND_PATCH_UNREADABLE", `The patch file could not be read: ${patchValue}`, "Pass a readable unified diff file; nothing was published."); }
+	if (patchBytes.length === 0) return refused("LAND_PATCH_EMPTY", "The patch file is empty", "Pass a unified diff that selects caller hunks; nothing was published.");
+	const selection = parsePatchSelection(patchBytes.toString("utf8"));
+	if (selection === null) return refused("LAND_PATCH_FORMAT", "The patch is not a standard a/ b/ unified diff", "Produce the patch with git diff or git format-patch; nothing was published.");
+	const renamed = selection.filter((entry) => entry.renamed).map((entry) => entry.path);
+	if (renamed.length > 0) return refused("LAND_PATCH_RENAMED", `The patch renames files and only content hunks land: ${renamed.join(", ")}`, "Regenerate the patch without renames or copies; nothing was published.");
+	const paths = normalizePatchPaths(selection.map((entry) => entry.path), repo);
+	if (!Array.isArray(paths)) return paths;
+	const owner = authorizedOwner(repo, paths);
+	if ("error" in owner) return owner.error;
+	const currentOwner = authorizedOwner(repo, paths);
+	if ("error" in currentOwner) return currentOwner.error;
+	if (currentOwner.owner !== owner.owner) return refused("OWNER_MISMATCH", "The live pane owner changed before saving", "Reacquire the correct identity and reservation; nothing was committed.");
+	const branch = git(repo, ["symbolic-ref", "--quiet", "HEAD"]);
+	if (branch.code !== 0 || branch.out.trim() !== "refs/heads/main")
+		return refused("LAND_MAIN_REQUIRED", "Land requires the canonical shared main checkout", "Return to shared main without discarding work; no commit was created.");
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
+	if (gitDir.code !== 0 || commonDir.code !== 0 || resolve(repo, commonDir.out.trim()) !== resolve(gitDir.out.trim()))
+		return refused("LAND_CANONICAL_REQUIRED", "Land requires the primary shared checkout, not a linked worktree", "Use the canonical shared main checkout; no commit was created.");
+	const fetch = git(repo, ["fetch", "origin", "refs/heads/main"]);
+	if (fetch.code !== 0 || fetch.interrupted)
+		return patchUnrun(repo, "LAND_ORIGIN_UNAVAILABLE", "Fresh origin/main could not be fetched", "Restore origin reachability and retry; nothing was committed or published.", owner.owner, paths, null, null);
+	const mainRef = git(repo, ["rev-parse", "--verify", "refs/remotes/origin/main"]);
+	if (mainRef.code !== 0)
+		return patchUnrun(repo, "LAND_ORIGIN_UNAVAILABLE", "Fresh origin/main has no readable commit after fetch", "Restore origin reachability and retry; nothing was committed or published.", owner.owner, paths, null, null);
+	const base = mainRef.out.trim();
+	const localMain = git(repo, ["rev-parse", "refs/heads/main"]).out.trim();
+	let checkPreflight = preparePushCheck(repo, base);
+	if (checkPreflight.kind === "ready" && paths.includes(PUSH_CHECK_PATH))
+		checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };
+	if (checkPreflight.kind === "unrun") {
+		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
+		return {
+			code: 77,
+			data: { overall: "UNRUN", commit: null, owner: owner.owner, paths, base, check: checkPreflight.result, phases },
+			errors: [{ code: "LAND_CHECK_UNRUN", message: `The registered repo check is unavailable: ${checkPreflight.result.reason ?? "unknown"}`, remediation: "Restore the registered check executable and retry; no commit or publication was attempted." }],
+			verification: "UNVERIFIED",
+		};
+	}
+	// Reconstruct the caller selection onto fresh origin/main in a detached
+	// scratch worktree. The shared worktree and index never contribute bytes.
+	const tmpRoot = process.env.TMPDIR && isAbsolute(process.env.TMPDIR) ? process.env.TMPDIR : tmpdir();
+	let scratchBase = "";
+	try { scratchBase = mkdtempSync(join(tmpRoot, "omp-kit-land-patch-")); }
+	catch { return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "A scratch construction directory could not be created", "Restore temporary-directory access and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256); }
+	const scratch = join(scratchBase, "work");
+	const cleanup = (): void => {
+		try { git(repo, ["worktree", "remove", "--force", scratch]); } catch { /* scratch removal is best-effort */ }
+		try { git(repo, ["worktree", "prune"]); } catch { /* scratch removal is best-effort */ }
+		try { rmSync(scratchBase, { recursive: true, force: true }); } catch { /* scratch removal is best-effort */ }
+	};
+	const added = git(repo, ["worktree", "add", "--detach", scratch, base]);
+	if (added.code !== 0 || added.interrupted) {
+		cleanup();
+		return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "Fresh origin/main could not be checked out for reconstruction", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+	}
+	const applied = git(scratch, ["apply", "--3way", patchPath]);
+	if (applied.code !== 0 || applied.interrupted) {
+		cleanup();
+		const files = patchFailureFiles(applied.err);
+		const named = files.length > 0 ? files : paths;
+		const hunks = named.flatMap((file) => selection.find((entry) => entry.path === file)?.hunks ?? []).slice(0, 6);
+		const check = checkPreflight.kind === "skip" ? checkPreflight.result : pushCheckResult("UNRUN", "patch_conflict", checkPreflight.result.sha256);
+		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: null, owner: owner.owner, paths, base, localMain, check, phases },
+			errors: [{ code: "PATCH_CONFLICT", message: `The patch does not apply to fresh origin/main: ${named.join(", ")}${hunks.length > 0 ? ` (${hunks.join("; ")})` : ""}`, remediation: "Regenerate the caller patch from current origin/main so every selected hunk applies; no commit was created or published." }],
+			verification: "NOT_RUN",
+		};
+	}
+	const changed = git(scratch, ["diff", "--quiet", "HEAD"]);
+	if (changed.code === 0) {
+		cleanup();
+		const check = checkPreflight.kind === "skip" ? checkPreflight.result : pushCheckResult("UNRUN", "patch_empty", checkPreflight.result.sha256);
+		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: null, owner: owner.owner, paths, base, localMain, check, phases },
+			errors: [{ code: "LAND_PATCH_EMPTY", message: "The patch selects no changes against fresh origin/main", remediation: "Select caller hunks that differ from current origin/main; no commit was created or published." }],
+			verification: "NOT_RUN",
+		};
+	}
+	if (changed.code !== 1) {
+		cleanup();
+		return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", "The reconstructed tree could not be inspected safely", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+	}
+	const commit = git(scratch, ["commit", "-m", message]);
+	if (commit.code !== 0 || commit.interrupted) {
+		cleanup();
+		const check = checkPreflight.kind === "skip" ? checkPreflight.result : pushCheckResult("UNRUN", "commit_refused", checkPreflight.result.sha256);
+		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
+		return {
+			code: commit.interrupted ? 77 : 1,
+			data: { overall: commit.interrupted ? "UNRUN" : "REFUSED", commit: null, owner: owner.owner, paths, base, localMain, check, phases },
+			errors: [{ code: commit.interrupted ? "LAND_COMMIT_INTERRUPTED" : "COMMIT_CREATION_REFUSED", message: commit.interrupted ? "Git saved no verifiable candidate before the commit command ended" : `Git refused the reconstructed candidate: ${commit.err.trim()}`, remediation: "Inspect the shared main and hooks before retrying; no publication was attempted." }],
+			verification: commit.interrupted ? "UNVERIFIED" : "NOT_RUN",
+		};
+	}
+	const candidateRef = git(scratch, ["rev-parse", "--verify", "HEAD"]);
+	if (candidateRef.code !== 0) {
+		cleanup();
+		return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", "The reconstructed candidate has no readable commit", "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
+	}
+	const candidate = candidateRef.out.trim();
+	const checkResult = runPushCheck(repo, base, candidate);
+	const admission = pushCheckAdmission(checkResult);
+	if (!admission.allow) {
+		cleanup();
+		const remoteAfter = observedRemoteMain(repo);
+		if (remoteAfter && remoteAfter !== base) git(repo, ["fetch", "origin", "refs/heads/main"]);
+		const convergence = patchConvergence(repo, "REFUSED", checkResult.status === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN", false, base, candidate, remoteAfter, 0, elapsed());
+		const phases = landPhaseEvidence(repo, candidate, true, convergence);
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
+			errors: [checkResult.status === "FAIL"
+				? { code: "LAND_CHECK_FAILED", message: "The registered repo check failed for the exact reconstructed candidate", remediation: "Repair the check or candidate; it was not published." }
+				: { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }],
+			verification: "PERFORMED",
+		};
+	}
+	const observed = observedRemoteMain(repo);
+	if (observed === null) {
+		cleanup();
+		return patchUnrun(repo, "LAND_ORIGIN_UNVERIFIED", "Fresh origin/main could not be re-read before publication", "Restore origin reachability and retry; nothing was published.", owner.owner, paths, base, checkResult.sha256);
+	}
+	if (observed !== base) {
+		cleanup();
+		// Materialize the moved origin so phase evidence classifies the
+		// candidate against the actual publication head instead of UNKNOWN.
+		git(repo, ["fetch", "origin", "refs/heads/main"]);
+		const convergence = patchConvergence(repo, "REFUSED", "ORIGIN_MOVED", false, base, candidate, observed, 0, elapsed());
+		const phases = landPhaseEvidence(repo, candidate, true, convergence);
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
+			errors: [{ code: "LAND_ORIGIN_MOVED", message: "origin/main moved during patch construction; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }],
+			verification: "PERFORMED",
+		};
+	}
+	const push = git(repo, ["push", "origin", `${candidate}:refs/heads/main`]);
+	if (push.interrupted) {
+		cleanup();
+		const phases = landPhaseEvidence(repo, candidate, true);
+		return {
+			code: 77,
+			data: { overall: "UNRUN", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: checkResult, phases },
+			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: "The push command did not finish; publication could not be verified", remediation: "Inspect origin/main before retrying; no force-push or fallback was attempted." }],
+			verification: "UNVERIFIED",
+		};
+	}
+	const after = observedRemoteMain(repo);
+	cleanup();
+	const published = push.code === 0 && after === candidate;
+	const pushedCheck = { ...checkResult, pushed_sha: published ? candidate : null };
+	const convergence = published
+		? patchConvergence(repo, "FAST_FORWARD", null, true, base, candidate, after, 1, elapsed())
+		: patchConvergence(repo, "REFUSED", after === base ? "PUSH_FAILED" : "PUSH_REJECTED", false, base, candidate, after, 0, elapsed());
+	if (after && after !== base && after !== candidate) git(repo, ["fetch", "origin", "refs/heads/main"]);
+	const phases = landPhaseEvidence(repo, candidate, true, convergence);
+	if (published) {
+		return {
+			code: 0,
+			data: { overall: "PUSHED", commit: candidate, candidate_sha: candidate, pushed_sha: candidate, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
+			verification: "PERFORMED",
+		};
+	}
+	if (after === base) {
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
+			errors: [{ code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${push.err.trim().slice(-300) || "the push was rejected without origin movement"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." }],
+			verification: "PERFORMED",
+		};
+	}
+	return {
+		code: 1,
+		data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
+		errors: [{ code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }],
+		verification: "PERFORMED",
+	};
+}
+
 export function landCommand(request: ParsedCommand): CliResult {
 	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
 	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
 	if (root.code !== 0) return refused("LAND_REPOSITORY_REQUIRED", "The current directory is not inside a Git repository", "Run land from the repository to publish.");
 	const repo = resolve(root.out.trim());
+	if (request.flags.get("--patch") !== undefined) return landPatchCommand(repo, request);
 	const paths = normalizePaths(request.flags.get("--paths"), repo);
 	if (!Array.isArray(paths)) return paths;
 	const message = request.flags.get("--message");
