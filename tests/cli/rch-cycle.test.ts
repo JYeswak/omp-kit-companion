@@ -284,7 +284,10 @@ test("a dead-owner lease is reported unreapable with the missing native capabili
 	const result = await runRchCycle(input, fixture.executor);
 	expect(fixture.recoverCalls()).toEqual([]);
 	expect(result.deadLeases).toEqual([{ wrapperId: "rchw-dead", worker: "worker-a", pid: 52001, state: "running", phase: "finalize", basis: "stale_heartbeat", outcome: "unreapable", reason: DEAD_LEASE_UNREAPABLE_REASON }]);
-	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("no native rch verb retires a dead-owner lease");
+	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("rch owns retirement");
+	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("terminal_acknowledged");
+	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("recover-consumed-*");
+	expect(DEAD_LEASE_UNREAPABLE_REASON).toContain("omp-kit never deletes or rewrites");
 	expect([result.overall, result.reason]).toEqual([baseline.overall, baseline.reason]);
 	expect(result.overall).toBe("COMPLETE");
 	expect(fixture.submitted()).toBe(1);

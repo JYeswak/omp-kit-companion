@@ -188,8 +188,13 @@ function scanDeadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] | nu
 export function deadLeases(reply: unknown, scope: DeadLeaseScope): DeadLease[] {
 	return scanDeadLeases(reply, scope) ?? [];
 }
-/** Why a reported dead lease is left in place. Observed on rch 2.1.34 (daemon.log): `jobs recover` exits 1 for dead-owner leases ("same-id remote execution has no durable completion yet"; "source-authority lock ... invalid claim record") and rchd's own dead-client lease recovery fails the same way on every retry. `rch jobs` has only attach, cancel and recover. */
-export const DEAD_LEASE_UNREAPABLE_REASON = "no native rch verb retires a dead-owner lease: jobs recover fails without durable remote completion or valid source-authority claims, and rch jobs has no reap, release or prune verb";
+/** Why a reported dead lease is left in place. The producer owns retirement: `rch` must write
+ * `terminal_acknowledged` or a `recover-consumed-*` marker after its own completion/recovery
+ * path. Observed on rch 2.1.34 (daemon.log): `jobs recover` exits 1 for dead-owner leases
+ * ("same-id remote execution has no durable completion yet"; "source-authority lock ... invalid
+ * claim record") and rchd's dead-client recovery fails the same way on every retry. `rch jobs`
+ * has only attach, cancel and recover; omp-kit never deletes or rewrites the producer's lease. */
+export const DEAD_LEASE_UNREAPABLE_REASON = "rch owns retirement: only terminal_acknowledged or recover-consumed-* records settle a dead-owner lease; no native rch verb retires it, and omp-kit never deletes or rewrites the lease";
 /** Report dead-owner leases on one worker. Never runs a native verb: none can retire them, and an unreadable journal reports nothing. */
 async function reportDeadLeases(executor: RchExecutor, worker: string, signal?: AbortSignal): Promise<DeadLeaseReport[] | null> {
 	const dead = scanDeadLeases(exactBuildIds(await executor.capture(["jobs", "--json"], CONTROL_TIMEOUT_MS, signal)), { now: Date.now(), worker, excludePids: [process.pid] });

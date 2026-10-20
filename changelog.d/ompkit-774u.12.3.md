@@ -1,0 +1,1 @@
+- RCHLOCK1: dead-wrapper lease reporting now names `rch` as the sole retirement authority (`terminal_acknowledged` or `recover-consumed-*`). `omp-kit` reports unreapable leases and never deletes or rewrites producer-owned lease state.
