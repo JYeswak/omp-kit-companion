@@ -1,0 +1,1 @@
+{"dead_rules":[{"kind":"bash","rule":"dead-alpha","sessions":12},{"kind":"write","rule":"dead-beta","sessions":12}],"noisy_lower_bound":0.05,"sample_size":8,"seed":17}

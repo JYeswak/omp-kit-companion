@@ -50,6 +50,35 @@ export interface CalibrationInput {
 	noisy_lower_bound: number;
 }
 
+/** Named refusal for invalid calibration input; the CLI surfaces `code` in its refusal envelope. */
+export class CalibrationInputError extends Error {
+	constructor(readonly code: "CALIBRATION_COUNT_INVALID" | "CALIBRATION_SCHEMA_INVALID" | "CALIBRATION_INPUT_INVALID", message: string) {
+		super(`${code}: ${message}`);
+		this.name = "CalibrationInputError";
+	}
+}
+
+function checkRuleCounts(rule: { rule: unknown; kind: unknown; scanned: unknown; fires: unknown }): void {
+	if (typeof rule.rule !== "string" || rule.rule.length === 0 || typeof rule.kind !== "string" || rule.kind.length === 0) {
+		throw new CalibrationInputError("CALIBRATION_SCHEMA_INVALID", "corpus rule needs non-empty string rule/kind");
+	}
+	if (typeof rule.scanned !== "number" || !Number.isSafeInteger(rule.scanned) || rule.scanned < 0
+		|| typeof rule.fires !== "number" || !Number.isSafeInteger(rule.fires) || rule.fires < 0) {
+		throw new CalibrationInputError("CALIBRATION_COUNT_INVALID", `rule ${String(rule.rule)} needs safe non-negative integer scanned/fires`);
+	}
+	if (rule.fires > rule.scanned) {
+		throw new CalibrationInputError("CALIBRATION_COUNT_INVALID", `rule ${String(rule.rule)} has more fires than scanned events`);
+	}
+}
+
+function checkLabel(label: FireLabel, index: number): void {
+	if (typeof label.rule !== "string" || typeof label.kind !== "string"
+		|| typeof label.event_index !== "number" || !Number.isSafeInteger(label.event_index) || label.event_index < 0
+		|| typeof label.false_fire !== "boolean") {
+		throw new CalibrationInputError("CALIBRATION_SCHEMA_INVALID", `label at index ${index} needs string rule/kind, non-negative integer event_index, boolean false_fire`);
+	}
+}
+
 const WILSON_Z = 1.96;
 
 export function wilsonInterval(successes: number, trials: number): { low: number; high: number } {
@@ -94,10 +123,20 @@ export function calibrateRule(input: {
 	labels: readonly boolean[];
 	noisy_lower_bound: number;
 }): CalibrationRule {
+	checkRuleCounts(input);
+	if (typeof input.session_count !== "number" || !Number.isSafeInteger(input.session_count) || input.session_count < 0) {
+		throw new CalibrationInputError("CALIBRATION_COUNT_INVALID", `rule ${input.rule} needs a safe non-negative integer session_count`);
+	}
+	if (!Array.isArray(input.labels) || input.labels.some((label) => typeof label !== "boolean")) {
+		throw new CalibrationInputError("CALIBRATION_SCHEMA_INVALID", `rule ${input.rule} needs a boolean labels array`);
+	}
+	if (typeof input.noisy_lower_bound !== "number" || !Number.isFinite(input.noisy_lower_bound) || input.noisy_lower_bound < 0 || input.noisy_lower_bound > 1) {
+		throw new CalibrationInputError("CALIBRATION_INPUT_INVALID", `rule ${input.rule} needs a finite noisy_lower_bound in [0, 1]`);
+	}
 	const sampleSize = input.labels.length;
 	const falseFires = input.labels.filter((isTrueFire) => !isTrueFire).length;
-	const interval = wilsonInterval(falseFires, sampleSize);
 	const falseRate = sampleSize > 0 ? falseFires / sampleSize : null;
+	const interval = wilsonInterval(falseFires, sampleSize);
 	return {
 		rule: input.rule,
 		kind: input.kind,
@@ -114,6 +153,24 @@ export function calibrateRule(input: {
 }
 
 export function calibrateCorpus(input: CalibrationInput): CalibrationReport {
+	if (!input || typeof input !== "object" || !input.corpus || typeof input.corpus !== "object"
+		|| typeof input.corpus.files !== "number" || !Number.isSafeInteger(input.corpus.files) || input.corpus.files < 0
+		|| !Array.isArray(input.corpus.rules)) {
+		throw new CalibrationInputError("CALIBRATION_SCHEMA_INVALID", "calibration needs a corpus object with non-negative integer files and a rules array");
+	}
+	if (!Array.isArray(input.labels)) {
+		throw new CalibrationInputError("CALIBRATION_SCHEMA_INVALID", "calibration needs a labels array");
+	}
+	input.labels.forEach(checkLabel);
+	if (typeof input.seed !== "number" || !Number.isSafeInteger(input.seed)) {
+		throw new CalibrationInputError("CALIBRATION_INPUT_INVALID", "calibration needs an integer seed for deterministic sampling");
+	}
+	if (typeof input.sample_size !== "number" || !Number.isFinite(input.sample_size) || Math.trunc(input.sample_size) < 1) {
+		throw new CalibrationInputError("CALIBRATION_INPUT_INVALID", "calibration needs a sample_size of at least 1");
+	}
+	if (typeof input.noisy_lower_bound !== "number" || !Number.isFinite(input.noisy_lower_bound) || input.noisy_lower_bound < 0 || input.noisy_lower_bound > 1) {
+		throw new CalibrationInputError("CALIBRATION_INPUT_INVALID", "calibration needs a finite noisy_lower_bound in [0, 1]");
+	}
 	const sampleSize = Math.max(1, Math.trunc(input.sample_size));
 	const labelsByRule = new Map<string, FireLabel[]>();
 	for (const label of input.labels) {

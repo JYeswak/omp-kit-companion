@@ -1,0 +1,1 @@
+- Calibrate rule noise with sampled false-fire rates: `doctor --scope rules --corpus-report/--labels` reports per-rule Wilson intervals with sample sizes, flags rules whose interval lower bound exceeds the threshold, and lists dead rules; invalid counts and schemas refuse with named errors. (ompkit-rc-epic-land-fix-release-dogfood-rz5.63)

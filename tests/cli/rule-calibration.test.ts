@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { calibrateCorpus, calibrateRule, wilsonInterval } from "../../src/rule-calibration.ts";
@@ -58,4 +58,85 @@ test("doctor rules exposes calibrated noisy and dead rules from explicit reports
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("planted false-fire rate is recovered within its Wilson interval", () => {
+	const planted = 0.5;
+	const truth = Array.from({ length: 40 }, (_, index) => index % 2 === 0);
+	const result = calibrateRule({
+		rule: "planted-rule", kind: "bash", scanned: 200, fires: 40,
+		session_count: 12, labels: truth, noisy_lower_bound: 0.05,
+	});
+	expect(result.sample_size).toBe(40);
+	expect(result.false_fires).toBe(20);
+	expect(result.false_fire_rate).toBeCloseTo(planted);
+	expect(result.ci_low).toBeLessThanOrEqual(planted);
+	expect(result.ci_high).toBeGreaterThanOrEqual(planted);
+});
+
+test("invalid counts refuse with a named error", () => {
+	expect(() => calibrateRule({
+		rule: "bad-counts", kind: "bash", scanned: 5, fires: 9,
+		session_count: 3, labels: [true], noisy_lower_bound: 0.05,
+	})).toThrow("CALIBRATION_COUNT_INVALID");
+	expect(() => calibrateCorpus({
+		corpus: { files: -1, rules: [] }, labels: [], seed: 17, sample_size: 8, noisy_lower_bound: 0.05,
+	})).toThrow("CALIBRATION_SCHEMA_INVALID");
+});
+
+test("doctor rules refuses invalid counts and invalid schema with named errors", () => {
+	const root = mkdtempSync(join(runtimeTempRoot(), "mt2-refuse-"));
+	try {
+		const corpus = join(root, "corpus.json");
+		const labels = join(root, "labels.json");
+		const goodLabels = join(root, "good-labels.json");
+		writeFileSync(corpus, JSON.stringify({ files: 12, rules: [{ rule: "bad", kind: "bash", scanned: 5, fires: 9 }] }));
+		writeFileSync(labels, JSON.stringify([{ rule: "bad", kind: "bash", event_index: 0, false_fire: true }]));
+		writeFileSync(goodLabels, JSON.stringify([{ rule: "bad", kind: "bash", event_index: 0, false_fire: true }]));
+		const run = (corpusPath: string, labelsPath: string) => Bun.spawnSync(
+			[process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "doctor", "--scope", "rules",
+				"--corpus-report", corpusPath, "--labels", labelsPath, "--json"], { stdout: "pipe", stderr: "pipe" });
+		const counts = run(corpus, labels);
+		expect(counts.exitCode).toBe(2);
+		const countsEnvelope = JSON.parse(counts.stdout.toString()) as { errors?: { code?: string; message?: string }[] };
+		expect(countsEnvelope.errors?.[0]?.code).toBe("CALIBRATION_INPUT_INVALID");
+		expect(countsEnvelope.errors?.[0]?.message).toContain("CALIBRATION_COUNT_INVALID");
+		writeFileSync(corpus, "{not valid json");
+		const schema = run(corpus, goodLabels);
+		expect(schema.exitCode).toBe(2);
+		const schemaEnvelope = JSON.parse(schema.stdout.toString()) as { errors?: { code?: string }[] };
+		expect(schemaEnvelope.errors?.[0]?.code).toBe("CALIBRATION_INPUT_INVALID");
+		writeFileSync(corpus, JSON.stringify({ files: 12 }));
+		const shape = run(corpus, goodLabels);
+		expect(shape.exitCode).toBe(2);
+		const shapeEnvelope = JSON.parse(shape.stdout.toString()) as { errors?: { code?: string; message?: string }[] };
+		expect(shapeEnvelope.errors?.[0]?.code).toBe("CALIBRATION_INPUT_INVALID");
+		expect(shapeEnvelope.errors?.[0]?.message).toContain("CALIBRATION_SCHEMA_INVALID");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("dead-rule list matches the checked-in fixture", () => {
+	const fixture = JSON.parse(readFileSync(resolve(import.meta.dir, "fixtures/rule-calibration-dead.json"), "utf8")) as {
+		seed: number; sample_size: number; noisy_lower_bound: number; dead_rules: unknown[];
+	};
+	const labels = Array.from({ length: 12 }, (_, index) => ({
+		rule: "live-gamma", kind: "bash", event_index: index, false_fire: index % 3 === 0,
+	}));
+	const report = calibrateCorpus({
+		corpus: {
+			files: 12,
+			rules: [
+				{ rule: "live-gamma", kind: "bash", scanned: 12, fires: 6 },
+				{ rule: "dead-alpha", kind: "bash", scanned: 12, fires: 0 },
+				{ rule: "dead-beta", kind: "write", scanned: 12, fires: 0 },
+			],
+		},
+		labels,
+		seed: fixture.seed,
+		sample_size: fixture.sample_size,
+		noisy_lower_bound: fixture.noisy_lower_bound,
+	});
+	expect(report.dead_rules).toEqual(fixture.dead_rules);
 });
