@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
 import { fleetPolicyState } from "./fleet-policy";
+import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerStateRoot, resolveLedgerAgent } from "./kit-write-ledger";
 
 export interface SaveGuardExecResult {
 	stdout: string;
@@ -484,6 +485,89 @@ async function recordToolPaths(
 		repository.paths.add(repoPath);
 		recordSessionDelta(repository, repoPath, before, after);
 	}
+}
+
+/**
+ * OWN1-LEDGER (ompkit-52p3): attribute confirmed byte changes to the shared
+ * write ledger. Shares recordToolPaths' root contract (nearest git toplevel;
+ * outside-repo and agent-tmp paths skipped) and its byte-change rule: a
+ * successful tool result without a before/after change writes no entry.
+ * Every filesystem step is infallible by construction (appendLedgerEntry
+ * never throws), so a ledger failure never blocks the tool call (AC4).
+ * Unknown agents skip the ledger: unattributed writes stay unattributed.
+ */
+export async function appendLedgerWrites(
+	exec: SaveGuardApi["exec"],
+	attribution: { stateRoot: string; agent: string; session: string },
+	state: SessionState,
+	cwd: string,
+	toolPaths: ToolPathChange[],
+	beforeSnapshots: Map<string, FileSnapshot> | undefined,
+	completedSnapshots: Map<string, FileSnapshot>,
+): Promise<void> {
+	for (const change of toolPaths) {
+		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
+		const lookupDirectory = isWithinDirectory(cwd, absolutePath) ? cwd : path.dirname(absolutePath);
+		let root = state.rootByDirectory.get(lookupDirectory);
+		if (root === undefined) {
+			const top = await runGit(exec, lookupDirectory, ["rev-parse", "--show-toplevel"]);
+			if (top.code !== 0) continue;
+			const discovered: string = String(path.resolve(gitLine(top.stdout)));
+			if (discovered.length === 0) continue;
+			root = discovered;
+		}
+		const relative = path.relative(root, absolutePath);
+		if (relative.length === 0 || path.isAbsolute(relative) || relative === ".." ||
+			relative.startsWith(`..${path.sep}`)) continue;
+		const repoPath = relative.split(path.sep).join("/");
+		if (isAgentTempPath(repoPath)) continue;
+		const before = beforeSnapshots?.get(absolutePath);
+		const after = completedSnapshots.get(absolutePath) ?? { known: false, contents: null };
+		if (before?.known && after.known && before.contents === after.contents && before.digest === after.digest) continue;
+		appendLedgerEntry(attribution.stateRoot, {
+			v: 1,
+			repo: root,
+			relpath: repoPath,
+			agent: attribution.agent,
+			session: attribution.session,
+			ts: new Date().toISOString(),
+			blob: after.digest ?? null,
+		});
+	}
+}
+
+/**
+ * OWN1-LEDGER (ompkit-52p3 AC3): narrow a computed finding to this session's
+ * own last writes. Demanded paths whose last ledger writer is another
+ * session (a peer's leased edit) move to omissions: no save demand for this
+ * session. Paths with no ledger entry keep the finding as computed: bash
+ * writes stay unattributed and follow the existing session-paths behavior.
+ */
+export function omitPeerLedgerPaths(
+	finding: SaveGuardFinding,
+	writers: Map<string, { session: string; agent: string }>,
+	sessionId: string,
+): void {
+	for (const repoPath of finding.paths.slice()) {
+		const last = writers.get(repoPath);
+		if (!last || isCurrentSessionWriter(last, sessionId)) continue;
+		finding.paths.splice(finding.paths.indexOf(repoPath), 1);
+		finding.sharedPaths = (finding.sharedPaths ?? []).filter(path => path !== repoPath);
+		for (const group of finding.beadPaths ?? []) group.paths = group.paths.filter(path => path !== repoPath);
+		finding.beadPaths = (finding.beadPaths ?? []).filter(group => group.paths.length > 0);
+		finding.untrackedPaths = (finding.untrackedPaths ?? []).filter(path => path !== repoPath);
+		(finding.omittedPaths ??= []).push({ path: repoPath, reason: `last ledger writer is ${last.agent} in another session; no save demand for this session` });
+	}
+}
+
+/**
+ * OWN1-LEDGER: one ledger read for a stop/shutdown finding; a missing state
+ * root leaves the finding untouched (existing behavior).
+ */
+export function applyLedgerPeerOmission(finding: SaveGuardFinding, repoRoot: string, sessionId: string): void {
+	const stateRoot = ledgerStateRoot(process.env.HOME, process.env.XDG_STATE_HOME);
+	if (!stateRoot) return;
+	omitPeerLedgerPaths(finding, lastWriters(stateRoot, repoRoot), sessionId);
 }
 
 function statusEntries(stdout: string): Map<string, string> {
@@ -1070,6 +1154,16 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 				}
 				if (paths.length > 0) {
 					await recordToolPaths(pi.exec.bind(pi), currentState, ctx.cwd, paths, pathSnapshots, completedSnapshots);
+					// OWN1-LEDGER (ompkit-52p3): attribute under the pane identity
+					// when known. Infallible and awaited in the attribution queue,
+					// so stop never overtakes it and failure never blocks (AC4).
+					const ledgerAgent = resolveLedgerAgent(process.env);
+					const ledgerRoot = ledgerStateRoot(process.env.HOME, process.env.XDG_STATE_HOME);
+					if (ledgerAgent && ledgerRoot) {
+						await appendLedgerWrites(pi.exec.bind(pi),
+							{ stateRoot: ledgerRoot, agent: ledgerAgent, session: sessionId },
+							currentState, ctx.cwd, paths, pathSnapshots, completedSnapshots);
+					}
 				}
 			})
 			.catch(() => undefined);
@@ -1090,6 +1184,9 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const findings: SaveGuardFinding[] = [];
 		for (const repository of state.repositories.values()) {
 			const finding = await checkSaveState(pi.exec.bind(pi), repository);
+			// OWN1-LEDGER (ompkit-52p3 AC3): narrow the demand to this session's
+			// own last writes; a peer's leased edit becomes an omission.
+			if (finding) applyLedgerPeerOmission(finding, repository.root, sessionId);
 			if (finding) findings.push(finding);
 		}
 		const scratch = await checkScratchOwed(pi.exec.bind(pi), ctx.cwd);
@@ -1151,6 +1248,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 				const findings: SaveGuardFinding[] = [];
 				for (const repository of state.repositories.values()) {
 					const finding = await checkSaveState(pi.exec.bind(pi), repository);
+					if (finding) applyLedgerPeerOmission(finding, repository.root, sessionId);
 					if (finding) findings.push(finding);
 				}
 				if (findings.length > 0) {
