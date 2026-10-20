@@ -30,7 +30,8 @@ BUN_OMP = "bun ~/.bun/bin/omp"
 BUN = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun"
 TERN = "/Users/Shared/Library/Application Support/Tern/omp/versions/"
 TARGET = TERN + "18.10.3"
-TARGET_INFO = {"ok": True, "command": "omp", "which": "/opt/homebrew/bin/omp", "path": TARGET, "version": "18.10.3", "via": "fake"}
+TARGET_INFO = {"ok": True, "command": "omp", "which": "/opt/homebrew/bin/omp", "path": TARGET, "version": "18.10.3", "via": "fake",
+              "bytes_sha256": "9f2cb4109db2f7d3f1c8d4e5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5"}
 # The "+ 👁 0.42" spend segment is always present: OMP restores advisor spend from the transcript on resume.
 STATUS = " {glyph} · ◉ {model}{badge} · 📁 ~/w · ◫ 1.0%/1M ⟲ · S1.00 + 👁 0.42"
 APPROVE = {"approved_by": "selftest", "quote": "go"}
@@ -253,6 +254,7 @@ def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
     gate_mode(case, tmp)
     gate_respawn(case, tmp, uid, good_env, plan)
     gate_run(case, tmp, uid, good_env, aligned)
+    gate_approval_binding(case, tmp, uid, good_env, aligned)
     gate_uxr3(case, tmp, plan, inventory, aligned)
     gate_advisor_resume_crash(case, tmp, uid, good_env, aligned)
 
@@ -1120,6 +1122,125 @@ def gate_run(case, tmp, uid, good_env, aligned):
         raised = True
     case("NEG manifest row carrying bare `/advisor` refused at send (REFUSED_KEYS_NOT_ALLOWED); run send path raises",
          res["rows"][0]["result"] == "REFUSED_KEYS_NOT_ALLOWED" and not calls and raised, json.dumps(res["rows"]))
+
+
+# ---------- ompkit-rhy9.5: one approval bound to exact indirect inputs ----------
+
+def gate_approval_binding(case, tmp, uid, good_env, aligned):
+    root = os.path.join(tmp, "bindroot")
+    home = fake_home(root)
+    agents = agents_fixture(root)
+
+    def cwd(name):
+        d = os.path.join(root, "bind", name)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def ledger_events(rd):
+        with open(os.path.join(rd, fr_run.LEDGER)) as fh:
+            return [json.loads(ln) for ln in fh if ln.strip()]
+
+    # CTL positive: one exact approval executes the admitted effects; the operator's
+    # verbatim words stay on the RUN_START record with the save/preserve digests.
+    fl, ctx, rd, man = small_run(root, "bind-pos", [Pane("b:0.1", "%601", 601, cwd("pos"))], home, agents, good_env, uid, aligned, wave=1)
+    case("CTL plan binds target bytes, snapshot digest and per-pane action/mode/custody",
+         man["target"].get("bytes_sha256") == TARGET_INFO["bytes_sha256"] and man.get("snapshot_sha256") == fr_run.dir_digest(man["snapshot_dir"])
+         and man["rows"][0]["action"] == "RESTART" and man["rows"][0]["mode"] == "RESTART" and man["rows"][0].get("session_file"),
+         json.dumps({k: man["target"].get(k) for k in ("path", "bytes_sha256")}))
+    rep, rc = fr_run.apply_run(rd, ctx, approve(rd))
+    res = {p["pane"]: p for p in rep["panes"]}
+    ev = ledger_events(rd)
+    start = next(e for e in ev if e["event"] == "RUN_START")
+    case("CTL one exact approval executes admitted preflight/save/preserve/restart effects, operator words retained verbatim",
+         rc == 0 and res["b:0.1"]["result"] == "VERIFIED" and fl.count("b:0.1", "/restart") == 1
+         and start.get("quote") == "go" and start.get("approved_by") == "selftest"
+         and any(e["event"] == "SAVE" and e.get("save_sha256") for e in ev)
+         and any(e["event"] == "PRESERVE" and e.get("preserve_sha256") for e in ev)
+         and res["b:0.1"].get("session") == "SESSION_KEPT" and res["b:0.1"].get("version") == "VERSION_OK",
+         json.dumps([rc, res["b:0.1"].get("result"), start.get("quote")]))
+    # CTL: an unrelated fresh run with its own exact approval is still permitted.
+    fl0, ctx0, rd0, _ = small_run(root, "bind-pos2", [Pane("b:0.0", "%600", 600, cwd("pos2"))], home, agents, good_env, uid, aligned, wave=1)
+    rep0, rc0 = fr_run.apply_run(rd0, ctx0, approve(rd0))
+    case("CTL unrelated legitimate run with its own exact approval still permitted",
+         rc0 == 0 and rep0["panes"][0]["result"] == "VERIFIED" and fl0.count("b:0.0", "/restart") == 1,
+         json.dumps([rc0, rep0["panes"][0].get("result")]))
+
+    # NEG: same path, different executable bytes -> refuse before any effect.
+    fl2, ctx2, rd2, _ = small_run(root, "bind-bytes", [Pane("b:0.2", "%602", 602, cwd("bytes"))], home, agents, good_env, uid, aligned, wave=1)
+    ap2 = approve(rd2)
+    ctx2.target_fn = lambda: dict(TARGET_INFO, bytes_sha256="0" * 64)
+    rep, rc = fr_run.apply_run(rd2, ctx2, ap2)
+    case("NEG executable bytes changed at the same path -> APPROVAL_TARGET_DRIFT, zero sends, zero launchctl mutations",
+         rc == fr_run.EXIT_REFUSED and str(rep.get("refused", "")).startswith("APPROVAL_TARGET_DRIFT")
+         and not fl2.sends and not fl2.ld.mutations(), json.dumps(rep))
+    # NEG: approval predating the bytes binding (no bytes in manifest) -> refuse, re-plan.
+    path2 = os.path.join(rd2, fr_run.RUN_MANIFEST)
+    with open(path2) as fh:
+        nob = json.load(fh)
+    nob["target"] = {k: v for k, v in nob["target"].items() if k != "bytes_sha256"}
+    nob["manifest_sha256"] = fr.manifest_sha(nob)  # legacy plan output: valid sha over a body with no bytes binding
+    fw.write_json(path2, nob)
+    rep, rc = fr_run.apply_run(rd2, ctx_for(fl2, home, agents, good_env, uid, aligned), approve(rd2))
+    case("NEG manifest without bound target bytes -> TARGET_BYTES_UNBOUND, zero sends, zero launchctl mutations",
+         rc == fr_run.EXIT_REFUSED and str(rep.get("refused", "")).startswith("TARGET_BYTES_UNBOUND")
+         and not fl2.sends and not fl2.ld.mutations(), json.dumps(rep))
+
+    # NEG: stage-1 snapshot mutated after approval -> refuse before any effect.
+    fl3, ctx3, rd3, _ = small_run(root, "bind-snap", [Pane("b:0.3", "%603", 603, cwd("snap"))], home, agents, good_env, uid, aligned, wave=1)
+    with open(os.path.join(rd3, "snapshot", "evil.json"), "w") as fh:
+        fh.write("{}")
+    rep, rc = fr_run.apply_run(rd3, ctx3, approve(rd3))
+    case("NEG stage-1 snapshot mutated after approval -> APPROVAL_SNAPSHOT_DRIFT, zero sends, zero launchctl mutations",
+         rc == fr_run.EXIT_REFUSED and str(rep.get("refused", "")).startswith("APPROVAL_SNAPSHOT_DRIFT")
+         and not fl3.sends and not fl3.ld.mutations(), json.dumps(rep))
+
+    # NEG: save.json mutated between runs -> resume refuses before any new effect.
+    fl4, ctx4, rd4, _ = small_run(root, "bind-save", [Pane("b:0.4", "%604", 604, cwd("save"))], home, agents, good_env, uid, aligned, wave=1)
+    rep, rc = fr_run.apply_run(rd4, ctx4, approve(rd4))
+    assert rc == 0, json.dumps(rep)
+    n4 = len(fl4.sends)
+    sp = os.path.join(rd4, "save.json")
+    with open(sp) as fh:
+        sj = json.load(fh)
+    sj["rows"][0]["omp_pid"] = 12345
+    fw.write_json(sp, sj)
+    rep, rc = fr_run.apply_run(rd4, ctx4, approve(rd4), resume_run=True)
+    case("NEG save.json mutated after its SAVE entry -> SAVE_DRIFT on resume, zero new sends",
+         rc == fr_run.EXIT_REFUSED and str(rep.get("refused", "")).startswith("SAVE_DRIFT") and len(fl4.sends) == n4,
+         json.dumps(rep))
+
+    # NEG: preserve/manifest.json mutated between runs -> resume refuses before any new effect.
+    fl5, ctx5, rd5, _ = small_run(root, "bind-pres", [Pane("b:0.5", "%605", 605, cwd("pres"))], home, agents, good_env, uid, aligned, wave=1)
+    rep, rc = fr_run.apply_run(rd5, ctx5, approve(rd5))
+    assert rc == 0, json.dumps(rep)
+    n5 = len(fl5.sends)
+    mp = os.path.join(rd5, "preserve", "manifest.json")
+    with open(mp) as fh:
+        pm = json.load(fh)
+    pm["evil"] = True
+    fw.write_json(mp, pm)
+    rep, rc = fr_run.apply_run(rd5, ctx5, approve(rd5), resume_run=True)
+    case("NEG preserve/manifest.json mutated after its PRESERVE entry -> PRESERVE_DRIFT on resume, zero new sends",
+         rc == fr_run.EXIT_REFUSED and str(rep.get("refused", "")).startswith("PRESERVE_DRIFT") and len(fl5.sends) == n5,
+         json.dumps(rep))
+
+    # NEG: launch --model / --profile changed between save and send -> hold, zero sends.
+    t_idle = 1_000_000.0 + 90
+
+    def swap_model(p):
+        p.flags += " --model GPT-9"
+
+    def swap_profile(p):
+        p.flags = p.flags.replace("--profile claude", "--profile dotp")
+    panes = [Pane("b:0.6", "%606", 606, cwd("model"), kind="tern", busy_until=t_idle, on_idle=swap_model),
+             Pane("b:0.7", "%607", 607, cwd("profile"), kind="tern", busy_until=t_idle, on_idle=swap_profile)]
+    fl6, ctx6, rd6, _ = small_run(root, "bind-flags", panes, home, agents, good_env, uid, aligned, wave=4, busy_timeout_min=5)
+    rep, rc = fr_run.apply_run(rd6, ctx6, approve(rd6))
+    res = {p["pane"]: p for p in rep["panes"]}
+    case("NEG launch --model changed between save and send -> HOLD_MODEL_CHANGED, zero sends",
+         res["b:0.6"]["result"] == "HOLD_MODEL_CHANGED" and fl6.count("b:0.6") == 0, json.dumps(res["b:0.6"]))
+    case("NEG launch --profile changed between save and send -> HOLD_PROFILE_CHANGED, zero sends",
+         res["b:0.7"]["result"] == "HOLD_PROFILE_CHANGED" and fl6.count("b:0.7") == 0, json.dumps(res["b:0.7"]))
 
 
 # ---------- canary + circuit breaker ----------

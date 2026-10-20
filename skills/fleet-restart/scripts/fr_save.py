@@ -129,13 +129,16 @@ def is_bun(exe, args):
 
 
 def target_live(run_fn):
-    """Restart target: realpath of the login shell's `omp` (zsh -lc 'command -v omp')."""
+    """Restart target: realpath of the login shell's `omp` (zsh -lc 'command -v omp').
+    bytes_sha256 binds the exact executable bytes: the same path with different
+    bytes is a different build and never inherits this run's approval."""
     rc, out = run_fn(["zsh", "-lc", "command -v omp"], None)
     cmd = out.strip().splitlines()[-1] if rc == 0 and out.strip() else ""
     if not cmd.startswith("/"):
         return {"ok": False, "why": "login shell has no omp on PATH (rc %d: %s)" % (rc, out.strip()[-200:])}
     real = os.path.realpath(cmd)
-    return {"ok": True, "command": "omp", "which": cmd, "path": real, "version": version_of(real), "via": "zsh -lc 'command -v omp'"}
+    return {"ok": True, "command": "omp", "which": cmd, "path": real, "version": version_of(real),
+            "bytes_sha256": sha256_file(real), "via": "zsh -lc 'command -v omp'"}
 
 
 def pane_mode(save_row, target):
@@ -378,10 +381,12 @@ def held_scratch(work, push):
 def revalidate_respawn(row, inv, lsof_fn):
     """Live re-check right before a respawn send, against the row's saved facts: the
     same omp pid (HELD_DRIFT), no git child (HOLD_GIT), the saved session file still
-    open (HOLD_SESSION_CHANGED), no other live holder of the saved session
-    (HOLD_SESSION_HOLDER: the session did not drain), and no owned work scratch
-    (HOLD_SCRATCH_OWNER: a respawn kills that pid and scratch-reaper then deletes
-    the dir). Returns (hold, detail) or (None, None)."""
+    open (HOLD_SESSION_CHANGED), the same launch --model (HOLD_MODEL_CHANGED) and
+    --profile (HOLD_PROFILE_CHANGED: a preserving-session respawn resumes the saved
+    context, never a fresh-context, model or profile change), no other live holder
+    of the saved session (HOLD_SESSION_HOLDER: the session did not drain), and no
+    owned work scratch (HOLD_SCRATCH_OWNER: a respawn kills that pid and
+    scratch-reaper then deletes the dir). Returns (hold, detail) or (None, None)."""
     p = next((x for x in inv["panes"] if x["pane_id"] == row["pane_id"]), None)
     agent = core.find_agent(inv["procs"], p["pane_pid"]) if p else None
     if not agent or agent["pid"] != row.get("omp_pid"):
@@ -391,6 +396,14 @@ def revalidate_respawn(row, inv, lsof_fn):
         return "HOLD_GIT", "git child pid %s" % git["pid"]
     if row.get("session_file") not in session_candidates(lsof_fn(agent["pid"])):
         return "HOLD_SESSION_CHANGED", "%s is no longer the open session" % row.get("session_file")
+    live_flags = agent.get("flags") or []
+    saved_flags = row.get("flags") or []
+    if (flag_value(live_flags, "--model") or None) != (flag_value(saved_flags, "--model") or None):
+        return "HOLD_MODEL_CHANGED", "launch --model now %r, saved %r" % (
+            flag_value(live_flags, "--model"), flag_value(saved_flags, "--model"))
+    if profile_of(live_flags) != profile_of(saved_flags):
+        return "HOLD_PROFILE_CHANGED", "launch --profile now %r, saved %r" % (
+            profile_of(live_flags), profile_of(saved_flags))
     others = session_holders(row.get("session_file"), inv, lsof_fn, exclude_pid=agent["pid"])
     if others:
         return "HOLD_SESSION_HOLDER", "%s still held by %s" % (

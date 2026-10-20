@@ -21,6 +21,7 @@ action appends to ledger.jsonl; --resume-run continues from it. The only
 keystrokes sent are `/restart` and `/advisor on`. All side effects go through a
 Ctx of injected functions."""
 import fcntl
+import hashlib
 import json
 import multiprocessing
 import os
@@ -116,6 +117,28 @@ def write_json(path, obj):
     fw.write_json(path, obj)
 
 
+def doc_digest(obj):
+    """Canonical sha256 of a JSON-able document (save/preserve binding)."""
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def dir_digest(path):
+    """Canonical sha256 of a snapshot dir: sorted relpaths plus file bytes."""
+    h = hashlib.sha256()
+    for root, _dirs, files in os.walk(path):
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, path)
+            h.update(rel.encode())
+            try:
+                with open(full, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+            except OSError:
+                h.update(b"<unreadable>")
+    return h.hexdigest()
+
+
 def shell_line(argv):
     return " ".join(shlex.quote(a) for a in argv)
 
@@ -194,8 +217,14 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
             modes[r["mode"]] = modes.get(r["mode"], 0) + 1
         if r.get("version"):
             versions[r["version"]] = versions.get(r["version"], 0) + 1
+    if target.get("ok") and not target.get("bytes_sha256"):
+        # Belt and braces: a target_fn that predates the bytes binding gets the
+        # live file digest filled in; an unreadable executable stays unbound and
+        # refuses at apply (TARGET_BYTES_UNBOUND).
+        target["bytes_sha256"] = fr_save.sha256_file(target.get("path"))
     man = {"kind": "run", "run_dir": os.path.abspath(run_dir), "created": core.now(), "snapshot_dir": os.path.abspath(snap_dir),
-           "snapshot_at": inv.get("captured_at"), "chief": chief, "chief_respawn": chief_cmd, "protect": list(protect), "unprotect": list(unprotect),
+           "snapshot_at": inv.get("captured_at"), "snapshot_sha256": dir_digest(snap_dir),
+           "chief": chief, "chief_respawn": chief_cmd, "protect": list(protect), "unprotect": list(unprotect),
            "only": list(only), "wave": wave, "busy_timeout_min": busy_timeout_min, "canary": int(canary), "strict_advisor": bool(strict_advisor),
            "align": plan["align"], "target": target, "herdr": plan.get("herdr") or {"ok": False, "why": "not collected", "rows": []},
            "stages": STAGES, "rows": rows, "holds": holds, "refused": refused,
@@ -742,10 +771,11 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
     if refusal:  # nothing written, nothing sent, no launchctl call
         return {"refused": refusal, "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
     started = fw.iso(ctx.clock())
-    ledger.add("RUN_START", manifest_sha256=man["manifest_sha256"], approved_by=approval["approved_by"], resume_run=resume_run)
+    ledger.add("RUN_START", manifest_sha256=man["manifest_sha256"], approved_by=approval["approved_by"], resume_run=resume_run,
+               quote=approval.get("quote"))
     ok, code, detail = core.env_check(ctx.env, ctx.uid)
     checks = [("check-env", ok, "%s %s" % (code, detail))]
-    disc = None
+    disc = tg = None
     if ok:
         good, line = ctx.preflight_fn()
         checks.append(("selftest", good, line))
@@ -766,6 +796,28 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
     if wdrift:
         ledger.add("RUN_END", result="REFUSED_WATCHERS_DRIFT", detail=wdrift)
         return {"refused": "APPROVAL_WATCHERS_DRIFT:" + wdrift, "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
+    # Indirect inputs bound under the one run approval: the exact executable bytes
+    # at the target path (a same-path binary swap is a different build), and the
+    # stage-1 snapshot dir. Either drift refuses before pause/sends, like watchers.
+    approved_bytes = (man.get("target") or {}).get("bytes_sha256")
+    live_bytes = tg.get("bytes_sha256") if isinstance(tg, dict) else None
+    if tg is None or not approved_bytes:
+        ledger.add("RUN_END", result="REFUSED_TARGET_UNBOUND",
+                   detail="approved bytes %r, live target %r" % (approved_bytes, (tg or {}).get("path") if isinstance(tg, dict) else tg))
+        return {"refused": "TARGET_BYTES_UNBOUND: re-plan so the approval binds the exact executable bytes",
+                "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
+    if live_bytes != approved_bytes:
+        ledger.add("RUN_END", result="REFUSED_TARGET_DRIFT",
+                   detail="live bytes %r != approved %r at %s" % (live_bytes, approved_bytes, tg.get("path")))
+        return {"refused": "APPROVAL_TARGET_DRIFT: executable bytes changed at %s" % tg.get("path"),
+                "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
+    snap_dir_live = man.get("snapshot_dir") or os.path.join(run_dir, "snapshot")
+    snap_live = dir_digest(snap_dir_live) if os.path.isdir(snap_dir_live) else None
+    if man.get("snapshot_sha256") and snap_live != man["snapshot_sha256"]:
+        ledger.add("RUN_END", result="REFUSED_SNAPSHOT_DRIFT",
+                   detail="live snapshot %r != approved %r" % (snap_live, man["snapshot_sha256"]))
+        return {"refused": "APPROVAL_SNAPSHOT_DRIFT: stage-1 snapshot mutated after approval",
+                "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
     if [c for c in checks if not c[1]]:
         ledger.add("RUN_END", result="REFUSED_PREFLIGHT")
         return {"refused": "PREFLIGHT_FAILED", "checks": [{"check": n, "ok": bool(g), "detail": w} for n, g, w in checks]}, EXIT_REFUSED
@@ -777,19 +829,31 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
     prior_save = fw.read_json(save_path) if resume_run else None
     if prior_save and prior_save.get("stage") == "apply":
         save_doc = prior_save  # the pre-restart state; re-saving now would read restarted panes
+        baseline = next((e.get("save_sha256") for e in events if e.get("event") == "SAVE" and e.get("save_sha256")), None)
+        if baseline and doc_digest(save_doc) != baseline:
+            ledger.add("RUN_END", result="REFUSED_SAVE_DRIFT", detail="save.json mutated after its SAVE ledger entry")
+            return {"refused": "SAVE_DRIFT: save.json mutated after approval-bound save; re-plan",
+                    "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
     else:
         save_doc = fr_save.save(ctx.inventory_fn(None), ctx.home, ctx.lsof_fn, ctx.run_fn)
         save_doc["stage"] = "apply"
         write_json(save_path, save_doc)
-    ledger.add("SAVE", agent_panes=save_doc["counts"]["agent_panes"], advisor_on=save_doc["counts"]["advisor_on"], holds=save_doc["holds"])
+    ledger.add("SAVE", agent_panes=save_doc["counts"]["agent_panes"], advisor_on=save_doc["counts"]["advisor_on"], holds=save_doc["holds"],
+               save_sha256=doc_digest(save_doc))
     preserve_dir = os.path.join(run_dir, "preserve")
     manifest_path = os.path.join(preserve_dir, "manifest.json")
     if resume_run and os.path.isfile(manifest_path):
         with open(manifest_path) as fh:
             preserved = json.load(fh)
+        baseline = next((e.get("preserve_sha256") for e in events if e.get("event") == "PRESERVE" and e.get("preserve_sha256")), None)
+        if baseline and doc_digest(preserved) != baseline:
+            ledger.add("RUN_END", result="REFUSED_PRESERVE_DRIFT", detail="preserve/manifest.json mutated after its PRESERVE ledger entry")
+            return {"refused": "PRESERVE_DRIFT: preserve inputs mutated after approval-bound preserve; re-plan",
+                    "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
     else:
         preserved = fr_save.preserve_work(save_doc, preserve_dir)
-    ledger.add("PRESERVE", ok=preserved["ok"], repos=len(preserved.get("repos") or []), scratch=len(preserved.get("scratch") or []), error=preserved.get("error"))
+    ledger.add("PRESERVE", ok=preserved["ok"], repos=len(preserved.get("repos") or []), scratch=len(preserved.get("scratch") or []), error=preserved.get("error"),
+               preserve_sha256=doc_digest(preserved))
     if not preserved["ok"]:
         ledger.add("RUN_END", result="REFUSED_PRESERVE")
         return {"refused": "PRESERVE_FAILED", "preserve": preserved}, EXIT_REFUSED
