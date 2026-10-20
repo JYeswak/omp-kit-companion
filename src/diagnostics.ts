@@ -801,6 +801,8 @@ export type PaneBindingStrength = "verified" | "unverified";
 export interface PaneBinding {
 	/** Resolved agent name; never inferred from legacy names or adopted-dead roster rows. */
 	name: string;
+	/** Project key this binding was observed under; null when the source reports none. One seat may carry several project/name bindings. */
+	project?: string | null;
 	/** Where the binding came from, e.g. "agent-mail:resolve-pane". */
 	source: string;
 	strength: PaneBindingStrength;
@@ -818,9 +820,48 @@ export interface PaneIdentityDeps {
 	resolvePane(id: string): string | null;
 	/** Binding-preserving resolver; preferred over resolvePane when present. */
 	resolvePaneBinding?(id: string): PaneBinding | null;
+	/** Every observed binding for a pane (e.g. one per project); preferred over resolvePaneBinding when present. Defaults to the single resolvePaneBinding result. */
+	resolvePaneBindings?(id: string): PaneBinding[] | null;
+	/** Reservation holders observed for the readback scope, or null when the source is unreadable. Read-only: never mutates leases. */
+	listReservations?(): ReservationHolder[] | null;
 	/** Registered agents, or null when the roster is unreadable. */
 	listAgents(): PaneIdentityAgent[] | null;
 	now?: number;
+}
+/** An exclusive or shared reservation holder as observed, before custody classification. */
+export interface ReservationHolder {
+	/** Holder identity as recorded, e.g. a lease holder name. */
+	holder: string;
+	/** Native seat the holder resolves to, when the source reports one. */
+	seat?: string | null;
+	/** True for exclusive leases; shared/observe-only otherwise. */
+	exclusive?: boolean;
+	/** Project key the reservation was observed under, when the source reports one. */
+	project?: string | null;
+}
+export type HolderCustody = "held-by-this-pane" | "peer" | "unresolved";
+export interface SeatHolderAttribution {
+	holder: string;
+	seat: string | null;
+	custody: HolderCustody;
+	exclusive: boolean;
+	/** Required when custody is unresolved: why the holder cannot be attributed to a live seat. */
+	reason?: string;
+}
+export interface SeatBindingRow {
+	/** Native seat/session this row describes. */
+	seat: string;
+	/** Every verified project/name binding observed for the seat. */
+	bindings: Array<{ project: string | null; name: string; source: string }>;
+	/** All known holders classified relative to this seat. */
+	holders: SeatHolderAttribution[];
+}
+/** Acknowledgement record to attribute to an exact acking-seat binding. */
+export interface IdentityAck {
+	/** Native seat that acknowledged, when the source reports one. */
+	seat?: string | null;
+	/** Sender name claimed by the acknowledgement, when present. */
+	name?: string | null;
 }
 
 const PANE_AGENT_STALE_MS = 7 * 24 * 3600 * 1000;
@@ -857,7 +898,7 @@ export function defaultPaneIdentity(projectKey: string): PaneIdentityDeps {
 					const candidate: unknown = record[key];
 					if (typeof candidate === "string" && candidate !== "") { seat = candidate; break; }
 				}
-				return { name, source: "agent-mail:resolve-pane", strength: "verified", seat };
+				return { name, project: projectKey, source: "agent-mail:resolve-pane", strength: "verified", seat };
 			}
 			return null;
 		} catch {
@@ -908,9 +949,18 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 	const noFile: string[] = [];
 	const unverified: Array<{ pane: string; name: string; source: string; reason: string }> = [];
 	const seats = new Set<string>();
+	const seatBindings = new Map<string, Array<{ project: string | null; name: string; source: string }>>();
+	const checkedPanes = new Set<string>();
+	const nameToSeat = new Map<string, string>();
+	const ambiguousNames = new Set<string>();
+	const bindingsFor = (pane: PaneIdentity): PaneBinding[] | null => {
+		if (deps.resolvePaneBindings) return deps.resolvePaneBindings(pane.id);
+		const single = deps.resolvePaneBinding?.(pane.id) ?? null;
+		return single === null ? null : [single];
+	};
 	for (const pane of panes) {
-		const binding = deps.resolvePaneBinding?.(pane.id) ?? null;
-		if (binding === null) {
+		const observed = bindingsFor(pane);
+		if (observed === null || observed.length === 0) {
 			const name = deps.resolvePane(pane.id);
 			if (name === null) {
 				noFile.push(pane.id);
@@ -919,15 +969,54 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 			unverified.push({ pane: pane.id, name, source: "bare-name-resolver", reason: "resolver returned a bare name with no source or strength; name-only bindings never verify a sender" });
 			continue;
 		}
-		if (binding.strength !== "verified") {
-			unverified.push({ pane: pane.id, name: binding.name, source: binding.source, reason: binding.reason ?? "binding is not qualified runtime evidence" });
-			continue;
+		for (const binding of observed) {
+			if (binding.strength !== "verified") {
+				unverified.push({ pane: pane.id, name: binding.name, source: binding.source, reason: binding.reason ?? "binding is not qualified runtime evidence" });
+				continue;
+			}
+			const seat = binding.seat !== undefined && binding.seat !== null && binding.seat !== "" ? binding.seat : pane.session;
+			if (binding.seat !== undefined && binding.seat !== null && binding.seat !== "") seats.add(binding.seat);
+			const ids = byName.get(binding.name) ?? [];
+			ids.push(pane.id);
+			byName.set(binding.name, ids);
+			checkedPanes.add(pane.id);
+			const rows = seatBindings.get(seat) ?? [];
+			const project = binding.project ?? null;
+			if (!rows.some((row) => row.project === project && row.name === binding.name && row.source === binding.source)) {
+				rows.push({ project, name: binding.name, source: binding.source });
+			}
+			seatBindings.set(seat, rows);
+			const known = nameToSeat.get(binding.name);
+			if (known === undefined) nameToSeat.set(binding.name, seat);
+			else if (known !== seat) ambiguousNames.add(binding.name);
 		}
-		if (binding.seat !== undefined && binding.seat !== null && binding.seat !== "") seats.add(binding.seat);
-		const ids = byName.get(binding.name) ?? [];
-		ids.push(pane.id);
-		byName.set(binding.name, ids);
 	}
+	const liveSeats = new Set(seatBindings.keys());
+	const reservations = deps.listReservations?.() ?? null;
+	const classifyHolder = (holder: ReservationHolder, seat: string): SeatHolderAttribution => {
+		const exclusive = holder.exclusive ?? false;
+		let holderSeat = holder.seat ?? null;
+		if (holderSeat === null || holderSeat === "") {
+			if (ambiguousNames.has(holder.holder)) {
+				return { holder: holder.holder, seat: null, custody: "unresolved", exclusive, reason: `holder ${holder.holder} is verified on multiple seats with no holder seat; seat-less attribution never verifies` };
+			}
+			holderSeat = nameToSeat.get(holder.holder) ?? null;
+		}
+		if (holderSeat === null || holderSeat === "") {
+			return { holder: holder.holder, seat: null, custody: "unresolved", exclusive, reason: "holder resolves to no observed live-seat binding; invented peers never verify" };
+		}
+		if (!liveSeats.has(holderSeat)) {
+			return { holder: holder.holder, seat: holderSeat, custody: "unresolved", exclusive, reason: `holder seat ${holderSeat} has no live pane in this readback` };
+		}
+		return { holder: holder.holder, seat: holderSeat, custody: holderSeat === seat ? "held-by-this-pane" : "peer", exclusive };
+	};
+	const seat_rows: SeatBindingRow[] = [...seatBindings.entries()]
+		.map(([seat, bindings]) => ({
+			seat,
+			bindings: [...bindings].sort((a, b) => (a.project ?? "").localeCompare(b.project ?? "") || a.name.localeCompare(b.name)),
+			holders: (reservations ?? []).map((holder) => classifyHolder(holder, seat)),
+		}))
+		.sort((a, b) => a.seat.localeCompare(b.seat));
 	const shared = [...byName.entries()].filter(([, ids]) => ids.length > 1)
 		.map(([name, ids]) => ({ name, panes: [...ids].sort() }));
 	const liveNames = new Set(byName.keys());
@@ -940,7 +1029,7 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 			stale.push({ name: agent.name, idle_ms: now - agent.lastActiveMs });
 		}
 	}
-	const checked = [...byName.values()].reduce((total, ids) => total + ids.length, 0);
+	const checked = checkedPanes.size;
 	const unchecked = noFile.length + unverified.length;
 	const status = shared.length ? "FAIL" : noFile.length || unverified.length || stale.length ? "DEGRADED" : "OK";
 	return finding("identity", status,
@@ -948,7 +1037,34 @@ export function inspectPaneIdentity(deps: PaneIdentityDeps): Finding {
 		shared.length ? `One identity resolves on multiple live panes: ${shared.map((row) => `${row.name} (${row.panes.join(", ")})`).join("; ")}` :
 		`Pane identity gaps (${unchecked}/${panes.length} unchecked): ${noFile.length ? `${noFile.length} live pane(s) without an identity file` : ""}${(noFile.length && (unverified.length || stale.length)) ? "; " : ""}${unverified.length ? `${unverified.length} pane(s) with unverified bindings: ${unverified.map((row) => `${row.pane}->${row.name} (${row.reason})`).join("; ")}` : ""}${((noFile.length || unverified.length) && stale.length) ? "; " : ""}${stale.length ? `idle registration(s) with no live pane: ${stale.map((row) => row.name).join(", ")}` : ""}`,
 		"Register each pane with native Agent Mail, then project its verified own-caller identity with agent-spawn-env.sh; resolve collisions before trusting writes.",
-		{ project: deps.project ?? null, live_panes: panes.length, checked_panes: checked, unchecked_panes: unchecked, no_file_panes: noFile, shared, stale, unverified, seats: [...seats].sort() });
+		{ project: deps.project ?? null, live_panes: panes.length, checked_panes: checked, unchecked_panes: unchecked, no_file_panes: noFile, shared, stale, unverified, seats: [...seats].sort(), seat_rows, reservations: reservations === null ? "unavailable" : reservations.length });
+}
+
+/** Attribute an acknowledgement to the exact acking-seat binding; UNKNOWN unless the seat carries that verified binding. */
+export function attributeAckSender(seatRows: SeatBindingRow[], ack: IdentityAck): { sender: string | null; attribution: "verified" | "unknown"; reason: string } {
+	const seat = ack.seat ?? null;
+	if (seat === null || seat === "") {
+		return { sender: null, attribution: "unknown", reason: "acknowledgement carries no seat; missing binding cannot yield verified attribution" };
+	}
+	const row = seatRows.find((candidate) => candidate.seat === seat) ?? null;
+	if (row === null) {
+		return { sender: null, attribution: "unknown", reason: `seat ${seat} has no live binding in this readback; stale seats never verify` };
+	}
+	if (row.bindings.length === 0) {
+		return { sender: null, attribution: "unknown", reason: `seat ${seat} has no verified project/name binding` };
+	}
+	if (ack.name !== undefined && ack.name !== null && ack.name !== "") {
+		const exact = row.bindings.find((binding) => binding.name === ack.name) ?? null;
+		if (exact === null) {
+			return { sender: null, attribution: "unknown", reason: `claimed sender ${ack.name} is not a verified binding of seat ${seat}; substituted names never verify` };
+		}
+		return { sender: exact.name, attribution: "verified", reason: `exact acking-seat binding ${exact.name} on seat ${seat}` };
+	}
+	const names = [...new Set(row.bindings.map((binding) => binding.name))].sort();
+	if (names.length === 1) {
+		return { sender: names[0], attribution: "verified", reason: `seat ${seat} carries exactly one verified name` };
+	}
+	return { sender: null, attribution: "unknown", reason: `seat ${seat} carries ${names.length} verified names with no exact acking-seat binding selected` };
 }
 
 const FLYWHEEL_STATUS: Record<Grade, DiagnosticStatus> = { A: "OK", B: "DEGRADED", C: "DEGRADED", D: "FAIL", F: "FAIL", "N/A": "UNVERIFIED" };

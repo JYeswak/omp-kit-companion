@@ -5,6 +5,8 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
+// Separate additive import: the shared import above stays byte-identical (fp72.96).
+import { attributeAckSender, type IdentityAck, type PaneBinding, type ReservationHolder, type SeatBindingRow } from "../../src/diagnostics.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
@@ -1806,4 +1808,94 @@ test("5vph: the default health deps run only `rch --json status`, then the probe
 	expect(calls).toEqual([["rch", ["--json", "status"]], ["rch", ["--json", "workers", "probe", "--all"]]]);
 	expect(inspectRchWorkerHealth(defaultRchWorkerHealth(501, () => null, "darwin")).evidence?.state).toBe("WORKER_STATUS_UNAVAILABLE");
 	expect(inspectRchWorkerHealth(defaultRchWorkerHealth(501, (_binary, args) => args.includes("probe") ? null : { code: 0, out: statusOut }, "darwin")).evidence?.state).toBe("PROBE_UNAVAILABLE");
+});
+
+// ompkit-fp72.96: self-custody readback — every project/name binding per seat, same-seat
+// holders as held-by-this-pane, exact acking-seat attribution, UNKNOWN otherwise.
+const fp96Bindings = (id: string): PaneBinding[] | null => {
+	if (id === "%101") return [
+		{ name: "SeatAgent", project: "proj-a", source: "agent-mail:resolve-pane", strength: "verified", seat: "s" },
+		{ name: "SeatAgentAlt", project: "proj-b", source: "agent-mail:resolve-pane", strength: "verified", seat: "s" },
+	];
+	if (id === "%102") return [
+		{ name: "OtherAgent", project: "proj-a", source: "agent-mail:resolve-pane", strength: "verified", seat: "t" },
+	];
+	return null;
+};
+const fp96Deps = (listReservations: () => ReservationHolder[] | null = () => [
+	{ holder: "SeatAgent", seat: "s", exclusive: true, project: "proj-a" },
+	{ holder: "OtherAgent", seat: "t", exclusive: true, project: "proj-a" },
+]) => ({
+	project: "proj-a",
+	listPanes: () => [
+		{ session: "s", window: "0", index: "0", id: "%101" },
+		{ session: "t", window: "0", index: "0", id: "%102" },
+	],
+	resolvePane: () => null,
+	resolvePaneBindings: fp96Bindings,
+	listReservations,
+	listAgents: () => [],
+});
+const fp96SeatRows = (row: Finding): SeatBindingRow[] => row.evidence?.seat_rows as SeatBindingRow[];
+
+test("fp72.96: one seat lists every project/name binding and its own lease reads self", () => {
+	const row = inspectPaneIdentity(fp96Deps());
+	expect(row.status).toBe("OK");
+	expect(row.evidence?.checked_panes).toBe(2);
+	const seatRows = fp96SeatRows(row);
+	const self = seatRows.find((candidate) => candidate.seat === "s");
+	expect(self?.bindings).toEqual([
+		{ project: "proj-a", name: "SeatAgent", source: "agent-mail:resolve-pane" },
+		{ project: "proj-b", name: "SeatAgentAlt", source: "agent-mail:resolve-pane" },
+	]);
+	expect(self?.holders.find((holder) => holder.holder === "SeatAgent")).toMatchObject({ seat: "s", custody: "held-by-this-pane", exclusive: true });
+	expect(self?.holders.find((holder) => holder.holder === "OtherAgent")).toMatchObject({ seat: "t", custody: "peer" });
+	const ack: IdentityAck = { seat: "s", name: "SeatAgentAlt" };
+	expect(attributeAckSender(seatRows, ack)).toMatchObject({ sender: "SeatAgentAlt", attribution: "verified" });
+	expect(attributeAckSender(seatRows, { seat: "t" })).toMatchObject({ sender: "OtherAgent", attribution: "verified" });
+});
+
+test("fp72.96: holder custody follows the resolved seat, never a bare name", () => {
+	const row = inspectPaneIdentity(fp96Deps(() => [
+		{ holder: "OtherAgent", seat: "s", exclusive: true },
+		{ holder: "GhostAgent", exclusive: true },
+	]));
+	const seatRows = fp96SeatRows(row);
+	const self = seatRows.find((candidate) => candidate.seat === "s");
+	expect(self?.holders.find((holder) => holder.holder === "OtherAgent")).toMatchObject({ custody: "held-by-this-pane", seat: "s" });
+	const ghost = self?.holders.find((holder) => holder.holder === "GhostAgent");
+	expect(ghost?.custody).toBe("unresolved");
+	expect(ghost?.reason).toContain("no observed live-seat binding");
+});
+
+test("fp72.96: a name verified on two seats never attributes a seat-less holder", () => {
+	const row = inspectPaneIdentity({
+		listPanes: () => [
+			{ session: "s", window: "0", index: "0", id: "%101" },
+			{ session: "t", window: "0", index: "0", id: "%102" },
+		],
+		resolvePane: () => null,
+		resolvePaneBindings: (id) => [{ name: "Roamer", project: "proj-a", source: "agent-mail:resolve-pane", strength: "verified", seat: id === "%101" ? "s" : "t" }],
+		listReservations: () => [{ holder: "Roamer", exclusive: true }],
+		listAgents: () => [],
+	});
+	expect(row.status).toBe("FAIL");
+	expect(row.reason).toContain("Roamer");
+	for (const seatRow of fp96SeatRows(row)) {
+		expect(seatRow.holders).toEqual([{
+			holder: "Roamer",
+			seat: null,
+			custody: "unresolved",
+			exclusive: true,
+			reason: expect.stringContaining("multiple seats"),
+		}]);
+	}
+});
+
+test("fp72.96: substituted, stale, and missing ack bindings stay unknown", () => {
+	const seatRows = fp96SeatRows(inspectPaneIdentity(fp96Deps()));
+	expect(attributeAckSender(seatRows, { seat: "s", name: "OtherAgent" })).toMatchObject({ sender: null, attribution: "unknown" });
+	expect(attributeAckSender(seatRows, { seat: "gone", name: "SeatAgent" })).toMatchObject({ sender: null, attribution: "unknown" });
+	expect(attributeAckSender(seatRows, {})).toMatchObject({ sender: null, attribution: "unknown" });
+	expect(attributeAckSender(seatRows, { seat: "s" })).toMatchObject({ sender: null, attribution: "unknown" });
 });
