@@ -30,7 +30,7 @@ import { inspectOmpSessions } from "./session-doctor.ts";
 import { censusLoad } from "./load-doctor.ts";
 import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
 import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
-import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce } from "./fleet-watch.ts";
+import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce, STRANDED_ESCALATION_LIMIT_MINUTES } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -2817,6 +2817,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
 					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", paneTarget(session, pane), ...keys]); },
 					logPath,
+					workAudit: await inspectWorkFleet({ roots: [...new Set([...config.sessions.map((session) => session.repo), ...(config.registeredTrackers ?? []).map((tracker) => tracker.repo)])], staleEditLimitMinutes: STRANDED_ESCALATION_LIMIT_MINUTES }),
 					admission: {
 						launcherBinding: "keeper",
 						authority: watchOff.disabled ? "OFF" : "ACTIVE",

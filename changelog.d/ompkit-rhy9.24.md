@@ -1,0 +1,1 @@
+- Route reserved uncommitted work stranded over 30 minutes to its configured director with save-sweep details, persistent episode deduplication and clearing after recovery; leave unknown ownership explicitly unresolved.

@@ -261,8 +261,8 @@ use native br/bv or a disposable copy.
 
 ## Stranded-work escalation
 
-A tick that carries the latest work-audit result (`doctor --scope work
---fleet` rows) routes over-limit stranded work to its owning director. A repo
+Each service tick reads the existing work audit for configured repositories
+and registered trackers, then routes over-limit stranded work to its owning director. A repo
 whose audit row carries uncommitted-age findings older than 30 minutes
 (`stale_uncommitted_edits`, the audit's own reservation and age calculation)
 raises one `STRANDED_ESCALATED` director action naming the repo, the holder
@@ -272,6 +272,8 @@ registered tracker naming a configured session; no new operator queue exists.
 Each episode sends once (persisted in the state ledger), a clean next audit
 clears the finding, and an over-limit breach with no configured owner is
 `STRANDED_UNRESOLVED`: named, logged, zero sends, never misrouted.
+Dirty-only work without an aged owned edit does not trigger escalation.
+Admission refusal leaves the episode pending so it can notify after recovery.
 
 ## Install
 

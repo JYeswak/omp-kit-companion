@@ -1,4 +1,5 @@
 import { classifyWorkProjection, type WorkProjectionInput } from "./work-projection.ts";
+import type { WorkRepoReport } from "./work-doctor.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { checkTrackerRecoveryCutover, defaultPostRecoverReadback, recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryCutoverInput, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { YAML } from "bun";
@@ -9,6 +10,8 @@ import { basename, dirname, join } from "node:path";
 import { fsyncDirectory, writePrivate } from "./mutations.ts";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
+/** Reserved uncommitted edits must exceed the work audit's 30-minute limit. */
+export const STRANDED_ESCALATION_LIMIT_MINUTES = 30;
 
 export type FleetWatchSession = {
 	session: string;
@@ -38,12 +41,14 @@ export type FleetWatchRegisteredTracker = { repo: string; session: string };
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
 export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt; repo?: string };
 export type FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION"; session: string; pane: string; checks: number; text: string; receipt: TrackerRetentionReceipt; repo?: string };
+/** An audit routing observation, not a delivery or acceptance receipt. */
+export type FleetWatchStrandedAction = { kind: "STRANDED_ESCALATED" | "STRANDED_UNRESOLVED"; session: string; pane: string; checks: number; text: string; repo: string };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
 	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
 };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction;
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction | FleetWatchStrandedAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -888,6 +893,22 @@ export class FleetWatcher {
 		this.preassignReports.set(key, { kind, atMs: this.now() });
 		return true;
 	}
+	/** Claim an admitted escalation once per persisted episode. */
+	claimStrandedEpisode(key: string): boolean {
+		return this.settlePreassignReport(`stranded:${key}`, "STRANDED_ESCALATED");
+	}
+	/** A clean audit ends every previously reported episode for this repo. */
+	clearStrandedRepo(repo: string): boolean {
+		const prefix = `stranded:${repo}\0`;
+		let cleared = false;
+		for (const key of this.preassignReports.keys()) {
+			if (key.startsWith(prefix)) {
+				this.preassignReports.delete(key);
+				cleared = true;
+			}
+		}
+		return cleared;
+	}
 	/** Park (NO-WORK) or wake a seat; parked seats are re-checked on every idle tick, and a woken seat restarts at the nudge count. */
 	setParked(session: FleetWatchSession, pane: string, parked: boolean): void {
 		const key = `${session.session}:${pane}`;
@@ -1078,6 +1099,8 @@ export type FleetWatchOnceDeps = {
 	preassignProbes?: PreassignProbes;
 	/** ompkit-364w pull probes (policy, review/rework rows, issues.jsonl, bv triage, seat identity). Absent, the native defaults run. */
 	pullProbes?: PullProbes;
+	/** Latest work-doctor rows; reuse its reservation and uncommitted ages. */
+	workAudit?: { repos: readonly WorkRepoReport[] } | null;
 };
 
 function admittedEffect(admission: AdmissionInput | undefined, action: string): boolean {
@@ -1130,6 +1153,58 @@ function recordPullNotice(
 		}) + "\n");
 	}
 	return true;
+}
+
+/** Route the work audit as one tick phase; return whether persisted episodes changed. */
+function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps, activeWatcher: FleetWatcher, actions: FleetWatchAction[]): boolean {
+	let stateDirty = false;
+	// ompkit-rhy9.24: route aged owned work through the configured director,
+	// never infer ownership from dirty files or choose an unrelated queue.
+	if (deps.workAudit) {
+		const owners = new Map<string, FleetWatchSession>();
+		for (const session of config.sessions) if (!owners.has(session.repo)) owners.set(session.repo, session);
+		for (const tracker of config.registeredTrackers ?? []) {
+			if (owners.has(tracker.repo)) continue;
+			const owner = config.sessions.find((session) => session.session === tracker.session);
+			if (owner) owners.set(tracker.repo, owner);
+		}
+		const audited = new Set<string>();
+		const stamp = () => new Date((deps.now ?? Date.now)()).toISOString();
+		for (const row of deps.workAudit.repos) {
+			if (audited.has(row.path)) continue;
+			audited.add(row.path);
+			const overLimit = (row.stale_uncommitted_edits ?? []).filter((edit) => edit.age_minutes > STRANDED_ESCALATION_LIMIT_MINUTES);
+			const owner = owners.get(row.path);
+			if (!row.stranded || overLimit.length === 0) {
+				if (activeWatcher.clearStrandedRepo(row.path)) {
+					stateDirty = true;
+					appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), kind: "STRANDED_CLEARED", session: owner?.session ?? "UNKNOWN", pane: "director", checks: 0, repo: row.path, text: `stranded finding cleared for ${row.path}; the next over-limit audit escalates again` }) + "\n");
+				}
+				continue;
+			}
+			if (!owner) {
+				const text = `Fleet watch STRANDED_UNRESOLVED: ${row.path} is stranded over the ${STRANDED_ESCALATION_LIMIT_MINUTES}min limit (${overLimit.map((edit) => `${edit.path} ${edit.age_minutes}min`).join(", ")}) but names no configured session; no director was notified. Configure the repo under a session or registeredTracker.`;
+				const action: FleetWatchStrandedAction = { kind: "STRANDED_UNRESOLVED", session: "UNKNOWN", pane: "director", checks: 0, text, repo: row.path };
+				appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), ...action }) + "\n");
+				actions.push(action);
+				continue;
+			}
+			for (const edit of overLimit) {
+				if (!admittedEffect(deps.admission, "send")) {
+					appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), kind: "ADMISSION_REFUSED", session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, repo: row.path, text: "admission refused stranded escalation; nothing was sent" }) + "\n");
+					continue;
+				}
+				if (!activeWatcher.claimStrandedEpisode(`${row.path}\0${edit.bead}\0${edit.path}`)) continue;
+				stateDirty = true;
+				const text = `Fleet watch STRANDED_ESCALATED to ${owner.coordinatorSession}: ${row.path} stranded ${edit.age_minutes}min over the ${STRANDED_ESCALATION_LIMIT_MINUTES}min limit; holder ${edit.agent_name} owns ${edit.path_pattern} (${edit.path}, bead ${edit.bead}). Save-sweep remediation: run the save sweep (planRepoSweep) for the held paths, commit releasable work and push; the finding clears on the next clean audit.`;
+				const action: FleetWatchStrandedAction = { kind: "STRANDED_ESCALATED", session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, text, repo: row.path };
+				deps.send(owner.coordinatorSession, owner.coordinatorPane, text);
+				appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), ...action }) + "\n");
+				actions.push(action);
+			}
+		}
+	}
+	return stateDirty;
 }
 
 export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
@@ -1233,7 +1308,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			actions.push(action);
 		}
 	}
-	let stateDirty = false;
+	let stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions);
 	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
 		const gate = writeGate(session.session, cached(flagCache, session.repo, () => probes.findRecoveryFlags(session.repo)), recoveryKinds.get(session.repo) ?? null);
 		if (!gate.ready) return gate;
