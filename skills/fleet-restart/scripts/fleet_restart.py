@@ -1077,7 +1077,7 @@ def main(argv):
     if args.cmd == "send":
         man = load(args.manifest)
         import fr_save
-        revalidate = fr_save.respawn_revalidator(lambda only=None: live_inventory(env, only=only), fr_save.lsof_live(run))
+        revalidate = fr_save.respawn_revalidator(lambda only=None: live_inventory(env, only=only), fr_save.lsof_live(run), run, args.home)
         res = send(man, args.apply, read_approval(args.approval), env, uid, capture_live(env), run, role=args.role, revalidate_fn=revalidate)
         dump(res, args.log)
         return 0 if not res.get("refused") and all(r["result"] in ("SENT", "WOULD_SEND") for r in res["rows"]) else 4

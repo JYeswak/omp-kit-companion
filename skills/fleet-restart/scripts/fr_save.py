@@ -5,6 +5,7 @@ repos on a private index and copies held scratch; it never writes the shared ind
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -235,6 +236,119 @@ def owner_pid(text):
                 return int(val) if val.isdigit() else None
     return None
 
+# ---------- scratch carry-over across respawn (ompkit-774u.4.1 AC4) ----------
+# The kit reaper keeps a dir LIVE while the named seat's session lease is held
+# (owner agent+session, shipped kit 0.2.49: src/scratch.ts inspectSession). A
+# respawn resumes the same session file, so the new seat holds the same lease
+# and that scratch carries over: it is not a respawn hold. Legacy pid-only
+# owners have no seat to keep them alive, so they still hold.
+AGENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SESSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{7,63}$")
+KIT_SEAT_VERSION = (0, 2, 49)
+
+
+def owner_seat(text):
+    """(agent, session) named by a scratch .owner, or (None, None).
+    Mirrors the kit owner record (src/scratch.ts parseOwnerFileEx): JSON or
+    key=value lines (single-line space-separated tokens, or legacy `key: value`
+    lines). The seat counts only when both agent and session are present and
+    valid; anything else is a pid-only-era owner."""
+    seen = {}
+    trimmed = text.strip()
+    if not trimmed:
+        return None, None
+    if trimmed.startswith("{"):
+        try:
+            parsed = json.loads(trimmed)
+        except ValueError:
+            return None, None
+        if not isinstance(parsed, dict):
+            return None, None
+        for key, value in parsed.items():
+            seen[str(key)] = str(value)
+    else:
+        lines = [line for line in text.split("\n") if line != ""]
+        if len(lines) == 1 and len(lines[0].strip().split()) > 1:
+            for token in lines[0].strip().split():
+                key, hit, value = token.partition("=")
+                if not hit or not key or not value or key in seen:
+                    return None, None
+                seen[key] = value
+        else:
+            for line in lines:
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                elif ": " in line:
+                    key, _, value = line.partition(": ")
+                else:
+                    return None, None
+                key, value = key.strip(), value.strip()
+                if not key or not value or key in seen:
+                    return None, None
+                seen[key] = value
+    agent, session = seen.get("agent"), seen.get("session")
+    if agent is None or session is None:
+        return None, None
+    if not AGENT_PATTERN.match(agent) or not SESSION_PATTERN.match(session):
+        return None, None
+    return agent, session
+
+
+def session_id_of(path):
+    """omp session id from a main transcript path sessions/<slug>/<ts>_<id>.jsonl,
+    else None. Mirrors the kit's sessionIdOf transcript rule (src/scratch.ts)."""
+    if not path or not path.endswith(".jsonl"):
+        return None
+    parts = path.split("/")
+    if len(parts) < 3 or parts[-3] != "sessions":
+        return None
+    name = parts[-1]
+    if "_" not in name:
+        return None
+    sid = name[name.rindex("_") + 1:-len(".jsonl")]
+    return sid if SESSION_PATTERN.match(sid) else None
+
+
+def session_owners_dir(home):
+    """Directory of the omp session-ownership leases, same default as the kit."""
+    override = os.environ.get("OMP_KIT_SESSION_OWNERS_DIR")
+    if override:
+        return override
+    return os.path.join(home, ".omp", "run", "session-owners")
+
+
+def lease_live(session, run_fn, home):
+    """True when a live process holds the session lease, False when the lock
+    exists but is unheld, None when that cannot be told. Mirrors the kit seat
+    check (lsof -t on the lock): without stdout the lease state is unproven."""
+    lock = os.path.join(session_owners_dir(home), session + ".lock")
+    if not os.path.exists(lock):
+        return False
+    try:
+        rc, out = run_fn(["lsof", "-t", "--", lock], None)
+    except Exception:
+        return None
+    if rc == 0 and out.strip():
+        return True
+    if rc == 1 and not out.strip():
+        return False
+    return None
+
+
+def kit_supports_seats(run_fn):
+    """True when the installed kit carries seat liveness (0.2.49+). Any probe
+    failure answers False: the hold stays until carry-over is proven."""
+    try:
+        rc, out = run_fn(["omp-kit", "--version"], None)
+    except Exception:
+        return False
+    if rc != 0:
+        return False
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    if not match:
+        return False
+    return tuple(int(match.group(i)) for i in (1, 2, 3)) >= KIT_SEAT_VERSION
+
 
 def git_common_dir(repo):
     """The repo's common git dir (worktrees keep refs and reflogs there)."""
@@ -291,12 +405,19 @@ def newest_file(path, cap=5000):
     return newest
 
 
-def owned_scratch(base, pid):
+def owned_scratch(base, pid, session=None, carry=None):
     """Scratch under <repo>/var/agent-tmp tied to the omp pid, as (work, runtime).
     work: dirs whose .owner pid is the omp pid; a respawn kills that pid and
-    scratch-reaper then deletes them. runtime: the dir named exactly `omp.<pid>`,
-    the process's own TMPDIR (compile caches, locks, runners; the new process
-    makes omp.<newpid>) -- listed, never a hold. `omp.<otherpid>` is ordinary work."""
+    scratch-reaper then deletes them -- unless the dir carries over (see below).
+    runtime: the dir named exactly `omp.<pid>`, the process's own TMPDIR
+    (compile caches, locks, runners; the new process makes omp.<newpid>) --
+    listed, never a hold. `omp.<otherpid>` is ordinary work.
+    A work dir carries over when its .owner names the pane's seat (agent+session
+    for this pane's session id) and carry(session) is not False: the kit reaper
+    keeps it LIVE on the session lease the respawned seat holds, so it is not a
+    respawn hold. carry defaults to no carry-over (every pid-owned dir holds);
+    pass lease_live bound to run_fn/home, or a test double, to prove it. Each
+    work row gains carried_over plus the owning seat for the receipt."""
     work, runtime = [], []
     try:
         entries = sorted(os.scandir(base), key=lambda e: e.name)
@@ -306,6 +427,7 @@ def owned_scratch(base, pid):
         if not e.is_dir(follow_symlinks=False):
             continue
         is_runtime = e.name == "omp.%d" % pid
+        text = None
         if not is_runtime:
             try:
                 with open(os.path.join(e.path, ".owner")) as fh:
@@ -314,8 +436,13 @@ def owned_scratch(base, pid):
                 continue
             if owner_pid(text) != pid:
                 continue
+        carried, seat = False, (None, None)
+        if text is not None and session is not None and carry is not None:
+            seat = owner_seat(text)
+            carried = seat[1] == session and carry(session) is not False
         mtime, newest = newest_file(e.path)
-        (runtime if is_runtime else work).append({"path": e.path, "newest_mtime": mtime, "newest_file": newest})
+        (runtime if is_runtime else work).append({"path": e.path, "newest_mtime": mtime, "newest_file": newest,
+                                                 "carried_over": carried, "owner_agent": seat[0], "owner_session": seat[1]})
     return work, runtime
 
 
@@ -362,31 +489,68 @@ def save_pane(pane, procs, home, lsof_fn, run_fn, dirt_cache):
     row["advisor"]["watchdog_files"] = watchdog_files(adir, project_dirs)
     row["repo"] = repo
     row["last_push"] = last_push(repo)
-    row["owned_scratch"], row["runtime_scratch"] = owned_scratch(os.path.join(repo or pane["cwd"], "var", "agent-tmp"), agent["pid"])
+    carry = carry_probe(run_fn, home) if session_file else None
+    row["owned_scratch"], row["runtime_scratch"] = owned_scratch(
+        os.path.join(repo or pane["cwd"], "var", "agent-tmp"), agent["pid"], session_id_of(session_file), carry)
     row["held_scratch"] = held_scratch(row["owned_scratch"], row["last_push"])
+    row["carried_scratch"] = [s["path"] for s in row["owned_scratch"] if s.get("carried_over")]
     if row["held_scratch"]:
-        # A respawn kills this pid and scratch-reaper then deletes the dir: an
-        # owned work-scratch hold refuses respawn. The preserve copy+pin is the
-        # save; it is explicitly not a successor pid (ompkit-774u.4.1).
+        # A respawn kills this pid and the scratch-reaper then deletes pid-owned
+        # dirs with no seat to keep them alive: an owned work-scratch hold refuses
+        # respawn. Scratch that carries over (owner seat + live session lease, the
+        # kit's seat liveness) is preserved by the copy+pin save but is not a
+        # hold (ompkit-774u.4.1).
         row["holds"].append("HOLD_SCRATCH_OWNER")
     row["repo_dirt_count"] = dirt_count(repo, run_fn, dirt_cache) if repo else None
     return row
 
 
+_KIT_SEATS = {}
+
+
+def kit_seats_cached(run_fn):
+    """kit_supports_seats once per run_fn (short-lived CLI runs; save_pane calls
+    carry_probe per pane and must not spawn a version probe per pane)."""
+    key = id(run_fn)
+    if key not in _KIT_SEATS:
+        _KIT_SEATS[key] = kit_supports_seats(run_fn)
+    return _KIT_SEATS[key]
+
+
+def carry_probe(run_fn, home):
+    """carry(session) for owned_scratch: prove the installed kit keeps seat-owned
+    scratch LIVE before dropping the hold. False (hold stays) when the kit predates
+    seat liveness or the probe fails; per session, False when its lease is provably
+    unheld. A lease whose state cannot be told is carried: the kit never reaps a
+    seat it cannot probe (SKIP owner-seat-liveness-unproven). The version probe
+    runs lazily on the first seat candidate, never for pid-only owners."""
+    state = {}
+
+    def carry(session):
+        if "seats" not in state:
+            state["seats"] = kit_seats_cached(run_fn)
+        if not state["seats"]:
+            return False
+        return lease_live(session, run_fn, home)
+    return carry
+
+
 def held_scratch(work, push):
-    """Work scratch with a file newer than the repo's last push (any file when no push is known)."""
-    return [s for s in work if s["newest_mtime"] is not None and (push is None or s["newest_mtime"] > push)]
+    """Work scratch with a file newer than the repo's last push (any file when no push is known),
+    excluding dirs that carry over the respawn on their session lease."""
+    return [s for s in work if not s.get("carried_over") and s["newest_mtime"] is not None and (push is None or s["newest_mtime"] > push)]
 
 
-def revalidate_respawn(row, inv, lsof_fn):
+def revalidate_respawn(row, inv, lsof_fn, run_fn=None, home=None):
     """Live re-check right before a respawn send, against the row's saved facts: the
     same omp pid (HELD_DRIFT), no git child (HOLD_GIT), the saved session file still
     open (HOLD_SESSION_CHANGED), the same launch --model (HOLD_MODEL_CHANGED) and
     --profile (HOLD_PROFILE_CHANGED: a preserving-session respawn resumes the saved
     context, never a fresh-context, model or profile change), no other live holder
     of the saved session (HOLD_SESSION_HOLDER: the session did not drain), and no
-    owned work scratch (HOLD_SCRATCH_OWNER: a respawn kills that pid and
-    scratch-reaper then deletes the dir). Returns (hold, detail) or (None, None)."""
+    owned work scratch that cannot carry over (HOLD_SCRATCH_OWNER: a respawn kills
+    that pid and scratch-reaper then deletes pid-owned dirs with no seat; seat-owned
+    scratch on a live session lease carries over). Returns (hold, detail) or (None, None)."""
     p = next((x for x in inv["panes"] if x["pane_id"] == row["pane_id"]), None)
     agent = core.find_agent(inv["procs"], p["pane_pid"]) if p else None
     if not agent or agent["pid"] != row.get("omp_pid"):
@@ -409,17 +573,21 @@ def revalidate_respawn(row, inv, lsof_fn):
         return "HOLD_SESSION_HOLDER", "%s still held by %s" % (
             row.get("session_file"), ", ".join("%s (pid %s)" % (h["pane"], h["omp_pid"]) for h in others))
     base = os.path.join(row.get("repo") or (p or {}).get("cwd", ""), "var", "agent-tmp")
-    live_held = held_scratch(owned_scratch(base, agent["pid"])[0], row.get("last_push"))
+    carry = carry_probe(run_fn, home) if run_fn is not None and home is not None and row.get("session_file") else None
+    live_held = held_scratch(
+        owned_scratch(base, agent["pid"], session_id_of(row.get("session_file")), carry)[0], row.get("last_push"))
     if live_held:
         return "HOLD_SCRATCH_OWNER", "owned work scratch: %s" % ", ".join(s["path"] for s in live_held)
     return None, None
 
 
-def respawn_revalidator(inventory_fn, lsof_fn):
+def respawn_revalidator(inventory_fn, lsof_fn, run_fn=None, home=None):
     """revalidate_fn for fleet_restart.send: a fresh full inventory per respawn
-    row (holder scan needs every pane, not just the row's own)."""
+    row (holder scan needs every pane, not just the row's own). Without run_fn
+    and home the scratch re-check keeps today's rule (every pid-owned dir holds);
+    pass both to drop the hold for scratch that carries over (ompkit-774u.4.1)."""
     def check(row):
-        return revalidate_respawn(row, inventory_fn(), lsof_fn)
+        return revalidate_respawn(row, inventory_fn(), lsof_fn, run_fn, home)
     return check
 
 
