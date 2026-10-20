@@ -19,6 +19,7 @@ import { pluginPackageHash } from "./apply-plugin.ts";
 import { inspectPluginRelease, livePluginReleaseIo } from "./plugin-release.ts";
 import { inspectHooks, liveHookFreshnessIo } from "./hook-refresh.ts";
 import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
+import { inspectTestScope } from "./test-scope.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
 export interface Finding {
@@ -57,6 +58,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	identity: ["identity"],
 	hooks: ["hooks"],
 	"regex-tools": ["regex-tools"],
+	"test-scope": ["test-scope"],
 	rch: ["rch", "rch_gc_roots", "rch_workers"],
 };
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
@@ -2081,6 +2083,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
 	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
 	if (input.scope === "public-files" && input.project) rows.push(...inspectPublicFilesScope(resolve(input.project), root));
+	if (input.scope === "test-scope") rows.push(inspectTestScope());
 	if (wants("actions-billing") && input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = wants("kit", "manifest", "installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules") ? readManifest(root) : undefined;
 	if (manifest) {
