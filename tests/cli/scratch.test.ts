@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, 
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
-import { exportCommitToScratch, parseTextOwner, releaseBudgetEntry } from "../../src/scratch.ts";
+import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
@@ -1869,4 +1869,24 @@ test("BEADTTL1: open bead at apply time rolls back and keeps the dir", () => {
 	const applied = applyReap(dir, root, verdict, openDeps);
 	expect(applied.action).toBe("SKIP");
 	expect(existsSync(dir)).toBe(true);
+});
+
+test("V261FREE: free-prose owners parse bead from text, label from dirname", () => {
+	expect(parseFreeOwner("BuildW12 (LavenderBeacon), bead cfs-j2wma.12\n", "BuildW12.j2wma12"))
+		.toMatchObject({ label: "BuildW12", bead: "cfs-j2wma.12" });
+	expect(parseFreeOwner("Grade303\n", "Grade303.9736")).toBeNull();
+	expect(parseFreeOwner("beady: nothing here\n", "x.1")).toBeNull();
+	expect(parseFreeOwner("xbead: nope\n", "x.1")).toBeNull();
+	expect(repoOfRoot("/r/var/agent-tmp")).toBe("/r");
+	expect(repoOfRoot("/r/other")).toBeNull();
+});
+
+test("V261FREE: free owner with closed bead reaps via root repo", () => {
+	const vat = join(fixtureRepo, "var", "agent-tmp");
+	const dir = join(vat, "BuildW12.j2wma12");
+	if (!existsSync(dir)) mkdirSync(dir);
+	roots.push(dir);
+	writeFileSync(join(dir, ".owner"), "BuildW12 (LavenderBeacon), bead cfs-j2wma.12\n");
+	const v = inspectSession(dir, vat, depsFor({ run: textRun(false, "closed") as never }));
+	expect(v).toMatchObject({ action: "REAP", reason: "text-owner-bead-closed-no-fds" });
 });

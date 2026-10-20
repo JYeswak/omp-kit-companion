@@ -496,6 +496,48 @@ function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string,
 	}
 }
 
+const BEAD_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
+/** Free-prose owner fallback (`BuildW12 (LavenderBeacon), bead cfs-j2wma.12`): the bead id after a
+ * `bead` keyword, the label from the `label.pid` dir name. Null when either is missing. Manual scan,
+ * no pattern engine: values here reach the reaper's delete path. */
+export function parseFreeOwner(text: string, dirName: string): TextOwner | null {
+	const label = dirName.split(".")[0] ?? "";
+	if (label === "" || label.includes("/") || label.startsWith(".")) return null;
+	let bead: string | null = null;
+	let at = 0;
+	while (true) {
+		const found = text.indexOf("bead", at);
+		if (found < 0) break;
+		const prev = found === 0 ? " " : (text[found - 1] ?? " ");
+		let i = found + 4;
+		let seps = 0;
+		while (text[i] === " " || text[i] === ":") {
+			i++;
+			seps++;
+		}
+		let token = "";
+		while (BEAD_TOKEN_CHARS.includes(text[i] ?? "")) {
+			token += text[i];
+			i++;
+		}
+		if (seps > 0 && !BEAD_TOKEN_CHARS.includes(prev) && token !== "") {
+			bead = token;
+			break;
+		}
+		at = found + 4;
+	}
+	if (bead === null) return null;
+	return { agent: null, label, repo: null, bead, created: null };
+}
+
+/** Owning repo from a conventional `<repo>/var/agent-tmp` root, else null. */
+export function repoOfRoot(root: string): string | null {
+	if (!root.endsWith("/var/agent-tmp")) return null;
+	const repo = dirname(dirname(root));
+	if (repo === "" || repo === "/") return null;
+	return repo;
+}
+
 /** A legacy text owner without a pid (`agent: X` / `label: Y` / `bead: Z` lines). Null when the text is not that shape. */
 export interface TextOwner { agent: string | null; label: string; repo: string | null; bead: string | null; created: string | null }
 export function parseTextOwner(text: string): TextOwner | null {
@@ -571,20 +613,21 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 		// Legacy pid-less text owners: no process to signal, so lsof-clear plus a
 		// closed or missing bead means REAP. Anything unprovable stays out.
 		const raw = readText(join(dir, ".owner"));
-		const text = raw === null ? null : parseTextOwner(raw);
+		const text = raw === null ? null : (parseTextOwner(raw) ?? parseFreeOwner(raw, dir.slice(root.length + 1)));
 		if (text !== null) {
 			const clear = lsofClearDir(deps, dir);
 			if (clear === null) return sized("SKIP", "text-owner-lsof-unavailable");
 			if (!clear) return sized("LIVE", "text-owner-open-fds-present");
 			if (text.bead === null) return sized("REAP", "text-owner-no-bead-no-fds");
-			if (text.repo === null) return sized("REAP", "text-owner-no-repo-no-fds");
+			const repoName = text.repo ?? repoOfRoot(root);
+			if (repoName === null) return sized("REAP", "text-owner-no-repo-no-fds");
 			let repoDir: string | null = null;
 			try {
-				const resolved = resolve(text.repo);
+				const resolved = resolve(repoName);
 				repoDir = statSync(resolved).isDirectory() ? resolved : null;
 			} catch { /* unresolvable owner repo: context is gone */ }
 			if (repoDir === null) return sized("REAP", "text-owner-repo-gone-no-fds");
-			const closed = beadClosed(text.bead, text.repo, deps.run);
+			const closed = beadClosed(text.bead, repoName, deps.run);
 			if (closed === true) return sized("REAP", "text-owner-bead-closed-no-fds");
 			if (closed === false) return sized("LIVE", "text-owner-bead-open");
 			return sized("SKIP", "text-owner-bead-unproven");
