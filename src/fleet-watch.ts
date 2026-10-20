@@ -26,10 +26,17 @@ export type FleetWatchSession = {
 	/** false parks the session's workers: no pull nudge, no escalation. Absent: pulling is on. */
 	pullEnabled?: boolean;
 };
-export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[] };
+export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[]; registeredTrackers?: FleetWatchRegisteredTracker[] };
+/**
+ * ompkit-ps3lo: MP6-registry seam. Every registered tracker is covered by
+ * the health tick even when no session entry names its repo; recovery still
+ * runs under the owning director named here. Absent, the legacy
+ * sessions-only coverage runs.
+ */
+export type FleetWatchRegisteredTracker = { repo: string; session: string };
 
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
-export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt };
+export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt; repo?: string };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
@@ -949,7 +956,25 @@ export function loadFleetWatchConfig(path: string): FleetWatchConfig {
 		if (session.phase !== undefined && (typeof session.phase !== "string" || session.phase === "")) throw invalid("phase");
 		if (session.pullEnabled !== undefined && typeof session.pullEnabled !== "boolean") throw invalid("pullEnabled");
 	}
-	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions };
+	const registeredTrackers = parseRegisteredTrackers((value as Record<string, unknown>).registeredTrackers);
+	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions, ...(registeredTrackers === undefined ? {} : { registeredTrackers }) };
+}
+
+/**
+ * ompkit-ps3lo: optional MP6-registry seam. Undefined when absent (legacy
+ * sessions-only coverage); otherwise every entry names a non-empty repo and
+ * its owning-director session. Anything else is a config error.
+ */
+function parseRegisteredTrackers(value: unknown): FleetWatchRegisteredTracker[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new Error("FLEET_WATCH_CONFIG_INVALID: registeredTrackers");
+	return value.map((entry, index) => {
+		const invalid = new Error(`FLEET_WATCH_CONFIG_INVALID: registeredTrackers[${index}]`);
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid;
+		const { repo, session } = entry as Record<string, unknown>;
+		if (typeof repo !== "string" || repo.trim() === "" || typeof session !== "string" || session.trim() === "") throw invalid;
+		return { repo, session };
+	});
 }
 
 function readNativePullState(repo: string, ids: readonly string[], coordinator: string | null, readyCommand?: string): NativePullState {
@@ -1133,9 +1158,37 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const recovery = (deps.recoverTracker ?? recoverBusyTracker)(session.repo, session.session);
 		recoveryKinds.set(session.repo, recovery?.kind ?? null);
 		if (!recovery) continue;
-		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }) };
+		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }), repo: session.repo };
 		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
 		actions.push(action);
+	}
+	// ompkit-ps3lo: MP6-registered trackers are covered even without a
+	// session entry. Recovery still needs its owning director: a registered
+	// session no configured session names is covered exactly once with a
+	// named NO_OWNING_DIRECTOR block and zero recover commands.
+	const configuredSessions = new Set(config.sessions.map((session) => session.session));
+	for (const tracker of config.registeredTrackers ?? []) {
+		if (recoveredRepos.has(tracker.repo)) continue;
+		if (!configuredSessions.has(tracker.session)) {
+			recoveredRepos.add(tracker.repo);
+			const text = `Fleet Watch: tracker recovery blocked; NO_OWNING_DIRECTOR: registered tracker ${tracker.repo} names session ${tracker.session}, which is not a configured session; zero recover commands ran.`;
+			const blockedAction: FleetWatchRecoveryAction = { kind: "RECOVERY_BLOCKED", session: tracker.session, pane: "tracker", checks: 0, text, repo: tracker.repo };
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...blockedAction }) + "\n");
+			actions.push(blockedAction);
+			continue;
+		}
+		recoveredRepos.add(tracker.repo);
+		if (!admittedEffect(deps.admission, "tracker-recovery")) {
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: tracker.session, pane: "tracker", checks: 0, repo: tracker.repo, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
+			recoveryKinds.set(tracker.repo, null);
+			continue;
+		}
+		const registeredRecovery = (deps.recoverTracker ?? recoverBusyTracker)(tracker.repo, tracker.session);
+		recoveryKinds.set(tracker.repo, registeredRecovery?.kind ?? null);
+		if (!registeredRecovery) continue;
+		const registeredAction: FleetWatchRecoveryAction = { kind: registeredRecovery.kind, session: tracker.session, pane: "tracker", checks: 0, text: registeredRecovery.text, ...(registeredRecovery.receipt === undefined ? {} : { receipt: registeredRecovery.receipt }), repo: tracker.repo };
+		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...registeredAction }) + "\n");
+		actions.push(registeredAction);
 	}
 	let stateDirty = false;
 	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
