@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 import {
 	checkTrackerRecoveryCutover,
@@ -26,10 +27,7 @@ const SESSION = "omp-test";
 const KIT = TRACKER_RECOVERY_CUTOVER_KIT_VERSION;
 
 function plantedRepo(): { scratch: string; repo: string; runDir: string } {
-	const parent = join(repoRoot, "var", "agent-tmp");
-	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-recovery-rhy9-16."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-rhy9-16\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = mkdtempSync(join(tmpdir(), "tracker-recovery-rhy9-16."));
 	const repo = join(scratch, "repo");
 	const runDir = join(repo, ".beads", ".br_recovery", "schema-migrations", "20261010T000000.000000Z-9-0");
 	mkdirSync(runDir, { recursive: true });
@@ -104,7 +102,7 @@ function tickDeps(logPath: string, brCalls: string[][], options: {
 			options.recoverCalls?.push([repo, session]);
 			return recoverBusyTracker(repo, session, rec);
 		},
-		...(options.cutover === undefined ? {} : { recoveryCutover: options.cutover === null ? null : () => options.cutover }),
+		...(options.cutover === undefined ? {} : { recoveryCutover: options.cutover === null ? null : () => options.cutover ?? null }),
 		gitLockReap: null,
 	};
 }
@@ -259,6 +257,52 @@ test("[bypass] null probe answer for one repo retires nothing", () => {
 		expect(recoverCalls).toEqual([[planted.repo, "s1"]]);
 		expect(logLines(logPath).filter((line) => line.kind === "TRACKER_RECOVERY_CUTOVER")).toHaveLength(0);
 		expect(actions.filter((action) => action.kind === "RECOVERY_PROCEEDED")).toHaveLength(1);
+	} finally {
+		rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("[cutover-negative] asserted registry evidence cannot replace an actual configured recovery path", () => {
+	const planted = plantedRepo();
+	const logPath = join(planted.scratch, "fleet-watch.jsonl");
+	const brCalls: string[][] = [];
+	const recoverCalls: [string, string][] = [];
+	try {
+		const config = tickConfig(planted.repo);
+		config.registeredTrackers = [];
+		runFleetWatchOnce(config, tickDeps(logPath, brCalls, { cutover: GREEN, recoverCalls }));
+		expect(recoverCalls).toEqual([[planted.repo, "s1"]]);
+		expect(logLines(logPath).filter((line) => line.kind === "TRACKER_RECOVERY_CUTOVER")).toHaveLength(0);
+	} finally {
+		rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("[readback-negative] failed native list never reports recovery proceeded", () => {
+	const planted = plantedRepo();
+	try {
+		const deps = recoveryDeps([]);
+		deps.postRecoverReadback = () => ({ ok: false, detail: "native br list exited 1" });
+		const result = recoverBusyTracker(planted.repo, SESSION, deps);
+		expect(result?.kind).toBe("RECOVERY_FAILED");
+		expect(result?.text).toContain("Post-recover native readback failed");
+	} finally {
+		rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+
+test("[holder-negative] live holder preserves the next eligible rate opportunity", () => {
+	const planted = plantedRepo();
+	const brCalls: string[][] = [];
+	const receipts: number[] = [];
+	try {
+		const deps: TrackerRecoveryDeps = {
+			...recoveryDeps(brCalls, { livePids: new Set([LIVE_PID]), lsof: { code: 0, stdout: `${LIVE_PID}\n`, stderr: "" } }),
+			writeRateReceipt: (_repo, at) => { receipts.push(at); },
+		};
+		expect(recoverBusyTracker(planted.repo, SESSION, deps)?.kind).toBe("RECOVERY_BLOCKED");
+		expect(receipts).toEqual([]);
+		expect(brCalls.filter((call) => call[1] === "doctor")).toEqual([]);
 	} finally {
 		rmSync(planted.scratch, { recursive: true, force: true });
 	}

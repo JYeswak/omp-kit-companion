@@ -1,6 +1,6 @@
 import { classifyWorkProjection, type WorkProjectionInput } from "./work-projection.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
+import { checkTrackerRecoveryCutover, defaultPostRecoverReadback, recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryCutoverInput, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { YAML } from "bun";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -1057,6 +1057,8 @@ export type FleetWatchOnceDeps = {
 	statePath?: string | null;
 	now?: () => number;
 	recoverTracker?: (repo: string, session: string) => TrackerRecoveryResult | null;
+	/** Retire the incumbent only with successor evidence and a configured registry recovery path. */
+	recoveryCutover?: ((repo: string) => TrackerRecoveryCutoverInput | null) | null;
 	/**
 	 * ompkit-rhy9.15 RET1: bounded quarantine retention per repo per tick.
 	 * Absent, the canonical retainTrackerQuarantine runs (silent unless it
@@ -1154,15 +1156,28 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		if (!cache.has(key)) cache.set(key, load());
 		return cache.get(key) as T;
 	}
+	const recoverTracker = deps.recoverTracker ?? ((repo: string, session: string) =>
+		recoverBusyTracker(repo, session, { postRecoverReadback: defaultPostRecoverReadback }));
+	const configuredRecoverySessions = new Set(config.sessions.map((session) => session.session));
+	const cutoverRepos = new Set<string>();
 	for (const session of config.sessions) {
 		if (recoveredRepos.has(session.repo)) continue;
+		if (cutoverRepos.has(session.repo)) continue;
+		const evidence = deps.recoveryCutover?.(session.repo);
+		const registered = config.registeredTrackers?.some((tracker) =>
+			tracker.repo === session.repo && configuredRecoverySessions.has(tracker.session)) ?? false;
+		if (evidence && registered && checkTrackerRecoveryCutover(evidence).retired) {
+			cutoverRepos.add(session.repo);
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "TRACKER_RECOVERY_CUTOVER", session: session.session, pane: "tracker", checks: 0, repo: session.repo, text: `successor kit owns tracker recovery for ${session.repo}; duplicated project recovery branch retired` }) + "\n");
+			continue;
+		}
 		recoveredRepos.add(session.repo);
 		if (!admittedEffect(deps.admission, "tracker-recovery")) {
 			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane: "tracker", checks: 0, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
 			recoveryKinds.set(session.repo, null);
 			continue;
 		}
-		const recovery = (deps.recoverTracker ?? recoverBusyTracker)(session.repo, session.session);
+		const recovery = recoverTracker(session.repo, session.session);
 		recoveryKinds.set(session.repo, recovery?.kind ?? null);
 		if (!recovery) continue;
 		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }), repo: session.repo };
@@ -1190,7 +1205,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			recoveryKinds.set(tracker.repo, null);
 			continue;
 		}
-		const registeredRecovery = (deps.recoverTracker ?? recoverBusyTracker)(tracker.repo, tracker.session);
+		const registeredRecovery = recoverTracker(tracker.repo, tracker.session);
 		recoveryKinds.set(tracker.repo, registeredRecovery?.kind ?? null);
 		if (!registeredRecovery) continue;
 		const registeredAction: FleetWatchRecoveryAction = { kind: registeredRecovery.kind, session: tracker.session, pane: "tracker", checks: 0, text: registeredRecovery.text, ...(registeredRecovery.receipt === undefined ? {} : { receipt: registeredRecovery.receipt }), repo: tracker.repo };

@@ -174,7 +174,10 @@ export interface TrackerRecoveryDeps {
 	readRateReceipt?: (repo: string) => number | null;
 	/** ompkit-x5iv.2: record a recover attempt receipt. */
 	writeRateReceipt?: (repo: string, atMs: number, kind: string) => void;
+	/** Native readback after successful recovery; null or absent preserves the caller's legacy behavior. */
+	postRecoverReadback?: ((repo: string, run: (args: readonly string[], cwd: string) => TrackerRecoveryCommandResult) => TrackerPostRecoverReadback) | null;
 }
+export interface TrackerPostRecoverReadback { ok: boolean; detail: string }
 
 interface RecoveryLease {
 	schema_version: 1;
@@ -237,7 +240,6 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 	}
 	const beforeArtifactCount = before.artifactCount;
 
-	(deps.writeRateReceipt ?? defaultWriteRateReceipt)(repo, attemptAt, "attempted");
 	const owner: RecoveryLease = {
 		schema_version: 1,
 		lease_id: (deps.leaseId ?? randomUUID)(),
@@ -266,6 +268,8 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 		return blocked(holders.state === "held" ? `DATABASE_HOLDER_LATCH: database holder PID ${holders.pid} is live` : `DATABASE_HOLDER_LATCH: database holder liveness is unknown: ${holders.reason}`);
 	}
 
+	// A held or unknown database must not consume the next eligible recovery tick.
+	(deps.writeRateReceipt ?? defaultWriteRateReceipt)(repo, attemptAt, "attempted");
 	let result: TrackerRecoveryResult;
 	try {
 		const command = run(["br", "doctor", "migrate-schema", "recover"], repo);
@@ -295,6 +299,19 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 			result = { ...result, receipt };
 		}
 	}
+	if (result.kind === "RECOVERY_PROCEEDED" && deps.postRecoverReadback != null) {
+		let readback: TrackerPostRecoverReadback;
+		try {
+			readback = deps.postRecoverReadback(repo, run);
+		} catch (error) {
+			readback = { ok: false, detail: `readback threw: ${errorMessage(error)}` };
+		}
+		result = {
+			...result,
+			kind: readback.ok ? "RECOVERY_PROCEEDED" : "RECOVERY_FAILED",
+			text: `${result.text} Post-recover native readback ${readback.ok ? "ok" : "failed"} for ${session} at ${repo}: ${readback.detail}`,
+		};
+	}
 	const releaseErrors = releaseLeases(acquired, owner.lease_id);
 	if (releaseErrors.length) {
 		result = { kind: "RECOVERY_FAILED", text: `${result.text} Holder lease cleanup failed for ${releaseErrors.length} flag(s).` };
@@ -304,6 +321,19 @@ export function recoverBusyTracker(repo: string, session: string, deps: TrackerR
 	function blocked(reason: string): TrackerRecoveryResult {
 		return { kind: "RECOVERY_BLOCKED", text: `Fleet Watch: tracker recovery blocked; ${reason}.` };
 	}
+}
+
+/** A successful recovery command is insufficient if native tracker reads still fail. */
+export function defaultPostRecoverReadback(repo: string, run: (args: readonly string[], cwd: string) => TrackerRecoveryCommandResult): TrackerPostRecoverReadback {
+	let result: TrackerRecoveryCommandResult;
+	try {
+		result = run(["br", "list"], repo);
+	} catch (error) {
+		return { ok: false, detail: `native br list threw: ${errorMessage(error)}` };
+	}
+	if (result.code === 0) return { ok: true, detail: "native br list succeeded" };
+	const detail = (result.stderr || result.stdout).trim().slice(0, 200);
+	return { ok: false, detail: `native br list exited ${String(result.code)}${detail ? `: ${detail}` : ""}` };
 }
 
 function findBusyFlags(root: string): { flags: BusyFlag[]; error?: string } {
