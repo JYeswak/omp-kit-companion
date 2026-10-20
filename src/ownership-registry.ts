@@ -232,6 +232,26 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		terminal: { outcome: "reaped", producer: "omp (temp-name hygiene)" },
 		census: null, noCensus: "a name, not an ownership record, in a tool outside this repository", ownerBead: null,
 	},
+	{
+		id: "rch-baseline-atomic-tmp", title: "rch socket baseline atomic-write temp rch-socket-ino.json.<pid>.tmp",
+		rows: [], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
+		writers: ["src/diagnostics.ts"],
+		cancel: "the write renames the temp onto the baseline in the same call, or removes it on failure",
+		crash: "a crash between write and rename leaves a <pid>.tmp orphan; the next successful write sweeps stale tmps first",
+		respawn: "the pid names only a unique temp file, never the owner",
+		terminal: { outcome: "reaped", producer: "writeRchSocketBaseline stale-tmp sweep" },
+		census: null, noCensus: "transient temp name: gone after rename except for crash orphans the sweep reaps", ownerBead: "ompkit-774u.12",
+	},
+	{
+		id: "report-atomic-tmp", title: "report inject atomic-write temp <report>.<pid>.<rand>.tmp",
+		rows: [], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
+		writers: ["src/report-inject-job.ts"],
+		cancel: "atomicReplace renames the temp onto the report in the same call, or unlinks it on failure",
+		crash: "a crash between write and rename leaves a <pid>.<rand>.tmp orphan; the next run sweeps stale tmps first",
+		respawn: "the pid names only a unique temp file, never the owner",
+		terminal: { outcome: "reaped", producer: "atomicReplace stale-tmp sweep" },
+		census: null, noCensus: "transient temp name: gone after rename except for crash orphans the sweep reaps", ownerBead: "ompkit-774u.12",
+	},
 ];
 
 /** Entries that account for an inventory row, for the coverage test and the doctor's row lookup. */

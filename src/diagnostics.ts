@@ -1627,6 +1627,11 @@ export function writeRchSocketBaseline(stateRoot: string, baseline: RchSocketBas
 		return false;
 	}
 	if (inspectStateRoot(stateRoot)) return false;
+	try {
+		for (const name of readdirSync(stateRoot)) {
+			if (name.endsWith(".tmp")) { try { rmSync(join(stateRoot, name)); } catch { /* best effort */ } }
+		}
+	} catch { /* best effort: a stale crash orphan is never fatal */ }
 	const path = rchSocketBaselinePath(stateRoot), temp = `${path}.${process.pid}.tmp`;
 	try {
 		writeFileSync(temp, `${JSON.stringify(baseline)}\n`, { mode: 0o600 });
