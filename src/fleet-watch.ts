@@ -1,3 +1,4 @@
+import { classifyWorkProjection, type WorkProjectionInput } from "./work-projection.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { recoverBusyTracker, recoveryFlagDirs, type TrackerQuarantineReceipt, type TrackerRecoveryResult } from "./tracker-recovery.ts";
 import { YAML } from "bun";
@@ -602,6 +603,10 @@ export interface PullInput {
 	/** Fresh native observations only; exported comments/edges are not decision or custody authority. */
 	nativeState?: NativePullState | undefined;
 	coordinator?: PullCoordinator;
+	/** Director-facing work-coordination projection (jq88); absent: native rows stay the sole authority. */
+	workProjection?: WorkProjectionInput | undefined;
+	/** Observation clock for the projection above; required when it is present. */
+	workProjectionNowMs?: number | undefined;
 }
 
 interface NativeDecisionReference {
@@ -701,6 +706,17 @@ function workerSupplyVerdict(input: PullInput, rows: ReadyRow[] | null): Preassi
 	const coordinator = input.coordinator?.actor ?? `UNKNOWN director for ${input.sessionName}${input.coordinator ? ` (${input.coordinator.session}:${input.coordinator.pane})` : ""}`;
 	const facts = input.nativeState?.ok ? input.nativeState : undefined;
 	const verdict = leafVerdict(input.sessionName, rows, input.skipLabels, input.readyFailure ?? null, coordinator);
+	// jq88: a stale/unavailable work-coordination projection is UNKNOWN, never an empty queue.
+	// Fresh native rows below stay the dispatch authority; the projection only withholds.
+	if (input.workProjection !== undefined && input.workProjectionNowMs !== undefined) {
+		const projection = classifyWorkProjection(input.workProjection, new Date(input.workProjectionNowMs));
+		if (projection.kind === "STALE" || projection.kind === "UNAVAILABLE") {
+			return { ready: false, kind: "UNKNOWN",
+				text: `Fleet watch (UNKNOWN): no nudge for ${input.sessionName} workers: work-coordination projection ${projection.kind} (${projection.warning}); reread fresh native br ready before dispatch, never dispatch from the empty projection.`,
+				refusals: [{ class: "tool_read_failure", bead: null, actor: coordinator,
+					next: `director rereads fresh native br ready for ${input.sessionName}; ${projection.warning}` }] };
+		}
+	}
 	const stale = triageRefusals(input, coordinator, facts);
 	let refusals = verdict.refusals;
 	if (stale !== undefined) {
