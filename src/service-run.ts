@@ -209,6 +209,55 @@ export function claimIncarnation(claim: RunClaim): string {
 	return `${claim.pid}:${claim.startedAt}:${claim.token}`;
 }
 
+export interface ServiceLauncherMember {
+	pid: number;
+	command: string;
+}
+
+export type ServiceLauncherObservation =
+	| { launchers: ServiceLauncherMember[] }
+	| { failure: string };
+
+/**
+ * ompkit-bj08.5 [d]: observe the live launchers of one service job — every
+ * process whose argv runs `service run <job>` — through a `ps` snapshot.
+ * Exact-token match on the three argv tokens (never substring: `fleet-watch`
+ * must not match `fleet-watcher`, per the OMP_TOKEN lesson in services.ts),
+ * so job names with regex metacharacters need no escaping. Observed rows
+ * are normalized to `service run <job>` for the keeper comparison; a live
+ * second launcher shares the command but not the keeper pid, so the
+ * admission's excess check fires. ps lines are capped at 4096 chars and
+ * unparseable rows are skipped, never assumed. Failure is explicit (the
+ * caller must fail closed: an unobservable launcher set confirms
+ * nothing). Never throws.
+ */
+export function observeServiceLaunchers(run: (args: readonly string[]) => { code: number; stdout: string }, job: string): ServiceLauncherObservation {
+	let stdout: string;
+	try {
+		const result = run(["ps", "-axo", "pid=,args="]);
+		if (result.code !== 0) return { failure: `ps exited ${result.code}: launcher set unobservable` };
+		stdout = result.stdout;
+	} catch (error) {
+		return { failure: `ps probe threw: ${error instanceof Error ? error.message : String(error)}` };
+	}
+	const command = `service run ${job}`;
+	const launchers: ServiceLauncherMember[] = [];
+	for (const raw of stdout.split("\n")) {
+		const line = raw.length > 4096 ? raw.slice(0, 4096) : raw;
+		const tokens = line.trim().split(/\s+/);
+		if (tokens.length < 4) continue;
+		const pid = Number(tokens[0]);
+		if (!Number.isSafeInteger(pid)) continue;
+		for (let i = 1; i + 2 < tokens.length; i++) {
+			if (tokens[i] === "service" && tokens[i + 1] === "run" && tokens[i + 2] === job) {
+				launchers.push({ pid, command });
+				break;
+			}
+		}
+	}
+	return { launchers };
+}
+
 export const LOAD_GATE_FACTOR = 2.5;
 export const SKIPPED_LOAD_EXIT = 4;
 
