@@ -224,7 +224,9 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
 		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
-		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py"; do
+		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py" \
+		"hooks.d/pre-commit/46-omp-kit-staged-readme scripts/check-staged-readme.sh" \
+		"hooks.d/pre-commit/readme-check.ts scripts/readme-check.ts"; do
 		# shellcheck disable=SC2086
 		set -- $pair
 		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
@@ -475,6 +477,17 @@ install_staged_pysafe() {
 	printf 'installed staged-pysafe member: %s\n' "$member"
 }
 
+# install_staged_readme: the checker copy sits beside the member,
+# non-executable, so the chain runner never runs it arg-less. The member
+# judges the staged tree (READMESIZE1, ompkit-readme-changelog-currency-vrrn.1).
+install_staged_readme() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/46-omp-kit-staged-readme"
+	place "$KITROOT/scripts/readme-check.ts" "$dir/readme-check.ts" -x
+	place "$KITROOT/scripts/check-staged-readme.sh" "$member" +x
+	printf 'installed staged-readme member: %s\n' "$member"
+}
+
 # install_commit_notes: the commit-msg member applies the push notes gate's
 # trailer+fragment rule to the staged tree; it runs after the bead-id member.
 install_commit_notes() {
@@ -543,6 +556,7 @@ install_staged_imports
 install_staged_fragments
 install_staged_regexploit
 install_staged_pysafe
+install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
 # Verify the whole installed chain (any failure rolls every mutation back):

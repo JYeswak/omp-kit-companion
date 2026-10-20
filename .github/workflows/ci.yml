@@ -251,6 +251,7 @@ jobs:
           sh tests/cli/check-staged-imports.test.sh
           sh tests/cli/install-commit-msg-bead.test.sh
           sh tests/cli/check-staged-pysafe.test.sh
+          sh tests/cli/staged-readme.test.sh
           python3 tests/scripts/pysafe_test.py
           python3 tests/scripts/pysafe_check_test.py
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
@@ -377,6 +378,9 @@ jobs:
               echo "differential oracle accepted planted mismatch" >&2
               exit 1
           fi
+      - name: Refuse fleet literals in shipped config and src defaults
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
+        run: sh checkers/check-shipped-config.sh .
   cli-contracts:
     name: cli-contracts (${{ matrix.os }})
     if: ${{ always() && github.event.repository.private == false && needs.resolve-omp-versions.result == 'success' }}

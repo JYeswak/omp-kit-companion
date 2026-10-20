@@ -53,7 +53,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 35 named scopes, opt-in guard extensions
+Around that core sit diagnostics for 36 named scopes, opt-in guard extensions
 for multi-agent fleets, service jobs, and a self-updating release channel.
 
 ### Why use omp-kit
@@ -82,7 +82,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 31 rules: 17 `reminder`, 11 `tripwire`, 1 `always`
+The pack has 26 rules: 13 `reminder`, 10 `tripwire`, 1 `always`
 (`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
 (`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
 the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
@@ -131,7 +131,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 35 diagnostic scopes
+### Doctor: 36 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -188,6 +188,9 @@ omp-kit apply extensions --apply --yes --profiles all
 
 `skills/` ships five OMP skills:
 
+- **omp-kit-native:** fleet situations mapped to the native verb that handles
+  them (waiting, verification, publishing, CI state, scratch, sends, doctor,
+  receipts) instead of hand-rolled loops; file a bead for any missing verb.
 - **omp-native:** use native OMP tooling first: `omp ttsr list/test/scan`,
   plugin links, and read-only settings.
 - **jeff-planning-enhanced:** the fleet planning protocol (plan, review,
@@ -327,19 +330,7 @@ policy or extensions by implication.
 
 ## Comparison
 
-| | omp-kit | Plain OMP rules (`ttsr`) | Hand-written AGENTS.md text | Generic pre-commit hooks / sandboxing |
-|---|---|---|---|---|
-| Fires mid-turn, before the agent acts | Yes (OMP TTSR plus `tool_call` extensions) | Yes | No; the model may ignore it | Hooks fire at commit; sandboxes block at the OS boundary |
-| Each rule has fire and near-miss cases | Yes, run by `omp-kit test` | You write and run `omp ttsr test` yourself | No | Hook test suites vary |
-| Rule changes reviewed against old witnesses | `omp-kit review rules` | No | No | No |
-| Profile changes previewed and undoable | Plan, receipt, `undo` | Manual edits | n/a | n/a |
-| Fleet coordination (reservations, callbacks, sends) | Yes | No | Prose only | No |
-| Secret scan against your real vault | `doctor --scope secrets`, pre-commit hook | No | No | Pattern scanners (e.g. gitleaks) match shapes, not your vault values |
-| Isolation from the host | None; it is not a sandbox | None | None | Sandboxes isolate; hooks do not |
-| Setup cost | Installer plus OMP | Built in | A text file | Per-repo hook setup |
-
-Use plain `ttsr` for a handful of personal rules. Use omp-kit when the rules
-must be proven, shared across profiles, or audited. Neither replaces a sandbox.
+Moved to [docs/comparison.md](docs/comparison.md).
 
 ## Installation
 
@@ -529,6 +520,9 @@ explicit report rather than inventing zero activity.
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, admit via `commit-msg` and the [push check](docs/land.md), publish with no force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Send to a fleet pane and prove it landed | `omp-kit send omp-test %54 "status update" --json` |
+| `omp-kit sha` | `sha SHA [--repo PATH]...` | Resolve a commit across every fleet repo and report which repos hold it; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
+| `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations; one PATH per call | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
+| `omp-kit intake` | `intake --from joshua --text TEXT --seat SEAT [--kind rule\|work]` | Record one request, resolve the receiving seat's role, print DO or ROUTE | `omp-kit intake --from joshua --text 'fix this test' --seat chief --json` |
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |
 | `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|apply [--apply --yes]` | Release, quarantine and delete scratch; idle 72 h goes to quarantine, quarantine expires after 7 days | `omp-kit scratch plan --json` |
@@ -630,6 +624,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope mission` | Repos building through rch and whether their gate calls the kit lease | `omp-kit doctor --scope mission` |
 | `--scope hooks` | Stale hook members per fleet repo | `omp-kit doctor --scope hooks` |
 | `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
+| `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus
 report without writing.
@@ -733,18 +728,7 @@ OMP_KIT_UPDATE_ENABLED=1 OMP_KIT_UPDATE_POLL=github OMP_KIT_UPDATE_REPO=JYeswak/
 
 ## Troubleshooting
 
-| Error | Meaning | Fix |
-|---|---|---|
-| `OMP_UNAVAILABLE` | No supported `omp` launcher on PATH | Install OMP your usual way and put `omp` on PATH; omp-kit will not install it |
-| `REQUIRED_FINDING_FAILED: Release rule inventory cannot be verified` | `doctor --scope kit` ran from a source tree or a damaged install | Use an intact, verified release from the installer |
-| `PENDING_RECOVERY` / `PARTIAL_UNDO` | A receipt or inverse mutation needs recovery; nothing was rolled back or deleted | Run `omp-kit audit --json`, check the postimages, then `omp-kit update --reconcile RECEIPT --yes` for an update or `omp-kit undo RECEIPT --yes` |
-| `INVALID_STATE_ROOT` | `XDG_STATE_HOME` is relative or not canonical | Set an absolute `XDG_STATE_HOME` or unset it; `omp-kit repair --scope state` fixes only the mode |
-| `KIT_UPDATE_JOB_CONFIG` | kit-update has neither a static tuple nor poll settings | Set `OMP_KIT_UPDATE_POLL=github` with `OMP_KIT_UPDATE_REPO=owner/repo`, or the four static inputs, or leave the job off |
-| `BUNDLED_RUNTIME_UNAVAILABLE` | The release is missing `scripts/ttsr-harness.ts` or its resources | Reinstall an intact release and rerun |
-| `REGEX_BUDGET_REPORT_INVALID` | `--regex-budget-report` has no valid `JSON_REPORT=` line | Capture the full `scripts/regex-budget.ts` output, even on nonzero exit |
-| `FLEET_WATCH_CONFIG_MISSING` / `FLEET_WATCH_TMUX_TMPDIR_MISSING` | Fleet Watch has no config or no tmux socket directory | Create `~/.config/omp-kit/fleet-watch.json` and export `TMUX_TMPDIR` before installing the service |
-| `installer: refused: archive SHA-256 mismatch or size limit` | The downloaded archive does not match the index | Re-download; do not bypass the check |
-| `BEAD_REQUIRED` from `send` | A work dispatch cites no bead id | Add the bead id or pass `--no-bead-reason TEXT` |
+Moved to [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Limitations
 
@@ -778,40 +762,7 @@ what is planned is in [ROADMAP.md](ROADMAP.md).
 
 ## FAQ
 
-**Does omp-kit install or update OMP?**
-No. It reads the OMP you have, refuses with `OMP_UNAVAILABLE` when there is
-none, and leaves OMP updates to your OMP install method. The
-[compatibility matrix](docs/omp-compatibility.md) lists the OMP releases each
-certification tested.
-
-**Do I need both the installer and the plugin?**
-The plugin alone gives you the rules and extensions inside OMP. The installer
-gives you the CLI for testing, diagnosis, receipts, services and updates. Most
-setups use both.
-
-**How do I see which release I have and what changed?**
-`omp-kit --info` prints the installed version and paths. What changed in each
-release is in [CHANGELOG.md](CHANGELOG.md) and on the GitHub release page.
-
-**Can I write my own rules and test them the same way?**
-Yes. Put rules in a directory and cases in the eight-column TSV format, then
-run `omp-kit test --rules /abs/rules --cases /abs/cases.tsv --json`. `review
-rules` compares a candidate against the incumbent's witnesses. The
-[usage guide](docs/usage.md) covers the format.
-
-**Does anything run in the background?**
-Only service jobs you install with `omp-kit service install`. The CLI itself is
-not a daemon.
-
-**How do agents drive it?**
-`omp-kit robot-docs guide`, `omp-kit capabilities --json` and
-`omp-kit schema --json` describe the grammar, the runnable commands, and the
-envelope. Repository rules for agents working on the kit are in
-[AGENTS.md](AGENTS.md).
-
-**Where do I report a bug or a vulnerability?**
-Bugs: [CONTRIBUTING.md](CONTRIBUTING.md). Sensitive reports:
-[SECURITY.md](SECURITY.md).
+Moved to [docs/faq.md](docs/faq.md).
 
 ## About Contributions
 
