@@ -74,11 +74,11 @@ function scratchDir(): string {
 }
 
 /** Idle panes, injected probes; `state` persists idle counts and parks across fresh invocations like the service. */
-function harness(config: FleetWatchConfig, current: { world: World }, busy: string[] = []) {
+function harness(config: FleetWatchConfig, current: { world: World }, busy: string[] = [], policy: TrackerPolicy = OMP_KIT_POLICY) {
 	const dir = scratchDir();
 	const sends: { pane: string; text: string }[] = [];
 	const pullProbes: PullProbes = {
-		readPolicy: () => OMP_KIT_POLICY,
+		readPolicy: () => policy,
 		listStatuses: () => current.world.statusRows,
 		readIssues: () => current.world.issues,
 		triage: () => current.world.triage,
@@ -108,8 +108,8 @@ function harness(config: FleetWatchConfig, current: { world: World }, busy: stri
 const configOf = (overrides: Partial<FleetWatchSession> = {}): FleetWatchConfig => ({ enabled: true, intervalSeconds: 120, noDecisionChecks: 99, sessions: [{ ...session, ...overrides }] });
 
 /** Two idle ticks: the second reaches the nudge threshold. */
-function nudgeOnce(config: FleetWatchConfig, current: World, busy: string[] = ["%2"]) {
-	const run = harness(config, { world: current }, busy);
+function nudgeOnce(config: FleetWatchConfig, current: World, busy: string[] = ["%2"], policy: TrackerPolicy = OMP_KIT_POLICY) {
+	const run = harness(config, { world: current }, busy, policy);
 	run.tick();
 	run.tick();
 	return run;
@@ -515,4 +515,40 @@ test("[defer] a close edge never promotes blocked or deferred work into the revi
 	});
 	if (policy === null) throw new Error("parked-work policy fixture is invalid");
 	expect(reviewStatuses(policy)).toEqual(["in_review"]);
+});
+
+test("[defer] native nudge never grades a parked deferred bead; a legit review row is still assigned once to a non-author", () => {
+	const policy = parsePolicy({
+		workflow: {
+			statuses: ["open", "in_progress", "in_review", "deferred", "blocked", "closed"],
+			transitions: {
+				in_progress: ["in_review", "deferred", "blocked"],
+				in_review: ["closed"],
+				deferred: ["closed"],
+				blocked: ["closed"],
+			},
+			status_groups: { ready: ["open"] },
+		},
+	});
+	if (policy === null) throw new Error("parked-work nudge fixture is invalid");
+	// jev-b35c.11 shape plus the exact BrownGoose recurrence bead jev-b35c.32.4.4
+	// (deferred duplicate roll-up under a recorded STAYS DEFERRED disposition):
+	// parked deferred rows listed ahead of the legit review row, plus an
+	// available ready leaf the free author-pane should pull instead of parked beads.
+	const parked11: ReadyRow = { id: "jev-b35c.11", status: "deferred", assignee: "ThirdWorker", labels: [], issue_type: "task" };
+	const parked44: ReadyRow = { id: "jev-b35c.32.4.4", status: "deferred", assignee: "", labels: [], issue_type: "task" };
+	const run = nudgeOnce(configOf(), world({
+		readyRows: [leaf("x-1")],
+		statusRows: [parked11, parked44, review("x-9", "BlueWorker")],
+		issues: [issue("x-1", { parents: ["x-epic"] })],
+		triage: { usable: true, ids: ["x-1"] },
+	}), [], policy);
+	const all = [...run.worker("%1"), ...run.worker("%2"), ...run.coordinator()];
+	expect(all.some((text) => text.includes("jev-b35c.11"))).toBe(false);
+	expect(all.some((text) => text.includes("jev-b35c.32.4.4"))).toBe(false);
+	expect(all.filter((text) => text.includes("Grade "))).toHaveLength(1);
+	const [grade] = run.worker("%1");
+	expect(grade).toContain("Grade x-9 first (in_review, author BlueWorker; never grade your own)");
+	const [pull] = run.worker("%2");
+	expect(pull).toContain("take x-1 (bv --robot-triage #1, under x-epic)");
 });
