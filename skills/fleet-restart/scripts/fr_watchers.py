@@ -25,6 +25,16 @@ PAUSED = "watchers-paused.json"
 RESUMED = "watchers-resumed.json"
 
 
+def platform_status():
+    """None on macOS (launchd is available); otherwise an UNSUPPORTED refusal
+    dict with the reason, so the watcher stage skips instead of calling a
+    missing launchctl (ompkit-oq1h.9)."""
+    if sys.platform == "darwin":
+        return None
+    return {"result": "UNSUPPORTED",
+            "reason": "watchers stage needs macOS launchd (sys.platform=%s)" % sys.platform}
+
+
 def iso(epoch):
     return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

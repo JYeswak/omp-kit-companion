@@ -136,6 +136,26 @@ launchctl bootout "gui/$(id -u)/com.omp-kit.fleet-round-barrier"   # phase over
 
 Each run writes `barrier-<N>-<PHASE>.json` and `.md` (atomically) and appends its table to `barrier.launchd.log`, all in the round dir with umask 077. The timer only reports: it never sends mail or pane input.
 
+**Linux (systemd) or manual.** `barrier.launchd.plist` is macOS-only. On Linux, run the same
+judge command from a user timer, or by hand when a phase opens:
+
+```ini
+# ~/.config/systemd/user/fleet-round-barrier@.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bun %h/skills/fleet-round/scripts/fleet-round.ts barrier --config %h/round/fleet.json --round %i --phase INSIGHT --opened-at 2026-10-12T14:00:00Z --state %h/round --out-md %h/round/barrier-%i-INSIGHT.md
+```
+
+```ini
+# ~/.config/systemd/user/fleet-round-barrier@.timer
+[Timer]
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
+```
+
+Manual fallback (any POSIX shell): `bun "$SKILL/scripts/fleet-round.ts" barrier --config "$DIR/fleet.json" --round 0 --phase INSIGHT --opened-at <ISO> --state "$DIR"` whenever a phase opens. The timer only reports: it never sends mail or pane input.
+
 ## Never
 
 - Never write to a tracker, send to a pane, or send Agent Mail. `collect` runs br with `--no-auto-import --no-auto-flush`, and reads identity files directly because Agent Mail's resolver may adopt and rewrite them. `barrier` reads Agent Mail's store readonly; its only writes are its state and output files in the round dir.

@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import shlex
 import subprocess
 import sys
@@ -19,9 +20,9 @@ import fr_save
 import fr_watchers as fw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BUN_OMP = "bun /Users/josh/.bun/bin/omp"
+BUN_OMP = "bun ~/.bun/bin/omp"
 BUN = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun"
-TERN = "/Users/josh/Library/Application Support/Tern/omp/versions/"
+TERN = "/Users/Shared/Library/Application Support/Tern/omp/versions/"
 TARGET = TERN + "18.10.3"
 TARGET_INFO = {"ok": True, "command": "omp", "which": "/opt/homebrew/bin/omp", "path": TARGET, "version": "18.10.3", "via": "fake"}
 # The "+ 👁 0.42" spend segment is always present: OMP restores advisor spend from the transcript on resume.
@@ -238,6 +239,7 @@ def approve(run_dir, **extra):
 def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
     gate_check_env(case, tmp, good_env)
     gate_watchers(case, tmp, uid)
+    gate_portability(case, tmp)
     gate_save(case, tmp)
     gate_preserve(case, tmp)
     gate_parallel(case, tmp)
@@ -428,7 +430,7 @@ def gate_save(case, tmp):
     root = os.path.join(tmp, "save")
     home = fake_home(root)
     sess = "/h/.omp/agent/sessions/-Developer-x/2026-10-13T00-00-00-000Z_abc.jsonl"
-    lsof = "p501\nfcwd\nn/Users/x\nftxt\nn%s\nftxt\nn/usr/lib/dyld\nf38\nn%s\nf39\nn%s\nf40\nn%s\n" % (
+    lsof = "p501\nfcwd\nn/tmp/x\nftxt\nn%s\nftxt\nn/usr/lib/dyld\nf38\nn%s\nf39\nn%s\nf40\nn%s\n" % (
         TERN + "18.9.2", sess[:-6] + "/__advisor.jsonl", sess, sess[:-6] + "/FleetWorker.jsonl")
     case("CTL lsof fixture -> main session file (subagent and __advisor transcripts excluded)",
          fr_save.pick_session(fr_save.session_candidates(lsof), None) == (sess, None), json.dumps(fr_save.session_candidates(lsof)))
@@ -1259,6 +1261,53 @@ def gate_verdict_resume(case, root, home, agents, good_env, uid, aligned):
     case("CTL crash after VERIFY before VERDICT, all checks good -> resume re-verifies without re-sending: VERIFIED, exit 0",
          rep["panes"][0]["result"] == "VERIFIED" and rep["panes"][0]["version"] == "VERSION_OK" and rep["panes"][0]["session"] == "SESSION_KEPT"
          and len(fl.sends) == n == 1 and ev.count("VERDICT") == 1 and "REVERIFY" in ev and rc == 0, json.dumps([ev, rep["panes"], rc]))
+
+
+def home_hits(text):
+    """Per-user home-root literals, mirroring scripts/publishability-check.sh
+    (the /Users/Shared documentation exemption). Built by concatenation so
+    this probe never trips the scan itself (ompkit-oq1h.9)."""
+    pat = re.compile("/Users" + "/[^ /:]+" + "|/home" + "/[^ /:]+")
+    return [ln for ln in text.splitlines()
+            if pat.search(ln) and "/Users" + "/Shared" not in ln]
+
+
+def gate_portability(case, tmp):
+    both = fr.health_text("/r/repo", "s:0.1", which=lambda name: "/bin/%s" % name)
+    case("CTL health clause names bare tools on PATH",
+         "flywheel doctor --repo /r/repo --json" in both and "ntm health s:0.1 --json" in both
+         and "INIT includes HEALTH" in both, both)
+    only_ntm = fr.health_text("/r/repo", "s:0.1", which=lambda name: "/bin/ntm" if name == "ntm" else None)
+    case("NEG missing flywheel is omitted from the health clause, never reported as run",
+         "flywheel" not in only_ntm and "ntm health s:0.1 --json" in only_ntm, only_ntm)
+    neither = fr.health_text("/r/repo", "s:0.1", which=lambda name: None)
+    case("NEG no health tool on PATH -> record-by-hand line, no bare-tool claim",
+         neither.startswith("No HEALTH tool") and "flywheel" in neither and "ntm" in neither, neither)
+    real_platform = sys.platform
+    try:
+        sys.platform = "linux"
+        plat = fw.platform_status()
+        case("NEG watcher stage off macOS -> UNSUPPORTED skip with reason",
+             (plat or {}).get("result") == "UNSUPPORTED" and "launchd" in (plat or {}).get("reason", ""), json.dumps(plat))
+    finally:
+        sys.platform = real_platform
+    case("CTL watcher stage on this host is not refused", fw.platform_status() is None, json.dumps(fw.platform_status()))
+    planted = "x " + "/Users" + "/planted/bin " + "y"
+    case("NEG probe flags a planted per-user home literal", len(home_hits(planted)) == 1, planted)
+    case("CTL probe passes the shared-docs exemption and bare tildes",
+         home_hits("x /Users/Shared/y\nz ~/w\n") == [], "exempt/tilde")
+    roots = [os.path.dirname(HERE), os.path.join(os.path.dirname(os.path.dirname(HERE)), "fleet-round")]
+    found = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != ".ruff_cache"]
+            for fn in filenames:
+                if not fn.endswith((".py", ".md", ".json", ".plist", ".ts", ".sh")):
+                    continue
+                with open(os.path.join(dirpath, fn), encoding="utf-8", errors="replace") as fh:
+                    for ln in home_hits(fh.read()):
+                        found.append(os.path.join(dirpath, fn) + ": " + ln.strip()[:80])
+    case("NEG shipped skill sources carry no per-user home literal", not found, json.dumps(found[:5]))
 
 
 # ---------- uxr3 ----------

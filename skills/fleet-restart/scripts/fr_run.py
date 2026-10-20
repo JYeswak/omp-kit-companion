@@ -141,7 +141,12 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
             herdr = {"ok": False, "why": "herdr_fn: %s" % exc, "rows": []}
     plan["herdr"] = herdr
     write_json(os.path.join(run_dir, "plan.json"), plan)
-    disc = fw.discover(ctx.agents_dir, ctx.registry, ctx.run_fn, ctx.uid)
+    plat = fw.platform_status()
+    if plat is not None:
+        disc = {"agents_dir": ctx.agents_dir, "jobs": [], "unreadable": [], "registered_missing": sorted(ctx.registry),
+                "unclassified": [], "pause_plan": [], "deadman_left": []}
+    else:
+        disc = fw.discover(ctx.agents_dir, ctx.registry, ctx.run_fn, ctx.uid)
     saved = {r["pane_id"]: r for r in save_doc["rows"]}
     rows, chief_cmd = [], None
     for r in plan["rows"]:
@@ -175,6 +180,8 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
         refused.append("CHIEF_UNKNOWN")
     if disc["unclassified"]:
         refused.append("HOLD_UNCLASSIFIED")
+    if plat is not None:
+        refused.append("WATCHERS_UNSUPPORTED: %s" % plat["reason"])
     if disc["deadman_left"]:
         refused.append("PRIOR_RUN_DEADMAN_INSTALLED")
     holds, acts, modes, versions = {}, {}, {}, {}
@@ -192,7 +199,8 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
            "only": list(only), "wave": wave, "busy_timeout_min": busy_timeout_min, "canary": int(canary), "strict_advisor": bool(strict_advisor),
            "align": plan["align"], "target": target, "herdr": plan.get("herdr") or {"ok": False, "why": "not collected", "rows": []},
            "stages": STAGES, "rows": rows, "holds": holds, "refused": refused,
-           "watchers": {"pause": disc["pause_plan"], "unclassified": [j for j in disc["jobs"] if j["status"] == "HOLD_UNCLASSIFIED"],
+           "watchers": {"platform": "darwin-launchd" if plat is None else plat,
+                        "pause": disc["pause_plan"], "unclassified": [j for j in disc["jobs"] if j["status"] == "HOLD_UNCLASSIFIED"],
                         "unreadable": disc["unreadable"], "registered_missing": disc["registered_missing"], "deadman_left": disc["deadman_left"]},
            "counts": {"agent_panes": sum(1 for r in rows if r.get("omp_pid")), "advisor_on": sum(1 for r in rows if (r.get("advisor") or {}).get("on")),
                       "session_files": sum(1 for r in rows if r.get("session_file")), "actions": acts, "modes": modes, "versions": versions,

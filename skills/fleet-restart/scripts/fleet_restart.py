@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -52,7 +53,7 @@ def env_check(env, uid):
     elif env.get("TMUX_TMPDIR"):
         sock = os.path.join(env["TMUX_TMPDIR"], "tmux-%d" % uid, "default")
     else:
-        return False, "TMUX_ENV_MISSING", "export TMUX_TMPDIR=<fleet socket dir> (this fleet: /Users/josh/.tmux-sockets)"
+        return False, "TMUX_ENV_MISSING", "export TMUX_TMPDIR=<fleet socket dir> (e.g. $HOME/.tmux-sockets)"
     if not os.path.exists(sock):
         return False, "TMUX_SOCKET_MISSING", "no tmux server socket at %s" % sock
     return True, "OK", sock
@@ -538,6 +539,21 @@ def restart_manifest(plan, mode="restart", save=None):
     return man
 
 
+def health_text(repo, session, which=None):
+    """INIT health clause for a staged director message. Tools are named bare
+    (resolved on the operator's PATH, never a per-user absolute path); a tool
+    missing from PATH is omitted from the clause, never reported as run."""
+    find = which or shutil.which
+    parts = []
+    if find("flywheel"):
+        parts.append("flywheel doctor --repo %s --json" % repo)
+    if find("ntm"):
+        parts.append("ntm health %s --json" % session)
+    if not parts:
+        return "No HEALTH tool (flywheel/ntm) is on PATH: record versions by hand. "
+    return "INIT includes HEALTH: %s. " % " and ".join(parts)
+
+
 def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directors):
     """Directors are named by the operator (pane position is not a role: on
     2026-10-11 uds--burn-down:0.1 was a worker and control-plane:0.1 ran UDS)."""
@@ -559,9 +575,10 @@ def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directo
                 "Fresh session on omp-kit %s. Read %s, your row and your workers' rows, then your pane snapshot %s.\n"
                 "Follow the kit tick order: INIT → RESEARCH → PLAN → BEADS → DISPATCH → VALIDATE → INTEGRATE → LEARN. "
                 "VALIDATE is before INTEGRATE. A callback with no validation receipt is not INTEGRATE-ready.\n"
-                "INIT includes HEALTH: /Users/josh/Developer/foundry/bin/flywheel doctor --repo %s --json and ntm health %s --json. "
+                % (kit_version, handoff, snap)
+                + health_text(r["cwd"], r["session"]) +
                 "A stale user/shell pane is a warning, not a block; exit 30 repo_not_initialized means phase INIT.\n"
-                "Callback, one line: %s\n" % (kit_version, handoff, snap, r["cwd"], r["session"], CALLBACK))
+                "Callback, one line: %s\n" % CALLBACK)
         else:
             text = (
                 "Fresh session on omp-kit %s. Read your row in %s and your pane snapshot %s.\n"
@@ -1085,6 +1102,10 @@ def main(argv):
 
 def watchers_cmd(args, env, uid):
     import fr_watchers as fw
+    plat = fw.platform_status()
+    if plat:
+        dump(dict(plat, action=args.action))
+        return 0
     reg = fw.load_registry(args.registry or fw.REGISTRY_PATH)
     if args.action == "snapshot":
         disc = fw.discover(args.agents_dir, reg, run, uid)

@@ -42,29 +42,29 @@ SONNET_IDLE = [  # live 2026-10-11 shape: boxed status bar with ' > ' separators
 ]
 SHELL_WITH_OLD_STATUS = [" π · ◕ CI glm-5.3-flash · 📁 ~/Developer/modeltest · S0.1"] + ["output line %d" % i for i in range(10)] + [
     "josh@Joshs-Mac-Studio modeltest % rea setup --client omp", "zsh: command not found: rea", "josh@Joshs-Mac-Studio modeltest % "]
-OMP = "bun /Users/josh/.bun/bin/omp"
-CLI = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun /Users/josh/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"
+OMP = "bun ~/.bun/bin/omp"
+CLI = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun ~/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"
 WORKER = CLI + " __omp_worker_daemon_broker"
 
 
 def inventory():
     panes = [
         # Sonnet worker launched bare: no --profile, model only in args/screen.
-        {"pane": "modeltest:0.1", "pane_id": "%55", "pane_pid": 100, "cwd": "/Users/josh/Developer/modeltest", "screen": SONNET_IDLE},
+        {"pane": "modeltest:0.1", "pane_id": "%55", "pane_pid": 100, "cwd": "~/Developer/modeltest", "screen": SONNET_IDLE},
         # director busy mid-turn.
-        {"pane": "control-plane:0.1", "pane_id": "%17", "pane_pid": 200, "cwd": "/Users/josh/Developer/uds", "screen": BUSY},
+        {"pane": "control-plane:0.1", "pane_id": "%17", "pane_pid": 200, "cwd": "~/Developer/uds", "screen": BUSY},
         # re-exec'd omp (cli.js shape) with --thinking/--auto-approve flags.
-        {"pane": "uds--burn-down:0.1", "pane_id": "%36", "pane_pid": 300, "cwd": "/Users/josh/Developer/uds", "screen": IDLE},
+        {"pane": "uds--burn-down:0.1", "pane_id": "%36", "pane_pid": 300, "cwd": "~/Developer/uds", "screen": IDLE},
         # protected pane.
-        {"pane": "uds--burn-down:0.0", "pane_id": "%31", "pane_pid": 400, "cwd": "/Users/josh/Developer/uds", "screen": IDLE},
+        {"pane": "uds--burn-down:0.0", "pane_id": "%31", "pane_pid": 400, "cwd": "~/Developer/uds", "screen": IDLE},
         # chief pane.
-        {"pane": "omp-test:0.1", "pane_id": "%3", "pane_pid": 500, "cwd": "/Users/josh/Developer/omp-test", "screen": IDLE},
+        {"pane": "omp-test:0.1", "pane_id": "%3", "pane_pid": 500, "cwd": "~/Developer/omp-test", "screen": IDLE},
         # plain shell with only a stray worker-daemon descendant.
-        {"pane": "jev:0.0", "pane_id": "%19", "pane_pid": 600, "cwd": "/Users/josh/Developer/jev", "screen": ["%"]},
+        {"pane": "jev:0.0", "pane_id": "%19", "pane_pid": 600, "cwd": "~/Developer/jev", "screen": ["%"]},
         # agent whose cwd is forbidden.
         {"pane": "modeltest:0.2", "pane_id": "%4", "pane_pid": 700, "cwd": "/private/tmp", "screen": IDLE},
         # idle agent with a long-running git child (rz5.101.1).
-        {"pane": "cfs:0.2", "pane_id": "%8", "pane_pid": 800, "cwd": "/Users/josh/Developer/cfs", "screen": IDLE},
+        {"pane": "cfs:0.2", "pane_id": "%8", "pane_pid": 800, "cwd": "~/Developer/cfs", "screen": IDLE},
     ]
     procs = [
         {"pid": 100, "ppid": 1, "args": "-zsh"},
@@ -177,14 +177,14 @@ def main():
     case("NEG chief pane -> SKIP_CHIEF", rows["omp-test:0.1"]["action"] == "SKIP_CHIEF", rows["omp-test:0.1"]["action"])
     case("NEG /private/tmp cwd -> HOLD_CWD", rows["modeltest:0.2"]["action"] == "HOLD_CWD", rows["modeltest:0.2"]["action"])
     # --- Tern compiled omp (measured ps shapes 2026-10-11): an agent by its own first token or versioned path
-    tern = "/Users/josh/Library/Application Support/Tern/omp/versions/18.9.2"
+    tern = "/Users/Shared/Library/Application Support/Tern/omp/versions/18.9.2"
     for args, want in [("omp --profile codex --model gpt-6-luna", ["--profile", "codex", "--model", "gpt-6-luna"]),
                        ("/opt/homebrew/bin/omp -p --profile claude", ["-p", "--profile", "claude"]),
                        (tern + " --profile muse --thinking high", ["--profile", "muse", "--thinking", "high"]),
                        ("omp", [])]:
         got = fr.omp_match(args)
         case("CTL Tern compiled omp detected, flags kept: %s" % args[:40], got == want, json.dumps(got))
-    for args in ["zsh -lc cd /Users/josh/Developer/jev && omp --profile glm; exec zsh -l",
+    for args in ["zsh -lc cd ~/Developer/jev && omp --profile glm; exec zsh -l",
                  "omp-kit status --json", "/opt/homebrew/bin/omp-kit test", "omp __omp_worker_daemon_broker",
                  tern + "-rc.1 --profile x", "grep omp", tern.replace("/Tern/", "/Other/") + " --profile x"]:
         case("NEG not an omp agent: %s" % args[:48], fr.omp_match(args) is None, json.dumps(fr.omp_match(args)))
@@ -201,7 +201,7 @@ def main():
     row = dict(rows["uds--burn-down:0.1"])
     good_cmd = fr.respawn_cmd(row)
     case("CTL respawn cmd from live args passes flag check", fr.check_cmd_flags(good_cmd, row["flags"])[0], good_cmd)
-    screen_cmd = "cd /Users/josh/Developer/uds && omp --model muse-code/muse-spark-1.3-contributor"
+    screen_cmd = "cd ~/Developer/uds && omp --model muse-code/muse-spark-1.3-contributor"
     ok, code = fr.check_cmd_flags(screen_cmd, row["flags"])
     case("NEG screen-rebuilt respawn cmd -> FLAGS_NOT_FROM_LIVE_ARGS", not ok and code == "FLAGS_NOT_FROM_LIVE_ARGS", code)
     save_fixture = {"rows": [{"pane_id": r["pane_id"], "session_file": "/s/sessions/-x/%s.jsonl" % r["pane_id"][1:], "holds": [],

@@ -29,7 +29,7 @@ Triggers: "restart the fleet", "fleet-wide restart", "restart all agents on the 
 2. **Copy flags from the live process, never from the screen.** On 2026-10-11, 24 of 32 screen-built commands were wrong. Respawn runs `tmux respawn-pane -k -t <pane> -c <cwd> "zsh -lc 'cd <cwd> && omp <live flags> --resume <session file>[ --advisor]; exec zsh -l'"`. `<live flags>` must keep `--profile`. `<live flags>` = the process argv minus argv[0] and minus any `--resume`/`-r`/`--restore` pair. `omp` is the plain login-shell command, never a versioned path or bun. `send` refuses a row whose flags differ from the live process or whose `--resume` is not the saved file. Unknown launch affinity, or a relaunch that drops a live `--profile` (including `ntm respawn` when affinity is unknown), is `HOLD_PROFILE`, not a send: that start is the default profile and `<profile>/agent/WATCHDOG.yml` does not load. Do not guess a profile when the session file is not under `~/.omp/profiles/<name>/`. A herdr relaunch whose session file is under that directory adds `--profile <name>` and records it in `added` (rule 16). The script does not emit `HOLD_PROFILE` yet; the chief still must not send that row.
 3. **Detect agents by process, not model name.** An agent pane holds `bun …/.bun/bin/omp`, `bun …/pi-coding-agent/dist/cli.js` or a Tern compiled `omp`, excluding `__omp_worker*`.
 4. **Never restart a busy pane, never touch a composer with text.** A spinner means mid-turn: the run polls busy panes every 30 s up to `--busy-timeout-min` and acts at the turn boundary; still busy → `QUEUED_BUSY`, zero sends. Text typed or queued in the composer → `HOLD_COMPOSER`: `/restart` would be submitted with it and a respawn would discard it. An unreadable status bar or composer layout is a hold (fail closed). Every send re-reads the screen first.
-5. **ntm needs the fleet socket.** `check-env` checks `TMUX_TMPDIR=/Users/josh/.tmux-sockets` (or `$TMUX`); every apply refuses without it.
+5. **ntm needs the fleet socket.** `check-env` checks `TMUX_TMPDIR` (e.g. `$HOME/.tmux-sockets`) or `$TMUX`; every apply refuses without it.
 6. **One operator approval per run, bound to the run manifest.** `run --apply` refuses unless the approval file carries the sha256 of `run-manifest.json`, the operator's name and their words verbatim. Re-planning or editing the manifest changes the sha and voids the approval. Write the approval only from an operator message in this conversation; the script binds bytes, it cannot prove a human wrote them. Re-dispatch messages (stage 7) get their own approval.
 7. **Plugin links must point at the active release before any restart.** `run --plan` refuses with `ALIGN_STALE`, and `run --apply` re-checks align and the target in preflight.
 8. **Skip what is not yours.** The chief pane is never touched by the run; the report prints its exact respawn command for the operator to run last. Also skipped: `DEFAULT_PROTECT` (`uds--burn-down:0.0`), shell panes, `/tmp` cwds. A protected pane runs only when `--unprotect <pane>` is given at plan and apply and the approval's `unprotect` list names it.
@@ -72,9 +72,9 @@ Call the script by its full path in every command. Never put the launcher in a s
 
 ```bash
 SKILL=<directory holding this SKILL.md>      # e.g. ~/.local/opt/omp-kit/releases/<v>/skills/fleet-restart
-RUN=/Users/josh/Developer/omp-test/var/agent-tmp/fleet-restart-$(date +%Y%m%d).$$
+RUN=$HOME/Developer/omp-test/var/agent-tmp/fleet-restart-$(date +%Y%m%d).$$
 mkdir -p "$RUN"; printf 'pid=%s\nlabel=fleet-restart\npurpose=fleet restart run\n' $$ > "$RUN/.owner"; export TMPDIR="$RUN"
-export TMUX_TMPDIR=/Users/josh/.tmux-sockets
+export TMUX_TMPDIR=$HOME/.tmux-sockets
 python3 "$SKILL/scripts/selftest.py"                              # every gate must bite; stop on FAIL
 python3 "$SKILL/scripts/fleet_restart.py" check-env               # exit 2 = TMUX env/socket missing
 ```

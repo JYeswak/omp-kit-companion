@@ -1,0 +1,4 @@
+- Remove per-user `/Users/josh` literals from the shipped fleet-restart and fleet-round skills: socket hints, setup examples, HEALTH text, and selftest fixtures now use `$HOME`/`~`/bare tool names or the shared-docs path, so `git grep -n /Users/josh -- skills` is empty. (ompkit-oq1h.9)
+- Stage the director HEALTH clause from PATH-resolved tools: a missing flywheel or ntm is omitted from the message, never reported as run; no health tool on PATH yields an explicit record-by-hand line.
+- Gate the watcher stage on macOS: off-darwin `watchers` commands and run plans report UNSUPPORTED with the launchd reason instead of calling a missing launchctl.
+- Document the Linux/systemd (or manual) path for the fleet-round barrier timer next to the launchd template.
