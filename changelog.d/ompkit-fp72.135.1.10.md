@@ -1,0 +1,1 @@
+- Load `extensions/secret-output-guard.ts` through `package.json` omp.extensions (was shipped but never ran); add `omp.notLoadedExtensions` so every non-test extensions/*.ts is either loaded or explicitly excused with a reason, enforced by `extensions/ext-manifest.test.ts`. (ompkit-fp72.135.1.10)

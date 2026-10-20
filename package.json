@@ -17,7 +17,26 @@
       "extensions/kit-loop-guard.ts",
       "extensions/kit-upgrade-notice.ts",
       "extensions/kit-goal-keepalive.ts",
-      "extensions/kit-agent-mail-guard.ts"
-    ]
+      "extensions/kit-agent-mail-guard.ts",
+      "extensions/secret-output-guard.ts"
+    ],
+    "notLoadedExtensions": {
+      "extensions/adapter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/cass-search.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/dcg-tool-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/delete-effect-admission.ts": "library module with no extension entrypoint; imported by extensions/slb-guard-fail-closed.ts",
+      "extensions/ee-ambient-session-start.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/ee-failure-journal.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/fleet-policy.ts": "library module with no extension entrypoint; imported by extensions/fleet-guard.ts",
+      "extensions/jev-memory-filter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/kit-write-ledger.ts": "library module with no extension entrypoint; imported by extensions/kit-save-guard.ts",
+      "extensions/observational-tool-result.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/rch-lane-bind-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/rch-mutator.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/skill-topology-session-start.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/slb-guard-fail-closed.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/zestgraph-danger-gate.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/zeststream-cast-spawn-cap.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest"
+    }
   }
 }

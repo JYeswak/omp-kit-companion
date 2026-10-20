@@ -12,7 +12,7 @@
 
 </div>
 
-A tested rule pack, six guard extensions, five skills, and a guarded CLI for
+A tested rule pack, ten guard extensions, five skills, and a guarded CLI for
 an existing OMP install.
 
 ```sh
@@ -149,7 +149,7 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares six extensions:
+The repo is an OMP plugin. `package.json` declares ten extensions:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
@@ -159,8 +159,9 @@ The repo is an OMP plugin. `package.json` declares six extensions:
 | `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, re-reads `AGENTS.md` and the in-progress bead; refuses a self-close (`SELF_CLOSE_REFUSED`), `blocked` without an open fix (`BLOCK_REFUSED`) and a close that strands a blocked bead (`BLOCK_RELEASE_REQUIRED`) |
 | `kit-agent-mail-guard.ts` | `tool_call` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
 | `kit-callback.ts` | `agent_end` | For `fleet-watch.json` worker panes, sends the last `DONE`/`BLOCKED` line to the coordinator via `ntm send`. Never blocks |
+| `secret-output-guard.ts` | `tool_call`, `tool_execution_end` | Redacts secret-shaped tool output (gh token shapes, keychain passwords, `cf-secret` values, binding tokens) before emission; safe metadata passes through byte-identical |
 
-Installing the plugin loads all six. `omp-kit apply extensions` installs only
+Installing the plugin loads all ten. `omp-kit apply extensions` installs only
 the two listed in `policy/extensions.json` (`kit-guard-optin.ts` and
 `fleet-guard.ts`) into the profiles you select:
 
