@@ -1,5 +1,6 @@
+import { classifyWorkProjection, type WorkProjectionInput } from "./work-projection.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { recoverBusyTracker, recoveryFlagDirs, type TrackerQuarantineReceipt, type TrackerRecoveryResult } from "./tracker-recovery.ts";
+import { recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { YAML } from "bun";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -25,16 +26,24 @@ export type FleetWatchSession = {
 	/** false parks the session's workers: no pull nudge, no escalation. Absent: pulling is on. */
 	pullEnabled?: boolean;
 };
-export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[] };
+export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[]; registeredTrackers?: FleetWatchRegisteredTracker[] };
+/**
+ * ompkit-ps3lo: MP6-registry seam. Every registered tracker is covered by
+ * the health tick even when no session entry names its repo; recovery still
+ * runs under the owning director named here. Absent, the legacy
+ * sessions-only coverage runs.
+ */
+export type FleetWatchRegisteredTracker = { repo: string; session: string };
 
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
-export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt };
+export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt; repo?: string };
+export type FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION"; session: string; pane: string; checks: number; text: string; receipt: TrackerRetentionReceipt; repo?: string };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
 	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
 };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchPullAction;
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -602,6 +611,10 @@ export interface PullInput {
 	/** Fresh native observations only; exported comments/edges are not decision or custody authority. */
 	nativeState?: NativePullState | undefined;
 	coordinator?: PullCoordinator;
+	/** Director-facing work-coordination projection (jq88); absent: native rows stay the sole authority. */
+	workProjection?: WorkProjectionInput | undefined;
+	/** Observation clock for the projection above; required when it is present. */
+	workProjectionNowMs?: number | undefined;
 }
 
 interface NativeDecisionReference {
@@ -701,6 +714,17 @@ function workerSupplyVerdict(input: PullInput, rows: ReadyRow[] | null): Preassi
 	const coordinator = input.coordinator?.actor ?? `UNKNOWN director for ${input.sessionName}${input.coordinator ? ` (${input.coordinator.session}:${input.coordinator.pane})` : ""}`;
 	const facts = input.nativeState?.ok ? input.nativeState : undefined;
 	const verdict = leafVerdict(input.sessionName, rows, input.skipLabels, input.readyFailure ?? null, coordinator);
+	// jq88: a stale/unavailable work-coordination projection is UNKNOWN, never an empty queue.
+	// Fresh native rows below stay the dispatch authority; the projection only withholds.
+	if (input.workProjection !== undefined && input.workProjectionNowMs !== undefined) {
+		const projection = classifyWorkProjection(input.workProjection, new Date(input.workProjectionNowMs));
+		if (projection.kind === "STALE" || projection.kind === "UNAVAILABLE") {
+			return { ready: false, kind: "UNKNOWN",
+				text: `Fleet watch (UNKNOWN): no nudge for ${input.sessionName} workers: work-coordination projection ${projection.kind} (${projection.warning}); reread fresh native br ready before dispatch, never dispatch from the empty projection.`,
+				refusals: [{ class: "tool_read_failure", bead: null, actor: coordinator,
+					next: `director rereads fresh native br ready for ${input.sessionName}; ${projection.warning}` }] };
+		}
+	}
 	const stale = triageRefusals(input, coordinator, facts);
 	let refusals = verdict.refusals;
 	if (stale !== undefined) {
@@ -933,7 +957,25 @@ export function loadFleetWatchConfig(path: string): FleetWatchConfig {
 		if (session.phase !== undefined && (typeof session.phase !== "string" || session.phase === "")) throw invalid("phase");
 		if (session.pullEnabled !== undefined && typeof session.pullEnabled !== "boolean") throw invalid("pullEnabled");
 	}
-	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions };
+	const registeredTrackers = parseRegisteredTrackers((value as Record<string, unknown>).registeredTrackers);
+	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions, ...(registeredTrackers === undefined ? {} : { registeredTrackers }) };
+}
+
+/**
+ * ompkit-ps3lo: optional MP6-registry seam. Undefined when absent (legacy
+ * sessions-only coverage); otherwise every entry names a non-empty repo and
+ * its owning-director session. Anything else is a config error.
+ */
+function parseRegisteredTrackers(value: unknown): FleetWatchRegisteredTracker[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new Error("FLEET_WATCH_CONFIG_INVALID: registeredTrackers");
+	return value.map((entry, index) => {
+		const invalid = new Error(`FLEET_WATCH_CONFIG_INVALID: registeredTrackers[${index}]`);
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid;
+		const { repo, session } = entry as Record<string, unknown>;
+		if (typeof repo !== "string" || repo.trim() === "" || typeof session !== "string" || session.trim() === "") throw invalid;
+		return { repo, session };
+	});
 }
 
 function readNativePullState(repo: string, ids: readonly string[], coordinator: string | null, readyCommand?: string): NativePullState {
@@ -1015,6 +1057,12 @@ export type FleetWatchOnceDeps = {
 	statePath?: string | null;
 	now?: () => number;
 	recoverTracker?: (repo: string, session: string) => TrackerRecoveryResult | null;
+	/**
+	 * ompkit-rhy9.15 RET1: bounded quarantine retention per repo per tick.
+	 * Absent, the canonical retainTrackerQuarantine runs (silent unless it
+	 * reaps); null disables retention for the tick.
+	 */
+	retainTracker?: ((repo: string) => TrackerRetentionOutcome | null) | null;
 	/**
 	 * ompkit-bj08.5: pause/custody admission snapshot. Every send, sendKeys
 	 * and tracker-recovery effect consults it first; a refusal performs zero
@@ -1117,9 +1165,58 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const recovery = (deps.recoverTracker ?? recoverBusyTracker)(session.repo, session.session);
 		recoveryKinds.set(session.repo, recovery?.kind ?? null);
 		if (!recovery) continue;
-		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }) };
+		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }), repo: session.repo };
 		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
 		actions.push(action);
+	}
+	// ompkit-ps3lo: MP6-registered trackers are covered even without a
+	// session entry. Recovery still needs its owning director: a registered
+	// session no configured session names is covered exactly once with a
+	// named NO_OWNING_DIRECTOR block and zero recover commands.
+	const configuredSessions = new Set(config.sessions.map((session) => session.session));
+	for (const tracker of config.registeredTrackers ?? []) {
+		if (recoveredRepos.has(tracker.repo)) continue;
+		if (!configuredSessions.has(tracker.session)) {
+			recoveredRepos.add(tracker.repo);
+			const text = `Fleet Watch: tracker recovery blocked; NO_OWNING_DIRECTOR: registered tracker ${tracker.repo} names session ${tracker.session}, which is not a configured session; zero recover commands ran.`;
+			const blockedAction: FleetWatchRecoveryAction = { kind: "RECOVERY_BLOCKED", session: tracker.session, pane: "tracker", checks: 0, text, repo: tracker.repo };
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...blockedAction }) + "\n");
+			actions.push(blockedAction);
+			continue;
+		}
+		recoveredRepos.add(tracker.repo);
+		if (!admittedEffect(deps.admission, "tracker-recovery")) {
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: tracker.session, pane: "tracker", checks: 0, repo: tracker.repo, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
+			recoveryKinds.set(tracker.repo, null);
+			continue;
+		}
+		const registeredRecovery = (deps.recoverTracker ?? recoverBusyTracker)(tracker.repo, tracker.session);
+		recoveryKinds.set(tracker.repo, registeredRecovery?.kind ?? null);
+		if (!registeredRecovery) continue;
+		const registeredAction: FleetWatchRecoveryAction = { kind: registeredRecovery.kind, session: tracker.session, pane: "tracker", checks: 0, text: registeredRecovery.text, ...(registeredRecovery.receipt === undefined ? {} : { receipt: registeredRecovery.receipt }), repo: tracker.repo };
+		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...registeredAction }) + "\n");
+		actions.push(registeredAction);
+	}
+	// ompkit-rhy9.15 RET1: one bounded retention pass per unique repo per
+	// tick, after recovery. The canonical operation is silent (null) unless
+	// it reaps, so healthy ticks log nothing new. Admission gates the pass
+	// like every other tracker effect; a refusal performs zero effects.
+	const retentionRepos = new Map<string, string>();
+	for (const session of config.sessions) if (!retentionRepos.has(session.repo)) retentionRepos.set(session.repo, session.session);
+	for (const tracker of config.registeredTrackers ?? []) if (!retentionRepos.has(tracker.repo)) retentionRepos.set(tracker.repo, tracker.session);
+	const retainOne = deps.retainTracker === null ? null : (deps.retainTracker ?? ((target: string) => retainTrackerQuarantine(target, { now: deps.now })));
+	if (retainOne !== null) {
+		for (const [repo, sessionName] of retentionRepos) {
+			if (!admittedEffect(deps.admission, "tracker-quarantine-retention")) {
+				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: sessionName, pane: "tracker", checks: 0, repo, text: "admission refused tracker quarantine retention; no artifact was moved" }) + "\n");
+				continue;
+			}
+			const retention = retainOne(repo);
+			if (!retention) continue;
+			const action: FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION", session: sessionName, pane: "tracker", checks: 0, text: retention.text, receipt: retention.receipt, repo };
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
+			actions.push(action);
+		}
 	}
 	let stateDirty = false;
 	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
