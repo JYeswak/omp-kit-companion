@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, serviceLabel } from "../../src/service.ts";
+import { CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { acquireDaemonLock, DAEMON_HELD_EXIT } from "../../src/service-run.ts";
 
@@ -134,8 +135,20 @@ Restart=on-failure
 RestartSec=60
 `;
 
-test("known_jobs_cc_daemon scaffolding for .18.2", () => {
-	expect(KNOWN_JOBS["cc"]).toMatchObject({ name: "cc", label: "com.omp-kit.cc", kind: "daemon" });
+test("known_jobs_includes_cc_daemon", () => {
+	expect(KNOWN_JOBS["cc"]).toMatchObject({ name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0 });
+});
+
+test("run_cc_resolves_fleet_root", () => {
+	sanitizedEnv();
+	const home = fixtureHome();
+	const root = fixtureFleetRoot();
+	const adapter = join(root, "scripts", "cc", "cc.py");
+	const cmd = ccServiceCommand(home, adapter);
+	expect(cmd.argv).toEqual(["python3", adapter, "serve", "--host", "127.0.0.1", "--port", "7474", "--lanes"]);
+	expect(CC_SERVICE_HOST).toBe("127.0.0.1");
+	expect(CC_SERVICE_PORT).toBe(7474);
+	expect(cmd.env.CC_STATE).toBe(join(home, ".local", "state", "omp-kit", "cc"));
 });
 
 test("render_daemon_plist_golden", () => {
@@ -257,8 +270,11 @@ test("single_instance_lock: second concurrent service run exits 75 ALREADY_RUNNI
 	} finally {
 		if (first.status === "ACQUIRED") first.lock.release();
 	}
+	// Lock free: `service run cc` execs the fixture adapter (a python stub that
+	// exits 0) with CC_STATE set, holding the one-instance lock for the child.
 	const after = cli(["service", "run", "cc"], home, namespace());
-	expect(after.envelope.errors[0].code).toBe("SERVICE_BODY_UNIMPLEMENTED");
+	expect(after.code).toBe(0);
+	expect(after.envelope.data).toMatchObject({ job: "cc", status: "EXITED", exit: 0 });
 });
 
 test("sigkill holder leaves no stale daemon lock", async () => {

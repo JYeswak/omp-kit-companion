@@ -63,6 +63,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { ccServiceCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
@@ -84,6 +85,7 @@ import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, observeServiceLaunchers, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { type RunLock } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
@@ -2297,6 +2299,47 @@ function parseScratchWorkerResult(stdout: string, exit: number): CliResult {
 	return { code, data: { ...decoded.data }, errors, verification: "UNVERIFIED" };
 }
 
+/**
+ * CC14 (.18.2): the `service run cc` body. Holds the one-instance lock for
+ * the child lifetime (launchd restarts us; a second concurrent holder is
+ * refused ALREADY_RUNNING before we get here), execs the fleet checkout's
+ * `cc.py serve --lanes` with CC_STATE set, forwards termination so no
+ * orphaned server survives the service stop, and maps the child exit.
+ */
+async function runCcService(home: string, adapter: string, lock: RunLock): Promise<CliResult> {
+	const cmd = ccServiceCommand(home, adapter);
+	let child: Bun.Subprocess<"inherit", "inherit", "ignore"> | null = null;
+	try {
+		child = Bun.spawn(cmd.argv as [string, ...string[]], {
+			env: { ...process.env, CC_STATE: cmd.env.CC_STATE },
+			stdout: "inherit", stderr: "inherit", stdin: "ignore",
+		});
+	} catch (error) {
+		lock.release();
+		return refusal("CC_SERVICE_SPAWN_FAILED", `Could not start the cc service: ${(error as Error).message}`,
+			"Verify python3 resolves and the fleet checkout holds scripts/cc/cc.py; no server was started.");
+	}
+	const running = child;
+	const forward = () => { try { running.kill("SIGTERM"); } catch { /* already gone; the wait below reports it */ } };
+	process.once("SIGTERM", forward);
+	process.once("SIGINT", forward);
+	let exit: number;
+	try {
+		exit = await running.exited;
+	} finally {
+		process.off("SIGTERM", forward);
+		process.off("SIGINT", forward);
+		lock.release();
+	}
+	if (exit === 0) {
+		return { code: 0, data: { overall: "OK", job: "cc", status: "EXITED", exit }, verification: "UNVERIFIED" };
+	}
+	return { code: exit, data: { overall: "ERROR", job: "cc", status: "EXITED", exit },
+		errors: [{ code: "CC_SERVICE_EXIT", message: `The cc service exited with code ${exit}`,
+			remediation: "Inspect the cc error log; launchd restarts the daemon (ThrottleInterval 60 s)." }],
+		verification: "UNVERIFIED" };
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -2535,6 +2578,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					errors: [{ code: "ALREADY_RUNNING", message: `Another ${job.name} instance holds the one-instance lock`,
 						remediation: "Do not start a second instance; inspect the running one." }], verification: "UNVERIFIED" };
 			}
+			if (job.name === "cc") return runCcService(home, adapter.adapter, held.lock);
 			held.lock.release();
 			return refusal("SERVICE_BODY_UNIMPLEMENTED", `No service body is implemented for ${job.name}`,
 				"Do not activate this job until its producer is wired; no matcher was substituted.");

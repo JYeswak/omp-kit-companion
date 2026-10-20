@@ -162,6 +162,22 @@ export function resolveFleetAdapter(home: string, adapterRel: string = CC_SERVIC
 		? "No fleet checkout names the adapter: OMP_KIT_FLEET_ROOT is unset and fleet-watch.json names no repos."
 		: `No fleet checkout holds ${adapterRel}: checked ${candidates.join(", ")}.` };
 }
+/**
+ * CC14 (.18.2): the `service run cc` command. The daemon execs the fleet
+ * checkout's `cc.py serve --lanes` (ingester lanes plus the read-only HTTP
+ * API on the loopback interface) with CC_STATE set to the service state dir,
+ * so the store path never depends on the ambient environment. Pure builder:
+ * the run wiring holds the one-instance lock for the child lifetime.
+ */
+export const CC_SERVICE_HOST = "127.0.0.1";
+export const CC_SERVICE_PORT = 7474;
+export interface CcServiceCommand { argv: string[]; env: { CC_STATE: string } }
+export function ccServiceCommand(home: string, adapter: string): CcServiceCommand {
+	return {
+		argv: ["python3", adapter, "serve", "--host", CC_SERVICE_HOST, "--port", String(CC_SERVICE_PORT), "--lanes"],
+		env: { CC_STATE: join(stateHome(home), "omp-kit", "cc") },
+	};
+}
 
 export interface ScratchPressureTriggerResult {
 	pressure: ScratchPressure;
