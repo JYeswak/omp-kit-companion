@@ -1,0 +1,5 @@
+### Added
+
+- `omp-kit land` qualifies every publication candidate against its actual construction parent before any check or push: the candidate must carry the explicitly named `refs/heads/main` ref, exactly one actual parent equal to the qualified base, byte-identical owned content with no drift since qualification, no restored bytes the actual parent superseded (a caller patch that reverts an owned file to seed content is refused as `LAND_STALE_RESTORE`), only reserved owned paths, and re-proved exclusive custody at publication time. Anything else publishes nothing (`LAND_ACTUAL_PARENT_MISMATCH`, `LAND_CANDIDATE_CONTENT_MISMATCH`, `LAND_FOREIGN_PATH_PUBLISH`, `LAND_CUSTODY_EXPIRED`, `LAND_PUBLICATION_REF_UNNAMED`).
+
+- `omp-kit doctor --scope land` reports the land guard identity: guard `actual-parent-custody-v1`, publication ref, pane-bound owner and owner capability (or `UNKNOWN`), actual-parent read capability (`native-git` or `UNKNOWN`), and decision (`READY` or `UNKNOWN`) with evidence.

@@ -234,6 +234,175 @@ function pushCheckAdmission(result: PushCheckResult): { allow: boolean; reason?:
 	return { allow: false, reason: result.status === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
 }
 
+const LAND_PUBLICATION_REF = "refs/heads/main";
+const LAND_ACTUAL_PARENT_GUARD = "actual-parent-custody-v1";
+
+export const LAND_GUARD_PUBLIC_IDENTITY = {
+	guard: LAND_ACTUAL_PARENT_GUARD,
+	publication_ref: LAND_PUBLICATION_REF,
+} as const;
+
+type WorktreeBlob = { present: boolean; oid: string | null };
+
+function hashWorktreeBlob(repo: string, path: string): WorktreeBlob {
+	const run = git(repo, ["hash-object", "--", join(repo, path)]);
+	if (run.code !== 0 || run.interrupted) return { present: false, oid: null };
+	const oid = run.out.trim();
+	return oid.length > 0 ? { present: true, oid } : { present: false, oid: null };
+}
+
+function treeBlob(repo: string, revision: string, path: string): WorktreeBlob | null {
+	const run = git(repo, ["ls-tree", revision, "--", `:(literal)${path}`]);
+	if (run.code !== 0 || run.interrupted) return null;
+	const line = run.out.trimEnd();
+	if (!line) return { present: false, oid: null };
+	const tab = line.indexOf("\t");
+	if (tab < 0) return null;
+	const fields = line.slice(0, tab).split(" ");
+	if (fields.length !== 3 || fields[1] !== "blob" || !fields[2]) return null;
+	return { present: true, oid: fields[2] ?? null };
+}
+
+function candidateTouchedPaths(repo: string, candidate: string): string[] | null {
+	const run = git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames", candidate]);
+	if (run.code !== 0 || run.interrupted) return null;
+	return run.out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
+function supersededBlob(repo: string, base: string, path: string, candidateOid: string): boolean | null {
+	const baseEntry = treeBlob(repo, base, path);
+	if (baseEntry === null) return null;
+	if (baseEntry.present && baseEntry.oid === candidateOid) return false;
+	const log = git(repo, ["log", "--format=%H", base, "--", `:(literal)${path}`]);
+	if (log.code !== 0 || log.interrupted) return null;
+	for (const commit of log.out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0)) {
+		if (commit === base) continue;
+		const entry = treeBlob(repo, commit, path);
+		if (entry === null) return null;
+		if (entry.present && entry.oid === candidateOid) return true;
+	}
+	return false;
+}
+
+export type LandPublicationQualification = {
+	guard: string;
+	publication_ref: string;
+	base: string;
+	candidate: string;
+	actual_parents: string[];
+	owned_paths: string[];
+	owner: string;
+};
+
+export type LandGuardRefusal = {
+	refusal: CliResult;
+	guardCheck: PushCheckResult;
+};
+
+export function qualifyPublicationCandidate(repo: string, input: {
+	candidate: string;
+	base: string;
+	paths: string[];
+	owner: string;
+	publicationRef: string;
+	qualifiedBlobs: Record<string, WorktreeBlob>;
+}): { qualification: LandPublicationQualification } | LandGuardRefusal {
+	const guardCheck = pushCheckResult("UNRUN", "guard_refused");
+	const guardRefusal = (code: string, message: string, remediation: string): LandGuardRefusal => ({
+		refusal: {
+			code: 1,
+			data: { overall: "REFUSED", check: guardCheck },
+			errors: [{ code, message, remediation }],
+			verification: "NOT_RUN",
+		},
+		guardCheck,
+	});
+	if (typeof input.publicationRef !== "string" || input.publicationRef.length === 0)
+		return guardRefusal("LAND_PUBLICATION_REF_UNNAMED", "The publication ref is unnamed; no candidate was qualified", "Name the supported publication ref explicitly; nothing was published.");
+	if (input.publicationRef !== LAND_PUBLICATION_REF)
+		return guardRefusal("LAND_PUBLICATION_REF_UNSUPPORTED", `The publication ref ${input.publicationRef} is not the supported ${LAND_PUBLICATION_REF}; no candidate was qualified`, "Publish only through the supported publication ref; nothing was published.");
+	const parentResult = git(repo, ["show", "-s", "--format=%P", input.candidate]);
+	if (parentResult.code !== 0 || parentResult.interrupted)
+		return guardRefusal("LAND_ACTUAL_PARENT_UNREADABLE", "The candidate has no readable actual parent; no candidate was qualified", "Repair the candidate commit and retry; nothing was published.");
+	const actualParents = parentResult.out.trim().split(" ").map((parent) => parent.trim()).filter((parent) => parent.length > 0);
+	if (actualParents.length !== 1 || actualParents[0] !== input.base)
+		return guardRefusal("LAND_ACTUAL_PARENT_MISMATCH", `The candidate is parented on ${actualParents.length === 1 ? actualParents[0] : `(${actualParents.length} parents)`}, not the qualified base ${input.base}; no candidate was qualified`, "Reconcile with the current publication parent and run land again so the new candidate is qualified.");
+	for (const path of input.paths) {
+		const qualified = input.qualifiedBlobs[path];
+		if (!qualified)
+			return guardRefusal("LAND_CANDIDATE_UNQUALIFIED", `Owned path ${path} has no qualified worktree bytes; no candidate was qualified`, "Re-run land so every owned path is qualified before publication; nothing was published.");
+		const candidateEntry = treeBlob(repo, input.candidate, path);
+		if (candidateEntry === null)
+			return guardRefusal("LAND_CANDIDATE_UNREADABLE", `The candidate tree could not be read for ${path}; no candidate was qualified`, "Repair the repository and retry; nothing was published.");
+		const sameBytes = qualified.present === candidateEntry.present && qualified.oid === candidateEntry.oid;
+		if (!sameBytes)
+			return guardRefusal("LAND_CANDIDATE_CONTENT_MISMATCH", `Owned path ${path} drifted between qualification and candidate construction; no candidate was qualified`, "Re-run land on the current worktree bytes; nothing was published.");
+		if (candidateEntry.present && candidateEntry.oid) {
+			const restored = supersededBlob(repo, input.base, path, candidateEntry.oid);
+			if (restored === null)
+				return guardRefusal("LAND_STALE_HISTORY_UNREADABLE", `The actual-parent history for ${path} could not be read; no candidate was qualified`, "Repair the repository history and retry; nothing was published.");
+			if (restored)
+				return guardRefusal("LAND_STALE_RESTORE", `Owned path ${path} restores bytes the actual parent ${input.base} superseded; no candidate was qualified`, "Rebase the owned change onto the actual parent content instead of restoring obsolete bytes; nothing was published.");
+		}
+	}
+	const touched = candidateTouchedPaths(repo, input.candidate);
+	if (touched === null)
+		return guardRefusal("LAND_CANDIDATE_UNREADABLE", "The candidate file list could not be read; no candidate was qualified", "Repair the repository and retry; nothing was published.");
+	const foreign = touched.filter((entry) => !input.paths.includes(entry));
+	if (foreign.length > 0)
+		return guardRefusal("LAND_FOREIGN_PATH_PUBLISH", `The candidate touches unreserved paths: ${foreign.join(", ")}; no candidate was qualified`, "Reserve and name each exact file separately, then re-run land; nothing was published.");
+	const current = authorizedOwner(repo, input.paths);
+	if ("error" in current)
+		return guardRefusal("LAND_CUSTODY_EXPIRED", "Live custody lapsed before publication; no candidate was qualified", "Reacquire the exact exclusive reservations and re-run land; nothing was published.");
+	if (current.owner !== input.owner)
+		return guardRefusal("LAND_CUSTODY_FOREIGN", "The live pane owner changed before publication; no candidate was qualified", "Reacquire the correct identity and reservation; nothing was published.");
+	return {
+		qualification: {
+			guard: LAND_ACTUAL_PARENT_GUARD,
+			publication_ref: LAND_PUBLICATION_REF,
+			base: input.base,
+			candidate: input.candidate,
+			actual_parents: actualParents,
+			owned_paths: [...input.paths],
+			owner: input.owner,
+		},
+	};
+}
+
+export type LandGuardIdentity = {
+	guard: string;
+	publication_ref: string;
+	owner: string;
+	owner_capability: string;
+	actual_parent_capability: string;
+	decision: string;
+	reason: string;
+};
+
+export function inspectLandGuard(repo: string): LandGuardIdentity {
+	let owner = "UNKNOWN";
+	let ownerCapability = "UNKNOWN";
+	const claimed = authorizedOwner(repo, []);
+	if (!("error" in claimed)) {
+		owner = claimed.owner;
+		ownerCapability = "verified-current";
+	}
+	const headParents = git(repo, ["show", "-s", "--format=%P", "HEAD"]);
+	const actualParentCapability = headParents.code === 0 && !headParents.interrupted ? "native-git" : "UNKNOWN";
+	const ready = owner !== "UNKNOWN" && actualParentCapability !== "UNKNOWN";
+	return {
+		guard: LAND_ACTUAL_PARENT_GUARD,
+		publication_ref: LAND_PUBLICATION_REF,
+		owner,
+		owner_capability: ownerCapability,
+		actual_parent_capability: actualParentCapability,
+		decision: ready ? "READY" : "UNKNOWN",
+		reason: ready
+			? `Guard ${LAND_ACTUAL_PARENT_GUARD} qualifies owned candidates against their actual publication parent on ${LAND_PUBLICATION_REF} for pane-bound owner ${owner}`
+			: "Land guard identities are not fully provable in this checkout; no qualification was attempted",
+	};
+}
+
 function trackedPaths(repo: string, path: string): string[] | null {
 	const result = git(repo, ["ls-files", "-z", "--", `:(literal)${path}`]);
 	return result.code === 0 ? result.out.split("\0").filter((entry) => entry.length > 0) : null;
@@ -588,6 +757,33 @@ function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
 		return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", "The reconstructed candidate has no readable commit", "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
 	}
 	const candidate = candidateRef.out.trim();
+	// Actual-parent/custody qualification (ompkit-rhy9.10): the reconstructed
+	// candidate carries the caller bytes by construction, so qualification
+	// pins the actual parent, rejects superseded restores, admits only owned
+	// paths, and re-proves custody before any check or publication.
+	const patchQualifiedBlobs: Record<string, WorktreeBlob> = {};
+	for (const path of paths) {
+		const entry = treeBlob(repo, candidate, path);
+		if (entry === null) {
+			cleanup();
+			return patchUnrun(repo, "LAND_CANDIDATE_UNREADABLE", `The reconstructed candidate tree could not be read for ${path}`, "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		}
+		patchQualifiedBlobs[path] = entry;
+	}
+	const patchQualified = qualifyPublicationCandidate(repo, {
+		candidate, base, paths, owner: owner.owner,
+		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs: patchQualifiedBlobs,
+	});
+	if ("refusal" in patchQualified) {
+		cleanup();
+		const phases = landPhaseEvidence(repo, candidate, false);
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: patchQualified.guardCheck, phases },
+			errors: patchQualified.refusal.errors,
+			verification: "PERFORMED",
+		};
+	}
 	const checkResult = runPushCheck(repo, base, candidate);
 	const admission = pushCheckAdmission(checkResult);
 	if (!admission.allow) {
@@ -739,6 +935,11 @@ export function landCommand(request: ParsedCommand): CliResult {
 			if (add.code !== 0) return refused("LAND_PATH_UNAVAILABLE", `Could not prepare owned path ${path}`, "Repair the file or index; no commit was created.");
 		}
 	}
+	// Snapshot the exact qualified worktree bytes before construction. The
+	// actual-parent guard compares the built candidate against this snapshot
+	// and the qualified base, never against a dispatch seed or shared HEAD.
+	const qualifiedBlobs: Record<string, WorktreeBlob> = {};
+	for (const path of paths) qualifiedBlobs[path] = hashWorktreeBlob(repo, path);
 	// A peer may advance HEAD from a post-commit hook before Git returns. Attribute
 	// our save through a per-call native reflog action, never through the later tip.
 	const action = `omp-kit-land-${randomUUID()}`;
@@ -766,6 +967,23 @@ export function landCommand(request: ParsedCommand): CliResult {
 		const check = pushCheckResult("UNRUN", "commit_interrupted", checkPreflight.result.sha256);
 		const phases = landPhaseEvidence(repo, sha, false);
 		return { code: 77, data: { overall: "UNRUN", commit: sha, owner: owner.owner, paths, base: head.out.trim(), check, phases }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "UNVERIFIED" };
+	}
+	// Actual-parent/custody qualification (ompkit-rhy9.10): the constructed
+	// candidate must be parented on exactly the qualified base, carry exactly
+	// the qualified bytes without restoring superseded history, touch only
+	// owned paths, and hold current custody. Anything else publishes nothing.
+	const qualified = qualifyPublicationCandidate(repo, {
+		candidate: sha, base: head.out.trim(), paths, owner: owner.owner,
+		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs,
+	});
+	if ("refusal" in qualified) {
+		const phases = landPhaseEvidence(repo, sha, false);
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: sha, candidate_sha: sha, pushed_sha: null, owner: owner.owner, paths, base: head.out.trim(), check: qualified.guardCheck, phases },
+			errors: qualified.refusal.errors,
+			verification: "PERFORMED",
+		};
 	}
 	let convergenceStarted = false;
 	let convergenceResult: ConvergeResult | undefined;

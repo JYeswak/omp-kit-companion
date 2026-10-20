@@ -9,7 +9,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
 import { audit, undo, why } from "./audit.ts";
-import { landCommand } from "./land.ts";
+import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
 import { convergeCommand } from "./converge.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
@@ -519,6 +519,21 @@ function inspectReservationAge(request: ParsedCommand): Finding {
 		evidence: { checked: report.checked, overdue: report.overdue, hot_paths: hotPaths } };
 }
 
+function landDoctorFinding(project: string): Finding {
+	const top = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd: project, stdout: "pipe", stderr: "pipe" });
+	if (top.exitCode !== 0) return { component: "land", status: "UNVERIFIED",
+		reason: "The selected project is not inside a Git repository; no land guard identity was read",
+		recommended_action: "Run doctor --scope land inside a Git checkout.",
+		evidence: { ...LAND_GUARD_PUBLIC_IDENTITY, owner: "UNKNOWN", owner_capability: "UNKNOWN", actual_parent_capability: "UNKNOWN", decision: "UNKNOWN" } };
+	const identity = inspectLandGuard(resolve(String(top.stdout).trim()));
+	return { component: "land", status: identity.decision === "READY" ? "OK" : "UNVERIFIED",
+		reason: identity.reason,
+		recommended_action: identity.decision === "READY"
+			? "Land owned paths normally; the guard qualifies each candidate against its actual publication parent."
+			: "Resolve the pane identity and reservations, then re-run doctor --scope land.",
+		evidence: { ...identity } };
+}
+
 async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.has("--deep")) {
 		const scope = String(request.flags.get("--scope") ?? "effective_profile");
@@ -594,6 +609,8 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			findings = inspectFleetScope(liveFleetIo());
 		} else if (scope === "ownership") {
 			findings = inspectOwnership(liveOwnershipIo());
+		} else if (scope === "land") {
+			findings = [landDoctorFinding(diagnosticProject)];
 		} else if (scope === "reservations") {
 			findings = [inspectReservationAge(request)];
 		} else if (scope === "github") {

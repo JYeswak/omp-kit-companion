@@ -80,6 +80,7 @@ function command(cwd: string, args: string[], holds: unknown, options: {
 	registeredHerdrPane?: string;
 	herdrAgent?: string;
 	expectedAmProject?: string;
+	subcommand?: string;
 }) {
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	delete env.GIT_INDEX_FILE;
@@ -103,7 +104,7 @@ function command(cwd: string, args: string[], holds: unknown, options: {
 	env.FAKE_HERDR_AGENT = options.herdrAgent ?? options.agent ?? "DarkFern";
 	env.FAKE_HOLDS_JSON = JSON.stringify(holds);
 	env.FAKE_AM_MODE = options.reservationMode ?? "ok";
-	const run = spawnSync("bun", [cliPath, "land", ...args, "--json"], { cwd, env, encoding: "utf8", timeout: 30_000 });
+	const run = spawnSync("bun", [cliPath, options.subcommand ?? "land", ...args, "--json"], { cwd, env, encoding: "utf8", timeout: 30_000 });
 	let body: Record<string, unknown>;
 	try {
 		body = JSON.parse(run.stdout);
@@ -1607,4 +1608,222 @@ test("refuses worktree paths combined with a patch file", () => {
 	expect(responseCode(run.body)).toBe("LAND_PATCH_EXCLUSIVE");
 	expect(remoteHead(work)).toBe(originBefore);
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+});
+
+/** Actual-parent publication qualification (ompkit-rhy9.10): the candidate is
+ * qualified against its real construction parent, never a dispatch seed. */
+import { qualifyPublicationCandidate } from "../../src/land.ts";
+
+function actualParentSetup(): { work: string; fakeBin: string; seed: string; parent: string } {
+	const { work, fakeBin } = fixture();
+	const seed = remoteHead(work);
+	const origin = git(work, ["remote", "get-url", "origin"]).trim();
+	const peerDir = join(scratch, `actual-parent-peer-${fixtureNumber++}`);
+	git(scratch, ["clone", "--branch", "main", origin, peerDir]);
+	git(peerDir, ["config", "user.name", "actual-parent peer"]);
+	git(peerDir, ["config", "user.email", "actual-parent-peer@example.invalid"]);
+	writeFileSync(join(peerDir, "owned.txt"), "actual parent bytes\n");
+	git(peerDir, ["add", "--", "owned.txt"]);
+	git(peerDir, ["commit", "-m", "actual parent advances owned bytes [test]"]);
+	git(peerDir, ["push", "origin", "HEAD:refs/heads/main"]);
+	const parent = remoteHead(work);
+	expect(parent).not.toBe(seed);
+	git(work, ["fetch", "origin"]);
+	git(work, ["merge", "--ff-only", "origin/main"]);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(parent);
+	return { work, fakeBin, seed, parent };
+}
+
+test("publishes only the approved owned delta parented on the actual parent", () => {
+	const { work, fakeBin, parent } = actualParentSetup();
+	writeFileSync(join(work, "owned.txt"), "actual parent bytes plus approved delta\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(0);
+	expectLandSchema(run.body.data);
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: string; owner: string;
+		paths: string[]; base: string; localMain: string;
+		phases: { candidate_sha: string; actual_parents: string[]; publication_ref: string; construction: string; publication: string };
+	};
+	expect(data.overall).toBe("PUSHED");
+	expect(data.base).toBe(parent);
+	expect(data.owner).toBe("DarkFern");
+	expect(data.candidate_sha).toBe(data.commit);
+	expect(data.pushed_sha).toBe(data.commit);
+	expect(data.localMain).toBe(data.commit);
+	// The candidate is parented on exactly the actual publication parent.
+	expect(git(work, ["show", "-s", "--format=%P", data.commit]).trim()).toBe(parent);
+	expect(data.phases.actual_parents).toEqual([parent]);
+	expect(data.phases.publication_ref).toBe("refs/heads/main");
+	expect(data.phases.construction).toBe("APPLIED");
+	expect(data.phases.publication).toBe("APPLIED");
+	// The candidate publishes ONLY the approved owned delta.
+	expect(git(work, ["diff-tree", "--no-commit-id", "--name-only", "-r", data.commit]).trim()).toBe("owned.txt");
+	// Nonauthor native observer: real tree/ref/index/worktree postimages.
+	expect(git(work, ["show", `${data.commit}:owned.txt`])).toBe("actual parent bytes plus approved delta\n");
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(data.commit);
+	expect(git(work, ["rev-parse", ":owned.txt"]).trim()).toBe(git(work, ["rev-parse", `${data.commit}:owned.txt`]).trim());
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("actual parent bytes plus approved delta\n");
+	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("peer baseline\n");
+	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("untouched baseline\n");
+	expect(remoteHead(work)).toBe(data.commit);
+});
+
+test("refuses a caller patch restoring bytes the actual parent superseded", () => {
+	const { work, fakeBin, seed, parent } = actualParentSetup();
+	const origin = git(work, ["remote", "get-url", "origin"]).trim();
+	const caller = join(scratch, `stale-caller-${fixtureNumber++}`);
+	git(scratch, ["clone", "--branch", "main", origin, caller]);
+	git(caller, ["config", "user.name", "stale caller"]);
+	git(caller, ["config", "user.email", "stale-caller@example.invalid"]);
+	// The caller selection restores the seed bytes onto the actual parent.
+	writeFileSync(join(caller, "owned.txt"), "base owned\n");
+	git(caller, ["add", "--", "owned.txt"]);
+	git(caller, ["commit", "-m", "stale restore [test]"]);
+	const patch = join(scratch, `stale-restore-${fixtureNumber}.patch`);
+	writeFileSync(patch, git(caller, ["diff", parent, "HEAD"]));
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const localBefore = git(work, ["rev-parse", "HEAD"]).trim();
+	const run = command(work, ["--patch", patch, "--message", "feat(land): stale restore [test]", "--apply", "--yes"], hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_STALE_RESTORE");
+	expectLandSchema(run.body.data);
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: null;
+		phases: { candidate_sha: string; actual_parents: string[]; publication_ref: string };
+	};
+	expect(data.overall).toBe("REFUSED");
+	expect(data.pushed_sha).toBeNull();
+	// The refused candidate really was parented on the actual parent with stale bytes.
+	expect(git(work, ["show", "-s", "--format=%P", data.candidate_sha]).trim()).toBe(parent);
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("base owned\n");
+	expect(data.phases.actual_parents).toEqual([parent]);
+	expect(data.phases.publication_ref).toBe("refs/heads/main");
+	// Zero publication: the seed bytes never reach origin and local refs never move.
+	expect(remoteHead(work)).toBe(parent);
+	expect(git(work, ["show", `${parent}:owned.txt`])).toBe("actual parent bytes\n");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(localBefore);
+	expect(seed).not.toBe(parent);
+});
+
+test("refuses when the publication parent advances before publication", () => {
+	const { work, fakeBin, parent } = actualParentSetup();
+	const origin = git(work, ["remote", "get-url", "origin"]).trim();
+	const peerDir = join(scratch, `race-peer-${fixtureNumber++}`);
+	git(scratch, ["clone", "--branch", "main", origin, peerDir]);
+	git(peerDir, ["config", "user.name", "race peer"]);
+	git(peerDir, ["config", "user.email", "race-peer@example.invalid"]);
+	// B3 advances the same owned path, so no silent merge can absorb it.
+	writeFileSync(join(peerDir, "owned.txt"), "peer raced publication\n");
+	git(peerDir, ["add", "--", "owned.txt"]);
+	git(peerDir, ["commit", "-m", "race advance [test]"]);
+	const raced = git(peerDir, ["rev-parse", "HEAD"]).trim();
+	const postCommit = join(work, ".git", "hooks", "post-commit");
+	writeFileSync(postCommit, `#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\ngit -C '${peerDir}' push origin main\n`);
+	chmodSync(postCommit, 0o755);
+	writeFileSync(join(work, "owned.txt"), "approved delta raced by peer\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expectLandSchema(run.body.data);
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: null; base: string;
+		convergence: { reason: string };
+	};
+	expect(data.overall).toBe("REFUSED");
+	expect(data.base).toBe(parent);
+	expect(data.pushed_sha).toBeNull();
+	// The saved candidate is preserved parented on B2, but origin holds B3: zero publication.
+	expect(git(work, ["show", "-s", "--format=%P", data.candidate_sha]).trim()).toBe(parent);
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("approved delta raced by peer\n");
+	expect(remoteHead(work)).toBe(raced);
+	expect(remoteHead(work)).not.toBe(data.candidate_sha);
+	expect(git(work, ["show", `${raced}:owned.txt`])).toBe("peer raced publication\n");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.candidate_sha);
+});
+
+test("refuses when live custody lapses between save and publication", () => {
+	const { work } = fixture();
+	const base = remoteHead(work);
+	const holdsFile = join(scratch, `custody-holds-${fixtureNumber++}.json`);
+	const currentHolds = JSON.stringify({ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 });
+	const attestation = `"reservation_read_attestation":{"state":"current","database_matches_server":true,"storage_root_matches_server":true}`;
+	writeFileSync(holdsFile, `{"my_reservations":[${currentHolds}],${attestation}}`);
+	const expiredHolds = JSON.stringify({ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 0 });
+	const statefulBin = join(scratch, `stateful-am-${fixtureNumber}`);
+	mkdirSync(statefulBin);
+	writeFileSync(join(statefulBin, "am"), String.raw`#!/bin/sh
+case "$1 $2" in
+  "agents resolve-pane") printf '{"agent_name":"DarkFern"}\n' ;;
+  "robot reservations") cat "$FAKE_HOLDS_FILE" ;;
+  *) exit 2 ;;
+esac
+`);
+	chmodSync(join(statefulBin, "am"), 0o755);
+	const postCommit = join(work, ".git", "hooks", "post-commit");
+	writeFileSync(postCommit, `#!/bin/sh\nprintf '{"my_reservations":[%s],%s}' '${expiredHolds}' '${attestation}' > "$FAKE_HOLDS_FILE"\n`);
+	chmodSync(postCommit, 0o755);
+	writeFileSync(join(work, "owned.txt"), "owned save with lapsing custody\n");
+	const run = command(work, landArgs("owned.txt"), [], { amDir: statefulBin, gitEnv: { FAKE_HOLDS_FILE: holdsFile } });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_CUSTODY_EXPIRED");
+	expectLandSchema(run.body.data);
+	const data = run.body.data as { overall: string; commit: string; candidate_sha: string; pushed_sha: null };
+	expect(data.overall).toBe("REFUSED");
+	expect(data.pushed_sha).toBeNull();
+	// The save is real and kept, but nothing was published after custody lapsed.
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("owned save with lapsing custody\n");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.candidate_sha);
+	expect(remoteHead(work)).toBe(base);
+});
+
+test("the actual-parent guard names its ref and reads real parents", () => {
+	const { work } = fixture();
+	const base = git(work, ["rev-parse", "HEAD"]).trim();
+	const unnamed = qualifyPublicationCandidate(work, {
+		candidate: base, base, paths: ["owned.txt"], owner: "DarkFern",
+		publicationRef: "", qualifiedBlobs: {},
+	});
+	expect("refusal" in unnamed && unnamed.refusal.errors?.[0]?.code).toBe("LAND_PUBLICATION_REF_UNNAMED");
+	const foreign = qualifyPublicationCandidate(work, {
+		candidate: base, base, paths: ["owned.txt"], owner: "DarkFern",
+		publicationRef: "refs/heads/feature", qualifiedBlobs: {},
+	});
+	expect("refusal" in foreign && foreign.refusal.errors?.[0]?.code).toBe("LAND_PUBLICATION_REF_UNSUPPORTED");
+	const absent = qualifyPublicationCandidate(work, {
+		candidate: "f".repeat(40), base, paths: ["owned.txt"], owner: "DarkFern",
+		publicationRef: "refs/heads/main", qualifiedBlobs: {},
+	});
+	expect("refusal" in absent && absent.refusal.errors?.[0]?.code).toBe("LAND_ACTUAL_PARENT_UNREADABLE");
+	// The root fixture commit has no parent at all, so it can never qualify against itself as base.
+	const mismatch = qualifyPublicationCandidate(work, {
+		candidate: base, base, paths: ["owned.txt"], owner: "DarkFern",
+		publicationRef: "refs/heads/main", qualifiedBlobs: {},
+	});
+	expect("refusal" in mismatch && mismatch.refusal.errors?.[0]?.code).toBe("LAND_ACTUAL_PARENT_MISMATCH");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+});
+
+test("doctor reports the land guard identities and decision", () => {
+	const { work, fakeBin } = fixture();
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, ["--scope", "land"], hold, { amDir: fakeBin, subcommand: "doctor" });
+	const data: unknown = run.body.data;
+	const findings: unknown = data !== null && typeof data === "object" && "findings" in data ? data.findings : undefined;
+	expect(Array.isArray(findings)).toBe(true);
+	const land = (Array.isArray(findings) ? findings : []).find((entry): entry is { component: unknown; status: unknown; reason: unknown; evidence: unknown } =>
+		typeof entry === "object" && entry !== null && "component" in entry && entry.component === "land");
+	expect(land?.status).toBe("OK");
+	const evidence: unknown = land !== undefined && typeof land.evidence === "object" && land.evidence !== null ? land.evidence : undefined;
+	expect(evidence).toMatchObject({
+		guard: "actual-parent-custody-v1",
+		publication_ref: "refs/heads/main",
+		owner: "DarkFern",
+		owner_capability: "verified-current",
+		actual_parent_capability: "native-git",
+		decision: "READY",
+	});
+	expect(typeof land?.reason).toBe("string");
 });
