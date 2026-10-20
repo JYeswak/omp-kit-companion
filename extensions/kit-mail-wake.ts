@@ -232,7 +232,11 @@ export function createMailWake(deps: MailWakeDeps) {
 		const sender = typeof prop(args, "sender_name") === "string" ? (prop(args, "sender_name") as string).trim() : "";
 		const recipients = [...new Set([...names(prop(args, "to")), ...names(prop(args, "cc")), ...names(prop(args, "bcc"))])]
 			.filter(name => name.toLowerCase() !== sender.toLowerCase());
-		if (tool === "reply_message" && recipients.length === 0) return undefined;
+		// A reply with no explicit recipients goes to the thread's defaults, known only from the result.
+		if (tool === "reply_message" && recipients.length === 0) {
+			if (typeof toolCallId === "string") plans.set(toolCallId, { tool, sender, subject: "", projectKey, targets: [] });
+			return undefined;
+		}
 		const blocks = recipients.length ? await liveBlocks() : null;
 		const targets: Plan["targets"] = [];
 		for (const name of recipients) targets.push({ name, res: await resolve(name, projectKey, blocks) });
@@ -272,7 +276,18 @@ export function createMailWake(deps: MailWakeDeps) {
 		if (!plan) return undefined;
 		plans.delete(event.toolCallId);
 		if (event.isError === true) return undefined;
-		const id = messageIdOf(parseResult(event.content));
+		const payload = parseResult(event.content);
+		const id = messageIdOf(payload);
+		if (plan.targets.length === 0) {
+			const deliveries = prop(payload, "deliveries");
+			const sentPayload = Array.isArray(deliveries) ? prop(deliveries[0], "payload") : payload;
+			const subject = prop(sentPayload, "subject");
+			if (typeof subject === "string") plan.subject = subject;
+			const recipients = [...new Set([...names(prop(sentPayload, "to")), ...names(prop(sentPayload, "cc"))])]
+				.filter(name => name.toLowerCase() !== plan.sender.toLowerCase());
+			const blocks = recipients.length ? await liveBlocks() : null;
+			for (const name of recipients) plan.targets.push({ name, res: await resolve(name, plan.projectKey, blocks) });
+		}
 		const notices: string[] = [];
 		for (const target of plan.targets) {
 			const base = { message_id: id, project_key: plan.projectKey, sender: plan.sender, recipient: target.name, subject: plan.subject };
