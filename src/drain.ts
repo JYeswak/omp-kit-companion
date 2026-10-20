@@ -63,8 +63,9 @@ export function closeQueue(
 	return rows.sort((a, b) => a.landedMs - b.landedMs || (a.id < b.id ? -1 : 1));
 }
 
-/** Stale claims (ompkit-kdbz.1 DRAIN1): in_progress with no worker older than 24 h,
- * or no new evidence in 48 h. Fail-closed: only what the tracker shows. */
+/** Stale claims (ompkit-kdbz.1 DRAIN1): in_progress/rework with no worker older than 24 h,
+ * or no new evidence in 48 h. Fail-closed: only what the tracker shows. Reclaim always
+ * returns a holderless worked row to open so it re-enters the claimable pull. */
 export function staleClaims(
 	issues: readonly DrainIssue[],
 	comments: readonly DrainComment[],
@@ -73,7 +74,7 @@ export function staleClaims(
 	const byId = commentsByIssue(comments);
 	const rows: StaleClaimRow[] = [];
 	for (const issue of issues) {
-		if (issue.status !== "in_progress") continue;
+		if (issue.status !== "in_progress" && issue.status !== "rework") continue;
 		const latest = (byId.get(issue.id) ?? []).reduce((max, comment) => Math.max(max, comment.createdMs), issue.updatedMs);
 		const stamp = new Date(nowMs).toISOString().slice(0, 10);
 		const reclaim = `br comments add ${issue.id} "reclaimed ${stamp}: no live holder" && br update ${issue.id} --status open --assignee ""`;

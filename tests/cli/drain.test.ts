@@ -63,6 +63,29 @@ test("stale-claim flags unassigned in_progress older than 24h with the reclaim c
 	expect(rows[0]?.reclaim).toContain("br update x-1 --status open");
 });
 
+test("original boundary: holderless rework is surfaced with an open reclaim", () => {
+	const rows = staleClaims(
+		[issue("x-rework", { status: "rework", updatedMs: NOW - STALE_UNASSIGNED_MS - HOUR })],
+		[],
+		NOW,
+	);
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ id: "x-rework", reason: "unassigned-24h" });
+	expect(rows[0]?.reclaim).toContain("br update x-rework --status open --assignee \"\"");
+});
+
+test("planted negative: fresh rework and open controls stay out of stale claims", () => {
+	const rows = staleClaims(
+		[
+			issue("fresh-rework", { status: "rework", updatedMs: NOW - HOUR }),
+			issue("open-control", { status: "open", updatedMs: NOW - 30 * 24 * HOUR }),
+		],
+		[],
+		NOW,
+	);
+	expect(rows).toEqual([]);
+});
+
 test("planted: assigned beads with same-day evidence stay quiet", () => {
 	const rows = staleClaims(
 		[
