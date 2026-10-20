@@ -133,6 +133,10 @@ heavy_step() {
 }
 
 # sbh pressure is a flag routed to waste management, never a veto on saving work.
+# The flag names the largest scratch owners (AC1) so the waste loop knows where to
+# start. The scan is inline (not a helper) so gate-function extractors keep working;
+# it is best effort (any measurement failure prints the flag without owners) and
+# bounded to the first 200 scratch entries.
 disk_pressure_flag() {
 	command -v sbh >/dev/null 2>&1 || return 0
 	sbh_rc=0
@@ -144,7 +148,35 @@ disk_pressure_flag() {
 	else
 		pct="an unparsed"
 	fi
-	echo "WARN disk-pressure: sbh reports $pct free (below its floor); saving continues on the 10 GiB physical floor; run waste management (ompkit-774u.15)"
+	owners=
+	if [ -n "${ROOT:-}" ] && [ -d "$ROOT/var/agent-tmp" ]; then
+		owners=$(scanned=0
+			for entry in "$ROOT/var/agent-tmp"/*; do
+				[ -d "$entry" ] || continue
+				scanned=$((scanned + 1))
+				[ "$scanned" -le 200 ] || break
+				size=$(du -sk "$entry" 2>/dev/null | awk '{ print $1 }') || continue
+				# bash 3.2 (macOS /bin/sh) rejects `continue` as a case body; grep instead.
+				printf '%s' "$size" | grep -q '^[0-9][0-9]*$' || continue
+				label=
+				if [ -f "$entry/.owner" ]; then
+					label=$(sed -n 's/^label=//p' "$entry/.owner" 2>/dev/null | tr -d '\t' | head -n 1) || label=
+				fi
+				[ -n "$label" ] || label=$(basename "$entry") || continue
+				printf '%s\t%s\n' "$size" "$label"
+			done | sort -rn | head -n 3 | awk -F'\t' '{
+				kb=$1; label=$2
+				if (kb >= 1048576) human=sprintf("%s:%.1fGiB", label, kb/1048576)
+				else if (kb >= 1024) human=sprintf("%s:%.1fMiB", label, kb/1024)
+				else human=sprintf("%s:%dKiB", label, kb)
+				printf "%s%s", (NR>1 ? "," : ""), human
+			} END { if (NR>0) printf "\n" }') || owners=
+	fi
+	if [ -n "$owners" ]; then
+		echo "WARN disk-pressure: sbh reports $pct free (below its floor); saving continues on the 10 GiB physical floor; run waste management (ompkit-774u.15); top_scratch=$owners"
+	else
+		echo "WARN disk-pressure: sbh reports $pct free (below its floor); saving continues on the 10 GiB physical floor; run waste management (ompkit-774u.15)"
+	fi
 }
 
 gate_harness() {
@@ -701,20 +733,33 @@ if [ -z "$CHANGED" ] && [ -n "$BASE" ]; then
 elif [ -z "$CHANGED" ]; then
 	CHANGED=$(git -C "$ROOT" diff-tree --root --no-commit-id --name-only -r "$COMMIT")
 fi
-# ompkit-hecp: the harness resolves repo-relative case paths against OMP_KIT_CASE_CWD; the
-# archive lives under var/agent-tmp, so without this every case path looks like scratch.
-: "${OMP_KIT_CASE_CWD:=$ROOT}"
-export OMP_KIT_CASE_CWD
+# ompkit-hecp: corpus-relative paths resolve against the harness hermetic root
+# unless the caller overrides OMP_KIT_CASE_CWD (e.g. pre-push-gate), so no
+# location-dependent default is forced here: the verdict must not depend on
+# where this archive was extracted.
+setup_case_env() {
+	if [ -n "${OMP_KIT_CASE_CWD+set}" ]; then
+		export OMP_KIT_CASE_CWD
+	else
+		unset OMP_KIT_CASE_CWD
+	fi
+}
+setup_case_env
 # CIGATE1 ledger: the pushing checkout's own git dir (never committed, never shared). An explicit
 # FRESH_GATE_LEDGER (including empty, which turns it off) wins.
 if [ -z "${FRESH_GATE_LEDGER+set}" ]; then
-	ledger_git=$(git -C "$OMP_KIT_CASE_CWD" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
+	ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
 	FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
 fi
 # GATESCR1: the steps run in the background and this shell waits, because a POSIX shell defers a
 # trap until its foreground job ends; with a hung suite in the foreground, HUP/INT/TERM never ran
 # the handler. `wait` returns on the signal, so the handler stops the tree and removes WORK.
 run_gate() {
+	# SAVEFIRST1 (ompkit-774u.16): everything under the gate — including ladders nested
+	# inside `test --full` — admits on physical bytes. sanitizedEnv carries this into the
+	# isolated fixture; ladder.sh applies it to its heavy calls. Standalone runs leave it
+	# unset, where the sbh policy floor still applies.
+	export OMP_KIT_DISK_OBSERVER=statfs
 	disk_pressure_flag
 	started=$(date +%s)
 	run_step manifest gate_manifest || exit 1

@@ -298,9 +298,16 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
 		return 2;
 	}
-	const override = options.diskObserver;
+	const envObserver = process.env.OMP_KIT_DISK_OBSERVER;
+	const envOverride = envObserver === undefined || envObserver === "" ? undefined : envObserver;
+	// SAVEFIRST1 (ompkit-774u.16): OMP_KIT_DISK_OBSERVER is the ambient form of
+	// --disk-observer for callers that cannot take a flag (ladder.sh heavy calls
+	// nested inside a save). Precedence: flag, then env, then load.json. An invalid
+	// env value refuses loudly (exit 2), never silently changes admission.
+	const override = options.diskObserver ?? envOverride;
 	if (override !== undefined && !DISK_OBSERVERS.includes(override as DiskObserver)) {
-		process.stderr.write(`heavy: --disk-observer must be "statfs", "sbh" or "auto", got "${override}"; no command was run\n`);
+		const source = options.diskObserver !== undefined ? "--disk-observer" : "OMP_KIT_DISK_OBSERVER";
+		process.stderr.write(`heavy: ${source} must be "statfs", "sbh" or "auto", got "${override}"; no command was run\n`);
 		return 2;
 	}
 	const observerOverride = override as DiskObserver | undefined;

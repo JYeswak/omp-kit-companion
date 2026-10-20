@@ -70,7 +70,8 @@ function systemTempRoots(): readonly string[] {
 }
 
 
-function callerScratchRoot(root: string, workspace: string): string {
+/** Validate a caller-supplied owned scratch root; exported for integration work-dir admission. */
+export function callerScratchRoot(root: string, workspace: string): string {
 	try {
 		if (!isAbsolute(root)) throw new Error("absolute root required");
 		const caller = realpathSync(resolve(workspace));
@@ -129,6 +130,10 @@ export function sanitizedEnv(
 		if (value !== undefined) env[key] = value;
 	}
 	if (inherited.OMP_KIT_NATIVE_STAGE_PROGRESS === "1") env.OMP_KIT_NATIVE_STAGE_PROGRESS = "1";
+	// SAVEFIRST1 (ompkit-774u.16): the pre-push gate's statfs override must reach ladders
+	// nested inside `test --full`; only the three heavy observers cross the boundary, so a
+	// typo can never smuggle an arbitrary value into the isolated run.
+	if (inherited.OMP_KIT_DISK_OBSERVER === "statfs" || inherited.OMP_KIT_DISK_OBSERVER === "sbh" || inherited.OMP_KIT_DISK_OBSERVER === "auto") env.OMP_KIT_DISK_OBSERVER = inherited.OMP_KIT_DISK_OBSERVER;
 	const sourceCache = ompSourceCacheRoot(inherited);
 	if (sourceCache) env.OMP_KIT_OMP_SRC_CACHE = resolve(sourceCache);
 	env.HOME = join(privateRoot, "home");
