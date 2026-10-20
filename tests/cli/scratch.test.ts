@@ -3,6 +3,7 @@ import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, 
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { exportCommitToScratch, parseTextOwner } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
@@ -1646,8 +1647,8 @@ test("scratch apply names a permission failure on stderr and the receipt and exi
     expect(row.error ?? "").toMatch(/EACCES/);
     expect(result.envelope.data.receipt).toMatchObject({ failed_count: 1, refused_count: 0 });
     expect(result.stderr).toContain(`SKIP ${dead} (atomic-quarantine-failed)`);
-    // The `error: <errno …>` suffix on that stderr line rides the held-back cli.ts
-    // follow-up (ompkit-3tgm DONE report); the envelope and receipt already carry it.
+    const progress = result.stderr.split("\n").find(line => line.includes(dead) && line.includes("atomic-quarantine-failed"));
+    expect(progress ?? "").toMatch(/EACCES/);
     expect(existsSync(dead)).toBe(true);
   } finally {
     chmodSync(qt, 0o755);
@@ -1675,3 +1676,96 @@ test("scratch apply with only a correctly refused expiry exits 0 with refused co
     expect.objectContaining({ dir: held, action: "SKIP", reason: "quarantine-owner-active" }));
   expect(existsSync(join(held, "data"))).toBe(true);
 }, 30000);
+
+// REAPSKIP1 (ompkit-3tgm): the scheduled job reports applied/refused/failed
+// counts; a run with only correctly refused SKIPs exits 0 and leaves the dir.
+test("service run reports applied/refused/failed counts and exits 0 on refusals only", () => {
+  const { home, state } = cliHome();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const live = join(root, "mismatch-live");
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("mismatch-live")));
+  writeFileSync(join(live, "work"), "live\n");
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
+    PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const run = cli(["service", "run", "scratch-reaper"], home, env);
+  expect(run.code).toBe(0);
+  const sessions = run.envelope.data.sessions as { dir: string; action: string; reason: string }[];
+  expect(sessions.find(value => value.dir === live)).toMatchObject({ action: "SKIP", reason: "session-name-owner-mismatch" });
+  const refused = sessions.filter(value => value.action === "SKIP").length;
+  expect(refused).toBeGreaterThan(0);
+  expect(run.envelope.data.stats).toMatchObject({ applied: sessions.length, refused, failures: 0 });
+  expect(existsSync(live)).toBe(true);
+}, 30000);
+
+test("SCRATCHLEAK1: legacy colon text owners parse; bare prose does not", () => {
+	expect(parseTextOwner("agent: ReplayNOFIXKIT\nlabel: kg88-remeasure\nrepo: omp-kit\nbead: ompkit-kg88\ncreated: 2026-10-18\n"))
+		.toMatchObject({ agent: "ReplayNOFIXKIT", label: "kg88-remeasure", bead: "ompkit-kg88" });
+	expect(parseTextOwner("Grade303")).toBeNull();
+	expect(parseTextOwner("label: w\nbogus: 1\n")).toBeNull();
+	expect(parseTextOwner("label: w\nlabel: w\n")).toBeNull();
+	expect(parseOwnerFile("pid: 42\nlabel: w\nrepo: r\ncreated: 2026-10-18\n")).toMatchObject({ pid: 42, bead: null });
+	expect(parseOwnerFile("pid: 42\nlabel: w\nrepo: r\ncreated: 2026-10-18\nbead: ompkit-1\n")).toMatchObject({ pid: 42, bead: "ompkit-1" });
+});
+
+function textFixture(owner: string): { dir: string; root: string } {
+	const root = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "text-owner-"));
+	roots.push(root);
+	const dir = join(root, `case.${process.pid}`);
+	mkdirSync(dir);
+	writeFileSync(join(dir, ".owner"), owner);
+	return { dir, root };
+}
+
+function textRun(lsofOpen: boolean, beadStatus: string | null) {
+	return (args: readonly string[]) => {
+		if (args[0] === "lsof") return lsofOpen ? { code: 0, stdout: "bash 1234 cwd DIR", stderr: "" } : { code: 1, stdout: "", stderr: "" };
+		if (args[0] === "br") return beadStatus === null
+			? { code: 1, stdout: "", stderr: "not found" }
+			: { code: 0, stdout: JSON.stringify([{ id: "b", status: beadStatus }]), stderr: "" };
+		return { code: 127, stdout: "", stderr: "" };
+	};
+}
+
+test("SCRATCHLEAK1: text owner, closed bead, no fds reaps; open fds keep it (planted)", () => {
+	const owner = (repo: string) => `agent: X\nlabel: t\nrepo: ${repo}\nbead: ompkit-kg88\ncreated: 2026-10-18\n`;
+	const closed = textFixture(owner(fixtureRepo));
+	const reaped = inspectSession(closed.dir, closed.root, depsFor({ run: textRun(false, "closed") as never }));
+	expect(reaped).toMatchObject({ action: "REAP", reason: "text-owner-bead-closed-no-fds" });
+	const held = textFixture(owner(fixtureRepo));
+	const kept = inspectSession(held.dir, held.root, depsFor({ run: textRun(true, "closed") as never }));
+	expect(kept).toMatchObject({ action: "LIVE", reason: "text-owner-open-fds-present" });
+});
+
+test("SCRATCHLEAK1: text owner with no bead field reaps when clear; open bead stays live", () => {
+	const plain = textFixture(`agent: X\nlabel: t\nrepo: ${fixtureRepo}\ncreated: 2026-10-18\n`);
+	expect(inspectSession(plain.dir, plain.root, depsFor({ run: textRun(false, null) as never })))
+		.toMatchObject({ action: "REAP", reason: "text-owner-no-bead-no-fds" });
+	const open = textFixture(`agent: X\nlabel: t\nrepo: ${fixtureRepo}\nbead: ompkit-open\ncreated: 2026-10-18\n`);
+	expect(inspectSession(open.dir, open.root, depsFor({ run: textRun(false, "open") as never })))
+		.toMatchObject({ action: "LIVE", reason: "text-owner-bead-open" });
+});
+
+test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", () => {
+	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
+	roots.push(repo);
+	const made = createScratch("probe", repo, depsFor(), { bead: "ompkit-fp72.19.1.43" }, true);
+	expect(made.ok).toBe(true);
+	const raw = readFileSync(join(made.dir, ".owner"), "utf8");
+	expect(JSON.parse(raw)).toMatchObject({ label: "probe", bead: "ompkit-fp72.19.1.43" });
+	expect(parseOwnerFile(raw)).toMatchObject({ bead: "ompkit-fp72.19.1.43" });
+	expect(made.exportLine).toBe(`export TMPDIR=${made.dir}`);
+});
+
+test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (planted)", () => {
+	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
+	roots.push(repo);
+	const made = createScratch("exp", repo, depsFor(), {}, true);
+	expect(made.ok).toBe(true);
+	const head = defaultRunner(["git", "-C", fixtureRepo, "rev-parse", "HEAD"], { timeoutMs: 15_000 });
+	expect(head.code).toBe(0);
+	expect(exportCommitToScratch(fixtureRepo, head.stdout.trim(), made.dir, defaultRunner)).toBeNull();
+	expect(existsSync(join(made.dir, "package.json"))).toBe(true);
+	expect(exportCommitToScratch(fixtureRepo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
+});

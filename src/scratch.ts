@@ -84,12 +84,21 @@ export function parseOwnerFile(text: string): ScratchOwner | null {
 	}
 	for (const line of text.split("\n")) {
 		if (line === "") continue;
+		let key: string, value: string;
 		const eq = line.indexOf("=");
-		if (eq < 0) return null;
-		const key = line.slice(0, eq);
-		const value = line.slice(eq + 1);
+		if (eq >= 0) {
+			key = line.slice(0, eq);
+			value = line.slice(eq + 1);
+			if (value === "" || /[\t\r\n]/.test(value)) return null;
+		} else {
+			// Legacy text owners use `key: value` lines (e.g. `agent: X`, `bead: ompkit-yyy`).
+			const colon = line.indexOf(": ");
+			if (colon < 0) return null;
+			key = line.slice(0, colon);
+			value = line.slice(colon + 2);
+			if (key === "" || value === "" || /[\t\r\n]/.test(value)) return null;
+		}
 		if (!(ALLOWED_OWNER_FIELDS as readonly string[]).includes(key)) return null;
-		if (value === "" || /[\t\r\n]/.test(value)) return null;
 		if (seen[key] !== undefined) return null;
 		seen[key] = value;
 	}
@@ -129,12 +138,15 @@ function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null 
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!)) return null;
 	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) return null;
 	const createdAt = seen.created_at ?? seen.created!;
-	const bins = binned.length === 0 ? NO_BIN : parseBinFields(seen, createdAt);
+	const loneBead = binned.length === 1 && seen.bin === undefined && seen.bead !== undefined;
+	if (loneBead && !AGENT_PATTERN.test(seen.bead!)) return null;
+	const bins = binned.length === 0 || loneBead ? NO_BIN : parseBinFields(seen, createdAt);
 	if (bins === null) return null;
 	if (budgeted.length === 1 && !BUDGET_PATTERN.test(seen.budget!)) return null;
 	return { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
 		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
 		agent: seen.agent ?? null, session: seen.session ?? null, ...bins,
+		bead: bins.bead ?? (loneBead ? seen.bead! : null),
 		budget: budgeted.length === 1 ? Number(seen.budget) : null };
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
@@ -484,6 +496,61 @@ function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string,
 	}
 }
 
+/** A legacy text owner without a pid (`agent: X` / `label: Y` / `bead: Z` lines). Null when the text is not that shape. */
+export interface TextOwner { agent: string | null; label: string; repo: string | null; bead: string | null; created: string | null }
+export function parseTextOwner(text: string): TextOwner | null {
+	const seen: Record<string, string> = {};
+	let lines = 0;
+	for (const line of text.split("\n")) {
+		if (line === "") continue;
+		lines++;
+		const colon = line.indexOf(": ");
+		if (colon < 0) return null;
+		const key = line.slice(0, colon), value = line.slice(colon + 2);
+		if (key === "" || value === "" || /[\t\r\n]/.test(value)) return null;
+		if (!["agent", "label", "repo", "bead", "created"].includes(key)) return null;
+		if (seen[key] !== undefined) return null;
+		seen[key] = value;
+	}
+	if (lines === 0 || seen.label === undefined) return null;
+	return { agent: seen.agent ?? null, label: seen.label, repo: seen.repo ?? null, bead: seen.bead ?? null, created: seen.created ?? null };
+}
+
+/** Bead status through the runner's `br show` in the owner repo, or null when unprovable (fail closed). */
+function beadClosed(bead: string, repo: string | null, run: ScratchRunner): boolean | null {
+	if (repo === null) return null;
+	let resolved: string;
+	try {
+		resolved = resolve(repo);
+	} catch {
+		return null;
+	}
+	let stat;
+	try {
+		stat = statSync(resolved);
+	} catch {
+		return null;
+	}
+	if (!stat.isDirectory()) return null;
+	let out: ScratchRunResult;
+	try {
+		out = run(["br", "show", bead, "--json"], { timeoutMs: 15_000 });
+	} catch {
+		return null;
+	}
+	if (out.code !== 0) return null;
+	try {
+		const parsed: unknown = JSON.parse(out.stdout);
+		const first = Array.isArray(parsed) ? parsed[0] : parsed;
+		const status = (first as Record<string, unknown>)?.status;
+		if (status === "closed") return true;
+		if (typeof status === "string" && status !== "") return false;
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
 	const sized = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
 		({ dir, action, reason, owner, sizeBytes: dirSize(dir) });
@@ -497,7 +564,23 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 	if (!stat.isDirectory()) return { dir, action: "SKIP", reason: "not-directory", owner: null, sizeBytes: 0 };
 	if (resolve(dir) !== dir || !dir.startsWith(root)) return { dir, action: "SKIP", reason: "session-outside-root", owner: null, sizeBytes: 0 };
 	const { owner, malformed } = readOwner(dir);
-	if (!owner) return sized("SKIP", malformed ? "malformed-owner-file" : "no-owner-file");
+	if (!owner) {
+		// Legacy pid-less text owners: no process to signal, so lsof-clear plus a
+		// closed or missing bead means REAP. Anything unprovable stays out.
+		const raw = readText(join(dir, ".owner"));
+		const text = raw === null ? null : parseTextOwner(raw);
+		if (text !== null) {
+			const clear = lsofClearDir(deps, dir);
+			if (clear === null) return sized("SKIP", "text-owner-lsof-unavailable");
+			if (!clear) return sized("LIVE", "text-owner-open-fds-present");
+			if (text.bead === null) return sized("REAP", "text-owner-no-bead-no-fds");
+			const closed = beadClosed(text.bead, text.repo, deps.run);
+			if (closed === true) return sized("REAP", "text-owner-bead-closed-no-fds");
+			if (closed === false) return sized("LIVE", "text-owner-bead-open");
+			return sized("SKIP", "text-owner-bead-unproven");
+		}
+		return sized("SKIP", malformed ? "malformed-owner-file" : "no-owner-file");
+	}
 	if (!ownerMatchesScratchRoot(owner, ownerRoot, dir, deps)) return sized("SKIP", "owner-repo-outside-scratch-root", owner);
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith(".")) {
 		return sized("SKIP", "owner-label-invalid", owner);
@@ -1043,7 +1126,7 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	const parsed = parseOwnerFile(ownerText);
 	const suffixPid = /\.(\d+)$/.exec(marker.legacyName);
 	const owner: ScratchOwner = parsed ?? { pid: suffixPid ? Number(suffixPid[1]) : 0, processStart: null,
-		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null, bin: null, purpose: null, bead: null, expires: null };
+		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null, bin: null, purpose: null, bead: null, expires: null, budget: null };
 	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName, bin: null, ref: null };
 }
 
@@ -1203,7 +1286,7 @@ export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: s
  * of hand-writing .owner files; hand-written bare-label owners are reported
  * as malformed-owner-file with per-root counts in the plan totals.
  */
-export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}): ScratchCreateResult {
+export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}, jsonOwner = false): ScratchCreateResult {
 	if (!/^[A-Za-z0-9][A-Za-z0-9._%-]*$/.test(label)) return { ok: false, dir: "", exportLine: "", reason: "label-invalid" };
 	let repo: string;
 	try {
@@ -1218,13 +1301,21 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
 	const seat = deps.callerSeat?.();
-	const durable = seat?.agent && seat.main ? `agent=${seat.agent}\nsession=${seat.main}\n` : "";
-	const binned = [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]]
-		.filter((pair): pair is [string, string] => pair[1] !== undefined).map(([key, value]) => `${key}=${value}\n`).join("");
-	if (bins.budgetBytes !== undefined && (!Number.isInteger(bins.budgetBytes) || !BUDGET_PATTERN.test(String(bins.budgetBytes))))
-		return { ok: false, dir: "", exportLine: "", reason: "budget-invalid" };
-	const budgeted = bins.budgetBytes !== undefined ? `budget=${bins.budgetBytes}\n` : "";
-	const ownerText = `pid=${process.pid}\nprocess_start=${start}\nlabel=${label}\nrepo=${repo}\ncreated_at=${createdAt}\nargv0=${argv}\n${durable}${binned}${budgeted}`;
+	const fields: Record<string, string | number> = { pid: process.pid, process_start: start, label, repo, created_at: createdAt, argv0: argv };
+	if (seat?.agent && seat.main) {
+		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
+		fields.agent = seat.agent;
+		fields.session = seat.main;
+	}
+	for (const [key, value] of [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]] as const) {
+		if (value === undefined) continue;
+		fields[key] = value;
+	}
+	if (bins.budgetBytes !== undefined) {
+		if (!Number.isInteger(bins.budgetBytes) || !BUDGET_PATTERN.test(String(bins.budgetBytes))) return { ok: false, dir: "", exportLine: "", reason: "budget-invalid" };
+		fields.budget = bins.budgetBytes;
+	}
+	const ownerText = jsonOwner ? JSON.stringify(fields) : Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join("");
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -1244,6 +1335,26 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const parsed = parseOwnerFile(ownerText);
 	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
 	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created" };
+}
+
+/**
+ * Exact-commit read-only export into a scratch dir: `git archive` to a tarball
+ * (file output, never a pipe, so binary stays intact), extract, remove the
+ * tarball. The dir already exists and is owned by the caller; on failure the
+ * dir is left in place with nothing added. Null on success, else the reason.
+ */
+export function exportCommitToScratch(repo: string, commit: string, dir: string, run: ScratchRunner): string | null {
+	const typed = run(["git", "-C", repo, "cat-file", "-t", commit], { timeoutMs: 15_000 });
+	if (typed.code !== 0 || typed.stdout.trim() !== "commit") return "export-commit-unknown";
+	const tarball = join(dir, ".export.tar");
+	const archived = run(["git", "-C", repo, "archive", "--format=tar", `--output=${tarball}`, commit], { timeoutMs: 120_000 });
+	if (archived.code !== 0) return "export-archive-failed";
+	const extracted = run(["tar", "-xf", tarball, "-C", dir], { timeoutMs: 120_000 });
+	try {
+		rmSync(tarball, { force: true });
+	} catch { /* best effort */ }
+	if (extracted.code !== 0) return "export-extract-failed";
+	return null;
 }
 
 /** Move an owner-released session to quarantine without requiring its process to exit. */

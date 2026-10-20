@@ -50,11 +50,16 @@ test("the four bins exist and an owner record carries bin, purpose and bead; no 
 	expect(parseOwnerFile(JSON.stringify({ pid: 42, label: "w", repo, created: CREATED, bin: "promote" }))).toMatchObject({ bin: "promote" });
 });
 
-test("a malformed bin group makes the owner record malformed: unknown bin, purpose or bead alone, a bad token, expires on a non-hold", () => {
-	for (const extra of ["bin=archive\n", "purpose=probe\n", "bead=ompkit-1\n", "bin=throwaway\nexpires=2026-10-20\n", "bin=throwaway\npurpose=has space\n",
+test("a malformed bin group makes the owner record malformed: unknown bin, purpose alone, a bad token, expires on a non-hold", () => {
+	for (const extra of ["bin=archive\n", "purpose=probe\n", "bin=throwaway\nexpires=2026-10-20\n", "bin=throwaway\npurpose=has space\n",
 		`bin=throwaway\npurpose=${"p".repeat(41)}\n`, "bin=throwaway\nbead=-bad\n", "bin=\n"])
 		expect({ extra, parsed: parseOwnerFile(ownerText(42, extra)) }).toEqual({ extra, parsed: null });
 	expect(parseOwnerFile(ownerText(42, `bin=throwaway\npurpose=${"p".repeat(40)}\n`))).not.toBeNull();
+});
+
+test("a lone bead without a bin is valid (scratch new records the owning bead; unbinned)", () => {
+	expect(parseOwnerFile(ownerText(42, "bead=ompkit-1\n"))).toMatchObject({ bin: null, bead: "ompkit-1" });
+	expect(parseOwnerFile(ownerText(42, "bead=-bad\n"))).toBeNull();
 });
 
 test("a hold needs a bead and an expiry no later than 14 days after creation, and stays inside the pattern", () => {
