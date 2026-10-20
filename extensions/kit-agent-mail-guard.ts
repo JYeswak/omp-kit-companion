@@ -50,9 +50,11 @@ import {
  * from `rules-fleet/kit-no-plaintext-secret.md` beside this extension and compiled as OMP does (plain RegExp),
  * so the rule and this guard cannot disagree. A missing or unparseable rule refuses (fail closed).
  *
- * Not done: injecting the seat's sender_token. A tool_call handler can replace the execution input
- * (ToolCallEventResult.input), so the mechanism exists, but no per-seat token store does: pane identity
- * files hold only the name, and AGENT_MAIL_TOKEN is the HTTP bearer, not a registration token.
+ * A send that passes every check runs with the seat's sender_token injected when one is
+ * registered: AGENT_MAIL_SENDER_TOKEN (the token the seat's registration minted, the same
+ * variable `am mail send` honors) fills a missing sender_token via ToolCallEventResult.input,
+ * which OMP revalidates and executes. Only the seat's own sender_name is ever stamped, an
+ * explicit token is never overridden, and the token never appears in a reason string.
  */
 
 export const AM_BODY_CAP = 1800;
@@ -428,9 +430,8 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		return refuse("AM_PHANTOM_REFUSED", `"${name}" is not registered under project_key ${key}, so the send is refused before a phantom recipient is created. The wider lookup is incomplete (${coverage}): confirm with \`${amBin} agents list -p <suspected-key> --json\`, or register the recipient first.`);
 	}
 
-	async function checkMessage(tool: "send_message" | "reply_message", value: unknown, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> {
+	async function checkMessage(tool: "send_message" | "reply_message", value: unknown, ctx: FlywheelContext, names: string[]): Promise<FlywheelToolCallResult | undefined> {
 		const sender = prop(value, "sender_name");
-		const names = await seatNames(ctx, prop(value, "project_key"));
 		if (names.length === 0) {
 			return refuse("AM_IDENTITY_UNKNOWN", "this seat has no identity (AGENT_NAME is unset and no Agent Mail pane identity names this pane), so sender_name cannot be checked. Launch the seat with AGENT_NAME set.");
 		}
@@ -474,6 +475,40 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		return undefined;
 	}
+	/**
+	 * The seat's sender_token, injected into a send the seat already passed every check on.
+	 * Source: AGENT_MAIL_SENDER_TOKEN (the token the seat's registration minted, exported at
+	 * launch; same variable `am mail send` honors). Only when sender_name is the seat (never
+	 * another agent's), only when the call carries no non-empty sender_token of its own, and
+	 * only the raw execution input is revised — the token never appears in a reason string.
+	 * Returns undefined when there is nothing to inject: the send runs as written.
+	 */
+	function injectSenderToken(call: MailCall, event: FlywheelToolCallEvent, names: string[]): { input: Record<string, unknown> } | undefined {
+		const token = env.AGENT_MAIL_SENDER_TOKEN?.trim();
+		if (!token || !call.args.ok) return undefined;
+		const value = call.args.value;
+		if (typeof value !== "object" || value === null) return undefined;
+		const sender = prop(value, "sender_name");
+		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) return undefined;
+		const existing = prop(value, "sender_token");
+		if (typeof existing === "string" && existing.trim() !== "") return undefined;
+		const raw = event.input;
+		if (typeof raw !== "object" || raw === null) return undefined;
+		if (typeof event.toolName === "string" && event.toolName.trim().toLowerCase() === "write") {
+			const content = prop(raw, "content");
+			if (typeof content === "string") {
+				let parsed: unknown;
+				try { parsed = JSON.parse(content); } catch { return undefined; }
+				if (typeof parsed !== "object" || parsed === null) return undefined;
+				return { input: { ...raw, content: JSON.stringify({ ...parsed, sender_token: token }) } };
+			}
+			if (typeof content === "object" && content !== null) {
+				return { input: { ...raw, content: { ...content, sender_token: token } } };
+			}
+			return undefined;
+		}
+		return { input: { ...raw, sender_token: token } };
+	}
 
 	pi.on("tool_call", async (event, ctx) => {
 		const call = mailCall(event);
@@ -497,7 +532,10 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				return undefined;
 			}
 			if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
-			return await checkMessage(call.tool === "send_message" ? "send_message" : "reply_message", call.args.value, ctx);
+			const names = await seatNames(ctx, prop(call.args.value, "project_key"));
+			const verdict = await checkMessage(call.tool === "send_message" ? "send_message" : "reply_message", call.args.value, ctx, names);
+			if (verdict !== undefined) return verdict;
+			return injectSenderToken(call, event, names);
 		} catch (error) {
 			return refuse("AM_GUARD_FAILED", `the check failed (${error instanceof Error ? error.message : String(error)}).`);
 		}

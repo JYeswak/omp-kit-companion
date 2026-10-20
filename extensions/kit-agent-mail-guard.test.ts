@@ -523,3 +523,59 @@ test("phantom: an unreadable roster fails closed instead of sending unchecked", 
 		expect(code(await h.mail(cwd, "send_message", send()))).toBe("AM_ROSTER_UNAVAILABLE");
 	}
 });
+
+// --- sender_token injection ----------------------------------------------------------------------
+
+const SEAT_TOKEN = "seat-token-minted-for-tests";
+
+/** The mail arguments a passing send runs with after the guard's input revision. */
+function stampedArgs(result: FlywheelToolCallResult | undefined): Record<string, unknown> | undefined {
+	if (typeof result !== "object" || result === null || !("input" in result)) return undefined;
+	const input: unknown = result.input;
+	const content: unknown = typeof input === "object" && input !== null && "content" in input ? input.content : input;
+	if (typeof content === "string") {
+		let parsed: unknown;
+		try { parsed = JSON.parse(content); } catch { return undefined; }
+		// typeof-object is the boundary invariant for the args bag.
+		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+	}
+	// typeof-object is the boundary invariant for the args bag.
+	return typeof content === "object" && content !== null ? (content as Record<string, unknown>) : undefined;
+}
+
+test("token: a passing send runs stamped with the seat token; explicit tokens and other senders untouched", async () => {
+	const h = await createHost({ env: { AGENT_NAME: "PlumRaven", AGENT_MAIL_SENDER_TOKEN: SEAT_TOKEN } });
+	const cwd = fleetRepo();
+	const stamped = await h.mail(cwd, "send_message", send());
+	const body = stampedArgs(stamped);
+	expect(body?.sender_token).toBe(SEAT_TOKEN);
+	expect(body?.subject).toBe(`DONE ${BEAD}: landed`);
+	expect(body?.to).toEqual(["BlueLake"]);
+	expect(stamped !== undefined && "reason" in stamped).toBe(false);
+	// An explicit token is never overridden: the send runs as written.
+	expect(await h.mail(cwd, "send_message", send({ sender_token: "explicit-token" }))).toBeUndefined();
+	// Another sender is still refused, and the seat token goes nowhere near the refusal.
+	const refused = await h.mail(cwd, "send_message", send({ sender_name: "BlueLake" }));
+	expect(code(refused)).toBe("AM_IDENTITY_MISMATCH");
+	expect(JSON.stringify(refused)).not.toContain(SEAT_TOKEN);
+	// No token registered: the send runs as written.
+	const bare = await createHost();
+	expect(await bare.mail(fleetRepo(), "send_message", send())).toBeUndefined();
+});
+
+test("token: direct MCP-call form, object content, and empty-string token are stamped", async () => {
+	const h = await createHost({ env: { AGENT_NAME: "PlumRaven", AGENT_MAIL_SENDER_TOKEN: SEAT_TOKEN } });
+	const cwd = fleetRepo();
+	const direct = await h.call({ toolName: "mcp__mcp_agent_mail_send_message", input: send() }, cwd);
+	const dinput = stampedArgs(direct);
+	expect(dinput?.sender_token).toBe(SEAT_TOKEN);
+	expect(dinput?.subject).toBe(`DONE ${BEAD}: landed`);
+	const objectForm = await h.call({ toolName: "write", input: { path: `${MAIL}send_message`, content: send() } }, cwd);
+	expect(stampedArgs(objectForm)?.sender_token).toBe(SEAT_TOKEN);
+	const emptyToken = await h.call(
+		{ toolName: "write", input: { path: `${MAIL}send_message`, content: JSON.stringify(send({ sender_token: "" })) } }, cwd);
+	expect(stampedArgs(emptyToken)?.sender_token).toBe(SEAT_TOKEN);
+	const replyCall = await h.call({ toolName: "mcp__mcp_agent_mail_reply_message", input: reply() }, cwd);
+	const rinput = stampedArgs(replyCall);
+	expect(rinput?.sender_token).toBe(SEAT_TOKEN);
+});
