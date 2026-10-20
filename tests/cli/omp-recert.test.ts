@@ -1,0 +1,19 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkOmpDrift, readOmpTestRecord, writeOmpTestRecord } from "../../src/omp-recert.ts";
+import type { OmpTestRecord } from "../../src/omp-recert.ts";
+const state = () => mkdtempSync(join(tmpdir(), "omp-recert-"));
+const rec = (omp_version: string, verdict: "PASS" | "FAIL" = "PASS"): OmpTestRecord => ({ schema_version: 1, omp_version, scope: "fast", verdict, recorded_at: "2026-10-20T00:00:00Z" });
+describe("omp-recert drift decision", () => {
+ test("unchanged version short-circuits", () => { const d = checkOmpDrift("18.12.2", rec("18.12.2")); expect(d.status).toBe("OK"); expect(d.trigger_recert).toBe(false); expect(d.log_line).toContain("short-circuit"); });
+ test("planted negative rejects always-recert", () => { for (const v of ["18.12.2", "18.10.3", "18.12.3"]) expect(checkOmpDrift(v, rec(v)).trigger_recert).toBe(false); });
+ test("patch bump is stale", () => { const d = checkOmpDrift("18.12.3", rec("18.12.2")); expect(d.status).toBe("STALE-OMP"); expect(d.trigger_recert).toBe(true); expect(d.reason).toContain("18.12.2"); expect(d.reason).toContain("18.12.3"); });
+ test("minor and major bumps are stale", () => { expect(checkOmpDrift("18.13.0", rec("18.12.2")).status).toBe("STALE-OMP"); expect(checkOmpDrift("19.0.0", rec("18.12.2")).trigger_recert).toBe(true); });
+ test("missing record names test --record", () => { const d = checkOmpDrift("18.12.2", null); expect(d.status).toBe("NOT_RUN"); expect(d.trigger_recert).toBe(true); expect(d.recommended_action).toContain("test --record"); });
+ test("FAIL remains stale when versions match", () => { const d = checkOmpDrift("18.12.2", rec("18.12.2", "FAIL")); expect(d.status).toBe("STALE-OMP"); expect(d.trigger_recert).toBe(true); });
+ test("unresolvable OMP defers", () => { const d = checkOmpDrift(null, rec("18.12.2")); expect(d.status).toBe("NOT_RUN"); expect(d.trigger_recert).toBe(false); });
+ test("record round trips", () => { const dir = state(); const written = writeOmpTestRecord(dir, { omp_version: "18.12.2", scope: "fast", verdict: "PASS", recorded_at: "2026-10-20T00:00:00Z" }); expect(readOmpTestRecord(dir)).toEqual(written); });
+ test("corrupt record is absent", () => { const dir = state(); writeFileSync(join(dir, "omp-test-record.json"), "not json{"); expect(readOmpTestRecord(dir)).toBeNull(); });
+});
