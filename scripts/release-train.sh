@@ -32,15 +32,17 @@
 #   bump --version V --date YYYY-MM-DD [--repo DIR]
 #     The upstream oh-my-pi release commit (scripts/release.ts): fold
 #     changelog.d/ into CHANGELOG.md [Unreleased], promote it to
-#     `## [V] - DATE`, set both package.json versions, and commit
-#     `chore: bump version to V` on the checked-out SHA. Nothing to release
-#     (no Unreleased entries, no fragments) is a refusal: no commit, no tag,
-#     never an empty release body.
+#     `## [V] - DATE`, set both package.json versions, stamp the generated
+#     README release line to `Current release: vV` (scripts/stamp-release-line.sh),
+#     and commit `chore: bump version to V` on the checked-out SHA. Nothing to
+#     release (no Unreleased entries, no fragments) is a refusal: no commit, no
+#     tag, never an empty release body.
 #   evidence-sha --sha SHA [--repo DIR]
 #     The SHA whose green CI a release at SHA may reuse: SHA itself, or the
 #     parent of a release bump commit whose only changes are the CHANGELOG
-#     promotion, removed changelog.d fragments and the two package.json
-#     version fields (anything more gets no inherited evidence).
+#     promotion, removed changelog.d fragments, the two package.json version
+#     fields, and the generated README release line restamped to the bump
+#     version (anything more gets no inherited evidence).
 #   version-match --version V --sha SHA [--repo DIR]
 #     Tag gate (ompkit-fp72.135.1.14): package.json at SHA must state V in
 #     both .version and .omp.version. Match prints VERSION_MATCH and exits 0;
@@ -282,10 +284,12 @@ bump)
 	printf '%s\n' "$promoted"
 	if [ "$rc" -eq 4 ]; then printf 'BUMP=skip REASON=nothing-to-release version=%s\n' "$version"; exit 4; fi
 	[ "$rc" -eq 0 ] || { echo "bump: promote failed (rc=$rc)" >&2; exit 1; }
-	# The tree was clean, and promote only rewrites/removes tracked files, so -u stages exactly its result.
+	stamped=$(cd "$repo" && sh "$SCRIPT_DIR/stamp-release-line.sh" --version "$version" 2>&1) || { echo "bump: stamp failed: $stamped" >&2; exit 1; }
+	printf '%s\n' "$stamped"
+	# The tree was clean, and promote+stamp only rewrite tracked files, so -u stages exactly their result.
 	git -C "$repo" add -u -- .
 	git -C "$repo" commit -q -m "chore: bump version to $version" \
-		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set." \
+		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set, README release line stamped." \
 		-m "Bead: ompkit-v66l" \
 		-m "[no-changelog] release bump commit; its notes are the promoted CHANGELOG section" || { echo "bump: commit failed" >&2; exit 1; }
 	printf 'BUMP=committed version=%s sha=%s\n' "$version" "$(git -C "$repo" rev-parse HEAD)"; exit 0
@@ -311,12 +315,20 @@ evidence-sha)
 	if [ "$shape" = ok ]; then
 		parent=$(git -C "$repo" rev-parse "$sha^")
 		changes=$(git -C "$repo" diff-tree --no-commit-id --no-renames --name-status -r "$sha")
-		bad_paths=$(printf '%s\n' "$changes" | grep -Ev '^(M	CHANGELOG\.md|M	package\.json|D	changelog\.d/[a-z0-9.-]+\.md)$' || true)
+		bad_paths=$(printf '%s\n' "$changes" | grep -Ev '^(M	CHANGELOG\.md|M	package\.json|M	README\.md|D	changelog\.d/[a-z0-9.-]+\.md)$' || true)
 		[ -z "$bad_paths" ] || shape=bad
 		now=$(git -C "$repo" show "$sha:package.json" | jq -S 'del(.version, .omp.version)' 2>/dev/null) || shape=bad
 		before=$(git -C "$repo" show "$parent:package.json" | jq -S 'del(.version, .omp.version)' 2>/dev/null) || shape=bad
 		[ "$now" = "$before" ] || shape=bad
 		git -C "$repo" show "$sha:package.json" | jq -e --arg v "$version" '.version == $v and .omp.version == $v' >/dev/null 2>&1 || shape=bad
+		# A README.md change is admissible only when it is exactly the generated
+		# release line restamped to the bump version (no hand prose may ride along).
+		if git -C "$repo" diff-tree --no-commit-id --no-renames --name-only -r "$sha" | grep -qx 'README.md'; then
+			stamped=$(git -C "$repo" show "$sha:README.md" | awk '/<!-- kit-release:start -->/{flag=1;next}/<!-- kit-release:end -->/{flag=0}flag' | grep -v '^[[:space:]]*$' || true)
+			[ "$stamped" = "Current release: v$version" ] || shape=bad
+			stray=$(git -C "$repo" diff "$parent" "$sha" -- README.md | grep -E '^[+-]' | grep -vE '^[+-]{3}' | grep -vF "Current release: v" || true)
+			[ -z "$stray" ] || shape=bad
+		fi
 	fi
 	if [ "$shape" = ok ]; then printf 'EVIDENCE_SHA=%s REASON=release-bump-parent bump=%s\n' "$parent" "$sha"; exit 0; fi
 	printf 'EVIDENCE_SHA=%s REASON=bump-shape-mismatch\n' "$sha"; exit 0

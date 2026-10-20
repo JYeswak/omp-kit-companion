@@ -5,8 +5,10 @@
 //      (src/commands.ts, imported -- never grepped) appears in README.md's `## Command reference`
 //      as `omp-kit <command>` / `--scope <value>`.
 //   2. README.md pins no release version: no `vX.Y.Z` / `X.Y.Z` / `KIT_VERSION=X.Y.Z` outside the
-//      generated OMP footer (scripts/docs-footer.sh owns that block). Install snippets resolve the
-//      latest release at run time.
+//      generated OMP footer (scripts/docs-footer.sh owns that block) and the generated release
+//      line (`<!-- kit-release:start --> … `Current release: vX.Y.Z`, stamped by the release train
+//      via scripts/stamp-release-line.sh and verified here to equal the package.json version).
+//      Install snippets resolve the latest release at run time.
 //   3. The readme-update gate (skill readme-update, --profile product) passes when it is installed;
 //      the repo's own structural checks always run (CI has no skills directory).
 //
@@ -18,6 +20,9 @@ import { dirname, join, resolve } from "node:path";
 
 const FOOTER_START = "<!-- verified-ttsr-docs:start -->";
 const FOOTER_END = "<!-- verified-ttsr-docs:end -->";
+/** Generated release line the train stamps at tag time (scripts/stamp-release-line.sh owns this block). */
+export const RELEASE_START = "<!-- kit-release:start -->";
+export const RELEASE_END = "<!-- kit-release:end -->";
 /** A release-shaped version triple not embedded in a longer dotted or word token (127.0.0.1 is not one). */
 export const VERSION_LITERAL = /(?<![\w.-])v?(?:0|[1-9]\d{0,5})\.(?:0|[1-9]\d{0,5})\.(?:0|[1-9]\d{0,5})(?!\.?\d)/g;
 /** readme-update forbids worklog headings (W1-W3); mirrored here for runs without the skill. */
@@ -66,12 +71,19 @@ async function loadRegistry(path: string): Promise<Registry> {
 	return { commands: names, scopes: scopeValue.split("|") };
 }
 
-/** README text with the generated footer removed (it legitimately carries OMP versions). */
-function withoutFooter(readme: string): string {
-	const start = readme.indexOf(FOOTER_START);
-	const end = readme.indexOf(FOOTER_END);
+/** README text with one generated block removed (generated blocks legitimately carry versions). */
+function withoutBlock(readme: string, startMarker: string, endMarker: string): string {
+	const start = readme.indexOf(startMarker);
+	const end = readme.indexOf(endMarker);
 	if (start < 0 || end < start) return readme;
-	return readme.slice(0, start) + readme.slice(end + FOOTER_END.length);
+	return readme.slice(0, start) + readme.slice(end + endMarker.length);
+}
+/** The generated release-line body, or undefined when either marker is missing. */
+export function releaseBlock(readme: string): string | undefined {
+	const start = readme.indexOf(RELEASE_START);
+	const end = readme.indexOf(RELEASE_END);
+	if (start < 0 || end < start) return undefined;
+	return readme.slice(start + RELEASE_START.length, end).trim();
 }
 
 function section(readme: string, heading: string): string | undefined {
@@ -86,9 +98,24 @@ const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "sev
 /** "30 rules", "five guard extensions", "30 diagnostic scopes": a count claim about the shipped inventory. */
 export const COUNT_CLAIM = new RegExp(`(?<![\\w.-])(\\d{1,4}|${NUMBER_WORDS.join("|")})[ \\t]+(?:[a-z]+(?:-[a-z]+)*[ \\t]+)?(rules|scopes|commands|extensions|skills)\\b`, "gi");
 
-export function checkReadme(readme: string, registry: Registry, inventory: Inventory): string[] {
+export function checkReadme(readme: string, registry: Registry, inventory: Inventory, releaseVersion?: string): string[] {
 	const findings: string[] = [];
-	const body = withoutFooter(readme);
+	// The OMP footer sits at the end of the file so stripping it shifts no finding line; the
+	// release line sits at the top, so it stays in the scanned body and only its own line range
+	// is exempt from the version-literal rule (stripping it would misnumber every finding below).
+	const body = withoutBlock(readme, FOOTER_START, FOOTER_END);
+	const block = releaseBlock(readme);
+	if (block === undefined) {
+		findings.push(`README.md has no generated release line (${RELEASE_START} … ${RELEASE_END}); the release train stamps it at tag time with sh scripts/stamp-release-line.sh`);
+	} else if (releaseVersion === undefined) {
+		findings.push("README.md release line is unverifiable: no package.json version supplied to checkReadme");
+	} else if (block !== `Current release: v${releaseVersion}`) {
+		findings.push(`README.md release line says \`${block}\` but package.json is ${releaseVersion}; refresh with sh scripts/stamp-release-line.sh --version ${releaseVersion}`);
+	}
+	const releaseStart = body.indexOf(RELEASE_START);
+	const releaseEnd = body.indexOf(RELEASE_END);
+	const exemptFrom = releaseStart < 0 ? -1 : body.slice(0, releaseStart).split("\n").length - 1;
+	const exemptTo = releaseEnd < releaseStart ? -1 : body.slice(0, releaseEnd + RELEASE_END.length).split("\n").length - 1;
 	const reference = section(body, "## Command reference");
 	if (reference === undefined) {
 		findings.push("README.md has no `## Command reference` section");
@@ -103,8 +130,9 @@ export function checkReadme(readme: string, registry: Registry, inventory: Inven
 		}
 	}
 	body.split("\n").forEach((line, index) => {
-		for (const match of line.matchAll(VERSION_LITERAL))
-			findings.push(`README.md:${index + 1} pins a release version literal \`${match[0]}\`; resolve the latest release at run time instead`);
+		if (index < exemptFrom || index > exemptTo)
+			for (const match of line.matchAll(VERSION_LITERAL))
+				findings.push(`README.md:${index + 1} pins a release version literal \`${match[0]}\`; resolve the latest release at run time instead`);
 		if (WORKLOG_HEADING.test(line)) findings.push(`README.md:${index + 1} worklog/changelog heading (readme-update W1-W3); history belongs in CHANGELOG.md: ${line.trim()}`);
 		if (/^[ \t]*[-*][ \t]+\[[ xX]\][ \t]/.test(line)) findings.push(`README.md:${index + 1} task checkbox (readme-update W7)`);
 		const actual: Record<string, number> = {
@@ -165,7 +193,13 @@ async function main(argv: string[]): Promise<number> {
 	if (!existsSync(readmePath)) usage(`no README at ${readmePath}`);
 	const registry = await loadRegistry(registryPath);
 	const inventory = loadInventory(root);
-	const findings = checkReadme(readFileSync(readmePath, "utf8"), registry, inventory);
+	let releaseVersion: string | undefined;
+	try {
+		const manifest: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+		const version = manifest && typeof manifest === "object" && "version" in manifest ? manifest.version : undefined;
+		if (typeof version === "string" && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) releaseVersion = version;
+	} catch { releaseVersion = undefined; }
+	const findings = checkReadme(readFileSync(readmePath, "utf8"), registry, inventory, releaseVersion);
 	console.log(`readme-check: registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath}); ${inventory.rules} rules, ${inventory.extensions} extensions, ${inventory.skills} skills`);
 	if (readmeGate) {
 		const gate = runReadmeGate(readmePath);
