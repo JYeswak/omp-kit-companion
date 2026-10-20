@@ -44,8 +44,10 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-commit/49-omp-kit-staged-pysafe", "scripts/check-staged-pysafe.sh"],
 	["hooks.d/pre-commit/pysafe.py", "scripts/pysafe.py"],
 	["hooks.d/pre-commit/pysafe_check.py", "scripts/pysafe_check.py"],
-];
+	["hooks.d/pre-commit/46-omp-kit-staged-readme", "scripts/check-staged-readme.sh"],
+	["hooks.d/pre-commit/readme-check.ts", "scripts/readme-check.ts"],
 
+];
 /**
  * The two pushed-beads members are conditional in the installer
  * (--no-pushed-beads skips them). A missing optional member is not a finding;
@@ -287,14 +289,22 @@ export async function refreshFleetHooks(io: HookRefreshIo): Promise<HookRefreshR
 		}
 		const members: HookMemberRefresh[] = [];
 		const changed: string[] = [];
-		for (const [installedRel] of HOOK_MEMBER_PAIRS) {
+		const invalid: string[] = [];
+		for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
 			const after = io.digest(join(located.dir, installedRel));
 			const was = before[installedRel] ?? null;
-			const refreshed = was !== after && after !== null;
-			if (refreshed) changed.push(join(located.dir, installedRel));
+			const sourceDigest = io.digest(join(io.kitRoot(), sourceRel));
+			const optionalMissing = OPTIONAL_MEMBERS[installedRel] === true && was === null && after === null;
+			const matchesSource = optionalMissing || (sourceDigest !== null && after === sourceDigest);
+			const refreshed = was !== after && after !== null && matchesSource;
+			if (was !== after) changed.push(join(located.dir, installedRel));
+			if (!matchesSource) invalid.push(installedRel);
 			members.push({ member: installedRel, before_sha256: was, after_sha256: after, refreshed });
 		}
-		if (changed.length === 0) {
+		if (invalid.length > 0) {
+			report.failed += 1;
+			report.results.push({ repo, source: entry.source, status: "FAILED", hooks_dir: located.dir, tracked: located.tracked, paths: changed, members, detail: `installer left ${invalid.length} member(s) missing or mismatched: ${invalid.join(", ")}` });
+		} else if (changed.length === 0) {
 			report.fresh += 1;
 			report.results.push({ repo, source: entry.source, status: "FRESH", hooks_dir: located.dir, tracked: located.tracked, paths: [], members, detail: "every member already matched the active release" });
 		} else if (located.tracked) {

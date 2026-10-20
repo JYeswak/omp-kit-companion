@@ -18,7 +18,7 @@ import {
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
-/** Fixture kit root with all 16 source members plus one stale-target source. */
+/** Fixture kit root with all 18 source members plus one stale-target source. */
 function fixtureKit(): string {
 	const kit = mkdtempSync(join(tmpdir(), "hookrefresh-kit-"));
 	for (const [, sourceRel] of HOOK_MEMBER_PAIRS) {
@@ -118,16 +118,19 @@ test("planted: refresh copies the source over the old member; the fresh member k
 
 test("a tracked hooks path records PENDING_COMMIT and leaves the commit to the director", async () => {
 	const kit = fixtureKit();
-	const dir = fixtureHooksDir(kit, "hooks.d/commit-msg/49-omp-kit-stale-worktree");
 	const repo = mkdtempSync(join(tmpdir(), "hookrefresh-tracked-"));
 	const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe", timeout: 30_000 });
 	run(["init", "-q"]);
 	run(["config", "user.email", "test@example.com"]);
 	run(["config", "user.name", "test"]);
 	run(["config", "core.hooksPath", ".githooks"]);
-	const githooks = join(repo, ".githooks", "hooks.d", "commit-msg");
-	mkdirSync(githooks, { recursive: true });
-	writeFileSync(join(githooks, "49-omp-kit-stale-worktree"), "# OLD member\n");
+	const githooks = join(repo, ".githooks");
+	for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
+		const path = join(githooks, installedRel);
+		mkdirSync(join(path, ".."), { recursive: true });
+		writeFileSync(path, readFileSync(join(kit, sourceRel)));
+	}
+	writeFileSync(join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "# OLD member\n");
 	run(["add", "."]);
 	run(["commit", "-qm", "track hooks"]);
 	const headBefore = run(["rev-parse", "HEAD"]).stdout.toString().trim();
@@ -136,8 +139,10 @@ test("a tracked hooks path records PENDING_COMMIT and leaves the commit to the d
 		...base,
 		pullRepos: () => [{ repo, source: "t:cfs" }],
 		runInstaller: (target) => {
-			writeFileSync(join(target, ".githooks", "hooks.d", "commit-msg", "49-omp-kit-stale-worktree"), readFileSync(join(kit, "scripts/check-stale-worktree.sh")));
-			return { ok: true, detail: "seam refreshed tracked member" };
+			for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
+				writeFileSync(join(target, ".githooks", installedRel), readFileSync(join(kit, sourceRel)));
+			}
+			return { ok: true, detail: "seam refreshed all members" };
 		},
 	});
 	expect(report.pending_commit).toBe(1);
@@ -147,8 +152,29 @@ test("a tracked hooks path records PENDING_COMMIT and leaves the commit to the d
 	expect(run(["rev-parse", "HEAD"]).stdout.toString().trim()).toBe(headBefore);
 	expect(run(["status", "--porcelain"]).stdout.toString()).toContain("49-omp-kit-stale-worktree");
 	rmSync(kit, { recursive: true, force: true });
-	rmSync(dir, { recursive: true, force: true });
 	rmSync(repo, { recursive: true, force: true });
+});
+
+test("planted negative: an installer that leaves stale bytes is FAILED, never reported refreshed", async () => {
+	const kit = fixtureKit();
+	const staleDir = fixtureHooksDir(kit, "hooks.d/commit-msg/49-omp-kit-stale-worktree");
+	const before = sha(readFileSync(join(staleDir, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "utf8"));
+	const base = memIo(kit, [{ repo: "/stale", hooksDir: staleDir, tracked: false }]);
+	const report = await refreshFleetHooks({
+		...base,
+		pullRepos: () => [{ repo: "/stale", source: "t:stale" }],
+		runInstaller: () => ({ ok: true, detail: "planted no-op installer" }),
+	});
+	expect(report.failed).toBe(1);
+	expect(report.refreshed).toBe(0);
+	expect(report.results[0]!.status).toBe("FAILED");
+	expect(report.results[0]!.detail).toContain("49-omp-kit-stale-worktree");
+	const stale = report.results[0]!.members.find((row) => row.member === "hooks.d/commit-msg/49-omp-kit-stale-worktree")!;
+	expect(stale.before_sha256).toBe(before);
+	expect(stale.after_sha256).toBe(before);
+	expect(stale.refreshed).toBe(false);
+	rmSync(kit, { recursive: true, force: true });
+	rmSync(staleDir, { recursive: true, force: true });
 });
 
 test("only pullEnabled sessions refresh; doctor still sees every fleet repo", () => {
