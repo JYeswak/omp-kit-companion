@@ -200,7 +200,7 @@ function trackerRereadApplies(cwd: string, env: Record<string, string | undefine
 
 export function compactionRereadMessage(pending: PendingReread): string {
 	const steps: string[] = [];
-	if (!pending.agentsOk) steps.push(`reread ${pending.agentsPath} in full`);
+	if (!pending.agentsOk) steps.push(`read any line range of ${pending.agentsPath}`);
 	const assignee = pending.identities.length > 0 ? pending.identities[0] : "<your agent name>";
 	if (!pending.beadOk) {
 		steps.push(`run \`br list --status in_progress --assignee ${assignee} --json\` and \`br show <id> --json\` for your in-progress bead`);

@@ -133,8 +133,7 @@ test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	expect(h.sent.length).toBe(1);
 	const { message, options } = h.sent[0]!;
-	expect(message.content).toContain("COMPACTION_REREAD");
-	expect(message.content).toContain(`reread ${join(repo, "AGENTS.md")} in full`);
+	expect(message.content).toContain(`read any line range of ${join(repo, "AGENTS.md")}`);
 	expect(message.content).not.toContain(join(root, "AGENTS.md") + " ");
 	expect(message.content).toContain("br show <id>");
 	expect(options?.deliverAs).toBe("nextTurn");

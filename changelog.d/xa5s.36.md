@@ -1,0 +1,1 @@
+- Make COMPACTION_REREAD tell small-context agents to read any line range of AGENTS.md while preserving the observed-content requirement (ompkit-xa5s.36).
