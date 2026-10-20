@@ -49,8 +49,6 @@
 #     mismatch refuses with exit 4, never a tag. Unparseable or missing
 #     package.json fails closed (exit 4); bad usage exits 2, missing jq exits 3.
 
-set -u
-
 usage() { echo "usage: release-train.sh decide|next-version|verify-candidate|publish-lag|latest-flag|wait-release-idle|bump|evidence-sha|version-match ..." >&2; exit 2; }
 
 cmd=${1:-}; [ -n "$cmd" ] || usage; shift

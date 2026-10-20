@@ -4,3 +4,21 @@ dist/
 .tmp-*
 reports/
 /var/
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
+
+# Private fleet hazard packs (oq1h.7): operator-local, never shipped
+/config/dcg/
+
+# COMPDIRT1 (ompkit-m2ww.1): generated junk, never committed (AC3)
+node_modules/.vite/
+node_modules/.vitest-cache/
+__pycache__/
+*.pyc
+tests/var/
+.slb/
+*.bun-build
+# COMPDIRT1 planted negative: suite writes scratch state under literal
+# `undefined/` when HOME is bogus in test env (stateRoot(home) join)
+/undefined/

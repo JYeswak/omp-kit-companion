@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { type Finding } from "./diagnostics.ts";
+import { readManifest, type Finding } from "./diagnostics.ts";
 import { ensureMutationStateRoot, fsyncDirectory, inspectPendingMutations, writePrivate, type Image } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runtimeTempRoot } from "./runtime.ts";
@@ -310,6 +310,11 @@ function planProfilePolicy(home: string, profile: PolicyConfig, read: NativePoli
 	}
 	return { steps };
 }
+/** Release source check: rule bytes must match MANIFEST.tsv before any policy plan. Names only the disagreeing file, never absolute paths. */
+function verifyReleaseSource(root: string): void {
+	const manifest = readManifest(root);
+	if (manifest.error) fail("SOURCE_INVALID", [manifest.error]);
+}
 export function planPolicy(input: PolicyInput): PolicyPlan {
 	const root = absolute(input.root), home = absolute(input.home);
 	const stateRoot = absolute(input.stateRoot ?? join(process.env.XDG_STATE_HOME || join(home, ".local", "state"), "omp-kit"));
@@ -317,6 +322,7 @@ export function planPolicy(input: PolicyInput): PolicyPlan {
 	if (home === sep || root === home || !safeDirectory(root) || !safeDirectory(home)) fail("UNSAFE_PATH");
 	if (input.project && !safeDirectory(absolute(input.project))) fail("UNSAFE_PROJECT");
 	const source = requirePolicy(root);
+	verifyReleaseSource(root);
 	const profiles = selectedProfiles(input);
 	const ompPath = policyOmpPath(input.ompPath);
 	if (!isAbsolute(ompPath)) fail("OMP_CONFIG_UNAVAILABLE");

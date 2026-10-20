@@ -24,7 +24,9 @@ export interface FleetGuardBlock {
 }
 
 const MAIN_ONLY_REASON =
-	"fleet-guard main-only: branch/worktree creation is blocked. Work on main; see AGENTS.md Working on main.";
+	"fleet-guard main-only: branch/worktree creation is blocked. Work on main and publish only through the private-index landing route (`omp-kit land --paths <reserved> --message <msg> --apply` with an active exclusive reservation); see AGENTS.md Working on main.";
+const PUSH_REASON =
+	"fleet-guard publication: raw `git push` is refused (BRANCHGUARD1: no new branches, no direct publication; see AGENTS.md Working on main). Publish only through the private-index landing route (`omp-kit land --paths <reserved> --message <msg> --apply` with an active exclusive reservation); naming a candidate ref or a prior feasibility proof is not a permit; no files were changed.";
 const BRANCH_OPT_OUT = ".omp/fleet-guard.json";
 
 function asString(value: unknown): string | undefined {
@@ -424,6 +426,31 @@ function branchCreation(words: readonly string[]): boolean {
 	return false;
 }
 
+// BRANCHGUARD1 (ompkit-xa5s.11): every raw `git push` from a tool call is a
+// publication attempt and is refused before effect, whatever the ref spelling
+// (new branch, HEAD:refs/heads/*, SHA:refs/agent-candidates/*, refs/heads/main,
+// deletion refspecs, --tags/--all/--mirror). Publication passes only through
+// the native owner-bound landing route (`omp-kit land --apply`), which never
+// traverses this tool-call gate, so the gate carries no permit: declaring a
+// candidate or a prior proof admits nothing. Dry runs and help output publish
+// nothing and stay quiet; `git stash push` is a stash subcommand, not a push.
+function rawPush(words: readonly string[]): boolean {
+	let index = 1;
+	while (index < words.length) {
+		const word = words[index]!;
+		if (word === "--") { index++; break; }
+		if (!word.startsWith("-") || word === "-") break;
+		if (word === "-C" || word === "-c" || word === "--git-dir" || word === "--work-tree" || word === "--namespace") { index += 2; continue; }
+		if (word.startsWith("--git-dir=") || word.startsWith("--work-tree=") || word.startsWith("--namespace=")) { index++; continue; }
+		index++;
+	}
+	if (index >= words.length || words[index] !== "push") return false;
+	for (const word of words.slice(index + 1)) {
+		if (word === "-n" || word === "--dry-run" || word === "--help" || word === "-h") return false;
+	}
+	return true;
+}
+
 function branchesOptedOut(root: string): boolean {
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(join(root, BRANCH_OPT_OUT), "utf8"));
@@ -532,6 +559,7 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 			const root = repositoryRoot(pathBase);
 			if (!root) continue;
 			if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
+			if (rawPush(effective)) return { block: true, reason: PUSH_REASON };
 			const scope = analyzeCommit(effective);
 			if (scope && scope.amend) return { block: true, reason: AMEND_REASON };
 			if (scope && scope.only) {

@@ -44,10 +44,7 @@ branch = "main"
 required_workflow = "ci.yml"
 
 [fleet]
-repos = [
-  { name = "omp-kit-companion", path = "~/Developer/omp-kit-companion", tracker = "~/Developer/omp-kit" },
-  { name = "uds", path = "~/Developer/uds" },
-  { name = "jev", path = "~/Developer/jev" },
-  { name = "localbench", path = "~/Developer/localbench" },
-  { name = "clutterfreespaces.ios", path = "~/Developer/clutterfreespaces.ios" },
-]
+# Stock shipped config: NO fleet literals (oq1h.7). The operator's user
+# config (XDG_CONFIG_HOME/omp-kit/fleet.toml) provides the fleet list;
+# empty here means `planning score --fleet` reports NOT_CONFIGURED.
+repos = []

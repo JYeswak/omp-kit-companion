@@ -1,0 +1,1 @@
+- Native certification reaps each check's process group (session-scoped spawn with TERM/KILL on timeout and stray cleanup on exit), and `scripts/e2e-live.sh` reaps the omp session group after every scenario: a `test --full` timeout no longer strands writers under the work tree, so teardown reports the true timeout instead of `[Errno 66] Directory not empty`. (ompkit-fp72.48)

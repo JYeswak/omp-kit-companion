@@ -269,3 +269,36 @@ test("planted: ps elapsed parses day, hour and minute forms", () => {
 test("planted: shell quoting round-trips single quotes", () => {
 	expect(shellQuote("it's")).toBe("'it'\\''s'");
 });
+
+test("planted: versioned Tern omp path is a live agent, not frozen", () => {
+	const input = workerPane("%11", 100, 101, OLD_START, composer(false, null), "/s/profiles/dev/agent/sessions/a.jsonl", "Agenta");
+	input.processes = [{ pid: 101, ppid: 100, args: "/Users/josh/.local/bin/omp-0.2.37 --profile dev --model m1" }];
+	const { io, rd } = fake(input);
+	const report = reportStalePanes(io, rd, RELINK_AT, "receipt",
+		[{ pid: 101, ppid: 100, args: "/Users/josh/.local/bin/omp-0.2.37 --profile dev --model m1" }]);
+	const row = report.panes[0]!;
+	expect(row.verdict).toBe("READY");
+	expect(row.ompPid).toBe(101);
+});
+
+test("planted: session file held by another pane descendant still resolves", () => {
+	const input = workerPane("%11", 100, 101, OLD_START, composer(false, null), null, "Agenta");
+	input.processes = [
+		{ pid: 101, ppid: 100, args: "bun /x/omp --profile dev" },
+		{ pid: 102, ppid: 100, args: "omp-helper --watch" },
+	];
+	input.sessionFiles = new Map([[102, ["/s/profiles/dev/agent/sessions/a.jsonl"]]]);
+	const { io, rd } = fake(input);
+	const report = reportStalePanes(io, rd, RELINK_AT, "receipt", input.processes!);
+	const row = report.panes[0]!;
+	expect(row.verdict).toBe("READY");
+	expect(row.sessionFile).toContain("a.jsonl");
+});
+
+test("planted: omp.json config path is not a live agent", () => {
+	const input = workerPane("%11", 100, 101, OLD_START, composer(false, null), "/s/a.jsonl", "Agenta");
+	const { io, rd } = fake(input);
+	const report = reportStalePanes(io, rd, RELINK_AT, "receipt",
+		[{ pid: 101, ppid: 100, args: "bun /x/omp.json --profile dev" }]);
+	expect(report.panes[0]!.verdict).toBe("SKIP-FROZEN");
+});

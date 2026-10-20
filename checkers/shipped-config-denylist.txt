@@ -1,0 +1,10 @@
+# Shipped-config denylist (oq1h.7): fixed strings that must never appear in
+# shipped config/ or src defaults. One fixed string per line; `#` starts a
+# comment. Extend this file (reviewed) when a new fleet identity class is
+# observed in defaults; the checker proves the mechanism with a planted
+# ~/Developer re-add.
+~/Developer
+/Users/josh
+JYeswak/
+# Fleet seat names observed in operating defaults get a line here.
+# None remain after oq1h.7; do not add prose, only exact literals.

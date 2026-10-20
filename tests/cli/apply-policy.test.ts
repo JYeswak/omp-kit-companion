@@ -311,6 +311,47 @@ nativeTest("disabled profile rules are never re-enabled and non-TTSR policy keys
 	writeFileSync(join(f.root, "policy", "ttsr.json"), JSON.stringify({ ...policyValues, model: "forbidden" }));
 	expect(() => planPolicy({ ...f.input, profiles: ["work"] })).toThrow(/INVALID_POLICY/);
 });
+test("policy planning refuses a release whose rule bytes disagree with the manifest", () => {
+	const f = fixture();
+	seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	writeFileSync(join(f.root, "rules", "managed.md"), "tampered after release\n");
+	expect(() => planPolicy({ ...f.input, profiles: ["work"] })).toThrow(/SOURCE_INVALID.*managed/);
+});
+
+nativeTest("compiled apply policy --plan names the disagreeing file on SOURCE_INVALID", () => {
+	const f = fixture();
+	seedProfile(f.home, "work", { ...policyValues, enabled: false });
+	const kit = join(f.workspace, "kit"), good = join(kit, "releases", "v1"), bad = join(kit, "releases", "v2");
+	for (const release of [good, bad]) {
+		mkdirSync(join(release, "bin"), { recursive: true });
+		for (const directory of ["rules", "retired", "policy"]) cpSync(join(f.root, directory), join(release, directory), { recursive: true });
+		cpSync(join(f.root, "MANIFEST.tsv"), join(release, "MANIFEST.tsv"));
+	}
+	writeFileSync(join(bad, "rules", "managed.md"), "tampered after release\n");
+	const build = (release: string) => {
+		const binary = join(release, "bin", "omp-kit");
+		const compiled = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
+			resolve(import.meta.dir, "../../src/cli.ts"), "--outfile", binary], { cwd: f.workspace, stdout: "pipe", stderr: "pipe" });
+		expect(compiled.exitCode, compiled.stdout.toString() + compiled.stderr.toString()).toBe(0);
+		return binary;
+	};
+	const goodBin = build(good), badBin = build(bad);
+	const run = (binary: string) => {
+		const child = Bun.spawnSync([binary, "apply", "policy", "--plan", "--json"], { cwd: f.project,
+			env: { ...nativeTestEnv(f.home) }, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+		const stdout = child.stdout.toString();
+		return { exitCode: child.exitCode, output: stdout + child.stderr.toString(), envelope: JSON.parse(stdout) };
+	};
+	const control = run(goodBin);
+	expect(control.exitCode, control.output).toBe(0);
+	expect(control.envelope.data.action).toBe("PLAN");
+	const refused = run(badBin);
+	expect(refused.exitCode).toBe(2);
+	expect(refused.envelope.errors[0].code).toBe("SOURCE_INVALID");
+	expect(refused.envelope.errors[0].message).toContain("managed");
+	expect(refused.envelope.data.cause_code).toBe("SOURCE_INVALID");
+	expect(String(refused.envelope.data.cause_message)).toContain("managed");
+});
 
 nativeTest("optional TTSR profile list controls settings diagnosis and default policy plan", () => {
 	const f = fixture();

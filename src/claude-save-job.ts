@@ -1,17 +1,21 @@
-/** claude-save-job.ts — SAVE1 (ompkit-ckyg): keep ~/.claude committed and pushed.
+/** claude-save-job.ts — SAVE1 (ompkit-ckyg): keep the operator's claude repo committed and pushed.
  *
  * An interval service job (hourly) that commits admitted changes on main and
  * pushes origin main. Refusals (each with a planted test): HEAD not main,
- * upstream not origin/main, any worktree, any branch besides main, any
- * gitlink outside the 5-gitlink allowlist, a dirty
- * tracked denied file (cc-router-local.json, settings.json), a gitleaks
- * finding, a missing gitleaks scanner (fail-closed), and SKILL.md outside
- * skills/. Gitlinks and denied files are never staged. No merge, rebase,
+ * upstream not origin/main, any worktree, any branch besides the configured
+ * branch baseline, any worktree, any gitlink outside the configured baseline
+ * plus HEAD, a dirty tracked denied file (cc-router-local.json,
+ * settings.json), a gitleaks finding, a missing gitleaks scanner
+ * (fail-closed), and SKILL.md outside skills/. The branch/gitlink baselines
+ * come from the operator's user config (default empty: fail-closed stock
+ * runner); gitlinks already committed at HEAD are tolerated too, so a
+ * committed move of one of them (git mv) does not refuse every later save.
+ * Gitlinks and denied files are never staged. No merge, rebase,
  * stash, branch creation, or force-push: a non-fast-forward push is reported.
- * Tests run on scratch repos only, never ~/.claude itself.
+ * Tests run on scratch repos only, never the operator's repo itself.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 export const GITLEAKS_TIMEOUT_MS = 15_000;
 
@@ -39,10 +43,17 @@ export interface ClaudeSaveResult {
 	reason?: string;
 }
 
+export interface ClaudeSaveBaselines {
+	gitlinks?: readonly string[];
+	branches?: readonly string[];
+}
+
 export interface ClaudeSaveConfig {
 	enabled: boolean;
 	repo: string;
 	stateRoot: string;
+	/** Pre-approved baselines from the operator's user config; default empty (fail-closed stock runner). */
+	baselines?: ClaudeSaveBaselines;
 }
 
 export interface ClaudeSaveGit {
@@ -61,21 +72,36 @@ export interface ClaudeSaveDeps {
 
 const DENIED_BASENAMES: Record<string, true> = { "cc-router-local.json": true, "settings.json": true };
 
-/** Gitlinks snapshotted from ~/.claude 2026-10-06 (5 entries). Gitlinks already committed at HEAD
- * are tolerated too, so a committed move of one of them (git mv) does not refuse every later save;
- * only a gitlink that is neither here nor at HEAD is new. */
-export const CLAUDE_SAVE_BASELINE_GITLINKS: readonly string[] = [
-	"external-skills/app-store-connect-skill",
-	"external-skills/claude-code-apple-skills",
-	"mcps/postgres-mcp.disabled",
-	"skills/.archived-non-skills-20261001/rawr-slides",
-	"skills/.non-skill-dirs-relocated-20260610/rawr-slides",
-];
+/** Resolve the operator's claude-save baselines: explicit override, then XDG config, then ~/.config. */
+export function claudeSaveUserConfigPath(home: string): string {
+	const override = process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+	if (override !== undefined && override !== "") return override;
+	const base = process.env.XDG_CONFIG_HOME;
+	const dir = base !== undefined && base !== "" && isAbsolute(base) ? base : join(home, ".config");
+	return join(dir, "omp-kit", "claude-save.json");
+}
 
-/** Branch baseline: main only. TopazRiver deleted every other ~/.claude
- * branch with Josh's approval (amendment 3, 2026-10-06); any re-created
- * archived branch is refused as new. */
-export const CLAUDE_SAVE_BASELINE_BRANCHES: readonly string[] = ["main"];
+/** Read the operator's claude-save baselines. Absent file means empty baselines; malformed fails closed. */
+export function readClaudeSaveUserBaselines(home: string): { gitlinks: string[]; branches: string[] } {
+	const path = claudeSaveUserConfigPath(home);
+	let text: string;
+	try { text = readFileSync(path, "utf8"); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { gitlinks: [], branches: [] };
+		throw new Error("CLAUDE_SAVE_CONFIG_UNREADABLE");
+	}
+	let parsed: unknown;
+	try { parsed = JSON.parse(text); }
+	catch { throw new Error("CLAUDE_SAVE_CONFIG_INVALID"); }
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("CLAUDE_SAVE_CONFIG_INVALID");
+	const root = parsed as Record<string, unknown>;
+	const checkList = (value: unknown, name: string): string[] => {
+		if (value === undefined) return [];
+		if (!Array.isArray(value) || !value.every(item => typeof item === "string")) throw new Error(`CLAUDE_SAVE_CONFIG_${name}_INVALID`);
+		return [...value];
+	};
+	return { gitlinks: checkList(root.gitlinks, "GITLINKS"), branches: checkList(root.branches, "BRANCHES") };
+}
 
 export function claudeSaveJobEnabled(environment: { OMP_KIT_CLAUDE_SAVE_ENABLED?: string; OMP_KIT_JOB?: string }): boolean {
 	return environment.OMP_KIT_CLAUDE_SAVE_ENABLED === "1" || environment.OMP_KIT_JOB === "claude-save";
@@ -190,14 +216,14 @@ export async function runClaudeSaveJob(config: ClaudeSaveConfig, deps: ClaudeSav
 		if (worktreePaths.length > 1) return record(ctx, fail(ctx, "WORKTREE_PRESENT", `${worktreePaths.length - 1} linked worktree(s); remove them before the saver runs`));
 		const branches = git(["branch", "--list", "--format=%(refname:short)"]);
 		if (branches.code !== 0) return record(ctx, fail(ctx, "BRANCH_LIST_FAILED", branches.stderr.trim()));
-		const baseline = new Set(CLAUDE_SAVE_BASELINE_BRANCHES);
+		const baseline = new Set(config.baselines?.branches ?? []);
 		const extra = branches.stdout.split("\n").map(name => name.trim()).filter(name => name !== "" && !baseline.has(name));
-		if (extra.length > 0) return record(ctx, fail(ctx, "NEW_BRANCH", `new branches outside the main-only baseline: ${extra.join(", ")}`));
+		if (extra.length > 0) return record(ctx, fail(ctx, "NEW_BRANCH", `new branches outside the configured baseline: ${extra.join(", ")}`));
 		const index = git(["ls-files", "-s"]);
 		if (index.code !== 0) return record(ctx, fail(ctx, "INDEX_READ_FAILED", index.stderr.trim()));
 		const headTree = git(["ls-tree", "-r", "--full-tree", "HEAD"]);
 		if (headTree.code !== 0) return record(ctx, fail(ctx, "HEAD_TREE_READ_FAILED", headTree.stderr.trim()));
-		const allowGitlinks = new Set(CLAUDE_SAVE_BASELINE_GITLINKS);
+		const allowGitlinks = new Set(config.baselines?.gitlinks ?? []);
 		for (const line of headTree.stdout.split("\n")) {
 			const match = /^160000 commit [0-9a-f]{40}\t(.*)$/.exec(line);
 			if (match) allowGitlinks.add(match[1]!);

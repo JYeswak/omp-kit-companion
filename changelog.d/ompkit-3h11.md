@@ -1,0 +1,3 @@
+### Added
+
+- `omp-kit doctor --scope secrets` enforces the no-ambient-secrets guard (ompkit-3h11): it FAILs, naming names only and never values, on a literal secret-shaped export in `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, or `~/.config/zsh/*.zsh`; on a secret-shaped name in `tmux show-environment -g`; and on a non-allowlisted secret-shaped name in the live process environment, reporting how many local omp processes still run on a pre-guard environment until respawned from a fresh shell. Test seams (`OMP_KIT_SECRET_SCAN_RC_FILES`, `OMP_KIT_SECRET_SCAN_PROCESS_ENV`, `OMP_KIT_SECRET_SCAN_PROCESS_COUNT`, `OMP_KIT_SECRET_SCAN_ALLOWLIST`) drive planted-fixture tests with synthetic values only.

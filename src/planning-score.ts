@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { record } from "./mcp-sources.ts";
+import { readUserFleetRepos } from "./fleet-user-config.ts";
 import type { PresentationResult } from "./output.ts";
 
 export type PlanningStatus = "PASS" | "FAIL" | "UNKNOWN" | "NOT_APPLICABLE";
@@ -655,6 +656,7 @@ export function runPlanningScore(options: PlanningScoreOptions): PresentationRes
 		const home = options.home ?? process.env.HOME ?? "";
 		const baseConfig = parseConfigError(kitRoot, home);
 		const entries = options.fleet ? baseConfig.fleet : singleRepoEntry(options, baseConfig.fleet, home, kitRoot);
+		if (options.fleet && entries.length === 0) return notConfigured("planning score has no fleet repositories configured");
 		const nowEpochSeconds = Math.floor(Date.now() / 1000);
 		const rows = entries.flatMap((entry) => scoreRepoEntry(entry, kitRoot, home, baseConfig.tuning, nowEpochSeconds));
 		const overall = scorePlanningFleet(rows, baseConfig.tuning);
@@ -737,6 +739,12 @@ function usageFailure(message: string): PresentationResult {
 function unavailable(message: string, remediation: string): PresentationResult {
 	const row = { kind: "overall", status: "UNKNOWN", weighted_score: null, metrics: {} };
 	return { code: 3, data: { ...row, text: message }, jsonl: [row], errors: [{ code: "PLANNING_SCORE_UNAVAILABLE", message, remediation }], verification: "UNVERIFIED" };
+}
+function notConfigured(message: string): PresentationResult {
+	const row = { kind: "overall", status: "UNKNOWN", weighted_score: null, metrics: {} };
+	return { code: 3, data: { ...row, text: message }, jsonl: [row],
+		errors: [{ code: "NOT_CONFIGURED", message, remediation: "Add a [fleet] repos list to your user fleet config (XDG_CONFIG_HOME/omp-kit/fleet.toml, default ~/.config/omp-kit/fleet.toml); stock runners configure nothing." }],
+		verification: "UNVERIFIED" };
 }
 type ParsedGitCommit = Omit<PlanningCommit, "changedPaths"> & { changedPaths: string[] };
 function parseGitLogHeader(line: string): ParsedGitCommit | null | undefined {
@@ -980,10 +988,17 @@ function readFleetConfig(kitRoot: string, home: string): { raw: Record<string, u
 	const raw = parseTomlFile(join(kitRoot, "config", "planning-score.toml"), false);
 	if (!raw) return null;
 	const tuning = validateTuning(raw);
-	const fleet = selectFleet(raw, home, kitRoot);
+	const shipped = selectFleet(raw, home, kitRoot);
+	if (!shipped) return null;
+	// oq1h.7: shipped config holds no fleet literals; the operator overlay appends the fleet list.
+	let fleet = shipped;
+	try {
+		const extra = readUserFleetRepos(home, kitRoot).map(row => ({ name: row.name, path: row.path, ...(row.tracker === null ? {} : { tracker: row.tracker }) }));
+		if (extra.length > 0) fleet = [...shipped, ...extra];
+	} catch { return null; }
 	const plan = record(raw.plan) ? raw.plan : null;
 	const planDefault = plan ? stringValue(plan.default) : null;
-	if (!tuning || !fleet || !planDefault) return null;
+	if (!tuning || !planDefault) return null;
 	return { raw, tuning, fleet, planDefault };
 }
 function parseConfigError(root: string, home: string): LoadedPlanningScoreConfig {

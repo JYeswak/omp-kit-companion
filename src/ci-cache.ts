@@ -46,10 +46,9 @@ export const CI_POLLER_INTERVAL_S = 60;
 export const STALE_AFTER_MS = 180_000;
 export const CACHE_NAME = "ci-runs.json";
 
+/** Tracked repos come only from OMP_KIT_CI_REPOS. Unset means unconfigured: the poller reports NO_REPOS and makes no network call. */
 export function defaultTrackedRepos(): string[] {
-	const fromEnv = (process.env.OMP_KIT_CI_REPOS ?? "").split(",").map(part => part.trim()).filter(part => part !== "");
-	if (fromEnv.length > 0) return fromEnv;
-	return ["JYeswak/omp-kit-companion"];
+	return (process.env.OMP_KIT_CI_REPOS ?? "").split(",").map(part => part.trim()).filter(part => part !== "");
 }
 
 export function ciApiBase(): string {

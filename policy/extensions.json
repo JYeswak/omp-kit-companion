@@ -1,4 +1,4 @@
 {
-  "extensions": ["kit-guard-optin.ts", "fleet-guard.ts"],
+  "extensions": ["kit-guard-optin.ts", "fleet-guard.ts", "adapter.ts", "cass-search.ts", "dcg-tool-bridge.ts", "ee-ambient-session-start.ts", "ee-failure-journal.ts", "jev-memory-filter.ts", "observational-tool-result.ts", "rch-lane-bind-bridge.ts", "rch-mutator.ts", "skill-topology-session-start.ts", "slb-guard-fail-closed.ts", "zestgraph-danger-gate.ts", "zeststream-cast-spawn-cap.ts"],
   "skipProfiles": []
 }

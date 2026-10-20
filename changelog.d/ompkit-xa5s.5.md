@@ -1,0 +1,4 @@
+### Fixed
+- Installed integration proofs launch the packaged mock-model server with the executable's embedded Bun runtime, instead of relaunching the CLI and failing before the profile matrix runs.
+- Installed live proofs accept a validated caller-owned repo scratch root without moving their sandbox into system temporary storage; unowned, symlinked and foreign-workspace roots remain refused.
+- `omp-kit test --integrations` creates its work dir under `OMP_KIT_TEST_WORK_ROOT` when it names a validated caller-owned scratch root, instead of always using the OS temp dir; unowned or foreign-workspace roots fail closed with `INTEGRATIONS_UNAVAILABLE` naming the root. `--keep` is now a registered flag that retains the isolated work dir for inspection.

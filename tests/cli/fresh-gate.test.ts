@@ -722,3 +722,33 @@ test.skipIf(!AMPLE)("CIGATE1 wall budget: past the budget the nearest tests run 
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 120_000);
+
+test("hecp: fresh-gate preserves an explicit case root and forces no location default", () => {
+	const script = readFileSync(gate, "utf8");
+	const start = script.indexOf("setup_case_env() {");
+	expect(start).toBeGreaterThan(-1);
+	const end = script.indexOf("\n}\n", start);
+	expect(end).toBeGreaterThan(start);
+	const fn = script.slice(start, end + 3);
+	mkdirSync(scratchRoot, { recursive: true });
+	const probe = join(scratchRoot, `hecp-case-env-${process.pid}.sh`);
+	writeFileSync(probe, fn + "\nsetup_case_env\n" + "if [ -n \"${OMP_KIT_CASE_CWD+set}\" ]; then printf \"CASE_CWD=%s\\n\" \"$OMP_KIT_CASE_CWD\"; else printf \"CASE_CWD_UNSET\\n\"; fi\n");
+	try {
+		// An explicit caller override (e.g. pre-push-gate) passes through untouched.
+		const explicit = Bun.spawnSync(["sh", probe], { env: { ...process.env, OMP_KIT_CASE_CWD: "/caller/repo" }, stdout: "pipe", stderr: "pipe" });
+		expect(explicit.exitCode).toBe(0);
+		expect(explicit.stdout.toString()).toContain("CASE_CWD=/caller/repo");
+		// Without an override no location-dependent default is forced: the harness
+		// hermetic root applies, so the verdict cannot depend on where the archive
+		// was extracted.
+		const cleanEnv: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) {
+			if (value !== undefined && key !== "OMP_KIT_CASE_CWD") cleanEnv[key] = value;
+		}
+		const implicit = Bun.spawnSync(["sh", probe], { cwd: scratchRoot, env: cleanEnv, stdout: "pipe", stderr: "pipe" });
+		expect(implicit.exitCode).toBe(0);
+		expect(implicit.stdout.toString()).toContain("CASE_CWD_UNSET");
+	} finally {
+		rmSync(probe, { force: true });
+	}
+});

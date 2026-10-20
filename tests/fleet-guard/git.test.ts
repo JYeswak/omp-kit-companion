@@ -302,3 +302,104 @@ describe("fleet guard main-only git checks", () => {
 		expect(result?.reason).toContain("budget");
 	});
 });
+
+describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", () => {
+	const SHA = "97081b70d4a355844ad0f6c0bbd0c0a0f6c0bbd0";
+	const fire = [
+		"git push origin cfs-save-brightforge-80-reader",
+		"git push origin HEAD:refs/heads/cfs-save-brightforge-80-reader",
+		"git push origin main",
+		"git push origin refs/heads/main",
+		"git push origin HEAD:refs/heads/main",
+		"git push",
+		`git push origin ${SHA}:refs/agent-candidates/candidate97081b70`,
+		"git push origin HEAD:refs/agent-candidates/candidate97081b70",
+		"git push origin refs/agent-candidates/candidate97081b70",
+		"git push origin :refs/heads/stale-branch",
+		"git push --delete origin stale-branch",
+		"git push --force origin main",
+		"git push --tags origin",
+		"git push --all origin",
+		"git push --mirror origin",
+		"git -C sub push origin main",
+		"git -c user.name=t push origin main",
+		"GIT_DIR=x git push origin main",
+		"env GIT_SSH=x git push origin main",
+		"git push origin main && git status",
+		"git status && git push origin HEAD:refs/heads/side",
+		"sh -c 'git push origin main'",
+		"bash -c \"git push origin main\"",
+		"echo $(git push origin main)",
+		"git commit -m \"$(git push origin main)\"",
+		`git push origin +HEAD:refs/heads/side`,
+	];
+	test("every raw push spelling is refused before effect and names the rule and landing route", () => {
+		const before = snapshotTree(repo);
+		const gitBefore = gitState();
+		for (const command of fire) {
+			const result = check(event(command), context);
+			expect(result?.block, command).toBe(true);
+			expect(result?.reason, command).toContain("publication");
+			expect(result?.reason, command).toContain("land");
+		}
+		expect(snapshotTree(repo)).toEqual(before);
+		expect(gitState()).toBe(gitBefore);
+	});
+
+	test("structured argv pushes are refused with the same reason", async () => {
+		const argv = (...words: string[]) => ({ toolName: "bash", arguments: words });
+		for (const words of [
+			["git", "push", "origin", "main"],
+			["git", "push", "origin", "HEAD:refs/heads/side"],
+			["git", "push", "origin", `${SHA}:refs/agent-candidates/candidate97081b70`],
+		]) {
+			const result = check(argv(...words), context);
+			expect(result?.block, words.join(" ")).toBe(true);
+			expect(result?.reason, words.join(" ")).toContain("publication");
+		}
+		const entry = await handleToolCall(argv("git", "push", "origin", "main"), context);
+		expect(entry?.block).toBe(true);
+		expect(entry?.reason).toContain("publication");
+	});
+
+	test("branch creation refusal names the landing route (AC1 switch -c row)", () => {
+		rmSync(join(repo, ".omp", "fleet-guard.json"), { force: true });
+		rmSync(join(repo, ".omp-fleet-guard.json"), { force: true });
+		const result = check(event("git switch -c topic"), context);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("land");
+	});
+
+	test("the branch opt-out never admits a raw push", () => {
+		mkdirSync(join(repo, ".omp"), { recursive: true });
+		writeFileSync(join(repo, ".omp", "fleet-guard.json"), JSON.stringify({ branches: true }));
+		try {
+			const result = check(event("git push origin main"), context);
+			expect(result?.block, "opt-out admitted a raw push").toBe(true);
+		} finally {
+			rmSync(join(repo, ".omp", "fleet-guard.json"), { force: true });
+			rmSync(join(repo, ".omp-fleet-guard.json"), { force: true });
+		}
+	});
+
+	test("dry runs, stash, reads, and quoted prose stay quiet", () => {
+		const before = snapshotTree(repo);
+		for (const command of [
+			"git push -n origin main",
+			"git push --dry-run origin HEAD:refs/heads/side",
+			"git stash push -m wip",
+			"git switch main",
+			"git checkout main",
+			"git status",
+			"git log --oneline",
+			"git fetch origin main",
+			"git branch",
+			"printf 'git push origin main'",
+			"git commit -m 'mention git push origin main in prose'",
+		]) {
+			expect(check(event(command), context), command).toBeUndefined();
+		}
+		expect(check(event("git push origin main"), { cwd: "/" })).toBeUndefined();
+		expect(snapshotTree(repo)).toEqual(before);
+	});
+});

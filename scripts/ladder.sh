@@ -130,6 +130,7 @@ step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crossch
 # Metamorphic strict invariant: every relation break fails the ladder.
 step metamorphic-ratchet "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --metamorphic-json
 step readiness-selftest /bin/sh checkers/check-readiness.sh --selftest
+step shipped-config-selftest /bin/sh checkers/check-shipped-config.sh --selftest
 step e2e-live /bin/sh "$HERE/scripts/e2e-live.sh"
 step e2e-plant /bin/sh "$HERE/scripts/e2e-live.sh" --plant
 echo "LADDER: GREEN"

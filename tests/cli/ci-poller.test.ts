@@ -212,3 +212,40 @@ test("mixed fresh and stale ci status names the stale repo in JSON and human out
 	expect(humanText).toContain("o/fresh");
 	expect(humanText).toContain("o/stale");
 });
+
+test("planted: two seats share one poller cache with zero network (two watchers collapse to one)", () => {
+	const shared = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-shared-"));
+	roots.push(shared);
+	const state = join(shared, "state", "omp-kit");
+	mkdirSync(state, { recursive: true });
+	const stamped = new Date(Date.now()).toISOString();
+	const cache: CiCacheFile = { version: 1, repos: { "o/r": { etag: null, fetched_at: stamped,
+		last_checked_at: stamped, source: "poll:200", backoff_until_ms: null, backoff_reason: null,
+		runs: [{ id: 7, name: "push", branch: "main", sha: "abc", status: "completed", conclusion: "success",
+			created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T01:00:00Z",
+			fetched_at: stamped, source: "poll" }] } } };
+	const before = JSON.stringify(cache);
+	writeFileSync(join(state, CACHE_NAME), before);
+	const seat = (name: string) => {
+		const home = join(shared, name);
+		mkdirSync(home, { recursive: true });
+		return Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "ci", "status", "--json"], {
+			cwd: home,
+			env: { ...process.env, HOME: home, XDG_STATE_HOME: join(shared, "state"), OMP_KIT_GITHUB_API: "http://127.0.0.1:1" },
+			stdout: "pipe", stderr: "pipe",
+		});
+	};
+	const first = seat("seat-a");
+	const second = seat("seat-b");
+	expect(first.exitCode).toBe(0);
+	expect(second.exitCode).toBe(0);
+	const a = JSON.parse(first.stdout.toString()).data;
+	const b = JSON.parse(second.stdout.toString()).data;
+	expect(a.overall).toBe("OK");
+	expect(b.overall).toBe("OK");
+	expect(a.repos["o/r"]).toMatchObject({ status: "OK", stale: false });
+	expect(b.repos["o/r"]).toMatchObject({ status: "OK", stale: false });
+	expect(b.repos["o/r"]?.runs[0]).toMatchObject({ id: 7, stale: false });
+	expect(a.repos["o/r"]?.runs[0]).toMatchObject({ id: 7, stale: false });
+	expect(readFileSync(join(state, CACHE_NAME), "utf8")).toBe(before);
+});

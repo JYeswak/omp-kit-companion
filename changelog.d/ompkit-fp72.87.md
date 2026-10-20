@@ -1,0 +1,1 @@
+- Bundle the source-pinned DCG fleet-hazard pack 1.3.1 as a manifest-verified configuration asset; activation remains explicit and documented coverage gaps remain unresolved.

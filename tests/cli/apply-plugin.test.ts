@@ -3,7 +3,7 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "nod
 import { join, resolve } from "node:path";
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
-import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, undoPlugin, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
+import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, pluginReceiptPaths, pluginRowErrors, undoPlugin, type PluginReceipt, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
 
 const store = "/fixture/releases/0.2.5";
 const scratchRoot = join(process.cwd(), "var", "agent-tmp");
@@ -599,4 +599,72 @@ test("directory-backed default plugin is replaced with an exact reversible backu
 	} finally {
 		rmSync(stateRoot, { recursive: true, force: true });
 	}
+});
+
+test("planted: receipt candidates include the top-level write location", () => {
+	const stateRoot = makeStateRoot("receipt-paths");
+	try {
+		writeFileSync(join(stateRoot, "plugin-abc.json"), "{}\n");
+		mkdirSync(join(stateRoot, "receipts"), { recursive: true });
+		writeFileSync(join(stateRoot, "receipts", "plugin-legacy.json"), "{}\n");
+		writeFileSync(join(stateRoot, "other.json"), "{}\n");
+		const found = pluginReceiptPaths(stateRoot);
+		expect(found).toContain(join(stateRoot, "plugin-abc.json"));
+		expect(found).toContain(join(stateRoot, "receipts", "plugin-legacy.json"));
+		expect(found.some((path) => path.endsWith("other.json"))).toBe(false);
+	} finally {
+		rmSync(stateRoot, { recursive: true, force: true });
+	}
+});
+
+test("ompkit-fp72.29: pre-apply incomplete snapshot refuses with the specific cause, not a generic label", () => {
+	const fake = runner();
+	const stateRoot = makeStateRoot("fp72-29-pre");
+	const issue = "PLUGIN_SNAPSHOT_INCOMPLETE:/fixture/user-home/.omp/plugins";
+	fake.state.set("default", { installed: true, target: "/fixture/releases/0.2.25", link_path: "/fixture/user-home/default/plugins/node_modules/omp-kit-companion", plugins_dir_hash: null, lock_hash: null, link_kind: "SYMLINK", snapshot_issue: issue });
+	try {
+		const receipt = applyPlugin(planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }]), fake.runner, stateRoot);
+		expect(receipt.rows[0]).toMatchObject({ profile: "default", status: "REFUSED" });
+		expect(receipt.rows[0]?.reason).toContain("PLUGIN_SNAPSHOT_INCOMPLETE");
+		expect(fake.calls).toEqual([]);
+	} finally {
+		rmSync(stateRoot, { recursive: true, force: true });
+	}
+});
+
+test("ompkit-fp72.29: post-mutation incomplete snapshot is PARTIAL with the specific cause, never success", () => {
+	const fake = runner();
+	const stateRoot = makeStateRoot("fp72-29-post");
+	const issue = "PLUGIN_SNAPSHOT_INCOMPLETE:/fixture/user-home/.omp/plugins";
+	let linked = false;
+	const invoking: PluginRunner = {
+		...fake.runner,
+		snapshot: (profile: string) => {
+			const clean = fake.runner.snapshot(profile);
+			return linked ? { ...clean, plugins_dir_hash: null, lock_hash: null, snapshot_issue: issue } : clean;
+		},
+		invoke: (profile, args) => {
+			const result = fake.runner.invoke(profile, args);
+			linked = true;
+			return result;
+		},
+	};
+	try {
+		const receipt = applyPlugin(planPlugin(store, [{ name: "default", configFiles: ["config.yml"] }]), invoking, stateRoot);
+		expect(receipt.rows[0]?.status).toBe("PARTIAL");
+		expect(receipt.rows[0]?.reason).toContain("PLUGIN_SNAPSHOT_INCOMPLETE");
+	} finally {
+		rmSync(stateRoot, { recursive: true, force: true });
+	}
+});
+
+test("ompkit-fp72.29: failed rows project to CLI errors entries naming profile and cause", () => {
+	const rows: PluginReceipt["rows"] = [
+		{ profile: "default", status: "PARTIAL", before: null, after: null, reason: "PLUGIN_SNAPSHOT_INCOMPLETE:/fixture/user-home/.omp/plugins" },
+		{ profile: "codex", status: "APPLIED", before: null, after: null },
+	];
+	const errors = pluginRowErrors(rows);
+	expect(errors.length).toBe(1);
+	expect(errors[0]?.code).toContain("PLUGIN_SNAPSHOT_INCOMPLETE");
+	expect(errors[0]?.message).toContain("default");
 });

@@ -7,6 +7,10 @@ import {
 	parseSessionJournal,
 	parseTernInspection,
 	parseTernProcess,
+	resolveDaemonSocket,
+	resolveTernWindow,
+	ternWindowArgv,
+	ternWindowEnv,
 } from "../../src/plane-tern.ts";
 
 
@@ -149,7 +153,9 @@ test("observer returns UNKNOWN when the session file rotates across its bracket"
 	const io = {
 		run(argv: string[]) {
 			if (argv.includes("inspect")) {
-				const sessionFile = inspectCount++ === 0 ? "/sessions/session-1.jsonl" : "/sessions/session-2.jsonl";
+				// The first two reads (window resolution, opening bracket) agree;
+				// the rotation lands across the observation bracket itself.
+				const sessionFile = inspectCount++ < 2 ? "/sessions/session-1.jsonl" : "/sessions/session-2.jsonl";
 				const panes = [{ ...inspectFixture.panes[0], working: false, omp_session_file: sessionFile }];
 				return { code: 0, out: JSON.stringify({ ...inspectFixture, panes }) };
 			}
@@ -198,7 +204,9 @@ test("observer returns UNKNOWN when the session file changes across its bracket"
 
 test("observer fails closed when a CLI runner throws", async () => {
 	const io = { run() { throw new Error("exec failed"); }, readSessionFile() { return terminalJournal; }, wait: async () => {} };
-	expect(await observeTernSeat(seat, io)).toMatchObject({ state: "UNKNOWN", reason: "INSPECT_FAILED" });
+	// The first command is the window resolution read; its failure refuses
+	// the seat before any observation, still UNKNOWN and never IDLE.
+	expect(await observeTernSeat(seat, io)).toMatchObject({ state: "UNKNOWN", reason: "PLANE_SEAT_UNBOUND" });
 });
 
 test("identity returns the registered Tern pane and runtime binding", async () => {
@@ -420,5 +428,85 @@ test("unknown record types still refuse the whole journal", () => {
 		timestamp: stamp(3), activeLeafId: "frob-1" });
 	const result = parseSessionJournal([header, nativeUser, frob, usage].join("\n") + "\n");
 	expect(result).toMatchObject({ status: "UNKNOWN" });
+});
+
+// ---- window resolution (ompkit-kdbz.2.16 TERNWINKEY1) ----
+const resolutionIo = (runs: string[][], snapshot: unknown, code = 0) => ({
+	run(argv: string[], _env?: Record<string, string>) {
+		runs.push(argv);
+		return { code, out: typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot) };
+	},
+	readSessionFile(_path: string) { return null; },
+	wait: async () => {},
+});
+const windowedFixture = { sessions: [{ id: 41, name: "Default" }], panes: [], clients: [], detached: [] };
+const noDaemonEnv = { TERN_DAEMON_SOCKET: "", TERN_CONFIG_DIR: "/nonexistent-tern-config", HOME: "/nonexistent-home" };
+
+test("resolution verifies an explicit key against the window's own snapshot", () => {
+	const runs: string[][] = [];
+	const result = resolveTernWindow(seat, resolutionIo(runs, windowedFixture), noDaemonEnv);
+	expect(result).toMatchObject({ ok: true, kind: "key", windowKey: "window-1", daemonSocket: null });
+	expect(runs).toEqual([["tern", "--window", "window-1", "inspect", "--json"]]);
+	if (result.ok) {
+		expect(ternWindowArgv(result)).toEqual(["--window", "window-1"]);
+		expect(ternWindowEnv(result)).toBeUndefined();
+	}
+});
+
+test("resolution maps an empty key to the documented default window without the flag", () => {
+	const runs: string[][] = [];
+	const result = resolveTernWindow({ ...seat, windowKey: "" }, resolutionIo(runs, windowedFixture), noDaemonEnv);
+	expect(result).toMatchObject({ ok: true, kind: "default", daemonSocket: null });
+	expect(runs).toEqual([["tern", "inspect", "--json"]]);
+	if (result.ok) {
+		expect(ternWindowArgv(result)).toEqual([]);
+		expect(ternWindowEnv(result)).toBeUndefined();
+	}
+});
+
+test("resolution pins an explicit daemon socket into the run env", () => {
+	const runs: string[][] = [];
+	const seenEnvs: (Record<string, string> | undefined)[] = [];
+	const io = { run(argv: string[], env?: Record<string, string>) { runs.push(argv); seenEnvs.push(env);
+		return { code: 0, out: JSON.stringify(windowedFixture) }; },
+		readSessionFile(_path: string) { return null; }, wait: async () => {} };
+	const result = resolveTernWindow(seat, io, { ...noDaemonEnv, TERN_DAEMON_SOCKET: "/sockets/daemon.sock" });
+	expect(result).toMatchObject({ ok: true, kind: "key", daemonSocket: "/sockets/daemon.sock" });
+	expect(seenEnvs).toEqual([{ TERN_DAEMON_SOCKET: "/sockets/daemon.sock" }]);
+	if (result.ok) expect(ternWindowEnv(result)).toEqual({ TERN_DAEMON_SOCKET: "/sockets/daemon.sock" });
+});
+
+test("resolution refuses a key that addresses no live window", () => {
+	const runs: string[][] = [];
+	const result = resolveTernWindow({ ...seat, windowKey: "bogus" }, resolutionIo(runs, "", 2), noDaemonEnv);
+	expect(result).toMatchObject({ ok: false, code: "PLANE_SEAT_UNBOUND" });
+});
+
+test("resolution refuses a default window missing the configured session", () => {
+	const runs: string[][] = [];
+	const elsewhere = { sessions: [{ id: 9, name: "elsewhere" }], panes: [], clients: [], detached: [] };
+	const result = resolveTernWindow({ ...seat, windowKey: "" }, resolutionIo(runs, elsewhere), noDaemonEnv);
+	expect(result).toMatchObject({ ok: false, code: "PLANE_SEAT_UNBOUND" });
+	expect(runs).toEqual([["tern", "inspect", "--json"]]);
+});
+
+test("resolution refuses structural defects before running any command", () => {
+	for (const bad of [{ ...seat, session: " " }, { ...seat, pane: "nope" }, { ...seat, cwd: "relative" }]) {
+		const runs: string[][] = [];
+		expect(resolveTernWindow(bad, resolutionIo(runs, windowedFixture), noDaemonEnv))
+			.toMatchObject({ ok: false, code: "PLANE_SEAT_UNBOUND" });
+		expect(runs.length).toBe(0);
+	}
+});
+
+test("observer serves a default-resolved seat from the first-window snapshot", async () => {
+	const result = await observeTernSeat({ ...seat, windowKey: "" }, testIo(false, terminalJournal));
+	expect(result).toMatchObject({ state: "IDLE", working: false, oracleBusy: false,
+		sessionFile: "/sessions/session-1.jsonl", sessionLeafId: "assistant-1" });
+});
+
+test("resolveDaemonSocket prefers the explicit override and otherwise stays null without a live socket", () => {
+	expect(resolveDaemonSocket({ ...noDaemonEnv, TERN_DAEMON_SOCKET: "/x/daemon.sock" })).toBe("/x/daemon.sock");
+	expect(resolveDaemonSocket(noDaemonEnv)).toBeNull();
 });
 

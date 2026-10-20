@@ -559,7 +559,7 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 			continue;
 		}
 		if (before.snapshot_issue || before.plugins_dir_hash === null || before.lock_hash === null) {
-			rows.push({ profile: step.profile, status: "REFUSED", before, after: current, reason: "PROFILE_SNAPSHOT_UNVERIFIED" });
+			rows.push({ profile: step.profile, status: "REFUSED", before, after: current, reason: before.snapshot_issue ?? "PROFILE_SNAPSHOT_UNVERIFIED" });
 			continue;
 		}
 		let backup: PluginUndoBackup | undefined;
@@ -628,7 +628,7 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 		if (check && !check.ok)
 			rows.push({ profile: step.profile, status: "PARTIAL", before, after, reason: check.reason ?? "POSTCHECK_FAILED", ...(backup ? { backup } : {}) });
 		else if (after.snapshot_issue || after.plugins_dir_hash === null || after.lock_hash === null)
-			rows.push({ profile: step.profile, status: "PARTIAL", before, after, reason: "PROFILE_SNAPSHOT_UNVERIFIED", ...(backup ? { backup } : {}) });
+			rows.push({ profile: step.profile, status: "PARTIAL", before, after, reason: after.snapshot_issue ?? "PROFILE_SNAPSHOT_UNVERIFIED", ...(backup ? { backup } : {}) });
 		else rows.push({ profile: step.profile, status: "APPLIED", before, after, ...(backup ? { backup } : {}) });
 	}
 	const receipt: PluginReceipt = { schema_version: 1, id, store: plan.store, created_at: new Date().toISOString(),
@@ -639,6 +639,47 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 	writeFileSync(tmp, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
 	renameSync(tmp, path);
 	return receipt;
+}
+
+/**
+ * Project failed receipt rows (REFUSED/PARTIAL/SKIPPED) to CLI errors entries.
+ * The row reason keeps the specific snapshot cause (e.g. PLUGIN_SNAPSHOT_INCOMPLETE:<path>);
+ * ompkit-fp72.29: a PARTIAL apply must never report empty errors[].
+ */
+export function pluginRowErrors(rows: PluginReceipt["rows"]): { code: string; message: string; remediation: string }[] {
+	return rows
+		.filter(row => row.status !== "APPLIED" && row.status !== "UNCHANGED")
+		.map(row => {
+			const cause = row.reason ?? "PLUGIN_APPLY_FAILED";
+			const code = cause.split(":")[0] || "PLUGIN_APPLY_FAILED";
+			return {
+				code,
+				message: `profile ${row.profile}: ${row.status} ${cause}`,
+				remediation: "Inspect the profile receipt row and rerun apply plugin; no unverified rollback was attempted.",
+			};
+		});
+}
+
+/**
+ * Candidate plugin receipt paths under a state root. Receipts are written at
+ * the top level (`plugin-<id>.json`); the legacy `receipts/` subdirectory is
+ * still scanned so older installs compare against a relink instead of
+ * reporting every pane SKIP-FRESH (ompkit-xa5s.6, RedMaple 2026-10-13).
+ */
+export function pluginReceiptPaths(stateRoot: string): string[] {
+	const found: string[] = [];
+	for (const dir of [stateRoot, join(stateRoot, "receipts")]) {
+		let entries: string[] = [];
+		try {
+			entries = readdirSync(dir);
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.startsWith("plugin-") && entry.endsWith(".json")) found.push(join(dir, entry));
+		}
+	}
+	return found;
 }
 
 export function undoPlugin(

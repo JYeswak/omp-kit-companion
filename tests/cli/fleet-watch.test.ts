@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { FleetWatcher, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
@@ -227,5 +227,55 @@ test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where
 	} finally {
 		tmux("kill-server");
 		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null disables", () => {
+	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(scratchParent, { recursive: true });
+	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-gitlock."));
+	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-gitlock-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "fleet-watch-gitlock-repo-")));
+	const gitDir = join(root, ".git");
+	mkdirSync(gitDir);
+	const lock = join(gitDir, "index.lock");
+	const ledgerPath = join(scratch, "ledger.jsonl");
+	const logPath = join(scratch, "actions.jsonl");
+	const now = Date.now();
+	const staleLock = () => {
+		writeFileSync(lock, "");
+		const back = new Date(now - 130_000);
+		utimesSync(lock, back, back);
+	};
+	const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
+	const quiet = {
+		capture: () => ({ code: 0, stdout: "⠋ working", stderr: "" }),
+		send: () => {},
+		sendKeys: () => {},
+		logPath,
+		now: () => now,
+		statePath: null,
+	};
+	try {
+		staleLock();
+		const repoConfig = { ...config, sessions: [{ ...session, repo: root }] };
+		runFleetWatchOnce(repoConfig, { ...quiet, gitLockReap: { run: clearRun, ledgerPath, staleAfterMs: 120_000 } });
+		expect(existsSync(lock)).toBe(false);
+		expect(readdirSync(gitDir).some((name) => name.startsWith("index.lock.stale-"))).toBe(true);
+		const ledger = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		expect(ledger).toHaveLength(1);
+		expect(ledger[0]).toMatchObject({ kind: "GITLOCK_REAPED", lock, repo: root, sizeBytes: 0 });
+		const kinds = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line).kind);
+		expect(kinds).toEqual(["GITLOCK_REAPED"]);
+		// Disabled: the next stale lock survives the tick untouched.
+		staleLock();
+		runFleetWatchOnce(repoConfig, { ...quiet, gitLockReap: null });
+		expect(existsSync(lock)).toBe(true);
+		expect(readFileSync(ledgerPath, "utf8").trim().split("\n")).toHaveLength(1);
+		const kindsAfter = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line).kind);
+		expect(kindsAfter).toEqual(["GITLOCK_REAPED"]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
 	}
 });

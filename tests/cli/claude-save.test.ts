@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkSkillLibrary, claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
+import { checkSkillLibrary, claudeSaveJobEnabled, readClaudeSaveUserBaselines, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -44,10 +44,18 @@ function completeScan(request: GitleaksScanRequest, overrides: Partial<Completed
 		stderr: "",
 		...overrides
 	};
-}
+};
+
+/** Explicit fixture baselines (oq1h.7): the job takes baselines from config, never ships them. */
+const FIXTURE_BASELINES = {
+	branches: ["main"],
+	gitlinks: ["external-skills/app-store-connect-skill", "external-skills/claude-code-apple-skills",
+		"mcps/postgres-mcp.disabled", "skills/.archived-non-skills-20261001/rawr-slides",
+		"skills/.non-skill-dirs-relocated-20260610/rawr-slides"],
+};
 
 function run(repo: string, stateRoot: string, gitleaks: GitleaksScanner = request => completeScan(request)) {
-	const config: ClaudeSaveConfig = { enabled: true, repo, stateRoot };
+	const config: ClaudeSaveConfig = { enabled: true, repo, stateRoot, baselines: FIXTURE_BASELINES };
 	return runClaudeSaveJob(config, {
 		git: (args, env) => {
 			const out = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: repo, ...env } });
@@ -227,7 +235,7 @@ test("missing scanner fails closed", async () => {
 	const { repo } = fixtureRepo();
 	writeFileSync(join(repo, "notes.md"), "x\n");
 	const before = headSha(repo);
-	const result = await runClaudeSaveJob({ enabled: true, repo, stateRoot: join(repo, "..", "state") },
+	const result = await runClaudeSaveJob({ enabled: true, repo, stateRoot: join(repo, "..", "state"), baselines: FIXTURE_BASELINES },
 		{ git: args => sh(repo, ...args), runId: "t1", nowIso: "2026-10-06T00:00:00Z" });
 	expect(result).toMatchObject({ status: "REFUSED", refusal: "GITLEAKS_UNAVAILABLE" });
 	expect(headSha(repo)).toBe(before);
@@ -333,4 +341,56 @@ test("non-fast-forward push is reported, never forced", async () => {
 	const result = await run(repo, join(repo, "..", "state"));
 	expect(result).toMatchObject({ status: "PUSH_FAILED", committed: true, pushed: false, refusal: "PUSH_REJECTED" });
 	expect(sh(repo, "log", "--oneline").stdout).toContain("claude-save:");
+});
+
+test("oq1h.7 default-empty baselines refuse even a main-only tree (fail-closed stock runner)", async () => {
+	const { repo } = fixtureRepo();
+	const before = headSha(repo);
+	const result = await runClaudeSaveJob({ enabled: true, repo, stateRoot: join(repo, "..", "state") },
+		{ git: args => sh(repo, ...args), runId: "t1", nowIso: "2026-10-06T00:00:00Z" });
+	expect(result).toMatchObject({ status: "REFUSED", refusal: "NEW_BRANCH" });
+	expect(result.reason).toContain("main");
+	expect(headSha(repo)).toBe(before);
+});
+
+test("oq1h.7 user baselines are read from the operator config, default empty", () => {
+	const base = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "save1-user-"));
+	dirs.push(base);
+	const home = join(base, "home");
+	const savedXdg = process.env.XDG_CONFIG_HOME, savedOverride = process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+	process.env.XDG_CONFIG_HOME = join(home, "config");
+	delete process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+	try {
+		expect(readClaudeSaveUserBaselines(home)).toEqual({ gitlinks: [], branches: [] });
+		mkdirSync(join(home, "config", "omp-kit"), { recursive: true });
+		writeFileSync(join(home, "config", "omp-kit", "claude-save.json"),
+			JSON.stringify({ gitlinks: ["fixture/link"], branches: ["main"] }));
+		expect(readClaudeSaveUserBaselines(home)).toEqual({ gitlinks: ["fixture/link"], branches: ["main"] });
+		writeFileSync(join(home, "config", "omp-kit", "claude-save.json"), "{nope");
+		expect(() => readClaudeSaveUserBaselines(home)).toThrow("CLAUDE_SAVE_CONFIG_INVALID");
+		writeFileSync(join(home, "config", "omp-kit", "claude-save.json"), JSON.stringify({ branches: [7] }));
+		expect(() => readClaudeSaveUserBaselines(home)).toThrow("CLAUDE_SAVE_CONFIG_BRANCHES_INVALID");
+	} finally {
+		if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = savedXdg;
+		if (savedOverride === undefined) delete process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+		else process.env.OMP_KIT_CLAUDE_SAVE_CONFIG = savedOverride;
+	}
+});
+
+test("oq1h.7 configured user baselines admit the job like the old shipped ones", async () => {
+	const { repo } = fixtureRepo();
+	writeFileSync(join(repo, "notes.md"), "hello\nmore\n");
+	const result = await runClaudeSaveJob(
+		{ enabled: true, repo, stateRoot: join(repo, "..", "state"), baselines: { branches: ["main"], gitlinks: [] } },
+		{
+			git: (args, env) => {
+				const out = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: repo, ...env } });
+				return { code: out.exitCode ?? 1, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
+			},
+			gitleaks: request => completeScan(request),
+			runId: "t1",
+			nowIso: "2026-10-06T00:00:00Z",
+		});
+	expect(result).toMatchObject({ status: "PUSHED", committed: true, pushed: true });
 });

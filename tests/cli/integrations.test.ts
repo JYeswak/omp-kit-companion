@@ -224,6 +224,36 @@ test("integrations --plan prints without reading profiles", () => {
 	expect(plan?.integrations).toContain("dcg");
 	expect(plan?.integrations).toContain("fleet-guard");
 });
+test("integrations work dir honors a validated caller scratch root and refuses unowned roots", () => {
+	const callerWs = join(base, "caller-ws");
+	const scratchRoot = join(callerWs, "var", "agent-tmp", `caller-itg.${process.pid}`);
+	mkdirSync(scratchRoot, { recursive: true });
+	writeFileSync(join(scratchRoot, ".owner"), `pid=${process.pid}\nlabel=caller-itg\nrepo=${callerWs}\ncreated=${new Date().toISOString()}\n`);
+	const probeDir = join(home, ".omp/profiles/caller-probe/agent");
+	mkdirSync(probeDir, { recursive: true });
+	writeFileSync(join(probeDir, "config.yml"), "extensions:\n");
+	const run = (extraEnv: Record<string, string>, args: string[]) => Bun.spawnSync([binary, ...args], {
+		cwd: home, env: { ...environment, ...extraEnv }, stdout: "pipe", stderr: "pipe",
+	});
+	const owned = run(
+		{ OMP_KIT_TEST_WORK_ROOT: scratchRoot, OMP_KIT_CASE_CWD: callerWs },
+		["test", "--integrations", "--profile", "caller-probe", "--keep", "--json"]);
+	const ownedOut = `${owned.stdout.toString()}\n${owned.stderr.toString()}`;
+	expect(owned.exitCode, ownedOut).toBe(0);
+	const kept = readdirSync(scratchRoot).filter(name => name.startsWith("omp-kit-integrations-"));
+	expect(kept.length).toBe(1);
+	rmSync(join(scratchRoot, kept[0]!), { recursive: true, force: true });
+	const unowned = join(base, "unowned-scratch");
+	mkdirSync(unowned, { recursive: true });
+	const refused = run(
+		{ OMP_KIT_TEST_WORK_ROOT: unowned, OMP_KIT_CASE_CWD: callerWs },
+		["test", "--integrations", "--profile", "caller-probe", "--json"]);
+	const refusedOut = refused.stdout.toString();
+	expect(refused.exitCode, `${refusedOut}\n${refused.stderr.toString()}`).toBe(3);
+	expect(refusedOut).toContain("INTEGRATIONS_UNAVAILABLE");
+	expect(refusedOut).toContain(unowned);
+}, 120_000);
+
 
 /**
  * A starting process has no completion event: poll the port file the mock writes once it accepts

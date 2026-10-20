@@ -770,6 +770,27 @@ test("fresh and partial opt-in installs remain separate from rule hash findings 
 	expect(finding(rows, "extensions").status).toBe("DEGRADED");
 	expect(finding(rows, "extensions").evidence?.missing).toEqual(["kit-guard-optin.ts", "profile:default"]);
 });
+test("profile entry pointing at an unversioned file is reported by doctor", async () => {
+	const f = fixture(); installOmp(f);
+	mkdirSync(join(f.root, "policy")); mkdirSync(join(f.root, "extensions"));
+	writeFileSync(join(f.root, "policy", "extensions.json"), '{"extensions":["kit-guard-optin.ts"],"skipProfiles":[]}');
+	writeFileSync(join(f.root, "extensions", "kit-guard-optin.ts"), "shipped\n");
+	const ext = join(f.home, ".omp", "omp-extensions", "kit-guard-optin.ts");
+	mkdirSync(join(f.home, ".omp", "omp-extensions"), { recursive: true });
+	writeFileSync(ext, "shipped\n");
+	const stray = join(f.home, ".omp", "omp-extensions", "hand-placed.ts");
+	writeFileSync(stray, "operator bytes\n");
+	const agent = join(f.home, ".omp", "agent");
+	mkdirSync(agent, { recursive: true });
+	writeFileSync(join(agent, "config.yml"), `extensions:\n  - ${ext}\n  - ${stray}\n`);
+	const before = tree(f.home);
+	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
+	expect(tree(f.home)).toEqual(before);
+	expect(finding(rows, "extensions").status).toBe("DEGRADED");
+	const unversioned = finding(rows, "extensions").evidence?.unversioned_extensions as { profile: string; path: string }[];
+	expect(unversioned.map((entry) => entry.path)).toEqual([stray]);
+	expect(unversioned[0]?.profile).toBe("default");
+});
 
 test("unsafe profile config symlink does not read outside HOME", async () => {
 	const f = fixture(); installOmp(f);

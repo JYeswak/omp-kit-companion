@@ -1,0 +1,3 @@
+### Fixed
+- `omp-kit send SESSION tern:<id> MESSAGE` now routes to the verified native Tern delivery with session-file proof instead of the tmux/ntm path that could never land on a Tern seat (LIVE MISS 2026-10-19: two coordinator sends reported NOT_DELIVERED while the raw transport worked). Malformed `tern:` addresses refuse before delivery with `TERN_MALFORMED_ADDRESS` and zero sends; `--cwd` (default: caller cwd) and `--window-key` (default: verified default window) scope the seat binding.
+- New `rules/kit-teach-send-verify.md`: bare `ntm send` reminds toward `omp-kit send` (marker proof, one retry, drop-folder fallback); kit send invocations and prose mentions stay quiet.

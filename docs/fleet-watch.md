@@ -48,6 +48,11 @@ is absent, including grading and rework selection.
 `focusEpics`, `mission` (`file:line`), `round`, `phase` and `pullEnabled`
 are optional; a malformed value refuses the config with
 `FLEET_WATCH_CONFIG_INVALID: sessions[N].<field>`.
+The optional top-level `registeredTrackers` array (`{"repo", "session"}` per
+entry) covers MP6-registered trackers that have no session entry: each is
+visited exactly once per tick, recovery runs under the owning-director
+session named there, and an entry naming no configured session is logged
+once as a `NO_OWNING_DIRECTOR` block with zero recover commands.
 `noDecisionChecks` controls the idle checks before an ordinary no-decision
 alert. Capture failures are different: Fleet Watch reports one `NO_DECISION`
 with the tmux error and does not infer that the pane is idle or send a nudge.
@@ -248,6 +253,25 @@ blocked attempts are recorded as `RECOVERY_PROCEEDED`, `RECOVERY_BLOCKED`,
 or `RECOVERY_FAILED` events in the Fleet Watch JSONL log; they do not steer
 panes or send a coordinator message. The recovery command runs as
 `br doctor migrate-schema recover` from the configured repository.
+The duplicated per-session recovery branch retires per repo only after the
+successor-kit cutover passes (installed kit, enabled registry tracker-health
+job, registered tracker); otherwise the local incumbent runs unchanged. Raw
+live-tracker SQLite readers are forbidden by `rules/kit-no-live-tracker-sqlite.md`:
+use native br/bv or a disposable copy.
+
+## Stranded-work escalation
+
+A tick that carries the latest work-audit result (`doctor --scope work
+--fleet` rows) routes over-limit stranded work to its owning director. A repo
+whose audit row carries uncommitted-age findings older than 30 minutes
+(`stale_uncommitted_edits`, the audit's own reservation and age calculation)
+raises one `STRANDED_ESCALATED` director action naming the repo, the holder
+and owned paths, and the save-sweep remediation (sweep, commit releasable
+work, push). Ownership is the configured session for the repo, else a
+registered tracker naming a configured session; no new operator queue exists.
+Each episode sends once (persisted in the state ledger), a clean next audit
+clears the finding, and an over-limit breach with no configured owner is
+`STRANDED_UNRESOLVED`: named, logged, zero sends, never misrouted.
 
 ## Install
 
