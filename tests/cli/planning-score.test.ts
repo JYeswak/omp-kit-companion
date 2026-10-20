@@ -305,6 +305,89 @@ for (const scope of ["base", "override"] as const) {
 	}
 }
 
+// PLANPORT1 (ompkit-f1zn5): `planning score` finds the plan from <repo>/.omp/plan.toml and counts review rounds from review files.
+function planConfigRepo(label: string, opts: { reviewFiles: boolean; config: string | null; roundCommits?: number }) {
+	const repo = fixture("plan-config-" + label);
+	const home = fixture("plan-config-home-" + label);
+	const git = (args: string[]) => {
+		const result = Bun.spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+	};
+	git(["init", "--quiet"]);
+	git(["config", "user.name", "Plan Fixture"]);
+	git(["config", "user.email", "plan-fixture@example.invalid"]);
+	mkdirSync(join(repo, ".omp"), { recursive: true });
+	mkdirSync(join(repo, ".beads"), { recursive: true });
+	mkdirSync(join(repo, "docs", "stamp", "reviews"), { recursive: true });
+	const planLines = Array.from({ length: 100 }, (_, i) => "line " + i);
+	writeFileSync(join(repo, "docs", "stamp", "plan.md"), planLines.join("\n") + "\n");
+	writeFileSync(join(repo, ".beads", "issues.jsonl"), JSON.stringify({ id: "s1", title: "Ship it", description: "Plan: docs/stamp/plan.md §1",
+		acceptance_criteria: "verified", status: "open", issue_type: "task", dependencies: [] }) + "\n");
+	writeFileSync(join(repo, ".omp", "planning-score.toml"), "[ci]\nmode = \"local\"\ncheck = \"true\"\nbranch = \"main\"\nreceipts = \"receipts\"\n");
+	if (opts.config !== null) writeFileSync(join(repo, ".omp", "plan.toml"), opts.config);
+	git(["add", "-A"]);
+	git(["commit", "--quiet", "-m", "draft [test]"]);
+	git(["branch", "-M", "main"]);
+	if (opts.reviewFiles) {
+		writeFileSync(join(repo, "docs", "stamp", "reviews", "round1-muse.md"), "R1\n");
+		writeFileSync(join(repo, "docs", "stamp", "reviews", "findings.jsonl"),
+			JSON.stringify({ id: "muse:C1", family: "muse", round: 1, severity: "critical" }) + "\n" +
+			JSON.stringify({ id: "grok:M1", family: "grok", round: 2, severity: "minor" }) + "\n");
+		git(["add", "-A"]);
+		git(["commit", "--quiet", "-m", "review round 1 [test]"]);
+		planLines[0] = "line 0 revised";
+		writeFileSync(join(repo, "docs", "stamp", "plan.md"), planLines.join("\n") + "\n");
+		writeFileSync(join(repo, "docs", "stamp", "reviews", "round2-grok.md"), "R2\n");
+		writeFileSync(join(repo, "docs", "stamp", "reviews", "round2b-verify-grok.md"), "R2b\n");
+		git(["add", "-A"]);
+		git(["commit", "--quiet", "-m", "review round 2 [test]"]);
+	}
+	for (let i = 1; i <= (opts.roundCommits ?? 0); i++) git(["commit", "--quiet", "--allow-empty", "-m", "plan(stamp): review round " + i + " [test]"]);
+	return { repo, home };
+}
+async function scoreRows(repo: string, home: string, planConfig?: string) {
+	const api = await scoreApi();
+	if (!api) return [];
+	const result = api.runPlanningScore({ kitRoot: repoRoot, repoPath: repo, home, ...(planConfig ? { planConfig } : {}) });
+	return (result.jsonl ?? []).filter((row): row is Record<string, unknown> => record(row) && row.kind === "mission");
+}
+const stampConfig = "[plan]\nname = \"stamp\"\npath = \"docs/stamp/plan.md\"\nreviews = \"docs/stamp/reviews\"\n";
+
+test("PLANPORT1 plan config names the plan and review files count its rounds", async () => {
+	const { repo, home } = planConfigRepo("files", { reviewFiles: true, config: stampConfig });
+	const rows = await scoreRows(repo, home);
+	const stamp = rows.find((row) => row.mission === "stamp");
+	if (!stamp || !record(stamp.metrics)) throw new Error("plan-config mission missing: " + JSON.stringify(rows));
+	expect(stamp.metrics.plan_present).toMatchObject({ value: true, status: "PASS", evidence: { plan_path: "docs/stamp/plan.md", file_exists: true, citing_beads: 1 } });
+	// Files round1, round2, round2b plus findings rounds 1 and 2: three distinct rounds.
+	expect(stamp.metrics.plan_rounds).toMatchObject({ value: 3, evidence: { source: "review_files", rounds: ["1", "2", "2b"], files: 3 } });
+	// The commit that recorded round 2b changed 2 of 200 plan lines (1 removed + 1 added over old+new line counts).
+	expect(stamp.metrics.plan_last_diff).toMatchObject({ value: 0.01, status: "PASS", evidence: { source: "review_files" } });
+});
+
+test("PLANPORT1 control: without review files, rounds come from commit subjects", async () => {
+	const { repo, home } = planConfigRepo("subjects", { reviewFiles: false, config: stampConfig, roundCommits: 2 });
+	const rows = await scoreRows(repo, home);
+	const stamp = rows.find((row) => row.mission === "stamp");
+	if (!stamp || !record(stamp.metrics)) throw new Error("plan-config mission missing");
+	expect(stamp.metrics.plan_rounds).toMatchObject({ value: 2, status: "FAIL" });
+	expect(record(stamp.metrics.plan_rounds) ? stamp.metrics.plan_rounds.evidence : null).toBeUndefined();
+});
+
+test("PLANPORT1 an outside plan config scores a repo without writing it; absent and escaping configs are UNKNOWN", async () => {
+	const { repo, home } = planConfigRepo("override", { reviewFiles: true, config: null });
+	expect(await scoreRows(repo, home)).not.toContainEqual(expect.objectContaining({ mission: "stamp" }));
+	const outside = join(fixture("plan-config-outside"), "plan.toml");
+	writeFileSync(outside, stampConfig);
+	const stamp = (await scoreRows(repo, home, outside)).find((row) => row.mission === "stamp");
+	expect(stamp).toMatchObject({ metrics: { plan_rounds: { value: 3 } } });
+	const absent = await scoreRows(repo, home, join(fixture("plan-config-absent"), "plan.toml"));
+	expect(absent).toEqual([expect.objectContaining({ status: "UNKNOWN", metrics: expect.objectContaining({ plan_present: expect.objectContaining({ evidence: { reason: expect.stringContaining("Plan config not found") } }) }) })]);
+	writeFileSync(outside, "[plan]\nname = \"stamp\"\npath = \"../escape.md\"\n");
+	const escaping = await scoreRows(repo, home, outside);
+	expect(escaping).toEqual([expect.objectContaining({ status: "UNKNOWN", metrics: expect.objectContaining({ plan_present: expect.objectContaining({ evidence: { reason: expect.stringContaining("outside the repository") } }) }) })]);
+});
+
 
 test("A5 prose acceptance is presence, not test evidence", async () => {
 	const api = await scoreApi();

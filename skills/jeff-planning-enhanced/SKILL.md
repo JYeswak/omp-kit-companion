@@ -117,6 +117,8 @@ Run on every `br` write, as reports, never as a review round: cycles and edge di
 ## Scoring: `omp-kit planning score`
 Reads the repo's git history, plan file and tracker; prints one JSON line per mission and an overall score. Thresholds and weights live in one file, so tuning means editing one number: kit defaults in `omp-kit/config/planning-score.toml`, with an optional repo override in `.omp/planning-score.toml`.
 
+**The comprehensive plan.** A repo whose plan of record is one comprehensive plan names it in `.omp/plan.toml` `[plan]` (`name`, `path`, `reviews`; the same file the omp-kit plan tooling `plan_check.py`/`plan_gen.py` reads). The score adds that plan as mission `<name>` (default `plan`) and counts its review rounds from the review files: distinct `round<label>-*.md` file names plus `round` fields in `findings.jsonl` (`plan_last_diff` is the plan's change in the commit that recorded the latest round). Without review files it falls back to `plan(<name>): review round N` commits. `OMP_KIT_PLAN_CONFIG=PATH` scores a repo against a plan config kept outside it.
+
 | Metric | Measured from | Default target | Weight |
 |---|---|---|---|
 | `plan_present` | configured plan file exists and mission beads cite it | yes | 1.0 |

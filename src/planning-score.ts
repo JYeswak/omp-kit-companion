@@ -63,8 +63,8 @@ export type PlanningScoreSnapshot = {
 	beads: readonly PlanningBead[] | null;
 	polishPreviousBeads?: readonly PlanningBead[] | null;
 	polishCurrentBeads?: readonly PlanningBead[] | null;
-	nowEpochSeconds: number | null;
 	stage?: string;
+	reviewRounds?: ReviewRounds | null;
 	ci: PlanningCiEvidence;
 };
 export type PlanningScoreTuning = {
@@ -82,7 +82,11 @@ export type MissionScore = {
 };
 
 type TaggedSubject = { mission: string; action: string };
-type FleetRepo = { name: string; path: string; tracker?: string };
+type FleetRepo = { name: string; path: string; tracker?: string; planConfig?: string };
+/** Review rounds read from a plan config's review dir (round<label>-*.md files and findings.jsonl `round`). */
+export type ReviewRounds = { labels: string[]; files: number; last_commit: string | null; last_diff: number | null };
+/** The repo's comprehensive plan, from <repo>/.omp/plan.toml [plan] (omp-kit scripts/plan_config.py schema). */
+type PlanConfigEntry = { mission: string; planPath: string; reviews: string | null; source: string };
 export type LoadedPlanningScoreConfig = {
 	raw: Record<string, unknown>;
 	tuning: PlanningScoreTuning;
@@ -93,6 +97,7 @@ type RepositoryScoreContext = {
 	repoPath: string;
 	trackerPath: string;
 	config: LoadedPlanningScoreConfig;
+	planConfig: PlanConfigEntry | null;
 	repoCommits: readonly PlanningCommit[];
 	trackerCommits: readonly PlanningCommit[];
 	beads: PlanningBead[] | null;
@@ -104,6 +109,9 @@ const SECONDS_PER_DAY = 86_400;
 const MAX_TOML_BYTES = 1_048_576;
 const MAX_TRACKER_BYTES = 64 * 1_048_576;
 const MAX_RECEIPT_BYTES = 1_048_576;
+const PLAN_CONFIG_REL = join(".omp", "plan.toml");
+const DEFAULT_PLAN_MISSION = "plan";
+const ROUND_FILE = /^round(\d{1,4}[a-z]?)[-_.]/i;
 const SCORE_METRIC_NAMES = ["plan_present", "plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "bead_self_contained", "bead_breadth", "plan_to_code_hours", "plan_ship_ratio_7d", "main_green"] as const;
 const HISTORICAL_METRICS = ["plan_present", "plan_rounds", "plan_last_diff", "converted_once", "coverage_checks", "polish_rounds", "polish_last_changed", "plan_to_code_hours"] as const;
 const CODE_EXTENSIONS = new Set([".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".jsx", ".mjs", ".php", ".py", ".rb", ".rs", ".sh", ".swift", ".ts", ".tsx", ".vue"]);
@@ -423,17 +431,26 @@ function scoreHistoryMetrics(snapshot: PlanningScoreSnapshot, target: (name: str
 		return;
 	}
 	const reviews = commits.filter((item) => { const tag = parseTag(item.subject, "plan"); return tag?.mission === snapshot.mission && tag.action.startsWith("review round ") && positiveRound(tag.action.slice("review round ".length)); });
+	const files = snapshot.reviewRounds ?? null;
 	const roundsTarget = numberValue(target("plan_rounds", 4)) ?? 4;
-	put("plan_rounds", reviews.length, ">= " + roundsTarget, reviews.length >= roundsTarget ? "PASS" : "FAIL");
+	const rounds = files ? files.labels.length : reviews.length;
+	put("plan_rounds", rounds, ">= " + roundsTarget, rounds >= roundsTarget ? "PASS" : "FAIL",
+		files ? { source: "review_files", rounds: files.labels, files: files.files } : undefined);
 	const conversions = conversionCount(commits, snapshot.mission);
 	put("converted_once", conversions, 1, conversions === 1 ? "PASS" : "FAIL");
 	const coverage = commits.filter((item) => { const tag = parseTag(item.subject, "beads"); return tag?.mission === snapshot.mission && tag.action.startsWith("coverage check ") && positiveRound(tag.action.slice("coverage check ".length)); }).length;
 	const coverageTarget = numberValue(target("coverage_checks", 1)) ?? 1;
 	put("coverage_checks", coverage, ">= " + coverageTarget, coverage >= coverageTarget ? "PASS" : "FAIL");
 	scorePolishMetrics(snapshot, commits, target, put);
+	const maxDiff = numberValue(target("plan_last_diff", 0.05)) ?? 0.05;
+	if (files) {
+		// The plan's change in the commit that recorded the latest review round's file.
+		const diff = files.last_diff;
+		put("plan_last_diff", diff, "<= " + maxDiff, diff === null ? "UNKNOWN" : diff <= maxDiff ? "PASS" : "FAIL", { source: "review_files", commit: files.last_commit });
+		return;
+	}
 	const latestReview = [...reviews].sort((left, right) => left.timestamp - right.timestamp).at(-1);
 	const diff = latestReview ? numberValue(latestReview.planDiffRatio) : null;
-	const maxDiff = numberValue(target("plan_last_diff", 0.05)) ?? 0.05;
 	put("plan_last_diff", diff, "<= " + maxDiff, diff === null ? "UNKNOWN" : diff <= maxDiff ? "PASS" : "FAIL", latestReview ? { commit: latestReview.sha } : undefined);
 }
 function scorePolishMetrics(snapshot: PlanningScoreSnapshot, commits: readonly PlanningCommit[], target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
@@ -541,36 +558,95 @@ function planShipRatio(snapshot: PlanningScoreSnapshot, tuning: PlanningScoreTun
 	return { value, status: value <= limit ? "PASS" : "FAIL", evidence: { planning_commits: tagged.length, code_commits: code.length } };
 }
 
-export type PlanningScoreOptions = { kitRoot: string; repoPath?: string; fleet?: boolean; cwd?: string; home?: string };
+/** planConfig: a plan config file read instead of <repo>/.omp/plan.toml (single-repo mode only). */
+export type PlanningScoreOptions = { kitRoot: string; repoPath?: string; fleet?: boolean; cwd?: string; home?: string; planConfig?: string };
 function scoreRepoEntry(entry: FleetRepo, kitRoot: string, home: string, defaultTuning: PlanningScoreTuning, nowEpochSeconds: number): MissionScore[] {
 	const repoPath = expandPath(entry.path, home, kitRoot);
 	const trackerPath = expandPath(entry.tracker ?? entry.path, home, kitRoot);
 	let config: LoadedPlanningScoreConfig;
-	try { config = loadPlanningScoreConfig(kitRoot, repoPath, home); }
+	let planConfig: PlanConfigEntry | null;
+	try {
+		config = loadPlanningScoreConfig(kitRoot, repoPath, home);
+		planConfig = loadPlanConfig(repoPath, entry.planConfig ?? null, home);
+	}
 	catch (error) { return [unknownScore(entry.name, repoPath, "UNKNOWN", defaultTuning, error instanceof Error ? error.message : String(error))]; }
 	const repoCommits = readGitLog(repoPath);
 	const trackerCommits = trackerPath === repoPath ? repoCommits : readGitLog(trackerPath);
 	if (!repoCommits || !trackerCommits) return [unknownScore(entry.name, repoPath, "UNKNOWN", config.tuning, "Repository or tracker history is unreadable")];
 	const missions = discoverMissions(repoCommits, trackerCommits, config.raw);
+	if (planConfig && !missions.includes(planConfig.mission)) missions.push(planConfig.mission);
+	missions.sort();
 	if (!missions.length) return [unknownScore(entry.name, repoPath, "UNKNOWN", config.tuning, "No planning mission commits or configured mission were found")];
 	const beads = readIssues(trackerPath);
 	const ci = collectCiEvidence(repoPath, home, record(config.raw.ci) ? config.raw.ci : {});
-	const context: RepositoryScoreContext = { repoPath, trackerPath, config, repoCommits, trackerCommits, beads, ci, home, nowEpochSeconds };
+	const context: RepositoryScoreContext = { repoPath, trackerPath, config, planConfig, repoCommits, trackerCommits, beads, ci, home, nowEpochSeconds };
 	return missions.map((mission) => scoreMission(context, mission));
 }
 function scoreMission(context: RepositoryScoreContext, mission: string): MissionScore {
-	const { repoPath, trackerPath, config, repoCommits, trackerCommits, beads, ci, home, nowEpochSeconds } = context;
+	const { repoPath, trackerPath, config, planConfig, repoCommits, trackerCommits, beads, ci, home, nowEpochSeconds } = context;
 	const missionConfigs = record(config.raw.missions) ? config.raw.missions : {};
 	const settings = record(missionConfigs[mission]) ? missionConfigs[mission] : {};
-	const planPath = resolvePlanPath(repoPath, mission, stringValue(settings.plan) ?? config.planDefault, home);
+	const fromPlanConfig = planConfig?.mission === mission ? planConfig : null;
+	const planPath = fromPlanConfig ? fromPlanConfig.planPath : resolvePlanPath(repoPath, mission, stringValue(settings.plan) ?? config.planDefault, home);
 	const planExists = planPath === null ? null : safePathStat(join(repoPath, planPath)) === "file";
 	const repoWithDiff = attachLastPlanDiff(repoPath, mission, planPath, repoCommits);
 	const polish = trackerCommits.filter((commit) => isPolishRound(commit, mission)).sort((left, right) => left.timestamp - right.timestamp);
 	const previous = polish.at(-2);
 	const current = polish.at(-1);
+	const reviewRounds = fromPlanConfig?.reviews && planPath ? readReviewRounds(repoPath, fromPlanConfig.reviews, planPath) : null;
 	return scorePlanningSnapshot({ repoPath, trackerPath, mission, planPath, planExists, repoCommits: repoWithDiff, trackerCommits, beads,
 		polishPreviousBeads: previous ? readIssuesAtCommit(trackerPath, previous.sha) : null,
-		polishCurrentBeads: current ? readIssuesAtCommit(trackerPath, current.sha) : null, nowEpochSeconds, stage: stringValue(settings.stage) ?? undefined, ci }, config.tuning);
+		polishCurrentBeads: current ? readIssuesAtCommit(trackerPath, current.sha) : null, nowEpochSeconds, stage: stringValue(settings.stage) ?? undefined, reviewRounds, ci }, config.tuning);
+}
+/** Read <repo>/.omp/plan.toml (or `override`). Absent: null. Malformed, or a plan path outside the repo: throws. */
+function loadPlanConfig(repo: string, override: string | null, home: string): PlanConfigEntry | null {
+	const source = override ?? join(repo, PLAN_CONFIG_REL);
+	if (safePathStat(source) === "missing") {
+		if (override) throw new Error("Plan config not found: " + source);
+		return null;
+	}
+	const text = safeRead(source, MAX_TOML_BYTES);
+	if (text === null) throw new Error("Unsafe or oversized plan config: " + source);
+	const parsed: unknown = Bun.TOML.parse(text);
+	const plan = record(parsed) && record(parsed.plan) ? parsed.plan : null;
+	const path = plan ? stringValue(plan.path) : null;
+	if (!plan || !path) throw new Error("Plan config has no [plan] path: " + source);
+	const planPath = resolvePlanPath(repo, "", path, home);
+	if (!planPath) throw new Error("Plan config [plan] path is outside the repository: " + source);
+	const name = stringValue(plan.name) ?? DEFAULT_PLAN_MISSION;
+	if (!safeMission(name)) throw new Error("Plan config [plan] name is not a mission name: " + source);
+	const reviews = stringValue(plan.reviews);
+	return { mission: name, planPath, reviews: reviews ? resolvePlanPath(repo, "", reviews, home) : null, source };
+}
+/** Distinct review-round labels from `round<label>-*.md` file names and findings.jsonl `round` fields; null when none. */
+function readReviewRounds(repo: string, reviewsRel: string, planPath: string): ReviewRounds | null {
+	const dir = join(repo, reviewsRel);
+	if (safePathStat(dir) !== "directory") return null;
+	const filesByLabel = new Map<string, string[]>();
+	let files = 0;
+	for (const name of readdirSync(dir).sort()) {
+		const match = ROUND_FILE.exec(name);
+		if (!match || safePathStat(join(dir, name)) !== "file") continue;
+		const label = match[1]!.toLowerCase();
+		filesByLabel.set(label, [...(filesByLabel.get(label) ?? []), name]);
+		files += 1;
+	}
+	const labels = new Set(filesByLabel.keys());
+	const findings = safeRead(join(dir, "findings.jsonl"), MAX_TRACKER_BYTES);
+	for (const line of findings?.split("\n") ?? []) {
+		if (!line.trim()) continue;
+		let row: unknown;
+		try { row = JSON.parse(line); } catch { continue; }
+		const round = record(row) ? row.round : undefined;
+		if (typeof round === "number" && Number.isSafeInteger(round) && round > 0) labels.add(String(round));
+		else if (typeof round === "string" && /^\d{1,4}[a-z]?$/i.test(round)) labels.add(round.toLowerCase());
+	}
+	if (!labels.size) return null;
+	const ordered = [...labels].sort((left, right) => Number.parseInt(left, 10) - Number.parseInt(right, 10) || left.localeCompare(right));
+	const lastFiles = filesByLabel.get(ordered.at(-1)!) ?? [];
+	const added = lastFiles.map((name) => gitText(repo, ["log", "--diff-filter=A", "--format=%H", "-1", "--", join(reviewsRel, name)])?.trim() ?? "").filter(Boolean);
+	const lastCommit = added.length ? added.sort().at(-1)! : null;
+	return { labels: ordered, files, last_commit: lastCommit, last_diff: lastCommit ? planDiffRatio(repo, lastCommit, planPath) : null };
 }
 export function runPlanningScore(options: PlanningScoreOptions): PresentationResult {
 	try {
@@ -596,7 +672,10 @@ export function runPlanningScore(options: PlanningScoreOptions): PresentationRes
 function singleRepoEntry(options: PlanningScoreOptions, fleet: readonly FleetRepo[], home: string, kitRoot: string): FleetRepo[] {
 	const repoPath = resolve(options.repoPath ?? options.cwd ?? process.cwd());
 	const matched = fleet.find((entry) => expandPath(entry.path, home, kitRoot) === repoPath);
-	return [{ name: matched?.name ?? basename(repoPath), path: repoPath, tracker: matched?.tracker }];
+	// A plan config outside the repo (OMP_KIT_PLAN_CONFIG) lets an operator score a repo they may not write.
+	const planConfig = options.planConfig ?? process.env.OMP_KIT_PLAN_CONFIG;
+	return [{ name: matched?.name ?? basename(repoPath), path: repoPath, tracker: matched?.tracker,
+		...(planConfig ? { planConfig: expandPath(planConfig, home, options.cwd ?? process.cwd()) } : {}) }];
 }
 function targetForMetric(name: string, tuning: PlanningScoreTuning): unknown {
 	if (name === "bead_self_contained") return {

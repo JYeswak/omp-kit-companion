@@ -662,6 +662,7 @@ report without writing.
 | `~/.config/omp-kit/fleet-watch.json`, `OMP_KIT_FLEET_WATCH_CONFIG` | Fleet Watch sessions | none; the service refuses without it |
 | `$XDG_CONFIG_HOME/omp-kit/load.json` | `heavy` slots, maximum wait, disk observer (`sbh` strict, `statfs` OS-only, `auto` default) and optional floor percent | 2 slots, auto observer, bytes-need only |
 | `config/planning-score.toml`, `<repo>/.omp/planning-score.toml` | Planning score tuning and fleet list | kit defaults |
+| `<repo>/.omp/plan.toml`, `OMP_KIT_PLAN_CONFIG` | The repo's comprehensive plan: path, review dir (rounds counted from review files) | none: missions from `plan(<m>):` commits only |
 | `config/lessons.toml` | fleet-lessons job | kit defaults |
 | `config/beads-policy.template.yaml` | Strict `.beads/policy.yaml` template, copied by hand | n/a |
 | `.omp/infra-pins.toml` | Toolchain pins for `infra` | kit copy, `--file` overrides |
