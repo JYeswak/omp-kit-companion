@@ -5,6 +5,8 @@ import kitUpgradeNotice, {
 	loadedRelease,
 	sessionKey,
 	upgradeGap,
+	SELF_RESTART_COMMAND,
+	SELF_RESTART_SCRIPT,
 	upgradeNoticeMessage,
 	type UpgradeNoticeApi,
 	type UpgradeNoticeContext,
@@ -99,13 +101,50 @@ test("semver: numeric comparison (0.2.7 < 0.2.55 < 0.2.57); lexicographic order 
 	expect(upgradeGap("0.2.7", "0.2.55")).toEqual({ installed: "0.2.55", loaded: "0.2.7" });
 });
 
-test("message: names installed and loaded plus the three seat-duty steps", () => {
-	const msg = upgradeNoticeMessage("0.2.58", "0.2.57");
+test("message (fleet): the three self-restart steps in order, each with its exact command", () => {
+	const msg = upgradeNoticeMessage("0.2.58", "0.2.57", true);
 	expect(msg).toContain("omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now");
-	expect(msg).toContain("commit --only");
-	expect(msg).toContain("handoff");
-	expect(msg).toContain("idle");
-	expect(msg).toContain("--reload --resume-goal");
+	const save = msg.indexOf("1. Save your work: `git commit --only");
+	const run = msg.indexOf("2. Run the self-restart helper: `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`");
+	const end = msg.indexOf("3. End your turn now with no further tool call.");
+	expect(save).toBeGreaterThan(-1);
+	expect(run).toBeGreaterThan(save);
+	expect(end).toBeGreaterThan(run);
+	expect(SELF_RESTART_COMMAND).toBe("python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py");
+	expect(msg).toContain("`[pending]` commit");
+	expect(msg).toContain("The helper pauses your goal (Esc), reloads this seat on omp-kit 0.2.58 and resumes your goal.");
+	// Retired steps: no seat waits on the chief's sentinel, and no hand-written handoff ledger.
+	expect(msg).not.toContain("loop_sentinel");
+	expect(msg).not.toContain("handoff");
+});
+
+test("message (stock): only how to restart omp; no fleet command, sentinel or handoff", () => {
+	const msg = upgradeNoticeMessage("0.2.58", "0.2.57");
+	expect(msg).toBe(
+		"kit-upgrade-notice UPGRADE_NOTICE: omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now.\n" +
+			"To load the new release, restart omp: save your work, exit omp, then start it again with `omp --resume` " +
+			"to continue this session on 0.2.58.",
+	);
+	for (const fleetOnly of ["self_restart", "respawn_seat", "loop_sentinel", "handoff", "git commit --only"]) {
+		expect(msg).not.toContain(fleetOnly);
+	}
+});
+
+test("mode: the installed self-restart helper under home selects fleet text; its absence selects stock", async () => {
+	for (const installed of [true, false]) {
+		const f = files();
+		const probed: string[] = [];
+		const { api, sent, handlers } = fakePi(IDLE);
+		await kitUpgradeNotice(api, {
+			selfPath: LOADED, session: "seat-1", home: "/h", ...f.deps,
+			isFile: (path) => { probed.push(path); return installed; },
+		});
+		handlers["session_start"]!(null, IDLE);
+		expect(probed).toEqual([`/h/${SELF_RESTART_SCRIPT}`]);
+		expect(sent.length).toBe(1);
+		expect(sent[0]!.content).toBe(upgradeNoticeMessage("0.2.58", "0.2.57", installed));
+		expect(sent[0]!.content.includes(SELF_RESTART_COMMAND)).toBe(installed);
+	}
 });
 
 test("regex: a 1 MiB non-matching path completes without hanging", () => {

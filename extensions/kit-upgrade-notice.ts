@@ -2,8 +2,12 @@
  * kit-upgrade-notice (AUTOUPGRADE1 ompkit-v66l.22.1, J-2026-10-18-39 step 1): the seat's own kit extension
  * detects the gap between the installed omp-kit release and the release its process loaded, and injects
  * exactly one notice per release per seat with pi.sendMessage (deliverAs nextTurn when idle, aside when
- * busy): 'omp-kit <installed> is installed; this seat runs <loaded>; upgrade now', plus the three seat-duty
- * steps (save, handoff, end the turn idle). The chief's loop_sentinel restarts the idle seat from there.
+ * busy): 'omp-kit <installed> is installed; this seat runs <loaded>; upgrade now', plus how to restart.
+ * Fleet mode (SELFRESTART1 ompkit-v66l.33, J-2026-10-20-08/09): the seat restarts ITSELF from the notice:
+ * save work, run the self-restart helper (one command), end the turn. The helper resolves the seat, pauses its
+ * goal (Esc), reloads omp on the new release and resumes the goal; no seat waits on the chief's sentinel (the
+ * lead waited 4.5 h on 2026-10-20). Fleet mode means the helper is installed (the configured restart command,
+ * SELF_RESTART_SCRIPT under home). Stock mode (no helper) names no fleet command: it says how to restart omp.
  *
  * Loaded release: this file ships inside releases/<v>/extensions/, so the module's own path names the
  * loaded release. A checkout path (no /releases/<X.Y.Z>/) reads null and never notices. Installed release:
@@ -14,7 +18,7 @@
  * than a missed notice, and the sentinel's own start-time comparison still queues the seat.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -63,16 +67,31 @@ export function upgradeGap(loaded: string | null, installed: string | null): { i
 	return { installed, loaded };
 }
 
-/** The notice body: the gap plus the three seat-duty steps (save, handoff, end idle). */
-export function upgradeNoticeMessage(installed: string, loaded: string): string {
+/** The configured restart command: the fleet's self-restart helper, relative to home. Its presence is fleet mode. */
+export const SELF_RESTART_SCRIPT = join(".claude", "skills", "omp-kit-orchestration", "scripts", "self_restart.py");
+export const SELF_RESTART_COMMAND = "python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py";
+
+/**
+ * The notice body: the gap plus the restart steps. Fleet mode: (1) save work, (2) run the self-restart helper,
+ * (3) end the turn with no further tool call. Stock mode: only how to restart omp to load the release.
+ */
+export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false): string {
+	const head = `kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; this seat runs ${loaded}; upgrade now.\n`;
+	if (!fleet) {
+		return (
+			head +
+			`To load the new release, restart omp: save your work, exit omp, then start it again ` +
+			`with \`omp --resume\` to continue this session on ${installed}.`
+		);
+	}
 	return (
-		`kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; ` +
-		`this seat runs ${loaded}; upgrade now.\n` +
-		`At your next turn boundary, without starting new work:\n` +
-		`1. Save your work (git commit --only and publish, or a [pending] commit).\n` +
-		`2. Write your handoff (respawn_seat handoff ledger).\n` +
-		`3. End your turn idle; the chief's loop_sentinel will restart this seat ` +
-		`with respawn_seat --reload --resume-goal.`
+		head +
+		`At your next turn boundary, without starting new work, restart this seat yourself:\n` +
+		`1. Save your work: \`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, ` +
+		`or a \`[pending]\` commit.\n` +
+		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
+		`3. End your turn now with no further tool call. The helper pauses your goal (Esc), reloads this seat ` +
+		`on omp-kit ${installed} and resumes your goal.`
 	);
 }
 
@@ -111,6 +130,16 @@ export interface UpgradeNoticeDeps {
 	readlink?: (path: string) => string;
 	readFile?: (path: string) => string | undefined;
 	writeFile?: (path: string, content: string) => void;
+	/** Seam for fleet-mode detection: true when the path is a regular file (tests inject fakes). */
+	isFile?: (path: string) => boolean;
+}
+
+function defaultIsFile(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
 }
 
 function defaultReadFile(path: string): string | undefined {
@@ -166,7 +195,7 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			pi.sendMessage(
 				{
 					customType: "kit-upgrade-notice",
-					content: upgradeNoticeMessage(gap.installed, gap.loaded),
+					content: upgradeNoticeMessage(gap.installed, gap.loaded, (deps.isFile ?? defaultIsFile)(join(home, SELF_RESTART_SCRIPT))),
 					display: true,
 					details: { behavior: UPGRADE_NOTICE },
 				},

@@ -1,0 +1,3 @@
+### Changed
+
+- The kit-upgrade notice now tells a fleet seat to restart itself instead of waiting on the chief's loop sentinel. Fleet mode, meaning the self-restart helper is installed at `~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`, lists three steps in order: (1) save work with `git commit --only` on your reserved paths and publish, or make a `[pending]` commit; (2) run `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`; (3) end the turn with no further tool call. The helper pauses the goal, reloads the seat on the new release and resumes the goal. Without the helper (stock mode), the notice says only how to restart omp (`omp --resume`). The hand-written handoff-ledger step is gone. (ompkit-v66l.33)
