@@ -146,8 +146,67 @@ function applyResult(result: CliRunResult): Record<string, any> {
 	return JSON.parse(result.stdout).data;
 }
 
-function applyArgs(plan: string, trackerRoot: string, mission = "core8", actor = "PlanningWriter"): string[] {
-	return ["planning", "convert", "--plan", plan, "--mission", mission, "--apply", "--tracker-root", trackerRoot, "--actor", actor, "--yes", "--json"];
+function applyArgs(plan: string, trackerRoot: string, mission = "core8", actor = "PlanningWriter", extra: string[] = []): string[] {
+	return ["planning", "convert", "--plan", plan, "--mission", mission, "--apply", "--tracker-root", trackerRoot, "--actor", actor, "--yes", ...extra, "--json"];
+}
+
+function amendPlanSource(slug: string, existing: string, acceptance: string[], mission = "core8"): string {
+	return [
+		"```text",
+		"### " + slug + " — " + slug.replaceAll("-", " "),
+		"type: task priority: 1",
+		"labels: plan:" + mission + ", mission:" + mission + ", test:planning-convert",
+		"depends-on: (none)",
+		"existing: " + existing,
+		"discovered-from: planning-convert-test",
+		"WHAT: (a) " + slug + " reconciles a changed acceptance.",
+		"WHY: The selected tracker must never silently drop a changed acceptance.",
+		"ACCEPTANCE:",
+		...acceptance,
+		"NO-CLAIM: This fixture does not certify unrelated tracker state.",
+		"```",
+	].join("\n");
+}
+
+function writeAmendPlan(name: string, slug: string, existing: string, acceptance: string[]): string {
+	const path = join(scratch, name + ".md");
+	writeFileSync(path, amendPlanSource(slug, existing, acceptance));
+	return path;
+}
+
+const amendAcceptanceV1 = [
+	"- [a] amend-target contributes its positive acceptance criterion.",
+	"- [a] Planted negative: amend-target is not applied twice.",
+];
+const amendAcceptanceV2 = [
+	"- [a] amend-target now requires a changed acceptance criterion.",
+	"- [a] Planted negative: the changed criterion is never silently dropped.",
+];
+
+function concurrentWriteFixture(trackerRoot: string, targetId: string): Record<string, string> {
+	const realBr = Bun.which("br");
+	if (!realBr) throw new Error("native br unavailable");
+	const bin = join(trackerRoot, "concurrent-bin");
+	mkdirSync(bin, { recursive: true });
+	const sentinel = join(bin, "tripped");
+	writeFileSync(join(bin, "br"), `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const dbIndex = args.indexOf("--db");
+const db = dbIndex >= 0 ? args[dbIndex + 1] : "";
+if (args[0] === "update" && args[1] === process.env.CONCURRENT_TARGET && !(await Bun.file(process.env.CONCURRENT_SENTINEL).exists())) {
+	await Bun.write(process.env.CONCURRENT_SENTINEL, "tripped\\n");
+	const concurrent = Bun.spawnSync([${JSON.stringify(realBr)}, "update", process.env.CONCURRENT_TARGET, "--append-notes", "concurrent-probe", "--db", db, "--actor", "ConcurrentWriter", "--no-auto-import", "--no-auto-flush", "--no-daemon", "--no-color", "--json"], { stdout: "pipe", stderr: "pipe" });
+	if (concurrent.exitCode !== 0) {
+		process.stderr.write("concurrent probe write failed: " + concurrent.stderr.toString());
+		process.exit(1);
+	}
+}
+const result = Bun.spawnSync([${JSON.stringify(realBr)}, ...args], { stdout: "pipe", stderr: "pipe" });
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.exitCode ?? 1);
+`, { mode: 0o755 });
+	return { PATH: bin + ":" + childEnv.PATH, CONCURRENT_TARGET: targetId, CONCURRENT_SENTINEL: sentinel };
 }
 
 function nativeShapeFixture(trackerRoot: string, targetId: string, mode: string): Record<string, string> {
@@ -309,6 +368,84 @@ test("planning convert apply second run creates no duplicate issues, notes, acce
 	const dependencies = JSON.stringify(nativeJson(["dep", "list", existingId], trackerRoot));
 	expect(dependencies.split(created[0]!.id).length - 1).toBe(1);
 });
+test("planning convert refuses a changed acceptance under an existing token with STALE_ACCEPTANCE", async () => {
+	const trackerRoot = join(scratch, "apply-stale-tracker");
+	initializeTracker(trackerRoot);
+	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [x] Keep this verified criterion." });
+	const first = await runCli(applyArgs(writeAmendPlan("stale-v1", "amend-target", targetId, amendAcceptanceV1), trackerRoot));
+	expect(first.exitCode).toBe(0);
+	expect(applyResult(first).overall).toBe("CLEAN");
+	const before = showNativeIssue(trackerRoot, targetId);
+	expect(String(before.notes)).toContain("core8:amend-target");
+	const second = await runCli(applyArgs(writeAmendPlan("stale-v2", "amend-target", targetId, amendAcceptanceV2), trackerRoot));
+	expect(second.exitCode).not.toBe(0);
+	const report = applyResult(second);
+	expect(report.overall).toBe("REFUSED");
+	const stale = report.amended_targets.find((target: { id: string }) => target.id === targetId);
+	expect(stale.status).toBe("STALE_ACCEPTANCE");
+	expect(stale.slugs).toEqual(["amend-target"]);
+	expect(JSON.stringify(stale.missing_acceptance)).toContain("changed acceptance criterion");
+	expect(JSON.stringify(stale.stored_acceptance)).toContain("Keep this verified criterion");
+	expect(String(report.apply_preflight_error)).toContain("STALE_ACCEPTANCE");
+	expect(String(report.apply_preflight_error)).toContain("amend-target");
+	expect(showNativeIssue(trackerRoot, targetId)).toEqual(before);
+	expect(report.writes_landed.filter((write: { kind: string }) => write.kind === "AMENDED")).toEqual([]);
+	expect(String(report.text)).toContain("STALE_ACCEPTANCE");
+});
+
+test("planning convert --amend-acceptance appends changed boxes under the revision gate", async () => {
+	const trackerRoot = join(scratch, "apply-amend-tracker");
+	initializeTracker(trackerRoot);
+	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this manual criterion." });
+	const first = await runCli(applyArgs(writeAmendPlan("amend-v1", "amend-target", targetId, amendAcceptanceV1), trackerRoot));
+	expect(first.exitCode).toBe(0);
+	const second = await runCli(applyArgs(writeAmendPlan("amend-v2", "amend-target", targetId, amendAcceptanceV2), trackerRoot, "core8", "PlanningWriter", ["--amend-acceptance"]));
+	expect(second.exitCode).toBe(0);
+	const report = applyResult(second);
+	expect(report.overall).toBe("CLEAN");
+	const amended = report.amended_targets.find((target: { id: string }) => target.id === targetId);
+	expect(amended.status).toBe("AMENDED");
+	expect(JSON.stringify(amended.acceptance_added)).toContain("changed acceptance criterion");
+	const after = showNativeIssue(trackerRoot, targetId);
+	expect(String(after.acceptance_criteria)).toContain("Keep this manual criterion.");
+	expect(String(after.acceptance_criteria)).toContain("changed acceptance criterion");
+	expect(after.notes).toBe("core8:amend-target");
+	expect(JSON.stringify(amended.superseded_acceptance)).toContain("Keep this manual criterion.");
+	const third = await runCli(applyArgs(writeAmendPlan("amend-v3", "amend-target", targetId, amendAcceptanceV2), trackerRoot, "core8", "PlanningWriter", ["--amend-acceptance"]));
+	expect(third.exitCode).toBe(0);
+	const thirdReport = applyResult(third);
+	expect(thirdReport.overall).toBe("CLEAN");
+	expect(thirdReport.amended_targets.find((target: { id: string }) => target.id === targetId).status).toBe("UNCHANGED");
+	expect(thirdReport.writes_landed).toEqual([]);
+	const final = showNativeIssue(trackerRoot, targetId);
+	expect(String(final.acceptance_criteria).split("changed acceptance criterion").length - 1).toBe(1);
+});
+
+test("planning convert guarded amendment refuses a concurrent target change", async () => {
+	const trackerRoot = join(scratch, "apply-concurrent-tracker");
+	initializeTracker(trackerRoot);
+	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
+	const first = await runCli(applyArgs(writeAmendPlan("concurrent-v1", "amend-target", targetId, amendAcceptanceV1), trackerRoot));
+	expect(first.exitCode).toBe(0);
+	const second = await runCli(
+		applyArgs(writeAmendPlan("concurrent-v2", "amend-target", targetId, amendAcceptanceV2), trackerRoot, "core8", "PlanningWriter", ["--amend-acceptance"]),
+		concurrentWriteFixture(trackerRoot, targetId),
+	);
+	expect(second.exitCode).not.toBe(0);
+	const report = applyResult(second);
+	expect(report.overall).toBe("FINDINGS");
+	expect(report.apply_failure.step).toBe("amend-" + targetId);
+	const after = showNativeIssue(trackerRoot, targetId);
+	expect(String(after.notes)).toContain("concurrent-probe");
+	expect(String(after.acceptance_criteria)).not.toContain("changed acceptance criterion");
+});
+
+test("planning convert refuses --amend-acceptance without --apply", async () => {
+	const dbDir = join(scratch, "amend-flag-db");
+	const result = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir, "--amend-acceptance", "--json"]);
+	expect(result.exitCode).not.toBe(0);
+	expect(JSON.parse(result.stdout).data.overall).toBe("NOT_RUN");
+});
 
 test("planning convert apply reports foreign targets without writing them", async () => {
 	const trackerRoot = join(scratch, "apply-foreign-tracker");
@@ -401,8 +538,8 @@ test("planning convert apply creates new targets beneath one core8 epic and repo
 test("planning convert is a public dry-run and apply command with explicit mode flags", () => {
 	const planning = COMMANDS.find((command) => command.name === "planning");
 	const convert = planning?.subcommands?.find((command) => command.name === "convert");
-	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--json]");
-	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db", "--apply", "--tracker-root", "--actor", "--yes"]);
+	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--amend-acceptance] [--json]");
+	expect(convert?.flags.map((flag) => flag.name)).toEqual(["--plan", "--mission", "--dry-run", "--db", "--apply", "--tracker-root", "--actor", "--yes", "--amend-acceptance"]);
 	expect(convert?.mutation).toBe(true);
 });
 

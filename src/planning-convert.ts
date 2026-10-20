@@ -54,7 +54,7 @@ type ApplyWrite = {
 	acceptance_added?: string[];
 	contributions_added?: string[];
 };
-type AmendedTarget = { id: string; slugs: string[]; acceptance_added: string[]; contributions_added: string[]; status: "AMENDED" | "UNCHANGED" };
+type AmendedTarget = { id: string; slugs: string[]; acceptance_added: string[]; contributions_added: string[]; status: "AMENDED" | "UNCHANGED" | "STALE_ACCEPTANCE"; missing_acceptance?: string[]; stored_acceptance?: string[]; superseded_acceptance?: string[] };
 type ForeignTarget = { status: "FOREIGN"; id: string; slug: string };
 type ApplyFailure = { step: string; message: string; exit_code: number | null; stdout: string; stderr: string; reconciliation_error?: string };
 type ApplyReconciliation = { writes: ApplyWrite[]; error: string | null };
@@ -347,6 +347,37 @@ function acceptanceBoxes(value: string): Array<{ letter: string; text: string }>
 		} else if (trimmed && boxes.length) boxes[boxes.length - 1]!.text += " " + trimmed;
 	}
 	return boxes;
+}
+function normalizeBoxText(value: string): string {
+	const words: string[] = [];
+	let current = "";
+	for (const character of value.trim()) {
+		if (character === " " || character === "\t" || character === "\n" || character === "\r" || character === "\v" || character === "\f") {
+			if (current) {
+				words.push(current);
+				current = "";
+			}
+			continue;
+		}
+		current += character;
+	}
+	if (current) words.push(current);
+	return words.join(" ");
+}
+function missingBoxTexts(needles: string[], haystack: string[]): string[] {
+	const counts = new Map<string, number>();
+	for (const text of haystack) {
+		const key = normalizeBoxText(text);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const missing: string[] = [];
+	for (const text of needles) {
+		const key = normalizeBoxText(text);
+		const count = counts.get(key) ?? 0;
+		if (count > 0) counts.set(key, count - 1);
+		else missing.push(text);
+	}
+	return missing;
 }
 
 function coverageFindings(items: PlanItem[]): CoverageFinding[] {
@@ -757,8 +788,14 @@ function reportText(data: ConvertReport): string {
 		lines.push("", "Apply writes landed: " + (data.writes_landed?.length ?? 0));
 		if (data.writes_landed?.length) for (const write of data.writes_landed) lines.push("- " + JSON.stringify(write));
 		if (data.reused_items?.length) for (const item of data.reused_items) lines.push("- REUSED " + item.id + " (" + item.slug + ")");
-		if (data.amended_targets?.length) for (const target of data.amended_targets)
+		if (data.amended_targets?.length) for (const target of data.amended_targets) {
 			lines.push("- " + target.status + " " + target.id + " (" + target.slugs.join(", ") + ")");
+			if (target.status === "STALE_ACCEPTANCE") {
+				for (const box of target.missing_acceptance ?? []) lines.push("  - missing acceptance box: " + box);
+				for (const box of target.stored_acceptance ?? []) lines.push("  - stored acceptance box: " + box);
+			}
+			for (const box of target.superseded_acceptance ?? []) lines.push("  - superseded acceptance box: " + box);
+		}
 		if (data.foreign_targets?.length) for (const target of data.foreign_targets)
 			lines.push("- FOREIGN " + target.id + " + " + target.slug);
 		if (data.merged_dependency_cycles?.length) for (const cycle of data.merged_dependency_cycles)
@@ -842,6 +879,7 @@ function runPlanningConvertApply(
 	cwd: string,
 	trackerRoot: string,
 	actor: string,
+	amendAcceptance: boolean,
 ): PresentationResult {
 	data.writes_landed = [];
 	data.created_items = [];
@@ -1160,16 +1198,47 @@ function runPlanningConvertApply(
 		const noteLines = splitLines(group.details.notes).map((line) => line.trim());
 		const acceptanceAdded: string[] = [];
 		const contributionsAdded: string[] = [];
+		const storedTexts = acceptanceBoxes(group.details.acceptance_criteria).map((box) => box.text);
+		const pendingTexts = [...storedTexts];
+		let staleSlug: string | null = null;
+		let staleMissing: string[] = [];
+		let amendedChanged = false;
 		for (const item of group.items) {
 			const token = data.mission + ":" + item.slug;
-			if (noteLines.includes(token)) continue;
-			for (const box of acceptanceBoxes(item.acceptance))
-				acceptanceAdded.push("[" + box.letter + "] " + box.text);
-			contributionsAdded.push(token);
+			if (!noteLines.includes(token)) {
+				for (const box of acceptanceBoxes(item.acceptance))
+					acceptanceAdded.push("[" + box.letter + "] " + box.text);
+				contributionsAdded.push(token);
+				continue;
+			}
+			const itemBoxes = acceptanceBoxes(item.acceptance);
+			const itemCriteria = itemBoxes.map((box) => "[" + box.letter + "] " + box.text);
+			const missing = missingBoxTexts(itemCriteria, pendingTexts);
+			if (!missing.length) continue;
+			if (!amendAcceptance) {
+				staleSlug = item.slug;
+				staleMissing = missing;
+				break;
+			}
+			for (const text of missing) {
+				acceptanceAdded.push(text);
+				pendingTexts.push(text);
+			}
+			amendedChanged = true;
 		}
+		if (staleSlug !== null) {
+			data.amended_targets.push({
+				id, slugs: group.items.map((item) => item.slug), acceptance_added: [], contributions_added: [],
+				status: "STALE_ACCEPTANCE", missing_acceptance: staleMissing, stored_acceptance: storedTexts,
+			});
+			return refuse("target " + id + " has STALE_ACCEPTANCE under contribution " + data.mission + ":" + staleSlug + ": the plan changed acceptance boxes that are not stored; re-run with --amend-acceptance to append them under the native revision gate");
+		}
+		const itemCriteria = new Set(group.items.flatMap((item) => acceptanceBoxes(item.acceptance).map((box) => normalizeBoxText("[" + box.letter + "] " + box.text))));
+		const superseded = storedTexts.filter((text) => !itemCriteria.has(normalizeBoxText(text)));
 		const amended: AmendedTarget = {
 			id, slugs: group.items.map((item) => item.slug), acceptance_added: acceptanceAdded,
 			contributions_added: contributionsAdded, status: acceptanceAdded.length || contributionsAdded.length ? "AMENDED" : "UNCHANGED",
+			...(amendedChanged && superseded.length ? { superseded_acceptance: superseded } : {}),
 		};
 		if (!acceptanceAdded.length && !contributionsAdded.length) {
 			data.amended_targets.push(amended);
@@ -1288,8 +1357,8 @@ function runPlanningConvertApply(
 }
 
 export type PlanningConvertOptions = { planPath: string; mission: string; cwd?: string } & (
-	| { apply: true; trackerRoot: string; actor: string; dbDir?: never }
-	| { apply?: false; dbDir: string; actor?: never; trackerRoot?: never }
+	| { apply: true; trackerRoot: string; actor: string; amendAcceptance?: boolean; dbDir?: never }
+	| { apply?: false; dbDir: string; actor?: never; amendAcceptance?: never; trackerRoot?: never }
 );
 export function runPlanningConvert(options: PlanningConvertOptions): PresentationResult {
 	const cwd = resolve(options.cwd ?? process.cwd());
@@ -1334,7 +1403,7 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		uncovered_what_letters: coverage,
 		dependency_cycles: graph.cycles,
 	});
-	if (options.apply) return runPlanningConvertApply(initial, items, parsed.candidateSlugs, cwd, options.trackerRoot, options.actor);
+	if (options.apply) return runPlanningConvertApply(initial, items, parsed.candidateSlugs, cwd, options.trackerRoot, options.actor, options.amendAcceptance === true);
 	const database = safeDbDirectory(requestedDb, cwd);
 	if ("error" in database) {
 		initial.overall = "REFUSED";

@@ -482,7 +482,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--repo", value: "PATH", description: "Score one repository; defaults to the current directory" },
 			{ name: "--fleet", description: "Score the repositories declared in the kit planning-score tuning file" },
 		], example: "omp-kit planning score --fleet --json", runnable: false, dataSchema: planningScoreData },
-		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in an isolated database or selected tracker", usage: "planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--json]", flags: [
+		{ name: "convert", description: "Convert a fenced Markdown plan into native beads in an isolated database or selected tracker", usage: "planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--amend-acceptance] [--json]", flags: [
 			{ name: "--plan", value: "PATH", description: "Read the planning document; never modify it" },
 			{ name: "--mission", value: "M", description: "Mission slug to assign and score" },
 			{ name: "--dry-run", description: "Create native beads only in the fresh isolated --db directory" },
@@ -491,6 +491,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--tracker-root", value: "DIR", description: "Selected native tracker root; valid only with --apply" },
 			{ name: "--actor", value: "ACTOR", description: "Required with --apply: actual writer for native audit attribution; not verified identity or policy bypass; never exports JSONL" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
+			{ name: "--amend-acceptance", description: "With --apply: append changed acceptance boxes under the native revision gate instead of refusing STALE_ACCEPTANCE; valid only with --apply" },
 		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, mutation: true, dataSchema: planningConvertData },
 	], runnable: false },
 	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate|anchor [--project PATH] [--json]", flags: [], subcommands: [

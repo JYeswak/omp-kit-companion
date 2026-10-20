@@ -3611,12 +3611,14 @@ function planningConvertCommand(request: ParsedCommand): CliResult {
 		const trackerRoot = request.flags.get("--tracker-root");
 		if (typeof trackerRoot !== "string" || !trackerRoot.trim())
 			return refusal("INVALID_FLAG", "--tracker-root requires a non-empty selected tracker path", "Use omp-kit planning convert --plan PATH --mission M --apply --tracker-root DIR --actor ACTOR.");
-		return runPlanningConvert({ planPath: planFlag, mission: missionFlag, apply: true, trackerRoot, actor, cwd: process.cwd() });
+		return runPlanningConvert({ planPath: planFlag, mission: missionFlag, apply: true, trackerRoot, actor, amendAcceptance: request.flags.has("--amend-acceptance"), cwd: process.cwd() });
 	}
 	if (request.flags.has("--tracker-root"))
 		return refusal("INVALID_FLAG", "--tracker-root is valid only with --apply.", "Use --dry-run with --db DIR.");
 	if (request.flags.has("--yes"))
 		return refusal("INVALID_FLAG", "--yes is valid only with --apply.", "Use --dry-run with --db DIR, or choose --apply to confirm a tracker write.");
+	if (request.flags.has("--amend-acceptance"))
+		return refusal("INVALID_FLAG", "--amend-acceptance is valid only with --apply.", "Use --dry-run with --db DIR, or choose --apply with --amend-acceptance to reconcile changed acceptance.");
 	const databaseFlag = request.flags.get("--db");
 	if (typeof databaseFlag !== "string" || !databaseFlag.trim())
 		return refusal("INVALID_FLAG", "--db requires a non-empty isolated directory", "Use a fresh path under var/agent-tmp with an .owner file.");
