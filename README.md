@@ -12,6 +12,10 @@
 
 </div>
 
+<!-- kit-release:start -->
+Current release: v0.2.63
+<!-- kit-release:end -->
+
 A tested rule pack, ten guard extensions, five skills, and a guarded CLI for
 an existing OMP install.
 

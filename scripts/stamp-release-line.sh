@@ -33,8 +33,8 @@ fi
 START="<!-- kit-release:start -->"
 END="<!-- kit-release:end -->"
 LINE="Current release: v$VERSION"
-if ! grep -qF "$START" "$README"; then echo "stamp-release-line: start marker missing in $README" >&2; exit 1; fi
-if ! grep -qF "$END" "$README"; then echo "stamp-release-line: end marker missing in $README" >&2; exit 1; fi
+if ! grep -qF "$START" "$README"; then echo "stamp-release-line: start marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
+if ! grep -qF "$END" "$README"; then echo "stamp-release-line: end marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/stamp-release-line.XXXXXX")
 trap 'rm -f "$tmp"' EXIT INT TERM
