@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
 import { dirname, join, resolve } from "node:path";
 import { proveSend, type ProvenSend } from "./send.ts";
 import { isRecord } from "./type-guards.ts";
+import { intakeCountsLine, readIntakeRows, summarizeIntakeHour, INTAKE_DELIVER_HOUR_MS } from "./intake-deliver.ts";
 
 export const REPORT_INJECT_JOB = "fleet-report";
 export const REPORT_INJECT_INTERVAL_SECONDS = 3600;
@@ -16,6 +17,8 @@ export interface ReportInjectConfig {
 	home: string;
 	dropDir: string;
 	fleetConfigPath?: string;
+	/** Absolute repo root holding decisions/joshua.jsonl; appends the hourly intake counts line. */
+	intakeRepo?: string;
 }
 
 export interface ReportInjectCommandResult {
@@ -229,6 +232,18 @@ function atomicReplace(path: string, body: string): void {
 }
 
 
+export function intakeDigestLine(repo: string | undefined, nowMs: number): string | null {
+	if (typeof repo !== "string" || repo.trim() === "") return null;
+	let rows;
+	try {
+		rows = readIntakeRows(repo);
+	} catch {
+		return null;
+	}
+	const hourStart = Math.floor(nowMs / INTAKE_DELIVER_HOUR_MS) * INTAKE_DELIVER_HOUR_MS;
+	return intakeCountsLine(summarizeIntakeHour(rows, hourStart));
+}
+
 function digestText(generatedAt: string, ages: ReportSourceAges, projects: readonly ReportProjectRow[], reportPath: string): string {
 	const first = `REPORTINJECT1 generated_at=${generatedAt} source_age(sitrep)=${ages.sitrep} fleet-state=${ages.fleetState} fleet-pulse=${ages.fleetPulse} fleet-flow=${ages.fleetFlow} mission=${ages.mission}`;
 	const projectLimit = REPORT_INJECT_MAX_DIGEST_LINES - 3;
@@ -318,7 +333,13 @@ export async function runReportInjectJob(config: ReportInjectConfig, deps: Repor
 	const sourceFailed = stateCurrent === false || sitrepRun.code !== 0
 		|| projects.some(row => row.status !== "OK")
 		|| Object.values(sourceAges).some(age => age === "UNKNOWN" || age === "STALE");
+	// INTAKE1 AC3: hourly intake counts ride the digest as one pseudo-project row.
+	// Insert-only splice (push before digest, pop right after) touching no landed
+	// line; result.projects below never carries the row.
+	const intakeLine = intakeDigestLine(config.intakeRepo, generatedAtMs);
+	if (intakeLine !== null) projects.push({ name: "intake", status: "OK", detail: intakeLine.slice("intake: ".length) });
 	const digest = digestText(generatedAt, sourceAges, projects, reportPath);
+	if (intakeLine !== null) projects.pop();
 	const route = chiefRoute(configData);
 	if (route === null) {
 		log(`CHIEF_PANE_MISSING report=${reportPath}`);

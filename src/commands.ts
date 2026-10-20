@@ -287,6 +287,14 @@ const custodyData: DataSchema = { type: "object", required: ["code"], properties
 	paths: { type: "array", items: { type: "object" } }, authorities: { type: "array", items: { type: "string" } },
 	probe_exit: { type: "number" }, error: { type: "string" }, detail: { type: "string" },
 } };
+const intakeData: DataSchema = { type: "object", required: ["overall", "action"], properties: {
+	overall: { enum: ["OK", "FINDINGS", "REFUSED", "UNAVAILABLE"] },
+	schema: { type: "string" }, action: { enum: ["DO", "ROUTE", "REFUSE", "PENDING"] },
+	bead: { type: ["string", "null"] }, seat: { type: "string" }, role: { type: "string" },
+	reply: { type: "string" }, reason: { type: "string" }, roleOverride: { type: "string" },
+	row: { type: "object" }, beadArgs: { type: "object" },
+	delivery: { type: "object" }, counts: { type: "object" }, counts_line: { type: "string" },
+} };
 const infraData: DataSchema = { type: "object", required: ["overall", "command"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	command: { enum: ["pin", "check", "promote", "undo"] },
@@ -774,6 +782,27 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--reason", value: "TEXT", description: "Lease reason with --reserve (never a credential)" },
 		], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, mutation: true, dataSchema: custodyData },
 	], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, dataSchema: custodyData },
+	{ name: "intake", description: "Record one request from Joshua, resolve the receiving seat's role, print DO or ROUTE <bead> -> <seat>", usage: "intake --from joshua --text TEXT --seat SEAT [--kind rule|work]", flags: [
+		{ name: "--from", value: "NAME", description: "Request source; only joshua is recorded" },
+		{ name: "--text", value: "TEXT", description: "Verbatim request text" },
+		{ name: "--seat", value: "SEAT", description: "Receiving seat (default: AGENT_NAME)" },
+		{ name: "--kind", value: "KIND", description: "rule records a decisions row; work searches beads else creates one (default: work)" },
+		{ name: "--self-do", description: "The runner would do the work itself; refused without --role-override" },
+		{ name: "--role-override", value: "QUOTE", description: "Joshua's quoted words authorizing a self-do" },
+		{ name: "--repo", value: "PATH", description: "Absolute repo root for the decisions ledger and br cwd (default: cwd)" },
+		{ name: "--db", value: "PATH", description: "Tracker for br reads/writes" },
+		{ name: "--config", value: "PATH", description: "fleet-watch.json for role resolution (default: ~/.config/omp-kit/fleet-watch.json)" },
+		{ name: "--parent", value: "ID", description: "Parent bead for a newly created work bead" },
+		{ name: "--blocks", value: "ID", description: "Bead id the new work bead blocks" },
+		{ name: "--deliver", description: "On ROUTE, send through br assignee + Agent Mail + tern and prove delivery" },
+		{ name: "--session", value: "SESSION", description: "Tern session of the receiving seat (with --deliver)" },
+		{ name: "--pane", value: "PANE", description: "Tern pane of the receiving seat (with --deliver)" },
+		{ name: "--window-key", value: "KEY", description: "Tern window key of the receiving seat (with --deliver)" },
+		{ name: "--drop-dir", value: "PATH", description: "Drop folder for unproven deliveries (with --deliver)" },
+		{ name: "--project", value: "KEY", description: "Agent Mail project key (with --deliver)" },
+		{ name: "--director-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no director" },
+		{ name: "--worker-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no worker" },
+	], example: "omp-kit intake --from joshua --text 'fix this test' --seat chief --json", runnable: false, mutation: true, dataSchema: intakeData },
 	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes)", usage: "infra pin|check|promote|undo", flags: [], subcommands: [
 		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
 			{ name: "--file", value: "PATH", description: "Pin file to read (default: kit .omp/infra-pins.toml)" },

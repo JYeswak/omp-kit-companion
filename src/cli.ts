@@ -90,6 +90,7 @@ import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLes
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
+import { intakeCommand } from "./intake-verb.ts";
 import { looksSecret } from "./mcp-sources.ts";
 
 const SCHEMA_VERSION = "1";
@@ -125,6 +126,7 @@ const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
 	"planning convert": ["br"],
 	"drain close-queue": ["br"],
 	"drain stale-claims": ["br"],
+	"intake": ["br"],
 };
 
 const TOOL_UNAVAILABLE_CODES: Record<string, string> = {
@@ -1055,6 +1057,7 @@ registerCommandHandler("undo", receiptCommand);
 registerCommandHandler("land", landCommand);
 registerCommandHandler("converge", convergeCommand);
 registerCommandHandler("custody check", custodyCheckCommand);
+registerCommandHandler("intake", intakeCommand);
 
 function rulesCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
