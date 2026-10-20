@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
+import { afterAll } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ccActionOutcome, ccActionTarget, registerCommandHandler, runCli } from "../src/cli.ts";
 
@@ -7,9 +9,15 @@ const repoRoot = resolve(import.meta.dir, "..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 
+const scratchDirs: string[] = [];
+afterAll(() => {
+	for (const dir of scratchDirs) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+});
+
 function freshState(): string {
 	const dir = mkdtempSync(join(scratchRoot, "cli-actions-test." + process.pid + "."));
 	mkdirSync(join(dir, "spool"), { recursive: true });
+	scratchDirs.push(dir);
 	return dir;
 }
 

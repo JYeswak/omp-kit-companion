@@ -7,7 +7,9 @@
  * the lease named for release passes through as exit 11).
  */
 import { expect, test } from "bun:test";
+import { afterAll } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ccActionOutcome, runCli, type ParsedCommand } from "./cli.ts";
 import {
@@ -19,6 +21,13 @@ import {
 const repoRoot = join(import.meta.dir, "..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
+
+const scratchPrefix = `custody-verb-test.${process.pid}.`;
+afterAll(() => {
+	for (const name of readdirSync(scratchRoot)) {
+		if (name.startsWith(scratchPrefix)) { try { rmSync(join(scratchRoot, name), { recursive: true, force: true }); } catch { /* best effort */ } }
+	}
+});
 
 function freshDir(prefix: string): string {
 	return mkdtempSync(join(scratchRoot, `custody-verb-test.${process.pid}.${prefix}.`));
