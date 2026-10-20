@@ -1,6 +1,6 @@
 import { classifyWorkProjection, type WorkProjectionInput } from "./work-projection.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { recoverBusyTracker, recoveryFlagDirs, type TrackerQuarantineReceipt, type TrackerRecoveryResult } from "./tracker-recovery.ts";
+import { recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { YAML } from "bun";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -37,12 +37,13 @@ export type FleetWatchRegisteredTracker = { repo: string; session: string };
 
 export type FleetWatchPaneAction = { kind: "NUDGED" | "ESCALATED" | "NO_DECISION" | "STEERING_SUBMITTED"; session: string; pane: string; checks: number; text: string };
 export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt; repo?: string };
+export type FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION"; session: string; pane: string; checks: number; text: string; receipt: TrackerRetentionReceipt; repo?: string };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
 	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
 };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchPullAction;
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -1057,6 +1058,12 @@ export type FleetWatchOnceDeps = {
 	now?: () => number;
 	recoverTracker?: (repo: string, session: string) => TrackerRecoveryResult | null;
 	/**
+	 * ompkit-rhy9.15 RET1: bounded quarantine retention per repo per tick.
+	 * Absent, the canonical retainTrackerQuarantine runs (silent unless it
+	 * reaps); null disables retention for the tick.
+	 */
+	retainTracker?: ((repo: string) => TrackerRetentionOutcome | null) | null;
+	/**
 	 * ompkit-bj08.5: pause/custody admission snapshot. Every send, sendKeys
 	 * and tracker-recovery effect consults it first; a refusal performs zero
 	 * effects and is recorded in the log. Absent, the legacy path runs.
@@ -1189,6 +1196,27 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const registeredAction: FleetWatchRecoveryAction = { kind: registeredRecovery.kind, session: tracker.session, pane: "tracker", checks: 0, text: registeredRecovery.text, ...(registeredRecovery.receipt === undefined ? {} : { receipt: registeredRecovery.receipt }), repo: tracker.repo };
 		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...registeredAction }) + "\n");
 		actions.push(registeredAction);
+	}
+	// ompkit-rhy9.15 RET1: one bounded retention pass per unique repo per
+	// tick, after recovery. The canonical operation is silent (null) unless
+	// it reaps, so healthy ticks log nothing new. Admission gates the pass
+	// like every other tracker effect; a refusal performs zero effects.
+	const retentionRepos = new Map<string, string>();
+	for (const session of config.sessions) if (!retentionRepos.has(session.repo)) retentionRepos.set(session.repo, session.session);
+	for (const tracker of config.registeredTrackers ?? []) if (!retentionRepos.has(tracker.repo)) retentionRepos.set(tracker.repo, tracker.session);
+	const retainOne = deps.retainTracker === null ? null : (deps.retainTracker ?? ((target: string) => retainTrackerQuarantine(target, { now: deps.now })));
+	if (retainOne !== null) {
+		for (const [repo, sessionName] of retentionRepos) {
+			if (!admittedEffect(deps.admission, "tracker-quarantine-retention")) {
+				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: sessionName, pane: "tracker", checks: 0, repo, text: "admission refused tracker quarantine retention; no artifact was moved" }) + "\n");
+				continue;
+			}
+			const retention = retainOne(repo);
+			if (!retention) continue;
+			const action: FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION", session: sessionName, pane: "tracker", checks: 0, text: retention.text, receipt: retention.receipt, repo };
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
+			actions.push(action);
+		}
 	}
 	let stateDirty = false;
 	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
