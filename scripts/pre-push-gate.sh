@@ -347,7 +347,25 @@ else
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
 # its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child.
+# LAND1 (ompkit-rhy9.12): every publication needs the full-suite verdict for the exact candidate
+# tree, not just the focused suites fresh-gate selected. The verdict script comes from the gate
+# archive (base-authoritative, like every step above) and judges the candidate archive; its cache
+# is keyed by candidate tree with check/runtime identity, so a repeated identical tree reuses the
+# recorded verdict without rerunning. Skipped until the base archive carries the checker (first
+# landing), like pushed-bead-ids, commit-imports and doc-drift above.
 sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
+	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
+else
+	printf '== full-suite-verdict\n'
+	if sh "$gate_scripts/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$local_sha" --archive-dir "$archive"; then
+		printf 'GREEN full-suite-verdict\n'
+	else
+		rc=$?
+		printf 'RED full-suite-verdict producer_rc=%s\n' "$rc" >&2
+		exit "$rc"
+	fi
+fi
 }
 # The body runs as a plain subshell, not inside `||`: POSIX ignores set -e anywhere in an AND-OR
 # list, so `( gate_body ) || st=$?` would let a failing early checker fall through. set +e is

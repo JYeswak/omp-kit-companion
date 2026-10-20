@@ -664,5 +664,179 @@ else
 	fail=$((fail + 1)); printf 'FAIL scr-fresh-gate-work: work=%s owner=%s prompt=%s rc=%s sleep_alive=%s left=%s killed_work=%s sweep rc=%s out<<<%s>>> sweep<<<%s>>>\n' "$fgwork" "$fgowner" "$fprompt" "$frc" "$fsleep" "$fleft" "$kwork" "$wrc" "$(cat "$TMP/fg.out")" "$wout"
 fi
 
+# LAND1 (ompkit-rhy9.12): the full-suite verdict for the exact candidate tree. The fixture base
+# archive carries the REAL scripts/full-suite-verdict.sh beside a stub fresh-gate, so every case
+# below runs the real judging code against a tiny real suite. Case B is the enforcement specimen:
+# removing the verdict step from the adapter lets the red tree through, so the case fails.
+mkverdictrepo() {
+	name=$1
+	repo="$TMP/$name"
+	rm -rf "$repo"
+	mkdir -p "$repo/scripts" "$repo/tests/cli" "$repo/var/agent-tmp"
+	git -C "$repo" init -q
+	git -C "$repo" config user.email "test@example.invalid"
+	git -C "$repo" config user.name "worker-1"
+	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
+	printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$repo/scripts/fresh-gate.sh"
+	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
+	create_checker_test_stubs "$repo"
+	printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$repo/tests/cli/green.test.ts"
+	printf '#!/bin/sh\necho shell-suite-ok\n' > "$repo/tests/cli/green.test.sh"
+	printf 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, 1)\nif __name__ == "__main__":\n    unittest.main()\n' > "$repo/tests/cli/green_test.py"
+	git -C "$repo" add -A
+	git -C "$repo" commit -qm "[test] verdict base"
+	printf '#!/bin/sh\necho shell-suite-ok\nprintf "extra-ok\\n"\n' > "$repo/tests/cli/extra.test.sh"
+	git -C "$repo" add -A
+	git -C "$repo" commit -qm "[test] verdict head"
+	printf '%s' "$repo"
+}
+verdictcache() {
+	repo=$1
+	tree=$(git -C "$repo" rev-parse "HEAD^{tree}")
+	printf '%s' "$repo/.git/omp-kit/full-suite-verdicts/$tree.json"
+}
+
+# LAND1-A control: a green tree passes and records a complete PASS verdict for its exact tree.
+vrepro=$(mkverdictrepo land1a)
+rc=$(run_adapter "$vrepro")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "GREEN full-suite-verdict" && [ -f "$(verdictcache "$vrepro")" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-B planted: a tree failing an otherwise-unselected shell suite is refused. fresh-gate is a
+# passing stub, so only the full-suite verdict can refuse this tree.
+vrepro=$(mkverdictrepo land1b)
+printf '#!/bin/sh\necho unselected-suite-runs\nexit 3\n' > "$vrepro/tests/cli/unselected.test.sh"
+git -C "$vrepro" add -A
+git -C "$vrepro" commit -qm "[test] verdict red head"
+rc=$(run_adapter "$vrepro")
+out=$(cat "$TMP/out")
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "RED full-suite-verdict"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1b-refuse-unselected: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-C: retrying the same red tree reuses the cached RED without rerunning.
+rc=$(run_adapter "$vrepro")
+out=$(cat "$TMP/out")
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "VERDICT REUSED FAIL" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1c-reuse-red: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-D: a changed tree cannot reuse the old verdict; it reruns the complete suite.
+printf '#!/bin/sh\necho another-green-suite\n' > "$vrepro/tests/cli/another.test.sh"
+git -C "$vrepro" add -A
+git -C "$vrepro" commit -qm "[test] verdict changed tree"
+rc=$(run_adapter "$vrepro")
+out=$(cat "$TMP/out")
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "running the complete suite" && ! printf '%s' "$out" | grep -q "VERDICT REUSED"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1d-changed-tree-reruns: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-E: the same tree under changed check bytes cannot reuse the old verdict. base2 carries a
+# comment-only change to the judging script; head2 re-commits head1's exact content under base2,
+# so the candidate tree is byte-identical while the checks identity moved.
+erepro="$TMP/land1e"
+rm -rf "$erepro"
+mkdir -p "$erepro/scripts" "$erepro/tests/cli" "$erepro/var/agent-tmp"
+git -C "$erepro" init -q
+git -C "$erepro" config user.email "test@example.invalid"
+git -C "$erepro" config user.name "worker-1"
+cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
+printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$erepro/scripts/fresh-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
+create_checker_test_stubs "$erepro"
+printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$erepro/tests/cli/green.test.ts"
+git -C "$erepro" add -A
+git -C "$erepro" commit -qm "[test] e base1"
+printf '#!/bin/sh\necho shell-suite-ok\n' > "$erepro/tests/cli/extra.test.sh"
+git -C "$erepro" add -A
+git -C "$erepro" commit -qm "[test] e head1"
+head1=$(git -C "$erepro" rev-parse HEAD)
+rc=$(run_adapter "$erepro")
+out1=$(cat "$TMP/out")
+git -C "$erepro" checkout -q HEAD~1
+printf '# judging-script comment change only\n' >> "$erepro/scripts/full-suite-verdict.sh"
+git -C "$erepro" add -A
+git -C "$erepro" commit -qm "[test] e base2 judge change"
+git -C "$erepro" checkout -q "$head1" -- scripts tests
+git -C "$erepro" commit -qm "[test] e head2 same tree"
+tree1=$(git -C "$erepro" rev-parse "$head1^{tree}")
+tree2=$(git -C "$erepro" rev-parse "HEAD^{tree}")
+rc=$(run_adapter "$erepro")
+out=$(cat "$TMP/out")
+if [ "$tree1" = "$tree2" ] && [ "$rc" = "0" ] && printf '%s' "$out1" | grep -q "GREEN full-suite-verdict" \
+	&& printf '%s' "$out" | grep -q "running the complete suite" && ! printf '%s' "$out" | grep -q "VERDICT REUSED"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1e-changed-checks-rerun: tree1=%s tree2=%s rc=%s out<<<%s>>>\n' "$tree1" "$tree2" "$rc" "$out"
+fi
+
+# LAND1-F: the same tree under a changed runtime identity cannot reuse the old verdict.
+frepro=$(mkverdictrepo land1f)
+rc=$(run_adapter "$frepro")
+rc2=$(FULL_SUITE_RUNTIME_ID=legB run_adapter "$frepro")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && [ "$rc2" = "0" ] && printf '%s' "$out" | grep -q "running the complete suite" && ! printf '%s' "$out" | grep -q "VERDICT REUSED"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1f-changed-runtime-reruns: rc=%s rc2=%s out<<<%s>>>\n' "$rc" "$rc2" "$out"
+fi
+
+# LAND1-G: a corrupt cache entry is a miss, never a pass; the suite reruns and passes.
+grepro=$(mkverdictrepo land1g)
+rc=$(run_adapter "$grepro")
+printf 'corrupt{{{' > "$(verdictcache "$grepro")"
+rc=$(run_adapter "$grepro")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "running the complete suite" && printf '%s' "$out" | grep -q "GREEN full-suite-verdict"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1g-corrupt-reruns: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-H: a timed-out suite is non-pass and caches nothing, so a retry would rerun.
+hrepro="$TMP/land1h"
+rm -rf "$hrepro"
+mkdir -p "$hrepro/scripts" "$hrepro/tests/cli" "$hrepro/var/agent-tmp"
+git -C "$hrepro" init -q
+git -C "$hrepro" config user.email "test@example.invalid"
+git -C "$hrepro" config user.name "worker-1"
+cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
+printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$hrepro/scripts/fresh-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
+create_checker_test_stubs "$hrepro"
+printf '#!/bin/sh\necho hanging-suite-start\nsleep 120\necho hanging-suite-end\n' > "$hrepro/tests/cli/hang.test.sh"
+git -C "$hrepro" add -A
+git -C "$hrepro" commit -qm "[test] h base"
+git -C "$hrepro" commit -q --allow-empty -m "[test] h head"
+htree=$(git -C "$hrepro" rev-parse "HEAD^{tree}")
+rc=$(FULL_SUITE_TIMEOUT_SECS=10 run_adapter "$hrepro")
+out=$(cat "$TMP/out")
+hentry="$hrepro/.git/omp-kit/full-suite-verdicts/$htree.json"
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "timed out" && [ ! -f "$hentry" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1h-timeout-nocache: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
+# LAND1-I: a base archive predating the checker skips with a named SKIP and passes the stub gate.
+irepro=$(mkrepo skipverdict 'echo BASE-GATE' 'echo HEAD-GATE')
+rc=$(run_adapter "$irepro")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "SKIP full-suite-verdict: checker absent from base archive"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL land1i-bootstrap-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
