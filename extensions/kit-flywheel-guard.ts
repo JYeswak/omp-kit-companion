@@ -1386,18 +1386,35 @@ function refuseBlock(id: string, why: string, next: string): FlywheelToolCallRes
 	return { block: true, reason: `kit-flywheel-guard ${BLOCK_REFUSED}: ${id} ${why}. ${next} Nothing was changed.` };
 }
 
-async function execJson(exec: FlywheelExec, request: TrackerRequest, args: string[]): Promise<{ ok: true; value: unknown } | { ok: false; why: string }> {
+type TrackerRead = { ok: true; value: unknown } | { ok: false; why: string; stdout: string; spawned: boolean };
+
+async function execJson(exec: FlywheelExec, request: TrackerRequest, args: string[]): Promise<TrackerRead> {
 	let result: FlywheelExecResult;
 	try {
 		result = await exec(request.bin, [...args, "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
 	} catch (error) {
-		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` could not run (${error instanceof Error ? error.message : String(error)})` };
+		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` could not run (${error instanceof Error ? error.message : String(error)})`, stdout: "", spawned: false };
 	}
-	if (result.code !== 0 || result.killed) return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` exited ${result.killed ? "after timeout" : result.code}` };
+	if (result.code !== 0 || result.killed) return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` exited ${result.killed ? "after timeout" : result.code}`, stdout: result.stdout, spawned: true };
 	try {
 		return { ok: true, value: JSON.parse(result.stdout) };
 	} catch {
-		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` returned unparseable output` };
+		return { ok: false, why: `\`${request.bin} ${args.join(" ")}\` returned unparseable output`, stdout: result.stdout, spawned: true };
+	}
+}
+
+/**
+ * BLOCKEDADMIT1 AC5 (stock-runner parity, J-2026-10-17-16): with no br binary on the seat, or outside a
+ * fleet-protocol tracker (br 0.7.4 NOT_INITIALIZED), the block check stands down and the seat sees the
+ * tool's own error. A live tracker that cannot answer (timeout, unparseable output, or a bead missing
+ * from it) stays fail-closed.
+ */
+function trackerIsStock(result: Extract<TrackerRead, { ok: false }>): boolean {
+	if (!result.spawned) return true;
+	try {
+		return field(field(JSON.parse(result.stdout), "error"), "code") === "NOT_INITIALIZED";
+	} catch {
+		return false;
 	}
 }
 
@@ -1409,8 +1426,11 @@ async function execJson(exec: FlywheelExec, request: TrackerRequest, args: strin
 async function checkBlockedHasFix(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	for (const id of request.ids) {
 		const shown = await execJson(deps.exec, request, ["show", id, "--json"]);
+		if (!shown.ok) {
+			if (trackerIsStock(shown)) continue;
+			return refuseBlock(id, `cannot be checked for a blocking fix (${shown.why})`, "Restore the native lookup, then retry.");
+		}
 		const edges = await execJson(deps.exec, request, ["dep", "list", id, "--json"]);
-		if (!shown.ok) return refuseBlock(id, `cannot be checked for a blocking fix (${shown.why})`, "Restore the native lookup, then retry.");
 		if (!edges.ok) return refuseBlock(id, `cannot be checked for a blocking fix (${edges.why})`, "Restore the native lookup, then retry.");
 		const rows: unknown[] = Array.isArray(edges.value) ? edges.value : [];
 		const open = rows.some(row => field(row, "type") === "blocks" && typeof field(row, "status") === "string"

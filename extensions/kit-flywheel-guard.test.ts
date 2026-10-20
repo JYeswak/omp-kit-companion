@@ -807,6 +807,30 @@ test("BLOCK_REFUSED: other status updates, other verbs and unreadable beads", as
 	expect((await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "dep"))?.block).toBe(true);
 });
 
+test("BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer stays refused", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const stock = async (respond: Responder) => toolCall(await createFlywheelHost(base, { respond }), project, SET_BLOCKED);
+	const tmux = { stdout: "", stderr: "no server", code: 1 };
+	const noBr: Responder = call => {
+		if (call.command === "tmux") return tmux;
+		throw new Error("spawn br ENOENT");
+	};
+	expect(await stock(noBr)).toBeUndefined();
+	const noTracker: Responder = call => {
+		if (call.command === "tmux") return tmux;
+		return { stdout: JSON.stringify({ error: { code: "NOT_INITIALIZED", message: "Beads not initialized: run 'br init' first" } }), stderr: "", code: 2 };
+	};
+	expect(await stock(noTracker)).toBeUndefined();
+	const lostBead: Responder = call => {
+		if (call.command === "tmux") return tmux;
+		return { stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: "Issue not found: kit-9" } }), stderr: "", code: 3 };
+	};
+	const refused = await stock(lostBead);
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("BLOCK_REFUSED");
+	expect(refused?.reason).toContain("cannot be checked");
+});
+
 test("BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is checked like the bare command", async () => {
 	const open = { edges: [{ type: "blocks", status: "open" }] };
 	for (const wrapped of [
@@ -892,6 +916,16 @@ test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a
 	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "open", dependency_type: "blocks" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
 	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "blocked", dependency_type: "parent-child" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
 	expect((await closeCall({}, "br close kit-x"))?.block).toBeUndefined();
+});
+
+test("BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding refusal", async () => {
+	const project = mkdtempSync(join(base, "proj-"));
+	const h = await createFlywheelHost(base, { respond: call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		return { stdout: JSON.stringify({ error: { code: "NOT_INITIALIZED", message: "Beads not initialized" } }), stderr: "", code: 2 };
+	} });
+	const result = await toolCall(h, project, "br close kit-x --reason done");
+	if (result?.block === true) expect(result.reason).not.toContain("BLOCK_RELEASE_REQUIRED");
 });
 
 // --- COMPACTION_REREAD wording and clearing envelopes (ompkit-xa5s.24 rework, chief ORDER AM63971) ---
