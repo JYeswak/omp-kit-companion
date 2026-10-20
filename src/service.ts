@@ -503,7 +503,16 @@ export function systemdTimer(job: ServiceJobDef): string {
 		"Persistent=true", "RandomizedDelaySec=180", "", "[Install]", "WantedBy=default.target", ""].join("\n");
 }
 
-export interface LaunchctlPrint { loaded: boolean; path: string | null; state: string | null; pid: number | null; runs: number | null; lastExit: number | null }
+export interface LaunchctlPrint {
+	loaded: boolean | null;
+	path: string | null;
+	state: string | null;
+	pid: number | null;
+	runs: number | null;
+	lastExit: number | null;
+	query_ok?: boolean;
+	query_error?: string | null;
+}
 
 export function parseLaunchctlPrint(stdout: string): LaunchctlPrint {
 	const path = /^\s*path\s*=\s*(.+?)\s*$/m.exec(stdout)?.[1]?.trim() ?? null;
@@ -513,7 +522,7 @@ export function parseLaunchctlPrint(stdout: string): LaunchctlPrint {
 	const lastExit = /^\s*last exit code\s*=\s*(-?\d+)\s*$/m.exec(stdout);
 	return { loaded: path !== null, path,
 		state, pid: pid ? Number(pid[1]) : null, runs: runs ? Number(runs[1]) : null,
-		lastExit: lastExit ? Number(lastExit[1]) : null };
+		lastExit: lastExit ? Number(lastExit[1]) : null, query_ok: true, query_error: null };
 }
 
 function serviceOutputText(result: ServiceRunResult): string {
@@ -583,9 +592,19 @@ function readText(path: string): string | null {
 }
 export function queryPrint(label: string, run: ServiceRunner = defaultRunner): LaunchctlPrint {
 	const result = run(["launchctl", "print", `${domain()}/${label}`]);
-	if (result.code !== 0) return { loaded: false, path: null, state: null, pid: null, runs: null, lastExit: null };
+	if (result.code !== 0) {
+		return {
+			loaded: null, path: null, state: null, pid: null, runs: null, lastExit: null,
+			query_ok: false,
+			query_error: result.code === 113 && /Could not find service|No such process/i.test(serviceOutputText(result))
+				? "LAUNCHCTL_NOT_FOUND_LABEL" : `LAUNCHCTL_EXIT_${result.code}`,
+		};
+	}
 	const parsed = parseLaunchctlPrint(result.stdout);
-	return parsed.loaded ? parsed : { loaded: false, path: null, state: null, pid: null, runs: null, lastExit: null };
+	if (parsed.path === null) {
+		return { ...parsed, loaded: null, query_ok: false, query_error: "LAUNCHCTL_PARSE_FAILED" };
+	}
+	return parsed;
 }
 
 export function oversizedOwnLogs(home: string, job: ServiceJobDef): string[] {

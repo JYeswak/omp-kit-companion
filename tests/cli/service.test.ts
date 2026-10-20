@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
@@ -79,6 +79,41 @@ function runner(calls: string[][], behavior?: (args: readonly string[]) => Servi
 function healthyPrint(plist: string): string {
   return ["path = " + plist, "state = running", "pid = 123", "runs = 5", "last exit code = 0", ""].join("\n");
 }
+test("service launchctl query reports loaded state and plist identity", () => {
+  const result = queryPrint("com.omp-kit.omp-watch", () => ({
+    code: 0,
+    stdout: healthyPrint("/Users/test/Library/LaunchAgents/com.omp-kit.omp-watch.plist"),
+    stderr: "",
+  }));
+  expect(result).toMatchObject({
+    loaded: true,
+    query_ok: true,
+    query_error: null,
+    path: "/Users/test/Library/LaunchAgents/com.omp-kit.omp-watch.plist",
+  });
+});
+
+test("service launchctl query distinguishes a missing label from a failed query", () => {
+  const absent = queryPrint("com.omp-kit.omp-watch", () => ({
+    code: 113,
+    stdout: "",
+    stderr: "Could not find service",
+  }));
+  expect(absent).toMatchObject({ loaded: null, query_ok: false, query_error: "LAUNCHCTL_NOT_FOUND_LABEL", path: null });
+
+  const failed = queryPrint("com.omp-kit.omp-watch", () => ({
+    code: 113,
+    stdout: "",
+    stderr: "launchd domain unavailable",
+  }));
+  expect(failed).toMatchObject({ loaded: null, query_ok: false, query_error: "LAUNCHCTL_EXIT_113", path: null });
+});
+
+test("service launchctl query reports parse failure instead of unloaded", () => {
+  const result = queryPrint("com.omp-kit.omp-watch", () => ({ code: 0, stdout: "state = running\n", stderr: "" }));
+  expect(result).toMatchObject({ loaded: null, query_ok: false, query_error: "LAUNCHCTL_PARSE_FAILED" });
+});
+
 function healthyInput(home: string, launcher: string, watch: string) {
   seedServiceTmp(home);
   const rendered = renderLaunchdPlist(home, job, launcher, watch).text;
