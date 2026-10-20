@@ -75,7 +75,8 @@ class Fixture:
         self.git("commit", "--only", "-m", "fixture native baseline", "--", guard.TRACKER)
 
     def cmd(self, argv: list[str], env: dict | None = None, expected: int = 0) -> subprocess.CompletedProcess:
-        p = subprocess.run(argv, cwd=self.root, env=env or ENV, capture_output=True, text=True, timeout=30)
+        p = subprocess.run(argv, cwd=self.root, env=env or ENV, capture_output=True, text=True,  # pysafe: leaf git/native-br fixture subprocess; timeout bounds the wait, DEVNULL stdin
+                           timeout=30, stdin=subprocess.DEVNULL)
         with (self.root / "commands.jsonl").open("a") as out:
             out.write(json.dumps({"argv": argv, "rc": p.returncode, "stdout": p.stdout, "stderr": p.stderr}) + "\n")
         if p.returncode != expected:

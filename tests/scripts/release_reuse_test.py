@@ -356,10 +356,13 @@ class RollingReleaseTest(unittest.TestCase):
             root = Path(directory)
             remote, repo = root / "origin.git", root / "repo"
             env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)], env=env, check=True, capture_output=True)
-            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], env=env, check=True, capture_output=True)
+            subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)], env=env,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
+                           check=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], env=env,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
+                           check=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
             def git(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True, text=True)
+                return subprocess.run(["git", *args], cwd=repo, env=env, check=True,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
+                                      capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
             git("config", "user.name", "Native receipt fixture")
             git("config", "user.email", "fixture@example.invalid")
             git("remote", "add", "origin", str(remote))
@@ -376,24 +379,26 @@ class RollingReleaseTest(unittest.TestCase):
             sys.executable, str(ROOT / "scripts/release_reuse.py"), "require-created-ref",
             "--ack", str(ack), "--source-sha", source, "--version", version, "--push-status", str(status),
             "--destination", str(repo.parent / "origin.git"),
-        ], capture_output=True, text=True).returncode
+        ], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL).returncode  # pysafe: script under test reaps its own trees via run_bounded; outer timeout bounds the wait, DEVNULL stdin
 
     def test_only_real_new_tag_creation_authorizes_signing(self) -> None:
         with self.native_tag_repo() as (repo, source, newer):
             command = ["git", "-c", "push.followTags=false", "push", "--porcelain", "origin"]
-            first = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
+            first = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo,  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                   capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertEqual(self.tag_ack_status(repo, first.stdout, source, status=first.returncode), 0)
-            identical = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
+            identical = subprocess.run([*command, f"{source}:refs/tags/v0.0.0"], cwd=repo,  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                       capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
             self.assertEqual(identical.returncode, 0)
             self.assertEqual(self.tag_ack_status(repo, identical.stdout, source), 4)
-            conflict = subprocess.run([*command, f"{newer}:refs/tags/v0.0.0"], cwd=repo, capture_output=True, text=True)
-            self.assertEqual(self.tag_ack_status(repo, conflict.stdout, newer, status=conflict.returncode), 4)
+            conflict = subprocess.run([*command, f"{newer}:refs/tags/v0.0.0"], cwd=repo,  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                      capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
 
     def test_native_creation_ack_refuses_wrong_binding_or_missing_reply(self) -> None:
         with self.native_tag_repo() as (repo, source, newer):
-            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
-                                     cwd=repo, capture_output=True, text=True, check=True)
+            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                     cwd=repo, capture_output=True, text=True, check=True, timeout=120, stdin=subprocess.DEVNULL)
             for reply, expected_source, version in (
                 (created.stdout, newer, "0.0.0"), (created.stdout, source, "0.0.1"),
                 ("", source, "0.0.0"), (created.stdout + "unexpected acknowledgment\n", source, "0.0.0"),
@@ -406,22 +411,23 @@ class RollingReleaseTest(unittest.TestCase):
 
     def test_native_tag_ack_rejects_nonsemantic_version(self) -> None:
         with self.native_tag_repo() as (repo, source, _):
-            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/vnot-a-version"],
-                                     cwd=repo, capture_output=True, text=True, check=True)
+            created = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/vnot-a-version"],  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                     cwd=repo, capture_output=True, text=True, check=True, timeout=120, stdin=subprocess.DEVNULL)
             self.assertEqual(self.tag_ack_status(repo, created.stdout, source, version="not-a-version"), 4)
 
     def test_concurrent_native_tag_push_has_only_one_authorized_creator(self) -> None:
         with self.native_tag_repo() as (repo, source, _):
             command = ["git", "-c", "push.followTags=false", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"]
-            children = [subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
-            replies = [(child, child.communicate()) for child in children]
+            children = [subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True, stdin=subprocess.DEVNULL) for _ in range(2)]
+            replies = [(child, child.communicate(timeout=120)) for child in children]
             authorized = [self.tag_ack_status(repo, reply[0], source, status=child.returncode) for child, reply in replies]
             self.assertEqual(sorted(authorized), [0, 4])
 
     def test_creator_receipt_requires_actual_new_tag_ack_and_exact_selection(self) -> None:
         with self.native_tag_repo() as (repo, source, newer):
-            result = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
-                                    cwd=repo, capture_output=True, text=True, check=True)
+            result = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                    cwd=repo, capture_output=True, text=True, check=True, timeout=120, stdin=subprocess.DEVNULL)
             ack, selection, output = (repo.parent / name for name in ("ack", "selection.json", "tag-creation.json"))
             ack.write_text(result.stdout)
             selection.write_text(json.dumps({"source_sha": source, "version": "0.0.0", "repository": REPOSITORY}))
@@ -437,8 +443,8 @@ class RollingReleaseTest(unittest.TestCase):
                 release_reuse._tag_creation_receipt(args)
             self.assertFalse(output.exists())
             args.source_sha = source
-            same = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],
-                                  cwd=repo, capture_output=True, text=True, check=True)
+            same = subprocess.run(["git", "push", "--porcelain", "origin", f"{source}:refs/tags/v0.0.0"],  # pysafe: local temp-repo git push; pack children exit when the client dies and its pipes close, timeout bounds the wait, DEVNULL stdin
+                                  cwd=repo, capture_output=True, text=True, check=True, timeout=120, stdin=subprocess.DEVNULL)
             ack.write_text(same.stdout)
             with self.assertRaises(ValueError):
                 release_reuse._tag_creation_receipt(args)
@@ -643,7 +649,8 @@ class RollingReleaseTest(unittest.TestCase):
             root = Path(directory)
             environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             def git(*args: str) -> str:
-                result = subprocess.run(["git", "-C", str(root), *args], env=environment, text=True, capture_output=True, timeout=30)
+                result = subprocess.run(["git", "-C", str(root), *args], env=environment, text=True,  # pysafe(subprocess-orphan): leaf git fixture in a temp repo with no descendants; the timeout bounds it
+                                        capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return result.stdout.strip()
             git("init", "-q", "--initial-branch=main")

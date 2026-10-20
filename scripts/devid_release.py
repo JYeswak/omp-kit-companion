@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 sys.path.insert(0, str(ROOT / "installer"))
 import install  # noqa: E402  (the installer's own fail-closed archive parser)
 
@@ -181,11 +183,13 @@ def macho_code(data: bytes, path: str) -> bytes:
 
 
 def _codesign_details(binary: Path) -> dict[str, list[str]]:
-    result = subprocess.run(["codesign", "-d", "--verbose=4", str(binary)], capture_output=True, text=True, timeout=120)
+    result = run_bounded(["codesign", "-d", "--verbose=4", str(binary)], timeout=120)
+    if result.outcome != "OK":
+        raise Refused(f"{binary.name}: codesign -d timed out after 120s; process group killed")
     if result.returncode:
-        raise Refused(f"{binary.name}: codesign -d failed: {result.stderr.strip()}")
+        raise Refused(f"{binary.name}: codesign -d failed: {result.text('stderr').strip()}")
     details: dict[str, list[str]] = {}
-    for line in (result.stderr + result.stdout).splitlines():
+    for line in (result.text("stderr") + result.text("stdout")).splitlines():
         key, separator, value = line.partition("=")
         if separator:
             details.setdefault(key.strip(), []).append(value.strip())
@@ -195,9 +199,11 @@ def _codesign_details(binary: Path) -> dict[str, list[str]]:
 def check_signature(binary: Path, path: str, entitlements: Path, *, notarized: bool) -> dict[str, str]:
     if shutil.which("codesign") is None or shutil.which("spctl") is None:
         raise Refused("codesign/spctl unavailable: Developer ID verification needs macOS (use --structural-only for structure)")
-    strict = subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(binary)], capture_output=True, text=True, timeout=300)
+    strict = run_bounded(["codesign", "--verify", "--strict", "--verbose=2", str(binary)], timeout=300)
+    if strict.outcome != "OK":
+        raise Refused(f"{path}: codesign --verify --strict timed out after 300s; process group killed")
     if strict.returncode:
-        raise Refused(f"{path}: codesign --verify --strict failed: {strict.stderr.strip()}")
+        raise Refused(f"{path}: codesign --verify --strict failed: {strict.text('stderr').strip()}")
     details = _codesign_details(binary)
     first = lambda key: (details.get(key) or [""])[0]  # noqa: E731
     code_directory = first("CodeDirectory v")
@@ -211,7 +217,9 @@ def check_signature(binary: Path, path: str, entitlements: Path, *, notarized: b
         raise Refused(f"{path}: hardened runtime flag missing ({code_directory})")
     if not first("Timestamp"):
         raise Refused(f"{path}: no secure timestamp")
-    shown = subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", str(binary)], capture_output=True, timeout=120)
+    shown = run_bounded(["codesign", "-d", "--entitlements", "-", "--xml", str(binary)], timeout=120)
+    if shown.outcome != "OK":
+        raise Refused(f"{path}: codesign entitlements dump timed out after 120s; process group killed")
     try:
         actual = plistlib.loads(shown.stdout) if shown.returncode == 0 and shown.stdout.strip() else None
     except plistlib.InvalidFileException:
@@ -222,10 +230,12 @@ def check_signature(binary: Path, path: str, entitlements: Path, *, notarized: b
     if notarized:
         # `--type execute` rejects every bare Mach-O ("does not seem to be an app"); the primary-signature
         # context assesses the notarization ticket by cdhash, online.
-        assess = subprocess.run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "-vv", str(binary)],
-                                capture_output=True, text=True, timeout=300)
-        if assess.returncode or "source=Notarized Developer ID" not in assess.stderr:
-            raise Refused(f"{path}: Gatekeeper does not report Notarized Developer ID: {assess.stderr.strip()}")
+        assess = run_bounded(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "-vv", str(binary)],
+                             timeout=300)
+        if assess.outcome != "OK":
+            raise Refused(f"{path}: spctl assess timed out after 300s; process group killed")
+        if assess.returncode or "source=Notarized Developer ID" not in assess.text("stderr"):
+            raise Refused(f"{path}: Gatekeeper does not report Notarized Developer ID: {assess.text('stderr').strip()}")
         result["gatekeeper"] = "Notarized Developer ID"
     return result
 
@@ -233,11 +243,13 @@ def check_signature(binary: Path, path: str, entitlements: Path, *, notarized: b
 def execute(binary: Path, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="devid-exec-") as home:
         env = {"HOME": home, "TMPDIR": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "NO_COLOR": "1"}
-        result = subprocess.run([str(binary), "--version"], capture_output=True, text=True, env=env, cwd=home, timeout=120)
+        result = run_bounded([str(binary), "--version"], env=env, cwd=home, timeout=120)
+    if result.outcome != "OK":
+        raise Refused(f"{binary.name} --version timed out after 120s; process group killed")
     if result.returncode in (-9, 137):
         raise Refused(f"{binary.name} was killed on launch (rc {result.returncode}; code-signing enforcement)")
-    if result.returncode or result.stdout.strip() != f"omp-kit {version}":
-        raise Refused(f"{binary.name} --version: rc {result.returncode}, stdout {result.stdout.strip()!r}, stderr {result.stderr.strip()[-400:]!r}")
+    if result.returncode or result.text("stdout").strip() != f"omp-kit {version}":
+        raise Refused(f"{binary.name} --version: rc {result.returncode}, stdout {result.text('stdout').strip()!r}, stderr {result.text('stderr').strip()[-400:]!r}")
 
 
 def signed_members(members: dict[str, tuple[str, bytes]]) -> list[str]:

@@ -221,8 +221,8 @@ def tracker_rows(real: str, project: str, database: str, lock_fd: int | None = N
     command = [real, "list", "--status", "all", "--deferred", "--limit", "0", "--json",
                "--db", database, "--no-auto-import", "--no-auto-flush"]
     try:
-        result = subprocess.run(command, cwd=project, capture_output=True, text=True,
-                                timeout=60, pass_fds=(() if lock_fd is None else (lock_fd,)))
+        result = subprocess.run(command, cwd=project, capture_output=True, text=True,  # pysafe: leaf native br list; timeout bounds the wait, DEVNULL stdin
+                                timeout=60, stdin=subprocess.DEVNULL, pass_fds=(() if lock_fd is None else (lock_fd,)))
     except (OSError, subprocess.SubprocessError) as error:
         raise AdmissionError(f"native br list failed: {error}") from error
     if result.returncode:
@@ -368,8 +368,8 @@ def send_sweep_page(policy: tuple[int, tuple[str, str] | None], issues: list[dic
     command = ["omp-kit", "send", session, pane, message, "--no-bead-reason",
                "creation-sweep-review", "--until-delivered", "15", "--json"]
     try:
-        result = subprocess.run(command, cwd=os.environ["BR_SHIM_PROJECT"], capture_output=True,
-                                text=True, timeout=30)
+        result = subprocess.run(command, cwd=os.environ["BR_SHIM_PROJECT"], capture_output=True,  # pysafe: leaf omp-kit send with --until-delivered 15; timeout bounds the wait, DEVNULL stdin
+                                text=True, timeout=30, stdin=subprocess.DEVNULL)
         receipt = json.loads(result.stdout) if result.stdout else {}
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         print(f"br-shim: BR_CREATE_SWEEP_PAGE_UNVERIFIED {error}; review list follows:\n{message}",

@@ -26,8 +26,8 @@ def run_shim(args: list[str], shim: str, real: str, project: str) -> int:
     command = [shim, *args]
     environment = dict(os.environ, BR_REAL=real)
     try:
-        result = subprocess.run(command, cwd=project, env=environment, capture_output=True,
-                                text=True, timeout=30)
+        result = subprocess.run(command, cwd=project, env=environment, capture_output=True,  # pysafe: leaf shim exec to native br; timeout bounds the wait, DEVNULL stdin
+                                text=True, timeout=30, stdin=subprocess.DEVNULL)
         if result.returncode:
             if result.stdout:
                 sys.stdout.write(result.stdout)
@@ -95,8 +95,8 @@ def execute_displacement(parsed: dict, issues: list[dict], real: str, shim: str,
     create_args.append("--json")
     create_command = [real, *parsed["prefix"], "create", *create_args]
     try:
-        created = subprocess.run(create_command, cwd=project, capture_output=True, text=True,
-                                 pass_fds=(lock_fd,))
+        created = subprocess.run(create_command, cwd=project, capture_output=True, text=True,  # pysafe: leaf native br create; timeout bounds the wait, DEVNULL stdin
+                                 timeout=120, stdin=subprocess.DEVNULL, pass_fds=(lock_fd,))
     except (OSError, subprocess.SubprocessError) as error:
         return fail(f"P0 displacement create failed before changing the named P0: {error}")
     if created.returncode:
@@ -159,8 +159,8 @@ def main(argv: list[str]) -> int:
     try:
         parsed = parse_create_args(argv)
         if parsed["dry_run"]:
-            return subprocess.run([real, *parsed["prefix"], "create", *parsed["forwarded"]],
-                                  cwd=project).returncode
+            return subprocess.run([real, *parsed["prefix"], "create", *parsed["forwarded"]],  # pysafe: leaf native br dry-run passthrough; timeout bounds the wait, DEVNULL stdin fails fast instead of hanging
+                                  cwd=project, timeout=120, stdin=subprocess.DEVNULL).returncode
         lock_fd = acquire_tracker_lock(database)
         try:
             issues = tracker_rows(real, project, database, lock_fd)
@@ -212,7 +212,8 @@ def main(argv: list[str]) -> int:
             now = dt.datetime.now(dt.timezone.utc)
             sweep_crossing = len(recent_creations(issues, actor, now)) == SWEEP_THRESHOLD
             command = [real, *parsed["prefix"], "create", *parsed["forwarded"]]
-            result = subprocess.run(command, cwd=project, pass_fds=(lock_fd,))
+            result = subprocess.run(command, cwd=project, timeout=120, stdin=subprocess.DEVNULL,  # pysafe: leaf native br create; timeout bounds the wait, DEVNULL stdin
+                                    pass_fds=(lock_fd,))
             if result.returncode:
                 return result.returncode
             if sweep_crossing:

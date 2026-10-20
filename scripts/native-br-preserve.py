@@ -24,6 +24,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
+
 TRACKER = ".beads/issues.jsonl"
 SCHEMA = "br.sync.additive-reconciliation.v2"
 ALGORITHM = "exact-id-additive-create-monotonic-closure-explicit-scalar-v2"
@@ -110,9 +113,13 @@ def rows(data: bytes) -> dict[str, dict]:
 
 def run(argv: list[str], repo: Path, env: dict) -> bytes:
     try:
-        process = subprocess.run(argv, cwd=repo, env=env, capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        process = run_bounded(argv, cwd=repo, env=env, timeout=30)
+    except OSError as exc:
         raise Refusal("READ_UNAVAILABLE") from exc
+    if process.outcome != "OK":
+        # Timeout: the whole process group was killed, so no descendant can
+        # hold the read past the deadline.
+        raise Refusal("READ_UNAVAILABLE")
     if process.returncode:
         # Native malformed/unknown-field/conflict refusals stay refusals. Their
         # raw diagnostic may contain tracker text and is deliberately not echoed.

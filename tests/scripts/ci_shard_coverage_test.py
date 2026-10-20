@@ -8,11 +8,14 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 _spec = importlib.util.spec_from_file_location("ci_shard_coverage", ROOT / "scripts" / "ci-shard-coverage.py")
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/ci-shard-coverage.py")
@@ -39,17 +42,21 @@ class ShardCoverageTest(unittest.TestCase):
             path.write_text(f'import {{ expect, test }} from "bun:test";\ntest("{name}", () => expect(1).toBe(1));\n')
         (cls.repo / "bunfig.toml").write_text("")
         env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-        subprocess.run(["git", "init", "-q", str(cls.repo)], check=True, env=env)
-        subprocess.run(["git", "add", "-A"], cwd=cls.repo, check=True, env=env)
+        subprocess.run(["git", "init", "-q", str(cls.repo)], check=True, env=env,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
+                       timeout=60, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "add", "-A"], cwd=cls.repo, check=True, env=env,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
+                       timeout=60, stdin=subprocess.DEVNULL)
         cls.reports = Path(cls.tmp.name) / "reports"
         cls.reports.mkdir()
         for index in range(1, SHARDS + 1):
             out = cls.reports / f"junit-{index}.attempt-1.xml"
-            run = subprocess.run(["bun", "test", *ROOTS, *[f"--path-ignore-patterns={glob}" for glob in IGNORES],
-                                  f"--shard={index}/{SHARDS}", "--reporter=junit", f"--reporter-outfile={out}"],
-                                 cwd=cls.repo, capture_output=True, text=True)
+            run = run_bounded(["bun", "test", *ROOTS, *[f"--path-ignore-patterns={glob}" for glob in IGNORES],
+                               f"--shard={index}/{SHARDS}", "--reporter=junit", f"--reporter-outfile={out}"],
+                              cwd=cls.repo, timeout=300)
+            if run.outcome != "OK":
+                raise RuntimeError(f"bun shard {index} timed out after 300s; process group killed")
             if run.returncode != 0 or not out.is_file():
-                raise RuntimeError(f"bun shard {index} failed: {run.stdout}{run.stderr}")
+                raise RuntimeError(f"bun shard {index} failed: {run.text('stdout')}{run.text('stderr')}")
 
     @classmethod
     def tearDownClass(cls) -> None:

@@ -64,8 +64,8 @@ def run_scoped(argv, *, cwd, env, timeout):
     group gets TERM, a grace period, then KILL before TimeoutExpired is
     re-raised. Survivors after a clean exit get the same treatment, since a
     finished check owns no orphans. Returns CompletedProcess like run()."""
-    child = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, start_new_session=True)
+    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
         stdout, stderr = child.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -380,9 +380,10 @@ def isolated_snapshot(*roots):
 
 def verified_source(source_sha):
     checkout = Path(__file__).resolve().parent.parent
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, capture_output=True, timeout=15)
-    dirty = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all"],
-                           cwd=checkout, capture_output=True, timeout=30)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, capture_output=True, timeout=15,  # pysafe(subprocess-orphan): `git rev-parse` is a single-process leaf with no descendants; the timeout bounds it
+                            stdin=subprocess.DEVNULL)
+    dirty = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all"],  # pysafe(subprocess-orphan): `git status` is a single-process leaf with no descendants; the timeout bounds it
+                           cwd=checkout, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
     if commit.returncode != 0 or dirty.returncode != 0 or commit.stdout.decode().strip() != source_sha or dirty.stdout:
         raise ValueError("native source is not the exact clean requested commit")
 

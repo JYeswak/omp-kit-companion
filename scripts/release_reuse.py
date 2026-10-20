@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 import sys
+
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -466,8 +467,8 @@ def selection_matches(binding: Any, notes: bytes, *, source_sha: str, version: s
     )
 
 def _artifact_files(repository: str, artifact: dict[str, Any], expected: set[str]) -> dict[str, bytes]:
-    result = subprocess.run(["gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    result = subprocess.run(["gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],  # pysafe: single `gh api` artifact fetch with no descendants; timeout bounds the wait, DEVNULL stdin
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, stdin=subprocess.DEVNULL)
     if result.stderr:
         print(result.stderr.decode(errors="replace"), end="", file=sys.stderr)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
@@ -764,7 +765,8 @@ def _verify_final(args: argparse.Namespace) -> int:
 
 
 def _command(argv: list[str], *, cwd: str | None = None, timeout: int = 120) -> str:
-    result = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    result = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # pysafe: short-lived git/gh leaf commands with no descendants; timeout bounds the wait, DEVNULL stdin
+                            timeout=timeout, stdin=subprocess.DEVNULL)
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
     if result.returncode:
@@ -974,7 +976,7 @@ def _owned_failure(repository: str, run: dict[str, Any], source: str) -> bool:
 
 def _native_dispatch(repository: str, workflow: str, ref: str, inputs: dict[str, str | bool]) -> str:
     response = subprocess.run(["gh", "api", "--include", "--method", "POST", "-H", "X-GitHub-Api-Version: 2026-03-10",
-                               f"repos/{repository}/actions/workflows/{workflow}/dispatches", "--input", "-"],
+                               f"repos/{repository}/actions/workflows/{workflow}/dispatches", "--input", "-"],  # pysafe: single `gh api` POST leaf with no descendants; timeout bounds the wait, input= already closes stdin
                               input=json.dumps({"ref": ref, "inputs": inputs}), text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     if response.stderr:
@@ -1104,7 +1106,14 @@ def _drive(args: argparse.Namespace) -> int:
     # (a genuinely corrected one) is admitted normally with a new derived version. Classification needs established
     # owner authority and canonical native sign metadata, never a title; anything unproven keeps its existing path.
     unsignable_shas: set[str] = set()
+    # Every non-breaking pass removes pending["id"] from remaining, so the
+    # sweep can take at most len(rows) passes plus the final empty one.
+    max_attempts = len(rows) + 1
+    attempts = 0
     while True:
+        attempts += 1
+        if attempts > max_attempts:
+            raise ValueError("qualification sweep exceeded its attempt bound; the run list changed under iteration")
         pending = pending_candidate(remaining, terminal_publications, recovery_floor)
         if pending is None:
             break
@@ -1219,7 +1228,8 @@ def _drive(args: argparse.Namespace) -> int:
             raise ValueError("selected source already failed qualification; diagnose forward, do not rerun it")
         # Published versions remain spent even if their tag was removed or not fetched.
         tag_input = "\n".join(sorted(set(tags).union(released))) + "\n"
-        result = subprocess.run(["sh", str(tools / "release-train.sh"), "next-version", "--changelog-ref", head], input=tag_input, text=True,
+        result = subprocess.run(["sh", str(tools / "release-train.sh"), "next-version", "--changelog-ref", head],  # pysafe: local version helper; timeout bounds the wait, input= already closes stdin
+                                input=tag_input, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=root, timeout=30)
         print(result.stderr, end="", file=sys.stderr)
         if result.returncode:
@@ -1238,8 +1248,9 @@ def _drive(args: argparse.Namespace) -> int:
         # a failed certification or an excuse to manufacture an empty release.
         preview = Path(os.environ["RUNNER_TEMP"]) / f"release-notes-{args.train_id}.md"
         note_result = subprocess.run(["sh", str(tools / "release-notes.sh"), "source", "--base-tag", base_tag,
-                                     "--head", sha, "--version", version, "--output", str(preview)],
-                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                                     "--head", sha, "--version", version, "--output", str(preview)],  # pysafe: local notes helper; timeout bounds the wait, DEVNULL stdin
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                                    stdin=subprocess.DEVNULL)
         print(note_result.stdout, end="")
         print(note_result.stderr, end="", file=sys.stderr)
         if note_result.returncode == 4:
@@ -1393,8 +1404,8 @@ def _verify_index(args: argparse.Namespace) -> int:
 
 
 def _is_ancestor(base: str, head: str) -> bool:
-    result = subprocess.run(["git", "--no-replace-objects", "merge-base", "--is-ancestor", base, head],
-                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    result = subprocess.run(["git", "--no-replace-objects", "merge-base", "--is-ancestor", base, head],  # pysafe(subprocess-orphan): `git merge-base` is a single-process leaf with no descendants; the timeout bounds it
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, stdin=subprocess.DEVNULL)
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
     if result.returncode not in (0, 1):
@@ -1448,10 +1459,12 @@ def _release_asset_rows(repository: str, release_id: int) -> list[dict[str, Any]
 
 
 def _remote_asset_hash(repository: str, asset: dict[str, Any], directory: str) -> str:
+    # Memory-capped run_bounded cannot serve here: the asset streams straight
+    # to a temp file so arbitrarily large releases hash without bound.
     with tempfile.TemporaryFile(dir=directory) as target:
-        result = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
+        result = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",  # pysafe(subprocess-orphan): `gh api` asset fetch is a single-process leaf with no descendants; the timeout bounds it
                                  f"repos/{repository}/releases/assets/{asset['id']}"],
-                                stdout=target, stderr=subprocess.PIPE, timeout=180)
+                                stdout=target, stderr=subprocess.PIPE, timeout=180, stdin=subprocess.DEVNULL)
         if result.stderr:
             print(result.stderr.decode(errors="replace"), end="", file=sys.stderr)
         if result.returncode:
@@ -1540,7 +1553,8 @@ def _repair_release(args: argparse.Namespace) -> int:
     _authorize_selection(args.repository, binding, notes, args.source_sha, args.version, binding["train_run_id"])
     for name in missing:
         result = subprocess.run(["gh", "release", "upload", f"v{args.version}", str(expected[name]),
-                                 "--repo", args.repository], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+                                 "--repo", args.repository], text=True, stdout=subprocess.PIPE,  # pysafe: single `gh release upload` leaf with no descendants; timeout bounds the wait, DEVNULL stdin
+                                stderr=subprocess.PIPE, timeout=180, stdin=subprocess.DEVNULL)
         if result.stdout:
             print(result.stdout, end="")
         if result.stderr:

@@ -62,8 +62,8 @@ class Fixture:
         (self.repo / "foreign-untracked.txt").write_bytes(b"foreign\x00untracked\n")
 
     def run(self, *args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(args, cwd=self.repo, env=self.env, text=True,
-                                capture_output=True, timeout=30)
+        result = subprocess.run(args, cwd=self.repo, env=self.env, text=True,  # pysafe: leaf git/agent-mail fixture subprocess; timeout bounds the wait, DEVNULL stdin
+                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
         if result.returncode and not allow_failure:
             raise AssertionError(f"{args!r}: rc={result.returncode}\n{result.stdout}{result.stderr}")
         return result
@@ -141,7 +141,7 @@ def unadmitted_history_refused(fixture: Fixture) -> None:
     # Construct an object without moving or checking out any branch. It is not
     # published: the existing native shared-main member must reject it.
     tree = fixture.git("rev-parse", "HEAD^{tree}")
-    result = subprocess.run(["git", "commit-tree", tree, "-p", fixture.base],
+    result = subprocess.run(["git", "commit-tree", tree, "-p", fixture.base],  # pysafe(subprocess-orphan): `git commit-tree` is a single-process leaf with no descendants; input= already closes stdin and the timeout bounds it
                             input="unadmitted test object\n", cwd=fixture.repo,
                             env=fixture.env, text=True, capture_output=True, timeout=30, check=True)
     candidate = result.stdout.strip()

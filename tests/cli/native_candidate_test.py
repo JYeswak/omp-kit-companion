@@ -633,8 +633,8 @@ def native_ship_failure_index() -> None:
             [sys.executable, str(SCRIPT), "candidate", "--release",
              "--version", os.environ["CANDIDATE_VERSION"], "--source-sha", os.environ["SOURCE_SHA"],
              "--assets", os.environ["OMP_KIT_NATIVE_ASSETS_DIR"], "--receipts", str(receipts),
-             "--out", str(out)],
-            cwd=ROOT, capture_output=True, timeout=60)
+             "--out", str(out)],  # pysafe: python tool under test reaps its own session trees via run_scoped; outer timeout bounds the wait, DEVNULL stdin
+            cwd=ROOT, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
         print(child.stdout.decode(errors="replace"), end="", flush=True)
         print(child.stderr.decode(errors="replace"), end="", file=sys.stderr, flush=True)
         check.assertEqual(child.returncode, 1)

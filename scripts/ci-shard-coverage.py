@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
 # bun test discovery: *.test.*, *_test.*, *.spec.*, *_spec.* for js, jsx, ts and tsx.
 TEST_SUFFIXES = tuple(f"{sep}{kind}.{ext}" for sep in (".", "_") for kind in ("test", "spec")
@@ -28,8 +32,12 @@ TEST_SUFFIXES = tuple(f"{sep}{kind}.{ext}" for sep in (".", "_") for kind in ("t
 
 
 def expected_files(repo: Path, roots: list[str], ignores: list[str]) -> set[str]:
-    listed = subprocess.run(["git", "ls-files", "-z", "--", *roots], cwd=repo, check=True,
-                            capture_output=True).stdout.decode("utf-8").split("\0")
+    result = run_bounded(["git", "ls-files", "-z", "--", *roots], cwd=repo, timeout=60)
+    if result.outcome != "OK":
+        raise RuntimeError("git ls-files timed out after 60s; process group killed")
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, ["git", "ls-files", "-z", "--", *roots])
+    listed = result.text("stdout").split("\0")
     return {path for path in listed
             if path.endswith(TEST_SUFFIXES) and not any(fnmatch.fnmatchcase(path, glob) for glob in ignores)}
 

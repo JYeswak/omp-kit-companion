@@ -7,9 +7,14 @@ positive path needs genuine signed release assets and runs only in the release w
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
 RUNNER = Path(__file__).resolve().parents[1] / "e2e" / "real-home-journey.sh"
 SHA = "a" * 40
@@ -45,7 +50,10 @@ class SignedRunnerRefusals(unittest.TestCase):
             if value is not None:
                 argv += [key, str(value)]
         env = {k: v for k, v in os.environ.items() if not k.startswith("JOURNEY_")}
-        return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=60)
+        result = run_bounded(argv, env=env, timeout=60)
+        if result.outcome != "OK":
+            raise AssertionError(f"runner hung past 60s; process group killed: {argv[1]}")
+        return SimpleNamespace(returncode=result.returncode, stdout=result.text("stdout"), stderr=result.text("stderr"))
 
     def assert_refused(self, proc, needle):
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
