@@ -47,7 +47,7 @@ import {
  * Agent Mail calls, as fleet-guard does.
  *
  * The secret scanner is the one behind the kit-no-plaintext-secret rule: its `condition` regexes are read
- * from `rules/kit-no-plaintext-secret.md` beside this extension and compiled as OMP does (plain RegExp),
+ * from `rules-fleet/kit-no-plaintext-secret.md` beside this extension and compiled as OMP does (plain RegExp),
  * so the rule and this guard cannot disagree. A missing or unparseable rule refuses (fail closed).
  *
  * Not done: injecting the seat's sender_token. A tool_call handler can replace the execution input
@@ -71,7 +71,7 @@ const AM_SCAN_BUDGET_MS = 6_000;
 const AM_ROSTER_TTL_MS = 60_000;
 /** Completed cross-project scan cache TTL per guard instance. */
 const AM_SCAN_TTL_MS = 120_000;
-const SECRET_RULE_REL_PATH = "../rules/kit-no-plaintext-secret.md";
+const SECRET_RULE_REL_PATH = "../rules-fleet/kit-no-plaintext-secret.md";
 
 /** Subjects that may carry ack_required: a real ask. */
 export const ACK_VOCABULARY: Record<string, true> = { QUESTION: true, BLOCKED: true, APPROVAL: true, DECISION: true, HANDOFF: true };

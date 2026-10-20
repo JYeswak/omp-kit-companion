@@ -1,0 +1,33 @@
+{
+ "bead": "ompkit-774u.13.2",
+ "leg": "native-isolated-rpc",
+ "at": "2026-10-20",
+ "setup": {
+  "omp": "18.12.3",
+  "mode": "rpc",
+  "extensions": "--no-extensions -e extensions/kit-agent-mail-guard.ts",
+  "model": "mock openai-completions queue (2 scripted write calls)",
+  "seat_env": "AGENT_NAME=LavenderTern",
+  "fleet": "tmp git repo .omp/fleet.json enabled",
+  "tracker": "real br workspace prefix natv",
+  "roster": "real am project /tmp/amguard-native-backend (LavenderTern, TurquoiseDesert)",
+  "delivery": "none: allowed call executed against xd:// path with no mounted device; guard is the only mail-touching component and it only reads rosters"
+ },
+ "calls": [
+  {
+   "id": "leg_call_1",
+   "isError": true,
+   "result": "{\"content\": [{\"type\": \"text\", \"text\": \"kit-agent-mail-guard AM_IDENTITY_MISMATCH: sender_name \\\"OtherSeat\\\" is not this seat (LavenderTern). Send as yourself; never as another agent. Nothing was sent.\"}], \"details\": {}}"
+  },
+  {
+   "id": "leg_call_2",
+   "isError": true,
+   "result": "{\"content\": [{\"type\": \"text\", \"text\": \"No such tool: xd://mcp__mcp_agent_mail_send_message. Mounted devices: ast_edit, debug, lsp. Active top-level tools are also dispatchable via xd://<tool>.\"}], \"details\": {\"xdev\": {\"tool\": \"mcp__mcp_agent_mail_send_message\", \"mode\": \"execute\"}}, \"isError\": true}"
+  }
+ ],
+ "verdict": {
+  "impersonating_send": "refused AM_IDENTITY_MISMATCH (names seat LavenderTern)",
+  "valid_typed_ack": "allowed by guard; dispatcher reports No such tool (no device mounted), i.e. guard did not block",
+  "tool_starts": 2
+ }
+}
