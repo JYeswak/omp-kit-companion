@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { parseRuleOwnership, readManifest, type ManifestRule, type RuleOwnershipRecord } from "./diagnostics.ts";
+import { parseRuleManifest, parseRuleOwnership, readManifest, type ManifestRule, type RuleOwnershipRecord } from "./diagnostics.ts";
 import { applyMutation, planMutation, type FileMutation, type Image, type MutationPlan } from "./mutations.ts";
 
 export type RuleAction = "install" | "update" | "retire" | "unchanged" | "unowned-identical" | "unowned-retired" | "collision";
 export type RulePlanEntry = Readonly<{ name: string; path: string; action: RuleAction; beforeSha256: string | null; beforeMode: number | null; desiredSha256: string | null; desiredMode: number | null; owned: boolean }>;
 export type RulePlan = Readonly<{ scope: "rules"; entries: readonly RulePlanEntry[]; unknownMarkdown: number; changes: number; blocked: boolean }>;
 export type RuleReceipt = Readonly<{ status: "APPLIED" | "UNCHANGED"; id: string | null; files: number }>;
-export type RuleInput = Readonly<{ root: string; home: string; stateRoot?: string }>;
+export type RuleInput = Readonly<{ root: string; home: string; stateRoot?: string; fleet?: boolean }>;
 
 type Ownership = RuleOwnershipRecord;
 type Prepared = { input: RuleInput; sourceHash: string; inventoryHash: string; images: ReadonlyMap<string, Image | null>; ownershipImage: Image | null; mutation: MutationPlan | null };
@@ -61,22 +61,48 @@ function ownership(path: string): { value: Ownership; image: Image | null } {
 function same(a: Image, b: Image): boolean {
 	return a.sha256 === b.sha256 && a.size === b.size && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid;
 }
-function source(root: string): { rules: ManifestRule[]; retired: string[]; bytes: Map<string, Buffer>; hash: string } {
+function source(root: string, fleet = false): { rules: ManifestRule[]; retired: string[]; bytes: Map<string, Buffer>; hash: string } {
 	safeDirectories(root);
-	const manifest = readManifest(root);
-	if (manifest.error) fail("SOURCE_INVALID");
-	const manifestFile = bytesOf(join(root, "MANIFEST.tsv"), "SOURCE_INVALID");
+	const manifestName = fleet ? "MANIFEST.fleet.tsv" : "MANIFEST.tsv";
+	const rulesDir = fleet ? "rules-fleet" : "rules";
+	let rules: ManifestRule[];
+	if (fleet) {
+		// Filesystem faults throw SOURCE_INVALID, STATE_UNSAFE or UNSAFE_PATH
+		// via bytesOf; only manifest-parse and directory-listing faults map here.
+		const fleetFile = bytesOf(join(root, manifestName), "SOURCE_INVALID");
+		if (!fleetFile) fail("SOURCE_INVALID");
+		try {
+			rules = parseRuleManifest(fleetFile.bytes.toString("utf8"));
+		} catch { return fail("SOURCE_INVALID"); }
+	} else {
+		const manifest = readManifest(root);
+		if (manifest.error) fail("SOURCE_INVALID");
+		rules = manifest.rules;
+	}
+	const manifestFile = bytesOf(join(root, manifestName), "SOURCE_INVALID");
 	if (!manifestFile) fail("SOURCE_INVALID");
+	const seen = new Set<string>();
 	const bytes = new Map<string, Buffer>();
-	for (const rule of manifest.rules) {
-		const file = bytesOf(join(root, "rules", `${rule.name}.md`), "SOURCE_INVALID");
+	for (const rule of rules) {
+		seen.add(rule.name);
+		const file = bytesOf(join(root, rulesDir, `${rule.name}.md`), "SOURCE_INVALID");
 		if (!file || file.image.sha256 !== rule.sha256) fail("SOURCE_INVALID");
 		bytes.set(rule.name, file.bytes);
+	}
+	if (fleet) {
+		// readManifest already refuses default-pack rules omitted from MANIFEST.tsv;
+		// the fleet pack needs the same omission refusal here.
+		let fleetEntries: string[];
+		try {
+			fleetEntries = readdirSync(join(root, rulesDir)).sort();
+		} catch { return fail("SOURCE_INVALID"); }
+		for (const entry of fleetEntries)
+			if (entry.endsWith(".md") && !seen.has(entry.slice(0, -3))) fail("SOURCE_INVALID");
 	}
 	const retiredDir = join(root, "retired");
 	safeDirectories(retiredDir);
 	const retired: string[] = [], retirementHashes: string[] = [];
-	const active = new Set(manifest.rules.map(rule => rule.name));
+	const active = new Set(rules.map(rule => rule.name));
 	let retiredEntries: string[];
 	try {
 		if (!lstatSync(retiredDir).isDirectory()) fail("SOURCE_INVALID");
@@ -90,8 +116,8 @@ function source(root: string): { rules: ManifestRule[]; retired: string[]; bytes
 		retired.push(name);
 		retirementHashes.push(`${name}:${marker.image.sha256}`);
 	}
-	const signature = [manifestFile.image.sha256, ...manifest.rules.map(rule => `${rule.name}:${rule.sha256}`), ...retirementHashes].join("\n");
-	return { rules: manifest.rules, retired, bytes, hash: hex(Buffer.from(signature)) };
+	const signature = [manifestFile.image.sha256, ...rules.map(rule => `${rule.name}:${rule.sha256}`), ...retirementHashes].join("\n");
+	return { rules, retired, bytes, hash: hex(Buffer.from(signature)) };
 }
 
 /** Read-only, authority-aware preview; displayed paths are HOME-relative, never operator absolute paths. */
@@ -100,7 +126,7 @@ export function planRules(input: RuleInput): RulePlan {
 		if (!isAbsolute(input.home) || !isAbsolute(input.root) || resolve(input.home) !== input.home || resolve(input.root) !== input.root || input.home === input.root || input.home === sep ||
 			(input.stateRoot !== undefined && (!isAbsolute(input.stateRoot) || resolve(input.stateRoot) !== input.stateRoot))) fail("UNSAFE_PATH");
 		safeDirectories(input.home);
-		const pack = source(input.root);
+		const pack = source(input.root, input.fleet ?? false);
 		const target = join(input.home, ".agents", "rules");
 		const stateRoot = input.stateRoot ?? join(input.home, ".local", "state", "omp-kit");
 		if (stateRoot === target || stateRoot.startsWith(`${target}${sep}`) || target.startsWith(`${stateRoot}${sep}`) ||
@@ -179,7 +205,7 @@ export function applyRulePlan(plan: RulePlan, options: { confirmed: true }): Rul
 	if (!prepared.mutation) return { status: "UNCHANGED", id: null, files: 0 };
 	const result = applyMutation(prepared.mutation, { onBoundary: boundary => {
 		try {
-			if (source(prepared.input.root).hash !== prepared.sourceHash) fail("FRESH_PLAN");
+			if (source(prepared.input.root, prepared.input.fleet ?? false).hash !== prepared.sourceHash) fail("FRESH_PLAN");
 			if (boundary === "pending-synced") {
 				const target = join(prepared.input.home, ".agents", "rules");
 				const present = (() => {

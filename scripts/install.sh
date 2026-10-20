@@ -1,11 +1,15 @@
 #!/bin/sh
-# install.sh [--dry-run] [--target DIR] [--state DIR]
+# install.sh [--dry-run] [--target DIR] [--state DIR] [--fleet]
 #
 # Installs the managed rules listed in MANIFEST.tsv into the target rule root.
+# With --fleet, installs the opt-in fleet pack listed in MANIFEST.fleet.tsv
+# (source dir rules-fleet/) instead of the default neutral pack. The fleet pack
+# is never part of a default install; opt in explicitly on managed fleet machines.
 #   --target DIR  rule root omp loads (default ~/.agents/rules)
 #   --state  DIR  backups and install record (default ~/.local/state/omp-kit);
 #                 must not be inside the target: any *.md there loads as a rule
 #   --dry-run     print the plan, write nothing
+#   --fleet       install the fleet pack (MANIFEST.fleet.tsv, rules-fleet/)
 #
 # Refuses unless `build-manifest.sh --check` passes. When anything changes, every file in
 # the target is first copied to STATE/backups/<UTC>/. Each rule is installed atomically
@@ -18,13 +22,16 @@ export LC_ALL
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MANIFEST="$ROOT/MANIFEST.tsv"
+RULESDIR="$ROOT/rules"
 target="$HOME/.agents/rules"
 state="$HOME/.local/state/omp-kit"
 dry=0
+fleet=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1 ;;
+    --fleet) fleet=1 ;;
     --target) [ $# -ge 2 ] || { echo "install: --target needs a value" >&2; exit 2; }; target=$2; shift ;;
     --state) [ $# -ge 2 ] || { echo "install: --state needs a value" >&2; exit 2; }; state=$2; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
@@ -46,7 +53,25 @@ abspath() {
   echo "$(cd "$p" && pwd -P)$rest"
 }
 
-if ! sh "$ROOT/scripts/build-manifest.sh" --check; then
+if [ "$fleet" = 1 ]; then
+  MANIFEST="$ROOT/MANIFEST.fleet.tsv"
+  RULESDIR="$ROOT/rules-fleet"
+  # build-manifest.sh covers the default pack only; verify the fleet pack inline:
+  # every manifest row matches rules-fleet/<name>.md by sha256, and no extra .md ships.
+  fleet_names=$(awk -F'\t' 'NR > 1 { print $1 }' "$MANIFEST")
+  fleet_bad=0
+  for name in $fleet_names; do
+    want=$(awk -F'\t' -v n="$name" 'NR > 1 && $1 == n { print $2 }' "$MANIFEST")
+    [ -f "$RULESDIR/$name.md" ] || { echo "install: REFUSED: rules-fleet/$name.md missing" >&2; fleet_bad=1; continue; }
+    [ "$(sha256 "$RULESDIR/$name.md")" = "$want" ] || { echo "install: REFUSED: rules-fleet/$name.md hash disagrees with MANIFEST.fleet.tsv" >&2; fleet_bad=1; }
+  done
+  for f in "$RULESDIR"/*.md; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" .md)
+    printf '%s\n' "$fleet_names" | grep -qxF "$n" || { echo "install: REFUSED: rules-fleet/$n.md omitted from MANIFEST.fleet.tsv" >&2; fleet_bad=1; }
+  done
+  [ "$fleet_bad" = 0 ] || exit 1
+elif ! sh "$ROOT/scripts/build-manifest.sh" --check; then
   echo "install: REFUSED: MANIFEST.tsv does not match rules/; run scripts/build-manifest.sh" >&2
   exit 1
 fi
@@ -147,7 +172,7 @@ fi
 
 printf '%s' "$installs" | while read -r n k; do
   tmp="$target/.$n.omp-kit-tmp.$$"
-  cp "$ROOT/rules/$n.md" "$tmp"
+  cp "$RULESDIR/$n.md" "$tmp"
   mv -f "$tmp" "$target/$n.md"
   echo "installed $n.md ($k)"
 done
