@@ -1,10 +1,11 @@
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
+import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
@@ -776,7 +777,19 @@ export function landCommand(request: ParsedCommand): CliResult {
 			beforePush: (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
 				checkResult = runPushCheck(repo, baseSha, candidateSha);
-				return pushCheckAdmission(checkResult);
+				const admission = pushCheckAdmission(checkResult);
+				if (!admission.allow) return admission;
+				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): refuse the push while the session holds an
+				// undisposed scratch dir. Refuse on positive evidence only; an unlistable census is fail-open, never
+				// a block, so a broken measuring tool cannot strand a landing.
+				try {
+					const gate = disposalGate(homedir(), "push", { liveness: defaultLiveness(), run: defaultRunner });
+					if (!gate.unproven && gate.decision === "refuse") {
+						const first = gate.owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
+						return { allow: false, reason: `SCRATCH_DISPOSAL_REFUSED: ${gate.owed.length} undisposed scratch dir(s): ${first}${gate.owed.length > 3 ? "…" : ""}. Release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.` };
+					}
+				} catch { /* fail-open: the push check already passed */ }
+				return admission;
 			},
 		});
 		convergenceResult = convergence;

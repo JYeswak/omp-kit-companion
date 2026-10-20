@@ -131,6 +131,7 @@ export interface FlywheelGuardDeps {
 export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
+export const SCRATCH_DISPOSAL_REFUSED = "SCRATCH_DISPOSAL_REFUSED";
 export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
 export const NO_WAIT_REFUSED = "NO_WAIT_REFUSED";
@@ -1467,10 +1468,11 @@ const SCRATCH_MINE_TIMEOUT_MS = 20_000;
 const MAX_OWED_LISTED = 5;
 
 /**
- * SCRATCHBIN1 flag (ompkit-774u.15): at the caller's `in_review` or `close`, tell it which scratch dirs it still owns
- * unreleased. `omp-kit scratch mine --at <point>` lists only the caller's own dirs (owner agent and held session, or its
- * pid), excludes the live session dir, and logs one flag row for the 7-day false-flag audit. This is advice only: it
- * never blocks, and a missing or failing omp-kit yields no note. Promotion to a refusal needs that audit to be clean.
+ * SCRATCHBIN1 enforcement (ompkit-774u.15, Joshua scope 2026-10-20): at the caller's `in_review` or `close`, name
+ * which scratch dirs it still owns unreleased. `omp-kit scratch mine --at <point>` lists only the caller's own dirs
+ * (owner agent and held session, or its pid), excludes the live session dir, and logs one flag row for the false-flag
+ * audit. Positive owed is a refusal (the caller releases first); a missing or failing omp-kit yields no note and never
+ * blocks, so a broken measuring tool cannot deadlock a seat.
  */
 export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "review" | "close"): Promise<string | null> {
 	let result: FlywheelExecResult;
@@ -1494,7 +1496,7 @@ export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "r
 	const listed = owed.slice(0, MAX_OWED_LISTED).map(row => `${String(field(row, "dir"))} (${String(field(row, "state"))}, bin ${String(field(row, "bin"))})`);
 	const more = owed.length > listed.length ? ` and ${owed.length - listed.length} more` : "";
 	return `kit-flywheel-guard SCRATCH_OWED: you still own ${owed.length} scratch dir(s) you have not binned: ${listed.join("; ")}${more}. `
-		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. Warning only; nothing was blocked.";
+		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. Refused until each dir is released; nothing was closed.";
 }
 
 export const PARTIAL_RELEASE_REFUSED = "PARTIAL_RELEASE_REFUSED";
@@ -1647,7 +1649,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	if (warnings.length > 0) parts.push(`kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.`);
 	if (requests.some(request => request.operation === "review" || request.operation === "close")) {
 		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review");
-		if (owed !== null) parts.push(owed);
+		if (owed !== null) {
+			const prefix = parts.length > 0 ? `${parts.join(" ")} ` : "";
+			return { block: true,
+				reason: `${prefix}kit-flywheel-guard ${SCRATCH_DISPOSAL_REFUSED}: bead close/hand-off refused while undisposed scratch is owed. ${owed}` };
+		}
 	}
 	return parts.length === 0 ? undefined : { additionalContext: parts.join(" ") };
 }

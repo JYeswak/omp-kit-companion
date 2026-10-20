@@ -3443,7 +3443,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
-for (const subcommand of ["plan", "release", "apply", "mine", "new"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+for (const subcommand of ["plan", "release", "apply", "mine", "new", "gate"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
 	const repoFlag = request.flags.get("--repo");

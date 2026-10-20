@@ -305,6 +305,10 @@ const scratchMineData: DataSchema = { type: "object", required: ["overall", "dir
 		bin: { enum: ["throwaway", "evidence", "promote", "hold", "unbinned"] },
 	} } },
 } };
+const scratchGateData: DataSchema = { type: "object", required: ["overall", "point", "owed"], properties: {
+	overall: { enum: ["OK", "REFUSED", "UNPROVEN"] }, point: { type: "string" },
+	owed: { type: "array", items: { type: "string" } },
+} };
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	roots: { type: "array", items: { type: "string" } },
@@ -797,7 +801,7 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
 	{ name: "scratch",
 		description: `Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: ${UNOWNED_ACTIVE_RULE}. Plan and apply JSON include per-row sizes, per-root/per-verdict totals, malformed-owner counts and the exact policy; apply also includes a reaper receipt.`,
-		usage: "scratch plan|release DIR|mine|new|apply [--apply --yes]", flags: [], subcommands: [
+		usage: "scratch plan|release DIR|mine|new|apply|gate --at POINT [--apply --yes]", flags: [], subcommands: [
 			{ name: "new", description: "Create one owned task scratch dir with a JSON .owner and print its path; the only writer agents use", usage: "scratch new --label LABEL [--bead ID] [--export COMMIT]", flags: [
 				{ name: "--label", value: "LABEL", description: "Directory label: <repo>/var/agent-tmp/<label>.<pid>" },
 				{ name: "--bead", value: "ID", description: "Bead that owns this work, recorded in .owner" },
@@ -806,7 +810,10 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "plan", description: "Read-only report over all scratch roots with sized rows and per-root/per-verdict totals; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 			{ name: "mine", description: "List the caller's own scratch dirs (owner agent and session, or the caller's pid or an ancestor) with their state (unreleased, released, held, hold-expired) and bin; exit 0, overall FINDINGS while any is unreleased or its hold expired. Read-only unless --at is given", usage: "scratch mine [--at review|close|session-end]", flags: [
 				{ name: "--at", value: "review|close|session-end", description: "The disposal point asking: appends one flag row to the reap log when the caller has unreleased or hold-expired dirs, so a week of flags can be audited before the warning is promoted to a refusal" },
-			], example: "omp-kit scratch mine --json", runnable: false, dataSchema: scratchMineData },
+		], example: "omp-kit scratch mine --json", runnable: false, dataSchema: scratchMineData },
+		{ name: "gate", description: "Enforcement at a disposal point: refuse (exit 1, SCRATCH_OWED) while the session holds an undisposed dir; fail-open (UNPROVEN, exit 0) when the ownership census cannot be listed", usage: "scratch gate --at review|close|wave|push|session-end", flags: [
+			{ name: "--at", value: "review|close|wave|push|session-end", description: "The disposal point asking: review, close, wave, push or session-end" },
+		], example: "omp-kit scratch gate --at wave --json", runnable: false, dataSchema: scratchGateData },
 		{ name: "release", description: "Mark one finished task directory for quarantine; only its owning process or a child process may release it. --bin records where the content went: throwaway needs no reference, evidence and promote need --ref to a git-tracked file in the owner's repo or a bead that br show finds", usage: "scratch release DIR [--bin throwaway|evidence|promote [--ref file:PATH|bead:ID]]", argument: "DIR", flags: [
 			{ name: "--bin", value: "throwaway|evidence|promote", description: "Disposal bin: throwaway is deleted with no reference; evidence is content committed under the owner's repo or recorded on a bead; promote is content committed to its owning repo. A hold is declared when the dir is made, not at release" },
 			{ name: "--ref", value: "file:PATH|bead:ID", description: "With --bin evidence or promote: file:PATH names a git-tracked file in the owner's repo (relative paths resolve there); bead:ID names a bead br show finds" },

@@ -1102,7 +1102,7 @@ test("REREADSCOPE1: an empty list in A clears when no touched tracker holds an o
 	expect(bare.h.execs.some(call => call.args[0] === "list")).toBe(false);
 });
 
-// --- SCRATCH_OWED (ompkit-774u.15 C): advice at in_review and close, never a block ---
+// --- SCRATCH_DISPOSAL_REFUSED (ompkit-774u.15 enforcement, Joshua scope 2026-10-20): refuse at in_review and close ---
 
 function mineAnswer(rows: { dir: string; label?: string; state: string; bin: string }[]): FlywheelExecResult {
 	return { stdout: JSON.stringify({ ok: true, data: { overall: "FINDINGS", unreleased: rows.length, dirs: rows.map(row => ({ label: "seat", ...row })) } }), stderr: "", code: 0 };
@@ -1115,27 +1115,27 @@ function scratchResponder(mine: FlywheelExecResult, beads: Record<string, Flywhe
 
 const OWED = [{ dir: "/r/var/agent-tmp/probe.1", state: "unreleased", bin: "unbinned" }, { dir: "/r/var/agent-tmp/hold.2", state: "hold-expired", bin: "hold" }];
 
-test("SCRATCH_OWED: moving a bead to in_review lists the caller's unreleased dirs as advice and logs the point", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs is refused, naming each dir", async () => {
 	const project = mkdtempSync(join(base, "proj-"));
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED)) });
 	const result = await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox");
-	expect(result?.block).toBeUndefined();
-	expect(result?.additionalContext).toContain("SCRATCH_OWED");
-	expect(result?.additionalContext).toContain("/r/var/agent-tmp/probe.1 (unreleased, bin unbinned)");
-	expect(result?.additionalContext).toContain("/r/var/agent-tmp/hold.2 (hold-expired, bin hold)");
-	expect(result?.additionalContext).toContain("omp-kit scratch release DIR --bin throwaway|evidence|promote");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SCRATCH_DISPOSAL_REFUSED");
+	expect(result?.reason).toContain("/r/var/agent-tmp/probe.1 (unreleased, bin unbinned)");
+	expect(result?.reason).toContain("/r/var/agent-tmp/hold.2 (hold-expired, bin hold)");
+	expect(result?.reason).toContain("omp-kit scratch release DIR --bin throwaway|evidence|promote");
 	const mine = h.execs.filter(call => call.command === "omp-kit");
 	expect(mine.map(call => call.args)).toEqual([["scratch", "mine", "--at", "review", "--json"]]);
 	expect(mine[0]?.options?.cwd).toBe(project);
 });
 
-test("SCRATCH_OWED: a verifier's close of another seat's bead gets the same advice, logged as close", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is refused while the verifier owes dirs, logged as close", async () => {
 	const project = mkdtempSync(join(base, "proj-"));
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "Verifier" },
 		respond: scratchResponder(mineAnswer(OWED.slice(0, 1)), { "kit-2": bead("kit-2", "BlueFox") }) });
 	const result = await toolCall(h, project, "br close kit-2 --reason \"replayed\"");
-	expect(result?.block).toBeUndefined();
-	expect(result?.additionalContext).toContain("you still own 1 scratch dir(s)");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("you still own 1 scratch dir(s)");
 	expect(h.execs.find(call => call.command === "omp-kit")?.args).toEqual(["scratch", "mine", "--at", "close", "--json"]);
 });
 
@@ -1158,16 +1158,18 @@ test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unu
 	}
 });
 
-test("SCRATCH_OWED: a thrown exec never blocks and a long list is cut with a count", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list is refused with a count", async () => {
 	const project = mkdtempSync(join(base, "proj-"));
 	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return { stdout: "", code: 127 }; } });
 	expect(await toolCall(throwing, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
 	const many = Array.from({ length: 8 }, (_, index) => ({ dir: `/r/var/agent-tmp/d.${index}`, state: "unreleased", bin: "unbinned" }));
 	const long = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(many)) });
 	const result = await toolCall(long, project, "br update kit-1 --status in_review --actor BlueFox");
-	expect(result?.additionalContext).toContain("you still own 8 scratch dir(s)");
-	expect(result?.additionalContext).toContain("and 3 more");
-	expect(result?.additionalContext).not.toContain("d.5");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SCRATCH_DISPOSAL_REFUSED");
+	expect(result?.reason).toContain("you still own 8 scratch dir(s)");
+	expect(result?.reason).toContain("and 3 more");
+	expect(result?.reason).not.toContain("d.5");
 });
 
 test("SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit", async () => {
