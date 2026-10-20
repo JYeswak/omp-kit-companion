@@ -1286,7 +1286,7 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: released.owner.pid, legacy: true, reason });
 	return { ok: true, changed: true, dir, reason: "owner-released-legacy", ownerPid: released.owner.pid };
 }
-export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string }
+export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string; detail?: string }
 
 export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: string; expires?: string; budgetBytes?: number }
 
@@ -1296,7 +1296,73 @@ export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: s
  * of hand-writing .owner files; hand-written bare-label owners are reported
  * as malformed-owner-file with per-root counts in the plan totals.
  */
-export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}, jsonOwner = false): ScratchCreateResult {
+/** Seat and dir byte budgets (SCRATCHQUOTA1 ompkit-774u.9.10): reservation accounting at creation.
+ * Actual byte enforcement at write time belongs to the fleet guard, which reads this ledger;
+ * creation refuses a seat already at cap so growth is bounded even when nothing else runs. */
+export const DEFAULT_SEAT_BUDGET_BYTES = 50_000_000_000;
+export const DEFAULT_DIR_BUDGET_BYTES = 1_000_000_000;
+export interface BudgetDirEntry { budget: number; agent: string; bead: string | null; released: boolean }
+export interface BudgetLedger { version: 1; dirs: Record<string, BudgetDirEntry> }
+export function seatBudgetCap(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+	if (raw === undefined || raw === "") return DEFAULT_SEAT_BUDGET_BYTES;
+	const parsed = Number(raw);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_SEAT_BUDGET_BYTES;
+}
+export function defaultBudgetLedgerPath(env: NodeJS.ProcessEnv = process.env): string {
+	const state = env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
+	return join(state, "omp-kit", "scratch-budgets.json");
+}
+export function readBudgetLedger(path: string): BudgetLedger | null {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return { version: 1, dirs: {} };
+	}
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const dirs = (parsed as Record<string, unknown>).dirs;
+		if (typeof dirs !== "object" || dirs === null) return null;
+		return { version: 1, dirs: dirs as Record<string, BudgetDirEntry> };
+	} catch {
+		return null;
+	}
+}
+export function writeBudgetLedger(path: string, ledger: BudgetLedger): boolean {
+	try {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	} catch {
+		return false;
+	}
+	const tmp = `${path}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, JSON.stringify(ledger), { encoding: "utf8", mode: 0o600 });
+		renameSync(tmp, path);
+	} catch {
+		return false;
+	}
+	return true;
+}
+export function seatReservedBytes(ledger: BudgetLedger, agent: string): number {
+	let total = 0;
+	for (const entry of Object.values(ledger.dirs)) {
+		if (!entry.released && entry.agent === agent) total += entry.budget;
+	}
+	return total;
+}
+/** Mark a released dir so its reservation stops counting against the seat. True when the ledger changed. */
+export function releaseBudgetEntry(ledgerPath: string, dir: string): boolean {
+	const ledger = readBudgetLedger(ledgerPath);
+	if (ledger === null) return false;
+	const entry = ledger.dirs[dir];
+	if (!entry || entry.released) return false;
+	entry.released = true;
+	return writeBudgetLedger(ledgerPath, ledger);
+}
+
+export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}, jsonOwner = false, ledgerPath?: string): ScratchCreateResult {
 	if (!/^[A-Za-z0-9][A-Za-z0-9._%-]*$/.test(label)) return { ok: false, dir: "", exportLine: "", reason: "label-invalid" };
 	let repo: string;
 	try {
@@ -1327,6 +1393,17 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	}
 	const ownerText = jsonOwner ? JSON.stringify(fields) : Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join("");
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
+	const seatKey = seat?.agent && seat.main ? seat.agent : `pid:${process.pid}`;
+	const reservation = bins.budgetBytes ?? DEFAULT_DIR_BUDGET_BYTES;
+	const ledgerFile = ledgerPath ?? defaultBudgetLedgerPath();
+	const ledger = readBudgetLedger(ledgerFile);
+	if (ledger === null) return { ok: false, dir: "", exportLine: "", reason: "ledger-unavailable",
+		detail: `budget ledger ${ledgerFile} is unreadable; refusing rather than exceeding the seat cap blind` };
+	const cap = seatBudgetCap();
+	const reserved = seatReservedBytes(ledger, seatKey);
+	if (reserved + reservation > cap)
+		return { ok: false, dir: "", exportLine: "", reason: "seat-budget-exceeded",
+			detail: `seat ${seatKey} holds ${reserved} bytes of ${cap} budgeted; dir ${label} refusing (needs ${reservation}); release a dir first` };
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
 	} catch {
@@ -1344,6 +1421,14 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	}
 	const parsed = parseOwnerFile(ownerText);
 	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
+	ledger.dirs[dir] = { budget: reservation, agent: seatKey, bead: bins.bead ?? null, released: false };
+	if (!writeBudgetLedger(ledgerFile, ledger)) {
+		try {
+			rmSync(join(dir, ".owner"), { force: true });
+			rmSync(dir);
+		} catch { /* best effort */ }
+		return { ok: false, dir: "", exportLine: "", reason: "ledger-write-failed" };
+	}
 	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created" };
 }
 
