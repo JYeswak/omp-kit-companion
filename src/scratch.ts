@@ -963,6 +963,38 @@ export interface ApplyDeps extends InspectDeps {
 	home: string;
 	kill?: (pid: number) => boolean;
 	remove?: (path: string) => void;
+	/** Hold discharge probe (ompkit-774u.15): true when the hold's bead is closed, false when open, null when
+	unprovable. Defaults to a read-only `br show --json` through the runner; null fails open to a veto (keep). */
+	beadClosed?: (bead: string) => boolean | null;
+}
+
+function isBeadClosed(bead: string, deps: ApplyDeps): boolean | null {
+	if (deps.beadClosed !== undefined) {
+		try {
+			return deps.beadClosed(bead);
+		} catch {
+			return null;
+		}
+	}
+	let result: ScratchRunResult;
+	try {
+		result = deps.run(["br", "show", bead, "--json", "--no-auto-import", "--no-auto-flush"], { timeoutMs: 15_000 });
+	} catch {
+		return null;
+	}
+	if (result.code !== 0) return null;
+	try {
+		const parsed: unknown = JSON.parse(result.stdout);
+		const rows: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+		const row = rows.find(item => typeof item === "object" && item !== null
+			&& (item as Record<string, unknown>).id === bead) ?? (rows.length === 1 ? rows[0] : undefined);
+		if (typeof row !== "object" || row === null) return null;
+		const status = (row as Record<string, unknown>).status;
+		if (typeof status !== "string") return null;
+		return status === "closed" || status === "tombstone";
+	} catch {
+		return null;
+	}
 }
 
 export interface ReapEvent { event: string; dir: string; at: string; [key: string]: unknown }
@@ -1517,9 +1549,17 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 			action: failed.action, reason, error: failed.error ?? reason });
 		return failed;
 	};
-	if (!verdict.owner) return fail("owner-changed-after-initial-check");
-	if (!ownerMatchesScratchRoot(verdict.owner, root, dir, deps)) return fail("owner-repo-outside-scratch-root");
-	const expected = ownerSnapshot(verdict.owner);
+	const textVerdict = verdict.owner === null && verdict.reason.startsWith("text-owner-");
+	if (!verdict.owner && !textVerdict) return fail("owner-changed-after-initial-check");
+	let expected: string | null = null;
+	if (verdict.owner) {
+		if (!ownerMatchesScratchRoot(verdict.owner, root, dir, deps)) return fail("owner-repo-outside-scratch-root");
+		expected = ownerSnapshot(verdict.owner);
+	} else {
+		const raw = readText(join(dir, ".owner"));
+		if (raw === null || parseTextOwner(raw) === null) return fail("owner-changed-after-initial-check");
+		expected = raw;
+	}
 	const identity = inodeOf(dir);
 	if (identity === null) return fail("inode-proof-unavailable");
 	const entry = quarantineEntryFor(dir.slice(root.length + 1));
@@ -1538,7 +1578,8 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	if (isSymlink(moved)) return { ...verdict, dir: moved, action: "SKIP", reason: "path-replaced-with-non-directory" };
 	if (inodeOf(moved) !== identity) return { ...verdict, dir: moved, action: "SKIP", reason: "inode-changed-before-delete" };
 	const recheck = inspectSession(moved, qt, deps, false, root);
-	if (recheck.action !== "REAP" || !recheck.owner || ownerSnapshot(recheck.owner) !== expected) {
+	const recheckText = textVerdict ? readText(join(moved, ".owner")) : null;
+	if (recheck.action !== "REAP" || (textVerdict ? recheckText !== expected : (!recheck.owner || ownerSnapshot(recheck.owner) !== expected))) {
 		try {
 			renameSync(moved, dir);
 		} catch (error) {
@@ -1554,7 +1595,27 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	}
 	const finalText = readText(join(deleting, ".owner"));
 	const finalOwner = finalText === null ? null : parseOwnerFile(finalText);
-	if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected ||
+	if (textVerdict) {
+		const finalParsed = finalText === null ? null : parseTextOwner(finalText);
+		if (isSymlink(deleting) || inodeOf(deleting) !== identity || finalParsed === null ||
+			JSON.stringify(finalParsed) !== JSON.stringify(parseTextOwner(expected ?? "")) ||
+			lsofClearDir(deps, deleting) !== true) {
+			return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
+		}
+		// Bead-gated prompt delete (Joshua 2026-10-20): a bead that opened or became
+		// unprovable since plan time keeps the dir; closed or missing beads delete now.
+		if (finalParsed.bead !== null) {
+			const closed = beadClosed(finalParsed.bead, finalParsed.repo, deps.run);
+			if (closed !== true) {
+				try {
+					renameSync(deleting, dir);
+				} catch {
+					return { ...verdict, dir: deleting, action: "SKIP", reason: "quarantine-rollback-failed" };
+				}
+				return { ...verdict, action: "SKIP", reason: closed === false ? "text-owner-bead-open-at-apply" : "text-owner-bead-unproven-at-apply" };
+			}
+		}
+	} else if (isSymlink(deleting) || inodeOf(deleting) !== identity || !finalOwner || ownerSnapshot(finalOwner) !== expected ||
 		!ownerMatchesScratchRoot(finalOwner, root, deleting, deps) || lsofClearDir(deps, deleting) !== true) {
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
 	}
@@ -1564,7 +1625,7 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "delete-failed" };
 	}
 	if (existsSync(deleting)) return { ...verdict, dir: deleting, action: "SKIP", reason: "delete-failed" };
-	appendLog(deps.home, { event: "reap", dir, at, owner: expected.split("\n")[0], sizeBytes: verdict.sizeBytes });
+	appendLog(deps.home, { event: "reap", dir, at, owner: (expected ?? "").split("\n")[0], sizeBytes: verdict.sizeBytes });
 	return { ...verdict, action: "REAP", reason: `${verdict.reason}-applied` };
 }
 
@@ -1701,6 +1762,19 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 			continue;
 		}
 		const { owner, malformed } = readOwner(path);
+		// Holds are owed until discharged (ompkit-774u.15, Joshua scope 2026-10-20): a quarantined hold is vetoed
+		// while its bead is open or unprovable, and flagged but never deleted once expired. Only a closed bead
+		// discharges the hold back to the normal liveness path below. Fail-open: an unprovable bead keeps the dir.
+		if (owner && !malformed && owner.bin === "hold") {
+			const closed = owner.bead === null ? null : isBeadClosed(owner.bead, deps);
+			if (closed !== true) {
+				const ms = owner.expires === null ? NaN : Date.parse(owner.expires);
+				const reason = !Number.isNaN(ms) && ms <= now ? "quarantine-hold-expired" : "quarantine-hold-active";
+				appendLog(home, { event: reason, dir: path, at, bead: owner.bead, entry, sizeBytes: dirSize(path) });
+				done.push({ dir: path, action: "SKIP", reason, owner, sizeBytes: dirSize(path) });
+				continue;
+			}
+		}
 		if (!owner || malformed || !hasProcessIdentity(owner)) {
 			const clear = lsofClearDir(deps, path);
 			if (clear !== true) {
@@ -2417,8 +2491,8 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 	return rows.sort((left, right) => left.dir.localeCompare(right.dir));
 }
 
-export type OwedFlagPoint = "review" | "close" | "session-end";
-export const OWED_FLAG_POINTS: readonly OwedFlagPoint[] = ["review", "close", "session-end"];
+export type OwedFlagPoint = "review" | "close" | "wave" | "push" | "session-end";
+export const OWED_FLAG_POINTS: readonly OwedFlagPoint[] = ["review", "close", "wave", "push", "session-end"];
 
 /**
  * What a disposal point flags: an unreleased dir or an expired hold. The session's own dir (label omp, bin throwaway)
@@ -2439,6 +2513,26 @@ export function logOwedFlag(home: string, point: OwedFlagPoint, rows: readonly O
 	const owed = rows.filter(owesRelease);
 	if (owed.length === 0) return;
 	appendLog(home, { event: "flag", dir: owed[0]!.dir, at: new Date(now).toISOString(), point, dirs: owed.map(row => ({ dir: row.dir, state: row.state, bin: row.bin })) });
+}
+
+/**
+ * Enforcement at a disposal point (ompkit-774u.15, Joshua scope 2026-10-20): bead close or hand-off to review,
+ * wave close, push, and session end each refuse while the session holds an undisposed dir. Refuse on positive
+ * evidence only; an unlistable ownership census is fail-open (`unproven`), never a block, so a broken measuring
+ * tool cannot deadlock a seat. Every owed row carries a structured owner, so `release --bin throwaway` always
+ * offers a way out; the audit row from logOwedFlag names exactly what was refused.
+ */
+export interface DisposalGateResult { decision: "ok" | "refuse"; owed: OwnedScratchRow[]; unproven: boolean }
+export function disposalGate(home: string, point: OwedFlagPoint, deps: InspectDeps, now: number = Date.now()): DisposalGateResult {
+	let rows: OwnedScratchRow[];
+	try {
+		rows = ownedScratch(home, deps);
+	} catch {
+		return { decision: "ok", owed: [], unproven: true };
+	}
+	const owed = rows.filter(owesRelease);
+	logOwedFlag(home, point, rows, now);
+	return { decision: owed.length > 0 ? "refuse" : "ok", owed, unproven: false };
 }
 
 export function touchForAge(path: string, ageMs: number, now: number = Date.now()): void {

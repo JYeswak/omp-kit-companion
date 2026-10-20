@@ -63,7 +63,8 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3327,6 +3328,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}) });
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED", `Scratch release refused: ${released.reason}`,
 			"Use the exact owned task directory from its owner process; no directory was quarantined.");
+		releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
 			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null }, verification: "UNVERIFIED" };
 	}
@@ -3415,6 +3417,29 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
 			overBudget: rows.filter(row => row.overBudget).length,
 			note: "Read-only apart from --at, which appends one flag row to the reap log. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
+	}
+	if (sub === "gate") {
+		// Enforcement surface for closers with no native gate (ompkit-774u.15): wave close runs
+		// `omp-kit scratch gate --at wave`, push runs --at push. Refuse on positive owed only; an
+		// unlistable census is fail-open (UNPROVEN), never a block.
+		const atFlag = request.flags.get("--at");
+		const point = OWED_FLAG_POINTS.find((candidate) => candidate === atFlag);
+		if (point === undefined)
+			return refusal("SCRATCH_GATE_POINT_REQUIRED", `--at must be one of ${OWED_FLAG_POINTS.join("|")}`,
+				"Pass the disposal point that is asking: review, close, wave, push or session-end.");
+		const gate = disposalGate(home, point, deps);
+		if (gate.unproven)
+			return { code: 0, data: { overall: "UNPROVEN", point, owed: [] as string[],
+				note: "Ownership could not be listed; fail-open, nothing was blocked." }, verification: "UNVERIFIED" };
+		if (gate.decision === "refuse") {
+			const owed = gate.owed.map(row => `${row.dir} (${row.state}, bin ${row.bin})`);
+			return { code: 1, data: { overall: "REFUSED", point, owed },
+				errors: [{ code: "SCRATCH_OWED",
+					message: `Disposal refused at ${point}: you still own ${owed.length} undisposed scratch dir(s): ${owed.slice(0, 5).join("; ")}${owed.length > 5 ? ` and ${owed.length - 5} more` : ""}`,
+					remediation: "Release each with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]; a hold is discharged by closing its bead." }],
+				verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "OK", point, owed: [] as string[] }, verification: "UNVERIFIED" };
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }

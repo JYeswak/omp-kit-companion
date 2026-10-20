@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, 
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
-import { exportCommitToScratch, parseTextOwner } from "../../src/scratch.ts";
+import { exportCommitToScratch, parseTextOwner, releaseBudgetEntry } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
@@ -1780,4 +1780,93 @@ test("SCRATCHLEAK1: text owner with gone repo reaps when clear", () => {
 	const gone = textFixture(`agent: X\nlabel: t\nrepo: /no/such/repo-xyz\nbead: ompkit-1\ncreated: 2026-10-18\n`);
 	expect(inspectSession(gone.dir, gone.root, depsFor({ run: textRun(false, null) as never })))
 		.toMatchObject({ action: "REAP", reason: "text-owner-repo-gone-no-fds" });
+});
+
+function quotaRepo(): { repo: string; ledger: string } {
+	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "quotarepo-"));
+	roots.push(repo);
+	return { repo, ledger: join(repo, "budgets.json") };
+}
+
+test("SCRATCHQUOTA1: seat at cap is refused; release re-admits (planted)", () => {
+	const saved = process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+	process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = "250";
+	try {
+		const { repo, ledger } = quotaRepo();
+		const first = createScratch("q1", repo, depsFor(), { budgetBytes: 100 }, true, ledger);
+		expect(first.ok).toBe(true);
+		const refused = createScratch("q2", repo, depsFor(), { budgetBytes: 200 }, true, ledger);
+		expect(refused.ok).toBe(false);
+		expect(refused.reason).toBe("seat-budget-exceeded");
+		expect(refused.detail ?? "").toContain("q2");
+		expect(releaseBudgetEntry(ledger, first.dir)).toBe(true);
+		const admitted = createScratch("q3", repo, depsFor(), { budgetBytes: 200 }, true, ledger);
+		expect(admitted.ok).toBe(true);
+	} finally {
+		if (saved === undefined) delete process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+		else process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = saved;
+	}
+});
+
+test("SCRATCHQUOTA1: corrupt ledger fails closed; unbudgeted dirs count the default", () => {
+	const saved = process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+	process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = "250";
+	try {
+		const { repo, ledger } = quotaRepo();
+		writeFileSync(ledger, "not json{{{");
+		expect(createScratch("qc", repo, depsFor(), { budgetBytes: 10 }, true, ledger).reason).toBe("ledger-unavailable");
+		const { repo: repo2, ledger: ledger2 } = quotaRepo();
+		const big = createScratch("qd", repo2, depsFor(), {}, true, ledger2);
+		expect(big.ok).toBe(false);
+		expect(big.reason).toBe("seat-budget-exceeded");
+	} finally {
+		if (saved === undefined) delete process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+		else process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = saved;
+	}
+});
+
+function ttlFixture(owner: string, run: (args: readonly string[]) => { code: number | null; stdout: string; stderr: string }): { dir: string; root: string; deps: ApplyDeps } {
+	const home = useState();
+	const root = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	roots.push(root);
+	const dir = join(root, `ttl.${process.pid}`);
+	mkdirSync(dir);
+	writeFileSync(join(dir, ".owner"), owner);
+	writeFileSync(join(dir, "data"), "ttl\n");
+	return { dir, root, deps: { ...depsFor({ run: run as never }), home } };
+}
+
+function ttlRun(beadStatus: string | null) {
+	return (args: readonly string[]) => {
+		if (args[0] === "lsof") return { code: 1, stdout: "", stderr: "" };
+		if (args[0] === "br") return beadStatus === null
+			? { code: 1, stdout: "", stderr: "not found" }
+			: { code: 0, stdout: JSON.stringify([{ id: "b", status: beadStatus }]), stderr: "" };
+		return { code: 127, stdout: "", stderr: "" };
+	};
+}
+
+test("BEADTTL1: closed-bead text owner deletes promptly without quarantine wait", () => {
+	const root0 = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	roots.push(root0);
+	const owner = `agent: X\nlabel: t\nrepo: ${root0}\nbead: ompkit-closed\ncreated: 2026-10-18\n`;
+	const { dir, root, deps } = ttlFixture(owner, ttlRun("closed"));
+	const verdict = inspectSession(dir, root, depsFor({ run: ttlRun("closed") as never }));
+	expect(verdict.action).toBe("REAP");
+	const applied = applyReap(dir, root, verdict, deps);
+	expect(applied).toMatchObject({ action: "REAP" });
+	expect(existsSync(dir)).toBe(false);
+});
+
+test("BEADTTL1: open bead at apply time rolls back and keeps the dir", () => {
+	const root0 = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	roots.push(root0);
+	const owner = `agent: X\nlabel: t\nrepo: ${root0}\nbead: ompkit-open\ncreated: 2026-10-18\n`;
+	const { dir, root, deps } = ttlFixture(owner, ttlRun("closed"));
+	const verdict = inspectSession(dir, root, depsFor({ run: ttlRun("closed") as never }));
+	expect(verdict.action).toBe("REAP");
+	const openDeps = { ...deps, run: ttlRun("open") as never };
+	const applied = applyReap(dir, root, verdict, openDeps);
+	expect(applied.action).toBe("SKIP");
+	expect(existsSync(dir)).toBe(true);
 });
