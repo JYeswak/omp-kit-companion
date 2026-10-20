@@ -174,6 +174,10 @@ def verify_manifest(members, manifest, version):
             refuse("unlisted empty release directory")
 
 
+AUTH_HINT = ("run `gh auth login` first (in automation, export GH_TOKEN from"
+             " `gh auth token`): attestation fetch and verification need an authenticated gh.")
+
+
 def download_attestation(archive):
     digest = sha(Path(archive).read_bytes())
     result = subprocess.run(
@@ -182,7 +186,8 @@ def download_attestation(archive):
          "--jq", ".attestations[].bundle | tojson"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if result.returncode != 0 or not result.stdout.strip() or len(result.stdout) > 16 * 1024 * 1024:
-        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + result.stderr.decode(errors="replace").strip()[-1000:])
+        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + result.stderr.decode(errors="replace").strip()[-1000:]
+               + " " + AUTH_HINT)
     with open(str(archive) + ".sigstore.json", "xb") as output:
         output.write(result.stdout)
 
@@ -203,7 +208,8 @@ def verify_attestation(archive, version):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         digest = source.stdout.decode(errors="replace").strip()
         if source.returncode != 0 or len(digest) != 40 or any(c not in "0123456789abcdef" for c in digest):
-            refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: " + source.stderr.decode(errors="replace").strip()[-1000:])
+            refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: " + source.stderr.decode(errors="replace").strip()[-1000:]
+                   + " " + AUTH_HINT)
         # gh selects JSON-lines decoding by extension. Release siblings retain
         # .sigstore.json even when the authority returns both SBOM and SLSA bundles.
         raw = bundle.read_bytes()

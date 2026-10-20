@@ -17,14 +17,24 @@ an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
+# Requires `gh` authenticated (run `gh auth login` first; in automation export
+# GH_TOKEN): attestation fetch and verification refuse without it. See
+# [Installation](#installation) for the canonical block.
 KIT_VERSION=$(curl -fsSL https://api.github.com/repos/JYeswak/omp-kit-companion/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')
-KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v$KIT_VERSION/release-index.json"
-KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v$KIT_VERSION/installer"
-KIT_INSTALLER=$(mktemp -d)
+if [ -z "$KIT_VERSION" ]; then
+  echo "install: could not resolve the latest omp-kit release: the GitHub API request failed (unauthenticated requests are rate-limited to 60/hour)." >&2
+  echo "install: run 'gh auth login' (or export GH_TOKEN) and retry, or resolve the version with: gh api repos/JYeswak/omp-kit-companion/releases/latest --jq .tag_name" >&2
+  echo "install: nothing was downloaded." >&2
+  exit 1
+fi
+KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
+KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERSION}/installer"
+KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --dry-run
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX"
+sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
+sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
+export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
 ```
 
 ## TL;DR
@@ -331,7 +341,11 @@ must be proven, shared across profiles, or audited. Neither replaces a sandbox.
 
 Requirements: an existing OMP install with `omp` on PATH (for `status` and
 `test`), plus Python 3, GitHub CLI (`gh`) and `curl` for the installer (the version
-one-liner uses `str.removeprefix`, so Python 3.9 or newer). Linux builds need
+one-liner uses `str.removeprefix`, so Python 3.9 or newer). `gh` must be
+authenticated before you install: run `gh auth login` first (in automation,
+export `GH_TOKEN` from `gh auth token`). Attestation fetch and verification use
+`gh`, so a logged-out `gh` refuses as `KIT_ATTESTATION_BUNDLE_UNAVAILABLE`
+(exit 2) instead of installing. Linux builds need
 GNU libc. Installer and kit updates require a verifying Sigstore/SLSA bundle:
 GitHub Actions issuer, `JYeswak/omp-kit-companion` release workflow and the selected
 tag's authoritative source commit must match. Missing bundles, verifier or online
@@ -341,9 +355,15 @@ tag authority refuse as `KIT_ATTESTATION_*`; there is no hash-only activation.
 
 ```sh
 KIT_VERSION=$(curl -fsSL https://api.github.com/repos/JYeswak/omp-kit-companion/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')
-KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v$KIT_VERSION/release-index.json"
-KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v$KIT_VERSION/installer"
-KIT_INSTALLER=$(mktemp -d)
+if [ -z "$KIT_VERSION" ]; then
+  echo "install: could not resolve the latest omp-kit release: the GitHub API request failed (unauthenticated requests are rate-limited to 60/hour)." >&2
+  echo "install: run 'gh auth login' (or export GH_TOKEN) and retry, or resolve the version with: gh api repos/JYeswak/omp-kit-companion/releases/latest --jq .tag_name" >&2
+  echo "install: nothing was downloaded." >&2
+  exit 1
+fi
+KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
+KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERSION}/installer"
+KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
