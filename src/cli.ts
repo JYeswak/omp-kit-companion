@@ -4172,15 +4172,22 @@ export function ccActionTarget(flags: ReadonlyMap<string, string | true>): strin
 	return null;
 }
 
+/** CC contract codes allow [A-Za-z0-9_.-] only (cclib CODE_CHARS); fold `:`/` `/` separators. */
+export function ccCode(value: string): string {
+	return value.split(":").join("-").split(" ").join("-").split("/").join("-");
+}
+
 /** surface is kit: + the command path as computed in dispatch; service run NAME under OMP_KIT_JOB=NAME is its own launchd:<NAME> surface; parse failures are kit:parse_error. */
 export function ccActionSurface(parsed: ParseResult): string {
-	if (!("request" in parsed)) return "kit:parse_error";
+	if (!("request" in parsed)) return ccCode("kit:parse_error");
 	const { command, parent, argument } = parsed.request;
 	if (parent?.name === "service" && command.name === "run") {
 		const job = process.env.OMP_KIT_JOB;
-		if (job && argument === job) return `launchd:${job}`;
+		if (job && argument === job) return ccCode(`launchd:${job}`);
 	}
-	return `kit:${parent ? `${parent.name} ` : ""}${command.name}`;
+	let name = command.name;
+	while (name.startsWith("-")) name = name.slice(1);
+	return ccCode(`kit:${parent ? `${parent.name} ` : ""}${name}`);
 }
 
 export type CcActionOutcome = { outcome: "ok" | "refused" | "failed" | "timeout"; code: string | null };
@@ -4252,7 +4259,7 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 	ccEmit(spool, "action.result", { action_id: actionId, outcome: outcome.outcome, code: outcome.code, duration_ms: durationMs },
 		{ key: `kit:${actionId}:result`, timeMs: endMs, ...(Object.keys(ctx).length ? { ctx } : {}) });
 	ccEmit(spool, "source.tick",
-		{ instance: `kit:${process.pid}-${(startMs % 4294967296).toString(16).padStart(8, "0")}`, records_seen: 0, records_emitted: 2, records_ignored: 0, records_quarantined: 0, complete_through_ms: endMs, position: 0, error_code: null, skew_ms: null,
+		{ instance: ccCode(`kit:${process.pid}-${(startMs % 4294967296).toString(16).padStart(8, "0")}`), records_seen: 0, records_emitted: 2, records_ignored: 0, records_quarantined: 0, complete_through_ms: endMs, position: 0, error_code: null, skew_ms: null,
 			coverage: [{ record_type: "action.attempt", runtime_version: "v1", disposition: "emitted", reason: null, count: 1 }, { record_type: "action.result", runtime_version: "v1", disposition: "emitted", reason: null, count: 1 }] },
 		{ key: `kit:${actionId}:tick`, timeMs: endMs });
 	return exitCode;
