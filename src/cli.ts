@@ -1065,10 +1065,11 @@ function rulesCommand(request: ParsedCommand): CliResult {
 	if (!isAbsolute(xdgState) || resolve(xdgState) !== xdgState)
 		return refusal("INVALID_STATE_ROOT", "Private state root must be absolute and canonical", "Set an absolute XDG_STATE_HOME or leave it unset.");
 	try {
-		const plan = planRules({ root, home, stateRoot: join(xdgState, "omp-kit") });
+		const fleet = request.flags.has("--fleet");
+		const plan = planRules({ root, home, stateRoot: join(xdgState, "omp-kit"), fleet });
 		const entries = plan.entries.map(({ name, action, owned }) => ({ name, action, owned }));
 		const data = { overall: plan.blocked ? "FAIL" : "UNVERIFIED", action: "PLAN",
-			entries, changes: plan.changes, unknown_markdown: plan.unknownMarkdown,
+			fleet, entries, changes: plan.changes, unknown_markdown: plan.unknownMarkdown,
 			receipt_id: null as string | null };
 		if (plan.blocked) return { code: 2, data, errors: [{
 			code: "RULE_COLLISION", message: "An unowned or edited managed rule name blocks changes",
@@ -3325,12 +3326,16 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if ((binFlag !== undefined && bin === undefined) || (refFlag !== undefined && typeof refFlag !== "string"))
 			return refusal("SCRATCH_RELEASE_BIN_INVALID", `--bin must be one of ${SCRATCH_BINS.join("|")} and --ref a file:PATH or bead:ID value`,
 				"Pass --bin throwaway, or --bin evidence|promote with --ref; a hold is declared when the directory is created.");
-		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}) });
+		// Delete-at-once (ompkit-774u.15): --now deletes a released throwaway in the same turn after the
+		// reaper-grade rechecks; any doubt keeps the marked dir for the reaper (ok, now-held-* reason).
+		const now = request.flags.has("--now");
+		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}) });
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED", `Scratch release refused: ${released.reason}`,
 			"Use the exact owned task directory from its owner process; no directory was quarantined.");
 		releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
-			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null }, verification: "UNVERIFIED" };
+			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null,
+			deleted: released.reason === "owner-released-deleted" }, verification: "UNVERIFIED" };
 	}
 	if (sub === "plan") {
 		const plan = planScratch(home, deps);

@@ -1232,7 +1232,7 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 
 export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null }
 
-export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string }
+export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string; now?: boolean }
 
 /**
  * The destination an owner names when it releases its dir (ompkit-774u.15). Null when acceptable, else the refusal reason.
@@ -1257,6 +1257,40 @@ function releaseBinRefusal(owner: ScratchOwner, opts: ScratchReleaseOptions, dep
 	if (!regular) return "ref-missing";
 	const tracked = deps.run(["git", "-C", repo, "ls-files", "--error-unmatch", "--", relative(repo, target)], { timeoutMs: 15_000 });
 	return tracked.code === 0 ? null : "ref-not-tracked";
+}
+
+/**
+ * Same-turn deletion for a just-released throwaway (ompkit-774u.15 delete-at-once). Every recheck
+ * mirrors the final delete gate in applyReap: pinned identity (device + inode), unchanged owner
+ * text, owner still inside the scratch root, no open files. Any doubt keeps the dir — with its
+ * release marker — for the reaper, reported as ok with a now-held-* reason. Quarantine stays for
+ * the unsure; this path never moves a dir, never touches a hold, never deletes on a refusal.
+ */
+function deleteReleasedNow(dir: string, root: string, home: string, deps: InspectDeps, owner: ScratchOwner,
+ownerText: string, dev: number, ino: number, releasedAt: string): ScratchReleaseResult {
+	const held = (reason: string): ScratchReleaseResult => ({ ok: true, changed: true, dir, reason, ownerPid: owner.pid });
+	let stat;
+	try {
+		stat = lstatSync(dir);
+	} catch {
+		return held("now-held-directory-unavailable");
+	}
+	if (!stat.isDirectory() || stat.isSymbolicLink()) return held("now-held-not-a-directory");
+	if (String(stat.dev) !== String(dev) || String(stat.ino) !== String(ino)) return held("now-held-inode-changed");
+	if (isSymlink(join(dir, ".owner"))) return held("now-held-owner-unreadable");
+	const current = readText(join(dir, ".owner"));
+	if (current === null || current !== ownerText) return held("now-held-owner-changed");
+	if (!ownerMatchesScratchRoot(owner, root, dir, deps)) return held("now-held-owner-outside-root");
+	const clear = lsofClearDir(deps, dir);
+	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
+	try {
+		rmSync(dir, { recursive: true, force: true });
+	} catch {
+		return held("now-held-delete-failed");
+	}
+	if (existsSync(dir)) return held("now-held-delete-failed");
+	appendLog(home, { event: "release-deleted", dir, at: releasedAt, owner: owner.pid, bin: "throwaway" });
+	return { ok: true, changed: true, dir, reason: "owner-released-deleted", ownerPid: owner.pid };
 }
 
 export function releaseScratch(path: string, home: string, deps: InspectDeps, opts: ScratchReleaseOptions = {}): ScratchReleaseResult {
@@ -1291,6 +1325,10 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
 	const binRefusal = releaseBinRefusal(owner, opts, deps);
 	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal, ownerPid: owner.pid };
+	// Delete-at-once (ompkit-774u.15, Joshua J-102): same-turn deletion is a throwaway-only path. Evidence and
+	// promote keep their reaper deletion; a hold is never deleted by its owner here.
+	if (opts.now === true && opts.bin !== "throwaway")
+		return { ok: false, changed: false, dir, reason: "now-needs-throwaway", ownerPid: owner.pid };
 	if (owner.processStart !== null && !seatOwned) {
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
@@ -1319,6 +1357,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		`${stat.dev}:${stat.ino}` !== inodeOf(dir))
 		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: owner.pid };
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid, bin: opts.bin ?? "unbinned" });
+	if (opts.now === true) return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, releasedAt);
 	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
 }
 
@@ -1330,6 +1369,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number, ino: number,
 	ownerText: string | null, opts: ScratchReleaseOptions): ScratchReleaseResult {
 	const reason = opts.reason?.trim() ?? "";
+	if (opts.now === true) return { ok: false, changed: false, dir, reason: "now-needs-structured-owner", ownerPid: null };
 	if (opts.bin !== undefined || opts.ref !== undefined) return { ok: false, changed: false, dir, reason: "bin-needs-structured-owner", ownerPid: null };
 	if (opts.legacyOwner !== true || reason === "")
 		return { ok: false, changed: false, dir, reason: "owner-file-invalid", ownerPid: null };
