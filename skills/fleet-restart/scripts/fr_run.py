@@ -200,7 +200,8 @@ def plan_run(run_dir, ctx, chief, protect, unprotect=(), wave=3, busy_timeout_mi
            "align": plan["align"], "target": target, "herdr": plan.get("herdr") or {"ok": False, "why": "not collected", "rows": []},
            "stages": STAGES, "rows": rows, "holds": holds, "refused": refused,
            "watchers": {"platform": "darwin-launchd" if plat is None else plat,
-                        "pause": disc["pause_plan"], "unclassified": [j for j in disc["jobs"] if j["status"] == "HOLD_UNCLASSIFIED"],
+                        "pause": disc["pause_plan"], "binding": fw.approval_binding(disc, ctx.registry),
+                        "unclassified": [j for j in disc["jobs"] if j["status"] == "HOLD_UNCLASSIFIED"],
                         "unreadable": disc["unreadable"], "registered_missing": disc["registered_missing"], "deadman_left": disc["deadman_left"]},
            "counts": {"agent_panes": sum(1 for r in rows if r.get("omp_pid")), "advisor_on": sum(1 for r in rows if (r.get("advisor") or {}).get("on")),
                       "session_files": sum(1 for r in rows if r.get("session_file")), "actions": acts, "modes": modes, "versions": versions,
@@ -756,6 +757,15 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
         checks.append(("watchers-classified", not disc["unclassified"], ",".join(disc["unclassified"]) or "ok"))
     for name, good, why in checks:
         ledger.add("PREFLIGHT", check=name, ok=bool(good), detail=why)
+    paused_rec = fw.read_json(os.path.join(run_dir, fw.PAUSED)) or {}
+    expect_out = {r["label"] for r in paused_rec.get("rows", [])
+                  if r.get("action") == "BOOTED_OUT" and not r.get("resumed")} if resume_run else set()
+    # Watcher drift refuses before any other preflight failure is reported: a
+    # changed or unclassified actor must never reach the save/pause/send stages.
+    wdrift = fw.binding_drift((man.get("watchers") or {}).get("binding"), disc, ctx.registry, expect_out) if disc is not None else None
+    if wdrift:
+        ledger.add("RUN_END", result="REFUSED_WATCHERS_DRIFT", detail=wdrift)
+        return {"refused": "APPROVAL_WATCHERS_DRIFT:" + wdrift, "manifest_sha256": core.manifest_sha(man)}, EXIT_REFUSED
     if [c for c in checks if not c[1]]:
         ledger.add("RUN_END", result="REFUSED_PREFLIGHT")
         return {"refused": "PREFLIGHT_FAILED", "checks": [{"check": n, "ok": bool(g), "detail": w} for n, g, w in checks]}, EXIT_REFUSED
@@ -786,7 +796,8 @@ def apply_run(run_dir, ctx, approval, unprotect=(), resume_run=False, ttl_min=No
     results, error, paused, resumed = {}, None, None, None
     ttl = ttl_min or max(90, int(man.get("busy_timeout_min") or 0) + 60)
     try:
-        paused = fw.pause(run_dir, disc, ctx.run_fn, ctx.uid, ctx.clock(), ttl_min=ttl, apply=True)
+        paused = fw.pause(run_dir, disc, ctx.run_fn, ctx.uid, ctx.clock(), ttl_min=ttl, apply=True,
+                          approved=(man.get("watchers") or {}).get("binding"), registry=ctx.registry)
         ledger.add("WATCHERS_PAUSE", rows=[{k: r.get(k) for k in ("label", "action")} for r in paused["rows"]], refused=paused.get("refused"))
         if paused.get("refused"):
             raise RuntimeError("watchers pause refused: %s" % paused["refused"])

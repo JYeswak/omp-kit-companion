@@ -361,6 +361,7 @@ def main():
                         {"pid": 901, "ppid": 900, "args": "node mcp-server.js rea-agents"}], 111) is None)
     import selftest_run  # noqa: E402  (watchers, save, advisor, respawn, autonomous run gates)
     selftest_run.gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE)
+    selftest_run.gates_native(case, tmp, uid)  # opt-in isolated native LaunchAgent exercise (ompkit-rhy9.3)
 
     print("selftest: %s (%d failing)" % ("PASS" if not FAILS else "FAIL", len(FAILS)))
     return 1 if FAILS else 0

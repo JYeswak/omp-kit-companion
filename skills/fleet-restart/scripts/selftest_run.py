@@ -4,8 +4,11 @@ scratch, WATCHDOG drift), per-pane mode (RESTART only on the target build, else
 RESPAWN), composer hold, version verify, advisor re-apply, respawn argv, run
 plan/apply/resume-run. Called by selftest.py; every gate pairs a planted negative
 with its control. launchctl, ntm, tmux, lsof, the clock and sleep are fakes:
-nothing here touches the live fleet or launchd."""
+nothing here touches the live fleet or launchd, except the opt-in gates_native
+(owned selftest-prefixed labels only, swept afterwards; production watcher
+loaded state is snapshotted and must be unchanged)."""
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -13,6 +16,9 @@ import re
 import shlex
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "scripts"))
+import pysafe  # noqa: E402  (bounded child runs: process-group kill on timeout)
 
 import fleet_restart as fr
 import fr_run
@@ -239,6 +245,7 @@ def approve(run_dir, **extra):
 def gates(case, tmp, uid, good_env, plan, aligned, inventory, IDLE):
     gate_check_env(case, tmp, good_env)
     gate_watchers(case, tmp, uid)
+    gate_watchers_binding(case, tmp, uid, good_env, aligned)
     gate_portability(case, tmp)
     gate_save(case, tmp)
     gate_preserve(case, tmp)
@@ -422,6 +429,193 @@ def gate_watchers(case, tmp, uid):
     case("NEG dead-man fails to load -> pause refused, zero bootouts",
          rec.get("refused") == "DEADMAN_NOT_LOADED" and not [c for c in ld.mutations() if c[1] == "bootout"] and "com.omp-kit.fleet-watch" in ld.loaded,
          json.dumps(rec.get("refused")))
+
+# ---------- 2b. watchers approval binding (ompkit-rhy9.3) ----------
+
+def gate_watchers_binding(case, tmp, uid, good_env, aligned):
+    """The run approval binds classification + the loaded pause:true set + exact
+    plist bytes; drift refuses before effects. Resume restores exactly the rows
+    this run booted out, verifies loaded state, and never bootstraps changed
+    bytes. launchctl, ntm, tmux, the clock and sleep are fakes: nothing here
+    touches the live fleet or launchd (native proof lives in gates_native)."""
+    root = os.path.join(tmp, "watchers-binding")
+    os.makedirs(root, exist_ok=True)
+    home = fake_home(root)
+
+    def fresh_run(name, loaded=("com.omp-kit.fleet-watch", "com.omp-kit.ci-poller")):
+        ld = FakeLaunchd(loaded=set(loaded))
+        ag = agents_fixture(os.path.join(root, "a-" + name))
+        fl = fleet_fixture(os.path.join(root, "f-" + name), ld)
+        ctx = ctx_for(fl, home, ag, good_env, uid, aligned)
+        rd = os.path.join(root, "rb-" + name)
+        man = fr_run.plan_run(rd, ctx, "%3", fr.DEFAULT_PROTECT, wave=1, busy_timeout_min=0)
+        return ld, ag, fl, ctx, rd, man
+
+    ld, ag, fl, ctx, rd, man = fresh_run("ctl")
+    binding = man["watchers"]["binding"]
+    want_plist = os.path.join(ag, "com.omp-kit.fleet-watch.plist")
+    case("CTL run manifest binds classification + loaded pause:true set + plist bytes",
+         [(r["label"], r["plist"], r["class"]) for r in binding["pause"]]
+         == [("com.omp-kit.fleet-watch", want_plist, "pane-actor")]
+         and all(len(r["plist_sha256"]) == 64 for r in binding["pause"])
+         and binding["registry_sha256"] == fw.registry_digest(ctx.registry)
+         and binding["unclassified"] == [], json.dumps(binding))
+    case("CTL fresh discovery still matches the approval binding (no drift)",
+         fw.binding_drift(binding, fw.discover(ag, ctx.registry, ld.run, uid), ctx.registry) is None)
+    tpl_res = pysafe.run_bounded([sys.executable, os.path.join(HERE, "fleet_restart.py"), "approval-template", "--manifest",
+                                  os.path.join(rd, fr_run.RUN_MANIFEST)], timeout=120)
+    tpl = json.loads(tpl_res.text())
+    case("CTL approval-template names the precise observed set/plist identities",
+         tpl["watchers_pause"] == ["com.omp-kit.fleet-watch"]
+         and [(r["label"], r["plist"]) for r in tpl["watchers_pause_detail"]] == [("com.omp-kit.fleet-watch", want_plist)]
+         and all(len(r["plist_sha256"]) == 64 for r in tpl["watchers_pause_detail"])
+         and tpl["watchers_registry_sha256"] == binding["registry_sha256"], json.dumps(tpl)[:300])
+
+    def drift_case(name, mutate, fragment):
+        ld2, ag2, fl2, ctx2, rd2, man2 = fresh_run(name)
+        approval = approve(rd2)
+        mutate(ld2, ag2, fl2, ctx2)
+        rep, rc = fr_run.apply_run(rd2, ctx2, approval)
+        ev = [json.loads(ln)["event"] for ln in open(os.path.join(rd2, fr_run.LEDGER))]
+        case("NEG %s -> APPROVAL_WATCHERS_DRIFT, zero sends, zero launchctl mutations" % name,
+             rep.get("refused", "").startswith("APPROVAL_WATCHERS_DRIFT:") and fragment in rep.get("refused", "")
+             and rc == fr_run.EXIT_REFUSED and not fl2.sends and not ld2.mutations() and "WATCHERS_PAUSE" not in ev,
+             json.dumps(rep.get("refused")))
+
+    def add_actor(ld2, ag2, fl2, ctx2):
+        write_plist(ag2, "com.example.sender", ["/bin/sh", "-c", "tmux send-keys -t %3 Enter"])
+        ld2.loaded.add("com.example.sender")
+
+    def change_bytes(ld2, ag2, fl2, ctx2):
+        write_plist(ag2, "com.omp-kit.fleet-watch", ["/x/omp-kit", "service", "run", "watch-changed"])
+
+    def unload(ld2, ag2, fl2, ctx2):
+        ld2.loaded.discard("com.omp-kit.fleet-watch")
+
+    def reclassify(ld2, ag2, fl2, ctx2):
+        reg = dict(ctx2.registry)
+        entry = dict(reg["com.omp-kit.fleet-watch"])
+        entry["pause"] = False
+        reg["com.omp-kit.fleet-watch"] = entry
+        ctx2.registry = reg
+
+    def add_member(ld2, ag2, fl2, ctx2):
+        write_plist(ag2, "com.omp-kit.kit-update", ["/x/omp-kit", "service", "run", "kit-update"])
+        ld2.loaded.add("com.omp-kit.kit-update")
+
+    drift_case("loaded unregistered tmux send-keys actor after plan", add_actor, "HOLD_UNCLASSIFIED")
+    drift_case("approved plist bytes changed after plan", change_bytes, "plist bytes changed")
+    drift_case("approved job unloaded before apply", unload, "no longer loaded")
+    drift_case("registry reclassifies an approved job after plan", reclassify, "classification changed")
+    drift_case("loaded pause:true membership changed after plan", add_member, "set changed")
+
+    # crash before the pause: nothing booted out, so the resume still matches.
+    ld3, ag3, fl3, ctx3, rd3, man3 = fresh_run("crashsave")
+    restore = crash_on("PRESERVE")
+    try:
+        fr_run.apply_run(rd3, ctx3, approve(rd3))
+        crashed = False
+    except RuntimeError:
+        crashed = True
+    finally:
+        restore()
+    rep, rc = fr_run.apply_run(rd3, ctx3, approve(rd3), resume_run=True)
+    w101 = next((p for p in rep.get("panes", []) if p["pane"] == "w:0.1"), {})
+    case("CTL crash before pause: resume_run still matches the binding and verifies (no false drift)",
+         crashed and "APPROVAL_WATCHERS_DRIFT" not in str(rep.get("refused")) and w101.get("result") == "VERIFIED"
+         and rc == fr_run.EXIT_FAILED, json.dumps([crashed, rep.get("refused"), w101.get("result"), rc]))
+
+    # resume restores service state with zero pane sends: restoration is not dispatch.
+    ld4, ag4, fl4, ctx4, rd4, man4 = fresh_run("barrier")
+    real_resume = fw.resume
+    seen = {}
+
+    def guarded(run_dir, run_fn, uid_arg, now, **kw):
+        n0 = len(fl4.sends)
+        try:
+            return real_resume(run_dir, run_fn, uid_arg, now, **kw)
+        finally:
+            seen["new_sends"] = len(fl4.sends) - n0
+
+    fw.resume = guarded
+    try:
+        rep, rc = fr_run.apply_run(rd4, ctx4, approve(rd4))
+    finally:
+        fw.resume = real_resume
+    case("CTL watchers resume restores service state with zero pane sends (restoration is not dispatch)",
+         seen.get("new_sends") == 0 and rep["watchers"]["resume"]["result"] == "RESUMED"
+         and "com.omp-kit.fleet-watch" in ld4.loaded, json.dumps(rep["watchers"]["resume"]))
+
+    # resume-side byte binding, bootstrap failure, TTL kill, raised step (fake launchctl).
+    rd = os.path.join(root, "resume-tamper")
+    os.makedirs(rd)
+    ag = agents_fixture(os.path.join(root, "a-tamper"))
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"})
+    reg = fw.load_registry()
+    rec = fw.pause(rd, fw.discover(ag, reg, ld.run, uid), ld.run, uid, 1000, apply=True)
+    write_plist(ag, "com.omp-kit.fleet-watch", ["/x/omp-kit", "service", "run", "watch-tampered"])
+    res = fw.resume(rd, ld.run, uid, 1000 + 10, apply=True)
+    by = {r["label"]: r["action"] for r in res["rows"]}
+    case("NEG plist bytes changed between pause and resume -> RESUME_REFUSED_DRIFT, overall RESUME_FAILED, dead-man retained",
+         by.get("com.omp-kit.fleet-watch") == "RESUME_REFUSED_DRIFT" and res["result"] == "RESUME_FAILED"
+         and fw.deadman_label(rd) in ld.loaded and os.path.exists(rec["deadman"]["plist"])
+         and "com.omp-kit.fleet-watch" not in ld.loaded, json.dumps(res["rows"]))
+
+    rd = os.path.join(root, "resume-fail")
+    os.makedirs(rd)
+    ag = agents_fixture(os.path.join(root, "a-fail"))
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"}, refuse_bootstrap={"com.omp-kit.fleet-watch"})
+    fw.pause(rd, fw.discover(ag, reg, ld.run, uid), ld.run, uid, 2000, apply=True)
+    res = fw.resume(rd, ld.run, uid, 2000 + 10, apply=True)
+    case("NEG failed bootstrap is RESUME_FAILED, never reported as success",
+         res["result"] == "RESUME_FAILED" and [r["action"] for r in res["rows"]] == ["RESUME_FAILED"], json.dumps(res["rows"]))
+
+    rd = os.path.join(root, "ttl-kill")
+    os.makedirs(rd)
+    ag = agents_fixture(os.path.join(root, "a-ttl"))
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"})
+    fw.pause(rd, fw.discover(ag, reg, ld.run, uid), ld.run, uid, 3000, ttl_min=1, apply=True)
+    n = len(ld.mutations())
+    dead = fw.read_json(os.path.join(rd, fw.PAUSED))
+    res = fw.resume(rd, ld.run, uid, dead["expires_epoch"] + 1, if_expired=True, apply=True)
+    boots = [c[3] for c in ld.mutations()[n:] if c[1] == "bootstrap"]
+    case("CTL killed run past TTL: the dead-man path recovers exactly the actually-paused set and verifies loaded state",
+         res["result"] == "RESUMED" and [r["action"] for r in res["rows"]] == ["RESUMED"]
+         and boots == [os.path.join(ag, "com.omp-kit.fleet-watch.plist")]
+         and "com.omp-kit.fleet-watch" in ld.loaded and "com.omp-kit.fleet-flush" not in ld.loaded
+         and fw.deadman_label(rd) not in ld.loaded, json.dumps(res["rows"]))
+
+    rd = os.path.join(root, "raised")
+    os.makedirs(rd)
+    ag = agents_fixture(os.path.join(root, "a-raised"))
+    ld = FakeLaunchd(loaded={"com.omp-kit.fleet-watch", "com.omp-kit.ci-poller"})
+    fw.pause(rd, fw.discover(ag, reg, ld.run, uid), ld.run, uid, 4000, apply=True)
+    try:
+        raise RuntimeError("simulated restart-step crash")
+    except RuntimeError:
+        resumed = fw.resume(rd, ld.run, uid, 4000 + 5, apply=True)  # the apply_run finally line
+    case("CTL raised step still resumes exactly the paused set in finally, verified loaded, dead-man gone",
+         resumed["result"] == "RESUMED" and [r["label"] for r in resumed["rows"]] == ["com.omp-kit.fleet-watch"]
+         and "com.omp-kit.fleet-watch" in ld.loaded and "com.omp-kit.fleet-flush" not in ld.loaded
+         and fw.deadman_label(rd) not in ld.loaded, json.dumps(resumed["rows"]))
+
+    # standalone pause approval through the real manifest_sha: a byte change with
+    # identical labels must change the approval sha (a success-path --apply here
+    # would boot out live production watchers, so the live-command refusal lives
+    # in gates_native with owned labels).
+    agb = agents_fixture(os.path.join(root, "a-bytes"))
+    ldb = FakeLaunchd(loaded={"com.omp-kit.fleet-watch"})
+    regb = fw.load_registry()
+    man1 = fw.pause_plan_manifest(fw.discover(agb, regb, ldb.run, uid))
+    sha1 = fr.manifest_sha(dict(man1))
+    write_plist(agb, "com.omp-kit.fleet-watch", ["/x/omp-kit", "service", "run", "watch-drifted"])
+    man2 = fw.pause_plan_manifest(fw.discover(agb, regb, ldb.run, uid))
+    sha2 = fr.manifest_sha(dict(man2))
+    bare = lambda m: {"kind": m["kind"], "rows": [{k: r[k] for k in ("pane", "label")} for r in m["rows"]]}
+    case("NEG standalone pause approval is byte-sensitive: same labels, changed plist bytes -> different sha",
+         bool(man1["rows"]) and sha1 != sha2
+         and man1["rows"][0]["plist_sha256"] != man2["rows"][0]["plist_sha256"]
+         and fr.manifest_sha(bare(man1)) == fr.manifest_sha(bare(man2)), json.dumps([sha1[:12], sha2[:12]]))
 
 
 # ---------- 3. save ----------
@@ -1334,3 +1528,165 @@ def gate_uxr3(case, tmp, plan, inventory, aligned):
     p2 = fr.build_plan(inventory(), "omp-test:0.1", fr.DEFAULT_PROTECT, aligned, unprotect=["uds--burn-down:0.0"])
     row = {r["pane"]: r for r in p2["rows"]}["uds--burn-down:0.0"]
     case("CTL DEFAULT_PROTECT overridable via unprotect (row marked unprotected)", row["action"] == "RESTART" and row.get("unprotected"), json.dumps(row.get("action")))
+
+
+# ---------- native watchers exercise (ompkit-rhy9.3) ----------
+
+NATIVE_ENV = "FLEET_RESTART_NATIVE_WATCHERS"
+NATIVE_PREFIX = "com.omp-kit.selftest."
+
+
+def _launchctl(argv, timeout=30):
+    try:
+        res = pysafe.run_bounded(["launchctl"] + argv, timeout=timeout)
+    except OSError as exc:
+        return 127, "%s: %s" % (type(exc).__name__, exc)
+    return res.returncode if res.returncode is not None else 124, (res.text() + res.text("stderr"))[-500:]
+
+
+def _native_loaded(label):
+    return _launchctl(["print", "gui/%d/%s" % (os.getuid(), label)])[0] == 0
+
+
+def gates_native(case, tmp, uid):
+    """Isolated native LaunchAgent exercise through the real `watchers`
+    commands: owned selftest-prefixed labels only, plist files in the owned
+    tmp dir (never the live agents dir), inert payloads that never execute
+    (no RunAtLoad/triggers: loaded-but-inactive registry state only), swept
+    in a finally. Production watcher loaded state is snapshotted before and
+    compared after: any change fails the gate. Opt-in: needs macOS launchd
+    plus FLEET_RESTART_NATIVE_WATCHERS=1, otherwise an honest SKIP."""
+    if os.environ.get(NATIVE_ENV) != "1" or fw.platform_status() is not None:
+        case("SKIP native watcher exercise (needs macOS + FLEET_RESTART_NATIVE_WATCHERS=1)", True)
+        return
+    root = os.path.join(tmp, "watchers-native")
+    os.makedirs(root, exist_ok=True)
+    tag = "p%d" % os.getpid()
+    actor = NATIVE_PREFIX + tag + ".actor"
+    reader = NATIVE_PREFIX + tag + ".reader"
+    parked = NATIVE_PREFIX + tag + ".parked"
+    labels = [actor, reader, parked]
+    for lab in labels:
+        if not lab.startswith(NATIVE_PREFIX):
+            case("NEG native labels stay inside the owned selftest prefix", False, lab)
+            return
+    script = os.path.join(HERE, "fleet_restart.py")
+    ag = os.path.join(root, "LaunchAgents")
+    os.makedirs(ag, exist_ok=True)
+    reg_path = os.path.join(root, "registry.json")
+    with open(reg_path, "w") as fh:
+        json.dump({"jobs": {actor: {"class": "pane-actor", "pause": True, "why": "selftest owned actor"},
+                             reader: {"class": "reader", "pause": False, "why": "selftest owned reader"},
+                             parked: {"class": "pane-actor", "pause": True, "why": "selftest owned parked"}}}, fh)
+    for lab in labels:
+        write_plist(ag, lab, ["/bin/true"])
+    prod = ["com.omp-kit.fleet-watch", "com.omp-kit.fleet-flush", "com.omp-kit.kit-update",
+            "com.omp-kit.scratch-reaper", "com.omp-kit.omp-watch"]
+    before = {lab: _native_loaded(lab) for lab in prod}
+    rundirs = []
+
+    def cli(*args):
+        res = pysafe.run_bounded([sys.executable, script] + list(args), timeout=120)
+        try:
+            return res.returncode, json.loads(res.text() or "{}")
+        except ValueError:
+            return res.returncode, {"raw": (res.text() or "")[-500:], "stderr": (res.text("stderr") or "")[-500:]}
+
+    def sweep():
+        for lab in labels:
+            if _native_loaded(lab):
+                _launchctl(["bootout", "gui/%d/%s" % (os.getuid(), lab)])
+        for rd in rundirs:
+            dm = fw.deadman_label(os.path.abspath(rd))
+            if _native_loaded(dm):
+                _launchctl(["bootout", "gui/%d/%s" % dm])
+
+    def pause_apply(rd, ttl=None):
+        rc, _ = cli("watchers", "pause", "--run", rd, "--agents-dir", ag, "--registry", reg_path)
+        if rc != 0:
+            return (rc, {}), {}
+        with open(os.path.join(rd, "watchers-pause-plan.json")) as fh:
+            plan_man = json.load(fh)
+        appr = os.path.join(rd, "approval.json")
+        with open(appr, "w") as fh:
+            json.dump({"manifest_sha256": plan_man["manifest_sha256"], "approved_by": "selftest-native", "quote": "go"}, fh)
+        args = ["watchers", "pause", "--run", rd, "--agents-dir", ag, "--registry", reg_path, "--apply", "--approval", appr]
+        if ttl is not None:
+            args += ["--ttl-min", str(ttl)]
+        return cli(*args), plan_man
+
+    try:
+        sweep()  # strays from a killed earlier run are ours by prefix: reclaim first
+        for lab in (actor, reader):  # parked starts (and stays) unloaded
+            rc, out = _launchctl(["bootstrap", "gui/%d" % os.getuid(), os.path.join(ag, lab + ".plist")])
+            if rc != 0 or not _native_loaded(lab):
+                case("NEG native bootstrap loads the owned fixture %s" % lab, False, "rc=%d %s" % (rc, out))
+                return
+        case("CTL native fixtures load: actor + reader bootstrapped, parked stays unloaded",
+             _native_loaded(actor) and _native_loaded(reader) and not _native_loaded(parked))
+
+        rd = os.path.join(root, "n-ok")
+        rundirs.append(rd)
+        (rc, rec), plan_man = pause_apply(rd)
+        with open(os.path.join(ag, actor + ".plist"), "rb") as fh:
+            expect_sha = hashlib.sha256(fh.read()).hexdigest()
+        rows = {(r["label"], r["plist"], r["plist_sha256"]) for r in plan_man.get("rows", [])}
+        case("CTL native approval names the precise observed set/plist identities",
+             rows == {(actor, os.path.join(ag, actor + ".plist"), expect_sha)}, json.dumps(plan_man.get("rows")))
+        by = {r["label"]: r["action"] for r in rec.get("rows", [])}
+        case("CTL native pause: registered loaded pause:true job stops; reader and unloaded jobs untouched",
+             rc == 0 and by.get(actor) == "BOOTED_OUT" and by.get(parked) == "SKIP_NOT_LOADED"
+             and not _native_loaded(actor) and _native_loaded(reader) and not _native_loaded(parked),
+             json.dumps(by))
+        rc, res = cli("watchers", "resume", "--run", rd, "--agents-dir", ag, "--registry", reg_path, "--apply")
+        case("CTL native resume recovers the exact actually-paused set and verifies loaded state",
+             rc == 0 and res.get("result") == "RESUMED" and [r["label"] for r in res.get("rows", [])] == [actor]
+             and _native_loaded(actor) and _native_loaded(reader) and not _native_loaded(parked)
+             and not _native_loaded(fw.deadman_label(os.path.abspath(rd))), json.dumps(res.get("rows")))
+
+        rd = os.path.join(root, "n-raised")
+        rundirs.append(rd)
+        (rc, _), _ = pause_apply(rd)
+        crashed_window = rc == 0 and not _native_loaded(actor) and _native_loaded(reader)
+        rc, res = cli("watchers", "resume", "--run", rd, "--agents-dir", ag, "--registry", reg_path, "--apply")
+        case("CTL native raised step: the finally path still recovers the exact set, verified loaded",
+             crashed_window and rc == 0 and res.get("result") == "RESUMED"
+             and [r["label"] for r in res.get("rows", [])] == [actor] and _native_loaded(actor)
+             and not _native_loaded(parked), json.dumps(res.get("rows")))
+
+        rd = os.path.join(root, "n-ttl")
+        rundirs.append(rd)
+        (rc, _), _ = pause_apply(rd, ttl=0)
+        died = rc == 0 and not _native_loaded(actor)
+        # the run dies here: no finally. A fresh process runs the dead-man's
+        # exact command after expiry and must recover the exact set.
+        rc, res = cli("watchers", "resume", "--run", rd, "--agents-dir", ag, "--registry", reg_path,
+                      "--if-expired", "--apply")
+        case("CTL native killed run past TTL: the dead-man command recovers the exact set, verified loaded",
+             died and rc == 0 and res.get("result") == "RESUMED"
+             and [r["label"] for r in res.get("rows", [])] == [actor] and _native_loaded(actor)
+             and _native_loaded(reader) and not _native_loaded(parked)
+             and not _native_loaded(fw.deadman_label(os.path.abspath(rd))), json.dumps(res.get("rows")))
+
+        rd = os.path.join(root, "n-drift")
+        rundirs.append(rd)
+        rc, _ = cli("watchers", "pause", "--run", rd, "--agents-dir", ag, "--registry", reg_path)
+        with open(os.path.join(rd, "watchers-pause-plan.json")) as fh:
+            plan_man = json.load(fh)
+        appr = os.path.join(rd, "approval.json")
+        with open(appr, "w") as fh:
+            json.dump({"manifest_sha256": plan_man["manifest_sha256"], "approved_by": "selftest-native", "quote": "go"}, fh)
+        write_plist(ag, actor, ["/bin/true", "drifted"])  # same label, changed bytes after approval
+        rc2, out2 = cli("watchers", "pause", "--run", rd, "--agents-dir", ag, "--registry", reg_path,
+                        "--apply", "--approval", appr)
+        case("NEG native stale approval after plist bytes change -> APPROVAL_MISMATCH, actor still loaded, zero bootouts",
+             rc == 0 and rc2 == 4 and "APPROVAL_MISMATCH" in json.dumps(out2) and _native_loaded(actor)
+             and _native_loaded(reader) and not _native_loaded(parked), "rc=%d rc2=%d %s" % (rc, rc2, json.dumps(out2)[:300]))
+
+        after = {lab: _native_loaded(lab) for lab in prod}
+        case("CTL production watcher loaded state unchanged by the native exercise",
+             after == before, json.dumps({lab: (before[lab], after[lab]) for lab in prod if before[lab] != after[lab]}))
+    finally:
+        sweep()
+        left = [lab for lab in labels if _native_loaded(lab)]
+        case("CTL native sweep leaves no owned fixture loaded", not left, json.dumps(left))

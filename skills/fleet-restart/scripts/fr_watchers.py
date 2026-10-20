@@ -6,6 +6,7 @@ the selftest drives it with a fake. A dead-man LaunchAgent resumes the watchers
 if the run dies before its finally block. Stdlib only, no regex."""
 import datetime
 import glob
+import hashlib
 import json
 import os
 import plistlib
@@ -74,7 +75,8 @@ def discover(agents_dir, registry, run_fn, uid):
     for path in sorted(glob.glob(os.path.join(agents_dir, "*.plist"))):
         try:
             with open(path, "rb") as fh:
-                data = plistlib.load(fh)
+                raw = fh.read()
+            data = plistlib.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("plist root is not a dict")
         except Exception as exc:  # malformed plist: report, keep going
@@ -83,7 +85,8 @@ def discover(agents_dir, registry, run_fn, uid):
         label = str(data.get("Label") or os.path.basename(path)[:-len(".plist")])
         args = data.get("ProgramArguments") or ([data["Program"]] if data.get("Program") else [])
         args = [str(a) for a in args] if isinstance(args, list) else [str(args)]
-        row = {"label": label, "plist": path, "loaded": is_loaded(run_fn, uid, label)}
+        row = {"label": label, "plist": path, "plist_sha256": hashlib.sha256(raw).hexdigest(),
+               "loaded": is_loaded(run_fn, uid, label)}
         reg = registry.get(label)
         if label.startswith(DEADMAN_PREFIX):
             row.update({"registered": False, "class": "dead-man", "pause": False, "status": "DEADMAN"})
@@ -111,9 +114,76 @@ def discover(agents_dir, registry, run_fn, uid):
             "deadman_left": [j["label"] for j in jobs if j["status"] == "DEADMAN"]}
 
 
+def registry_digest(registry):
+    """Content hash of the loaded classification registry: a changed class or
+    pause flag changes the digest, so an approval bound to it goes stale."""
+    return hashlib.sha256(json.dumps(registry, sort_keys=True).encode()).hexdigest()
+
+
+def sha256_file(path):
+    """Hex digest of a file's bytes, or None when it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def pause_plan_manifest(disc):
-    """Standalone `watchers pause` approval target: bound to the exact labels it boots out."""
-    return {"kind": "watchers-pause", "rows": [{"pane": label, "label": label} for label in disc["pause_plan"]]}
+    """Standalone `watchers pause` approval target: bound to the exact labels
+    it boots out plus each plist's path and byte digest, so a changed plist
+    (same labels, different bytes) no longer matches the approval."""
+    by_label = {j["label"]: j for j in disc["jobs"]}
+    return {"kind": "watchers-pause",
+            "rows": [{"pane": label, "label": label, "plist": by_label[label]["plist"],
+                      "plist_sha256": by_label[label].get("plist_sha256")} for label in disc["pause_plan"]]}
+
+
+def approval_binding(disc, registry):
+    """The run approval's watchers binding: classification digest, the exact
+    loaded pause:true set with plist identities and byte digests, and the
+    unclassified/unreadable observations. Stored on the run manifest."""
+    by_label = {j["label"]: j for j in disc["jobs"]}
+    return {"registry_sha256": registry_digest(registry),
+            "pause": [{"label": label, "plist": by_label[label]["plist"],
+                       "plist_sha256": by_label[label].get("plist_sha256"), "class": by_label[label].get("class")}
+                      for label in disc["pause_plan"]],
+            "unclassified": list(disc["unclassified"]),
+            "unreadable": sorted(u["plist"] for u in disc["unreadable"])}
+
+
+def binding_drift(approved, disc, registry, expect_unloaded=()):
+    """None when the fresh discovery still matches the approved binding;
+    otherwise a short detail naming the drift. Jobs the current run already
+    booted out (expect_unloaded) must still match by identity and bytes, but
+    are not required to be loaded. Pure read: no launchctl mutation."""
+    if not approved:
+        return "watchers binding absent (planned before classification binding)"
+    if approved.get("registry_sha256") != registry_digest(registry):
+        return "registry classification changed since approval"
+    want = [r["label"] for r in approved.get("pause", [])]
+    now = {j["label"]: j for j in disc["jobs"]}
+    for row in approved.get("pause", []):
+        label = row["label"]
+        j = now.get(label)
+        if j is None:
+            return "approved job missing: %s" % label
+        if not j.get("registered") or not j.get("pause"):
+            return "approved job declassified: %s (%s)" % (label, j.get("status"))
+        if j.get("plist") != row.get("plist"):
+            return "approved job plist path changed: %s" % label
+        if j.get("plist_sha256") != row.get("plist_sha256"):
+            return "approved job plist bytes changed: %s" % label
+        if label not in expect_unloaded and not j.get("loaded"):
+            return "approved job no longer loaded: %s" % label
+    effective = set(disc["pause_plan"]) | (set(want) & set(expect_unloaded))
+    if sorted(effective) != sorted(want):
+        return "loaded pause:true set changed since approval"
+    if sorted(u["plist"] for u in disc["unreadable"]) != sorted(approved.get("unreadable", [])):
+        return "unreadable plist set changed since approval"
+    if disc["unclassified"]:
+        return "HOLD_UNCLASSIFIED: %s" % ",".join(disc["unclassified"])
+    return None
 
 
 def deadman_label(run_dir):
@@ -143,12 +213,22 @@ def read_json(path):
         return None
 
 
-def pause(run_dir, disc, run_fn, uid, now_epoch, ttl_min=90, apply=False, python=None):
+def pause(run_dir, disc, run_fn, uid, now_epoch, ttl_min=90, apply=False, python=None, approved=None, registry=None):
     """Dry run by default. Apply: install the dead-man first (a failed install aborts
-    before any bootout), then boot out each loaded pause:true job, recording every row."""
+    before any bootout), then boot out each loaded pause:true job, recording every row.
+    With approved set (a run manifest's watchers binding), the fresh discovery must
+    still match it; any drift refuses before the dead-man install, so before any
+    bootout or bootstrap."""
     path = os.path.join(run_dir, PAUSED)
     prior = read_json(path) or {}
     carried = {r["label"]: r for r in prior.get("rows", []) if r.get("action") == "BOOTED_OUT" and not r.get("resumed")}
+    if approved is not None:
+        # Rows this run already booted out are expected unloaded on a resume;
+        # they must still match by identity and bytes, just not by loaded state.
+        drift = binding_drift(approved, disc, registry or {}, set(carried))
+        if drift:
+            return {"run_dir": run_dir, "mode": "APPLY" if apply else "DRY_RUN",
+                    "refused": "APPROVAL_WATCHERS_DRIFT:" + drift, "rows": []}
     rows = []
     for j in disc["jobs"]:
         if not j.get("pause"):
@@ -156,7 +236,7 @@ def pause(run_dir, disc, run_fn, uid, now_epoch, ttl_min=90, apply=False, python
         if j["label"] in carried and not j["loaded"]:
             rows.append(dict(carried.pop(j["label"]), carried=True))  # paused by an earlier attempt of this run
             continue
-        rows.append({"label": j["label"], "plist": j["plist"], "was_loaded": j["loaded"],
+        rows.append({"label": j["label"], "plist": j["plist"], "plist_sha256": j.get("plist_sha256"), "was_loaded": j["loaded"],
                      "action": "WOULD_BOOTOUT" if j["loaded"] else "SKIP_NOT_LOADED"})
     rows += [dict(r, carried=True) for r in carried.values()]
     label = deadman_label(run_dir)
@@ -199,7 +279,10 @@ def default_python():
 
 def resume(run_dir, run_fn, uid, now_epoch, if_expired=False, apply=False):
     """Bootstrap exactly the rows this run booted out, verify each is loaded, remove
-    the dead-man. Idempotent: a second call finds every row loaded and no dead-man."""
+    the dead-man. Idempotent: a second call finds every row loaded and no dead-man.
+    A row whose plist bytes changed since the pause is never bootstrapped
+    (RESUME_REFUSED_DRIFT): resuming unknown bytes is an effect the approval did
+    not cover. Resume performs no pane dispatch: only launchctl bootstrap/bootout."""
     record = read_json(os.path.join(run_dir, PAUSED))
     if not record:
         return {"result": "NOTHING_PAUSED", "rows": []}
@@ -215,9 +298,14 @@ def resume(run_dir, run_fn, uid, now_epoch, if_expired=False, apply=False):
         if is_loaded(run_fn, uid, r["label"]):
             row["action"] = "ALREADY_LOADED"
         else:
-            rc, text = run_fn(["launchctl", "bootstrap", "gui/%d" % uid, r["plist"]], None)
-            row.update({"rc": rc, "out": text[-300:]})
-            row["action"] = "RESUMED" if is_loaded(run_fn, uid, r["label"]) else "RESUME_FAILED"
+            want = r.get("plist_sha256")
+            have = sha256_file(r["plist"]) if want else None
+            if want and have != want:
+                row.update({"action": "RESUME_REFUSED_DRIFT", "want_sha256": want, "have_sha256": have})
+            else:
+                rc, text = run_fn(["launchctl", "bootstrap", "gui/%d" % uid, r["plist"]], None)
+                row.update({"rc": rc, "out": text[-300:]})
+                row["action"] = "RESUMED" if is_loaded(run_fn, uid, r["label"]) else "RESUME_FAILED"
         out["rows"].append(row)
     dm = record["deadman"]
     out["result"] = "RESUMED" if all(r["action"] in ("RESUMED", "ALREADY_LOADED") for r in out["rows"]) else "RESUME_FAILED"

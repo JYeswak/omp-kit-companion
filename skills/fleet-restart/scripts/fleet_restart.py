@@ -1048,6 +1048,8 @@ def main(argv):
         if man.get("kind") == "run":
             tpl["rows"] = [r["pane"] for r in man["rows"] if r["action"] in ("RESTART", "QUEUE_BUSY")]
             tpl["watchers_pause"] = man["watchers"]["pause"]
+            tpl["watchers_pause_detail"] = (man["watchers"].get("binding") or {}).get("pause", [])
+            tpl["watchers_registry_sha256"] = (man["watchers"].get("binding") or {}).get("registry_sha256")
             tpl["unprotect"] = man.get("unprotect", [])
             tpl["target"] = man.get("target")
             tpl["canary"], tpl["strict_advisor"] = man.get("canary", 1), man.get("strict_advisor", False)
@@ -1145,6 +1147,7 @@ def run_cmd(args, env, uid):
                               canary=1 if args.canary is None else args.canary, strict_advisor=bool(args.strict_advisor), only=args.only)
         dump({"run_manifest": os.path.join(run_dir, fr_run.RUN_MANIFEST), "manifest_sha256": man["manifest_sha256"], "refused": man["refused"],
               "target": man["target"], "counts": man["counts"], "holds": man["holds"], "watchers_pause": man["watchers"]["pause"],
+              "watchers_pause_detail": (man["watchers"].get("binding") or {}).get("pause", []),
               "watchers_unclassified": [j["label"] for j in man["watchers"]["unclassified"]], "snapshot_dir": man["snapshot_dir"],
               "chief_respawn": man["chief_respawn"],
               "scratch_held": {r["pane"]: [d["path"] for d in r.get("held_scratch") or []] for r in man["rows"] if r.get("held_scratch")},
