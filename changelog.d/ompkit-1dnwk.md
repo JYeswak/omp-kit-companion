@@ -1,0 +1,3 @@
+### Fixed
+
+- Every scratch dir a seated caller makes now names its seat: `createScratch` falls back to the live seat lookup when no seat is injected, so programmatic creations stamp `agent`+`session` exactly like the CLI path, and unseated callers keep pid owners. A new `attributeOwnerSeat` resolves any structured owner to its seat — a seated record through its session lease, a pid-only record through the session leases its holder's ancestry holds — so a live holder always resolves to a live seat and a dead holder resolves to none, which is what makes it reclaimable. Reap verdicts are unchanged. (ompkit-1dnwk)

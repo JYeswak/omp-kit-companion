@@ -363,6 +363,48 @@ export function callerSeat(run: ScratchRunner, env: NodeJS.ProcessEnv = process.
 	const main = both.length === 1 ? both[0]! : both.length === 0 && sessions.length === 1 ? sessions[0]! : null;
 	return { agent, sessions, main };
 }
+/**
+ * Omp sessions whose lease a process in the given pid's ancestry holds open
+ * (SCRATCHOWN1 ompkit-1dnwk). Read-only: ps and lsof. Empty when no ancestor
+ * holds a lease or the tables cannot be read. A pid's agent name is NOT
+ * recoverable here — session leases are 0-byte locks — so attribution past
+ * the session id comes from the owner's own record.
+ */
+export function seatSessionsOfPid(pid: number, run: ScratchRunner): string[] {
+	const chain = ancestorPids(pid, run)?.filter(ancestor => ancestor > 1);
+	if (chain === undefined) return [];
+	const out = run(["lsof", "-a", "-p", chain.join(","), "-Fn"], { timeoutMs: LSOF_TIMEOUT_MS });
+	if (out.code === null) return [];
+	const locks = new Set<string>();
+	for (const line of out.stdout.split("\n")) {
+		if (!line.startsWith("n")) continue;
+		const lock = sessionIdOf(line.slice(1), "lock");
+		if (lock !== null) locks.add(lock);
+	}
+	return [...locks];
+}
+
+/** What an owner record attributes to: the seat and whether that seat is live. */
+export interface AttributedOwnerSeat { agent: string | null; sessions: string[]; seatLive: boolean | null }
+
+/**
+ * Attribute any structured owner to its seat (SCRATCHOWN1 ompkit-1dnwk): a
+ * seated record names its agent and session, resolved through seatLive; a
+ * pid-only record resolves its holder's ancestry to the session leases it
+ * holds, which is direct evidence of a live seat. `seatLive` is false when no
+ * seat attributes — a live pid outside any session is live by the pid rule
+ * but names no seat to nudge, and a dead holder names none to keep — and
+ * null only when a named seat's liveness is unprovable. Reap decisions stay
+ * with inspectSession; this never weakens them.
+ */
+export function attributeOwnerSeat(owner: ScratchOwner, deps: Pick<LivenessDeps, "seatLive"> & { run: ScratchRunner }): AttributedOwnerSeat {
+	if (owner.agent !== null && owner.session !== null) {
+		return { agent: owner.agent, sessions: [owner.session],
+			seatLive: deps.seatLive?.(owner.agent, owner.session) ?? null };
+	}
+	const sessions = seatSessionsOfPid(owner.pid, deps.run);
+	return { agent: null, sessions, seatLive: sessions.length > 0 };
+}
 
 const PS_MONTHS: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
 	Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
@@ -1566,7 +1608,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const dir = join(root, `${label}.${process.pid}`);
 	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
-	const seat = deps.callerSeat?.();
+	// No injected seat on the programmatic path: fall back to the live lookup
+	// (as release and owned-scratch do) so every dir a seated caller makes
+	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Unseated callers keep pid owners.
+	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	const fields: Record<string, string | number> = { pid: process.pid, process_start: start, label, repo, created_at: createdAt, argv0: argv };
 	if (seat?.agent && seat.main) {
 		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
