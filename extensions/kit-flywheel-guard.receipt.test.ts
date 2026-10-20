@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	CC_BEAD_RE,
 	parseEvidenceIds,
 	resolveCloseActor,
 	trackerRequests,
@@ -232,6 +233,30 @@ test("inert spool: no fleet state means no receipt and no warning", async () => 
 	expect(verdict).toBeUndefined();
 	await closeEnd(h, cwd, "r7", true);
 	expect(h.notices).toEqual([]);
+});
+
+test("refused: a non-bead token ($b, a sentence) is recorded without ctx.bead, so it never dead-letters", async () => {
+	// CLOSEGUARDBEAD1 (ompkit-5vi6p): cc.db dead_letters 6725-6728 were refused-close records whose
+	// ctx.bead held `$b`, `$BEAD`, `$1` and a mis-parsed reason sentence (FIELD_CODE / FIELD_LENGTH).
+	const cwd = stockRepo();
+	const state = spoolState();
+	const sentence = "GRADE-PASS (non-author GradeUdsRework, firsthand at be5fa3d incl 55a9523): tests 10/10";
+	const h = await createFlywheelHost(base, { respond: respond({}, cwd) });
+	for (const [call, token] of [["r8", "$b"], ["r9", sentence]] as const) {
+		const verdict = await closeCall(h, cwd, call, `br --actor Verifier close '${token}' --reason ok`);
+		expect(verdict?.block).toBe(true);
+		await closeEnd(h, cwd, call, true);
+	}
+	const refused = spoolLines(state, "closeguard").filter(line => line.type === "action.result");
+	expect(refused.length).toBe(2);
+	for (const line of refused) {
+		expect("bead" in line).toBe(false);
+		expect((line.data as Record<string, unknown>).outcome).toBe("refused");
+		expect(line.repo).toBe(cwd);
+	}
+	expect(CC_BEAD_RE.test("$b")).toBe(false);
+	expect(CC_BEAD_RE.test(sentence)).toBe(false);
+	expect(CC_BEAD_RE.test("ompkit-fp72.120.16.14")).toBe(true);
 });
 
 beforeEach(() => {

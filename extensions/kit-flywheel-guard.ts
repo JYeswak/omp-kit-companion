@@ -1673,6 +1673,13 @@ function closeguardSpool() {
  * alone would collide when one call closes several beads (the envelope id
  * hashes producer/position/type only), so the bead id joins the key.
  */
+/**
+ * The CC envelope bead grammar (omp-kit scripts/cc/cclib.py CODE_CHARS, 1..64 chars). A close
+ * token outside it (an unexpanded `$b`, a reason sentence parsed as an id) is not a bead id:
+ * putting it in ctx.bead dead-letters the whole record (CLOSEGUARDBEAD1, ompkit-5vi6p).
+ */
+export const CC_BEAD_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 export async function emitCloseReceipts(env: CloseGuardEmit, attempts: readonly CloseAttempt[],
 	toolCallId: string): Promise<{ emitted: number; failed: number }> {
 	const spool = closeguardSpool();
@@ -1689,6 +1696,10 @@ export async function emitCloseReceipts(env: CloseGuardEmit, attempts: readonly 
 		}
 		if (repo === null) {
 			env.notify?.(`kit-flywheel-guard: receipt skipped for ${attempt.id}: repo unresolved (not a git checkout); the close stands without a receipt.`, "warning");
+			continue;
+		}
+		if (!CC_BEAD_RE.test(attempt.id)) {
+			env.notify?.(`kit-flywheel-guard: receipt skipped: ${JSON.stringify(attempt.id.slice(0, 80))} is not a bead id; the close stands without a receipt.`, "warning");
 			continue;
 		}
 		try {
@@ -1743,7 +1754,7 @@ export async function emitRefusedCloseRecords(env: CloseGuardEmit, attempts: rea
 			}, {
 				key: `${attempt.id}:${toolCallId}:refused`,
 				timeMs: now,
-				ctx: { ...(repo === null ? {} : { repo }), bead: attempt.id, ...(attempt.actor === null ? {} : { agent: attempt.actor }) },
+				ctx: { ...(repo === null ? {} : { repo }), ...(CC_BEAD_RE.test(attempt.id) ? { bead: attempt.id } : {}), ...(attempt.actor === null ? {} : { agent: attempt.actor }) },
 			}));
 		} catch (error) {
 			env.notify?.(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: refused-close record for ${attempt.id} could not be built (${error instanceof Error ? error.message : String(error)}).`, "warning");
