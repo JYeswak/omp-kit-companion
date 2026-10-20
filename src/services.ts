@@ -8,13 +8,15 @@ export interface ServiceRow {
 	label: string;
 	class: ServiceClass;
 	domain: ServiceDomain;
-	loaded: "yes" | "no" | "unknown";
+	loaded: "yes" | "no" | "unknown" | null;
+	query_ok: boolean;
+	query_error: string | null;
 	pid: number | null;
 	last_exit: number | null;
 	trigger: string;
 	program: string;
+	args: string;
 	program_ok: string;
-	plist: string | null;
 	/** Plist path launchd actually loaded, from launchctl print; null when unasked or unanswered. */
 	loaded_plist: string | null;
 	tags: string[];
@@ -377,14 +379,12 @@ function judgeRequired(row: ServiceRow | null, job: DeclaredJob, home: string): 
 /** Read-only launchd inventory plus declared-job validation; never loads, unloads, or writes. */
 export function inventoryServices(input: ServicesInput, deps: InventoryDeps): ServicesReport {
 	const listed = deps.listAll();
-	if (listed.code !== 0) {
-		return { status: "UNVERIFIED", rows: [], duplicates: [], required: [],
-			admission: servicesAdmission([]),
-			reason: "launchctl list is unavailable on this machine; service inventory needs launchd" };
-	}
+	const queryOk = listed.code === 0;
+	const queryError = queryOk ? null : listed.code === 127 ? "LAUNCHCTL_NOT_FOUND" : `LAUNCHCTL_EXIT_${listed.code}`;
 	const loaded = parseLaunchdList(listed.stdout);
 	const rows: ServiceRow[] = [];
 	let systemUnverified = false;
+	const queryFields = { query_ok: queryOk, query_error: queryError };
 	for (const { directory, domain } of deps.plistDirs()) {
 		let names: string[];
 		try {
@@ -402,9 +402,9 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 				continue;
 			}
 			if (!stat.isFile() || stat.size > PLIST_BYTES_MAX) {
-				rows.push({ label: name, class: "BROKEN", domain, loaded: "no", pid: null, last_exit: null,
-					trigger: "-", program: "?", program_ok: "missing", plist, loaded_plist: null,
-					tags: [], omp_related: false, verified: true });
+				rows.push({ label: name, class: "BROKEN", domain, loaded: queryOk ? "no" : null, ...queryFields, pid: null, last_exit: null,
+					trigger: "-", program: "?", args: "", program_ok: "missing", plist, loaded_plist: null,
+					tags: [], omp_related: false, verified: queryOk });
 				continue;
 			}
 			let parsed;
@@ -414,9 +414,9 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 				parsed = null;
 			}
 			if (!parsed) {
-				rows.push({ label: name, class: "BROKEN", domain, loaded: "no", pid: null, last_exit: null,
-					trigger: "-", program: "?", program_ok: "missing", plist, loaded_plist: null,
-					tags: [], omp_related: false, verified: true });
+				rows.push({ label: name, class: "BROKEN", domain, loaded: queryOk ? "no" : null, ...queryFields, pid: null, last_exit: null,
+					trigger: "-", program: "?", args: "", program_ok: "missing", plist, loaded_plist: null,
+					tags: [], omp_related: false, verified: queryOk });
 				continue;
 			}
 			const { program, args, trigger } = parsed.program;
@@ -436,13 +436,13 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 				}
 			}
 			const entry = loaded.get(parsed.label);
-			let rowLoaded: "yes" | "no" | "unknown" = "no";
-			let verified = true;
-			if (domain === "user" || domain === "global-agent") {
+			let rowLoaded: "yes" | "no" | "unknown" | null = queryOk ? "no" : null;
+			let verified = queryOk;
+			if (queryOk && (domain === "user" || domain === "global-agent")) {
 				rowLoaded = entry ? "yes" : "no";
-			} else if (deps.printDomain("system", parsed.label) === 0) {
+			} else if (queryOk && deps.printDomain("system", parsed.label) === 0) {
 				rowLoaded = "yes";
-			} else {
+			} else if (queryOk) {
 				rowLoaded = "unknown";
 				verified = false;
 				systemUnverified = true;
@@ -470,7 +470,7 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 				cls = "FAILING";
 			}
 			const tags = tagRow(parsed.label, program, args);
-			rows.push({ label: parsed.label, class: cls, domain, loaded: rowLoaded, pid, last_exit: exit,
+			rows.push({ label: parsed.label, class: cls, domain, loaded: rowLoaded, ...queryFields, pid, last_exit: exit,
 				trigger: trigger || "-", program, args, program_ok: programOk, plist, loaded_plist: loadedPlist,
 				tags, omp_related: isOmpRelated(`${parsed.label} ${program} ${args}`), verified });
 		}
@@ -478,9 +478,9 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 	for (const [label, entry] of loaded) {
 		if (label.startsWith("com.apple.") || label.startsWith("application.") || label.includes(".anonymous.")) continue;
 		if (rows.some(row => row.label === label)) continue;
-		rows.push({ label, class: "LOADED_NO_PLIST", domain: "user", loaded: "yes", pid: entry.pid,
+		rows.push({ label, class: "LOADED_NO_PLIST", domain: "user", loaded: "yes", ...queryFields, pid: entry.pid,
 			last_exit: entry.exit, trigger: "-", program: "?", program_ok: "missing", plist: null,
-		loaded_plist: null, tags: tagRow(label, "", ""), omp_related: isOmpRelated(label), verified: true });
+			loaded_plist: null, tags: tagRow(label, "", ""), omp_related: isOmpRelated(label), verified: true });
 	}
 	const byProgram = new Map<string, string[]>();
 	for (const row of rows) {
