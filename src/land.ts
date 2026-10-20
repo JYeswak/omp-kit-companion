@@ -267,6 +267,9 @@ function parseReservations(stdout: string): Reservation[] | null {
 
 type PaneKey = { key: string } | { refusal: CliResult };
 
+// Owner seam (ompkit-kdbz.1.2.1): the tern:<id> mapping below resolves a DECLARED
+// Agent Mail pane registration (binding=legacy-unverified), not cryptographic or
+// current-native identity proof. Stronger caller/session proof stays on parent ACTOR1.
 function paneKey(): PaneKey {
 	const herdr = process.env.HERDR_PANE_ID;
 	if (process.env.HERDR_ENV === "1" || herdr !== undefined) {

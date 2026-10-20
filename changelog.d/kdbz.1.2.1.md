@@ -1,0 +1,1 @@
+- Record at the land owner seam that the `tern:<id>` mapping resolves a declared Agent Mail pane registration (binding=legacy-unverified), not cryptographic or current-native identity proof. (ompkit-kdbz.1.2.1)
