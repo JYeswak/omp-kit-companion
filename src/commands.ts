@@ -266,11 +266,18 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"], 
 	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
 } };
 const sendData: DataSchema = { type: "object", required: ["overall", "session", "pane", "status"], properties: {
-	overall: { enum: ["OK", "NOT_DELIVERED", "UNAVAILABLE", "UNVERIFIED"] },
-	session: { type: "string" }, pane: { type: "string" }, status: { enum: ["OK", "NOT_DELIVERED"] },
+	overall: { enum: ["OK", "NOT_DELIVERED", "PENDING_CONSUME", "UNAVAILABLE", "UNVERIFIED"] },
+	session: { type: "string" }, pane: { type: "string" },
+	status: { enum: ["OK", "DELIVERED", "NOT_DELIVERED", "UNDELIVERED", "PENDING_SUBMIT", "PENDING_CONSUME"] },
 	marker: { type: ["string", "null"] }, sends: { type: ["number", "null"] },
 	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
 	bead_ids: { type: "array", items: { type: "string" } }, no_bead_reason: { type: ["string", "null"] },
+	session_file: { type: ["string", "null"] }, offset: { type: ["number", "null"] }, tern_code: { type: "string" },
+} };
+const shaData: DataSchema = { type: "object", required: ["overall", "sha", "hits"], properties: {
+	overall: { enum: ["OK", "NOT_FOUND"] },
+	sha: { type: "string" }, repos: { type: "array", items: { type: "string" } },
+	hits: { type: "array", items: { type: "object" } }, text: { type: "string" },
 } };
 const custodyData: DataSchema = { type: "object", required: ["code"], properties: {
 	overall: { enum: ["GRANTED", "HELD", "DIRTY_UNOWNED", "NOT_RUN", "UNAVAILABLE"] },
@@ -395,8 +402,11 @@ const landData: DataSchema = { type: "object", required: ["overall", "check"], p
 }] };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] },
-	verdict: { enum: ["NOT_FOUND", "NON_EMPTY", "TOO_YOUNG", "UNKNOWN", "APPLY_REFUSED", "HELD", "WOULD_MOVE", "CHANGED", "BUSY"] },
+	verdict: { enum: ["NOT_FOUND", "NON_EMPTY", "TOO_YOUNG", "UNKNOWN", "APPLY_REFUSED", "HELD", "WOULD_MOVE", "CHANGED", "BUSY", "REAPED"] },
 	receipt: { type: ["object", "null"] },
+	results: { type: "array" },
+	ledger: { type: ["string", "null"] },
+	ledgerAppended: { type: ["boolean", "null"] },
 } };
 const missionData: DataSchema = { type: "object", required: ["overall", "mission_file", "identity", "stage", "pillars", "errors", "no_claim"], properties: {
 	overall: { enum: ["VALID", "UNREGISTERED", "INVALID"] }, mission_file: { type: "string" },
@@ -595,7 +605,7 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit tern-ref drift --json", runnable: false, mutation: true },
 	], runnable: false, mutation: true },
 	{ name: "test", description: "Run bundled matcher conformance, external G1-G3 packs, a public-synthetic external G4 marker fixture, a required-capability check, per-profile integration proof, per-profile MCP callable proof, strict zero-break metamorphic relations, mutation adequacy, or repeat flake verdicts",
-		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON [--expect SERVER:REGEX]]... [--startup-timeout-ms N] [--call-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
+		usage: "test [--project PATH] [--full] [--record] [--capabilities ABS_JSON] | [--rules ABS_DIR --cases ABS_FILE [--live-fixture ABS_JSON]] | [--integrations [--profile A,B] [--plan] [--out ABS_FILE] [--keep]] | [--mcp --profiles all|A,B [--servers A,B] [--call SERVER:TOOL:JSON [--expect SERVER:REGEX]]... [--startup-timeout-ms N] [--call-timeout-ms N]] | [--metamorphic [--rules ABS_DIR --cases ABS_FILE]] | [--mutants [--mutant-budget-secs N] [--rules ABS_DIR --cases ABS_FILE]] | [--repeat N [--scenario ID] [--baseline ABS_JSON]]", flags: [
 		{ name: "--project", value: "PATH", description: "Inspect project overrides without executing project code (bundled mode only)" },
 		{ name: "--full", description: "Request isolated live stage; cannot be combined with external packs" },
 		{ name: "--record", description: "Record the verdict and the tested OMP in the private state root so status can flag a later OMP change (bundled mode only; the only write test makes)" },
@@ -609,6 +619,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--profile", value: "NAME", description: "Integrations only: comma-separated profile names to prove" },
 		{ name: "--plan", description: "Integrations only: print the scenario matrix without running anything" },
 		{ name: "--out", value: "ABS_FILE", description: "Integrations only: write the JSON matrix report to this absolute path" },
+		{ name: "--keep", description: "Integrations only: retain the isolated work dir for inspection instead of removing it" },
 		{ name: "--mcp", description: "Per profile, check each server's env references (ENV_UNSET) and !command values (COMMAND_FAILED), start a fresh OMP rpc session on a private mirror of the profile's MCP config, list each server's tools and make each --call through OMP; a call is CALLABLE only with no error-shaped text and a matching --expect (else CALL_FAILED or UNVERIFIED_RESULT); exit 1 unless every selected server is CALLABLE" },
 		{ name: "--profiles", value: "NAMES|all", description: "MCP only: profiles to prove; all is the default profile plus every named profile" },
 		{ name: "--servers", value: "NAMES|all", description: "MCP only: servers to prove; default is every server in each profile's mcp.json" },
@@ -738,11 +749,16 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
 		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback)", usage: "send SESSION PANE MESSAGE", flags: [
+	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> panes use the verified native Tern delivery)", usage: "send SESSION PANE MESSAGE", flags: [
 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
 		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for deferred completion of a busy-pane send (default 300 for dispatches, off otherwise; 0 disables)" },
+		{ name: "--cwd", value: "PATH", description: "Absolute repository cwd the tern:<id> seat is bound to (default: caller cwd)" },
+		{ name: "--window-key", value: "KEY", description: "Explicit Tern window key for a tern:<id> send (default: verified default window)" },
 	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
+	{ name: "sha", description: "Resolve a commit sha across every fleet repo (kit, companion, ~/.claude, project repos) and report which repos hold it", usage: "sha SHA [--repo PATH]...", argument: "SHA", flags: [
+		{ name: "--repo", value: "PATH", repeatable: true, description: "Search exactly these repos instead of the discovered fleet set" },
+	], example: "omp-kit sha dd82fb4e --json", runnable: false, dataSchema: shaData },
 	{ name: "custody", description: "Answer 'may I edit this path' from git and reservations via the fleet custody probe; one PATH per call", usage: "custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH", flags: [], subcommands: [
 		{ name: "check", description: "Check-time answer (GRANTED) or lease (--reserve) for one repo-relative path; exit 0/10/11/2/3", usage: "custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH", argument: "PATH", flags: [
 			{ name: "--repo", value: "PATH", description: "Repo root the path must live inside" },
@@ -781,7 +797,12 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
 	{ name: "scratch",
 		description: `Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: ${UNOWNED_ACTIVE_RULE}. Plan and apply JSON include per-row sizes, per-root/per-verdict totals, malformed-owner counts and the exact policy; apply also includes a reaper receipt.`,
-		usage: "scratch plan|release DIR|mine|apply [--apply --yes]", flags: [], subcommands: [
+		usage: "scratch plan|release DIR|mine|new|apply [--apply --yes]", flags: [], subcommands: [
+			{ name: "new", description: "Create one owned task scratch dir with a JSON .owner and print its path; the only writer agents use", usage: "scratch new --label LABEL [--bead ID] [--export COMMIT]", flags: [
+				{ name: "--label", value: "LABEL", description: "Directory label: <repo>/var/agent-tmp/<label>.<pid>" },
+				{ name: "--bead", value: "ID", description: "Bead that owns this work, recorded in .owner" },
+				{ name: "--export", value: "COMMIT", description: "Exact commit to read-only export into the new dir" },
+			], example: "omp-kit scratch new --label probe --json", runnable: false, dataSchema: scratchData },
 			{ name: "plan", description: "Read-only report over all scratch roots with sized rows and per-root/per-verdict totals; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 			{ name: "mine", description: "List the caller's own scratch dirs (owner agent and session, or the caller's pid or an ancestor) with their state (unreleased, released, held, hold-expired) and bin; exit 0, overall FINDINGS while any is unreleased or its hold expired. Read-only unless --at is given", usage: "scratch mine [--at review|close|session-end]", flags: [
 				{ name: "--at", value: "review|close|session-end", description: "The disposal point asking: appends one flag row to the reap log when the caller has unreleased or hold-expired dirs, so a week of flags can be audited before the warning is promoted to a refusal" },
@@ -790,7 +811,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--bin", value: "throwaway|evidence|promote", description: "Disposal bin: throwaway is deleted with no reference; evidence is content committed under the owner's repo or recorded on a bead; promote is content committed to its owning repo. A hold is declared when the dir is made, not at release" },
 			{ name: "--ref", value: "file:PATH|bead:ID", description: "With --bin evidence or promote: file:PATH names a git-tracked file in the owner's repo (relative paths resolve there); bead:ID names a bead br show finds" },
 		], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --json", runnable: false, dataSchema: scratchReleaseData },
-		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused and no lock is moved", usage: "scratch index-lock --repo DIR", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
+		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused. --reap --yes moves index.lock and next-index-*.lock older than --min-age-ms (default 120 s) aside with a ledger receipt", usage: "scratch index-lock --repo DIR [--reap --yes [--min-age-ms N] [--ledger PATH]]", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }, { name: "--reap", description: "Gated apply: move stale locks aside, never unlink" }, { name: "--min-age-ms", value: "N", description: "Minimum lock age in milliseconds; non-negative integer, default 120000" }, { name: "--ledger", value: "PATH", description: "Receipt ledger file; default ~/.local/state/omp-kit/index-lock-ledger.jsonl" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
 			{ name: "apply", description: "Apply the guarded plan, delete expired quarantine, then kill orphaned harness servers; the JSON response repeats the policy and totals and includes the reaper receipt and the gap report. With --file-gaps, guarded gap classes are filed to their owning beads (one br comment per bead, only dirs no earlier run filed)", usage: "scratch apply [--apply --yes [--file-gaps [--db PATH]]]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },

@@ -63,7 +63,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { applyScratch, defaultLiveness, defaultRunner as scratchRunner, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -73,7 +73,8 @@ import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClaims } from "./drain.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
-import { proveSend } from "./send.ts";
+import { observeSendRecipient, proveSend, proveTernCliSend, readSendPause, routeSendTarget } from "./send.ts";
+import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
@@ -81,7 +82,7 @@ import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
-import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, observeServiceLaunchers, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
@@ -2260,10 +2261,12 @@ function runScratchReaperBody(home: string): CliResult {
 	});
 	const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
 		+ result.expired.filter(isApplyFailure).length;
+	const refused = result.receipt.refused_count;
 	return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: "scratch-reaper",
 		stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
 			reaped: result.applied.filter(v => v.action === "REAP").length,
 			quarantined: result.applied.filter(v => v.action === "QUARANTINE").length,
+			applied: result.applied.length, refused,
 			deleted: result.expired.length, failures: failed,
 			reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
 		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired },
@@ -2616,14 +2619,25 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		// ompkit-bj08.5: bind the lock holder incarnation across the gate-to-body
 		// gap; a changed or unreadable claim refuses with zero effects.
+		// ompkit-bj08.5 [d]: authority and launchers are re-read here, at the
+		// mutation boundary — never constants. The off switch is re-read
+		// because a pause declared after the pre-lock check (line ~2520)
+		// must still refuse; an off marker appearing in the gap yields OFF
+		// here and the SKIPPED-ADMISSION receipt below. The launcher set is
+		// observed via ps, not derived from the keeper claim, so a live
+		// second launcher outside the claim refuses. An unobservable ps
+		// snapshot confirms nothing (fail-closed). Generations stay
+		// temporal: gate-time versus body-time incarnations of the claim.
 		const bodyClaim = readRunClaim(jobsDir, job.name);
 		const bodyVersion = bodyClaim === null ? null : claimIncarnation(bodyClaim);
+		const bodyOff = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
+		const bodyLaunchers = observeServiceLaunchers(defaultRunner, job.name);
 		const runAdmission: AdmissionInput = {
 			launcherBinding: "keeper",
-			authority: "ACTIVE",
-			authorityConfirmed: true,
+			authority: bodyOff.disabled ? "OFF" : "ACTIVE",
+			authorityConfirmed: "launchers" in bodyLaunchers,
 			authorityGeneration: bodyVersion,
-			launchers: bodyClaim === null ? [] : [{ pid: bodyClaim.pid, command: `service run ${job.name}` }],
+			launchers: "launchers" in bodyLaunchers ? bodyLaunchers.launchers : [],
 			keeper: bodyClaim === null ? null : { pid: bodyClaim.pid, command: `service run ${job.name}` },
 			packet: { action: "service-run", ownedAction: "service-run", generation: gateVersion },
 			governedActions: ["service-run"],
@@ -2720,6 +2734,18 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
 				const watchClaim = readRunClaim(jobsDir, job.name);
 				const watchVersion = watchClaim === null ? null : claimIncarnation(watchClaim);
+				// ompkit-bj08.5 [d]: authority and launchers re-read at this
+				// effects boundary — never constants. The off switch is
+				// re-read because a pause declared after the pre-lock check
+				// must still refuse every nudge; the launcher set is
+				// observed via ps, not derived from the keeper claim, so a
+				// live second launcher outside the claim refuses. An
+				// unobservable ps snapshot confirms nothing (fail-closed).
+				// Generations stay temporal: the gate-time claim incarnation
+				// authorizes the packet, the body-time incarnation is the
+				// current authority; a changed holder in between refuses.
+				const watchOff = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
+				const watchLaunchers = observeServiceLaunchers(defaultRunner, job.name);
 				const result = runFleetWatchOnce(config, {
 					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", paneTarget(session, pane)]),
 					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
@@ -2727,10 +2753,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					logPath,
 					admission: {
 						launcherBinding: "keeper",
-						authority: "ACTIVE",
-						authorityConfirmed: true,
+						authority: watchOff.disabled ? "OFF" : "ACTIVE",
+						authorityConfirmed: "launchers" in watchLaunchers,
 						authorityGeneration: watchVersion,
-						launchers: watchClaim === null ? [] : [{ pid: watchClaim.pid, command: "service run fleet-watch" }],
+						launchers: "launchers" in watchLaunchers ? watchLaunchers.launchers : [],
 						keeper: watchClaim === null ? null : { pid: watchClaim.pid, command: "service run fleet-watch" },
 						packet: { action: "nudge", ownedAction: "nudge", generation: gateVersion },
 						governedActions: ["send", "send-keys", "tracker-recovery"],
@@ -2891,19 +2917,86 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Pass --until-delivered <seconds>; nothing was sent.");
 		untilDeliveredMs = Number(untilFlag) * 1000;
 	}
+	// SEND1 tern route: an explicit `tern:<id>` pane addresses the verified
+	// native Tern delivery (proveTernCliSend), never the tmux/ntm path that
+	// can never land on a Tern seat (LIVE MISS 2026-10-19). A malformed
+	// `tern:` address refuses here with zero sends.
+	const ternRoute = routeSendTarget(pane);
+	if (ternRoute.route === "refused") {
+		return refusal(ternRoute.code, ternRoute.detail, "Fix the pane address to tern:<decimal block id>; nothing was sent.");
+	}
+	if (ternRoute.route === "tern") {
+		const cwdFlag = request.flags.get("--cwd");
+		if (typeof cwdFlag === "string" && !isAbsolute(cwdFlag)) {
+			return refusal("INVALID_CWD", "The Tern seat repo needs a canonical absolute path",
+				"Pass an absolute --cwd pointing at the seat's repository; nothing was sent.");
+		}
+		const windowFlag = request.flags.get("--window-key");
+		const ternResult = await proveTernCliSend({ session, pane, message: messageParts.join(" "),
+			dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
+			...(typeof cwdFlag === "string" ? { cwd: cwdFlag } : {}),
+			...(typeof windowFlag === "string" ? { windowKey: windowFlag } : {}),
+			...(typeof reasonFlag === "string" ? { noBeadReason: reasonFlag } : {}),
+			...(untilDeliveredMs !== undefined ? { untilDeliveredMs } : {}),
+		});
+		const ternBeads = { bead_ids: [] as string[], no_bead_reason: null as string | null };
+		if (ternResult.status === "REFUSED") {
+			const remediation = ternResult.code === "BEAD_REQUIRED"
+				? "Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\"."
+				: "Nothing was sent: fix the refusal reason and retry.";
+			return refusal(ternResult.code, ternResult.detail, remediation);
+		}
+		if (ternResult.status === "OK") {
+			return { code: 0, data: { overall: "OK", session, pane, status: ternResult.status, marker: ternResult.marker,
+				sends: ternResult.sends, drop_path: null, detail: ternResult.detail, ...ternBeads,
+				session_file: ternResult.sessionFile, offset: ternResult.offset, tern_code: ternResult.code }, verification: "UNVERIFIED" };
+		}
+		if (ternResult.status === "PENDING_CONSUME") {
+			return { code: 1, data: { overall: "PENDING_CONSUME", session, pane, status: ternResult.status, marker: ternResult.marker,
+				sends: ternResult.sends, drop_path: ternResult.drop_path, detail: ternResult.detail, ...ternBeads,
+				session_file: ternResult.sessionFile, offset: null, tern_code: ternResult.code }, verification: "UNVERIFIED",
+				errors: [{ code: "PENDING_CONSUME", message: ternResult.detail,
+					remediation: ternResult.drop_path ? `The effect is unproven and retained, never auto-resent; the full text is at ${ternResult.drop_path}.` : "The effect is unproven and retained, never auto-resent." }] };
+		}
+		return { code: 1, data: { overall: "NOT_DELIVERED", session, pane, status: ternResult.status, marker: ternResult.marker,
+			sends: ternResult.sends, drop_path: ternResult.drop_path, detail: ternResult.detail, ...ternBeads,
+			session_file: ternResult.sessionFile, offset: null, tern_code: ternResult.code }, verification: "UNVERIFIED",
+			errors: [{ code: "NOT_DELIVERED", message: ternResult.detail,
+				remediation: ternResult.drop_path ? `Relay the message manually; the full text is at ${ternResult.drop_path}.` : "Retry the send; no drop file was written." }] };
+	}
+	// ompkit-bj08.5 [d]: the admission snapshot is the final observation,
+	// read from runtime sources — never constants. Authority comes from the
+	// operator pause declaration read (readSendPause); both generations
+	// come from the live recipient observation (observeSendRecipient).
+	// authorityConfirmed is the outcome of those two reads, not an
+	// assumption. When the recipient is unobservable (no live tmux) the
+	// snapshot is withheld and proveSend takes the legacy truthful
+	// unresolved path (NOT_DELIVERED with a drop copy). Residual, named:
+	// this branch has no OFF/PROTECTED source, so those refusals stay
+	// unreachable here; unconfirmed maps to the withheld-snapshot path.
+	const sendPaused = readSendPause(process.env);
+	// Same targeting proveSend resolves to (bare %id passes through,
+	// qualified targets pass through, anything else is session:pane), so
+	// the final observation names the same recipient the boundary recheck
+	// will re-observe. Pane-id grammar is pinned by observeSendRecipient.
+	const sendTarget = /^%\d+$/.test(pane) || pane.includes(":") ? pane : `${session}:${pane}`;
+	const sendRecipient = observeSendRecipient((argv) => {
+		const probed = defaultRunner(["tmux", ...argv]);
+		return { code: probed.code, out: probed.stdout };
+	}, sendTarget);
 	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
 		untilDeliveredMs,
 		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
-		admission: {
+		...(sendRecipient === null ? {} : { admission: {
 			launcherBinding: "none",
-			authority: "ACTIVE",
+			authority: sendPaused ? "PAUSED" : "ACTIVE",
 			authorityConfirmed: true,
-			authorityGeneration: `send/${session}/${pane}`,
+			authorityGeneration: sendRecipient,
 			launchers: [],
 			keeper: null,
-			packet: { action: "send", ownedAction: "send", generation: `send/${session}/${pane}` },
+			packet: { action: "send", ownedAction: "send", generation: sendRecipient },
 			governedActions: ["send"],
-		} });
+		} }) });
 	if (result.status === "BEAD_REQUIRED") {
 		return refusal("BEAD_REQUIRED", "A work dispatch must cite a bead id (kernel inv 4: beads are the execution substrate)",
 			"Nothing was sent: cite the bead from br ready, or create it first; for a deliberate exception pass --no-bead-reason \"<why>\".");
@@ -3240,6 +3333,40 @@ async function infraCommand(request: ParsedCommand): Promise<CliResult> {
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
 registerCommandHandler("load watch", loadWatchCommand);
 registerCommandHandler("send", sendCommand);
+
+function shaCommand(request: ParsedCommand): CliResult {
+	const sha = request.argument ?? "";
+	if (!SHA_PATTERN.test(sha))
+		return refusal("SHA_MALFORMED", `sha needs a 4-40 hex commit prefix, got ${sha || "(none)"}`,
+			"Run omp-kit sha <sha> with the cited commit prefix; nothing was searched.");
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home))
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "sha needs an absolute HOME to discover fleet repos",
+				remediation: "Run with an absolute HOME; nothing was searched." }], verification: "UNVERIFIED" };
+	const repoFlag = request.flags.get("--repo");
+	let repos: string[];
+	if (repoFlag !== undefined) {
+		repos = String(repoFlag).split("\n").filter((entry) => entry !== "");
+		const bad = repos.find((entry) => !isAbsolute(entry));
+		if (repos.length === 0 || bad)
+			return refusal("INVALID_REPO", "sha --repo needs absolute repo paths",
+				"Pass --repo /absolute/repo (repeatable); nothing was searched.");
+	} else {
+		repos = discoverFleetRepos(home);
+	}
+	const runner: ShaRunner = (args, opts) => {
+		const out = Bun.spawnSync(args as [string, ...string[]], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
+		return { code: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
+	};
+	const results = lookupSha(runner, repos, sha);
+	const hits = results.filter((row) => row.present);
+	const text = formatShaText(sha, repos, results);
+	if (!hits.length)
+		return { code: 1, data: { overall: "NOT_FOUND", sha, repos, hits: [], text }, verification: "UNVERIFIED" };
+	return { code: 0, data: { overall: "OK", sha, repos, hits, text }, verification: "UNVERIFIED" };
+}
+registerCommandHandler("sha", shaCommand);
 for (const subcommand of ["pin", "check", "promote", "undo"]) registerCommandHandler(`infra ${subcommand}`, infraCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
@@ -3253,8 +3380,8 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
 	}
 	const deps = { liveness: defaultLiveness(), run: scratchRunner, runtimeRepo: kitIdentity().release.root,
-		onProgress: (verdict: { dir: string; action: string; reason: string }) => {
-			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})\n`);
+		onProgress: (verdict: { dir: string; action: string; reason: string; error?: string }) => {
+			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})${verdict.error ? ` ${verdict.error}` : ""}\n`);
 		} };
 	if (sub === "release") {
 		if (!request.argument) return refusal("SCRATCH_RELEASE_PATH_REQUIRED", "scratch release needs a directory path",
@@ -3318,6 +3445,31 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				...(gapFiled === null ? { gapFileCommands } : { gapFiled }) },
 			verification: "UNVERIFIED" };
 	}
+	if (sub === "new") {
+		const labelFlag = request.flags.get("--label"), beadFlag = request.flags.get("--bead"), exportFlag = request.flags.get("--export");
+		if (typeof labelFlag !== "string" || labelFlag === "")
+			return refusal("SCRATCH_NEW_LABEL_REQUIRED", "scratch new needs --label LABEL",
+				"Run omp-kit scratch new --label <name> [--bead <id>] [--export <commit>] from the owning repo.");
+		if ((beadFlag !== undefined && typeof beadFlag !== "string") || (exportFlag !== undefined && typeof exportFlag !== "string"))
+			return refusal("SCRATCH_NEW_FLAG_INVALID", "--bead and --export take string values",
+				"Pass --bead <bead-id> and --export <commit-sha>.");
+		let repo: string;
+		try {
+			repo = resolve(process.cwd());
+		} catch {
+			return refusal("SCRATCH_NEW_REPO_UNAVAILABLE", "scratch new needs a resolvable working directory",
+				"Run from the repo that will own the scratch; nothing was created.");
+		}
+		const created = createScratch(labelFlag, repo, { ...deps, callerSeat: () => callerSeat(deps.run) },
+			{ ...(typeof beadFlag === "string" ? { bead: beadFlag } : {}) }, true);
+		if (!created.ok) return refusal("SCRATCH_NEW_REFUSED", `scratch new refused: ${created.reason}`,
+			"Use a fresh label; run from the repo that will own the scratch.");
+		if (typeof exportFlag === "string") {
+			const err = exportCommitToScratch(repo, exportFlag, created.dir, deps.run);
+			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, reason: err }, verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "OK", dir: created.dir, exportLine: created.exportLine }, verification: "UNVERIFIED" };
+	}
 	if (sub === "mine") {
 		const atFlag = request.flags.get("--at");
 		const point = OWED_FLAG_POINTS.find((candidate) => candidate === atFlag);
@@ -3333,7 +3485,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
-for (const subcommand of ["plan", "release", "apply", "mine"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+for (const subcommand of ["plan", "release", "apply", "mine", "new"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
 	const repoFlag = request.flags.get("--repo");
