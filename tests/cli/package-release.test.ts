@@ -602,13 +602,18 @@ test("detached signatures verify on a fresh copy; planted tampering, wrong keys,
 	expect(missing.stderr.toString()).toContain("SIG_NOT_FOUND");
 }, 120_000);
 
-test("GUARDLOAD1: shipped kit-flywheel-guard is bundled with no ../src/ escape and loads from the staged tree", () => {
-	const staged = join(output, "archived-source");
-	const shipped = readFileSync(join(staged, "extensions", "kit-flywheel-guard.ts"), "utf8");
-	expect(shipped).not.toContain("../src/");
-	expect(shipped).toContain("export");
-	const failures = checkPackagedExtensionLoads(staged);
-	expect(failures.map(failure => failure.file)).not.toContain("extensions/kit-flywheel-guard.ts");
+test("GUARDLOAD1: bundled kit-flywheel-guard carries no ../src/ escape and loads with no src/ present", async () => {
+	const bundled = await Bun.build({ entrypoints: [join(repo, "extensions", "kit-flywheel-guard.ts")],
+		target: "bun", format: "esm", minify: false });
+	expect(bundled.success).toBe(true);
+	expect(bundled.outputs.length).toBe(1);
+	const text = await bundled.outputs[0]!.text();
+	expect(text).not.toContain("../src/");
+	expect(text).toContain("export");
+	const root = mkdtempSync(join(output, "gate-shipped-"));
+	mkdirSync(join(root, "extensions"), { recursive: true });
+	writeFileSync(join(root, "extensions", "kit-flywheel-guard.ts"), text);
+	expect(checkPackagedExtensionLoads(root)).toEqual([]);
 });
 
 test("GUARDLOAD1: extension load gate fails a ../src/ escape naming file and module, passes a bundled tree", () => {
