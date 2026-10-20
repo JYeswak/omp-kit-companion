@@ -1,0 +1,1 @@
+- Omit tool-backed verbs (land, send, rch lease, fleet *, tern-ref *, planning convert, drain tracker verbs) from capabilities when their native binary (am, ntm, rch, tern, br, tmux) is absent from PATH; invoking one refuses with a named *_UNAVAILABLE code and exit 3 before any spawn. (ompkit-oq1h.6)

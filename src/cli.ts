@@ -107,9 +107,43 @@ export function registerCommandHandler(path: string, handler: CommandHandler): v
 	handlers.set(path, handler);
 }
 
+/** oq1h.6: grammar paths whose handler shells out to a native binary, with the binaries probed on PATH. Drain verbs read a beads tracker and emit br reclaim commands, so they gate on the tracker CLI. */
+const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
+	"land": ["am"],
+	"send": ["ntm", "tmux"],
+	"rch lease": ["rch"],
+	"fleet flush-pending": ["tmux"],
+	"fleet respawn": ["tmux"],
+	"tern-ref build": ["tern"],
+	"tern-ref query": ["tern"],
+	"tern-ref validate": ["tern"],
+	"tern-ref drift": ["tern"],
+	"planning convert": ["br"],
+	"drain close-queue": ["br"],
+	"drain stale-claims": ["br"],
+};
+
+const TOOL_UNAVAILABLE_CODES: Record<string, string> = {
+	"am": "AGENT_MAIL_UNAVAILABLE",
+	"ntm": "NTM_UNAVAILABLE",
+	"tmux": "TMUX_UNAVAILABLE",
+	"rch": "RCH_UNAVAILABLE",
+	"tern": "TERN_UNAVAILABLE",
+	"br": "BR_UNAVAILABLE",
+};
+
+const toolPresence: Record<string, boolean> = {};
+function toolPresent(tool: string): boolean {
+	const cached = toolPresence[tool];
+	if (cached !== undefined) return cached;
+	const found = Bun.which(tool) !== null;
+	toolPresence[tool] = found;
+	return found;
+}
+
 function isRunnable(command: Command, path: string): boolean {
 	if (command.subcommands) return command.subcommands.some((child) => isRunnable(child, `${path} ${child.name}`));
-	return command.runnable || handlers.has(path);
+	return (command.runnable || handlers.has(path)) && (TOOL_GATED_COMMANDS[path]?.every(toolPresent) ?? true);
 }
 
 function availableCommands(commands: readonly Command[] = COMMANDS, prefix = ""): Command[] {
@@ -3785,6 +3819,13 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (path === "lessons") return { code: 0, data: { text: help(command) }, verification: "PERFORMED" };
 	if (path === "lessons add" || path === "checkin") return lessonRecordCommand(request);
 	const handler = handlers.get(path);
+	const missingTool = TOOL_GATED_COMMANDS[path]?.find((tool) => !toolPresent(tool));
+	if (missingTool) {
+		const code = TOOL_UNAVAILABLE_CODES[missingTool] ?? "TOOL_UNAVAILABLE";
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code, message: `${path} needs the native ${missingTool} binary, which is not on PATH`,
+				remediation: `Install ${missingTool}, then re-run; nothing was executed and no mutation was attempted.` }], verification: "NOT_RUN" };
+	}
 	if (handler && (STATE_ROOT_COMMANDS[path] || (path === "test" && flags.has("--record"))) && !(path === "repair" && flags.get("--scope") === "state")) {
 		const stateRoot = receiptStateRoot();
 		const issue = stateRoot ? inspectStateRoot(stateRoot) : null;
