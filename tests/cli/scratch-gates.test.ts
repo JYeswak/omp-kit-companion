@@ -74,6 +74,48 @@ test("disposalGate refuses at every point while an undisposed dir is owed, and p
   expect(after.owed).toEqual([]);
 });
 
+test("disposalGate charges only exact caller ownership and excludes live owners", () => {
+  const root = mkdtempSync(join(scratchParent, "gates-boundary-"));
+  const home = mkdtempSync(join(scratchParent, "gates-boundary-home-"));
+  cleanup.push(root, home);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  process.env.XDG_STATE_HOME = join(home, "state");
+  mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+  const liveOwner = (pid: number, label: string, agent: string) =>
+    `pid=${pid}\nprocess_start=Mon Oct  5 13:27:00 2026\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-20T05:00:00Z\nargv0=test\nagent=${agent}\nsession=${SESSION}\n`;
+  for (const [name, text] of [
+    ["parent.61002", liveOwner(61002, "parent", "ParentSeat")],
+    ["sibling.61003", liveOwner(61003, "sibling", "SiblingSeat")],
+    ["child-live.61006", liveOwner(61006, "child-live", "ChildSeat")],
+    ["parent-live-3.61007", liveOwner(61007, "parent-live-3", "ParentSeat")],
+  ] as const) {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    writeFileSync(join(dir, ".owner"), text);
+  }
+  const live: LivenessDeps = {
+    signalAlive: (pid) => pid !== process.pid,
+    psVisible: (pid) => pid !== process.pid,
+    processStart: (pid) => pid === process.pid ? "Thu Jan  1 00:00:00 1970" : "Mon Oct  5 13:27:00 2026",
+  };
+  const caller: InspectDeps = { ...inspect(seat("ChildSeat", [SESSION])), liveness: live };
+  const childClean = disposalGate(home, "review", caller, NOW);
+  expect(childClean.decision).toBe("ok");
+  expect(childClean.owed).toEqual([]);
+  const own = join(root, "own.61004");
+  mkdirSync(own);
+  writeFileSync(join(own, ".owner"), owner(process.pid, "own"));
+  const gate = disposalGate(home, "review", caller, NOW);
+  expect(gate.decision).toBe("refuse");
+  const parentOwn = join(root, "parent-own.61005");
+  mkdirSync(parentOwn);
+  writeFileSync(join(parentOwn, ".owner"), owner(process.pid, "parent-own", `agent=ParentSeat\nsession=${SESSION}\n`));
+  const parentGate = disposalGate(home, "review", { ...inspect(seat("ParentSeat", [SESSION])), liveness: live }, NOW);
+  expect(parentGate.decision).toBe("refuse");
+  expect(parentGate.owed.map(row => row.label)).toEqual(["own", "parent-own"]);
+  expect(gate.owed.map(row => row.label)).toEqual(["own"]);
+});
+
 test("disposalGate is fail-open when the ownership census cannot be listed: never a block, nothing logged", () => {
   const root = mkdtempSync(join(scratchParent, "gates-unproven-"));
   const home = mkdtempSync(join(scratchParent, "gates-unproven-home-"));

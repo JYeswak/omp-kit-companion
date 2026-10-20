@@ -2645,9 +2645,20 @@ export interface OwnedScratchRow { dir: string; label: string; state: OwnedScrat
 
 /**
  * The caller's own scratch dirs across the scratch roots (ompkit-774u.15 C): those whose owner record names the caller's
- * agent and a session it holds, or the caller's own pid or an ancestor. Read-only; a dir the owner already released is
- * listed as released, a hold as held until its expiry. Dirs of other owners never appear.
- */
+ * agent and a session it holds, or the caller's exact pid. Read-only; a dir
+ * the owner already released is listed as released, a hold as held until its
+ * expiry. Dirs of other owners and ancestor/sibling seats never appear.
+*/
+function disposalOwnerMatches(owner: ScratchOwner, deps: InspectDeps): boolean {
+	// Disposal accounting is exact-seat ownership, not process ancestry. A child
+	// seat must never be charged for a parent or sibling's scratch.
+	return callerHoldsSeat(owner, deps) || owner.pid === process.pid;
+}
+
+function ownerIsLive(owner: ScratchOwner, deps: InspectDeps): boolean {
+	return owner.processStart !== null && probeOwner(owner.pid, owner.processStart, deps.liveness) === "live";
+}
+
 export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[] {
 	const now = deps.now ?? Date.now();
 	// One listing reads the process table and the caller's session leases once, not once per dir: a fleet repo holds
@@ -2677,7 +2688,7 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 			if (isSymlink(dir) || isSymlink(join(dir, ".owner"))) continue;
 			const text = readText(join(dir, ".owner"));
 			const owner = text === null ? null : parseOwnerFile(text);
-			if (owner === null || !(callerHoldsSeat(owner, once) || callerIsOwnedBy(owner.pid, process.pid, run))) continue;
+			if (owner === null || !disposalOwnerMatches(owner, once) || ownerIsLive(owner, once)) continue;
 			const released = readReleaseRecord(dir);
 			const bytes = dirSize(dir);
 			const budget = owner.budget;
