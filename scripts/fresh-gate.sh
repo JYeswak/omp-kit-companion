@@ -191,6 +191,38 @@ gate_cli_compile() {
 		heavy_step cli-compile bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig src/cli.ts --outfile="$WORK/omp-kit-cli"
 	)
 }
+gate_cli_boot() {
+	(
+		cd "$ARCHIVE_DIR"
+		boot_started=$(date +%s)
+		if ! version=$("$WORK/omp-kit-cli" --version 2>&1); then
+			printf 'cli-boot: --version failed: %s\n' "$version" >&2
+			return 1
+		fi
+		paths=$(sed -n 's/^[[:space:]]*registerCommandHandler("\([^"]*\)".*/\1/p' "$ARCHIVE_DIR/src/cli.ts")
+		[ -n "$paths" ] || {
+			printf 'cli-boot: no registered handlers found in src/cli.ts\n' >&2
+			return 1
+		}
+		while IFS= read -r path; do
+			[ -n "$path" ] || continue
+			# shellcheck disable=SC2086
+			if "$WORK/omp-kit-cli" $path --help >/dev/null 2>"$WORK/cli-boot.err"; then
+				:
+			else
+				rc=$?
+				printf 'cli-boot: registered verb %s --help failed (rc=%s): %s\n' \
+					"$path" "$rc" "$(cat "$WORK/cli-boot.err")" >&2
+				return "$rc"
+			fi
+		done <<EOF
+$paths
+EOF
+		printf 'cli-boot: version=%s verbs=%s elapsed=%ss\n' "$version" \
+			"$(printf '%s\n' "$paths" | awk 'NF { n++ } END { print n+0 }')" \
+			"$(($(date +%s) - boot_started))"
+	)
+}
 
 # judge_budget ELAPSED TESTS QUEUED: the 180 s budget judges the gate's own machinery. The affected
 # tests' run time (TESTS) scales with the diff, not with the gate, and is reported beside it; heavy
@@ -764,6 +796,7 @@ run_gate() {
 	started=$(date +%s)
 	run_step manifest gate_manifest || exit 1
 	run_step cli-compile gate_cli_compile || exit 1
+	run_step cli-boot gate_cli_boot || exit 1
 	run_step harness-gate gate_harness || exit 1
 	run_step notes gate_notes || exit 1
 	run_step readme gate_readme || exit 1
