@@ -272,6 +272,14 @@ const sendData: DataSchema = { type: "object", required: ["overall", "session", 
 	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
 	bead_ids: { type: "array", items: { type: "string" } }, no_bead_reason: { type: ["string", "null"] },
 } };
+const custodyData: DataSchema = { type: "object", required: ["code"], properties: {
+	overall: { enum: ["GRANTED", "HELD", "DIRTY_UNOWNED", "NOT_RUN", "UNAVAILABLE"] },
+	code: { enum: ["GRANTED", "HELD", "DIRTY_UNOWNED", "PROBE_FAILED", "PROBE_TIMEOUT", "USAGE"] },
+	schema_version: { type: "string" }, ok: { type: "boolean" }, repo: { type: "string" },
+	agent: { type: ["string", "null"] }, as_of: { type: "string" },
+	paths: { type: "array", items: { type: "object" } }, authorities: { type: "array", items: { type: "string" } },
+	probe_exit: { type: "number" }, error: { type: "string" }, detail: { type: "string" },
+} };
 const infraData: DataSchema = { type: "object", required: ["overall", "command"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
 	command: { enum: ["pin", "check", "promote", "undo"] },
@@ -735,6 +743,15 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
 		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for deferred completion of a busy-pane send (default 300 for dispatches, off otherwise; 0 disables)" },
 	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
+	{ name: "custody", description: "Answer 'may I edit this path' from git and reservations via the fleet custody probe; one PATH per call", usage: "custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH", flags: [], subcommands: [
+		{ name: "check", description: "Check-time answer (GRANTED) or lease (--reserve) for one repo-relative path; exit 0/10/11/2/3", usage: "custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH", argument: "PATH", flags: [
+			{ name: "--repo", value: "PATH", description: "Repo root the path must live inside" },
+			{ name: "--agent", value: "NAME", description: "Agent asking (default: AGENT_NAME)" },
+			{ name: "--reserve", description: "Turn a GRANTED answer into an exclusive lease" },
+			{ name: "--ttl", value: "SECONDS", description: "Lease TTL with --reserve (default 3600)" },
+			{ name: "--reason", value: "TEXT", description: "Lease reason with --reserve (never a credential)" },
+		], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, mutation: true, dataSchema: custodyData },
+	], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, dataSchema: custodyData },
 	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes)", usage: "infra pin|check|promote|undo", flags: [], subcommands: [
 		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
 			{ name: "--file", value: "PATH", description: "Pin file to read (default: kit .omp/infra-pins.toml)" },
