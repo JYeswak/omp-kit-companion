@@ -539,24 +539,37 @@ def restart_manifest(plan, mode="restart", save=None):
     return man
 
 
-def health_text(repo, session, which=None):
+def health_text(repo, sessions, which=None):
     """INIT health clause for a staged director message. Tools are named bare
     (resolved on the operator's PATH, never a per-user absolute path); a tool
-    missing from PATH is omitted from the clause, never reported as run."""
+    missing from PATH is omitted from the clause, never reported as run.
+    `sessions`: every session in the run, the director's own first: a director
+    whose workers live in another session (2026-10-11 control-plane:0.1 ->
+    uds--burn-down) must read that session's health too, not just its own
+    (ompkit-uxr3). Accepts one session string or a list."""
     find = which or shutil.which
     parts = []
     if find("flywheel"):
         parts.append("flywheel doctor --repo %s --json" % repo)
+    if isinstance(sessions, str):
+        sessions = [sessions]
     if find("ntm"):
-        parts.append("ntm health %s --json" % session)
+        parts += ["ntm health %s --json" % s for s in dict.fromkeys(sessions)]
     if not parts:
         return "No HEALTH tool (flywheel/ntm) is on PATH: record versions by hand. "
     return "INIT includes HEALTH: %s. " % " and ".join(parts)
 
 
-def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directors):
+def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directors, which=None):
     """Directors are named by the operator (pane position is not a role: on
-    2026-10-11 uds--burn-down:0.1 was a worker and control-plane:0.1 ran UDS)."""
+    2026-10-11 uds--burn-down:0.1 was a worker and control-plane:0.1 ran UDS).
+    Every staged text names its pane (the row is not inferable from the
+    snapshot file name), the callback channel (the pane's own output, where
+    the chief's sitrep sweep reads tails), and, for directors, every run
+    session's health. Workers hold for the director's dispatch: directors
+    DISPATCH in their first turn, so a self-assigning worker message
+    double-assigns (ompkit-uxr3). Holds (HOLD_CWD and the rest) never reach a
+    manifest: only RESTART rows are staged."""
     if not directors:
         raise ValueError("DIRECTORS_REQUIRED: pass the operator-confirmed director panes")
     unknown = set(directors) - {r["pane"] for r in plan["rows"]}
@@ -564,26 +577,29 @@ def messages_manifest(plan, handoff, snapshot_dir, kit_version, out_dir, directo
         raise ValueError("DIRECTORS_NOT_IN_PLAN: %s" % ", ".join(sorted(unknown)))
     os.makedirs(out_dir, exist_ok=True)
     dirs = set(directors)
+    sessions = sorted({r["session"] for r in plan["rows"] if r["action"] == "RESTART"})
     rows = []
     for r in plan["rows"]:
         if r["action"] != "RESTART":
             continue
         snap = os.path.join(snapshot_dir, "panes", r["pane"].replace(":", ".") + ".md")
         role = "director" if r["pane"] in dirs else "worker"
+        own_first = [r["session"]] + [s for s in sessions if s != r["session"]]
         if role == "director":
             text = (
-                "Fresh session on omp-kit %s. Read %s, your row and your workers' rows, then your pane snapshot %s.\n"
+                "You are %s (session %s). Fresh session on omp-kit %s. Read %s, your row and your workers' rows, then your pane snapshot %s.\n"
                 "Follow the kit tick order: INIT → RESEARCH → PLAN → BEADS → DISPATCH → VALIDATE → INTEGRATE → LEARN. "
                 "VALIDATE is before INTEGRATE. A callback with no validation receipt is not INTEGRATE-ready.\n"
-                % (kit_version, handoff, snap)
-                + health_text(r["cwd"], r["session"]) +
+                % (r["pane"], r["session"], kit_version, handoff, snap)
+                + health_text(r["cwd"], own_first, which) +
                 "A stale user/shell pane is a warning, not a block; exit 30 repo_not_initialized means phase INIT.\n"
-                "Callback, one line: %s\n" % CALLBACK)
+                "Callback, one line printed in your own pane output (the chief's sitrep sweep reads pane tails): %s\n" % CALLBACK)
         else:
             text = (
-                "Fresh session on omp-kit %s. Read your row in %s and your pane snapshot %s.\n"
-                "Take the next bead from your own br ready frontier.\n"
-                "Callback, one line: %s\n" % (kit_version, handoff, snap, CALLBACK))
+                "You are %s (session %s). Fresh session on omp-kit %s. Read your row in %s and your pane snapshot %s.\n"
+                "Hold for your director's dispatch message before taking work; do not self-assign from br ready first.\n"
+                "Callback, one line printed in your own pane output (the chief's sitrep sweep reads pane tails): %s\n"
+                % (r["pane"], r["session"], kit_version, handoff, snap, CALLBACK))
         path = os.path.join(out_dir, "%s.%s.txt" % (role, r["pane"].replace(":", ".")))
         with open(path, "w") as fh:
             fh.write(text)
@@ -807,10 +823,12 @@ def render_handoff(plan, snapshot_dir, version, chief):
         out.append("| %s | %s | %s | `%s` | %s | %s |" % (r["pane"], r["pane_id"], r["action"], " ".join(r.get("flags", [])) or "-",
                                                        r.get("screen_model") or "-", ",".join("%s@%s" % kv for kv in sorted(r.get("mcp", {}).items())) or "-"))
     queued = [r["pane"] for r in plan["rows"] if r["action"] in ("QUEUE_BUSY", "HOLD_UNKNOWN_STATE", "HOLD_CWD")]
+    cwd_held = [r["pane"] for r in plan["rows"] if r["action"] == "HOLD_CWD"]
     out += ["", "## Open for the next chief", "",
             "- Not restarted yet (restart at turn boundary or after operator decision): %s" % (", ".join(queued) or "none"),
+            "- HOLD_CWD panes need the operator to move them to a repo cwd first, then re-plan: a respawn reuses the row's cwd and the script never moves a pane. Held for cwd: %s" % (", ".join(cwd_held) or "none"),
             "- First messages are STAGED, not sent. Send directors first only after operator approval of the staged manifest; workers after directors report HEALTH.",
-            "- Callback grammar (one line): `%s`" % CALLBACK,
+            "- Callback grammar (one line, printed in the pane's own output): `%s`" % CALLBACK,
             "- Fill in below: HEALTH results, INTEGRATE items, open beads, PRs, defects found this restart.", "",
             "## Rollback", "", "Prior sessions stay on disk; `omp <same flags> --resume <session.jsonl>` restores a pane's old conversation.", ""]
     return "\n".join(out)

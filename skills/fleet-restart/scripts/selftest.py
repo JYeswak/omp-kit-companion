@@ -298,6 +298,46 @@ def main():
          "VALIDATE" in director_text and director_text.index("VALIDATE") < director_text.index("INTEGRATE")
          and director_text.index("DISPATCH") < director_text.index("VALIDATE"),
          director_text.replace("\n", " | "))
+    worker_text = next(open(r["file"]).read() for r in msgs["rows"] if r["role"] == "worker")
+    case("NEG staged director text names its pane, not just the snapshot file (uxr3 3b)",
+         director_text.startswith("You are modeltest:0.1 (session modeltest)."), director_text.splitlines()[0] if director_text else "empty")
+    case("NEG staged worker text names its pane (uxr3 3b)",
+         worker_text.startswith("You are uds--burn-down:0.1 (session uds--burn-down)."), worker_text.splitlines()[0] if worker_text else "empty")
+    case("NEG staged texts name the callback channel, the pane's own output (uxr3 3c)",
+         "printed in your own pane output" in director_text and "printed in your own pane output" in worker_text,
+         (director_text + worker_text).replace("\n", " | ")[:300])
+    staged_ntm = fr.messages_manifest(plan, handoff="/h.md", snapshot_dir="/snap", kit_version="0.2.20",
+                                      out_dir=os.path.join(tmp, "staged-ntm"), directors=["modeltest:0.1"],
+                                      which=lambda name: "/bin/" + name if name == "ntm" else None)
+    staged_director = next(open(r["file"]).read() for r in staged_ntm["rows"] if r["role"] == "director")
+    case("CTL HEALTH names every run session, director's own first (uxr3 3d cross-session)",
+         "ntm health modeltest --json" in staged_director and "ntm health uds--burn-down --json" in staged_director
+         and staged_director.index("ntm health modeltest --json") < staged_director.index("ntm health uds--burn-down --json"),
+         staged_director.replace("\n", " | ")[:400])
+    case("NEG HEALTH of only the director's own session is not enough (uxr3 3d)",
+         "ntm health uds--burn-down --json" in staged_director, staged_director.replace("\n", " | ")[:400])
+    case("NEG staged worker text does not self-assign from br ready (uxr3 4 double-assign)",
+         "Take the next bead" not in worker_text and "Hold for your director's dispatch" in worker_text,
+         worker_text.replace("\n", " | "))
+    held_names = [r["pane"] for r in fr.restart_manifest(plan, mode="restart")["rows"]]
+    held_respawn = fr.restart_manifest(plan, mode="respawn", save=save_fixture)
+    case("NEG HOLD_CWD pane reaches neither restart nor respawn manifest (uxr3 5)",
+         "modeltest:0.2" not in held_names and "modeltest:0.2" not in [r["pane"] for r in held_respawn["rows"]],
+         json.dumps(held_names))
+    hand = fr.render_handoff(plan, "/snap", "0.2.20", "%3")
+    case("CTL handoff names the HOLD_CWD operator relocation step (uxr3 5)",
+         "modeltest:0.2" in hand and "move them to a repo cwd first" in hand, hand.replace("\n", " | ")[:300])
+    role_calls = []
+    def role_run(argv, env):
+        role_calls.append((argv, env))
+        return 0, "{}"
+    res = fr.send(msgs, apply=True, approval={"manifest_sha256": fr.manifest_sha(msgs), "approved_by": "josh", "quote": "workers only"},
+                  env=good_env, uid=uid, capture_fn=lambda pid: IDLE, run_fn=role_run, role="worker")
+    role_by = {r["pane"]: r["result"] for r in res["rows"]}
+    case("CTL send --role worker sends only worker rows through their own session (uxr3 4)",
+         sorted(role_by) == ["uds--burn-down:0.1"] and role_by["uds--burn-down:0.1"] == "SENT"
+         and role_calls and role_calls[-1][0][2] == "uds--burn-down" and "--file" in role_calls[-1][0],
+         json.dumps(role_by) + " " + json.dumps(role_calls[-1][0] if role_calls else None))
     try:
         fr.messages_manifest(plan, handoff="/h.md", snapshot_dir="/snap", kit_version="0.2.20", out_dir=os.path.join(tmp, "nodirs"), directors=None)
         code = "NO_ERROR"
