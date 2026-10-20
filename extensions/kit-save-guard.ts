@@ -10,7 +10,7 @@
  */
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
 import { fleetPolicyState } from "./fleet-policy";
 import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerStateRoot, resolveLedgerAgent } from "./kit-write-ledger";
@@ -244,11 +244,11 @@ function pathsFromToolCall(event: SaveGuardToolCallEvent, cwd: string): Map<stri
 	}
 	const inputCwd = typeof event.input === "object" && event.input !== null &&
 		"cwd" in event.input && typeof event.input.cwd === "string"
-		? path.resolve(cwd, event.input.cwd)
-		: cwd;
+		? canonicalizePath(path.isAbsolute(event.input.cwd) ? event.input.cwd : path.join(cwd, event.input.cwd))
+		: canonicalizePath(cwd);
 	const snapshots = new Map<string, FileSnapshot>();
 	for (const value of inputPaths(event.input)) {
-		const absolutePath = path.isAbsolute(value) ? path.resolve(value) : path.resolve(inputCwd, value);
+		const absolutePath = canonicalizePath(path.isAbsolute(value) ? value : path.join(inputCwd, value));
 		snapshots.set(absolutePath, snapshotFile(absolutePath));
 	}
 	return snapshots;
@@ -407,6 +407,24 @@ async function waitForToolPathWork(state: SessionState): Promise<void> {
 	}
 }
 
+/**
+ * GUARDTMP1 (ompkit-so0li): canonicalize a path before attribution. On macOS
+ * /var is a symlink to /private/var, so $TMPDIR spellings (/var/...) disagree
+ * with `git rev-parse --show-toplevel` (/private/var/...). path.resolve alone
+ * preserves the spelling, path.relative then escapes with `..`, and the path
+ * is silently skipped as outside the repo (fail-open). Only the directory
+ * portion is resolved so a final-component symlink keeps its identity; an
+ * unresolvable directory falls back to the resolved spelling.
+ */
+function canonicalizePath(target: string): string {
+	const resolved = path.resolve(target);
+	try {
+		return path.join(realpathSync(path.dirname(resolved)), path.basename(resolved));
+	} catch {
+		return resolved;
+	}
+}
+
 function isWithinDirectory(directory: string, target: string): boolean {
 	const relative = path.relative(directory, target);
 	return relative === "" || (!path.isAbsolute(relative) && relative !== ".." &&
@@ -418,10 +436,10 @@ async function recordSessionStart(
 	state: SessionState,
 	cwd: string,
 ): Promise<void> {
-	const directory = path.resolve(cwd);
+	const directory = canonicalizePath(cwd);
 	const top = await runGit(exec, directory, ["rev-parse", "--show-toplevel"]);
 	if (top.code !== 0) return;
-	const root = path.resolve(gitLine(top.stdout));
+	const root = canonicalizePath(gitLine(top.stdout));
 	if (root.length === 0) return;
 	state.rootByDirectory.set(directory, root);
 	if (state.repositories.has(root)) return;
@@ -447,13 +465,14 @@ async function recordToolPaths(
 	completedSnapshots: Map<string, FileSnapshot>,
 ): Promise<void> {
 	for (const change of toolPaths) {
-		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
-		const lookupDirectory = isWithinDirectory(cwd, absolutePath) ? cwd : path.dirname(absolutePath);
+		const absolutePath = canonicalizePath(path.isAbsolute(change.path) ? change.path : path.join(cwd, change.path));
+		const base = canonicalizePath(cwd);
+		const lookupDirectory = isWithinDirectory(base, absolutePath) ? base : path.dirname(absolutePath);
 		let root = state.rootByDirectory.get(lookupDirectory);
 		if (root === undefined) {
 			const top = await runGit(exec, lookupDirectory, ["rev-parse", "--show-toplevel"]);
 			if (top.code !== 0) continue;
-			const discoveredRoot: string = String(path.resolve(gitLine(top.stdout)));
+			const discoveredRoot: string = String(canonicalizePath(gitLine(top.stdout)));
 			if (discoveredRoot.length === 0) continue;
 			root = discoveredRoot;
 			state.rootByDirectory.set(lookupDirectory, discoveredRoot);
@@ -506,13 +525,14 @@ export async function appendLedgerWrites(
 	completedSnapshots: Map<string, FileSnapshot>,
 ): Promise<void> {
 	for (const change of toolPaths) {
-		const absolutePath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(cwd, change.path);
-		const lookupDirectory = isWithinDirectory(cwd, absolutePath) ? cwd : path.dirname(absolutePath);
+		const absolutePath = canonicalizePath(path.isAbsolute(change.path) ? change.path : path.join(cwd, change.path));
+		const base = canonicalizePath(cwd);
+		const lookupDirectory = isWithinDirectory(base, absolutePath) ? base : path.dirname(absolutePath);
 		let root = state.rootByDirectory.get(lookupDirectory);
 		if (root === undefined) {
 			const top = await runGit(exec, lookupDirectory, ["rev-parse", "--show-toplevel"]);
 			if (top.code !== 0) continue;
-			const discovered: string = String(path.resolve(gitLine(top.stdout)));
+			const discovered: string = String(canonicalizePath(gitLine(top.stdout)));
 			if (discovered.length === 0) continue;
 			root = discovered;
 		}
@@ -1127,7 +1147,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 		const completedSnapshots = new Map<string, FileSnapshot>();
 		if (state) {
 			for (const change of paths) {
-				const absolutePath = path.resolve(ctx.cwd, change.path);
+				const absolutePath = canonicalizePath(path.isAbsolute(change.path) ? change.path : path.join(ctx.cwd, change.path));
 				completedSnapshots.set(absolutePath, snapshotFile(absolutePath));
 			}
 		}

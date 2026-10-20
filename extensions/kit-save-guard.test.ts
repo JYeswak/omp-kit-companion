@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import kitSaveGuard, { type SaveGuardApi, type SaveGuardContext } from "./kit-save-guard";
@@ -1307,4 +1307,37 @@ test("binning one dir and leaving another restarts the retry budget with the new
 	expect(reblocked).toMatchObject({ decision: "block" });
 	expect(reasonOf(reblocked)).toContain("second");
 	expect(reasonOf(reblocked)).not.toContain("first");
+}, 30_000);
+
+// GUARDTMP1 (ompkit-so0li): on macOS /var is a symlink to /private/var, so a
+// tmpdir repo is spelled /var/... by $TMPDIR but /private/var/... by
+// `git rev-parse --show-toplevel`. Attribution must canonicalize before the
+// inside-repo check, or the write is silently skipped (fail-open).
+test("tmpdir repos attribute identically under /var and /private/var spellings", async () => {
+	const root = repo({ remote: true });
+	const unresolved = root;
+	const canonical = realpathSync(root);
+	const spellings = [...new Set([unresolved, canonical])];
+	for (const cwdSpelling of spellings) {
+		for (const pathSpelling of spellings) {
+			const name = `tmpdir-owned-${spellings.indexOf(cwdSpelling)}-${spellings.indexOf(pathSpelling)}.txt`;
+			const fake = scratchFake(cwdSpelling, { code: 0, stdout: mineAnswer(0, []) });
+			await kitSaveGuard(fake.pi);
+			await startSession(fake);
+			await ownWrite(fake, join(pathSpelling, name), "session bytes\n", `tmpdir-${name}`);
+			const result = await stop(fake);
+			expect(result, `cwd=${cwdSpelling} path=${pathSpelling}`).toMatchObject({ decision: "block" });
+			expect(offeredPaths(result), `cwd=${cwdSpelling} path=${pathSpelling}`).toEqual([name]);
+		}
+	}
+}, 30_000);
+
+test("tmpdir negative: writes outside the repo still do not attribute", async () => {
+	const root = repo({ remote: true });
+	const outside = mkdtempSync(join(base, "outside-"));
+	const fake = scratchFake(root, { code: 0, stdout: mineAnswer(0, []) });
+	await kitSaveGuard(fake.pi);
+	await startSession(fake);
+	await ownWrite(fake, join(realpathSync(outside), "stray.txt"), "stray\n", "stray-1");
+	expect(await stop(fake)).toBeUndefined();
 }, 30_000);

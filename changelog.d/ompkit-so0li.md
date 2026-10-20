@@ -1,0 +1,3 @@
+### Fixed
+
+- `kit-save-guard` canonicalizes paths before attribution, so macOS tmpdir repos no longer silently skip the save demand. `/var` is a symlink to `/private/var`: `$TMPDIR` spells a repo `/var/...` while `git rev-parse --show-toplevel` spells it `/private/var/...`, and `path.relative` across the two spellings escapes with `..`, which the guard read as outside-the-repo (fail-open). Session roots, tool paths, snapshot keys, and discovered git roots are now resolved through the nearest existing ancestor directory (a final-component symlink keeps its identity), making attribution identical for either spelling. (ompkit-so0li)
