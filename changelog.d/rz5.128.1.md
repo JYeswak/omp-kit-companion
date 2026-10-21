@@ -1,0 +1,1 @@
+- UBSTIME1: add a source-bound single-file UBS wrapper with a fixed 120-second module budget; timeout, incomplete output, and missing environment are typed `UNKNOWN` non-verdicts, with control and planted-timeout contract tests.
