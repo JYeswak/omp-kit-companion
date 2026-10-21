@@ -369,6 +369,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		while (true) {
 			if (rowCreated && Date.now() >= deadline) {
 				await removeQueuedJob(storage, job.id, owner, liveness);
+				process.stderr.write("RESOURCE_DEFERRED: queue timeout\n");
 				process.stderr.write("deferred: queue timeout\n");
 				return 75;
 			}
@@ -386,6 +387,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			const acquired = await acquireLock(storage.lock, owner, deadline, options.noWait, liveness);
 			if (!acquired) {
 				const reason = options.noWait ? "state lock is busy" : "timed out waiting for the state lock";
+				process.stderr.write(`RESOURCE_DEFERRED: ${reason}\n`);
 				process.stderr.write(`deferred: ${reason}\n`);
 				return 75;
 			}
@@ -428,12 +430,27 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			}
 			if (missing !== null) return prerequisiteMissing(missing.observer, missing.text);
 			if (child) {
-				const code = await child.exited;
+				const remaining = Math.max(1, deadline - Date.now());
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const timedOut = new Promise<"deadline">(resolve => {
+					timer = setTimeout(() => resolve("deadline"), remaining);
+				});
+				const result = await Promise.race([child.exited, timedOut]);
+				if (timer !== undefined) clearTimeout(timer);
+				if (result === "deadline") {
+					try { child.kill("SIGTERM"); } catch { /* child may have exited at the boundary */ }
+					await child.exited;
+					await removeQueuedJob(storage, id, owner, liveness);
+					process.stderr.write("RESOURCE_DEFERRED: child exceeded heavy admission deadline\n");
+					process.stderr.write("deferred: child exceeded heavy admission deadline\n");
+					return 75;
+				}
 				await removeQueuedJob(storage, id, owner, liveness);
-				return signal ? SIGNAL_EXIT_CODES[signal] : code;
+				return signal ? SIGNAL_EXIT_CODES[signal] : result;
 			}
 			if (options.noWait || Date.now() >= deadline) {
 				await removeQueuedJob(storage, id, owner, liveness);
+				process.stderr.write(`RESOURCE_DEFERRED: ${reason ?? "admission unavailable"}${options.noWait ? " (--no-wait)" : " (queue timeout)"}\n`);
 				process.stderr.write(`deferred: ${reason ?? "admission unavailable"}${options.noWait ? " (--no-wait)" : " (queue timeout)"}\n`);
 				return 75;
 			}

@@ -64,6 +64,37 @@ test("machine admission blocks only above 2.5 times the core count", () => {
 	expect(machineLoadBlockReason(1, 4)).toBeNull();
 });
 
+test("SCANNERADMIT refuses above load threshold even in installed CI", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 0 });
+	const marker = join(root, "scanner-ran");
+	const result = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", `printf ran > '${marker}'`], {
+		OMP_KIT_HEAVY_FAKE_LOAD1: "1000000",
+		GITHUB_ACTIONS: "true",
+	});
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("RESOURCE_DEFERRED");
+	expect(existsSync(marker)).toBe(false);
+});
+
+test("SCANNERADMIT preserves genuine child exit 75 without refusal marker", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 5 });
+	const result = await invoke(root, ["heavy", "--", "sh", "-c", "exit 75"]);
+	expect(result.code).toBe(75);
+	expect(result.stderr).not.toContain("RESOURCE_DEFERRED");
+});
+
+test("SCANNERADMIT bounds a started child by the remaining deadline", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 0 });
+	const marker = join(root, "late-child-ran");
+	const result = await invoke(root, ["heavy", "--", "sh", "-c", `sleep 1; printf ran > '${marker}'`]);
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("RESOURCE_DEFERRED");
+	expect(existsSync(marker)).toBe(false);
+});
+
  // Slot-logic tests pin the heavy-specific load seam so the
  // slot behavior under test, not ambient runner load, decides the outcome.
  // The LOAD1 gate itself stays covered by the machineLoadBlockReason tests.
@@ -164,13 +195,16 @@ test("two concurrent runs serialize on one slot", async () => {
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 });
 
-test("the child runs ten nice points above its parent", async () => {
+test("the child runs ten nice points above its parent when the platform can raise it", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 5 });
 	const result = await invoke(root, ["heavy", "--label", "nicecheck", "--", "sh", "-c", "ps -o nice= -p $$; ps -o nice= -p $PPID"]);
 	expect(result.code).toBe(0);
 	const [childNice, parentNice] = result.stdout.trim().split("\n").map((line) => Number(line.trim()));
 	expect(Number.isInteger(childNice) && Number.isInteger(parentNice)).toBe(true);
+	// Platforms differ in their maximum nice value. When the parent is already
+	// >= 10, the requested +10 may be capped or otherwise platform-specific.
+	if (parentNice! >= 10) return;
 	expect(childNice! - parentNice!).toBe(10);
 	// macos-15 CI hit the 5 s default at 5008 ms (bun spawn + admission under load); measured cause.
 }, 30000);

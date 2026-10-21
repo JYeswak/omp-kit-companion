@@ -22,6 +22,38 @@ function fixture(label: string): string {
 function reaperResult(args: readonly string[]) {
 	return { code: 0, stdout: args.join(" "), stderr: "" };
 }
+function lowDiskPreload(state: string): string {
+	const path = join(state, "low-statfs.ts");
+	writeFileSync(path, `import { mock } from "bun:test";
+import * as realFs from "node:fs";
+
+const snapshot = { ...realFs };
+const realStatfs = realFs.statfsSync;
+function forcedStatfs(path: realFs.PathLike, options?: never) {
+	const observed = realStatfs(path, options);
+	const freePct = Number(process.env.OMP_TEST_DISK_FREE_PCT ?? "4.7");
+	return { ...observed, bavail: Math.floor(Number(observed.blocks) * freePct / 100) };
+}
+mock.module("node:fs", () => ({ ...snapshot, default: { ...snapshot, statfsSync: forcedStatfs }, statfsSync: forcedStatfs }));
+`);
+	return path;
+}
+
+function lowDiskPythonPreload(state: string): string {
+	const path = join(state, "sitecustomize.py");
+	writeFileSync(path, `import os
+_real_statvfs = os.statvfs
+def _forced_statvfs(path):
+    observed = _real_statvfs(path)
+    free_pct = float(os.environ.get("OMP_TEST_DISK_FREE_PCT", "4.7"))
+    class ForcedStatvfs:
+        f_blocks = observed.f_blocks
+        f_bavail = int(observed.f_blocks * free_pct / 100)
+    return ForcedStatvfs()
+os.statvfs = _forced_statvfs
+`);
+	return path;
+}
 
 test("DISKSTAGE-WIRE1 exact thresholds keep the 21% control and refuse below 10%", () => {
 	expect(diskStage(21)).toBe("ok");
@@ -45,6 +77,78 @@ test("DISKSTAGE-WIRE1 real admission is before work and records the reaper refus
 	expect(rows.some(row => row.action === "reaper" && (row.reaper as Record<string, unknown>)?.action === "RECLAIM_TRIGGERED")).toBe(true);
 	expect(rows.some(row => row.action === "wave-refused" && row.code === "DISK_WAVE_REFUSED")).toBe(true);
 });
+test("DISKSTAGE-WIRE1 real entrypoints admit the paired 21% boundary", () => {
+	const state = fixture("admit-entrypoints");
+	const env = {
+		...process.env,
+		OMP_TEST_DISK_FREE_PCT: "21",
+		OMPKIT_DISK_STAGE_STATE: state,
+		XDG_STATE_HOME: state,
+		XDG_CONFIG_HOME: state,
+		HOME: state,
+		OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
+		AGENT_NAME: "diskstage-test",
+		PATH: `${state}:${process.env.PATH ?? ""}`,
+	};
+	const heavyPreload = lowDiskPreload(state);
+	lowDiskPythonPreload(state);
+	const heavyMarker = join(state, "heavy-ran");
+	const heavy = spawnSync(process.execPath, ["--preload", heavyPreload, resolve(root, "src/cli.ts"), "heavy", "--no-wait", "--disk-observer", "statfs", "--", "sh", "-c", `printf ran > '${heavyMarker}'`], {
+		cwd: root, env, encoding: "utf8",
+	});
+	expect(heavy.status, heavy.stderr).toBe(0);
+	expect(heavy.stdout).not.toContain("DISK_HEAVY_REFUSED");
+	expect(readFileSync(heavyMarker, "utf8")).toBe("ran");
+	const wave = spawnSync("python3", [resolve(root, "scripts/wave_log.py"), "open", "--path", root, "--kind", "build", "--state-dir", state, "--repo", root, "--agent", "diskstage-test", "--json"], {
+		cwd: root,
+		env: { ...env, PYTHONPATH: `${state}${process.env.PYTHONPATH ? `:${process.env.PYTHONPATH}` : ""}` },
+		encoding: "utf8",
+	});
+	expect(wave.status, wave.stderr).toBe(0);
+	expect(wave.stdout).toContain('"overall": "OK"');
+	expect(existsSync(join(state, "waves", "waves.jsonl"))).toBe(true);
+});
+
+test("DISKSTAGE-WIRE1 planted STOP/CRITICAL refusal cannot bypass real heavy or wave entrypoints", () => {
+	for (const freePct of [9, 4.7]) {
+		const state = fixture(`refusal-${String(freePct).replace(".", "-")}`);
+		const expectedStage = freePct < 5 ? "critical" : "stop";
+		const env = {
+			...process.env,
+			OMP_TEST_DISK_FREE_PCT: String(freePct),
+			OMPKIT_DISK_STAGE_STATE: state,
+			XDG_STATE_HOME: state,
+			XDG_CONFIG_HOME: state,
+			HOME: state,
+			OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
+			AGENT_NAME: "diskstage-test",
+			PATH: `${state}:${process.env.PATH ?? ""}`,
+		};
+		const launchctl = join(state, "launchctl");
+		writeFileSync(launchctl, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+		const heavyPreload = lowDiskPreload(state);
+		lowDiskPythonPreload(state);
+		for (const kind of ["heavy", "wave"] as const) {
+			const admission = admitDiskWork(kind, root, { stateDir: state, readFreePct: () => freePct, platform: "other", reaper: reaperResult });
+			expect(admission).toMatchObject({ allowed: false, stage: expectedStage, freePct, code: kind === "heavy" ? "DISK_HEAVY_REFUSED" : "DISK_WAVE_REFUSED" });
+		}
+		const heavyMarker = join(state, "heavy-ran");
+		const heavy = spawnSync(process.execPath, ["--preload", heavyPreload, resolve(root, "src/cli.ts"), "heavy", "--no-wait", "--", "sh", "-c", `printf ran > '${heavyMarker}'`], { cwd: root, env, encoding: "utf8" });
+		expect(heavy.status).toBe(10);
+		expect(heavy.stdout).toContain("DISK_HEAVY_REFUSED");
+		expect(existsSync(heavyMarker)).toBe(false);
+		expect(existsSync(join(state, "load"))).toBe(false);
+		const wave = spawnSync("python3", [resolve(root, "scripts/wave_log.py"), "open", "--path", root, "--kind", "build", "--state-dir", state, "--repo", root, "--agent", "diskstage-test", "--json"], {
+			cwd: root,
+			env: { ...env, PYTHONPATH: `${state}${process.env.PYTHONPATH ? `:${process.env.PYTHONPATH}` : ""}` },
+			encoding: "utf8",
+		});
+		expect(wave.status).toBe(10);
+		expect(wave.stdout).toContain("DISK_WAVE_REFUSED");
+		expect(existsSync(join(state, "waves", "waves.jsonl"))).toBe(false);
+	}
+});
+
 
 test("DISKSTAGE-WIRE1 critical tick names and interrupts the top writer", () => {
 	const state = fixture("critical-state");
@@ -73,10 +177,23 @@ test("DISKSTAGE-WIRE1 critical tick names and interrupts the top writer", () => 
 
 test("DISKSTAGE-WIRE1 real heavy and wave entrypoints admit on the control filesystem", () => {
 	const state = fixture("entrypoints");
-	const env = { ...process.env, OMPKIT_DISK_STAGE_STATE: state, XDG_STATE_HOME: state, XDG_CONFIG_HOME: state, HOME: state, OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", AGENT_NAME: "diskstage-test" };
-	const heavy = spawnSync(process.execPath, [resolve(root, "src/cli.ts"), "heavy", "--no-wait", "--disk-observer", "statfs", "--", "true"], { cwd: root, env, encoding: "utf8" });
-	expect(heavy.status).toBe(0);
-	const wave = spawnSync("python3", [resolve(root, "scripts/wave_log.py"), "open", "--kind", "build", "--state-dir", state, "--repo", root, "--agent", "diskstage-test", "--json"], { cwd: root, env, encoding: "utf8" });
-	expect(wave.status).toBe(0);
+	const env = {
+		...process.env,
+		OMP_TEST_DISK_FREE_PCT: "21",
+		OMPKIT_DISK_STAGE_STATE: state,
+		XDG_STATE_HOME: state,
+		XDG_CONFIG_HOME: state,
+		HOME: state,
+		OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
+		AGENT_NAME: "diskstage-test",
+	};
+	const heavyPreload = lowDiskPreload(state);
+	const heavy = spawnSync(process.execPath, ["--preload", heavyPreload, resolve(root, "src/cli.ts"), "heavy", "--no-wait", "--disk-observer", "statfs", "--", "true"], { cwd: root, env, encoding: "utf8" });
+	expect(heavy.status, heavy.stderr).toBe(0);
+	lowDiskPythonPreload(state);
+	const wave = spawnSync("python3", [resolve(root, "scripts/wave_log.py"), "open", "--kind", "build", "--state-dir", state, "--repo", root, "--agent", "diskstage-test", "--json"], {
+		cwd: root, env: { ...env, PYTHONPATH: `${state}${process.env.PYTHONPATH ? `:${process.env.PYTHONPATH}` : ""}` }, encoding: "utf8",
+	});
+	expect(wave.status, wave.stderr).toBe(0);
 	expect(JSON.parse(wave.stdout).overall).toBe("OK");
 });
