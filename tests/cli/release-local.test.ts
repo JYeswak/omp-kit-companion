@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
@@ -75,4 +75,31 @@ test("release-local runs the bundled TTSR selftest after coverage, and its remov
 	const mutant = script.replace(/\nbounded 600 bun "\$SRC\/scripts\/ttsr-harness\.ts" --selftest[^]*?say "rule selftest PASS"\n/, "\n");
 	expect(mutant).not.toContain('ttsr-harness.ts" --selftest');
 	expect(mutant.slice(gate)).not.toContain('die "ttsr-harness --selftest failed');
+});
+
+test("release gate refuses a kit rule with its fire fixture removed", () => {
+	const work = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp"), "kitpost-gate-")));
+	const cases = join(ROOT, "cases", "cases.tsv");
+	const mutated = join(work, "cases.tsv");
+	try {
+		cpSync(cases, mutated);
+		const rows = readFileSync(mutated, "utf8").split("\n").map(row => row.endsWith("\r") ? row.slice(0, -1) : row);
+		const target = "kit-tool-result-is-not-json\tfire\t";
+		const index = rows.findIndex(row => row.startsWith(target));
+		if (index < 0) throw new Error("KITPOST fixture is missing its fire row");
+		rows.splice(index, 1);
+		writeFileSync(mutated, rows.join("\n"));
+		const run = (casesPath: string) => Bun.spawnSync(["bun", "scripts/ttsr-harness.ts", "--gate-json",
+			"--rules", join(ROOT, "rules"), "--cases", casesPath], {
+			cwd: ROOT, env: { ...process.env, OMP_SRC: process.env.OMP_SRC ?? join(process.env.HOME ?? "", ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent", "src") },
+			stdout: "pipe", stderr: "pipe",
+		});
+		const control = run(cases);
+		expect(control.exitCode, control.stderr.toString()).toBe(0);
+		const negative = run(mutated);
+		expect(negative.exitCode).not.toBe(0);
+		expect(negative.stdout.toString() + negative.stderr.toString()).toContain("COVERAGE kit-tool-result-is-not-json");
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
 });
