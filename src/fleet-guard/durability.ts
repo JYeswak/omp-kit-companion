@@ -127,9 +127,13 @@ async function physicalTarget(path: string): Promise<string> {
  * No cache: an index-only transition must affect the very next admission.
  */
 export async function check(event: FleetGuardEvent, context: FleetGuardContext): Promise<FleetGuardBlock | undefined> {
+	const cwd = context.cwd ?? (typeof event.cwd === "string" && event.cwd ? event.cwd : process.cwd());
+	// Ownership metadata is written only by the native scratch lifecycle. Tool
+	// payloads (including shell redirection, cp/mv, and in-place sed) must not
+	// replace or adopt a live marker.
+	if (event.toolName === "bash") return undefined;
 	if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
 	try {
-		const cwd = context.cwd ?? (typeof event.cwd === "string" && event.cwd ? event.cwd : process.cwd());
 		const entries = await targets(event);
 		if (entries.length === 0) return refuse("filesystem targets cannot be established from this payload variant");
 		let referenceRepo: string | undefined;

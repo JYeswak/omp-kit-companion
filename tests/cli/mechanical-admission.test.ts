@@ -27,6 +27,14 @@ describe("mechanical admission dispatch", () => {
 		expect(fireCase).toBeDefined();
 		expect(quietCase).toBeDefined();
 	});
+	test("owned .owner metadata stays quiet while an unsafe scratch artifact still fires", async () => {
+		const owner = admissionCases.find(c => c.path === "var/agent-tmp/dogfood-d0.62533/.owner" && c.expect === "quiet");
+		const unsafe = admissionCases.find(c => c.expect === "fire" && c.path.includes("var/agent-tmp") && c.path.endsWith(".md"));
+		expect(owner).toBeDefined();
+		expect(unsafe).toBeDefined();
+		expect(await assertDeterministicAdmission(owner!, { kit: KIT })).toBe(false);
+		expect(await assertDeterministicAdmission(unsafe!, { kit: KIT })).toBe(true);
+	});
 
 	test("the real guard returns one verdict per case, dispatched twice for the determinism check and shared by every exact partition", async () => {
 		for (const [c, expected] of [[fireCase, true], [quietCase, false]] as const) {
