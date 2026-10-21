@@ -527,6 +527,23 @@ export interface RereadCall {
 	cwd: string;
 }
 
+// Only text reads count: line ranges and raw text, not image/conflict diagnostics.
+// The final assertion is a strict JS end anchor, including for line terminators.
+const READ_PATH_RANGE = /^(?:\d+(?:-\d*)?|-\d+|\d+\+\d+)(?:,(?:\d+(?:-\d*)?|-\d+|\d+\+\d+))*(?![\s\S])/;
+
+function readSelectorTargets(rawPath: string, cwd: string, expected: string, home: string): boolean {
+	const raw = rawPath.trim();
+	if (resolve(cwd, expandHome(raw, home)) === expected) return true;
+	for (let split = raw.lastIndexOf(":"); split > 0; split = raw.lastIndexOf(":", split - 1)) {
+		const selector = raw.slice(split + 1);
+		const range = selector.startsWith("raw:") ? selector.slice(4)
+			: selector.endsWith(":raw") ? selector.slice(0, -4) : selector;
+		if ((selector === "raw" || READ_PATH_RANGE.test(range))
+			&& resolve(cwd, expandHome(raw.slice(0, split), home)) === expected) return true;
+	}
+	return false;
+}
+
 /**
  * Observe one successful tool result against the pending reread. Only
  * observed results count: call arguments, echoes, failures, wrong paths and
@@ -543,7 +560,7 @@ export async function observeRereadResult(call: RereadCall, result: unknown, pen
 		if (resultTainted(result)) return false;
 		const raw = field(call.input, "path");
 		if (typeof raw === "string" && pending.agentsPath !== null
-			&& resolve(call.cwd, expandHome(raw.trim(), home)) === pending.agentsPath) {
+			&& readSelectorTargets(raw, call.cwd, pending.agentsPath, home)) {
 			const content = stringField(result, READ_CONTENT_KEYS);
 			if (content !== null && content.length > 0) pending.agentsOk = true;
 		}

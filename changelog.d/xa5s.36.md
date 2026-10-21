@@ -1,1 +1,2 @@
 - Make COMPACTION_REREAD tell small-context agents to read any line range of AGENTS.md while preserving the observed-content requirement (ompkit-xa5s.36).
+- The guard recognizes native `read` text ranges and raw-mode selectors in either documented order as observed rereads; arbitrary suffixes, conflict summaries, image modes, and failed or truncated reads still cannot clear the gate (ompkit-xa5s.36).

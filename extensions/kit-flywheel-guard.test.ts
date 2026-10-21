@@ -552,6 +552,36 @@ test("REREAD: AGENTS read plus owned in_progress br show unblocks the edit", asy
 	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
 	expect(await callAs(h, cwd, "g1", "bash", { command: "cd sub && git commit -m done" })).toEqual([undefined]);
 });
+test.each([":1-1", ":raw:1-1", ":1-1:raw"])("REREAD: bounded text selector %s satisfies the gate", async suffix => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: `${agents}${suffix}` });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+test("REREAD: an unrecognized AGENTS.md selector remains blocked (planted negative)", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: `${agents}:not-a-selector` });
+	await endAs(h, cwd, "r1", "read", native("rules\n"));
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
+test("REREAD: a conflict-summary result is not a reread of governing text", async () => {
+	const { h, cwd, agents } = await rereadHost();
+	await callAs(h, cwd, "r1", "read", { path: `${agents}:conflicts` });
+	await endAs(h, cwd, "r1", "read", native("No unresolved git merge conflicts in AGENTS.md."));
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
+});
+
 
 test("REREAD: a failed read never clears the flag", async () => {
 	const { h, cwd, agents } = await rereadHost();
