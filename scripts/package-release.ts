@@ -4,7 +4,7 @@ import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdir
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
-
+import { authorizeSourceAct } from "../src/source-authority.ts";
 const root = resolve(import.meta.dir, "..");
 const platformTargets: Record<string, string> = {
 	"darwin-arm64-none": "bun-darwin-arm64",
@@ -23,7 +23,7 @@ for (const file of RELEASE_DATA_FILES) {
 	if (directory !== ".") roots.add(directory);
 }
 const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
-	"scripts/receipt.py", "scripts/pysafe.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
+	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
@@ -219,6 +219,11 @@ export function checkPackagedExtensionLoads(stagedRoot: string): { file: string;
 
 async function run(): Promise<void> {
 	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
+	try {
+		authorizeSourceAct({ canonicalRoot: root, privateRoots: [join(root, "var", "agent-tmp")] }, { path: root, act: "build" });
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
 	const filename = `omp-kit-v${version}-${key}.tar`;
@@ -233,7 +238,9 @@ async function run(): Promise<void> {
 		mkdirSync(dirname(binary), { recursive: true, mode: 0o700 });
 		const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
 			"--no-compile-autoload-bunfig", `--target=${platformTargets[key]}`, join(root, "src/cli.ts"), `--outfile=${binary}`], {
-			cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: process.env.TMPDIR ?? out },
+			// Bun's compile scratch is rooted in cwd. Keep both cwd and outfile in
+			// the owned mkdtemp directory so an interrupted build cannot soil root.
+			cwd: directory, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: directory },
 		});
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];

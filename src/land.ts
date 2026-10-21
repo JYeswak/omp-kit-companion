@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
+import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
@@ -868,6 +869,11 @@ export function landCommand(request: ParsedCommand): CliResult {
 	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
 	if (root.code !== 0) return refused("LAND_REPOSITORY_REQUIRED", "The current directory is not inside a Git repository", "Run land from the repository to publish.");
 	const repo = resolve(root.out.trim());
+	try {
+		authorizeSourceAct({ canonicalRoot: repo, privateRoots: [join(repo, "var", "agent-tmp")] }, { path: repo, act: "publish" });
+	} catch (error) {
+		return refused("SOURCE_ACT_REFUSED", error instanceof Error ? error.message : String(error), "Land only from the canonical companion source root; no commit or publication was attempted.");
+	}
 	if (request.flags.get("--patch") !== undefined) return landPatchCommand(repo, request);
 	const paths = normalizePaths(request.flags.get("--paths"), repo);
 	if (!Array.isArray(paths)) return paths;
