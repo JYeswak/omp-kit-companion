@@ -260,10 +260,9 @@ cat "$DIST/SHA256SUMS"
 	--output "$WORK/release-notes.md") || die "release-notes.sh source failed"
 
 # ----------------------------------------------------------------- 4b. rule gate
-# The kit-update postcheck runs this same ttsr coverage gate against the installed
-# pack and fails the update when a rule ships with no fire/quiet fixtures (KITPOST1:
-# v0.2.58 shipped zero fixtures for kit-tool-result-is-not-json and the postcheck
-# failed after the tag). Refuse here, before the tag, in both dry-run and real runs.
+# The kit-update postcheck runs this same ttsr coverage gate and bundled selftest
+# against the installed pack. Refuse here, before the tag, in both dry-run and
+# real runs, so a release cannot pass while its postcheck would fail.
 stage rule-gate
 bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --gate-json --rules "$SRC/rules" \
 	--cases "$SRC/cases/cases.tsv" >"$WORK/rule-gate.json" 2>"$WORK/rule-gate.stderr" ||
@@ -271,6 +270,10 @@ bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --gate-json --rules "$SRC/rules" 
 [ "$(jq -er '.status' "$WORK/rule-gate.json")" = PASS ] ||
 	die "ttsr coverage gate FAIL on the release source: $(jq -c '.failures' "$WORK/rule-gate.json")"
 say "rule gate PASS: $(jq -c '.counts' "$WORK/rule-gate.json")"
+
+bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --selftest >"$WORK/rule-selftest.stdout" 2>"$WORK/rule-selftest.stderr" ||
+	die "ttsr-harness --selftest failed on the release source; refusing release (see $WORK/rule-selftest.stderr)"
+say "rule selftest PASS"
 
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}

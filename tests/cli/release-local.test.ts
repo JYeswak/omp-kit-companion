@@ -61,3 +61,18 @@ test("release-local.sh dry run never reaches a remote write", () => {
 	expect(script).not.toContain("-f mode=ci-pipeline");
 	expect(Bun.spawnSync(["bash", "-n", join(ROOT, "scripts/release-local.sh")]).exitCode).toBe(0);
 });
+
+test("release-local runs the bundled TTSR selftest after coverage, and its removal is RED", () => {
+	const script = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
+	const gate = script.indexOf('stage rule-gate');
+	const selftest = script.indexOf('ttsr-harness.ts" --selftest', gate);
+	expect(gate).toBeGreaterThanOrEqual(0);
+	expect(selftest).toBeGreaterThan(gate);
+	expect(script.slice(gate, selftest)).toContain('ttsr-harness.ts" --gate-json');
+	expect(script.slice(selftest)).toContain('die "ttsr-harness --selftest failed');
+
+	// Planted negative: removing the selftest invocation must fail this contract.
+	const mutant = script.replace(/\nbounded 600 bun "\$SRC\/scripts\/ttsr-harness\.ts" --selftest[^]*?say "rule selftest PASS"\n/, "\n");
+	expect(mutant).not.toContain('ttsr-harness.ts" --selftest');
+	expect(mutant.slice(gate)).not.toContain('die "ttsr-harness --selftest failed');
+});
