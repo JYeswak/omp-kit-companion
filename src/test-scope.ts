@@ -52,9 +52,9 @@ function checkRunner(repo: string, runner: Runner, config: string | null): RepoR
 	if (config === null) return { repo, runner, config, verdict: "FAIL", reason: "runner configuration is absent; scratch exclusion cannot be verified", fix_proposal: proposal };
 	const source = readText(config);
 	const scratch = source.includes("var/agent-tmp") || source.includes("var\\/agent-tmp");
-	const systemTemp = source.includes(tmpdir()) || source.includes("/tmp/") || source.includes("/var/folders/") || source.includes("system-temp");
-	if (scratch && (systemTemp || runner === "bun")) {
-		return { repo, runner, config, verdict: "PASS", reason: "runner configuration excludes repository scratch; system temporary paths are outside the repository scan", fix_proposal: "No action required." };
+	const systemTemp = source.includes(tmpdir()) || source.includes("/tmp/") || source.includes("/var/tmp/") || source.includes("/var/folders/") || source.includes("system-temp");
+	if (scratch && systemTemp) {
+		return { repo, runner, config, verdict: "PASS", reason: "runner configuration excludes repository scratch and system temporary paths", fix_proposal: "No action required." };
 	}
 	return { repo, runner, config, verdict: "FAIL", reason: `runner configuration does not exclude var/agent-tmp and system temp (${tmpdir()})`, fix_proposal: proposal };
 }

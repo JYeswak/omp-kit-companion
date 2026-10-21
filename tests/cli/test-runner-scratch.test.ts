@@ -33,22 +33,36 @@ test("doctor test-scope reports planted Jest negative and passing Bun control", 
 		const bad = join(root, "bad");
 		mkdirSync(good, { recursive: true });
 		mkdirSync(bad, { recursive: true });
-		writeFileSync(join(good, "bunfig.toml"), "[test]\npathIgnorePatterns = [\"var/agent-tmp/**\"]\n");
+		writeFileSync(join(good, "bunfig.toml"), "[test]\npathIgnorePatterns = [\"var/agent-tmp/**\", \"/tmp/**\", \"/var/tmp/**\", \"/var/folders/**\"]\n");
 		writeFileSync(join(bad, "package.json"), JSON.stringify({ scripts: { test: "jest" }, devDependencies: { jest: "^29" } }));
 		const config = join(root, "fleet-watch.json");
 		writeFileSync(config, JSON.stringify({ sessions: [{ repo: good }, { repo: bad }] }));
-		const result = Bun.spawnSync([process.execPath, "run", join(REPO_ROOT, "src", "cli.ts"), "doctor", "--scope", "test-scope", "--json"], {
+		const negative = Bun.spawnSync([process.execPath, "run", join(REPO_ROOT, "src", "cli.ts"), "doctor", "--scope", "test-scope", "--json"], {
 			env: { ...process.env, OMP_KIT_FLEET_WATCH_CONFIG: config, OMP_KIT_OMP_SRC_FETCH: "0" },
 			stdout: "pipe", stderr: "pipe", stdin: "ignore",
 		});
-		const output = result.stdout.toString();
-		expect(result.exitCode, output + result.stderr.toString()).toBe(0);
-		const parsed = JSON.parse(output) as { data: { findings: Array<{ component: string; status: string; evidence?: { repos?: Array<{ repo: string; verdict: string; runner: string }> } }> } };
-		const finding = parsed.data.findings.find((row) => row.component === "test-scope")!;
-		expect(finding.status).toBe("FAIL");
-		expect(finding.evidence?.repos).toEqual(expect.arrayContaining([
+		const negativeOutput = negative.stdout.toString();
+		expect(negative.exitCode, negativeOutput + negative.stderr.toString()).toBe(0);
+		const negativeParsed = JSON.parse(negativeOutput) as { data: { findings: Array<{ component: string; status: string; evidence?: { repos?: Array<{ repo: string; verdict: string; runner: string }> } }> } };
+		const negativeFinding = negativeParsed.data.findings.find((row) => row.component === "test-scope")!;
+		expect(negativeFinding.status).toBe("FAIL");
+		expect(negativeFinding.evidence?.repos).toEqual(expect.arrayContaining([
 			expect.objectContaining({ repo: good, runner: "bun", verdict: "PASS" }),
 			expect.objectContaining({ repo: bad, runner: "jest", verdict: "FAIL" }),
+		]));
+		writeFileSync(join(bad, "jest.config.js"), "module.exports = { testPathIgnorePatterns: ['/var/agent-tmp/', '/tmp/', '/var/tmp/', '/var/folders/'] };\n");
+		const control = Bun.spawnSync([process.execPath, "run", join(REPO_ROOT, "src", "cli.ts"), "doctor", "--scope", "test-scope", "--json"], {
+			env: { ...process.env, OMP_KIT_FLEET_WATCH_CONFIG: config, OMP_KIT_OMP_SRC_FETCH: "0" },
+			stdout: "pipe", stderr: "pipe", stdin: "ignore",
+		});
+		const controlOutput = control.stdout.toString();
+		expect(control.exitCode, controlOutput + control.stderr.toString()).toBe(0);
+		const controlParsed = JSON.parse(controlOutput) as { data: { findings: Array<{ component: string; status: string; evidence?: { repos?: Array<{ repo: string; verdict: string; runner: string }> } }> } };
+		const controlFinding = controlParsed.data.findings.find((row) => row.component === "test-scope")!;
+		expect(controlFinding.status).toBe("OK");
+		expect(controlFinding.evidence?.repos).toEqual(expect.arrayContaining([
+			expect.objectContaining({ repo: good, runner: "bun", verdict: "PASS" }),
+			expect.objectContaining({ repo: bad, runner: "jest", verdict: "PASS" }),
 		]));
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
