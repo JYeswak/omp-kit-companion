@@ -98,3 +98,7 @@ kit-no-live-tracker-sqlite	fire	tool	bash	-	sqlite3 .beads/beads.db 'select 1'	r
 kit-no-live-tracker-sqlite	quiet	tool	bash	-	br show ompkit-oq1h.8 --json	native tracker read	{"tracked":{"rules-fleet/kit-no-live-tracker-sqlite.md":"br list"}}
 kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test %54 "status update"	raw transport send without verified delivery	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"ntm send"}}
 kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test %54 "status update"	verified native delivery path	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"omp-kit send"}}
+kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test --panes=%54 status update	bare ntm send fires the kit-send reminder	
+kit-teach-send-verify	fire	tool	bash	-	ntm send omp-chief tern:1756641624077 hello > /dev/null	output-discarded ntm send to a tern pane fires	
+kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test tern:5 "status update" --json	kit send stays quiet	
+kit-teach-send-verify	quiet	tool	bash	-	echo ntm send omp-test --panes=%54 hello	prose echo stays quiet	

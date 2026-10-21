@@ -419,7 +419,3 @@ kit-rea-runtime-shipped	quiet	tool	bash	-	sudo dtruss -p 1234 -f	constructed qui
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb /usr/local/bin/mytool	planted near-miss: user-managed /usr/local prefix must stay quiet; turns red if the matcher broadens to /usr/local	
 kit-tool-result-is-not-json	fire	tool	bash	-	node -e "console.log(JSON.parse(toolResult).title)"	JSON.parse on tool-result text, the measured 2h loop	
 kit-tool-result-is-not-json	quiet	tool	bash	-	br show <id> --json | jq '.title'	parse inside the command with jq	
-kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test --panes=%54 status update	bare ntm send fires the kit-send reminder	
-kit-teach-send-verify	fire	tool	bash	-	ntm send omp-chief tern:1756641624077 hello > /dev/null	output-discarded ntm send to a tern pane fires	
-kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test tern:5 "status update" --json	kit send stays quiet	
-kit-teach-send-verify	quiet	tool	bash	-	echo ntm send omp-test --panes=%54 hello	prose echo stays quiet	

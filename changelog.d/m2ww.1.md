@@ -7,3 +7,4 @@
 - Remote-build admission accepts finite, nonnegative worker disk-space telemetry in bytes when gigabyte telemetry is absent. (commit fa3c900)
 - Fleet restart derives protected panes from fleet configuration. (commit ed8a913)
 - Release packaging accepts clean source exports without an optional scratch directory, bundles the rule-pipeline helper, and separates cross-compiler scratch from package output.
+- Run send-verification fire and quiet cases with the fleet rule pack instead of referencing a fleet-only rule from the default release gate.
