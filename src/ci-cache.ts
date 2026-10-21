@@ -1,4 +1,7 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { spawnSync } from "node:child_process";
 /**
  * ci-cache.ts — one shared CI poller and its cache (GH2).
  *
@@ -26,6 +29,13 @@ export interface CiRunRow {
 	stale?: boolean;
 }
 
+export interface CiRepoTarget {
+	name: string;
+	path: string | null;
+	tracking_status: "TRACKED" | "UNTRACKED";
+	tracking_reason?: string;
+}
+
 export interface CiRepoCache {
 	etag: string | null;
 	fetched_at: string;
@@ -34,6 +44,8 @@ export interface CiRepoCache {
 	source: string;
 	backoff_until_ms: number | null;
 	backoff_reason?: string | null;
+	tracking_status?: "TRACKED" | "UNTRACKED";
+	tracking_reason?: string;
 	runs: CiRunRow[];
 }
 
@@ -46,9 +58,55 @@ export const CI_POLLER_INTERVAL_S = 60;
 export const STALE_AFTER_MS = 180_000;
 export const CACHE_NAME = "ci-runs.json";
 
-/** Tracked repos come only from OMP_KIT_CI_REPOS. Unset means unconfigured: the poller reports NO_REPOS and makes no network call. */
-export function defaultTrackedRepos(): string[] {
-	return (process.env.OMP_KIT_CI_REPOS ?? "").split(",").map(part => part.trim()).filter(part => part !== "");
+function githubRepo(remote: string): string | null {
+	const trimmed = remote.trim();
+	const value = trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+	const marker = "github.com";
+	const at = value.toLowerCase().indexOf(marker);
+	if (at < 0) return null;
+	const before = value.slice(0, at);
+	const preceding = before[before.length - 1];
+	if (preceding !== "/" && preceding !== "@" && preceding !== ":") return null;
+	let suffix = value.slice(at + marker.length);
+	while (suffix.startsWith("/") || suffix.startsWith(":") || suffix.startsWith(" ")) suffix = suffix.slice(1);
+	const parts = suffix.split("/").filter(Boolean);
+	return parts.length === 2 && parts.every(part => part !== "." && part !== ".." && !part.includes(" ")) ? `${parts[0]}/${parts[1]}` : null;
+}
+
+function fleetConfigPath(env: NodeJS.ProcessEnv): string {
+	const home = env.HOME ?? homedir();
+	return env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+}
+
+/** Discover fleet repos without invoking gh; the GitHub API is polled only by the shared poller. */
+export function defaultTrackedRepos(env: NodeJS.ProcessEnv = process.env): (string | CiRepoTarget)[] {
+	const override = env.OMP_KIT_CI_REPOS;
+	if (override !== undefined && override !== "") {
+		return override.split(",").map(name => name.trim()).filter(Boolean);
+	}
+	let config: unknown;
+	try { config = JSON.parse(readFileSync(fleetConfigPath(env), "utf8")); } catch { return []; }
+	if (config === null || typeof config !== "object") return [];
+	const record = config as Record<string, unknown>;
+	const targets: CiRepoTarget[] = [];
+	const seen = new Set<string>();
+	for (const key of ["sessions", "herdr"] as const) {
+		const rows = record[key];
+		if (!Array.isArray(rows)) continue;
+		for (const row of rows) {
+			if (row === null || typeof row !== "object") continue;
+			const path = (row as Record<string, unknown>).repo;
+			if (typeof path !== "string" || !isAbsolute(path) || seen.has(path)) continue;
+			seen.add(path);
+			const remote = spawnSync("git", ["-C", path, "config", "--get", "remote.origin.url"], { encoding: "utf8", timeout: 5000 });
+			const remoteUrl = remote.status === 0 ? remote.stdout.trim() : "";
+			const name = githubRepo(remoteUrl);
+			if (name !== null) targets.push({ name, path, tracking_status: "TRACKED" });
+			else targets.push({ name: path, path, tracking_status: "UNTRACKED",
+				tracking_reason: remoteUrl === "" ? "origin remote unavailable" : "origin is not a GitHub repository" });
+		}
+	}
+	return targets;
 }
 
 export function ciApiBase(): string {
@@ -115,13 +173,22 @@ export function readCacheFile(path: string): CiCacheFile | null {
 	}
 }
 
-export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: string[]): Promise<CiPollResult> {
+export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: readonly (string | CiRepoTarget)[]): Promise<CiPollResult> {
 	const nowMs = deps.nowMs ?? Date.now();
 	const nowIso = new Date(nowMs).toISOString();
 	const token = ciToken();
 	const base = ciApiBase();
 	const result: CiPollResult = { requestsMade: 0, backoffUntilMs: null, repos: {} };
-	for (const repo of repos) {
+	for (const input of repos) {
+		const target: CiRepoTarget = typeof input === "string" ? { name: input, path: null, tracking_status: "TRACKED" } : input;
+		const repo = target.name;
+		if (target.tracking_status === "UNTRACKED") {
+			cache.repos[repo] = { etag: null, fetched_at: nowIso, last_checked_at: nowIso,
+				source: "untracked", backoff_until_ms: null, backoff_reason: null,
+				tracking_status: "UNTRACKED", tracking_reason: target.tracking_reason, runs: [] };
+			result.repos[repo] = { status: "UNTRACKED", runs: 0 };
+			continue;
+		}
 		const previous = cache.repos[repo];
 		if (previous?.backoff_until_ms !== null && previous?.backoff_until_ms !== undefined && previous.backoff_until_ms > nowMs) {
 			result.repos[repo] = { status: "BACKOFF", runs: previous.runs.length };
@@ -189,12 +256,13 @@ export interface CiStatusData {
 		fetched_at: string;
 		last_checked_at: string | null;
 		source: string;
-		status: "OK" | "UNAVAILABLE";
+		status: "OK" | "UNAVAILABLE" | "UNTRACKED";
 		stale: boolean;
 		age_ms: number | null;
 		poller_state: "UNKNOWN" | "BACKOFF" | "ERROR";
 		backoff_reason: string | null;
 		backoff_until_ms: number | null;
+		tracking_reason?: string;
 		runs: CiRunRow[];
 	}>;
 }
@@ -209,9 +277,12 @@ export function readStatus(cache: CiCacheFile | null, nowMs: number): CiStatusDa
 		const stale = ageMs === null || ageMs < 0 || ageMs > STALE_AFTER_MS;
 		const activeBackoff = entry.backoff_until_ms !== null && entry.backoff_until_ms > nowMs;
 		const pollerState = activeBackoff ? "BACKOFF" : entry.source.startsWith("error:") ? "ERROR" : "UNKNOWN";
+		const unavailable = stale || entry.source.startsWith("error:") || entry.source.startsWith("backoff:");
+		const untracked = entry.tracking_status === "UNTRACKED";
 		repos[name] = {
 			fetched_at: entry.fetched_at, last_checked_at: lastCheckedAt, source: entry.source,
-			status: stale ? "UNAVAILABLE" : "OK", stale, age_ms: ageMs, poller_state: pollerState,
+			status: untracked ? "UNTRACKED" : unavailable ? "UNAVAILABLE" : "OK", stale, age_ms: ageMs, poller_state: pollerState,
+			...(entry.tracking_reason === undefined ? {} : { tracking_reason: entry.tracking_reason }),
 			backoff_reason: entry.backoff_reason ?? (activeBackoff ? "UNKNOWN" : null),
 			backoff_until_ms: entry.backoff_until_ms,
 			runs: entry.runs.map(row => ({ ...row, stale })),
