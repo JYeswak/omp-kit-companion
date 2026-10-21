@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 
@@ -2300,9 +2300,71 @@ function eachSessionDir(root: string, visit: (dir: string) => void, visitNested:
 	}
 }
 
+export interface BunBuildVerdict { path: string; action: "REAP" | "KEEP"; reason: string; sizeBytes: number }
+
+const BUN_BUILD_NAME = /^\.[A-Za-z0-9_-]+-00000000\.bun-build$/;
+const BUN_BUILD_MIN_AGE_MS = 60 * 60 * 1000;
+
+function bunBuildRepoRoots(entries: readonly ScratchRootEntry[]): string[] {
+	const roots: string[] = [];
+	for (const entry of entries) {
+		if (!entry.root.endsWith(`${sep}var${sep}agent-tmp`)) continue;
+		const repo = dirname(dirname(entry.root));
+		try {
+			const repoStat = lstatSync(repo);
+			const rootStat = lstatSync(entry.root);
+			if (repoStat.isDirectory() && !repoStat.isSymbolicLink() && rootStat.isDirectory() && !rootStat.isSymbolicLink())
+				roots.push(repo);
+		} catch { /* a concurrently removed fleet repo is not a candidate */ }
+	}
+	return [...new Set(roots)];
+}
+
+/** Find stale Bun compile leftovers only at the root of known fleet repositories. */
+export function inspectBunBuildFiles(entries: readonly ScratchRootEntry[], deps: InspectDeps): BunBuildVerdict[] {
+	const now = deps.now ?? Date.now();
+	const snapshot = deps.lsofSnapshot !== undefined ? deps.lsofSnapshot
+		: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const rows: BunBuildVerdict[] = [];
+	for (const repo of bunBuildRepoRoots(entries)) {
+		let names: string[];
+		try { names = readdirSync(repo); } catch { continue; }
+		for (const name of names) {
+			if (!BUN_BUILD_NAME.test(name)) continue;
+			const path = join(repo, name);
+			let stat;
+			try { stat = lstatSync(path); } catch { continue; }
+			if (!stat.isFile() || stat.isSymbolicLink()) continue;
+			if (stat.mtimeMs >= now - BUN_BUILD_MIN_AGE_MS)
+				rows.push({ path, action: "KEEP", reason: "bun-build-young", sizeBytes: stat.size });
+			else if (snapshot === null)
+				rows.push({ path, action: "KEEP", reason: "bun-build-lsof-unavailable", sizeBytes: stat.size });
+			else if (!snapshotClear(snapshot, path))
+				rows.push({ path, action: "KEEP", reason: "bun-build-open-fd", sizeBytes: stat.size });
+			else rows.push({ path, action: "REAP", reason: "bun-build-stale-no-open-fd", sizeBytes: stat.size });
+		}
+	}
+	return rows;
+}
+
+function applyBunBuildFile(row: BunBuildVerdict, entries: readonly ScratchRootEntry[], deps: ApplyDeps): BunBuildVerdict {
+	if (row.action !== "REAP") return row;
+	const checked = inspectBunBuildFiles(entries, {
+		...deps, now: deps.now, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS),
+	}).find(candidate => candidate.path === row.path);
+	if (checked === undefined || checked.action !== "REAP") return checked ?? { ...row, action: "KEEP", reason: "bun-build-disappeared" };
+	try {
+		(deps.remove ?? unlinkSync)(row.path);
+		return { ...row, action: "REAP", reason: "bun-build-reaped" };
+	} catch {
+		return { ...row, action: "KEEP", reason: "bun-build-delete-failed" };
+	}
+}
+
 export interface ScratchPlan {
 	roots: string[];
 	sessions: ScratchVerdict[];
+	bunBuilds: BunBuildVerdict[];
 	orphans: OrphanProcess[];
 	reapableBytes: number;
 	quarantinableBytes: number;
@@ -2348,10 +2410,12 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const sized = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(sized, allRoots);
 	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
-	return { roots: allRoots, sessions: sized, orphans, totals, rootMetrics,
+	const bunBuilds = inspectBunBuildFiles(entries, snapDeps);
+	return { roots: allRoots, sessions: sized, bunBuilds, orphans, totals, rootMetrics,
 		pressure: pressureForRoots(rootMetrics), quarantineBuckets: quarantineBuckets(home, deps.now ?? Date.now()),
 		unownedActiveRule: UNOWNED_ACTIVE_RULE,
-		reapableBytes: sized.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
+		reapableBytes: sized.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0)
+			+ bunBuilds.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
 		quarantinableBytes: sized.filter(v => v.action === "QUARANTINE").reduce((n, v) => n + v.sizeBytes, 0) };
 }
 
@@ -2547,6 +2611,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const planned: { verdict: ScratchVerdict; root: string }[] = [];
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+	const bunBuildPlan = inspectBunBuildFiles(entries, snapDeps);
 	const collect = (dir: string, root: string, nameRequired = true) => {
 		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
 		if (verdict !== null) planned.push({ verdict, root });
@@ -2580,6 +2645,12 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			error: terminal.error ?? terminal.reason });
 		deps.onProgress?.(terminal, { done: index + 1, total: planned.length });
 	}
+	const bunBuilds = bunBuildPlan.map(row => {
+		const terminal = applyBunBuildFile(row, entries, deps);
+		appendLog(home, { event: "bun-build", dir: terminal.path, at: new Date(now).toISOString(),
+			action: terminal.action, reason: terminal.reason, bytes: terminal.sizeBytes });
+		return terminal;
+	});
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	const killed = orphans.map(proc => {
 		const ok = killOrphan(proc.pid, deps);
@@ -2614,6 +2685,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			refusedBytes += verdict.sizeBytes;
 		}
 	}
+	for (const verdict of bunBuilds) if (verdict.action === "REAP") reapedBytes += verdict.sizeBytes;
 	for (const verdict of expired) {
 		if (verdict.action === "DELETE") deletedBytes += verdict.sizeBytes;
 		if (verdict.action !== "SKIP") continue;
@@ -2646,6 +2718,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	return {
 		roots: allRoots,
 		sessions: planEcho,
+		bunBuilds,
 		orphans,
 		applied,
 		killed,

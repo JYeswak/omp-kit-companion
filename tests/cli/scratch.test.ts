@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
@@ -1336,6 +1336,45 @@ test("scratch apply progress reports the exact row total", () => {
   };
   applyScratch(home, { ...depsFor({ onProgress }), home });
   expect(progress).toEqual([{ done: 1, total: 2 }, { done: 2, total: 2 }]);
+});
+
+test("scratch reaper removes stale bun-build files and keeps the open control", () => {
+  const home = useState();
+  const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "bun-build-repo-"));
+  roots.push(repo);
+  const scratch = join(repo, "var", "agent-tmp");
+  mkdirSync(scratch, { recursive: true });
+  process.env.OMP_KIT_SCRATCH_ROOTS = scratch;
+  const stale = join(repo, ".deadbeef-00000000.bun-build");
+  const held = join(repo, ".feedface-00000000.bun-build");
+  writeFileSync(stale, "stale");
+  writeFileSync(held, "held");
+  const now = Date.now();
+  const old = new Date(now - 2 * 3600 * 1000);
+  utimesSync(stale, old, old);
+  utimesSync(held, old, old);
+  const fd = openSync(held, "r");
+  try {
+    const run = (args: readonly string[]) => args[0] === "lsof"
+      ? { code: 0, stdout: `n${held}\n`, stderr: "" } : clearRun();
+    const plan = planScratch(home, { ...depsFor({ run, now }), now });
+    expect(plan.bunBuilds).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: stale, action: "REAP", reason: "bun-build-stale-no-open-fd" }),
+      expect.objectContaining({ path: held, action: "KEEP", reason: "bun-build-open-fd" }),
+    ]));
+    const result = applyScratch(home, { ...depsFor({ run, now }), home, now });
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(held)).toBe(true);
+    expect(result.bunBuilds).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: stale, action: "REAP", reason: "bun-build-reaped" }),
+      expect.objectContaining({ path: held, action: "KEEP", reason: "bun-build-open-fd" }),
+    ]));
+    const lines = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(lines).toContainEqual(expect.objectContaining({ event: "bun-build", dir: stale, action: "REAP" }));
+    expect(lines).toContainEqual(expect.objectContaining({ event: "bun-build", dir: held, action: "KEEP" }));
+  } finally {
+    closeSync(fd);
+  }
 });
 
 test("scratch apply writes one metrics receipt and rotates logs at one MiB", () => {
