@@ -85,12 +85,12 @@ function offlineSmoke(archive: string, root: string): boolean {
   try {
     execFileSync("mkdir", ["-p", extracted]);
     execFileSync("tar", ["-xf", archive, "-C", extracted]);
-    const binary = join(extracted, "bin", "omp-kit");
+    const binary = join(extracted, "omp-kit");
     const env = { HOME: join(root, "home"), PATH: "/usr/bin:/bin", XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache") };
     execFileSync("mkdir", ["-p", env.HOME, env.XDG_CONFIG_HOME, env.XDG_CACHE_HOME]);
     const version = execFileSync(binary, ["--version"], { env, encoding: "utf8" }).trim();
     execFileSync(binary, ["--help"], { env, stdio: "ignore" });
-    return /^omp-kit \d+\.\d+\.\d+$/.test(version);
+    return /^omp-kit (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version);
   } catch { return false; }
 }
 
