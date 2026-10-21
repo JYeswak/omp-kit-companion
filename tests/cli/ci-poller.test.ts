@@ -134,6 +134,20 @@ test("overall status is unavailable for any stale repo and exposes active rate-l
 	expect(status.repos["o/stale"]).toMatchObject({ status: "UNAVAILABLE", stale: true,
 		age_ms: STALE_AFTER_MS + 1, poller_state: "BACKOFF", backoff_reason: "RATE_LIMIT", backoff_until_ms: resetAt });
 });
+test("omitted or untracked repositories remain UNKNOWN without failing overall CI status", () => {
+	const cache: CiCacheFile = { version: 1, repos: {
+		"local/no-origin": { etag: null, fetched_at: new Date(1_000_000).toISOString(),
+			last_checked_at: new Date(1_000_000).toISOString(), source: "untracked",
+			backoff_until_ms: null, tracking_status: "UNTRACKED",
+			tracking_reason: "origin remote unavailable", runs: [] },
+	} };
+	const status = readStatus(cache, 1_000_000);
+	expect(status.overall).toBe("OK");
+	expect(status.repos["local/no-origin"]).toMatchObject({
+		status: "UNTRACKED", stale: false, tracking_reason: "origin remote unavailable",
+	});
+});
+
 
 test("planted: ci status is wired through the documented grammar", () => {
 	const ci = COMMANDS.find(command => command.name === "ci");
