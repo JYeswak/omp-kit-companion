@@ -128,6 +128,16 @@ function remoteHead(cwd: string): string {
 	if (!sha || ref !== "refs/heads/main") throw new Error(`unexpected origin/main response: ${output}`);
 	return sha;
 }
+function committedGateFile(path: string): Buffer {
+	const head = spawnSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: repoRoot, encoding: "utf8", timeout: 10_000 });
+	if (head.error) throw new Error(`cannot identify fixture source HEAD: ${head.error.message}`);
+	if (head.status === 0) {
+		const file = spawnSync("git", ["show", `HEAD:${path}`], { cwd: repoRoot, timeout: 10_000 });
+		if (file.error || file.status !== 0) throw new Error(`cannot read committed gate file ${path}: ${String(file.stderr ?? "")}`);
+		return Buffer.isBuffer(file.stdout) ? file.stdout : Buffer.from(String(file.stdout ?? ""));
+	}
+	return readFileSync(join(repoRoot, path));
+}
 
 function fixture(): Fixture {
 	const id = fixtureNumber++;
@@ -144,6 +154,11 @@ function fixture(): Fixture {
 	mkdirSync(join(work, "tests", "cli"), { recursive: true });
 	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
 	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
+	mkdirSync(join(work, "scripts"), { recursive: true });
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh"];
+	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
+	for (const path of gateFiles)
+		writeFileSync(join(work, path), committedGateFile(path), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
 	git(work, ["add", "-A"]);
 	git(work, ["commit", "-m", "base [test]"]);
 	git(work, ["push", "-u", "origin", "HEAD:refs/heads/main"]);
@@ -221,6 +236,7 @@ test("checks the exact candidate with the base-registered push check before publ
 	const checkShaFile = join(scratch, `checked-sha-${fixtureNumber}.txt`);
 	const checkContentFile = join(scratch, `checked-content-${fixtureNumber}.txt`);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 	const run = command(work, landArgs("owned.txt"), hold, {
 		amDir: fakeBin,
 		gitEnv: {
@@ -258,8 +274,13 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("post-commit worktree edit\n");
 	const tree = git(work, ["rev-parse", `${data.commit}^{tree}`]).trim();
 	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
+	const expectedChecks = createHash("sha256")
+		.update(git(work, ["show", `${data.commit}:scripts/full-suite-verdict.sh`]))
+		.update(git(work, ["show", `${data.commit}:scripts/fresh-gate.sh`]))
+		.update(git(work, ["show", `${data.commit}:scripts/gate-ci-only.tsv`]))
+		.digest("hex");
 	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
-		tree, verdict: "PASS", evidence: { complete: true },
+		tree, checks: expectedChecks, verdict: "PASS", evidence: { complete: true },
 	});
 	expect(remoteHead(work)).toBe(data.commit);
 });
