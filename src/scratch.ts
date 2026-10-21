@@ -1602,6 +1602,17 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	} catch {
 		return { ok: false, dir: "", exportLine: "", reason: "repo-invalid" };
 	}
+	// The CLI passes its working directory here.  Refuse that directory unless it
+	// is actually a repository, rather than creating a root that the reaper cannot
+	// discover from any repository.  Programmatic callers may still provide a
+	// fixture/alternate owner path explicitly.
+	try {
+		if (repo === resolve(process.cwd()) && !existsSync(join(repo, ".git"))) {
+			return { ok: false, dir: "", exportLine: "", reason: "cwd-not-repository" };
+		}
+	} catch {
+		return { ok: false, dir: "", exportLine: "", reason: "cwd-unavailable" };
+	}
 	const start = deps.liveness.processStart(process.pid);
 	if (start === null) return { ok: false, dir: "", exportLine: "", reason: "process-identity-unavailable" };
 	const root = join(repo, "var", "agent-tmp");
