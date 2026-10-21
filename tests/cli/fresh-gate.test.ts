@@ -177,6 +177,24 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 });
 
 
+test("fresh gate selftest refuses a deleted CLI boot check", () => {
+	const dir = fixture();
+	try {
+		const mutant = join(dir, "scripts/fresh-gate-mutant.sh");
+		const source = readFileSync(gate, "utf8");
+		const deleted = source.replace(/\ngate_cli_boot\(\) \{[\s\S]*?\n\}\n/, "\n");
+		expect(deleted).not.toBe(source);
+		writeFileSync(mutant, deleted);
+		chmodSync(mutant, 0o755);
+		const result = run(mutant, ["--selftest"]);
+		const output = result.stdout.toString() + result.stderr.toString();
+		expect(result.exitCode).not.toBe(0);
+		expect(output).toContain("gate_cli_boot");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("fresh gate selftest refuses a deleted gate function", () => {
 	const dir = fixture();
 	try {

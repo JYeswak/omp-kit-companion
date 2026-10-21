@@ -29,7 +29,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests; do
+	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
