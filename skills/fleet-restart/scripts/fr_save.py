@@ -95,13 +95,19 @@ def fork_evidence(session_file):
         return None
     if FORK_MOVED_MARKER in text:
         return "SESSION_MOVED_TO_NEW_FILE: %s logs %r" % (session_file, FORK_MOVED_MARKER)
-    first = text.splitlines()[0] if text.splitlines() else ""
-    try:
-        meta = json.loads(first) if first.lstrip().startswith("{") else {}
-    except ValueError:
-        meta = {}
-    if isinstance(meta, dict) and meta.get("parentSession"):
-        return "PARENT_SESSION %s in %s header" % (meta["parentSession"], session_file)
+    lines = text.splitlines()
+    # Real OMP files begin with a title record; the session header carrying
+    # parentSession is commonly the second line. Scan the bounded head, not
+    # only line one, so title-first fork files cannot pass as clean.
+    for line in lines:
+        if not line.lstrip().startswith("{"):
+            continue
+        try:
+            meta = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(meta, dict) and meta.get("parentSession"):
+            return "PARENT_SESSION %s in %s header" % (meta["parentSession"], session_file)
     return None
 
 

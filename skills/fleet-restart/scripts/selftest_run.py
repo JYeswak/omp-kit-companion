@@ -1574,17 +1574,23 @@ def gate_session_fork(case, root, home, agents, good_env, uid, aligned):
     clean = os.path.join(c, "clean.jsonl")
     moved = os.path.join(c, "moved.jsonl")
     parented = os.path.join(c, "parented.jsonl")
+    parented_title_first = os.path.join(c, "parented-title-first.jsonl")
     with open(clean, "w") as fh:
         fh.write('{"sessionId":"abc","cwd":"/w"}\n{"role":"user","text":"hi"}\n')
     with open(moved, "w") as fh:
         fh.write('{"sessionId":"abc","cwd":"/w"}\n{"role":"user","text":"hi"}\n{"type":"system","text":"Session moved to a new file (reason=open-elsewhere)"}\n')
     with open(parented, "w") as fh:
         fh.write('{"sessionId":"def","parentSession":"abc","cwd":"/w"}\n')
+    # Real OMP fork children put a title record before the session header.
+    with open(parented_title_first, "w") as fh:
+        fh.write('{"type":"title","sessionId":"def"}\n{"sessionId":"def","parentSession":"abc","cwd":"/w"}\n')
     case("CTL clean session file shows no fork", fr_save.fork_evidence(clean) is None)
     case("NEG 'Session moved to a new file' record names the fork",
          (fr_save.fork_evidence(moved) or "").startswith("SESSION_MOVED_TO_NEW_FILE"), fr_save.fork_evidence(moved))
     case("NEG parentSession header names the fork",
          (fr_save.fork_evidence(parented) or "").startswith("PARENT_SESSION"), fr_save.fork_evidence(parented))
+    case("NEG title-first parentSession header names the real fork",
+         (fr_save.fork_evidence(parented_title_first) or "").startswith("PARENT_SESSION"), fr_save.fork_evidence(parented_title_first))
     case("CTL missing session file is no fork evidence (never a false failure)", fr_save.fork_evidence(os.path.join(c, "gone.jsonl")) is None)
     case("CTL no session file is no fork evidence", fr_save.fork_evidence(None) is None)
 
