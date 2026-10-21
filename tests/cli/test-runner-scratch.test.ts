@@ -26,3 +26,29 @@ test("stock Bun runner ignores scratch copies but runs the control", () => {
 test("portable stock-runner configuration declares the scratch boundary", () => {
 	expect(readFileSync(join(REPO_ROOT, "bunfig.toml"), "utf8")).toMatch(/pathIgnorePatterns\s*=\s*\[[^\]]*var\/agent-tmp\/\*\*/);
 });
+test("doctor test-scope reports planted Jest negative and passing Bun control", () => {
+	const root = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "testscope1-doctor-"));
+	try {
+		const good = join(root, "good");
+		const bad = join(root, "bad");
+		mkdirSync(good, { recursive: true });
+		mkdirSync(bad, { recursive: true });
+		writeFileSync(join(good, "bunfig.toml"), "[test]\npathIgnorePatterns = [\"var/agent-tmp/**\"]\n");
+		writeFileSync(join(bad, "package.json"), JSON.stringify({ scripts: { test: "jest" }, devDependencies: { jest: "^29" } }));
+		const config = join(root, "fleet-watch.json");
+		writeFileSync(config, JSON.stringify({ sessions: [{ repo: good }, { repo: bad }] }));
+		const result = Bun.spawnSync([process.execPath, "run", join(REPO_ROOT, "src", "cli.ts"), "doctor", "--scope", "test-scope", "--json"], {
+			env: { ...process.env, OMP_KIT_FLEET_WATCH_CONFIG: config, OMP_KIT_OMP_SRC_FETCH: "0" },
+			stdout: "pipe", stderr: "pipe", stdin: "ignore",
+		});
+		const output = result.stdout.toString();
+		expect(result.exitCode, output + result.stderr.toString()).toBe(0);
+		const parsed = JSON.parse(output) as { data: { findings: Array<{ component: string; status: string; evidence?: { repos?: Array<{ repo: string; verdict: string; runner: string }> } }> } };
+		const finding = parsed.data.findings.find((row) => row.component === "test-scope")!;
+		expect(finding.status).toBe("FAIL");
+		expect(finding.evidence?.repos).toEqual(expect.arrayContaining([
+			expect.objectContaining({ repo: good, runner: "bun", verdict: "PASS" }),
+			expect.objectContaining({ repo: bad, runner: "jest", verdict: "FAIL" }),
+		]));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
