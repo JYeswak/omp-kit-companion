@@ -260,6 +260,35 @@ jobs:
           # shellcheck disable=SC2086
           gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false $latest_flag
 
+  verify-published:
+    # PUBVERIFY1: re-read what GitHub now serves; candidate-side checks are not publication proof.
+    needs: publish
+    if: needs.publish.outputs.promote == 'true' && needs.publish.outputs.phase == 'sign'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
+      - name: Download the published manifest and verify every public byte
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/published"
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --pattern release-index.json --dir "$RUNNER_TEMP/published"
+          bun scripts/verify-published.ts "$GITHUB_REPOSITORY" "v$VERSION" \
+            "$RUNNER_TEMP/published/release-index.json"
+
   tag-qualified:
     needs: publish
     if: needs.publish.outputs.promote == 'true' && needs.publish.outputs.phase == 'qualify'
