@@ -1,10 +1,11 @@
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
-import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
 
@@ -234,6 +235,45 @@ function pushCheckAdmission(result: PushCheckResult): { allow: boolean; reason?:
 	if (result.status === "PASS" || result.status === "SKIP") return { allow: true };
 	return { allow: false, reason: result.status === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
 }
+
+type FullSuiteVerdict = "PASS" | "FAIL" | "UNRUN";
+const FULL_SUITE_VERDICT_TIMEOUT_MS = 1_830_000;
+const FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+function runFullSuiteVerdict(repo: string, candidate: string): FullSuiteVerdict {
+	const script = resolve(dirname(fileURLToPath(import.meta.url)), "../scripts/full-suite-verdict.sh");
+	const configuredTimeoutSeconds = process.env.FULL_SUITE_TIMEOUT_SECS === undefined
+		? 1800
+		: Number(process.env.FULL_SUITE_TIMEOUT_SECS);
+	const timeoutMs = Number.isSafeInteger(configuredTimeoutSeconds) && configuredTimeoutSeconds > 0 && configuredTimeoutSeconds < 2_147_000
+		? configuredTimeoutSeconds * 1000 + 30_000
+		: FULL_SUITE_VERDICT_TIMEOUT_MS;
+	const run = spawnSync("sh", [script, "--repo", repo, "--commit", candidate], {
+		cwd: repo,
+		env: gitEnvironment(),
+		encoding: "utf8",
+		timeout: timeoutMs,
+		maxBuffer: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES,
+	});
+	const stdout = run.stdout ?? "";
+	const stderr = run.stderr ?? "";
+	if (!run.error && run.signal === null && run.status === 0 &&
+		(stdout.includes("FULL-SUITE: VERDICT PASS ") || stdout.includes("FULL-SUITE: VERDICT REUSED PASS ") ||
+			stderr.includes("FULL-SUITE: VERDICT PASS ") || stderr.includes("FULL-SUITE: VERDICT REUSED PASS ")))
+		return "PASS";
+	if (!run.error && run.signal === null && run.status !== 0 &&
+		(stdout.includes("FULL-SUITE: VERDICT FAIL ") || stdout.includes("FULL-SUITE: VERDICT REUSED FAIL ") ||
+			stderr.includes("FULL-SUITE: VERDICT FAIL ") || stderr.includes("FULL-SUITE: VERDICT REUSED FAIL ")))
+		return "FAIL";
+	return "UNRUN";
+}
+
+function fullSuiteError(verdict: Exclude<FullSuiteVerdict, "PASS">): { code: string; message: string; remediation: string } {
+	return verdict === "FAIL"
+		? { code: "LAND_FULL_SUITE_FAILED", message: "The complete declared suite failed against the exact candidate archive", remediation: "Repair the candidate and retry; the failed tree is cached RED and was not published." }
+		: { code: "LAND_FULL_SUITE_UNRUN", message: "The complete declared suite did not produce complete PASS evidence for the exact candidate archive", remediation: "Restore the suite runner or resolve its timeout/incomplete evidence, then retry; no publication was authorized." };
+}
+
 
 const LAND_PUBLICATION_REF = "refs/heads/main";
 const LAND_ACTUAL_PARENT_GUARD = "actual-parent-custody-v1";
@@ -802,6 +842,21 @@ function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
 			verification: "PERFORMED",
 		};
 	}
+	const fullSuiteVerdict = runFullSuiteVerdict(repo, candidate);
+	if (fullSuiteVerdict !== "PASS") {
+		cleanup();
+		const remoteAfter = observedRemoteMain(repo);
+		if (remoteAfter && remoteAfter !== base) git(repo, ["fetch", "origin", "refs/heads/main"]);
+		const reason = fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN";
+		const convergence = patchConvergence(repo, "REFUSED", reason, false, base, candidate, remoteAfter, 0, elapsed());
+		const phases = landPhaseEvidence(repo, candidate, true, convergence);
+		return {
+			code: fullSuiteVerdict === "UNRUN" ? 77 : 1,
+			data: { overall: fullSuiteVerdict === "UNRUN" ? "UNRUN" : "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
+			errors: [fullSuiteError(fullSuiteVerdict)],
+			verification: fullSuiteVerdict === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
+		};
+	}
 	const observed = observedRemoteMain(repo);
 	if (observed === null) {
 		cleanup();
@@ -996,6 +1051,7 @@ export function landCommand(request: ParsedCommand): CliResult {
 	let checkResult = checkPreflight.kind === "skip"
 		? checkPreflight.result
 		: pushCheckResult("UNRUN", "not_run", checkPreflight.result.sha256);
+	let fullSuiteVerdict: FullSuiteVerdict | undefined;
 	let checkedCandidateSha: string | null = null;
 	try {
 		convergenceStarted = true;
@@ -1006,6 +1062,9 @@ export function landCommand(request: ParsedCommand): CliResult {
 				checkResult = runPushCheck(repo, baseSha, candidateSha);
 				const admission = pushCheckAdmission(checkResult);
 				if (!admission.allow) return admission;
+				fullSuiteVerdict = runFullSuiteVerdict(repo, candidateSha);
+				if (fullSuiteVerdict !== "PASS")
+					return { allow: false, reason: fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
 				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): refuse the push while the session holds an
 				// undisposed scratch dir. Refuse on positive evidence only; an unlistable census is fail-open, never
 				// a block, so a broken measuring tool cannot strand a landing.
@@ -1024,17 +1083,19 @@ export function landCommand(request: ParsedCommand): CliResult {
 		const pushedSha = convergence.pushed ? convergence.remote_after ?? null : null;
 		checkResult = { ...checkResult, pushed_sha: pushedSha };
 		const checkUnavailable = checkResult.status === "UNRUN" && checkResult.reason !== "not_run";
+		const fullSuiteUnavailable = fullSuiteVerdict === "UNRUN";
 		const checkAllowed = checkResult.status === "PASS" || checkResult.status === "SKIP";
-		const published = convergence.pushed && pushedSha === candidateSha && checkAllowed;
-		const overall = published ? "PUSHED" : checkUnavailable ? "UNRUN" : "REFUSED";
+		const published = convergence.pushed && pushedSha === candidateSha && checkAllowed && fullSuiteVerdict === "PASS";
+		const overall = published ? "PUSHED" : checkUnavailable || fullSuiteUnavailable ? "UNRUN" : "REFUSED";
 		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergence);
-		const failure = published ? undefined : checkResult.status === "FAIL"
+		const suiteFailure = fullSuiteVerdict === "FAIL" || fullSuiteVerdict === "UNRUN" ? fullSuiteError(fullSuiteVerdict) : undefined;
+		const failure = published ? undefined : suiteFailure ?? (checkResult.status === "FAIL"
 			? { code: "LAND_CHECK_FAILED", message: "The registered repo check failed for the exact publication candidate", remediation: "Repair the check or candidate; it was not published." }
 			: checkUnavailable
 				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
 				: convergence.reason === "PUSH_REJECTED"
 					? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
-					: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." };
+					: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
 		return {
 			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
 			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner: owner.owner, paths, base: head.out.trim(), localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence, check: checkResult, phases },

@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -62,6 +62,7 @@ mkdirSync(scratchRoot, { recursive: true });
 const scratch = mkdtempSync(join(scratchRoot, `private-index-land.${process.pid}.`));
 writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=private-index-land repo=${repoRoot} created=${new Date().toISOString()}\n`);
 let fixtureNumber = 0;
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 type Fixture = { work: string; fakeBin: string };
 
@@ -136,9 +137,13 @@ function fixture(): Fixture {
 	git(scratch, ["clone", bare, work]);
 	git(work, ["config", "user.name", "LAND1 test"]);
 	git(work, ["config", "user.email", "land1@example.invalid"]);
+	mkdirSync(join(work, "var", "agent-tmp"), { recursive: true });
 	writeFileSync(join(work, "owned.txt"), "base owned\n");
 	writeFileSync(join(work, "peer.txt"), "peer baseline\n");
 	writeFileSync(join(work, "untouched.txt"), "untouched baseline\n");
+	mkdirSync(join(work, "tests", "cli"), { recursive: true });
+	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
+	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
 	git(work, ["add", "-A"]);
 	git(work, ["commit", "-m", "base [test]"]);
 	git(work, ["push", "-u", "origin", "HEAD:refs/heads/main"]);
@@ -251,7 +256,55 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(readFileSync(checkShaFile, "utf8")).toBe(`${data.commit}\n`);
 	expect(readFileSync(checkContentFile, "utf8")).toBe("candidate owned content\n");
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("post-commit worktree edit\n");
+	const tree = git(work, ["rev-parse", `${data.commit}^{tree}`]).trim();
+	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
+	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
+		tree, verdict: "PASS", evidence: { complete: true },
+	});
 	expect(remoteHead(work)).toBe(data.commit);
+});
+test("refuses a candidate whose exact full suite is red before origin advances", () => {
+	const { work, fakeBin } = fixture();
+	const base = remoteHead(work);
+	const contract = join(work, "suite-contract.txt");
+	writeFileSync(contract, "FAIL\n");
+	writeFileSync(join(work, "owned.txt"), "candidate with failing full suite\n");
+	const hold = [
+		{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 },
+		{ agent: "DarkFern", path: "suite-contract.txt", exclusive: true, remaining_seconds: 3600 },
+	];
+	const run = command(work, landArgs("owned.txt", "suite-contract.txt"), hold, { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_FULL_SUITE_FAILED");
+	expect(remoteHead(work)).toBe(base);
+	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
+	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
+	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
+	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
+		tree, verdict: "FAIL", evidence: { complete: true },
+	});
+});
+
+test("refuses incomplete full-suite evidence before origin advances", () => {
+	const { work, fakeBin } = fixture();
+	const base = remoteHead(work);
+	writeFileSync(join(work, "suite-contract.txt"), "SLOW\n");
+	writeFileSync(join(work, "owned.txt"), "candidate with incomplete full suite\n");
+	const hold = [
+		{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 },
+		{ agent: "DarkFern", path: "suite-contract.txt", exclusive: true, remaining_seconds: 3600 },
+	];
+	const run = command(work, landArgs("owned.txt", "suite-contract.txt"), hold, {
+		amDir: fakeBin,
+		gitEnv: { FULL_SUITE_TIMEOUT_SECS: "1" },
+	});
+	expect(run.status).toBe(77);
+	expect(responseCode(run.body)).toBe("LAND_FULL_SUITE_UNRUN");
+	expect(remoteHead(work)).toBe(base);
+	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
+	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
+	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
+	expect(existsSync(verdictPath)).toBe(false);
 });
 test("requires explicit --yes before publishing", () => {
 	const { work, fakeBin } = fixture();
@@ -1499,6 +1552,39 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("unstaged worktree bytes\n");
 	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(SERVICE_BASE);
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("refuses a patch whose exact full suite is red before origin advances", () => {
+	const setup = hunkSetup("none");
+	const { work, fakeBin, bare, base, patch } = setup;
+	const caller = join(scratch, `full-suite-caller-${fixtureNumber++}`);
+	git(scratch, ["clone", "--branch", "main", bare, caller]);
+	git(caller, ["config", "user.name", "caller"]);
+	git(caller, ["config", "user.email", "caller@example.invalid"]);
+	writeFileSync(join(caller, "suite-contract.txt"), "FAIL\n");
+	git(caller, ["add", "suite-contract.txt"]);
+	git(caller, ["commit", "-m", "break declared suite [test]"]);
+	writeFileSync(patch, `${readFileSync(patch, "utf8")}${git(caller, ["diff", base, "HEAD"])}`);
+	const hold = [
+		...patchHold(),
+		{ agent: "DarkFern", path: "suite-contract.txt", exclusive: true, remaining_seconds: 3600 },
+	];
+	const run = command(work, ["--patch", patch, "--message", "feat(land): reject failing full suite [test]", "--apply", "--yes"], hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
+	});
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_FULL_SUITE_FAILED");
+	expect(remoteHead(work)).toBe(base);
+	const data = run.body.data;
+	if (data === null || typeof data !== "object" || !("commit" in data) || typeof data.commit !== "string")
+		throw new Error("land patch refusal omitted its constructed candidate commit");
+	const candidate = data.commit;
+	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
+	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
+	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
+		tree, verdict: "FAIL", evidence: { complete: true },
+	});
 });
 
 test("refuses a true three-way conflict naming the file and hunks", () => {
