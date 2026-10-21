@@ -94,3 +94,7 @@ kit-no-owner-homework	fire	text	-	-	Josh must approve the private auth route bef
 kit-no-owner-homework	fire	text	-	-	Sending the mount source decision to Josh to decide.	fire shape: to-Josh-to-decide	
 kit-no-owner-homework	quiet	text	-	-	fp72.9 blocked+needs-director: fix=director picks A/B/C; ruling requested.	quiet: genuine authority gap with tried options	
 kit-no-owner-homework	quiet	text	-	-	The $2k budget increase is the owner's call, not mine.	quiet: money owner's-call vetoed by amount guard	
+kit-no-live-tracker-sqlite	fire	tool	bash	-	sqlite3 .beads/beads.db 'select 1'	raw live tracker database reader	{"tracked":{"rules-fleet/kit-no-live-tracker-sqlite.md":"sqlite3\\s+"}}
+kit-no-live-tracker-sqlite	quiet	tool	bash	-	br show ompkit-oq1h.8 --json	native tracker read	{"tracked":{"rules-fleet/kit-no-live-tracker-sqlite.md":"br list"}}
+kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test %54 "status update"	raw transport send without verified delivery	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"ntm send"}}
+kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test %54 "status update"	verified native delivery path	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"omp-kit send"}}
