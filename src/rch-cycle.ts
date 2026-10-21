@@ -125,7 +125,7 @@ export function parseRchStatus(value: unknown): RchStatus | null {
 		workers.push({ id: row.id, status: typeof row.status === "string" ? row.status : "unknown", fresh: row.pressure_telemetry_fresh === true,
 			confidence: typeof row.pressure_confidence === "string" ? row.pressure_confidence : "unknown", pressure: typeof row.pressure_state === "string" ? row.pressure_state : "unknown",
 			total: row.total_slots, used: row.used_slots, free: row.total_slots - row.used_slots,
-			buildDiskFreeGb: typeof row.pressure_build_disk_free_gb === "number" && Number.isFinite(row.pressure_build_disk_free_gb) ? row.pressure_build_disk_free_gb : null,
+			buildDiskFreeGb: typeof row.pressure_build_disk_free_gb === "number" && Number.isFinite(row.pressure_build_disk_free_gb) ? row.pressure_build_disk_free_gb : (typeof row.pressure_build_disk_free_bytes === "number" && Number.isFinite(row.pressure_build_disk_free_bytes) && row.pressure_build_disk_free_bytes >= 0 ? row.pressure_build_disk_free_bytes / 1_000_000_000 : null),
 			memoryPressure: typeof row.pressure_memory_pressure === "number" && Number.isFinite(row.pressure_memory_pressure) && row.pressure_memory_pressure >= 0 ? row.pressure_memory_pressure : null });
 	}
 	return { workers, active: daemon.active_builds.length, queued: daemon.queued_builds.length };
