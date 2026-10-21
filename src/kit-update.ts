@@ -347,11 +347,16 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    const ompIdentityKnown = selectedOmp !== null && observedOmp !== null && report.omp_version !== null && report.omp_version === selectedOmp.version;
    const ompChanged = selectedOmp !== null && observedOmp !== null &&
     (!sameOmpSnapshot(selectedOmp, observedOmp) || (report.omp_version !== null && report.omp_version !== selectedOmp.version));
+   const postcheckReason = !ompIdentityKnown
+    ? report.omp_version === null ? "OMP_VERSION_UNVERIFIED" : "OMP_VERSION_MISMATCH"
+    : matcher !== "PASS" ? "KIT_FAST_TEST_FAILED"
+    : live !== "PASS" ? "KIT_LIVE_TEST_FAILED"
+    : report.status !== "PASS" || report.exitCode !== 0 ? "KIT_POSTCHECK_FAILED" : undefined;
    postcheck = { status: !ompChanged && ompIdentityKnown && report.status === "PASS" && report.exitCode === 0 && matcher === "PASS" && live === "PASS" ? "PASS" : "FAIL",
-    matcher, live, report };
+    matcher, live, report, ...(postcheckReason ? { reason: postcheckReason } : {}) };
    if (ompChanged) throw new Error("OMP_CHANGED_DURING_KIT_UPDATE");
    if (postcheck.status !== "PASS" || !matches(plan.prefix, next) ||
-    !verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error("KIT_POSTCHECK_FAILED");
+    !verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error(postcheck.reason ?? "KIT_POSTCHECK_FAILED");
    reconcileKitUpdateReceipt(plan.stateRoot, heldLock, receiptId, () => matches(plan.prefix, next) &&
     verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256) &&
     sameOmpSnapshot(selectedOmp, selectedOmpSnapshot()) && postcheck.status === "PASS");

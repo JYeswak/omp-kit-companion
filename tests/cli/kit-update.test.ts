@@ -463,7 +463,7 @@ test("a null full-test OMP version is a named postcheck failure, not an OMP chan
 		const result = await applyKitUpdate(plan);
 		expect(result.status).toBe("PARTIAL");
 		expect(result.postcheck.report?.omp_version).toBeNull();
-		expect(result.postcheck.reason).toBe("KIT_POSTCHECK_FAILED");
+		expect(result.postcheck.reason).toBe("OMP_VERSION_UNVERIFIED");
 		expect(JSON.parse(readFileSync(manifestPath, "utf8")).version).toBe("18.4.2");
 		const envelope = kitUpdateEnvelope(plan, result);
 		const detail = envelope.data.postcheck_detail as { omp_version: string | null; failed_stages: string[] };
