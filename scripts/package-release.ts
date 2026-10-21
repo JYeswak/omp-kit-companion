@@ -27,7 +27,7 @@ const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/bu
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
-	"scripts/ladder.sh", "scripts/test-case-report.sh", "scripts/limit-process-tree.sh", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
+	"scripts/ladder.sh", "scripts/test-case-report.sh", "scripts/limit-process-tree.sh", "scripts/rule_pipeline.py", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
@@ -220,7 +220,8 @@ export function checkPackagedExtensionLoads(stagedRoot: string): { file: string;
 async function run(): Promise<void> {
 	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
 	try {
-		authorizeSourceAct({ canonicalRoot: root, privateRoots: [join(root, "var", "agent-tmp")] }, { path: root, act: "build" });
+		const privateRoots = join(root, "var", "agent-tmp");
+		authorizeSourceAct({ canonicalRoot: root, privateRoots: existsSync(privateRoots) ? [privateRoots] : [] }, { path: root, act: "build" });
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
@@ -232,15 +233,17 @@ async function run(): Promise<void> {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	const directory = mkdtempSync(join(out, "kit-package-"));
+	const compileTmp = mkdtempSync(join(out, "kit-compile-"));
 	try {
 		const ruleManifest = packageRuleManifest(root, out);
 		const binary = join(directory, RELEASE_BINARY_NAME);
 		mkdirSync(dirname(binary), { recursive: true, mode: 0o700 });
 		const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
 			"--no-compile-autoload-bunfig", `--target=${platformTargets[key]}`, join(root, "src/cli.ts"), `--outfile=${binary}`], {
-			// Bun's compile scratch is rooted in cwd. Keep both cwd and outfile in
-			// the owned mkdtemp directory so an interrupted build cannot soil root.
-			cwd: directory, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: directory },
+			// Bun's cross-target compiler stages a runtime image in TMPDIR. Keep
+			// that scratch tree separate from cwd: when both are the package
+			// directory, Bun attempts to copy its scratch image onto itself.
+			cwd: directory, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: compileTmp },
 		});
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
@@ -338,6 +341,7 @@ async function run(): Promise<void> {
 		process.stdout.write(`${JSON.stringify(asset)}\n`);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
+		rmSync(compileTmp, { recursive: true, force: true });
 	}
 }
 type SpdxInput = { version: string; key: string; filename: string; archiveSha: string; bunVersion: string; binarySha: string; files: { path: string; sha256: string }[] };

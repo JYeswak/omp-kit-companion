@@ -6,3 +6,4 @@
 - Expose the hooks doctor scope and preserve launchd query failures as unverified service state. (commit 3e78080)
 - Remote-build admission accepts finite, nonnegative worker disk-space telemetry in bytes when gigabyte telemetry is absent. (commit fa3c900)
 - Fleet restart derives protected panes from fleet configuration. (commit ed8a913)
+- Release packaging accepts clean source exports without an optional scratch directory, bundles the rule-pipeline helper, and separates cross-compiler scratch from package output.
