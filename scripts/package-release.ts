@@ -17,12 +17,12 @@ const platformTargets: Record<string, string> = {
 	"aarch64-unknown-linux-gnu": "bun-linux-arm64",
 	"x86_64-unknown-linux-gnu": "bun-linux-x64",
 };
-const roots = new Set(["rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "plugins/omp-kit-tern"]);
+const roots = new Set(["rules", "rules-fleet", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "plugins/omp-kit-tern"]);
 for (const file of RELEASE_DATA_FILES) {
 	const directory = dirname(file);
 	if (directory !== ".") roots.add(directory);
 }
-const files = ["LICENSE", "package.json", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
+const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
