@@ -5,6 +5,7 @@ import { basename, delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { defaultLiveness, probeOwner, type LivenessDeps } from "./scratch.ts";
+import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
 
 const LOAD_PER_CORE_LIMIT = 2.5;
@@ -297,6 +298,13 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	if (command.length === 0 || !command[0]) {
 		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
 		return 2;
+	}
+	// DISKSTAGE-WIRE1: staged statvfs admission is the real heavy entrypoint gate.
+	// It runs before queue/state mutation, so STOP and CRITICAL cannot enqueue work.
+	const staged = admitDiskWork("heavy");
+	if (!staged.allowed) {
+		process.stdout.write(`${staged.code}\n`);
+		return staged.code === "DISK_OBSERVER_UNAVAILABLE" ? HEAVY_PREREQ_MISSING : 10;
 	}
 	const envObserver = process.env.OMP_KIT_DISK_OBSERVER;
 	const envOverride = envObserver === undefined || envObserver === "" ? undefined : envObserver;
