@@ -18,7 +18,7 @@ set -eu
 LC_ALL=C
 export LC_ALL
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 MANIFEST="$ROOT/MANIFEST.tsv"
 
 check=0
@@ -39,7 +39,22 @@ OMP_KIT_BUN="$ROOT/scripts/runtime-adapter.sh"
 pack=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)
 [ -n "$pack" ] || pack="uncommitted-$(date -u +%Y-%m-%d)"
 
-work_dir=$("$OMP_KIT_BUN" --workdir) || { work_rc=$?; echo "build-manifest: private workdir producer_rc=$work_rc" >&2; exit "$work_rc"; }
+# A source export has src/ but deliberately no .git or compiled bin/omp-kit. It
+# is the gate's portable source input, not a release tree: use private local
+# scratch and the direct Bun producer instead of asking the packaged runtime
+# adapter to find an embedded launcher that the export cannot contain.
+source_export=0
+if [ ! -e "$ROOT/.git" ] && [ -d "$ROOT/src" ] && [ ! -x "$ROOT/bin/omp-kit" ]; then
+  source_export=1
+fi
+if [ "$source_export" = 1 ]; then
+  umask 077
+  work_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/omp-kit-manifest.XXXXXXXX") ||
+    { echo "build-manifest: cannot create private source-export workdir" >&2; exit 2; }
+else
+  work_dir=$("$OMP_KIT_BUN" --workdir) ||
+    { work_rc=$?; echo "build-manifest: private workdir producer_rc=$work_rc" >&2; exit "$work_rc"; }
+fi
 [ -n "$work_dir" ] || { echo "build-manifest: empty private workdir" >&2; exit 2; }
 tmp="$work_dir/manifest.tsv"
 cleanup() {
@@ -48,10 +63,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+
 # One process for every rule: name TAB class, from the rule object omp itself builds.
 classify_rules() {
-  if [ "$stdout" = 1 ]; then
-    command -v bun >/dev/null 2>&1 || { echo "build-manifest --stdout: Bun is required" >&2; return 127; }
+  if [ "$stdout" = 1 ] || [ "$source_export" = 1 ]; then
+    command -v bun >/dev/null 2>&1 || { echo "build-manifest: Bun is required for a source export" >&2; return 127; }
     bun run --no-env-file --config=/dev/null "$ROOT/scripts/rule-class.ts" "$@"
   else
     "$OMP_KIT_BUN" "$ROOT/scripts/rule-class.ts" "$@"
