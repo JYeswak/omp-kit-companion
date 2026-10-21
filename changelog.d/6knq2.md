@@ -1,0 +1,1 @@
+- Preserve quarantined live-agent work during expiry: fresh unowned mtimes and live seat leases now veto deletion (ompkit-6knq2).

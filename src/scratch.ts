@@ -1938,6 +1938,29 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		const quarantinedAt = quarantineTimeOf(entry);
 		if (quarantinedAt === null || now - quarantinedAt < ttlMs) continue;
 		const path = join(qt, entry);
+		const { owner: liveOwner } = readOwner(path);
+		if (liveOwner === null) {
+			const fresh = idleSince(path, now);
+			if (fresh === null) {
+				done.push({ dir: path, action: "SKIP", reason: "idle-proof-unavailable", owner: null, sizeBytes: dirSize(path) });
+				continue;
+			}
+			if (fresh >= now - QUARANTINE_IDLE_MS) {
+				done.push({ dir: path, action: "SKIP", reason: "quarantine-active-mtime", owner: null, sizeBytes: dirSize(path) });
+				continue;
+			}
+		}
+		if (liveOwner !== null && liveOwner.bin !== "hold" && liveOwner.agent !== null && liveOwner.session !== null) {
+			const seat = deps.liveness.seatLive?.(liveOwner.agent, liveOwner.session) ?? null;
+			if (seat === true) {
+				done.push({ dir: path, action: "LIVE", reason: "owner-seat-alive", owner: liveOwner, sizeBytes: dirSize(path) });
+				continue;
+			}
+			if (seat === null) {
+				done.push({ dir: path, action: "SKIP", reason: "owner-seat-liveness-unproven", owner: liveOwner, sizeBytes: dirSize(path) });
+				continue;
+			}
+		}
 		if (isSymlink(path)) {
 			done.push({ dir: path, action: "SKIP", reason: "quarantine-symlink", owner: null, sizeBytes: 0 });
 			continue;
