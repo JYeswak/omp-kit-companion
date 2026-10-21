@@ -1,10 +1,10 @@
 ---
 description: "Forbid raw live-tracker SQLite readers: use native br/bv or disposable copies; beads_rust#532 stays a mitigation"
 condition:
-  - 'sqlite3\s+["'']?[^"'`'\n;|&]*\.beads[\\/]beads\.db'
-  - '"(path|file|uri|database)"\s*:\s*"[^"]*\.beads[\\/]beads\.db'
-  - '(sqlite3?|Database)(\s*\(\s*|\s*\.\s*(open|connect)\s*\(\s*)["''][^"'`\n]*\.beads[\\/]beads\.db'
-  - 'ATTACH\s+(DATABASE\s+)?["''][^"'`\n]*\.beads[\\/]beads\.db'
+  - '\bsqlite3\s+["'']?[^"'']*\.beads[\\/]beads\.db'
+  - '"(path|file|uri|database)"\s*:\s*"[^"]*\.beads[\\/]beads\.db"'
+  - '(sqlite3?|Database)(\s*\(\s*|\s*\.\s*(open|connect)\s*\(\s*)["''][^"'']*\.beads[\\/]beads\.db'
+  - 'ATTACH\s+(DATABASE\s+)?["''][^"'']*\.beads[\\/]beads\.db'
 scope: tool:bash, tool:write, tool:edit
 interruptMode: always
 ---

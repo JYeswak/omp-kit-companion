@@ -125,6 +125,22 @@ jobs:
         run: bun scripts/test-quarantine.ts check
       - name: Prove stock PATH and run every portable extension contract
         run: bun scripts/test-stock-extensions.ts
+  fresh-gate-contract:
+    name: fresh-gate affected-tests contract
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
+      - name: Run affected-test selection and exact-commit fresh-gate contracts
+        run: bun test tests/cli/affected-tests.test.ts tests/cli/fresh-gate.test.ts
+
   mac-service-contracts:
     if: github.event.repository.private == false && (github.event_name == 'push' || github.event_name == 'pull_request')
     needs: resolve-omp-versions

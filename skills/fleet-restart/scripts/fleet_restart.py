@@ -23,7 +23,8 @@ import subprocess
 import sys
 
 DEFAULT_PROTECT = ["uds--burn-down:0.0"]
-FORBIDDEN_CWDS = ["/private/tmp", "/tmp"]
+
+FORBIDDEN_CWDS = ["/private/tmp", "/tmp", "/var/folders", "/private/var/folders"]
 OMP_RE = re.compile(r"(?:^|\s)\S*bun\s+(\S*/\.bun/bin/omp|\S*/pi-coding-agent/dist/cli\.js)(?=\s|$)")
 # Tern (by OMP's authors) installs omp as one compiled binary; ps shows the name it was invoked by
 # ("omp --profile x", "/opt/homebrew/bin/omp -p", measured 2026-10-11) or its versioned path, which
@@ -42,6 +43,46 @@ CALLBACK = "DONE|BLOCKED <bead> <sha> <evidence>; NEXT <item>"
 ADVISOR_MARKS = ("👁", "🙈")
 CAPTURE_LINES = 2000
 TAIL_LINES = 40
+
+
+def protected_panes(home, explicit=(), config_path=None):
+    """Resolve protected seats from an operator list or fleet-watch config.
+
+    A missing/invalid source is a refusal, never an implicit fallback to a
+    historical pane position.
+    """
+    explicit = [str(p) for p in explicit if str(p)]
+    if explicit:
+        return explicit, "explicit", None
+    path = config_path or os.environ.get("OMP_KIT_FLEET_WATCH_CONFIG")
+    if not path:
+        path = os.path.join(home, ".config", "omp-kit", "fleet-watch.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return [], "config", "PROTECTED_PANES_REQUIRED:%s (%s)" % (path, exc)
+    found = []
+    for key in ("chief", "chiefPane", "protectedPane"):
+        value = cfg.get(key) if isinstance(cfg, dict) else None
+        if isinstance(value, str) and value:
+            found.append(value)
+    sessions = cfg.get("sessions", []) if isinstance(cfg, dict) else []
+    if isinstance(sessions, list):
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            for key in ("coordinatorPane", "directorPane", "protectedPane"):
+                value = session.get(key)
+                if isinstance(value, str) and value:
+                    found.append(value)
+            for value in session.get("protectedPanes", []):
+                if isinstance(value, str) and value:
+                    found.append(value)
+    unique = list(dict.fromkeys(found))
+    if not unique:
+        return [], "config", "PROTECTED_PANES_REQUIRED:%s names no protected panes" % path
+    return unique, "config:%s" % path, None
 
 
 # ---------- environment ----------
@@ -299,8 +340,8 @@ def kit_version():
 # ---------- plan ----------
 
 def classify(pane, procs, chief, protect, unprotect=()):
-    """`unprotect`: panes the operator released from DEFAULT_PROTECT/--protect for
-    this run; `run --apply` honours it only when the approval names them too."""
+    """`unprotect`: panes the operator released from config/--protect for this
+    run; `run --apply` honours it only when the approval names them too."""
     row = {"pane": pane["pane"], "pane_id": pane["pane_id"], "session": pane["pane"].split(":", 1)[0], "cwd": pane["cwd"]}
     agent = find_agent(procs, pane["pane_pid"])
     screen = parse_screen(pane.get("screen", []))
@@ -464,6 +505,9 @@ def process_inventory(env):
 def build_plan(inv, chief, protect, align_report, unprotect=()):
     plan = {"created": now(), "snapshot_at": inv.get("captured_at"), "chief": chief, "protect": list(protect), "unprotect": list(unprotect),
             "align": {k: align_report[k] for k in ("ok", "version", "expected", "stale")}, "rows": []}
+    if not protect:
+        plan["refused"] = "PROTECTED_PANES_REQUIRED"
+        return plan
     if not align_report["ok"]:
         plan["refused"] = "ALIGN_STALE"
         return plan
@@ -892,7 +936,8 @@ def main(argv):
     p = sub.add_parser("plan")
     p.add_argument("--inventory", help="inventory.json from snapshot; default: live")
     p.add_argument("--chief", default=os.environ.get("TMUX_PANE", ""))
-    p.add_argument("--protect", action="append", default=[])
+    p.add_argument("--protect", action="append", default=[], help="protected pane (repeatable); overrides fleet config")
+    p.add_argument("--fleet-config", help="fleet-watch.json path used to derive protected panes")
     p.add_argument("--home", default=os.path.expanduser("~"))
     p.add_argument("--releases", default=os.path.expanduser("~/.local/opt/omp-kit/releases"))
     p.add_argument("--version")
@@ -960,7 +1005,8 @@ def main(argv):
     r.add_argument("--only", action="append", default=[], help="plan: limit the manifest to these panes (name or %%id)")
     r.add_argument("--unprotect", action="append", default=[], help="release a protected pane; the approval's unprotect list must name it too")
     r.add_argument("--chief", default=os.environ.get("TMUX_PANE", ""), help="chief pane (default $TMUX_PANE); never touched by the run")
-    r.add_argument("--protect", action="append", default=[])
+    r.add_argument("--protect", action="append", default=[], help="protected pane (repeatable); overrides fleet config")
+    r.add_argument("--fleet-config", help="fleet-watch.json path used to derive protected panes")
     r.add_argument("--home", default=os.path.expanduser("~"))
     r.add_argument("--releases", default=os.path.expanduser("~/.local/opt/omp-kit/releases"))
     r.add_argument("--version")
@@ -1001,7 +1047,11 @@ def main(argv):
         version = args.version or kit_version()
         inv = load(args.inventory) if args.inventory else live_inventory(env)
         chief = args.chief
-        plan = build_plan(inv, chief, DEFAULT_PROTECT + args.protect, align_check(args.home, args.releases, version))
+        protect, source, error = protected_panes(args.home, args.protect, args.fleet_config)
+        plan = build_plan(inv, chief, protect, align_check(args.home, args.releases, version))
+        plan["protect_source"] = source
+        if error:
+            plan["refused"] = error
         dump(plan, args.out)
         return 3 if plan.get("refused") else 0
     if args.cmd == "states":
@@ -1161,8 +1211,12 @@ def run_cmd(args, env, uid):
     ctx = fr_run.live_ctx(env, args.home, args.releases, args.version, agents_dir=args.agents_dir)
     run_dir = os.path.abspath(args.run)
     if args.plan:
-        man = fr_run.plan_run(run_dir, ctx, args.chief, DEFAULT_PROTECT + args.protect, args.unprotect, args.wave, args.busy_timeout_min,
+        protect, source, error = protected_panes(args.home, args.protect, args.fleet_config)
+        man = fr_run.plan_run(run_dir, ctx, args.chief, protect, args.unprotect, args.wave, args.busy_timeout_min,
                               canary=1 if args.canary is None else args.canary, strict_advisor=bool(args.strict_advisor), only=args.only)
+        if error:
+            man["refused"] = [error]
+            man["protect_source"] = source
         dump({"run_manifest": os.path.join(run_dir, fr_run.RUN_MANIFEST), "manifest_sha256": man["manifest_sha256"], "refused": man["refused"],
               "target": man["target"], "counts": man["counts"], "holds": man["holds"], "watchers_pause": man["watchers"]["pause"],
               "watchers_pause_detail": (man["watchers"].get("binding") or {}).get("pause", []),

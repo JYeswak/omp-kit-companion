@@ -70,6 +70,17 @@ if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "BASE-GATE" && ! printf '%s' 
 else
 	fail=$((fail + 1)); printf 'FAIL base-authoritative: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
+ # 1a. the installed archive gate binds its run ledger to the pushing checkout,
+ # not the temporary exact-commit export (which has no .git directory).
+ # shellcheck disable=SC2016
+repo=$(mkrepo ledger-bound 'mkdir -p "$(dirname "$FRESH_GATE_LEDGER")"; printf "%s\n" "$FRESH_GATE_LEDGER" > "$FRESH_GATE_LEDGER.probe"' 'echo HEAD-GATE')
+rc=$(run_adapter "$repo")
+ledger_probe="$repo/.git/omp-kit/fresh-gate-runs.jsonl.probe"
+if [ "$rc" = "0" ] && [ -s "$ledger_probe" ] && [ "$(cat "$ledger_probe")" = "$repo/.git/omp-kit/fresh-gate-runs.jsonl" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL ledger-binding: rc=%s probe=%s out<<<%s>>>\n' "$rc" "$(cat "$ledger_probe" 2>/dev/null || true)" "$(cat "$TMP/out")"
+fi
 
 # 2. a failing BASE gate refuses even when HEAD passes
 repo=$(mkrepo strictbase 'echo BASE-GATE-FAIL; exit 1' 'echo HEAD-GATE')

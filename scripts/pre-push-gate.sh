@@ -353,7 +353,9 @@ fi
 # is keyed by candidate tree with check/runtime identity, so a repeated identical tree reuses the
 # recorded verdict without rerunning. Skipped until the base archive carries the checker (first
 # landing), like pushed-bead-ids, commit-imports and doc-drift above.
-sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-gate: cannot resolve git dir for fresh-gate ledger\n' >&2; exit 1; }
+FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" \
+	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
 	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
 else
