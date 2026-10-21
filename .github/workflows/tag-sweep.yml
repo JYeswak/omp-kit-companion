@@ -4,6 +4,7 @@ on:
     - cron: '23 * * * *'
   workflow_dispatch:
 permissions:
+  actions: write
   contents: read
 jobs:
   sweep:
@@ -11,25 +12,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.x'}
-      - name: Detect tags without releases
+      - name: Detect tags without published releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP/tag-sweep"
-          if sh scripts/tag-sweep.sh --repo "$GITHUB_REPOSITORY" --receipt "$RUNNER_TEMP/tag-sweep/receipt.json"; then
-            echo 'No unpublished tags.'
-          else
-            rc=$?
-            test "$rc" -eq 1
-            echo 'Unpublished tags detected; release train must resume or supersede them.'
-          fi
-      - name: Upload sweep receipt
+          out="$RUNNER_TEMP/tag-sweep"
+          mkdir -p "$out"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?status=completed&per_page=100" \
+            > "$out/runs.json"
+          set +e
+          sh scripts/tag-sweep.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --runs-file "$out/runs.json" \
+            --receipt "$out/receipt.json" \
+            --release-index "$out/release-index.json"
+          rc=$?
+          set -e
+          test "$rc" -eq 0 || test "$rc" -eq 1
+          jq -e '.unresolved | length == 0' "$out/receipt.json" >/dev/null || {
+            echo 'Unresolved tag gaps remain; release train did not claim completion.' >&2
+            exit 1
+          }
+          while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
+            title="Promote run $run_id"
+            active=$(gh run list --workflow release-train.yml --repo "$GITHUB_REPOSITORY" \
+              --limit 100 --json displayTitle,status |
+              jq -r --arg title "$title" 'any(.[]; .displayTitle == $title and .status != "completed")')
+            if [ "$active" = true ]; then
+              echo "Recovery already active for certified run $run_id."
+            else
+              gh workflow run release-train.yml --repo "$GITHUB_REPOSITORY" --ref main \
+                -f candidate_run_id="$run_id"
+              echo "Recovery dispatched for certified run $run_id."
+            fi
+          done < <(jq -r '.resume[]?.certified_run_id // empty' "$out/receipt.json")
+      - name: Upload sweep receipt and release-gap index
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tag-sweep-receipt-${{ github.run_id }}
-          path: ${{ runner.temp }}/tag-sweep/receipt.json
+          path: ${{ runner.temp }}/tag-sweep
           if-no-files-found: error
