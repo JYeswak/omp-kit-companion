@@ -15,7 +15,6 @@ import resource
 import secrets
 import signal
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -36,6 +35,7 @@ def _load(name: str, path: Path):
 
 pysafe = _load("pysafe", ROOT / "scripts" / "pysafe.py")
 kitlib_run = _load("kitlib_run", ROOT / "scripts" / "kitlib_run.py")
+owned_tmp = _load("kitlib_tmp", ROOT / "scripts" / "kitlib_tmp.py").owned_tmp
 
 
 def substitute(value, marker: str, tmp: str):
@@ -78,7 +78,7 @@ def peak_rss_bytes() -> int:
 class Corpus(unittest.TestCase):
     def _run_case(self, case: dict) -> None:
         marker = f"kitlib-run-py-{os.getpid()}-{secrets.token_hex(6)}"
-        with tempfile.TemporaryDirectory(prefix="kitlib-run.") as scratch:
+        with owned_tmp("kitlib-run") as scratch:
             tmp = os.path.realpath(scratch)
             argv = substitute(case["argv"], marker, tmp)
             options = substitute(case["options"], marker, tmp)

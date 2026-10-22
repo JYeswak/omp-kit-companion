@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OMP_SRC } from "../../scripts/rule-class.ts";
@@ -9,7 +9,7 @@ const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const harness = join(repoRoot, "scripts", "ttsr-harness.ts");
 
 test("cli-crosscheck stops before cases and names a fail-closed OMP trust guard", () => {
-	const temp = mkdtempSync(join(tmpdir(), "omp-kit-trust-guard-"));
+	const temp = ownedTmp("omp-kit-trust-guard").path;
 	const wrapper = join(temp, "omp-trust-guard");
 	const trace = join(temp, "invocations.txt");
 	try {

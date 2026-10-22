@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { preassignVerdict } from "../../src/fleet-watch.ts";
@@ -10,6 +11,8 @@ import type { LivenessDeps } from "../../src/scratch.ts";
 // marker counts only while fresh and recover commands are rate-bounded.
 
 const repoRoot = resolve(import.meta.dir, "../..");
+const owned: string[] = [];
+afterAll(() => { for (const dir of owned.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const BUSY = JSON.stringify({ error: "database is busy (recovery in progress)" });
 const COMPLETE = JSON.stringify({ status: "complete" });
 const T0 = 1_700_000_000_000;
@@ -18,8 +21,8 @@ const T1 = 1_791_276_000_000;
 function plantedRepo(): { scratch: string; repo: string; root: string } {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-recovery-rate."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-rate-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = ownedTmp("tracker-recovery-rate", { root: parent }).path;
+	owned.push(scratch);
 	const repo = join(scratch, "repo");
 	const root = join(repo, ".beads", ".br_recovery", "schema-migrations");
 	mkdirSync(root, { recursive: true });

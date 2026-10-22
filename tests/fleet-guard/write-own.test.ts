@@ -1,6 +1,7 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
@@ -9,7 +10,7 @@ import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet
 // live exclusive Agent Mail reservation, read through the same `am robot reservations` lookup `git commit --only` uses.
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = realpathSync(mkdtempSync(join(scratchRoot, "fleet-guard-writeown-")));
+const scratch = realpathSync(ownedTmp("fleet-guard-writeown", { root: scratchRoot }).path);
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };

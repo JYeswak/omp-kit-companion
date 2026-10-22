@@ -4,24 +4,25 @@
 // inventory (tern/tmux answered by the fake host + identity files under HOME) and the
 // Agent Mail store at AGENT_MAIL_STORAGE_ROOT. Planted: live seat, live reservation,
 // fresh touch, unreadable liveness and a non-atomic shape are each refused.
-import { expect, test } from "bun:test";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { reclaimCommand } from "../../src/drain.ts";
 import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-host";
 import type { FlywheelToolCallResult } from "../../extensions/kit-flywheel-guard";
 
 const HOUR = 3600_000;
-const base = mkdtempSync(join(tmpdir(), "flywheel-reclaim-"));
+const base = ownedTmp("flywheel-reclaim").path;
+afterAll(() => rmSync(base, { recursive: true, force: true }));
 const NO_SEATS = JSON.stringify({ panes: [], sessions: [] });
 const SEAT_11 = JSON.stringify({ panes: [{ pane: 11, exited: null }], sessions: [{ name: "Default", tabs: [{ name: "t", blocks: [{ id: 11, live: true }] }] }] });
 
 type Plant = { holder: string; touchedMs: number; tern?: string | null; reservationFor?: string };
 
 function plantedHome(): string {
-	const home = mkdtempSync(join(base, "home-"));
+	const home = ownedTmp("home", { root: base }).path;
 	const folder = join(home, ".config", "agent-mail", "identity", "dddddddddddd");
 	mkdirSync(folder, { recursive: true });
 	writeFileSync(join(folder, "tern-11"), "SeatHolder\n");
@@ -29,7 +30,7 @@ function plantedHome(): string {
 }
 
 function plantedStore(now: number, reservationFor?: string): string {
-	const dir = mkdtempSync(join(base, "mail-"));
+	const dir = ownedTmp("mail", { root: base }).path;
 	const db = new Database(join(dir, "storage.sqlite3"));
 	db.exec("CREATE TABLE agents(id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT)");
 	db.exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, project_id INTEGER, sender_id INTEGER, created_ts INTEGER)");
@@ -58,7 +59,7 @@ async function reclaim(plant: Plant, command?: (revision: string, now: number) =
 		env: { BR_ACTOR: "Lead", AGENT_MAIL_STORAGE_ROOT: plantedStore(now, plant.reservationFor) },
 		home: plantedHome(), respond,
 	});
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = ownedTmp("proj", { root: base }).path;
 	return toolCall(h, project, command ? command(revision, now) : reclaimCommand("k-1", revision, now));
 }
 

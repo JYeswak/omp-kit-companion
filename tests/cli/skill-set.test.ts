@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -29,7 +29,7 @@ function sessionRow(id: string, role: string, text: string): string {
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(tmpdir(), "omp-kit-skill-set-"));
+	base = ownedTmp("omp-kit-skill-set").path;
 	release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");

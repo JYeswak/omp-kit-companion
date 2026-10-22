@@ -10,7 +10,6 @@ import importlib.util
 import io
 import os
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,8 @@ from collections.abc import Iterator
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 _spec = importlib.util.spec_from_file_location("release_reuse", ROOT / "scripts" / "release_reuse.py")
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/release_reuse.py")
@@ -286,7 +287,7 @@ class ReleaseReuseTest(unittest.TestCase):
                 "linux-x64-gnu": {"filename": filename, "sha256": digest},
             }
         }
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             archive = Path(directory) / filename
             archive.write_bytes(archive_bytes)
             self.assertTrue(release_reuse.archive_matches_index(index, "linux-x64-gnu", Path(directory)))
@@ -294,7 +295,7 @@ class ReleaseReuseTest(unittest.TestCase):
             self.assertFalse(release_reuse.archive_matches_index(index, "linux-x64-gnu", Path(directory)))
 
     def test_preflight_cli_rejects_reuse_without_green_ci(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             ci_runs = root / "ci-runs.json"
             candidate = root / "candidate.json"
@@ -324,7 +325,7 @@ class ReleaseReuseTest(unittest.TestCase):
     def test_invalid_reused_candidate_cli_fails_closed(self) -> None:
         proof, index = candidate_proof_and_index()
         proof["version"] = "0.2.21-rehearsal.12345.1"
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             proof_path = root / "proof.json"
             index_path = root / "index.json"
@@ -352,7 +353,7 @@ class ReleaseReuseTest(unittest.TestCase):
 class RollingReleaseTest(unittest.TestCase):
     @contextlib.contextmanager
     def native_tag_repo(self) -> Iterator[tuple[Path, str, str]]:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+        with owned_tmp("release-reuse-test") as directory, patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
             root = Path(directory)
             remote, repo = root / "origin.git", root / "repo"
             env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -464,7 +465,7 @@ class RollingReleaseTest(unittest.TestCase):
         receipt = {"schema_version": 1, "repository": REPOSITORY, "publisher_id": "90", "publisher_attempt": "1",
                    "selection": selection, "destination": destination, "push_status": 0,
                    "ack": f"To {destination}\n*\t{source}:refs/tags/v{version}\t[new tag]\nDone\n"}
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             (root / "selection.json").write_text(json.dumps(selection))
             (root / "notes").write_bytes(b"notes")
@@ -575,7 +576,7 @@ class RollingReleaseTest(unittest.TestCase):
         sign = dict(candidate_run(), id=777, head_sha=source, head_branch=f"v{version}", status="in_progress", conclusion=None,
                     display_title=release_reuse.release_title("sign", version, source, train), run_started_at="2026-01-01T00:00:00Z")
         darwin = "d" * 64
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             (root / "selection.json").write_text(json.dumps(selection))
             (root / "notes").write_bytes(b"notes")
@@ -638,14 +639,15 @@ class RollingReleaseTest(unittest.TestCase):
             # Legacy sources, a tag on another commit and a malformed digest never dispatch or leave a receipt.
             for options in ({"devid": False}, {"ref": "f" * 40}, {"digest": "D" * 64}, {"digest": "d" * 63}):
                 with self.subTest(options=options):
-                    fresh = Path(tempfile.mkdtemp(dir=directory))
+                    fresh = Path(directory) / f"fresh-{len(list(Path(directory).glob('fresh-*')))}"
+                    fresh.mkdir()
                     error, dispatch = run(fresh, **options)
                     self.assertIsInstance(error, ValueError)
                     dispatch.assert_not_called()
                     self.assertEqual(list(fresh.iterdir()), [])
 
     def test_darwin_signing_mode_comes_from_the_exact_source_and_defaults_to_adhoc(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             def git(*args: str) -> str:
@@ -770,7 +772,7 @@ class RollingReleaseTest(unittest.TestCase):
         return args, values
 
     def test_final_certification_accepts_historical_source_but_not_partial_or_foreign_proof(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, original = self.final_fixture(root)
             with final_authority(original), contextlib.redirect_stdout(io.StringIO()):
@@ -807,7 +809,7 @@ class RollingReleaseTest(unittest.TestCase):
                     release_reuse.main(args)
 
     def test_qualification_refuses_foreign_staging_context_or_public_installation_claim(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, values = self.final_fixture(root)
             key = release_reuse.SHIPPING_PLATFORMS[0] + "-minimum"
@@ -858,7 +860,7 @@ class RollingReleaseTest(unittest.TestCase):
                                                                      train_id="810", phase=phase))
 
     def test_signed_final_requires_actual_installer_and_upgrade_receipts(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, values = self.signed_fixture(root)
             with final_authority(values, qualified=values["qualified_run"]), contextlib.redirect_stdout(io.StringIO()):
@@ -870,7 +872,7 @@ class RollingReleaseTest(unittest.TestCase):
                     release_reuse.main(args)
 
     def test_signed_consumer_refuses_noop_wrong_bytes_foreign_attempt_and_unpublished_previous(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, values = self.signed_fixture(root)
             platform = release_reuse.SHIPPING_PLATFORMS[0]
@@ -890,7 +892,7 @@ class RollingReleaseTest(unittest.TestCase):
                             release_reuse.main(args)
 
     def test_active_q_and_version_wait_for_exact_publisher_not_release_existence(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             plan = {"kind": "resume", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "train_id": "810", "train_attempt": "1",
                     "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": []}
             path = Path(directory) / "plan.json"
@@ -938,7 +940,7 @@ class RollingReleaseTest(unittest.TestCase):
                              sign_rows: list[dict[str, Any]] | None = None,
                              devid: bool = False, tag: str | None = None) -> tuple[Any, Exception | None, str]:
         """Drive the real watch loop for a finished qualification; returns the dispatch mock, the terminal error and stdout."""
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             plan = {"kind": "resume", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "train_id": "810", "train_attempt": "1",
                     "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": []}
             path = Path(directory) / "plan.json"
@@ -1029,7 +1031,7 @@ class RollingReleaseTest(unittest.TestCase):
         self.assertIsNone(release_reuse.pending_candidate([dict(row, conclusion="failure")], set(), "0.2.20"))
 
     def test_existing_release_cannot_hide_a_failed_exact_publisher(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             plan = {"kind": "resume", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "train_id": "810", "train_attempt": "1",
                     "qualification_run_id": RUN_ID, "rehearsal": "false", "publisher_floor": 0, "recovery_ids": [],
                     "publisher_runs": {"9001": "sign"}}
@@ -1056,7 +1058,7 @@ class RollingReleaseTest(unittest.TestCase):
                 published.assert_not_called()
 
     def test_qualification_cannot_borrow_owner_for_different_source_version_base_or_run(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             allocation, bound, notes = owner_fixture()
             args = argparse.Namespace(repository=REPOSITORY, train_id="810", train_attempt="1", qualification_id=RUN_ID,
                                       qualification_attempt=1, source_sha=SOURCE_SHA, version=BASE_VERSION,
@@ -1091,7 +1093,7 @@ class RollingReleaseTest(unittest.TestCase):
                         release_reuse._require_allocation(args)
 
     def test_real_git_promotion_cannot_displace_newer_source_or_rebind_a_tag(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             def git(*args: str) -> str:
@@ -1126,7 +1128,7 @@ class RollingReleaseTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release_reuse.main(["promotion", "--repository", REPOSITORY, "--source-sha", sources[1], "--version", "0.2.21"])
     def test_authorized_latest_rerun_requires_its_complete_fresh_artifact_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, values = self.final_fixture(root)
             values["run"].update(run_attempt=2, run_started_at="2026-10-17T02:00:00Z", updated_at="2026-10-17T02:10:00Z")
@@ -1156,7 +1158,7 @@ class RollingReleaseTest(unittest.TestCase):
                         release_reuse.main(args)
 
     def test_signing_rerun_requires_fresh_sbom_snapshot_and_current_qualification_attempt(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             args, values = self.signed_fixture(root)
             values["run"] = dict(candidate_run(), id=67890, head_branch=f"v{BASE_VERSION}", run_attempt=2,
@@ -1267,7 +1269,7 @@ class RollingReleaseTest(unittest.TestCase):
                 release_reuse._load_owner_authority(REPOSITORY, "810", "1")
 
     def test_intel_probe_uses_bound_q_not_workflow_h_and_rejects_wrong_event(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             _, values = self.final_fixture(root)
             values["artifacts"]["artifacts"].append({"id": 1500, "name": "candidate-darwin-x64-none-attempt-1",
@@ -1291,7 +1293,7 @@ class RollingReleaseTest(unittest.TestCase):
 
 
     def test_replayed_rehearsal_without_intel_is_an_explicit_nonshipping_skip(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             _, values = self.final_fixture(root)
             values["proof"], values["index"] = candidate_proof_and_index()
@@ -1308,7 +1310,7 @@ class RollingReleaseTest(unittest.TestCase):
                 self.assertIn("has_probe=false", output.getvalue())
 
     def test_dispatch_records_the_native_qualification_once_after_immutable_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             allocation, expected, notes = owner_fixture()
             plan = {"kind": "allocate", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "base_tag": "v0.2.19",
@@ -1385,7 +1387,7 @@ class RollingReleaseTest(unittest.TestCase):
 
 
     def test_allocation_version_floor_reads_immutable_admission_main_not_stale_tools_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             def git(*args):
@@ -1432,7 +1434,7 @@ class RollingReleaseTest(unittest.TestCase):
             sleep.assert_not_called()
 
     def test_post_identity_is_persisted_even_when_immediate_child_metadata_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             allocation, canonical, notes = owner_fixture()
             plan = {"kind": "allocate", "source_sha": SOURCE_SHA, "version": BASE_VERSION, "base_tag": "v0.2.19",
@@ -1472,7 +1474,7 @@ class RollingReleaseTest(unittest.TestCase):
             self.assertNotIn(f"actions/runs/{RUN_ID}", reads)
 
     def test_terminal_unbound_candidate_cannot_poison_recovery_but_inflight_binding_stays_conservative(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             unbound = dict(candidate_run(), id=50000, status="in_progress", conclusion=None,
                            display_title=release_reuse.release_title("qualify", BASE_VERSION, SOURCE_SHA, "888"))
@@ -1542,7 +1544,7 @@ class RollingReleaseTest(unittest.TestCase):
                              unpublished_tag: str | None = None, tag_on_source=False, published_off_main=False,
                              signer_drift: str | None = None, extra_release: dict[str, Any] | None = None,
                              with_remote=False):
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             native_run = release_reuse.subprocess.run
             environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -2145,7 +2147,7 @@ class RollingReleaseTest(unittest.TestCase):
 class ExecutionCodeTrustTest(unittest.TestCase):
     @contextlib.contextmanager
     def authority_case(self, *, owner_off=False, qualification_off=False, source_later=False):
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             native_run = release_reuse.subprocess.run
@@ -2272,7 +2274,7 @@ class ExecutionCodeTrustTest(unittest.TestCase):
 class PublishedAssetsTest(unittest.TestCase):
     @contextlib.contextmanager
     def release_fixture(self, *, only_index=False, corrupt=None, race=None, deny_signature=False, consumer_failure=None):
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("release-reuse-test") as directory:
             root = Path(directory)
             assets = {}
             files = {}

@@ -9,12 +9,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 _spec = importlib.util.spec_from_file_location("ci_shard_coverage", ROOT / "scripts" / "ci-shard-coverage.py")
 if _spec is None or _spec.loader is None:
@@ -34,8 +34,8 @@ class ShardCoverageTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         if shutil.which("bun") is None:
             raise RuntimeError("ci-shard-coverage tests need bun on PATH; refusing to skip silently")
-        cls.tmp = tempfile.TemporaryDirectory()
-        cls.repo = Path(cls.tmp.name) / "repo"
+        cls.tmp = owned_tmp("ci-shard-coverage-test")
+        cls.repo = Path(cls.tmp.path) / "repo"
         for name in FILES:
             path = cls.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,7 @@ class ShardCoverageTest(unittest.TestCase):
                        timeout=60, stdin=subprocess.DEVNULL)
         subprocess.run(["git", "add", "-A"], cwd=cls.repo, check=True, env=env,  # pysafe: leaf git fixture in a temp repo; timeout bounds the wait, DEVNULL stdin
                        timeout=60, stdin=subprocess.DEVNULL)
-        cls.reports = Path(cls.tmp.name) / "reports"
+        cls.reports = Path(cls.tmp.path) / "reports"
         cls.reports.mkdir()
         for index in range(1, SHARDS + 1):
             out = cls.reports / f"junit-{index}.attempt-1.xml"
@@ -71,7 +71,8 @@ class ShardCoverageTest(unittest.TestCase):
         return code, out.getvalue() + err.getvalue()
 
     def copy_reports(self) -> Path:
-        target = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        target = Path(self.tmp.path) / f"reports-copy-{len(list(Path(self.tmp.path).glob('reports-copy-*')))}"
+        target.mkdir()
         for path in self.reports.iterdir():
             shutil.copy(path, target / path.name)
         return target

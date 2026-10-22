@@ -1,10 +1,10 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "../..");
-const dir = mkdtempSync(join(tmpdir(), "ubs-single-file-"));
+const dir = ownedTmp("ubs-single-file").path;
 const script = join(root, "scripts/ubs-single-file-verdict.sh");
 const input = join(dir, "fixture.ts");
 const fakeBin = join(dir, "bin");

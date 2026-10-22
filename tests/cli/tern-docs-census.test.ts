@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { ownedTmp } from '../../src/kitlib/tmp.ts';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import routes from '../../scripts/tern-script-routes.json';
 
@@ -20,7 +21,7 @@ const capturedPath = (directory: string, page: string) => join(directory, `${pag
 
 async function fixture() {
   await mkdir(scratch, { recursive: true });
-  const directory = await mkdtemp(join(scratch, 'tern-docs-census-test-'));
+  const directory = ownedTmp('tern-docs-census-test', { root: scratch }).path;
   owned.push(directory);
   for (const page of paths) {
     const path = capturedPath(directory, page);

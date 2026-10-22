@@ -1,6 +1,7 @@
 /** oq1h.7 portability: stock runners report NOT_CONFIGURED/NO_REPOS; the fleet lives in the user overlay. */
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLEET_LESSONS_NOT_CONFIGURED, readLessonsConfig, runFleetLessonsOnce } from "../../src/fleet-lessons.ts";
 import { readUserFleetRepos } from "../../src/fleet-user-config.ts";
@@ -29,7 +30,7 @@ function withEnv(vars: Record<string, string | undefined>) {
 }
 
 function scratch(): { base: string; home: string; kitRoot: string } {
-	const base = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "portability-"));
+	const base = ownedTmp("portability", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(base);
 	const home = join(base, "home"), kitRoot = join(base, "kit");
 	mkdirSync(join(kitRoot, "config"), { recursive: true });

@@ -7,8 +7,9 @@ set -u
 
 GUARD=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-suite-runtime.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/suite-runtime-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP suite-runtime-test || exit 1
 
 pass=0
 fail=0

@@ -1,10 +1,10 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 import { defaultSessionId, recoverBusyTracker, type TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import type { LivenessDeps } from "../../src/scratch.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -14,8 +14,7 @@ const session = "omp-test";
 function plantedTracker(name: "stale-proceeds" | "live-blocks" | "no-lease") {
 	const scratchParent = join(repoRoot, "var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
-	const scratch = mkdtempSync(join(scratchParent, "tracker-recovery."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = ownedTmp("tracker-recovery", { root: scratchParent }).path;
 	const repo = join(scratch, "repo");
 	const runDir = join(repo, ".beads", ".br_recovery", "schema-migrations", "planted-run");
 	mkdirSync(runDir, { recursive: true });
@@ -148,8 +147,7 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 	// liveness read as unknown. The list-sessions probe above replaced it;
 	// this row pins the old form's brokenness so a tmux behavior change is
 	// noticed instead of silently reviving the form.
-	const dir = join(tmpdir(), `o${process.pid.toString(36)}`);
-	mkdirSync(dir);
+	const dir = ownedTmp("o").path;
 	const socket = join(dir, "s");
 	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (args: readonly string[]) => {
@@ -170,8 +168,7 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 });
 
 test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id and null for a missing session", () => {
-	const dir = join(tmpdir(), `s${process.pid.toString(36)}`);
-	mkdirSync(dir);
+	const dir = ownedTmp("s").path;
 	const socket = join(dir, "s");
 	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (args: readonly string[]) => {

@@ -1,5 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { inspectWorkFleet } from "../../src/work-doctor.ts";
@@ -27,7 +28,7 @@ function repo(root: string, name: string): string {
 }
 
 function fixture(): { root: string; repos: Record<string, string> } {
-	const root = mkdtempSync(join(runtimeTempRoot(), "omp-kit-work-doctor-"));
+	const root = ownedTmp("omp-kit-work-doctor", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
 	mkdirSync(join(root, "not-a-repo", ".git"), { recursive: true });
 	const clean = repo(root, "clean");
@@ -125,7 +126,7 @@ test("work scope --project overrides --root and scans only the selected repo", (
 }, 30_000);
 
 test("work scope reports only old dirty files with matching active reservations", async () => {
-	const root = mkdtempSync(join(runtimeTempRoot(), "work-doctor-age."));
+	const root = ownedTmp("work-doctor-age", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
 	const target = join(root, "stale-edits");
 	const hooks = join(root, "hooks");
@@ -202,7 +203,7 @@ test("work scope reports only old dirty files with matching active reservations"
 });
 
 test("work scope exposes no clean-looking values when Git status times out", async () => {
-	const root = mkdtempSync(join(runtimeTempRoot(), "work-doctor-timeout."));
+	const root = ownedTmp("work-doctor-timeout", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
 	const target = repo(root, "timeout");
 	const hook = join(root, "fsmonitor.sh");

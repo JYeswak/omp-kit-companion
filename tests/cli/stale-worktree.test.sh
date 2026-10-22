@@ -10,8 +10,9 @@ set -u
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/stale-worktree-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP stale-worktree-test || exit 1
 
 pass=0
 fail=0

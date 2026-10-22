@@ -1,16 +1,17 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "../../src/sha.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const fixtures: string[] = [];
 function workspace(): string {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-sha-"));
+	const root = ownedTmp("omp-kit-sha").path;
 	fixtures.push(root);
 	return root;
 }
+afterAll(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 const GIT_ENV = {
 	...process.env,

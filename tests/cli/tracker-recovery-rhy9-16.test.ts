@@ -1,7 +1,7 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 import {
 	checkTrackerRecoveryCutover,
@@ -27,7 +27,7 @@ const SESSION = "omp-test";
 const KIT = TRACKER_RECOVERY_CUTOVER_KIT_VERSION;
 
 function plantedRepo(): { scratch: string; repo: string; runDir: string } {
-	const scratch = mkdtempSync(join(tmpdir(), "tracker-recovery-rhy9-16."));
+	const scratch = ownedTmp("tracker-recovery-rhy9-16").path;
 	const repo = join(scratch, "repo");
 	const runDir = join(repo, ".beads", ".br_recovery", "schema-migrations", "20261010T000000.000000Z-9-0");
 	mkdirSync(runDir, { recursive: true });

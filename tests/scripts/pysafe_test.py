@@ -9,7 +9,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -17,6 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "pysafe.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 _spec = importlib.util.spec_from_file_location("pysafe", HELPER)
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/pysafe.py")
@@ -56,8 +57,8 @@ def read_pid(path: Path, budget: float = 3.0) -> int:
 
 class Scratch(unittest.TestCase):
     def setUp(self) -> None:
-        self._dir = tempfile.TemporaryDirectory(prefix="pysafe-test.")
-        self.tmp = Path(self._dir.name)
+        self._dir = owned_tmp("pysafe-test")
+        self.tmp = Path(self._dir.path)
         self.pids: list = []
 
     def tearDown(self) -> None:

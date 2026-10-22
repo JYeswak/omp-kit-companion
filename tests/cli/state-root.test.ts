@@ -1,5 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const cli = resolve(import.meta.dir, "../../src/cli.ts");
@@ -9,7 +10,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 /** A legacy install: ~/.local/state/omp-kit created 0755 by the pre-CLI scripts, holding legacy files. */
 function legacyHome() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	const home = mkdtempSync(join(scratch, "state-root-"));
+	const home = ownedTmp("state-root", { root: scratch }).path;
 	roots.push(home);
 	const stateRoot = join(home, ".local", "state", "omp-kit");
 	mkdirSync(join(stateRoot, "backups", "20260925T020733Z"), { recursive: true });

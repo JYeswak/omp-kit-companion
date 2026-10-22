@@ -1,12 +1,12 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { diagnose } from "../../src/diagnostics.ts";
 import { inspectTestScope } from "../../src/test-scope.ts";
 
 test("doctor test-scope rejects a planted scratch runner copy and accepts the control", async () => {
-	const base = mkdtempSync(join(tmpdir(), "omp-kit-test-scope-"));
+	const base = ownedTmp("omp-kit-test-scope").path;
 	try {
 		const repo = join(base, "fixture-repo");
 		const config = join(base, "fleet-watch.json");
@@ -20,7 +20,7 @@ test("doctor test-scope rejects a planted scratch runner copy and accepts the co
 		const negative = inspectTestScope(config);
 		expect(negative.status).toBe("FAIL");
 		expect(negative.evidence?.repos).toEqual([expect.objectContaining({ repo, runner: "bun", verdict: "FAIL" })]);
-		writeFileSync(join(repo, "bunfig.toml"), `[test]\npathIgnorePatterns = ["var/agent-tmp/**", "${tmpdir()}/**"]\n`);
+		writeFileSync(join(repo, "bunfig.toml"), `[test]\npathIgnorePatterns = ["var/agent-tmp/**", "${dirname(base)}/**"]\n`);
 		const control = inspectTestScope(config);
 		expect(control.status).toBe("OK");
 		expect(control.evidence?.repos).toEqual([expect.objectContaining({ repo, runner: "bun", config: join(repo, "bunfig.toml"), verdict: "PASS" })]);

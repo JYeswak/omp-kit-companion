@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
-work=$(mktemp -d "${TMPDIR:-/tmp}/tag-sweep.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp work tag-sweep || exit 1
 
 # Planted missing control: older tags with no published release are detected and
 # recorded as superseded by the nearest newer stable release.

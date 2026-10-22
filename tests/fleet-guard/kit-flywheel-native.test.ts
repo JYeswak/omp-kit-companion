@@ -1,18 +1,18 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FlywheelExecResult } from "../../extensions/kit-flywheel-guard";
 import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-host";
 
-const base = mkdtempSync(join(tmpdir(), "kit-flywheel-native-"));
+const base = ownedTmp("kit-flywheel-native").path;
 
 afterAll(() => {
  rmSync(base, { recursive: true, force: true });
 });
 
 function nativeClaimFixture() {
-	const project = mkdtempSync(join(base, "native-claim-"));
+	const project = ownedTmp("native-claim", { root: base }).path;
 	const db = join(project, ".beads", "beads.db");
 	writeFileSync(join(project, ".owner"), JSON.stringify({
 		pid: process.pid, label: "native-claim-test", repo: join(import.meta.dir, "..", ".."), created: new Date().toISOString(),

@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import {
 	buildSessionRegistry,
 	checkHoldViolations,
@@ -19,8 +20,9 @@ import {
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `session-registry-test.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=session-registry-test repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const scratchTmp = ownedTmp("session-registry-test", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 
 const POLICY_PATH = join(scratch, "upgrade_policy.toml");
 
@@ -218,7 +220,7 @@ test("owner pane prefers declarations over neighbour pane references", () => {
 });
 
 test("in-tree known-bad registry files are refused, and good files round-trip", () => {
-	const dir = mkdtempSync(join(scratch, "files."));
+	const dir = ownedTmp("files", { root: scratch }).path;
 	const good = join(dir, "good.json");
 	writeRegistryFile(good, fixtureRegistry());
 	expect(readRegistryFile(good).sessions.length).toBe(2);

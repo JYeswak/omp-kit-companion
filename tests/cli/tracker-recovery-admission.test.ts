@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { recoverBusyTracker } from "../../src/tracker-recovery.ts";
 import type { AdmissionInput } from "../../src/actuator-admission.ts";
@@ -8,12 +9,14 @@ import type { LivenessDeps } from "../../src/scratch.ts";
 // ompkit-bj08.5: pause and dead-owner negatives through the real recovery branch.
 
 const repoRoot = resolve(import.meta.dir, "../..");
+const owned: string[] = [];
+afterAll(() => { for (const dir of owned.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 function plantedRepo(): { scratch: string; repo: string; runDir: string } {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-recovery-admission."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-admission-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = ownedTmp("tracker-recovery-admission", { root: parent }).path;
+	owned.push(scratch);
 	const repo = join(scratch, "repo");
 	const runDir = join(repo, ".beads", ".br_recovery", "schema-migrations", "run");
 	mkdirSync(runDir, { recursive: true });
@@ -85,8 +88,8 @@ test("[b] planted: paused authority blocks recovery with zero commands and zero 
 test("[b] admitted recovery with no flags stays null through the real branch", () => {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-recovery-admission-empty."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-admission-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = ownedTmp("tracker-recovery-admission-empty", { root: parent }).path;
+	owned.push(scratch);
 	const runCalls: string[][] = [];
 	const result = recoverBusyTracker(join(scratch, "repo"), "omp-test", {
 		pid: 700000,

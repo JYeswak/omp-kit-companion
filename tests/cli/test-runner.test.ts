@@ -1,7 +1,8 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
@@ -221,11 +222,11 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
 }
 
  beforeAll(() => {
- 	suiteTmp = mkdtempSync(join(REPO_ROOT, "var/agent-tmp", "suite-fast-test-"));
+ 	suiteTmp = ownedTmp("suite-fast-test", { root: join(REPO_ROOT, "var/agent-tmp") }).path;
  	process.env.TMPDIR = suiteTmp;
  	process.env.TMP = suiteTmp;
  	process.env.TEMP = suiteTmp;
- 	fixtureBase = mkdtempSync(join(tmpdir(), "omp-kit-fast-test-"));
+ 	fixtureBase = ownedTmp("omp-kit-fast-test").path;
 	const installedOmp = resolveOmpIdentity(process.env);
 	const toolBin = join(fixtureBase, "native-tools");
 	mkdirSync(toolBin);
@@ -331,11 +332,11 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
  });
 
  test("suite TMPDIR discipline: a fixture cycle leaves session-omp-test unchanged in size", () => {
- 	expect(tmpdir()).toBe(suiteTmp);
+ 	expect(tmpdir()).toBe(suiteTmp); // tempsafe: asserts the suite redirected tmpdir, creates nothing
  	const session = join(REPO_ROOT, "var/agent-tmp", "session-omp-test");
  	if (!existsSync(session)) return;
  	const before = dirBytes(session);
- 	const probe = mkdtempSync(join(tmpdir(), "omp-kit-tmpdir-probe-"));
+ 	const probe = ownedTmp("omp-kit-tmpdir-probe").path;
  	writeFileSync(join(probe, "payload"), "x".repeat(65536));
  	rmSync(probe, { recursive: true, force: true });
  	expect(dirBytes(session)).toBe(before);

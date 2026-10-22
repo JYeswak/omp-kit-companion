@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 function workspace(): string {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-toolgate-"));
+	const root = ownedTmp("omp-kit-toolgate").path;
 	fixtures.push(root);
 	return root;
 }
@@ -37,13 +37,13 @@ function robot(args: string[], root: string, bindir: string): CapsResult & { err
 
 /** Empty bindir: none of am, ntm, rch, tern, br, tmux is on PATH. */
 function stockBin(): string {
-	const dir = mkdtempSync(join(tmpdir(), "omp-kit-stockbin-"));
+	const dir = ownedTmp("omp-kit-stockbin").path;
 	fixtures.push(dir);
 	return dir;
 }
 
 function fakeBin(tools: string[]): string {
-	const dir = mkdtempSync(join(tmpdir(), "omp-kit-fakebin-"));
+	const dir = ownedTmp("omp-kit-fakebin").path;
 	fixtures.push(dir);
 	mkdirSync(dir, { recursive: true });
 	for (const tool of tools) {

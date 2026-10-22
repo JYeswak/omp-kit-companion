@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runFleetWatchOnce } from "../../src/fleet-watch.ts";
 import {
@@ -23,7 +24,7 @@ const clearHolder = (_path: string): TrackerRetentionHolder => ({ state: "clear"
 function scratchRepo(name: string): { scratch: string; repo: string } {
 	const parent = join(resolve(import.meta.dir, "../.."), "var/agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, `tracker-retention-${name}.`));
+	const scratch = ownedTmp(`tracker-retention-${name}`, { root: parent }).path;
 	const repo = join(scratch, "repo");
 	mkdirSync(repo, { recursive: true });
 	return { scratch, repo };

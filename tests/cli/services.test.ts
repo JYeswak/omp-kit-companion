@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -37,7 +37,7 @@ function writeLaunchctlList(rows: string): void {
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(tmpdir(), "omp-kit-services-"));
+	base = ownedTmp("omp-kit-services").path;
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");

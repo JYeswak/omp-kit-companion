@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -196,7 +195,7 @@ def main() -> int:
         parser.error("TMPDIR must be an owned directory under this repo's var/agent-tmp")
     print("generator", am, "sha256", hashlib.sha256(Path(am).read_bytes()).hexdigest(), flush=True)
     failures = 0
-    # Keep failed fixtures and complete producer output for the scratch reaper.
+    # Remove passing fixtures; keep failed fixtures and complete producer output for the scratch reaper.
     for name, check in (("publication", publication), ("mutation-custody", mutation_refused),
                         ("unadmitted-history", unadmitted_history_refused),
                         ("installer-regeneration", installer_regenerates_custody),
@@ -205,13 +204,15 @@ def main() -> int:
         for phase in ("installed", "regenerated"):
             # A fresh origin keeps publication a real ref update on both
             # trials; re-pushing an up-to-date ref would not exercise a hook.
-            parent = Path(tempfile.mkdtemp(prefix=f"snapshot-{name}-{phase}.", dir=tmp))
+            parent = tmp / f"snapshot-{name}-{phase}.{os.getpid()}"
+            parent.mkdir(mode=0o700)
             fixture = Fixture(parent, am, args.mutant)
             if phase == "regenerated":
                 fixture.install()
             try:
                 check(fixture)
                 print("PASS", name, phase, flush=True)
+                shutil.rmtree(parent)
             except AssertionError as error:
                 failures += 1
                 print("FAIL", name, phase, error, "fixture", parent, flush=True)

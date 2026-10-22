@@ -7,13 +7,14 @@ import io
 import json
 import os
 import sys
-import tempfile
 import textwrap
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 _spec = importlib.util.spec_from_file_location("pysafe_check", ROOT / "scripts" / "pysafe_check.py")
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/pysafe_check.py")
@@ -232,8 +233,8 @@ BAD = "import subprocess\nsubprocess.run(['x'], stdin=subprocess.DEVNULL)\n"
 
 class Ratchet(unittest.TestCase):
     def setUp(self) -> None:
-        self._dir = tempfile.TemporaryDirectory(prefix="pysafe-ratchet.")
-        self.repo = Path(self._dir.name)
+        self._dir = owned_tmp("pysafe-ratchet")
+        self.repo = Path(self._dir.path)
         git(self.repo, "init", "-q", "-b", "main")
         (self.repo / "old.py").write_text(BAD)
         git(self.repo, "add", "old.py")
@@ -312,7 +313,7 @@ class Ratchet(unittest.TestCase):
 
 class Output(unittest.TestCase):
     def test_md_and_json(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="pysafe-out.") as tmp:
+        with owned_tmp("pysafe-out") as tmp:
             bad = Path(tmp) / "bad.py"
             bad.write_text(BAD + "x = 1  # pysafe: nothing here to suppress\n")
             (Path(tmp) / "good.py").write_text("x = 1\n")

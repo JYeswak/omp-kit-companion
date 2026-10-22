@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { BEAD_LINT_REFUSED, BEAD_LINT_SCRIPTS_DIR, BEAD_LINT_UNEVALUABLE, BEAD_LINT_UNVERIFIED, checkBeadLint, type FlywheelExecResult } from "../../extensions/kit-flywheel-guard";
 import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-host";
@@ -8,7 +8,7 @@ import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-hos
 // LINTEVERY1 (ompkit-nskhp): bead-lint admission at the tool-call layer. A real
 // native br tracker, the real shipped python helpers, the real guard handler.
 
-const base = mkdtempSync(join(tmpdir(), "kit-flywheel-bead-lint-"));
+const base = ownedTmp("kit-flywheel-bead-lint").path;
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const PLANTED = `br create "x" -t task --acceptance "- [ ] AC1: x"`;
@@ -18,7 +18,7 @@ const CLEAN_ACCEPTANCE = "- [ ] AC1: planted negative: an unlinted create is ref
 const clean = (title: string) => `br create '${title}' -t task -l admission --description "$(cat <<'EOF'\n${CLEAN_DESCRIPTION}\nEOF\n)" --acceptance '${CLEAN_ACCEPTANCE}'`;
 
 function tracker() {
-	const project = mkdtempSync(join(base, "tracker-"));
+	const project = ownedTmp("tracker", { root: base }).path;
 	const db = join(project, ".beads", "beads.db");
 	const env = { ...process.env, HOME: project };
 	const run = (args: string[]): FlywheelExecResult => {
@@ -183,7 +183,7 @@ test("LINTEVERY1 infra: missing helper, missing python and an unreadable tracker
 	const thrown = await checkBeadLint(event, { exec: async () => { throw new Error("spawn failed"); }, home: base, sessionCwd: t.project });
 	expect(thrown?.block).not.toBe(true);
 	expect(thrown?.additionalContext).toContain("spawn failed");
-	const noTracker = mkdtempSync(join(base, "no-tracker-"));
+	const noTracker = ownedTmp("no-tracker", { root: base }).path;
 	const unreadable = await checkBeadLint({ toolName: "bash", input: { command: `br create "x" -t task --db '${noTracker}'` } },
 		{ exec: t.exec, home: base, sessionCwd: noTracker });
 	expect(unreadable?.block).not.toBe(true);

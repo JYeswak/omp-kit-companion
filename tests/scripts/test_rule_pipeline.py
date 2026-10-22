@@ -1,10 +1,10 @@
 import unittest
 import json
-import tempfile
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parents[2] / 'scripts'))
 import rule_pipeline as rp
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 
 class RulePipelineTest(unittest.TestCase):
     def rule(self, status='building'):
@@ -32,7 +32,7 @@ class RulePipelineTest(unittest.TestCase):
     def test_repeat_reopens_live_rule_and_writes_andon_event(self):
         rows = [self.rule('live')]
         rows[0]['s6_receipt'] = {'stage': 'S6', 'window': '7d', 'violation_rate': 0, 'joshua_repeats': 0}
-        with tempfile.TemporaryDirectory() as directory:
+        with owned_tmp("rule-pipeline-test") as directory:
             event = Path(directory) / 'events.jsonl'
             result = rp.repeat(rows, 'R-WAVE', event)
             self.assertEqual(rows[0]['status'], 'building')

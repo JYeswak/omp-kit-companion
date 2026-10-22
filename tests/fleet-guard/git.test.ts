@@ -1,12 +1,13 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, executedShellCommands } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
-const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-git-"));
+const scratch = ownedTmp("fleet-guard-git", { root: scratchRoot }).path;
 const repo = join(scratch, "repo");
 mkdirSync(repo, { recursive: true });
 const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };

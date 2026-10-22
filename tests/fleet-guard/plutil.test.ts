@@ -1,6 +1,7 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import fleetGuard from "../../extensions/fleet-guard.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../../src/fleet-guard/git.ts";
@@ -11,7 +12,7 @@ import { checkPlutilInPlace } from "../../src/fleet-guard/plutil.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "fleet-guard-plutil-"));
+const scratch = ownedTmp("fleet-guard-plutil", { root: scratchRoot }).path;
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const savedEnv = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };

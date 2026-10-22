@@ -1,5 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 import {
@@ -21,8 +22,7 @@ const SESSION = "omp-test";
 function plantedRepo(): { scratch: string; repo: string; root: string; runDir: string } {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-recovery-rhy9-13."));
-	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=tracker-recovery-rhy9-13\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const scratch = ownedTmp("tracker-recovery-rhy9-13", { root: parent }).path;
 	const repo = join(scratch, "repo");
 	const root = join(repo, ".beads", ".br_recovery", "schema-migrations");
 	const runDir = join(root, "20261010T000000.000000Z-9-0");
@@ -299,7 +299,7 @@ function fleetConfig(repoA: string, repoB: string, repoC: string, repoD: string)
 test("[coverage] registry fixtures: exact coverage, no duplicates, foreign director blocked", () => {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, "tracker-coverage-rhy9-13."));
+	const scratch = ownedTmp("tracker-coverage-rhy9-13", { root: parent }).path;
 	const logPath = join(scratch, "fleet-watch.jsonl");
 	try {
 		const recoverCalls: [string, string][] = [];

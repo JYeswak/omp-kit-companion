@@ -1,5 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 
@@ -39,7 +40,7 @@ function pushedRepo(root: string, name: string): { path: string; remote: string 
 }
 
 function fixture(): { root: string; paths: Record<string, string> } {
-	const root = mkdtempSync(join(runtimeTempRoot(), "omp-kit-work-stranded-"));
+	const root = ownedTmp("omp-kit-work-stranded", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
 	const paths: Record<string, string> = {};
 	paths.clean = pushedRepo(root, "clean").path;

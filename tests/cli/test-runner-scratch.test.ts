@@ -1,5 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -7,7 +8,7 @@ const REPO_ROOT = resolve(import.meta.dir, "../..");
 test("stock Bun runner ignores scratch copies but runs the control", () => {
 	const config = readFileSync(join(REPO_ROOT, "bunfig.toml"), "utf8");
 	expect(config).toContain('pathIgnorePatterns = ["var/agent-tmp/**"');
-	const root = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "testscope1-"));
+	const root = ownedTmp("testscope1").path;
 	try {
 		writeFileSync(join(root, "bunfig.toml"), "[test]\npathIgnorePatterns = [\"var/agent-tmp/**\", \"node_modules/**\"]\n");
 		mkdirSync(join(root, "tests", "cli"), { recursive: true });
@@ -27,7 +28,7 @@ test("portable stock-runner configuration declares the scratch boundary", () => 
 	expect(readFileSync(join(REPO_ROOT, "bunfig.toml"), "utf8")).toMatch(/pathIgnorePatterns\s*=\s*\[[^\]]*var\/agent-tmp\/\*\*/);
 });
 test("doctor test-scope reports planted Jest negative and passing Bun control", () => {
-	const root = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "testscope1-doctor-"));
+	const root = ownedTmp("testscope1-doctor").path;
 	try {
 		const good = join(root, "good");
 		const bad = join(root, "bad");

@@ -1,14 +1,16 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { inspectStaleWorktree } from "../../src/stale-worktree-doctor.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "stale-worktree-doctor-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=stale-worktree-doctor-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("stale-worktree-doctor-test", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 
 function git(repo: string, args: string[]): string {
 	const run = spawnSync("git", ["-c", "user.email=test@example.invalid", "-c", "user.name=worker", ...args], { cwd: repo, encoding: "utf8" });

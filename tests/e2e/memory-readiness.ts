@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { isRecord } from "../../src/type-guards.ts";
@@ -65,7 +65,7 @@ function memoryEvidence(stdout: string): { overall: string | null; finding_statu
 	} catch { return { overall: null, finding_status: null, evidence: null }; }
 }
 
-const work = mkdtempSync(join(tmpdir(), "omp-kit-memory-readiness-e2e-"));
+const work = ownedTmp("omp-kit-memory-readiness-e2e").path;
 const tools = join(work, "tools");
 const cliHome = join(work, "cli-home");
 const cliProject = join(work, "cli-project");

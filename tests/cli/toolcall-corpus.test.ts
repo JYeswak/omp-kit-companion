@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
@@ -8,8 +9,9 @@ const repoRoot = resolve(import.meta.dir, "../..");
 const scriptPath = join(repoRoot, "scripts", "toolcall-corpus.ts");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `toolcall-corpus.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=toolcall-corpus repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const scratchTmp = ownedTmp("toolcall-corpus", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 let fixtureNumber = 0;
 
 function field(value: unknown, key: string): unknown {

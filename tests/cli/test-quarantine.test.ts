@@ -1,6 +1,6 @@
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkRegistry, gate, readJunit, type QuarantineEntry } from "../../scripts/test-quarantine.ts";
 
@@ -30,7 +30,7 @@ function cli(args: string[], entries: QuarantineEntry[]) {
 
 // A real bun JUnit report: one passing test and one failing test inside a describe block.
 beforeAll(() => {
-	temp = mkdtempSync(join(tmpdir(), "omp-kit-quarantine-"));
+	temp = ownedTmp("omp-kit-quarantine").path;
 	counter = join(temp, "executions.log");
 	writeFileSync(join(temp, "fixture.test.ts"), [
 		'import { appendFileSync } from "node:fs";',
