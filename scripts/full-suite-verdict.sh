@@ -112,8 +112,15 @@ try:
     assert e.get("checks") == os.environ["CHECKS"]
     assert e.get("runtime") == os.environ["RUNTIME"]
     assert e.get("verdict") in ("PASS", "FAIL")
-    assert isinstance(e.get("evidence"), dict) and e["evidence"].get("complete") is True
+    evidence = e.get("evidence")
+    assert isinstance(evidence, dict) and evidence.get("complete") is True
     assert isinstance(e.get("exit_code"), int)
+    failures = [evidence.get(name) for name in ("bun_fail", "shell_fail", "py_fail")]
+    assert all(isinstance(value, int) and value >= 0 for value in failures)
+    if e["verdict"] == "PASS":
+        assert e["exit_code"] == 0 and all(value == 0 for value in failures)
+    else:
+        assert e["exit_code"] != 0 and any(value > 0 for value in failures)
     print("%s %s" % (e["verdict"], e["exit_code"]))
 except Exception:
     print("MISS")

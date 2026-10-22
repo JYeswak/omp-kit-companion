@@ -284,6 +284,31 @@ test("checks the exact candidate with the base-registered push check before publ
 	});
 	expect(remoteHead(work)).toBe(data.commit);
 });
+test("contradictory cached PASS evidence is a cache miss and cannot publish", () => {
+	const { work } = fixture();
+	writeFileSync(join(work, "suite-contract.txt"), "FAIL\n");
+	git(work, ["add", "suite-contract.txt"]);
+	git(work, ["commit", "-m", "plant red suite [test]"]);
+	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
+	const script = join(work, "scripts", "full-suite-verdict.sh");
+	const cache = join(work, ".git", "omp-kit", "full-suite-verdicts");
+	const first = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	});
+	expect(first.status, first.stdout + first.stderr).toBe(1);
+	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
+	const verdictPath = join(cache, `${tree}.json`);
+	const entry = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
+	entry.verdict = "PASS";
+	entry.exit_code = 0;
+	entry.evidence.shell_fail = 1;
+	writeFileSync(verdictPath, JSON.stringify(entry) + "\n");
+	const contradictory = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	});
+	expect(contradictory.status, contradictory.stdout + contradictory.stderr).toBe(1);
+	expect(`${contradictory.stdout}${contradictory.stderr}`).toContain("cache miss");
+});
 test("refuses a candidate whose exact full suite is red before origin advances", () => {
 	const { work, fakeBin } = fixture();
 	const base = remoteHead(work);
