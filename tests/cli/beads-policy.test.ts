@@ -1,14 +1,35 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { YAML } from "bun";
 
 const repoRoot = resolve(import.meta.dir, "../..");
-const scratchRoot = join(repoRoot, "var", "agent-tmp");
-mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "beads-policy-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=beads-policy-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratch = mkdtempSync(join(tmpdir(), "omp-kit-beads-policy."));
+let retired = false;
+const cleanup = () => {
+	if (retired) return;
+	rmSync(scratch, { recursive: true, force: true });
+	retired = true;
+};
+const interrupt = () => {
+	cleanup();
+	process.exit(130);
+};
+const terminate = () => {
+	cleanup();
+	process.exit(143);
+};
+process.once("exit", cleanup);
+process.once("SIGINT", interrupt);
+process.once("SIGTERM", terminate);
+afterAll(() => {
+	cleanup();
+	process.off("exit", cleanup);
+	process.off("SIGINT", interrupt);
+	process.off("SIGTERM", terminate);
+});
 
 const template = readFileSync(join(repoRoot, "config", "beads-policy.template.yaml"), "utf8");
 
@@ -86,16 +107,18 @@ test("MP3 planted: template without strict, or missing one gate, reports the ope
 function br(project: string, args: string[]): { rc: number; out: string } {
 	const db = join(project, ".beads", "probe.db");
 	const run = spawnSync("br", [...args, "--db", db, "--json", "--no-auto-import"],
-		{ cwd: project, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, RUST_LOG: "warn" } });
+		{ cwd: project, encoding: "utf8", input: "", timeout: 30_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, RUST_LOG: "warn" } });
 	return { rc: run.status ?? 1, out: String(run.stdout ?? "") };
 }
 
 function scratchTracker(policyYaml: string | null): string {
-	const probe = spawnSync("br", ["--version"], { encoding: "utf8" });
+	const probe = spawnSync("br", ["--version"], { encoding: "utf8", input: "", timeout: 10_000 });
 	if (probe.status !== 0) throw new Error("MP3 live tests need the br binary on PATH (cli-contracts installs pinned br 0.7.4); refusing to skip silently");
 	const project = join(scratch, "proj-" + Math.random().toString(36).slice(2));
 	mkdirSync(join(project, ".beads"), { recursive: true });
-	const init = spawnSync("br", ["init", "--db", join(project, ".beads", "probe.db"), "--prefix", "t"], { cwd: project, encoding: "utf8" });
+	const init = spawnSync("br", ["init", "--db", join(project, ".beads", "probe.db"), "--prefix", "t"], {
+		cwd: project, encoding: "utf8", input: "", timeout: 30_000,
+	});
 	expect(init.status).toBe(0);
 	if (policyYaml !== null) writeFileSync(join(project, ".beads", "policy.yaml"), policyYaml);
 	return project;
@@ -155,8 +178,7 @@ test("MP3 live: ready counts are unchanged by the policy file", () => {
 	makeBead(project);
 	makeBead(project);
 	const withPolicy = readyCount(project);
-	const removed = spawnSync("rm", [join(project, ".beads", "policy.yaml")]);
-	expect(removed.status).toBe(0);
+	rmSync(join(project, ".beads", "policy.yaml"));
 	expect(readyCount(project)).toBe(withPolicy);
 }, 60000);
 
@@ -175,7 +197,7 @@ test("MP3 fallback: provider evidence is recorded and same-pane close remains re
 	const gateRow: unknown = JSON.parse(gate.out);
 	expect(gateRow).toMatchObject({ provider, passed: true, to_status: "closed" });
 	const guard = (agent: string) => spawnSync("sh", [join(repoRoot, "scripts", "close-guard.sh"), id, "--db", join(project, ".beads", "probe.db")], {
-		cwd: project, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+		cwd: project, encoding: "utf8", input: "", timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
 		env: { ...process.env, RUST_LOG: "warn", AGENT_NAME: agent },
 	});
 	const samePane = guard("ProbeWorker");
@@ -198,8 +220,8 @@ test("MP3 bypass: every status->closed edge refuses --bypass-policy", () => {
 	}
 }, 60000);
 
-test("review accepts an unfinished contract but closure still requires completion", () => {
-	const project = scratchTracker(template);
+function verifySourceReadyContract(policyYaml: string): void {
+	const project = scratchTracker(policyYaml);
 	const create = () => {
 		const result = br(project, ["create", "--title", "review completion probe", "--actor", "RusticPine"]);
 		expect(result.rc).toBe(0);
@@ -209,24 +231,71 @@ test("review accepts an unfinished contract but closure still requires completio
 		return parsed.id;
 	};
 	const id = create();
+	const readyControl = create();
+	expect(br(project, ["update", readyControl, "--acceptance-criteria", "- [ ] Ready control remains available.", "--actor", "RusticPine"]).rc).toBe(0);
 	const unfinished = "- [ ] Exercise the consumer and obtain independent verification.";
 	expect(br(project, ["update", id, "--status", "in_progress", "--assignee", "RusticPine", "--acceptance-criteria", unfinished, "--transition-comment", "implementation started", "--actor", "RusticPine"]).rc).toBe(0);
+	const readyBefore = readyCount(project);
+	expect(readyBefore, "the independent open control must be ready before submission").toBe(1);
 	const submitted = br(project, ["update", id, "--status", "in_review", "--transition-comment", "implementation ready for independent verification", "--actor", "RusticPine"]);
 	expect(submitted, "unchecked acceptance must not prevent its independent review").toMatchObject({ rc: 0 });
-	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "RusticPine"]).rc).toBe(0);
+	const shown = br(project, ["show", id]);
+	expect(shown.rc).toBe(0);
+	expect(JSON.parse(shown.out)[0].acceptance_criteria).toBe(unfinished);
+	expect(readyCount(project)).toBe(readyBefore);
+	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "FixtureIndependentReviewer"]).rc).toBe(0);
 	const premature = br(project, ["close", id, "--reason", "fixture attempts incomplete closure", "--transition-comment", "review report alone is insufficient", "--actor", "RusticPine"]);
 	expect(premature.rc, "a reviewer report must not bypass incomplete acceptance").not.toBe(0);
 	expect(br(project, ["update", id, "--acceptance-criteria", unfinished.replace("[ ]", "[x]"), "--actor", "RusticPine"]).rc).toBe(0);
-	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "RusticPine"]).rc).toBe(0);
-	for (const { agent, expected } of [{ agent: "RusticPine", expected: 4 }, { agent: "FixtureIndependentReviewer", expected: 0 }]) {
+	expect(br(project, ["gate", "report", id, "--gate", "min_reviewers", "--provider", "reviewer:fixture", "--status", "pass", "--to", "closed", "--actor", "FixtureIndependentReviewer"]).rc).toBe(0);
+	for (const { agent, expected } of [{ agent: "RusticPine", expected: 4 }, { agent: "FixtureCloser", expected: 0 }]) {
 		const verdict = spawnSync("sh", [join(repoRoot, "scripts", "close-guard.sh"), id, "--db", join(project, ".beads", "probe.db")], {
-			cwd: project, encoding: "utf8", env: { ...process.env, RUST_LOG: "warn", AGENT_NAME: agent },
+			cwd: project, encoding: "utf8", input: "", timeout: 30_000,
+			env: { ...process.env, RUST_LOG: "warn", AGENT_NAME: agent },
 		});
 		expect(verdict.status, "complete acceptance must preserve the implementer/reviewer distinction").toBe(expected);
 		if (expected === 4) expect(verdict.stderr).toContain("holds the claim");
 	}
+	const closed = br(project, ["close", id, "--reason", "all original criteria verified by distinct reviewer", "--transition-comment", "independent completion control", "--actor", "FixtureCloser"]);
+	expect(closed.rc, closed.out).toBe(0);
+	const final = br(project, ["show", id]);
+	expect(final.rc).toBe(0);
+	expect(JSON.parse(final.out)[0].status).toBe("closed");
 
 	const empty = create();
-	expect(br(project, ["update", empty, "--status", "in_progress", "--transition-comment", "empty contract control", "--actor", "RusticPine"]).rc).toBe(0);
-	expect(br(project, ["update", empty, "--status", "in_review", "--transition-comment", "must refuse missing contract", "--actor", "RusticPine"]).rc).not.toBe(0);
+	const emptyClaim = br(project, ["update", empty, "--status", "in_progress", "--transition-comment", "empty contract control", "--actor", "RusticPine"]);
+	const emptyReview = emptyClaim.rc === 0
+		? br(project, ["update", empty, "--status", "in_review", "--transition-comment", "must refuse missing contract", "--actor", "RusticPine"])
+		: emptyClaim;
+	expect(emptyReview.rc, "an empty contract must not reach review, even when claim checks it earlier").toBe(4);
+	expect(JSON.parse(emptyReview.out)).toMatchObject({
+		error: {
+			code: "POLICY_VIOLATION",
+			context: {
+				violations: expect.arrayContaining([
+					expect.objectContaining({
+						detail: expect.objectContaining({ required_field: "acceptance_criteria_present" }),
+					}),
+				]),
+			},
+		},
+	});
+}
+
+const sourceReadyPolicy = process.env.OMP_KIT_BEADS_POLICY_FIXTURE
+	? readFileSync(process.env.OMP_KIT_BEADS_POLICY_FIXTURE, "utf8")
+	: template;
+
+test("source-ready review preserves unfinished acceptance and ready supply; verified completion closes", () => {
+	verifySourceReadyContract(sourceReadyPolicy);
+}, 60000);
+
+test("source-ready planted missing close completeness fails the same native consumer check", () => {
+	const missingCompleteness = sourceReadyPolicy.replace(
+		"closed: [acceptance_criteria, transition_comment]",
+		"closed: [transition_comment]",
+	);
+	expect(() => verifySourceReadyContract(missingCompleteness)).toThrow(
+		"a reviewer report must not bypass incomplete acceptance",
+	);
 }, 60000);
