@@ -128,25 +128,31 @@ interface MailSight {
 	lastActive: string;
 }
 
+function parseRosterRow(entry: unknown): MailRosterRow | null {
+	const name = prop(entry, "name");
+	if (typeof name !== "string" || name.trim() === "") return null;
+	const program = prop(entry, "program");
+	const model = prop(entry, "model");
+	const task = prop(entry, "task_description") ?? prop(entry, "task");
+	const lastActive = prop(entry, "last_active_ts") ?? prop(entry, "last_active");
+	return {
+		name: name.trim(),
+		program: typeof program === "string" ? program : "",
+		model: typeof model === "string" ? model : "",
+		task: typeof task === "string" ? task : "",
+		lastActive: typeof lastActive === "string" ? lastActive : "",
+	};
+}
+
 /** Parse an `am agents list --json` payload (a bare array) into roster rows; null when not that shape. */
 function parseRoster(payload: unknown): MailRosterRow[] | null {
 	const list = Array.isArray(payload) ? payload : prop(payload, "agents");
 	if (!Array.isArray(list)) return null;
 	const rows: MailRosterRow[] = [];
 	for (const entry of list) {
-		const name = prop(entry, "name");
-		if (typeof name !== "string" || name.trim() === "") return null;
-		const program = prop(entry, "program");
-		const model = prop(entry, "model");
-		const task = prop(entry, "task_description") ?? prop(entry, "task");
-		const lastActive = prop(entry, "last_active_ts") ?? prop(entry, "last_active");
-		rows.push({
-			name: name.trim(),
-			program: typeof program === "string" ? program : "",
-			model: typeof model === "string" ? model : "",
-			task: typeof task === "string" ? task : "",
-			lastActive: typeof lastActive === "string" ? lastActive : "",
-		});
+		const row = parseRosterRow(entry);
+		if (row === null) return null;
+		rows.push(row);
 	}
 	return rows;
 }
@@ -250,7 +256,11 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (candidates.length === 0) {
 			return refuse("AM_ACK_NO_BEAD", `ack_required needs the bead id the ask is about in the subject ("${subject.slice(0, 80)}" names none). Put the id after the vocabulary word, e.g. "QUESTION <bead-id>: ...".`);
 		}
-		const request: TrackerRequest = { bin: "br", ids: candidates, cwd, identities: [], operation: "claim", addLabels: [], actor: null, assignee: null, force: false };
+		const request: TrackerRequest = {
+			bin: "br", ids: candidates, cwd, identities: [], operation: "claim", addLabels: [],
+			actor: null, assignee: null, ifUnchanged: null, transitionComment: null,
+			status: null, reason: null, argv: [], force: false,
+		};
 		let why = "";
 		for (const id of candidates) {
 			const found = await readBeadState(pi.exec, request, id);
@@ -263,7 +273,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	const scanBudgetMs = deps.scanBudgetMs ?? AM_SCAN_BUDGET_MS;
 	const rosterCache = new Map<string, { at: number; rows: MailRosterRow[] }>();
 	const scanCache = new Map<string, { at: number; found: MailSight[]; checked: number; total: number }>();
-	let projectKeysCache: { at: number; keys: string[] } | null = null;
+	let projectKeysCache: { at: number; keys: string[]; scopes: Map<string, string> } | null = null;
 
 	async function fetchRoster(projectKey: string, timeoutMs: number): Promise<{ ok: true; rows: MailRosterRow[] } | { ok: false; why: string }> {
 		let result;
@@ -283,7 +293,8 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (rows === null) return { ok: false, why: `\`${amBin} agents list\` returned an unexpected shape` };
 		return { ok: true, rows };
 	}
-	async function exactAgent(projectKey: string, name: string, timeoutMs = AM_ROSTER_TIMEOUT_MS): Promise<{ ok: true; exists: boolean } | { ok: false; why: string }> {
+	async function exactAgent(projectKey: string, name: string, timeoutMs = AM_ROSTER_TIMEOUT_MS): Promise<{ ok: true; row: MailRosterRow | null } | { ok: false; why: string }> {
+		const started = now();
 		let result;
 		try {
 			result = await pi.exec(amBin, ["agents", "show", "-p", projectKey, name, "--json"], { timeout: timeoutMs });
@@ -298,8 +309,13 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 					const error = JSON.parse(result.stderr.slice(jsonStart));
 					const detail = prop(prop(error, "error"), "data");
 					if (prop(prop(error, "error"), "type") === "AGENT_NOT_FOUND"
-						&& prop(detail, "agent_name") === name
-						&& prop(detail, "project") === projectKey) return { ok: true, exists: false };
+						&& prop(detail, "agent_name") === name) {
+						const remainingMs = timeoutMs - (now() - started);
+						if (remainingMs > 0 && await projectKeys(remainingMs) !== null
+							&& projectKeysCache?.scopes.get(projectKey) === prop(detail, "project")) {
+							return { ok: true, row: null };
+						}
+					}
 				} catch { /* An unrecognized failure is not proof of absence. */ }
 			}
 			return { ok: false, why: "exact lookup failed without authoritative AGENT_NOT_FOUND" };
@@ -307,11 +323,13 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		let payload: unknown;
 		try { payload = JSON.parse(result.stdout); }
 		catch { return { ok: false, why: "exact lookup returned unparseable output" }; }
-		if (prop(payload, "name") !== name || typeof prop(payload, "project_id") !== "number"
-			|| !Number.isSafeInteger(prop(payload, "project_id")) || (prop(payload, "project_id") as number) <= 0) {
+		const row = parseRosterRow(payload);
+		const projectId = prop(payload, "project_id");
+		if (row === null || row.name.toLowerCase() !== name.toLowerCase()
+			|| typeof projectId !== "number" || !Number.isSafeInteger(projectId) || projectId <= 0) {
 			return { ok: false, why: "exact lookup returned a mismatched name or invalid project identity" };
 		}
-		return { ok: true, exists: true };
+		return { ok: true, row };
 	}
 
 	async function cachedRoster(projectKey: string, fresh = false): Promise<{ ok: true; rows: MailRosterRow[] } | { ok: false; why: string }> {
@@ -323,11 +341,11 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	}
 
 	/** Project keys holding at least one agent, from `am robot projects --json` (cached). */
-	async function projectKeys(): Promise<string[] | null> {
+	async function projectKeys(timeoutMs = AM_ROSTER_TIMEOUT_MS): Promise<string[] | null> {
 		if (projectKeysCache !== null && now() - projectKeysCache.at < AM_SCAN_TTL_MS) return projectKeysCache.keys;
 		let result;
 		try {
-			result = await pi.exec(amBin, ["robot", "projects", "--json"], { timeout: AM_ROSTER_TIMEOUT_MS });
+			result = await pi.exec(amBin, ["robot", "projects", "--json"], { timeout: timeoutMs });
 		} catch {
 			return null;
 		}
@@ -341,15 +359,19 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		const list = prop(payload, "projects");
 		if (!Array.isArray(list)) return null;
 		const keys: string[] = [];
+		const scopes = new Map<string, string>();
 		for (const entry of list) {
-			const agents = prop(entry, "agents");
-			if (typeof agents !== "number" || agents <= 0) continue;
 			const path = prop(entry, "path");
 			const slug = prop(entry, "slug");
 			const key = typeof path === "string" && path !== "" ? path : (typeof slug === "string" ? slug : "");
-			if (key !== "") keys.push(key);
+			if (key !== "" && typeof slug === "string" && slug !== "") {
+				scopes.set(key, slug);
+				scopes.set(slug, slug);
+			}
+			const agents = prop(entry, "agents");
+			if (typeof agents === "number" && agents > 0 && key !== "") keys.push(key);
 		}
-		projectKeysCache = { at: now(), keys };
+		projectKeysCache = { at: now(), keys, scopes };
 		return keys;
 	}
 
@@ -415,7 +437,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 		}
 		if (recipients.length === 0) return refuse("AM_ARGS_UNREADABLE", "send_message names no recipient in `to` or `cc`.");
-		let roster = await cachedRoster(key);
+		const roster = await cachedRoster(key);
 		if (!roster.ok) {
 			return refuse("AM_ROSTER_UNAVAILABLE", `the ${key} roster cannot be read (${roster.why}). An unchecked send could create a phantom recipient, so the send is refused instead of guessed. Restore \`${amBin} agents list\`, then retry.`);
 		}
@@ -432,12 +454,13 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				}
 			}
 		}
-		const missing = recipients.filter(name => !roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
+		let rows = roster.rows;
+		const missing = recipients.filter(name => !rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
+		let exactRows: MailRosterRow[] | undefined;
 		if (missing.length > 0) {
 			const refreshed = await cachedRoster(key, true);
-			const stillMissing = refreshed.ok
-				? recipients.filter(name => !refreshed.rows.some(row => row.name.toLowerCase() === name.toLowerCase()))
-				: missing;
+			if (refreshed.ok) rows = refreshed.rows;
+			const stillMissing = recipients.filter(name => !rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
 			if (stillMissing.length > 5) return refuse("AM_ROSTER_UNAVAILABLE", "too many recipients are absent from the capped roster for bounded exact checks.");
 			const deadline = now() + scanBudgetMs;
 			for (const name of stillMissing) {
@@ -445,12 +468,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				if (remainingMs <= 0) return refuse("AM_ROSTER_UNAVAILABLE", "the bounded exact-recipient lookup budget expired.");
 				const exact = await exactAgent(key, name, Math.min(AM_ROSTER_TIMEOUT_MS, remainingMs));
 				if (!exact.ok) return refuse("AM_ROSTER_UNAVAILABLE", `the exact lookup for "${name}" in ${key} was unavailable or malformed; registration is unknown, so the send is refused.`);
-				if (!exact.exists) return phantomRefusal(key, name, ctx.cwd);
+				if (exact.row === null) return phantomRefusal(key, name, ctx.cwd);
+				if (exactRows === undefined) exactRows = [];
+				exactRows.push(exact.row);
 			}
-			return undefined;
 		}
 		for (const name of recipients) {
-			const row = roster.rows.find(candidate => candidate.name.toLowerCase() === name.toLowerCase())!;
+			const row = rows.find(candidate => candidate.name.toLowerCase() === name.toLowerCase())
+				?? exactRows?.find(candidate => candidate.name.toLowerCase() === name.toLowerCase());
+			if (row === undefined) return refuse("AM_ROSTER_UNAVAILABLE", "recipient registration could not be retained for the project check.");
 			const scan = await locateAgent(name.toLowerCase(), key, ctx.cwd);
 			if (!scan.complete || scan.found.length === 0) continue;
 			const newer = scan.found.filter(sight => sight.lastActive !== "" && row.lastActive !== "" && sight.lastActive > row.lastActive);

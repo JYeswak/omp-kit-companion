@@ -88,6 +88,7 @@ const defaultRosters = (): Record<string, TestRosterRow[]> => ({
  */
 function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]): Responder {
 	const br = brKnows(...(ids.length > 0 ? ids : [BEAD]));
+	const keys = Object.keys(rosters);
 	return call => {
 		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") {
 			const at = call.args.indexOf("-p");
@@ -96,13 +97,25 @@ function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]
 			if (rows === undefined) return { stdout: "", stderr: `Project '${key}' not found.`, code: 1 };
 			return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
 		}
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "show") {
+			const at = call.args.indexOf("-p");
+			const key = at >= 0 ? (call.args[at + 1] ?? "") : "";
+			const name = at >= 0 ? (call.args[at + 2] ?? "") : "";
+			const rows = rosters[key];
+			if (rows === undefined) return { stdout: "", stderr: `Project '${key}' not found.`, code: 1 };
+			const row = rows.find(candidate => candidate.name.toLowerCase() === name.toLowerCase());
+			if (row) return { stdout: JSON.stringify({ ...row, id: 1, project_id: keys.indexOf(key) + 1 }), stderr: "", code: 0 };
+			return { stdout: "", stderr: `error: whois via server failed: ${JSON.stringify({
+				error: { type: "AGENT_NOT_FOUND", data: { agent_name: name, project: `project-${keys.indexOf(key) + 1}` } },
+			})}`, code: 1 };
+		}
 		if (call.command === "am" && call.args[0] === "robot" && call.args[1] === "projects") {
-			const keys = Object.keys(rosters);
 			return {
-				stdout: JSON.stringify({ projects: keys.map(key => ({ slug: key, path: key, agents: rosters[key]!.length })) }),
+				stdout: JSON.stringify({ projects: keys.map((key, index) => ({ slug: `project-${index + 1}`, path: key, agents: rosters[key]!.length })) }),
 				stderr: "", code: 0,
 			};
 		}
+		if (call.command === "am") return { stdout: "", stderr: "Unsupported Agent Mail fixture command", code: 1 };
 		return br(call);
 	};
 }
@@ -503,15 +516,35 @@ function execsAreReadsOnly(execs: ExecCall[]): boolean {
 test("phantom capped roster: exact project-scoped lookup admits a valid older recipient", async () => {
 	const rows = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
 	rows[0] = mailRow("PlumRaven");
+	const complete = fleetRespond({ [OMPKIT]: [...rows, mailRow("OldRecipient")] });
 	const respond: Responder = call => {
 		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
-		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "show") return { stdout: JSON.stringify({ id: 851, name: "OldRecipient", project_id: 233 }), stderr: "", code: 0 };
-		return fleetRespond({ [OMPKIT]: [mailRow("PlumRaven")] })(call);
+		return complete(call);
 	};
 	const host = await createHost({}, respond);
-	expect(await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["OldRecipient"], cc: [] }))).toBeUndefined();
-	expect(host.execs.some(call => call.command === "am" && call.args.join(" ") === `agents show -p ${OMPKIT} OldRecipient --json`)).toBe(true);
+	expect(await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["oldrecipient"], cc: [] }))).toBeUndefined();
 	expect(execsAreReadsOnly(host.execs)).toBe(true);
+});
+
+test("phantom capped roster: exact membership retains cross-project ambiguity warnings", async () => {
+	const recent = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
+	recent[0] = mailRow("PlumRaven");
+	const complete = fleetRespond({
+		[OMPKIT]: [...recent, mailRow("IcyBarn", { last_active_ts: "2026-10-06T22:07:55.466462Z" })],
+		[LOCALBENCH]: [mailRow("PlumRaven"), mailRow("IcyBarn", { last_active_ts: "2026-10-19T09:00:00.000000Z" })],
+	});
+	const respond: Responder = call => {
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list"
+			&& call.args[call.args.indexOf("-p") + 1] === OMPKIT) {
+			return { stdout: JSON.stringify(recent), stderr: "", code: 0 };
+		}
+		return complete(call);
+	};
+	const host = await createHost({}, respond);
+	const verdict = await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["IcyBarn"], cc: [] }));
+	expect(verdict?.block).not.toBe(true);
+	expect(verdict?.additionalContext).toContain("AM_PROJECT_AMBIGUOUS");
+	expect(verdict?.additionalContext).toContain(LOCALBENCH);
 });
 
 test("phantom capped roster: authoritative absence refuses; malformed, unavailable and wrong-name exact results remain unknown", async () => {
@@ -520,15 +553,16 @@ test("phantom capped roster: authoritative absence refuses; malformed, unavailab
 	const respondWith = (exact: FlywheelExecResult): Responder => call => {
 		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
 		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "show") return exact;
-		if (call.command === "am" && call.args[0] === "robot") return { stdout: JSON.stringify({ projects: [{ path: OMPKIT, agents: 250 }] }), stderr: "", code: 0 };
+		if (call.command === "am" && call.args[0] === "robot") return { stdout: JSON.stringify({ projects: [{ path: OMPKIT, slug: "native-project", agents: 250 }] }), stderr: "", code: 0 };
 		return brKnows(BEAD)(call);
 	};
-	const absent = await createHost({}, respondWith({ stdout: "", stderr: JSON.stringify({ error: { type: "AGENT_NOT_FOUND", data: { agent_name: "Missing", project: OMPKIT } } }), code: 1 }));
+	const absent = await createHost({}, respondWith({ stdout: "", stderr: `error: whois via server failed: ${JSON.stringify({ error: { type: "AGENT_NOT_FOUND", data: { agent_name: "Missing", project: "native-project" } } })}`, code: 1 }));
 	expect(code(await absent.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["Missing"], cc: [] })))).toBe("AM_PHANTOM_REFUSED");
 	for (const result of [
 		{ stdout: "not json", stderr: "", code: 0 },
 		{ stdout: "", stderr: "temporary server failure", code: 1 },
 		{ stdout: JSON.stringify({ id: 2, name: "Different", project_id: 233 }), stderr: "", code: 0 },
+		{ stdout: "", stderr: JSON.stringify({ error: { type: "AGENT_NOT_FOUND", data: { agent_name: "Missing", project: "different-project" } } }), code: 1 },
 		{ stdout: JSON.stringify({ id: 2, name: "Missing", project_id: 233 }), stderr: "", code: 0, killed: true },
 	]) {
 		const host = await createHost({}, respondWith(result));
