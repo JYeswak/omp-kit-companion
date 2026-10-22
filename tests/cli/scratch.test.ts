@@ -465,6 +465,8 @@ test("quarantine expiry honors the 24-hour default and configured TTL", () => {
     const path = join(qt, quarantineEntryFor(label, new Date(now - ageHours * 3600 * 1000)));
     mkdirSync(path, { recursive: true });
     writeFileSync(join(path, "data"), label);
+    // Owner-less entries must be idle past QUARANTINE_IDLE_MS (72h) to expire (6knq2 guard).
+    backdateTree(path, 80 * 3600 * 1000, now);
     return path;
   };
   const overDefault = createQuarantined("over-default", 25);
@@ -489,6 +491,25 @@ test("quarantine expiry honors the 24-hour default and configured TTL", () => {
   expect(invalidResult).toContainEqual(expect.objectContaining({ dir: qt, action: "SKIP", reason: "quarantine-ttl-config-invalid" }));
   expect(existsSync(invalidConfig)).toBe(true);
   expect(isApplyFailure(invalidResult[0]!)).toBe(true);
+});
+
+test("6knq2: an owner-less quarantine entry past its TTL but touched within 72h is kept", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const active = join(qt, quarantineEntryFor("still-active", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(active, { recursive: true });
+  writeFileSync(join(active, "data"), "written now");
+  const idle = join(qt, quarantineEntryFor("long-idle", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(idle, { recursive: true });
+  writeFileSync(join(idle, "data"), "written long ago");
+  backdateTree(idle, 80 * 3600 * 1000, now);
+  const result = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(result).toContainEqual(expect.objectContaining({ dir: active, action: "SKIP", reason: "quarantine-active-mtime" }));
+  expect(existsSync(active)).toBe(true);
+  expect(result.some(row => row.dir === idle && row.action === "DELETE")).toBe(true);
+  expect(existsSync(idle)).toBe(false);
 });
 
 test("expired delete markers log their cause and are retried", () => {
@@ -1411,6 +1432,7 @@ test("failed expiry stays in the failed bucket across ticks", () => {
   const path = join(qt, quarantineEntryFor("failed-persist", new Date(now - 25 * 3600 * 1000)));
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, "data"), "held");
+  backdateTree(path, 80 * 3600 * 1000, now);
   const failed = applyQuarantineExpiry(home, {
     ...depsFor(), home, now, remove: () => {
       const error = new Error("permission denied") as NodeJS.ErrnoException;
@@ -1435,6 +1457,8 @@ test("failure marker does not rename an open or replaced quarantine directory", 
   mkdirSync(qt, { recursive: true });
   const openPath = join(qt, quarantineEntryFor("open-failure", new Date(now - 25 * 3600 * 1000)));
   mkdirSync(openPath, { recursive: true });
+  writeFileSync(join(openPath, "data"), "open");
+  backdateTree(openPath, 80 * 3600 * 1000, now);
   let lsofCalls = 0;
   const openResult = applyQuarantineExpiry(home, {
     ...depsFor(), home, now,
@@ -1453,12 +1477,17 @@ test("failure marker does not rename an open or replaced quarantine directory", 
 
   const replacedPath = join(qt, quarantineEntryFor("replaced-failure", new Date(now - 25 * 3600 * 1000)));
   mkdirSync(replacedPath, { recursive: true });
+  writeFileSync(join(replacedPath, "data"), "replaced");
+  backdateTree(replacedPath, 80 * 3600 * 1000, now);
   const displaced = join(qt, "displaced-original");
   const replacedResult = applyQuarantineExpiry(home, {
     ...depsFor(), home, now,
-    remove: () => {
-      renameSync(replacedPath, displaced);
-      mkdirSync(replacedPath);
+    remove: (path: string) => {
+      // Swap only the entry under test; other expired entries just fail.
+      if (path === replacedPath) {
+        renameSync(replacedPath, displaced);
+        mkdirSync(replacedPath);
+      }
       const error = new Error("permission denied") as NodeJS.ErrnoException;
       error.code = "EACCES";
       throw error;
