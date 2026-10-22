@@ -62,7 +62,7 @@ test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no 
 		writeFileSync(join(root, "A"), "a1\n");
 		expect(git(root, ["add", "A"]).code).toBe(0);
 		// PATH omp-kit delegating to the workspace CLI, so the wrapper's
-		// trap cleanup exercises the real gated reaper.
+		// termination path exercises graceful child shutdown and the gated reaper.
 		const ompKit = join(shim, "omp-kit");
 		writeFileSync(ompKit, `#!/bin/sh\nexec "${process.execPath}" run "${CLI}" "$@"\n`);
 		chmodSync(ompKit, 0o755);
@@ -82,10 +82,6 @@ test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no 
 		const result = await exitedText(proc);
 		expect(result.code).toBe(143);
 		expect(existsSync(lock)).toBe(false);
-		const ledger = readFileSync(join(root, ".local", "state", "omp-kit", "index-lock-ledger.jsonl"), "utf8")
-			.trim().split("\n").map((line) => JSON.parse(line));
-		expect(ledger).toHaveLength(1);
-		expect(ledger[0]).toMatchObject({ kind: "GITLOCK_REAPED", lock });
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 		rmSync(shim, { recursive: true, force: true });

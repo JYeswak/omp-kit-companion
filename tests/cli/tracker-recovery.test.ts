@@ -148,8 +148,10 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 	// liveness read as unknown. The list-sessions probe above replaced it;
 	// this row pins the old form's brokenness so a tmux behavior change is
 	// noticed instead of silently reviving the form.
-	const dir = mkdtempSync(join(tmpdir(), "fw-oldform-"));
+	const dir = join(tmpdir(), `o${process.pid.toString(36)}`);
+	mkdirSync(dir);
 	const socket = join(dir, "s");
+	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (args: readonly string[]) => {
 		const result = spawnSync(args[0]!, ["-S", socket, ...args.slice(1)], { encoding: "utf8" });
 		return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -168,8 +170,10 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 });
 
 test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id and null for a missing session", () => {
-	const dir = mkdtempSync(join(tmpdir(), "fw-sid-"));
+	const dir = join(tmpdir(), `s${process.pid.toString(36)}`);
+	mkdirSync(dir);
 	const socket = join(dir, "s");
+	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (args: readonly string[]) => {
 		const result = spawnSync(args[0]!, ["-S", socket, ...args.slice(1)], { encoding: "utf8" });
 		return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };

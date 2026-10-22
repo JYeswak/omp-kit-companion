@@ -94,6 +94,41 @@ def reap_leftover(repo):
     except OSError:
         pass
 
+def wait_for_group_exit(pgid, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def stop_child_group(child):
+    pgid = child.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    if wait_for_group_exit(pgid, 1):
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    wait_for_group_exit(pgid, 1)
 
 def main(argv):
     try:
@@ -144,10 +179,7 @@ def main(argv):
 
         def on_signal(signum, _frame):
             if child is not None and child.poll() is None:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+                stop_child_group(child)
             reap_leftover(repo)
             sys.exit(128 + signum)
 
