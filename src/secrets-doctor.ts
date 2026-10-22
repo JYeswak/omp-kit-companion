@@ -23,6 +23,8 @@ export interface DigestSet { digests: Map<string, Set<string>>; lengths: Set<num
 export type DigestResult = { status: "OK"; set: DigestSet } | { status: "UNREACHABLE"; reason: string };
 
 export interface SecretHit { path: string; names: string[] }
+/** One rc file holding literal secret-shaped exports. `names` are variable NAMES only, never values. */
+export interface RcSecretHit { path: string; names: string[] }
 export interface SecretsReport {
 	scope: "secrets";
 	overall: "PASS" | "FAIL" | "UNVERIFIED";
@@ -34,6 +36,12 @@ export interface SecretsReport {
 	roots: string[];
 	hits: SecretHit[];
 	tmux_secret_names: string[];
+	/** Literal secret-shaped exports in shell rc files (ompkit-3h11 NOAMBIENT1). Names only. */
+	rc_secret_hits: RcSecretHit[];
+	/** Non-allowlisted secret-shaped names in the live process environment. Names only. */
+	live_process_secret_names: string[];
+	/** Local omp processes still running on a pre-guard environment (respawn needed). */
+	live_process_count: number | null;
 	files_scanned: number;
 	bytes_scanned: number;
 	skipped_large: number;
@@ -289,6 +297,105 @@ function readTmuxEnvironment(): string {
 	return result.status === 0 ? String(result.stdout) : "";
 }
 
+/**
+ * NOAMBIENT1 guard (ompkit-3h11): secrets MUST NOT live in the shell/tmux environment.
+ * Mirrors ~/.config/zsh/99-no-ambient-secrets.zsh. The allowlist is empty by operator
+ * decision (2026-10-11: Agent Mail runs --no-auth on loopback); entries need a named
+ * consumer and Josh's review. All outputs are NAMES only, never values.
+ */
+export const NO_AMBIENT_ALLOWLIST: ReadonlySet<string> = new Set();
+
+/** Shell rc files the guard covers. Injectable via input.rcFiles (scratch files in tests). */
+export function defaultNoAmbientRcFiles(home: string): string[] {
+	const files = [join(home, ".zshenv"), join(home, ".zshrc"), join(home, ".zprofile")];
+	let dir: string[] = [];
+	try { dir = readdirSync(join(home, ".config", "zsh")); } catch { /* absent */ }
+	for (const entry of dir.sort()) if (entry.endsWith(".zsh")) files.push(join(home, ".config", "zsh", entry));
+	return files;
+}
+
+const PLACEHOLDER_VALUE = /^(?:xxx+|changeme|placeholder|example|test|sample|redacted|<[^>]*>)$/i;
+const DYNAMIC_VALUE = /^\s*(?:\$|`|\$\()/;
+const LIVE_FETCH_REF = /cf-secret|inf_export_live|infisical/i;
+
+/** The zsh guard's `case` globs, exactly (case-sensitive): `*X*` contains, `*X` ends with. */
+const NO_AMBIENT_CONTAINS = ["SECRET", "PASSWORD", "PASSWD", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "CLIENT_SECRET", "DATABASE_URL", "BEARER"] as const;
+const NO_AMBIENT_SUFFIX = ["_TOKEN", "_DSN", "_APP_ID"] as const;
+
+/** Would ~/.config/zsh/99-no-ambient-secrets.zsh strip this exported name? Same globs, so the doctor never FAILs on a name the guard allows (e.g. TERN_WINDOW_KEY). */
+export function noAmbientSecretName(name: string): boolean {
+	return NO_AMBIENT_CONTAINS.some(part => name.includes(part)) || NO_AMBIENT_SUFFIX.some(suffix => name.endsWith(suffix));
+}
+
+/** Is this right-hand side a literal secret value (not a reference, fetch, or placeholder)? */
+export function rcLiteralValue(value: string): boolean {
+	let text = value.trim();
+	if (!text) return false;
+	if (text.endsWith(";")) text = text.slice(0, -1).trim();
+	const quoted = text.match(/^(['"])(.*)\1\s*$/) ?? text.match(/^(['"])(.*)$/);
+	if (quoted) text = (quoted[2] as string).trim();
+	if (!text || DYNAMIC_VALUE.test(text) || LIVE_FETCH_REF.test(text) || PLACEHOLDER_VALUE.test(text)) return false;
+	return text.length >= 8;
+}
+
+/** Secret-shaped NAMES with literal values in rc-file text. Returns NAMES only, never values. */
+export function rcLiteralSecretNames(text: string, allowlist: ReadonlySet<string> = NO_AMBIENT_ALLOWLIST): string[] {
+	const names = new Set<string>();
+	for (const line of text.split("\n")) {
+		if (line.length > 4096) continue; // bound per-line match work; rc assignments are short
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\+?=\s*(.+?)\s*$/);
+		if (!match) continue;
+		const name = match[1] as string;
+		if (allowlist.has(name) || !noAmbientSecretName(name)) continue;
+		if (rcLiteralValue(match[2] as string)) names.add(name);
+	}
+	return [...names].sort();
+}
+
+/** Scan rc files for literal secret-shaped exports. Missing/unreadable files stay quiet. */
+export function scanNoAmbientRcFiles(files: string[], allowlist: ReadonlySet<string> = NO_AMBIENT_ALLOWLIST): RcSecretHit[] {
+	const hits: RcSecretHit[] = [];
+	for (const file of files) {
+		let text: string;
+		try {
+			const stat = lstatSync(file);
+			if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+			text = readFileSync(file, "utf8");
+		} catch { continue; }
+		const names = rcLiteralSecretNames(text, allowlist);
+		if (names.length) hits.push({ path: file, names });
+	}
+	return hits;
+}
+
+/** Non-allowlisted secret-shaped NAMES present in the given environment NAMES. Names only. */
+export function liveProcessSecretNames(envNames: Iterable<string>, allowlist: ReadonlySet<string> = NO_AMBIENT_ALLOWLIST): string[] {
+	const names: string[] = [];
+	for (const name of envNames) {
+		if (!allowlist.has(name) && noAmbientSecretName(name)) names.push(name);
+	}
+	return names.sort();
+}
+
+/** Count local omp processes (respawn candidates): processes whose argv[0] basename is exactly `omp`. Counts only; never reads environments. */
+export function countLocalOmpProcesses(): number | null {
+	try {
+		const result = spawnSync("ps", ["-axo", "args="], { encoding: "utf8", timeout: 5_000 });
+		if (result.status !== 0) return null;
+		return ompArgvCount(String(result.stdout));
+	} catch { return null; }
+}
+
+/** Lines of `ps -axo args=` whose first word's basename is exactly `omp`. */
+export function ompArgvCount(psArgs: string): number {
+	return psArgs.split("\n").filter(line => {
+		const argv0 = line.trim().split(/\s+/, 1)[0] ?? "";
+		return argv0 !== "" && argv0.slice(argv0.lastIndexOf("/") + 1) === "omp";
+	}).length;
+}
+
 export interface SecretsScanInput {
 	home?: string;
 	/** Paths scanned recursively (files or directories). */
@@ -299,6 +406,14 @@ export interface SecretsScanInput {
 	tmuxEnvironment?: () => string;
 	/** Staged-blob mode: scan the index of this repository only (the pre-commit hook). */
 	stagedRepo?: string;
+	/** Rc files for the no-ambient guard; defaults to defaultNoAmbientRcFiles(home). */
+	rcFiles?: string[];
+	/** Extra allowlist entries (reviewed names); defaults to NO_AMBIENT_ALLOWLIST (empty). */
+	allowlist?: ReadonlySet<string>;
+	/** Environment NAMES for the live-process check; defaults to Object.keys(process.env). */
+	processEnvNames?: () => Iterable<string>;
+	/** Local omp process count; defaults to countLocalOmpProcesses(). */
+	processCount?: () => number | null;
 }
 
 function stagedBlobs(state: ScanState, repo: string): void {
@@ -319,12 +434,24 @@ export function inspectSecrets(input: SecretsScanInput = {}): SecretsReport {
 	const staged = input.stagedRepo !== undefined;
 	const roots = staged ? [resolve(input.stagedRepo as string)] : [...(input.roots ?? defaultSecretRoots(home)), ...(input.repos ?? []).map(repo => resolve(repo))];
 	const result = (input.digests ?? (() => liveDigestSource(home)))();
-	const base = { scope: "secrets" as const, mode: staged ? "staged" as const : "roots" as const, roots, tmux_secret_names: [] as string[], files_scanned: 0, bytes_scanned: 0, skipped_large: 0, truncated: false };
+	const allowlist = input.allowlist ?? NO_AMBIENT_ALLOWLIST;
+	const noAmbient = (): Pick<SecretsReport, "rc_secret_hits" | "live_process_secret_names" | "live_process_count"> => {
+		if (staged) return { rc_secret_hits: [], live_process_secret_names: [], live_process_count: null };
+		const rcFiles = input.rcFiles ?? defaultNoAmbientRcFiles(home);
+		return {
+			rc_secret_hits: scanNoAmbientRcFiles(rcFiles, allowlist).map(hit => ({ path: hit.path.startsWith(home + "/") ? `~/${relative(home, hit.path)}` : hit.path, names: hit.names })),
+			live_process_secret_names: liveProcessSecretNames((input.processEnvNames ?? (() => Object.keys(process.env)))(), allowlist),
+			live_process_count: (input.processCount ?? countLocalOmpProcesses)(),
+		};
+	};
+	const base = { scope: "secrets" as const, mode: staged ? "staged" as const : "roots" as const, roots, tmux_secret_names: [] as string[], rc_secret_hits: [] as RcSecretHit[], live_process_secret_names: [] as string[], live_process_count: null as number | null, files_scanned: 0, bytes_scanned: 0, skipped_large: 0, truncated: false };
 	if (result.status === "UNREACHABLE") {
 		const tmux = staged ? [] : tmuxSecretNames((input.tmuxEnvironment ?? readTmuxEnvironment)(), null);
-		const overall = tmux.length ? "FAIL" : "UNVERIFIED";
-		const text = `${overall}: Infisical unreachable (${result.reason}); the digest scan did not run, so no PASS.${tmux.length ? ` Secret-shaped names in the tmux global environment: ${tmux.join(", ")}.` : ""}`;
-		return { ...base, overall, digest_source: "infisical", vault_projects: 0, vault_digests: 0, failed_vault_reads: [], hits: [], tmux_secret_names: tmux, reason: result.reason, text };
+		const guard = noAmbient();
+		const failing = tmux.length > 0 || guard.rc_secret_hits.length > 0 || guard.live_process_secret_names.length > 0;
+		const overall = failing ? "FAIL" : "UNVERIFIED";
+		const text = `${overall}: Infisical unreachable (${result.reason}); the digest scan did not run, so no PASS.${tmux.length ? ` Secret-shaped names in the tmux global environment: ${tmux.join(", ")}.` : ""}${guard.rc_secret_hits.length ? ` Literal secret-shaped exports in rc files: ${guard.rc_secret_hits.map(hit => `${hit.path}: ${hit.names.join(", ")}`).join("; ")}.` : ""}${guard.live_process_secret_names.length ? ` Secret-shaped names in the live process environment: ${guard.live_process_secret_names.join(", ")} (${guard.live_process_count ?? "unknown"} local omp process(es) still run on a pre-guard environment until respawned).` : ""}`;
+		return { ...base, overall, digest_source: "infisical", vault_projects: 0, vault_digests: 0, failed_vault_reads: [], hits: [], tmux_secret_names: tmux, ...guard, reason: result.reason, text };
 	}
 	const state: ScanState = { set: result.set, hits: [], files: 0, bytes: 0, skippedLarge: 0, truncated: false };
 	if (staged) stagedBlobs(state, roots[0] as string);
@@ -340,19 +467,22 @@ export function inspectSecrets(input: SecretsScanInput = {}): SecretsReport {
 		}
 	}
 	const tmux = staged ? [] : tmuxSecretNames((input.tmuxEnvironment ?? readTmuxEnvironment)(), result.set);
-	const failing = state.hits.length > 0 || tmux.length > 0;
+	const guard = noAmbient();
+	const failing = state.hits.length > 0 || tmux.length > 0 || guard.rc_secret_hits.length > 0 || guard.live_process_secret_names.length > 0;
 	const overall = failing ? "FAIL" : state.truncated || result.set.failed.length ? "UNVERIFIED" : "PASS";
 	const reason = [state.truncated ? `scan truncated at ${MAX_FILES} files or ${MAX_TOTAL_BYTES} bytes; later files were not scanned` : "", result.set.failed.length ? `vault projects unread: ${result.set.failed.join(", ")}` : ""].filter(Boolean).join("; ") || null;
 	const shown = (path: string) => staged ? path : path.startsWith(home + "/") ? `~/${relative(home, path)}` : path;
 	const lines = [
-		`${overall}: ${state.hits.length} file(s) hold a vault value; ${tmux.length} secret-shaped tmux global name(s). Scanned ${state.files} file(s), ${state.bytes} byte(s), against ${result.set.digests.size} digest(s) from ${result.set.source}${result.set.projects ? ` (${result.set.projects} project(s))` : ""}.`,
+		`${overall}: ${state.hits.length} file(s) hold a vault value; ${tmux.length} secret-shaped tmux global name(s); ${guard.rc_secret_hits.length} rc file(s) with literal secret-shaped exports; ${guard.live_process_secret_names.length} secret-shaped live process name(s). Scanned ${state.files} file(s), ${state.bytes} byte(s), against ${result.set.digests.size} digest(s) from ${result.set.source}${result.set.projects ? ` (${result.set.projects} project(s))` : ""}.`,
 		...state.hits.map(hit => `  ${shown(hit.path)}: ${hit.names.join(", ")}`),
 		...(tmux.length ? [`  tmux show-environment -g: ${tmux.join(", ")}`] : []),
+		...guard.rc_secret_hits.map(hit => `  rc ${shown(hit.path)}: ${hit.names.join(", ")}`),
+		...(guard.live_process_secret_names.length ? [`  live process environment: ${guard.live_process_secret_names.join(", ")} (${guard.live_process_count ?? "unknown"} local omp process(es) still run on a pre-guard environment until respawned from a fresh shell)`] : []),
 		...(state.skippedLarge ? [`  skipped ${state.skippedLarge} file(s) over ${MAX_FILE_BYTES} bytes`] : []),
 		...(reason ? [`  ${reason}`] : []),
 		...(failing ? ["  Remove each value from the file (source it with cf-secret NAME / inf_export_live at point of use) and rotate it in Infisical."] : []),
 	];
-	return { ...base, overall, digest_source: result.set.source, vault_projects: result.set.projects, vault_digests: result.set.digests.size, failed_vault_reads: result.set.failed, hits: state.hits.map(hit => ({ path: shown(hit.path), names: hit.names })), tmux_secret_names: tmux, files_scanned: state.files, bytes_scanned: state.bytes, skipped_large: state.skippedLarge, truncated: state.truncated, reason, text: lines.join("\n") };
+	return { ...base, overall, digest_source: result.set.source, vault_projects: result.set.projects, vault_digests: result.set.digests.size, failed_vault_reads: result.set.failed, hits: state.hits.map(hit => ({ path: shown(hit.path), names: hit.names })), tmux_secret_names: tmux, ...guard, files_scanned: state.files, bytes_scanned: state.bytes, skipped_large: state.skippedLarge, truncated: state.truncated, reason, text: lines.join("\n") };
 }
 
 /** CLI wiring: seams are env-only so the pre-commit hook and the planted tests drive the real binary. */
@@ -362,6 +492,10 @@ export function secretsScanInputFromEnv(env: NodeJS.ProcessEnv, flags: { root?: 
 	else if (env.OMP_KIT_SECRET_DIGESTS_FILE) { const path = env.OMP_KIT_SECRET_DIGESTS_FILE; input.digests = () => ({ status: "OK", set: digestSetFromFile(path) }); }
 	if (env.OMP_KIT_SECRET_SCAN_ROOTS) input.roots = env.OMP_KIT_SECRET_SCAN_ROOTS.split(delimiter).filter(Boolean);
 	if (env.OMP_KIT_SECRET_SCAN_TMUX_ENV !== undefined) { const text = env.OMP_KIT_SECRET_SCAN_TMUX_ENV; input.tmuxEnvironment = () => text; }
+	if (env.OMP_KIT_SECRET_SCAN_RC_FILES !== undefined) { const files = env.OMP_KIT_SECRET_SCAN_RC_FILES.split(delimiter).filter(Boolean); input.rcFiles = files; }
+	if (env.OMP_KIT_SECRET_SCAN_ALLOWLIST !== undefined) { const extra = new Set(env.OMP_KIT_SECRET_SCAN_ALLOWLIST.split(delimiter).filter(Boolean)); input.allowlist = extra; }
+	if (env.OMP_KIT_SECRET_SCAN_PROCESS_ENV !== undefined) { const names = env.OMP_KIT_SECRET_SCAN_PROCESS_ENV.split(delimiter).filter(Boolean); input.processEnvNames = () => names; }
+	if (env.OMP_KIT_SECRET_SCAN_PROCESS_COUNT !== undefined) { const parsed = env.OMP_KIT_SECRET_SCAN_PROCESS_COUNT === "" ? null : Number(env.OMP_KIT_SECRET_SCAN_PROCESS_COUNT); const count = parsed === null || Number.isSafeInteger(parsed) ? parsed : null; input.processCount = () => count; }
 	const repos = flags.root ?? env.OMP_KIT_SECRET_SCAN_REPOS;
 	if (repos) input.repos = repos.split(delimiter).filter(Boolean);
 	if (flags.staged) input.stagedRepo = flags.cwd;
