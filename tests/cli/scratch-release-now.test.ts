@@ -4,7 +4,7 @@
 // marked dir and is NOT success (ok false, now-held-*); --now is refused without a bin, on free-prose owners, and never
 // touches a hold.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createScratch, releaseScratch, reapLogPath,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
@@ -100,6 +100,30 @@ test("an open file or missing lsof evidence keeps the marked dir and is not succ
 	expect(unknown).toMatchObject({ ok: false, changed: true, reason: "now-held-lsof-unavailable" });
 	expect(existsSync(blind.dir)).toBe(true);
 	expect(existsSync(join(blind.dir, ".omp-kit-release"))).toBe(true);
+});
+
+// SCRATCHRETIRE1 AC5: a delete that fails partway (a nested dir the owner cannot write) keeps the released dir, reports
+// non-success with the retained responsibility, and claims no reclaimed bytes; once the cause clears, the same release retires it.
+test("a partial delete failure keeps the marked dir, is not success, and claims no bytes; a later --now retires it", () => {
+	const stuck = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(stuck.dir, "top.txt"), "first");
+	const locked = join(stuck.dir, "locked");
+	mkdirSync(locked);
+	writeFileSync(join(locked, "inner.txt"), "second");
+	chmodSync(locked, 0o500);
+	try {
+		const held = releaseScratch(stuck.dir, stuck.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true });
+		expect(held).toMatchObject({ ok: false, changed: true, reason: "now-held-delete-failed" });
+		expect(held.detail).toContain("still yours to retire");
+		expect(Object.keys(held).filter((key) => ["bytes", "reclaimedBytes", "freedBytes", "bytesReclaimed"].includes(key))).toEqual([]);
+		expect(existsSync(stuck.dir)).toBe(true);
+		expect(existsSync(join(stuck.dir, ".omp-kit-release"))).toBe(true);
+	} finally {
+		chmodSync(locked, 0o700);
+	}
+	expect(releaseScratch(stuck.dir, stuck.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(stuck.dir)).toBe(false);
 });
 
 test("a hold is never deleted by now", () => {

@@ -1406,7 +1406,15 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 		: { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const clear = lsofClearDir(evidence, dir);
 	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
+	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
+	// owner cannot write) used to take both with the first files and leave an unowned remnant nobody could re-release.
 	try {
+		for (const name of readdirSync(dir)) {
+			if (name === ".owner" || name === RELEASE_FILE) continue;
+			rmSync(join(dir, name), { recursive: true, force: true });
+		}
+		rmSync(join(dir, RELEASE_FILE), { force: true });
+		rmSync(join(dir, ".owner"), { force: true });
 		rmSync(dir, { recursive: true, force: true });
 	} catch {
 		return held("now-held-delete-failed");
