@@ -37,6 +37,11 @@ The dir is removed by `cleanup()`, which is idempotent, and by a per-process reg
 SIGHUP, SIGINT and SIGTERM. After cleaning up on a signal, the process still dies with that signal. Only SIGKILL
 leaves the dir behind, and its `.owner` names the dead pid for the reaper.
 
+A tree that holds a non-writable dir, such as the 0555 `releases/<v>` dirs an install makes, still gets removed. If
+the first removal fails, every dir inside the owned dir is made owner-rwx and removal is retried once. Symlinks are
+never followed, so nothing outside the owned dir changes. If the retry also fails, `cleanup()` throws (TS), raises
+`OSError` (Python) or returns non-zero (sh); the exit and signal hooks never fail.
+
 To get a temp file, create it inside an owned dir.
 
 ```ts

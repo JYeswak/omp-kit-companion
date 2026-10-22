@@ -55,6 +55,7 @@ else if (action === "readonly-tree") {
 	chmodSync(a.path + "/ro", 0o555);
 	symlinkSync(process.env.KT_OUTSIDE, a.path + "/link");
 }
+else if (action !== "exit0") throw new Error("unknown child action " + action);
 `;
 
 const SH_CHILD = `
@@ -76,6 +77,7 @@ case $KT_ACTION in
 	cleanup-twice) kitlib_tmp_cleanup "$a"; kitlib_tmp_cleanup "$a"; kitlib_tmp_cleanup "$b"; kitlib_tmp_cleanup "$b"; printf 'cleaned\\n' ;;
 	bad-label) if kitlib_tmp c "$KT_LABEL"; then printf 'ACCEPTED\\n'; else printf 'REFUSED\\n'; fi ;;
 	readonly-tree) { mkdir -p "$a/ro/deep" && printf x >"$a/ro/deep/file" && chmod 0555 "$a/ro/deep" "$a/ro" && ln -s "$KT_OUTSIDE" "$a/link"; } || exit 91 ;;
+	*) printf 'unknown child action %s\\n' "$KT_ACTION" >&2; exit 92 ;;
 esac
 `;
 

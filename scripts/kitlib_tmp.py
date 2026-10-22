@@ -16,7 +16,11 @@ exist. Labels match ``^[a-z0-9][a-z0-9-]{0,47}$``. The dir holds a ``.owner``
 directory), ``created`` (ISO time) and, when given, ``bead`` -- the
 identity-free field set, so no ``ps`` spawn per dir (see src/kitlib/tmp.ts).
 
-``cleanup()`` removes the tree and is a no-op the second time. Use it as a
+``cleanup()`` removes the tree and is a no-op the second time. If removal
+fails (a 0555 dir inside, as installs make ``releases/<v>``), every real dir
+inside the owned dir is given owner rwx (symlinks are never followed) and
+removal is retried once; ``cleanup()`` raises if that fails too, the registry
+hooks never raise. Use it as a
 context manager (``with owned_tmp("x") as d:``, ``d`` the path string) or call
 ``cleanup()``. A per-process registry removes every live dir at ``atexit`` and
 on SIGHUP, SIGINT and SIGTERM; after a signal's cleanup the previous Python
@@ -41,6 +45,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import tempfile
 import threading
 from typing import Dict, Optional
@@ -52,21 +57,57 @@ _SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _CREATE_ATTEMPTS = 16
 _HOOKED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 
-_lock = threading.Lock()
+# Reentrant: the signal handler runs on the main thread and may interrupt a block that already holds it.
+_lock = threading.RLock()
 _live: Dict[str, int] = {}  # path -> creating pid
 _atexit_installed = False
 _signals_installed = False
 _previous: Dict[int, object] = {}
 
 
+def _make_dirs_writable(path: str) -> None:
+    """Give the owner rwx on ``path`` and every real dir under it; symlinks are never followed or changed."""
+    try:
+        top = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(top.st_mode):
+        return
+    os.chmod(path, stat.S_IMODE(top.st_mode) | 0o700)
+    for parent, dirnames, _files in os.walk(path, followlinks=False):
+        for name in dirnames:
+            child = os.path.join(parent, name)
+            info = os.lstat(child)
+            if stat.S_ISDIR(info.st_mode):
+                os.chmod(child, stat.S_IMODE(info.st_mode) | 0o700)
+
+
+def _remove_tree(path: str) -> None:
+    """Remove the tree at ``path``. A tree holding a non-writable dir (an install's 0555 ``releases/<v>``)
+    cannot be emptied, so on failure every dir inside is made owner-writable and removal is tried once more."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        _make_dirs_writable(path)
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return
+
+
 def cleanup_all_owned_tmp() -> None:
-    """Remove every dir this process's ``owned_tmp()`` calls still own."""
+    """Remove every dir this process's ``owned_tmp()`` calls still own; best effort, one failure never stops the rest."""
     with _lock:
-        mine = [path for path, pid in _live.items() if pid == os.getpid()]
-        for path in mine:
-            del _live[path]
+        mine = [path for path, pid in list(_live.items()) if pid == os.getpid()]
     for path in mine:
-        shutil.rmtree(path, ignore_errors=True)
+        try:
+            _remove_tree(path)
+        except OSError:
+            continue  # left with its .owner for the reaper
+        with _lock:
+            _live.pop(path, None)
 
 
 def _on_signal(signum: int, frame) -> None:
@@ -110,9 +151,10 @@ class OwnedTmp:
         self.path = path
 
     def cleanup(self) -> None:
+        """Remove the tree (a no-op once gone); raises ``OSError`` if it still cannot be removed."""
+        _remove_tree(self.path)
         with _lock:
             _live.pop(self.path, None)
-        shutil.rmtree(self.path, ignore_errors=True)
 
     def __enter__(self) -> str:
         return self.path

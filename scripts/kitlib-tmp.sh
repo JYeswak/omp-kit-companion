@@ -32,7 +32,9 @@
 # so the shell still dies of that signal (status 128+signum, e.g. 143 for
 # TERM). A trap runs only once the foreground command returns. SIGKILL cannot
 # be caught: the dir survives with its .owner, which is what the reaper reads.
-# A temp FILE goes inside an owned dir; there is no separate file API.
+# A temp FILE goes inside an owned dir; there is no separate file API. Removal
+# that fails (a 0555 dir inside, as installs make releases/<v>) is retried once
+# after chmod -R u+rwx on the owned dir, which never follows symlinks inside.
 #
 # Shells: /bin/sh, dash, bash (POSIX function and trap semantics). zsh is refused: it scopes an EXIT trap set in
 # a function to that function. Names: public kitlib_tmp*, private kitlib__tmp_*; state lives in
@@ -45,6 +47,14 @@ KITLIB__TMP_NL='
 # a-z plus 0-9 (KITLIB__TMP_LOWER) and with A-Z (KITLIB__TMP_ALNUM), spelled out for bracket patterns.
 KITLIB__TMP_LOWER=abcdefghijklmnopqrstuvwxyz0123456789
 KITLIB__TMP_ALNUM=ABCDEFGHIJKLMNOPQRSTUVWXYZ$KITLIB__TMP_LOWER
+
+# A tree holding a non-writable dir (an install's 0555 releases/<v>) cannot be emptied, so on failure give the
+# owner rwx on everything inside and retry once. POSIX chmod -R does not follow symlinks met while walking.
+kitlib__tmp_remove() {
+	rm -rf -- "$1" 2>/dev/null && return 0
+	chmod -R u+rwx -- "$1" 2>/dev/null || :
+	rm -rf -- "$1"
+}
 
 kitlib__tmp_run_registry() {
 	kitlib__tmp_cmds=$KITLIB__TMP_ATEXIT
@@ -59,7 +69,7 @@ kitlib__tmp_run_registry() {
 	kitlib__tmp_dirs=$KITLIB__TMP_DIRS
 	KITLIB__TMP_DIRS=
 	for kitlib__tmp_dir in $kitlib__tmp_dirs; do
-		rm -rf -- "$kitlib__tmp_dir"
+		kitlib__tmp_remove "$kitlib__tmp_dir" || :
 	done
 	IFS=$kitlib__tmp_ifs
 }
@@ -186,7 +196,8 @@ kitlib_tmp() {
 	eval "$1=\$kitlib__tmp_path"
 }
 
-# kitlib_tmp_cleanup PATH: remove one owned dir now; a no-op for a path already removed.
+# kitlib_tmp_cleanup PATH: remove one owned dir now; a no-op for a path already removed. Returns non-zero (and
+# keeps PATH registered for the exit cleanup) when the tree still cannot be removed.
 kitlib_tmp_cleanup() {
 	kitlib__tmp_keep=
 	kitlib__tmp_found=
@@ -201,7 +212,10 @@ kitlib_tmp_cleanup() {
 	done
 	IFS=$kitlib__tmp_ifs
 	KITLIB__TMP_DIRS=$kitlib__tmp_keep
-	[ -z "$kitlib__tmp_found" ] || rm -rf -- "$1"
+	[ -n "$kitlib__tmp_found" ] || return 0
+	kitlib__tmp_remove "$1" && return 0
+	KITLIB__TMP_DIRS=$KITLIB__TMP_DIRS$1$KITLIB__TMP_NL
+	return 1
 }
 
 # kitlib_tmp_atexit 'CMD': run CMD (eval'd, one line) at exit or on HUP/INT/TERM, before the dirs are removed.

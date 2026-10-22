@@ -19,7 +19,11 @@
  * reaper already treats a dead pid with an identity-free owner as reapable
  * and a live one as live unless the pid was reused after `created`.
  *
- * `cleanup()` removes the tree and is a no-op the second time. A per-process
+ * `cleanup()` removes the tree and is a no-op the second time. If removal
+ * fails (a 0555 dir inside, as installs make `releases/<v>`), every real dir
+ * inside the owned dir is given owner rwx (symlinks are never followed) and
+ * removal is retried once; `cleanup()` throws if that fails too, the
+ * registry hooks never throw. A per-process
  * registry removes every live dir on `process.on("exit")` and on SIGHUP,
  * SIGINT and SIGTERM; after a signal's cleanup, if no other listener for it
  * remains this module removes its own and re-sends the signal, so the default
@@ -28,14 +32,14 @@
  * FILE goes inside an owned dir; there is no separate file API.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface OwnedTmp {
 	/** Absolute path of the owned directory. */
 	readonly path: string;
-	/** Removes the directory tree; idempotent. */
+	/** Removes the directory tree; idempotent. Throws if the tree still cannot be removed. */
 	cleanup(): void;
 }
 
@@ -49,11 +53,34 @@ const HOOKED_SIGNALS = ["SIGHUP", "SIGINT", "SIGTERM"] as const;
 const liveDirs = new Set<string>();
 let hooksInstalled = false;
 
-/** Removes every directory an `ownedTmp()` call still owns. */
+/** Gives the owner rwx on `dir` and every real directory under it; symlinks are never followed or changed. */
+function makeDirsWritable(dir: string): void {
+	const stat = lstatSync(dir, { throwIfNoEntry: false });
+	if (stat === undefined || !stat.isDirectory()) return;
+	chmodSync(dir, (stat.mode & 0o7777) | 0o700);
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (entry.isDirectory()) makeDirsWritable(join(dir, entry.name));
+	}
+}
+
+/** Removes the tree at `dir`. A tree holding a non-writable dir (an install's 0555 `releases/<v>`) cannot be
+ * emptied, so on failure every dir inside is made owner-writable and the removal is tried once more. */
+function removeTree(dir: string): void {
+	try {
+		rmSync(dir, { recursive: true, force: true });
+	} catch {
+		makeDirsWritable(dir);
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+/** Removes every directory an `ownedTmp()` call still owns; best effort, so one failure never stops the rest. */
 export function cleanupAllOwnedTmp(): void {
 	for (const dir of liveDirs) {
-		rmSync(dir, { recursive: true, force: true });
-		liveDirs.delete(dir);
+		try {
+			removeTree(dir);
+			liveDirs.delete(dir);
+		} catch { /* left with its .owner for the reaper */ }
 	}
 }
 
@@ -121,7 +148,7 @@ export function ownedTmp(label: string, opts: { root?: string; bead?: string } =
 	return {
 		path,
 		cleanup(): void {
-			rmSync(path, { recursive: true, force: true });
+			removeTree(path);
 			liveDirs.delete(path);
 		},
 	};

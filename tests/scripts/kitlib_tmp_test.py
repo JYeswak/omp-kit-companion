@@ -73,6 +73,17 @@ elif action == "bad-label":
     except ValueError as error:
         os.write(2, (str(error) + "\n").encode())
         os.write(1, b"REFUSED\n")
+elif action == "readonly-tree":
+    ro = os.path.join(a.path, "ro")
+    os.makedirs(os.path.join(ro, "deep"))
+    with open(os.path.join(ro, "deep", "file"), "w") as handle:
+        handle.write("x")
+    os.chmod(os.path.join(ro, "deep"), 0o555)
+    os.chmod(ro, 0o555)
+    os.symlink(os.environ["KT_OUTSIDE"], os.path.join(a.path, "link"))
+else:
+    if action != "exit0":
+        raise SystemExit(f"unknown child action {action}")
 '''
 
 # Parses one owner file with the real reader (src/scratch.ts parseOwnerFile); prints its JSON or "null".
@@ -89,6 +100,8 @@ def _env(action: str, root: str, case: dict) -> dict:
            "KT_ROOT": root, "KT_ACTION": action}
     if "label" in case:
         env["KT_LABEL"] = case["label"]
+    if "outside_path" in case:
+        env["KT_OUTSIDE"] = case["outside_path"]
     return env
 
 
@@ -221,7 +234,21 @@ def run_case(case: dict, action: str) -> list:
     with kitlib_tmp.owned_tmp("kitlib-tmp-test") as owned:
         root = os.path.join(owned, "root")
         os.mkdir(root, 0o700)
-        return judge(run_child(action, root, case), case["expect"], root)
+        outside = None
+        if case.get("outside"):
+            outside = os.path.join(owned, "outside")
+            os.mkdir(outside, 0o700)
+            with open(os.path.join(outside, "keep"), "w", encoding="utf-8") as handle:
+                handle.write("keep\n")
+            os.chmod(outside, 0o555)
+            case = dict(case, outside_path=outside)
+        failures = judge(run_child(action, root, case), case["expect"], root)
+        if case["expect"].get("outside_intact") and outside is not None:
+            if os.stat(outside).st_mode & 0o777 != 0o555:
+                failures.append(f"OUTSIDE mode changed: {oct(os.stat(outside).st_mode & 0o777)}")
+            if not os.path.isfile(os.path.join(outside, "keep")):
+                failures.append("OUTSIDE lost its file keep")
+        return failures  # the with-exit removes the 0555 OUTSIDE too: the fix dogfooded on the test's own root
 
 
 class Corpus(unittest.TestCase):
@@ -300,6 +327,22 @@ class Surface(unittest.TestCase):
                 os.kill(pid, signal.SIGKILL)
             self.assertEqual(status, 0)
             self.assertTrue(os.path.isdir(path))
+
+    def test_cleanup_and_cleanup_all_remove_a_tree_holding_0555_dirs(self) -> None:
+        for remove in ("cleanup", "all"):
+            owned = kitlib_tmp.owned_tmp("kitlib-readonly")
+            release = os.path.join(owned.path, "releases", "0.0.1")
+            os.makedirs(release)
+            with open(os.path.join(release, "bin"), "w", encoding="utf-8") as handle:
+                handle.write("x")
+            os.chmod(release, 0o555)
+            os.chmod(os.path.dirname(release), 0o555)
+            if remove == "cleanup":
+                owned.cleanup()
+            else:
+                kitlib_tmp.cleanup_all_owned_tmp()
+            self.assertFalse(os.path.exists(owned.path), remove)
+            owned.cleanup()
 
     def test_dir_made_from_a_thread_is_registered(self) -> None:
         box = {}
