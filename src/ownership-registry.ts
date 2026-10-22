@@ -153,8 +153,8 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		id: "kit-temp-names", title: "Kit temp files and harness .owner files named with process.pid",
 		rows: [13], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
 		writers: [
-			"src/cli.ts", "src/diagnostics.ts", "src/fleet-lessons.ts", "src/fleet-watch.ts", "src/full-test-runner.ts", "src/integrations.ts",
-			"src/mechanical-admission.ts", "src/mutations.ts", "src/omp-source-cache.ts", "src/omp-watch.ts", "src/service.ts",
+			"src/cli.ts", "src/diagnostics.ts", "src/disk-stage.ts", "src/fleet-lessons.ts", "src/fleet-watch.ts", "src/full-test-runner.ts", "src/integrations.ts",
+			"src/mechanical-admission.ts", "src/mutations.ts", "src/omp-recert.ts", "src/omp-source-cache.ts", "src/omp-watch.ts", "src/service.ts",
 		],
 		cancel: "each writer renames or removes its temp file in the same call",
 		crash: "a leftover temp file sits in repo scratch or the state root and is reaped with it",
