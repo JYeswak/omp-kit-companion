@@ -216,6 +216,24 @@ describe("fleet guard main-only git checks", () => {
 		}
 	});
 
+	test("ompkit-rz5.158 AC2: a path another agent holds exclusively refuses naming the holder and the path", () => {
+		const peer = (exclusive: boolean) => ({ reservation_read_attestation: onlyAttestation,
+			all_active: [{ agent: "PeerHolder", path: "some/path", exclusive, remaining_seconds: 600 }] });
+		withOnlyFixture(peer(true), "ok", "FixtureAgent", () => {
+			const verdict = check(event("git commit --only -m m -- some/path"), context);
+			expect(verdict?.block).toBe(true);
+			expect(verdict?.reason).toContain("some/path, which PeerHolder holds exclusively");
+		});
+		// Controls: a shared foreign hold and no hold at all both refuse as plainly unreserved, naming nobody.
+		for (const response of [peer(false), { reservation_read_attestation: onlyAttestation, all_active: [] }]) {
+			withOnlyFixture(response, "ok", "FixtureAgent", () => {
+				const verdict = check(event("git commit --only -m m -- some/path"), context);
+				expect(verdict?.reason).toContain("without an active exclusive reservation");
+				expect(verdict?.reason).not.toContain("PeerHolder");
+			});
+		}
+	});
+
 	test("redirections are not pathspecs: a redirected --only commit of reserved paths is admitted (ompkit-xa5s.27)", () => {
 		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
 			for (const command of [

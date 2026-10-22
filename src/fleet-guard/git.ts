@@ -600,7 +600,7 @@ export interface AttestedReservation {
  * case used to refuse as "lookup unavailable" and sent workers to repair a healthy Agent Mail (ompkit-rz5.158).
  * Every failure names its cause.
  */
-export function parseReservationRead(stdout: string): { rows: AttestedReservation[] } | { why: string } {
+export function parseReservationRead(stdout: string): { rows: AttestedReservation[]; active: AttestedReservation[] } | { why: string } {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout);
@@ -615,7 +615,15 @@ export function parseReservationRead(stdout: string): { rows: AttestedReservatio
 	if (attested.state !== "current" || attested.database_matches_server !== true || attested.storage_root_matches_server !== true) {
 		return { why: `the read is not attested current (state=${String(attested.state)}, database_matches_server=${String(attested.database_matches_server)}, storage_root_matches_server=${String(attested.storage_root_matches_server)})` };
 	}
-	if (!("my_reservations" in record)) return { rows: [] };
+	// Everyone's live holds, only to name who blocks a path (rz5.158 AC2); never used to admit, so a malformed row is skipped.
+	const active: AttestedReservation[] = [];
+	for (const row of Array.isArray(record.all_active) ? record.all_active : []) {
+		if (!row || typeof row !== "object") continue;
+		const entry = row as Record<string, unknown>;
+		if (typeof entry.path === "string" && entry.path && typeof entry.exclusive === "boolean" && typeof entry.remaining_seconds === "number")
+			active.push({ agent: entry.agent, path: entry.path, exclusive: entry.exclusive, remaining_seconds: entry.remaining_seconds });
+	}
+	if (!("my_reservations" in record)) return { rows: [], active };
 	const rows = record.my_reservations;
 	if (!Array.isArray(rows)) return { why: "my_reservations is not a list" };
 	const out: AttestedReservation[] = [];
@@ -627,7 +635,7 @@ export function parseReservationRead(stdout: string): { rows: AttestedReservatio
 		}
 		out.push({ agent: entry.agent, path: entry.path, exclusive: entry.exclusive, remaining_seconds: entry.remaining_seconds });
 	}
-	return { rows: out };
+	return { rows: out, active };
 }
 
 function firstLine(text: unknown): string {
@@ -635,8 +643,14 @@ function firstLine(text: unknown): string {
 	return line ? `: ${line.slice(0, 200)}` : "";
 }
 
-/** The caller's live exclusive holds; a row that is shared, expired or another agent's covers nothing. */
-function readReservationHolds(repoRoot: string, agent: string): { holds: ReservationHold[] } | { why: string } {
+interface ForeignHold {
+	pattern: string;
+	holder: string;
+}
+
+/** The caller's live exclusive holds, and every other agent's live exclusive hold (to name a blocker); a row that is
+ * shared or expired covers nothing. */
+function readReservationHolds(repoRoot: string, agent: string): { holds: ReservationHold[]; foreign: ForeignHold[] } | { why: string } {
 	const run = spawnSync("am", ["robot", "reservations", "--project", repoRoot, "--agent", agent, "--json"], { encoding: "utf8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
 	if (run.error) {
 		const code = (run.error as NodeJS.ErrnoException).code;
@@ -645,7 +659,11 @@ function readReservationHolds(repoRoot: string, agent: string): { holds: Reserva
 	if (run.status !== 0) return { why: `am exited ${run.status === null ? `on signal ${run.signal}` : run.status}${firstLine(run.stderr)}` };
 	const read = parseReservationRead(String(run.stdout));
 	if ("why" in read) return read;
-	return { holds: read.rows.filter((row) => row.agent === agent && row.exclusive && row.remaining_seconds > 0).map((row) => ({ pattern: row.path })) };
+	return {
+		holds: read.rows.filter((row) => row.agent === agent && row.exclusive && row.remaining_seconds > 0).map((row) => ({ pattern: row.path })),
+		foreign: read.active.filter((row) => typeof row.agent === "string" && row.agent !== agent && row.exclusive && row.remaining_seconds > 0)
+			.map((row) => ({ pattern: row.path, holder: row.agent as string })),
+	};
 }
 
 // Index just past the `]` closing a fnmatch class opened at `open`; -1 when `[` is a literal (no closing `]`).
@@ -711,7 +729,7 @@ export function holdCovers(pattern: string, path: string): boolean {
 export type ReservationGaps =
 	| { kind: "identity" }
 	| { kind: "unavailable"; agent: string; why: string }
-	| { kind: "checked"; agent: string; uncovered: string[] };
+	| { kind: "checked"; agent: string; uncovered: string[]; foreign: { path: string; holder: string }[] };
 
 /**
  * The one reservation lookup for fleet-guard admissions (`git commit --only`, write ownership): the caller's
@@ -722,7 +740,12 @@ export function reservationGaps(root: string, paths: readonly string[], agent = 
 	if (!agent) return { kind: "identity" };
 	const read = readReservationHolds(root, agent);
 	if ("why" in read) return { kind: "unavailable", agent, why: read.why };
-	return { kind: "checked", agent, uncovered: paths.filter((path) => !read.holds.some((hold) => holdCovers(hold.pattern, path))) };
+	const uncovered = paths.filter((path) => !read.holds.some((hold) => holdCovers(hold.pattern, path)));
+	const foreign = uncovered.flatMap((path) => {
+		const hold = read.foreign.find((candidate) => holdCovers(candidate.pattern, path));
+		return hold ? [{ path, holder: hold.holder }] : [];
+	});
+	return { kind: "checked", agent, uncovered, foreign };
 }
 
 function relativeRepoPath(root: string, base: string, value: string): string | null {
@@ -738,6 +761,9 @@ function checkOnlyCoverage(paths: string[], root: string, base: string): FleetGu
 	if (gaps.kind === "identity") return { block: true, reason: ONLY_IDENTITY_REASON };
 	if (gaps.kind === "unavailable") return { block: true, reason: onlyUnavailableReason(gaps.why) };
 	if (relativePaths.includes(null)) return { block: true, reason: ONLY_FOREIGN_REASON };
+	// rz5.158 AC2: a path another agent holds exclusively names that holder and the path, so the caller knows whom to ask.
+	const held = gaps.foreign[0];
+	if (held) return { block: true, reason: `fleet-guard history: git commit --only names ${held.path}, which ${held.holder} holds exclusively; ask ${held.holder} to release or hand it over; no files were changed.` };
 	if (gaps.uncovered.length > 0) return { block: true, reason: ONLY_UNCOVERED_REASON };
 	return undefined;
 }
