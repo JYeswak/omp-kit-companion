@@ -33,6 +33,12 @@ child never removes its parent's dirs. SIGKILL cannot be caught: the dir
 survives with its ``.owner``, which is what the reaper reads. A temp FILE goes
 inside an owned dir; there is no separate file API.
 
+``auto_cleanup=False`` (ompkit-b3zgu) is for a dir that must outlive the
+process: it makes the same dir and ``.owner`` but never enters the registry,
+so no atexit or signal hook touches it (none is installed for it);
+``cleanup()`` still removes it on demand, and after a crash the scratch
+reaper reads its ``.owner`` (dead pid, no open fds) like any other.
+
 Shipped beside ``pysafe.py``; consume it the way ``pysafe.py`` documents
 (released artifact, never a companion checkout path).
 """
@@ -163,7 +169,8 @@ class OwnedTmp:
         self.cleanup()
 
 
-def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None) -> OwnedTmp:
+def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None,
+              auto_cleanup: bool = True) -> OwnedTmp:
     if not isinstance(label, str) or LABEL_PATTERN.fullmatch(label) is None:
         raise ValueError(f"kitlib tmp: label {label!r} is invalid; want ^[a-z0-9][a-z0-9-]{{0,47}}$")
     if bead is not None and (not isinstance(bead, str) or _BEAD_PATTERN.fullmatch(bead) is None):
@@ -171,7 +178,8 @@ def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None
     base = tempfile.gettempdir() if root is None else root
     if not os.path.isdir(base):
         raise NotADirectoryError(f"kitlib tmp: root {base!r} is not a directory")
-    _install_hooks()
+    if auto_cleanup:
+        _install_hooks()
     pid = os.getpid()
     path = ""
     for attempt in range(_CREATE_ATTEMPTS):
@@ -185,8 +193,9 @@ def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None
             continue
         path = candidate
         break
-    with _lock:
-        _live[path] = pid
+    if auto_cleanup:
+        with _lock:
+            _live[path] = pid
     created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     lines = [f"pid={pid}", f"label={label}", f"repo={_owner_repo()}", f"created={created}"]
     if bead is not None:

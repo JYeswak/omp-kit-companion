@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isSha256Hex } from "./regex-guards.ts";
 export const RELEASE_SCHEMA_VERSION = 1;
 export const RELEASE_MANIFEST_NAME = "release-manifest.json";
@@ -296,7 +297,9 @@ export async function stageKitRelease(input: StageKitInput): Promise<StagedKitRe
   if (!isAbsolute(input.stagingParent) || resolve(input.stagingParent) !== input.stagingParent ||
    !lstatSync(input.stagingParent).isDirectory() || realpathSync(input.stagingParent) !== input.stagingParent) fail("UNSAFE_STAGE_PARENT");
  } catch { fail("UNSAFE_STAGE_PARENT"); }
- const root = mkdtempSync(join(input.stagingParent, "kit-stage-"));
+ // kitlib owned dir (ompkit-b3zgu): returned to the caller, so auto-cleanup is off; its .owner lets the reaper see a
+ // crashed staging. The .owner leaves before return, so the staged tree is exactly the archive's members.
+ const root = ownedTmp("kit-stage", { root: input.stagingParent, autoCleanup: false }).path;
  try {
   for (const member of members) {
    const target = join(root, member.path);
@@ -318,6 +321,7 @@ export async function stageKitRelease(input: StageKitInput): Promise<StagedKitRe
   const identity = await input.probeBinaryInfo(executable);
   assertBinaryIdentity(identity, input.plan, verified);
   if (sha256(readFileSync(executable)) !== verified.manifest.files.find(file => file.path === RELEASE_BINARY_NAME)?.sha256) fail("STAGING_FAILED");
+  rmSync(join(root, ".owner"));
   return { ...verified, root, executable };
  } catch (error) {
   rmSync(root, { recursive: true, force: true });

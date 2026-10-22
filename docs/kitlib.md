@@ -64,3 +64,12 @@ kitlib_tmp_atexit 'printf "done\n"' # kitlib owns the EXIT/HUP/INT/TERM traps; r
 
 In sh, `KITLIB_TMP_ROOT` overrides the root and `KITLIB_TMP_BEAD` adds the bead. `kitlib_tmp_cleanup PATH` removes a
 dir early. The library refuses to run under zsh, because zsh scopes an EXIT trap to the function that sets it.
+
+### Keeping a dir past exit (ompkit-b3zgu)
+
+Some dirs must outlive the process that made them: a returned artifact dir, a `--keep` workDir, a sandbox root its
+caller drains first. Turn auto-cleanup off for those: TS `ownedTmp(label, { autoCleanup: false })`, Python
+`owned_tmp(label, auto_cleanup=False)`, sh `KITLIB_TMP_AUTO_CLEANUP=0 kitlib_tmp VAR label`. The dir and its
+`.owner` are the same, but no exit or signal hook removes it; `cleanup()` (`kitlib_tmp_cleanup`) still does on
+demand. If the process crashes, the scratch reaper reaps it from its `.owner` (dead pid, no open fds). Removal stays
+the caller's job.

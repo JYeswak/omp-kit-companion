@@ -2525,8 +2525,8 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	return verdict;
 }
 
-/** Test-run work dirs nested inside a session dir (omp-kit-integrations-* and omp-kit-work.*): visited without the name-pid suffix rule so the dead-pid rule applies wherever TMPDIR put them. Pid-less names fall through to the unowned lifecycle. */
-const NESTED_WORKDIR = /^omp-kit-(integrations-|work\.)/;
+/** Test-run work dirs nested inside a session dir (omp-kit-integrations-*, kitlib omp-kit-integrations.<pid>.<6> and omp-kit-work.*): visited without the name-pid suffix rule so the dead-pid rule applies wherever TMPDIR put them. Pid-less names fall through to the unowned lifecycle. */
+const NESTED_WORKDIR = /^omp-kit-(integrations[-.]|work\.)/;
 
 function eachSessionDir(root: string, visit: (dir: string) => void, visitNested: (dir: string) => void = visit): void {
 	let entries: string[];

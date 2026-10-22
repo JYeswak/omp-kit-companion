@@ -14,8 +14,8 @@ import { parseOwnerFile } from "../../src/scratch";
 type Expect = {
 	rc?: number | Record<string, number>; signal?: string; dirs: "gone" | "kept"; stdout_has?: string; stderr_has?: string; outside_intact?: boolean;
 };
-type Case = { id: string; action: string; label?: string; kill?: string; outside?: boolean; expect: Expect };
-type Negative = { id: string; case: string; action: string };
+type Case = { id: string; action: string; label?: string; kill?: string; outside?: boolean; auto_cleanup?: boolean; expect: Expect };
+type Negative = { id: string; case: string; action: string; auto_cleanup?: boolean; caught_by: string };
 type Lang = "ts" | "sh" | "dash";
 
 const REPO = join(import.meta.dir, "../..");
@@ -28,8 +28,9 @@ import { chmodSync, mkdirSync, symlinkSync, writeFileSync, writeSync } from "nod
 const { ownedTmp } = await import(process.env.KT_LIB);
 const root = process.env.KT_ROOT;
 const action = process.env.KT_ACTION;
-const a = ownedTmp("kitlib-a", { root });
-const b = ownedTmp("kitlib-b", { root, bead: "ompkit-41l85" });
+const autoCleanup = process.env.KT_AUTO_CLEANUP !== "0";
+const a = ownedTmp("kitlib-a", { root, autoCleanup });
+const b = ownedTmp("kitlib-b", { root, bead: "ompkit-41l85", autoCleanup });
 writeSync(1, a.path + "\\n" + b.path + "\\n");
 // The children are real processes; a pending timer keeps one alive until its signal lands or the test kills it.
 const linger = () => setTimeout(() => {}, 10000);
@@ -61,6 +62,7 @@ else if (action !== "exit0") throw new Error("unknown child action " + action);
 const SH_CHILD = `
 . "$KT_LIB"
 KITLIB_TMP_ROOT=$KT_ROOT
+KITLIB_TMP_AUTO_CLEANUP=$KT_AUTO_CLEANUP
 kitlib_tmp a kitlib-a || exit 90
 KITLIB_TMP_BEAD=ompkit-41l85
 kitlib_tmp b kitlib-b || exit 90
@@ -88,9 +90,9 @@ function childArgv(lang: Lang): { argv: string[]; lib: string } {
 
 interface Outcome { code: number | null; signal: string | null; stdout: string; stderr: string; pid: number; timedOut: boolean }
 
-async function runChild(lang: Lang, action: string, root: string, kase: Case, outside: string | null): Promise<Outcome> {
+async function runChild(lang: Lang, action: string, root: string, kase: Case, outside: string | null, autoCleanup: boolean): Promise<Outcome> {
 	const { argv, lib } = childArgv(lang);
-	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: root, KT_LIB: lib, KT_ROOT: root, KT_ACTION: action };
+	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: root, KT_LIB: lib, KT_ROOT: root, KT_ACTION: action, KT_AUTO_CLEANUP: autoCleanup ? "1" : "0" };
 	if (kase.label !== undefined) env.KT_LABEL = kase.label;
 	if (outside !== null) env.KT_OUTSIDE = outside;
 	const child = Bun.spawn(argv, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
@@ -161,7 +163,7 @@ function judge(lang: Lang, outcome: Outcome, want: Expect, root: string): string
 		if (JSON.stringify(left) !== JSON.stringify(names)) failures.push(`want exactly ${names.join(", ")} kept, root holds ${left.join(", ")}`);
 		if (pidAlive(outcome.pid)) failures.push(`child pid ${outcome.pid} is still alive`);
 		for (const dir of dirs) {
-			if (!existsSync(dir)) { failures.push(`dir removed despite SIGKILL: ${dir}`); continue; }
+			if (!existsSync(dir)) { failures.push(`dir removed: ${dir}`); continue; }
 			if ((statSync(dir).mode & 0o777) !== 0o700) failures.push(`dir mode is not 0700: ${dir}`);
 			const ownerPath = join(dir, ".owner");
 			if (!existsSync(ownerPath)) { failures.push(`no .owner in ${dir}`); continue; }
@@ -178,7 +180,7 @@ function judge(lang: Lang, outcome: Outcome, want: Expect, root: string): string
 	return failures;
 }
 
-async function runCase(lang: Lang, kase: Case, action = kase.action): Promise<string[]> {
+async function runCase(lang: Lang, kase: Case, action = kase.action, autoCleanup = kase.auto_cleanup !== false): Promise<string[]> {
 	const owned = ownedTmp("kitlib-tmp-test");
 	try {
 		const root = join(owned.path, "root");
@@ -190,7 +192,7 @@ async function runCase(lang: Lang, kase: Case, action = kase.action): Promise<st
 			writeFileSync(join(outside, "keep"), "keep\n");
 			chmodSync(outside, 0o555);
 		}
-		const failures = judge(lang, await runChild(lang, action, root, kase, outside), kase.expect, root);
+		const failures = judge(lang, await runChild(lang, action, root, kase, outside, autoCleanup), kase.expect, root);
 		if (kase.expect.outside_intact && outside !== null) {
 			if ((statSync(outside).mode & 0o777) !== 0o555) failures.push(`OUTSIDE mode changed: ${(statSync(outside).mode & 0o777).toString(8)}`);
 			if (!existsSync(join(outside, "keep"))) failures.push("OUTSIDE lost its file keep");
@@ -212,13 +214,13 @@ for (const lang of ["ts", "sh", ...(existsSync("/bin/dash") ? ["dash" as const] 
 				expect(await runCase(lang, kase)).toEqual([]);
 			}, CHILD_DEADLINE_MS + 10_000);
 		}
-		// Planted negatives: a test-only child that removes its own signal hook after the dirs exist. The library has
-		// no switch for this; the point is that the corpus judgement notices a missing hook.
+		// Planted negatives: a test-only child variant (a dropped signal hook, or the default where the case asks for
+		// autoCleanup: false). The library has no switch for this; the point is that the corpus judgement notices.
 		for (const negative of corpus.planted_negatives) {
 			test(`planted negative ${negative.id} is caught`, async () => {
 				const kase = corpus.cases.find(item => item.id === negative.case)!;
-				const failures = await runCase(lang, kase, negative.action);
-				expect(failures).toContainEqual(expect.stringMatching(/^dir survived: /));
+				const failures = await runCase(lang, kase, negative.action, negative.auto_cleanup ?? kase.auto_cleanup !== false);
+				expect(failures.some(failure => failure.startsWith(negative.caught_by))).toBe(true);
 			}, CHILD_DEADLINE_MS + 10_000);
 		}
 	});

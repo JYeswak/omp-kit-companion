@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
@@ -78,7 +78,8 @@ function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_
 		writeFileSync(join(root, ".owner"),
 			`pid=${process.pid}\nlabel=runtime-tests\nrepo=${caller}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	}
-	const base = mkdtempSync(join(root, "omp-kit-runtime-")); // tempsafe: runtime-adapter.sh admits only omp-kit-runtime-* sandbox names; parent root is ownedTmp-owned
+	// A kitlib name, omp-kit-runtime.<pid>.<6>, is the sandbox shape runtime-adapter.sh admits.
+	const base = ownedTmp("omp-kit-runtime", { root }).path;
 	fixtures.push(base);
 	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
 }
@@ -417,7 +418,7 @@ test("isolated child exit unconfirmed keeps the runner note out of the child std
 		}
 		await Promise.allSettled([child.exited, stdout, stderr]);
 		// The retained scratch is this test's own: its child group was killed above.
-		if (privateRoot && relative(admission.OMP_KIT_TEST_WORK_ROOT, privateRoot).split("/")[0]?.startsWith("omp-kit-runtime-")) {
+		if (privateRoot && relative(admission.OMP_KIT_TEST_WORK_ROOT, privateRoot).split("/")[0]?.startsWith("omp-kit-runtime.")) {
 			rmSync(privateRoot, { recursive: true, force: true });
 		}
 	}

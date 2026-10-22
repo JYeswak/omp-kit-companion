@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import type { LspReadinessReport, LspServerReadiness } from "./lsp-readiness.ts";
 import { resolveOmpDefaults } from "./lsp-readiness.ts";
 import { isRecord } from "./type-guards.ts";
@@ -470,7 +471,9 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 	try {
 		const scratchRoot = privateTempRoot();
 		tempParent = scratchRoot;
-		probeRoot = mkdtempSync(join(scratchRoot, "omp-kit-lsp-readiness-"));
+		// kitlib owned dir (ompkit-b3zgu): auto-cleanup is off because an unconfirmed mux shutdown keeps it for
+		// recovery; the finally below stays its only remover.
+		probeRoot = ownedTmp("omp-kit-lsp-readiness", { root: scratchRoot, autoCleanup: false }).path;
 		tempRemoved = false;
 		chmodSync(probeRoot, 0o700);
 		const home = join(probeRoot, "home");

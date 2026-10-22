@@ -241,7 +241,7 @@ test("integrations work dir honors a validated caller scratch root and refuses u
 		["test", "--integrations", "--profile", "caller-probe", "--keep", "--json"]);
 	const ownedOut = `${owned.stdout.toString()}\n${owned.stderr.toString()}`;
 	expect(owned.exitCode, ownedOut).toBe(0);
-	const kept = readdirSync(scratchRoot).filter(name => name.startsWith("omp-kit-integrations-"));
+	const kept = readdirSync(scratchRoot).filter(name => name.startsWith("omp-kit-integrations."));
 	expect(kept.length).toBe(1);
 	rmSync(join(scratchRoot, kept[0]!), { recursive: true, force: true });
 	const unowned = join(base, "unowned-scratch");

@@ -154,7 +154,7 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	const dirty = Buffer.from(bytes);
 	dirty[dirty.length - 1030] ^= 1;
 	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");
-	expect(readdirSync(output).filter(name => name.startsWith("kit-stage-"))).toHaveLength(1);
+	expect(readdirSync(output).filter(name => name.startsWith("kit-stage."))).toHaveLength(1);
 	expect(lstatSync(staged.executable).isFile()).toBe(true);
 	expect(existsSync(join(staged.root, "reports"))).toBe(false);
 });

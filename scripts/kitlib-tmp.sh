@@ -36,11 +36,16 @@
 # that fails (a 0555 dir inside, as installs make releases/<v>) is retried once
 # after chmod -R u+rwx on the owned dir, which never follows symlinks inside.
 #
+# KITLIB_TMP_AUTO_CLEANUP=0 kitlib_tmp VAR LABEL (ompkit-b3zgu) is for a dir that must outlive the shell: the same
+# dir and .owner, but no trap is installed for it and it never enters the exit registry. kitlib_tmp_cleanup still
+# removes it on demand; after a crash the scratch reaper reads its .owner (dead pid, no open fds) like any other.
+#
 # Shells: /bin/sh, dash, bash (POSIX function and trap semantics). zsh is refused: it scopes an EXIT trap set in
 # a function to that function. Names: public kitlib_tmp*, private kitlib__tmp_*; state lives in
-# KITLIB__TMP_DIRS and KITLIB__TMP_ATEXIT (newline-separated).
+# KITLIB__TMP_DIRS, KITLIB__TMP_KEPT (auto-cleanup off) and KITLIB__TMP_ATEXIT (newline-separated).
 
 KITLIB__TMP_DIRS=
+KITLIB__TMP_KEPT=
 KITLIB__TMP_ATEXIT=
 KITLIB__TMP_NL='
 '
@@ -154,7 +159,14 @@ kitlib_tmp() {
 		printf "kitlib tmp: root '%s' is not a directory\n" "$kitlib__tmp_root" >&2
 		return 2
 	fi
-	kitlib__tmp_install_traps || return 2
+	case ${KITLIB_TMP_AUTO_CLEANUP:-1} in
+		0) kitlib__tmp_auto= ;;
+		1) kitlib__tmp_auto=1 ;;
+		*) printf "kitlib tmp: KITLIB_TMP_AUTO_CLEANUP '%s' is invalid; want 0 or 1\n" "$KITLIB_TMP_AUTO_CLEANUP" >&2; return 2 ;;
+	esac
+	if [ -n "$kitlib__tmp_auto" ]; then
+		kitlib__tmp_install_traps || return 2
+	fi
 	kitlib__tmp_path=
 	kitlib__tmp_try=0
 	while [ "$kitlib__tmp_try" -lt 16 ]; do
@@ -170,7 +182,11 @@ kitlib_tmp() {
 		printf "kitlib tmp: could not create a dir for label '%s' under '%s'\n" "$2" "$kitlib__tmp_root" >&2
 		return 1
 	fi
-	KITLIB__TMP_DIRS=$KITLIB__TMP_DIRS$kitlib__tmp_path$KITLIB__TMP_NL
+	if [ -n "$kitlib__tmp_auto" ]; then
+		KITLIB__TMP_DIRS=$KITLIB__TMP_DIRS$kitlib__tmp_path$KITLIB__TMP_NL
+	else
+		KITLIB__TMP_KEPT=$KITLIB__TMP_KEPT$kitlib__tmp_path$KITLIB__TMP_NL
+	fi
 	kitlib__tmp_repo=$(pwd 2>/dev/null) || kitlib__tmp_repo=/
 	case $kitlib__tmp_repo in
 		/*) ;;
@@ -196,8 +212,8 @@ kitlib_tmp() {
 	eval "$1=\$kitlib__tmp_path"
 }
 
-# kitlib_tmp_cleanup PATH: remove one owned dir now; a no-op for a path already removed. Returns non-zero (and
-# keeps PATH registered for the exit cleanup) when the tree still cannot be removed.
+# kitlib_tmp_cleanup PATH: remove one owned dir now (auto-cleanup on or off); a no-op for a path already removed.
+# Returns non-zero (and keeps PATH registered where it was) when the tree still cannot be removed.
 kitlib_tmp_cleanup() {
 	kitlib__tmp_keep=
 	kitlib__tmp_found=
@@ -205,16 +221,29 @@ kitlib_tmp_cleanup() {
 	IFS=$KITLIB__TMP_NL
 	for kitlib__tmp_dir in $KITLIB__TMP_DIRS; do
 		if [ "$kitlib__tmp_dir" = "$1" ]; then
-			kitlib__tmp_found=1
+			kitlib__tmp_found=dirs
 		else
 			kitlib__tmp_keep=$kitlib__tmp_keep$kitlib__tmp_dir$KITLIB__TMP_NL
 		fi
 	done
-	IFS=$kitlib__tmp_ifs
 	KITLIB__TMP_DIRS=$kitlib__tmp_keep
+	kitlib__tmp_keep=
+	for kitlib__tmp_dir in $KITLIB__TMP_KEPT; do
+		if [ "$kitlib__tmp_dir" = "$1" ]; then
+			kitlib__tmp_found=kept
+		else
+			kitlib__tmp_keep=$kitlib__tmp_keep$kitlib__tmp_dir$KITLIB__TMP_NL
+		fi
+	done
+	KITLIB__TMP_KEPT=$kitlib__tmp_keep
+	IFS=$kitlib__tmp_ifs
 	[ -n "$kitlib__tmp_found" ] || return 0
 	kitlib__tmp_remove "$1" && return 0
-	KITLIB__TMP_DIRS=$KITLIB__TMP_DIRS$1$KITLIB__TMP_NL
+	if [ "$kitlib__tmp_found" = kept ]; then
+		KITLIB__TMP_KEPT=$KITLIB__TMP_KEPT$1$KITLIB__TMP_NL
+	else
+		KITLIB__TMP_DIRS=$KITLIB__TMP_DIRS$1$KITLIB__TMP_NL
+	fi
 	return 1
 }
 

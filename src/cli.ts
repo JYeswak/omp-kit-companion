@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { cpus, loadavg, tmpdir } from "node:os";
+import { readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { cpus, loadavg } from "node:os";
 import { createInterface } from "node:readline";
 import { isatty } from "node:tty";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -1986,9 +1986,9 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
 			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
 	}
-	const workDir = mkdtempSync(join(tmpdir(), `omp-kit-integrations-${process.pid}-`));
-	// The reaper keys dead runs off this marker (same rule as omp-kit-work dirs).
-	writeFileSync(join(workDir, ".owner"), `pid=${process.pid}\nlabel=omp-kit-integrations\nrepo=omp-kit-companion\ncreated=${new Date().toISOString()}\n`);
+	// kitlib owned dir (ompkit-b3zgu): its .owner keys the reaper on dead runs; auto-cleanup is off because --keep
+	// keeps it past exit, so removal stays the finally below.
+	const workDir = ownedTmp("omp-kit-integrations", { autoCleanup: false }).path;
 	// Per-case fake HOMEs inherit XDG_CACHE_HOME inside the work dir; uv would
 	// otherwise grow a gigabyte cache per case home. Share one per-run cache.
 	const uvCache = join(workDir, "uv-cache");

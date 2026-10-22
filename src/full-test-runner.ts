@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
@@ -66,7 +67,7 @@ function redactFullTestText(text: string, roots: readonly string[]): string {
  for (const path of [...paths].sort((a, b) => b.length - a.length))
   value = value.split(path).join("<private-path>");
  return value
-  .replace(/(?:\/private)?\/tmp\/omp-kit-(?:work|runtime)-[^\s'"<>]*|(?:\/private)?\/var\/folders\/[^/\s]+\/[^/\s]+\/T\/omp-kit-(?:work|runtime)-[^\s'"<>]*/g, "<private-runtime-temp>")
+  .replace(/(?:\/private)?\/tmp\/omp-kit-(?:work-|runtime[-.])[^\s'"<>]*|(?:\/private)?\/var\/folders\/[^/\s]+\/[^/\s]+\/T\/omp-kit-(?:work-|runtime[-.])[^\s'"<>]*/g, "<private-runtime-temp>")
   .replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z ]+ )?PRIVATE KEY-----|$)/g, "<redacted-private-key>")
   .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s"'<>@]+@/gi, "$1<redacted>@")
   .replace(/\b(Bearer|Basic)\s+[^\s,"'<>]+/gi, "$1 <redacted>")
@@ -121,7 +122,9 @@ export function retainProducerOutput(repoRoot: string, output: Pick<BundledRunRe
  const relativeScratch = relative(canonicalRepo, canonicalScratch);
  if (relativeScratch === ".." || relativeScratch.startsWith(`..${sep}`) || isAbsolute(relativeScratch))
   throw new Error("FULL_TEST_ARTIFACT_ROOT_ESCAPES_REPO");
- const directory = mkdtempSync(join(canonicalScratch, `full-test.${process.pid}.`));
+ // kitlib owned dir (ompkit-b3zgu), returned to the caller, so auto-cleanup is off. Its .owner is rewritten with
+ // repo= the canonical repo root (kitlib writes the cwd): the var/agent-tmp reaper binds the dir to that repo.
+ const directory = ownedTmp("full-test", { root: canonicalScratch, autoCleanup: false }).path;
  const stdout_path = join(directory, "producer.stdout");
  const stderr_path = join(directory, "producer.stderr");
  writeFileSync(join(directory, ".owner"),

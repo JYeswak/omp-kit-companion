@@ -47,8 +47,9 @@ sys.path.insert(0, os.environ["KT_LIBDIR"])
 import kitlib_tmp
 root = os.environ["KT_ROOT"]
 action = os.environ["KT_ACTION"]
-a = kitlib_tmp.owned_tmp("kitlib-a", root=root)
-b = kitlib_tmp.owned_tmp("kitlib-b", root=root, bead="ompkit-41l85")
+auto = os.environ.get("KT_AUTO_CLEANUP") != "0"
+a = kitlib_tmp.owned_tmp("kitlib-a", root=root, auto_cleanup=auto)
+b = kitlib_tmp.owned_tmp("kitlib-b", root=root, bead="ompkit-41l85", auto_cleanup=auto)
 os.write(1, (a.path + "\n" + b.path + "\n").encode())
 sigs = {"sigterm": signal.SIGTERM, "sigint": signal.SIGINT, "sighup": signal.SIGHUP}
 if action == "fail":
@@ -97,7 +98,7 @@ class Outcome:
 
 def _env(action: str, root: str, case: dict) -> dict:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": root, "KT_LIBDIR": str(ROOT / "scripts"),
-           "KT_ROOT": root, "KT_ACTION": action}
+           "KT_ROOT": root, "KT_ACTION": action, "KT_AUTO_CLEANUP": "0" if case.get("auto_cleanup") is False else "1"}
     if "label" in case:
         env["KT_LABEL"] = case["label"]
     if "outside_path" in case:
@@ -210,6 +211,9 @@ def judge(outcome: Outcome, want: dict, root: str) -> list:
             failures.append(f"child pid {outcome.pid} is still alive")
         for index, d in enumerate(dirs):
             owner = os.path.join(d, ".owner")
+            if not os.path.isdir(d):
+                failures.append(f"dir removed: {d}")
+                continue
             if not os.path.isfile(owner):
                 failures.append(f"no .owner in {d}")
                 continue
@@ -263,14 +267,17 @@ def _install_cases() -> None:
     for index, case in enumerate(corpus["cases"]):
         name = f"test_{index:02d}_{case['id'].replace('-', '_')}"
         setattr(Corpus, name, lambda self, case=case: self.assertEqual(run_case(case, case["action"]), []))
-    # Planted negatives: a test-only child that drops its own signal hook after the dirs exist. The library has no
-    # switch for this; the point is that the corpus judgement notices a missing hook.
+    # Planted negatives: a test-only child variant (a dropped signal hook, or the default where the case asks for
+    # auto_cleanup=False). The library has no switch for this; the point is that the corpus judgement notices.
     for negative in corpus["planted_negatives"]:
         name = f"test_planted_negative_{negative['id'].replace('-', '_')}"
 
         def check(self, negative=negative):
-            failures = run_case(by_id[negative["case"]], negative["action"])
-            self.assertTrue(any(f.startswith("dir survived: ") for f in failures), failures)
+            case = by_id[negative["case"]]
+            if "auto_cleanup" in negative:
+                case = dict(case, auto_cleanup=negative["auto_cleanup"])
+            failures = run_case(case, negative["action"])
+            self.assertTrue(any(f.startswith(negative["caught_by"]) for f in failures), failures)
 
         setattr(Corpus, name, check)
 

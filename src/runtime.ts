@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { parseOwnerFile } from "./scratch.ts";
 import { ompSourceCacheRoot } from "./omp-source-cache.ts";
 import { readTestCaseReports, type TestCaseReportCapture } from "./test-case-report.ts";
@@ -172,7 +173,10 @@ async function runIsolated(
 	}
 	const absoluteScript = resolveBundledScript(script, realRoot);
 	const identity = resolveOmpIdentity(process.env);
-	const privateRoot = mkdtempSync(join(runtimeTempRoot(), "omp-kit-runtime-")); // tempsafe: runtime sandbox drains descendants before removal and may be retained; owned by ownership-registry row 4 (runtime-adapter.sh + scratch reaper)
+	// kitlib owned dir omp-kit-runtime.<pid>.<6> (ompkit-b3zgu), the shape runtime-adapter.sh admits. Auto-cleanup is
+	// off: the sandbox drains descendants before removal and is retained when the child's exit is unconfirmed, so the
+	// finally below stays its only remover; a crash leaves its .owner for the scratch reaper.
+	const privateRoot = ownedTmp("omp-kit-runtime", { root: runtimeTempRoot(), autoCleanup: false }).path;
 	let cleanupPrivateRoot = true;
 	try {
 		for (const directory of PRIVATE_DIRS) mkdirSync(join(privateRoot, directory), { mode: 0o700 });

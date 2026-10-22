@@ -127,7 +127,7 @@ describe("versioned release contract", () => {
    };
    const staged = await stageKitRelease({ archive, plan, stagingParent, probeBinaryInfo });
    expect(readFileSync(staged.executable)).toEqual(binary);
-   expect(staged.root.startsWith(`${stagingParent}/kit-stage-`)).toBe(true);
+   expect(staged.root.startsWith(`${stagingParent}/kit-stage.`)).toBe(true);
    const badInfo = async () => ({ ...info, version: "9.9.9" });
    await expect(stageKitRelease({ archive, plan, stagingParent, probeBinaryInfo: badInfo })).rejects.toThrow("BINARY_IDENTITY_MISMATCH");
    expect(readdirSync(stagingParent)).toEqual([staged.root.slice(stagingParent.length + 1)]);

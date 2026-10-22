@@ -194,7 +194,7 @@ function redactor(
 	return (text: string) => {
 		let result = text;
 		for (const [path, replacement] of replacements) result = result.split(path).join(replacement);
-		const cleaned = result.replace(/(?:\/private)?\/tmp\/omp-kit-runtime-[^\s'"<>]*|\/var\/folders\/[^/\s]+\/[^/\s]+\/T\/omp-kit-runtime-[^\s'"<>]*/g, "<private-runtime-temp>");
+		const cleaned = result.replace(/(?:\/private)?\/tmp\/omp-kit-runtime[-.][^\s'"<>]*|\/var\/folders\/[^/\s]+\/[^/\s]+\/T\/omp-kit-runtime[-.][^\s'"<>]*/g, "<private-runtime-temp>");
 		// A failed identity can mention unknown package/source ancestors, not just its launcher.
 		return identity ? cleaned : cleaned.replace(/(^|[\s"'(=:])\/[^\s"'<>)]*/g, "$1<private-path>");
 	};

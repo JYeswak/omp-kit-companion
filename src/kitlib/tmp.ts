@@ -30,6 +30,13 @@
  * action still ends the process with that signal. SIGKILL cannot be caught:
  * the dir survives with its `.owner`, which is what the reaper reads. A temp
  * FILE goes inside an owned dir; there is no separate file API.
+ *
+ * `autoCleanup: false` (ompkit-b3zgu) is for a dir that must outlive the
+ * process: a returned artifact, a `--keep` workDir, a sandbox root its caller
+ * drains first. It makes the same dir and `.owner` but never enters the
+ * registry, so no exit or signal hook touches it; `cleanup()` still removes it
+ * on demand, and after a crash the scratch reaper reads its `.owner` (dead pid,
+ * no open fds) like any other.
  */
 import { randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -117,12 +124,13 @@ function ownerRepo(): string {
 	}
 }
 
-export function ownedTmp(label: string, opts: { root?: string; bead?: string } = {}): OwnedTmp {
+export function ownedTmp(label: string, opts: { root?: string; bead?: string; autoCleanup?: boolean } = {}): OwnedTmp {
 	if (typeof label !== "string" || !LABEL_PATTERN.test(label)) throw new Error(`kitlib tmp: label '${String(label)}' is invalid; want ^[a-z0-9][a-z0-9-]{0,47}$`);
 	if (opts.bead !== undefined && !BEAD_PATTERN.test(opts.bead)) throw new Error(`kitlib tmp: bead '${opts.bead}' is invalid; want 1-64 chars of A-Za-z0-9._-`);
 	const root = opts.root ?? tmpdir();
 	if (!statSync(root).isDirectory()) throw new Error(`kitlib tmp: root '${root}' is not a directory`);
-	installHooks();
+	const autoCleanup = opts.autoCleanup !== false;
+	if (autoCleanup) installHooks();
 	let path = "";
 	for (let attempt = 0; path === ""; attempt++) {
 		const candidate = join(root, `${label}.${process.pid}.${suffix()}`);
@@ -133,7 +141,7 @@ export function ownedTmp(label: string, opts: { root?: string; bead?: string } =
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt + 1 >= CREATE_ATTEMPTS) throw error;
 		}
 	}
-	liveDirs.add(path);
+	if (autoCleanup) liveDirs.add(path);
 	const lines = [`pid=${process.pid}`, `label=${label}`, `repo=${ownerRepo()}`, `created=${new Date().toISOString()}`];
 	if (opts.bead !== undefined) lines.push(`bead=${opts.bead}`);
 	try {
