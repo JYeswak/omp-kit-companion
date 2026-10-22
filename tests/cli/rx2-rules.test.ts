@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { lintCondition } from "../../scripts/regex-budget.ts";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const root = resolve(import.meta.dir, "../..");
 const ruleNames = [
@@ -35,7 +36,7 @@ const cases: [string, "fire" | "quiet", string, string][] = [
 ];
 
 function makeFixture(): string {
-	const dir = mkdtempSync(join(tmpdir(), "rx2-rules-test-"));
+	const dir = ownedTmp("rx2-rules-test").path;
 	try {
 		const rulesDir = join(dir, "rules");
 		mkdirSync(rulesDir);

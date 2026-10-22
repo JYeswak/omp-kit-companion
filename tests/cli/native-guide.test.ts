@@ -1,8 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const omp = resolveOmpIdentity();
 const git = Bun.which("git");
@@ -33,7 +35,7 @@ interface NativeFixture {
 
 function fixture(): NativeFixture {
 	const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-	const root = mkdtempSync(join(scratch, "native-guide-"));
+	const root = ownedTmp("native-guide", { root: scratch }).path;
 	roots.push(root);
 	const project = join(root, "project");
 	const home = join(root, "home");

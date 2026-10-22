@@ -10,13 +10,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import types
 import unittest
 import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 SCRIPT = ROOT / "scripts" / "native-candidate.py"
 with (ROOT / "scripts" / "omp-compat.json").open(encoding="utf-8") as source:
     COMPAT = json.load(source)
@@ -53,8 +54,8 @@ class CandidateReceiptTests(unittest.TestCase):
     def setUp(self) -> None:
         scratch = ROOT / "var" / "agent-tmp"
         scratch.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(prefix="native-candidate-test-", dir=scratch)
-        self.root = Path(self.temp.name)
+        self.temp = owned_tmp("native-candidate-test", root=str(scratch))
+        self.root = Path(self.temp.path)
         self.assets = self.root / "assets"
         self.receipts = self.root / "receipts"
         self.version = "1.2.3"
@@ -394,7 +395,7 @@ class CertEnvTests(unittest.TestCase):
     """RELEASE BLOCKER A2: the CI-judge signal must survive the scrubbed env."""
 
     def test_github_actions_passes_through_when_set(self) -> None:
-        home, root = Path("/tmp/home"), Path("/tmp/root")
+        home, root = Path("/tmp/home"), Path("/tmp/root")  # tempsafe: fake path values for env building; nothing is created
         saved = os.environ.get("GITHUB_ACTIONS")
         os.environ["GITHUB_ACTIONS"] = "true"
         try:
@@ -406,10 +407,10 @@ class CertEnvTests(unittest.TestCase):
                 os.environ["GITHUB_ACTIONS"] = saved
         self.assertEqual(env["GITHUB_ACTIONS"], "true")
         self.assertEqual(env["CI"], "true")
-        self.assertEqual(env["HOME"], "/tmp/home")
+        self.assertEqual(env["HOME"], "/tmp/home")  # tempsafe: fake path values for env building; nothing is created
 
     def test_github_actions_absent_when_unset(self) -> None:
-        home, root = Path("/tmp/home"), Path("/tmp/root")
+        home, root = Path("/tmp/home"), Path("/tmp/root")  # tempsafe: fake path values for env building; nothing is created
         saved = os.environ.pop("GITHUB_ACTIONS", None)
         try:
             env = native_candidate.cert_env(home, root)
@@ -424,8 +425,9 @@ class ScopedRunTests(unittest.TestCase):
     """fp72.48: certification children die as a group, so teardown never races live writers."""
 
     def test_timeout_reaps_detached_grandchild_and_tree_removes_cleanly(self) -> None:
-        work = Path(tempfile.mkdtemp(prefix="scoped-writer-", dir=ROOT / "var" / "agent-tmp"))
-        self.addCleanup(shutil.rmtree, work, True)
+        owned = owned_tmp("scoped-writer", root=str(ROOT / "var" / "agent-tmp"))
+        self.addCleanup(owned.cleanup)
+        work = Path(owned.path)
         late = work / "late.txt"
         pidfile = work / "writer.pid"
         # Child detaches a grandchild that writes into the tree, then sleeps
@@ -560,7 +562,7 @@ def native_failure_log() -> None:
         nice.chmod(0o700)
         return {**env, "PATH": str(fault_bin) + os.pathsep + env["PATH"]}
 
-    with tempfile.TemporaryDirectory(prefix="native-failure-log-") as work:
+    with owned_tmp("native-failure-log") as work:
         args = types.SimpleNamespace(
             version=os.environ["CANDIDATE_VERSION"], platform=target,
             source_sha=os.environ["SOURCE_SHA"], omp_version=os.environ["OMP_VERSION"],
@@ -629,7 +631,7 @@ def native_ship_failure_index() -> None:
     check.assertIs(refusal["certified"], False)
     check.assertEqual(refusal["platform"], "linux-x64-gnu")
     check.assertEqual(refusal["omp_track"], "certified")
-    with tempfile.TemporaryDirectory(prefix="native-ship-failure-index-") as work:
+    with owned_tmp("native-ship-failure-index") as work:
         root = Path(work)
         receipts = root / "receipts"
         # Never alter the passing receipts used by the real candidate.
@@ -656,11 +658,8 @@ def native_timeout_log(binary: str) -> None:
     """Exercise the original 900-second bound on a real packaged full CLI."""
     scratch = ROOT / "var" / "agent-tmp"
     scratch.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="native-timeout-log-", dir=scratch) as work:
+    with owned_tmp("native-timeout-log", root=str(scratch)) as work:
         root = Path(work)
-        (root / ".owner").write_text(
-            f"pid={os.getpid()}\nlabel=native-timeout-log\nrepo={ROOT}\ncreated={time.time()}\n",
-            encoding="utf-8")
         home = root / "home"
         home.mkdir()
         fault_bin = root / "fault-bin"

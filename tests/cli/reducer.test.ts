@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reduceCandidate, type PredicateOutcome, type ReducerOptions, type ReducerPredicate } from "../../src/reducer.ts";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { runMatcherObservation, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const open = "BEGIN PUBLIC DEMO\n";
@@ -22,7 +24,7 @@ let rules = "";
 let ruleSha = "";
 
 beforeAll(() => {
-	base = realpathSync(mkdtempSync(join(runtimeTempRoot(), "omp-kit-reducer-test-")));
+	base = realpathSync(ownedTmp("omp-kit-reducer-test", { root: runtimeTempRoot() }).path);
 	release = join(base, "release");
 	executablePath = join(release, "bin", "omp-kit");
 	rules = join(base, "synthetic-rules");
@@ -43,7 +45,7 @@ beforeAll(() => {
 afterAll(() => { if (base) rmSync(base, { recursive: true, force: true }); });
 
 function nativeOracle(expectedRuleSha256 = ruleSha): { evaluate: ReducerPredicate; reports: MatcherObservationReport[] } {
-	const cases = join(mkdtempSync(join(base, "oracle-")), "cases.tsv");
+	const cases = join(ownedTmp("oracle", { root: base }).path, "cases.tsv");
 	const reports: MatcherObservationReport[] = [];
 	const evaluate: ReducerPredicate = async (candidate, context) => {
 		if (context.signal.aborted) return { status: "UNAVAILABLE", reason: "aborted" };

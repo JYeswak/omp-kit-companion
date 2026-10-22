@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation } from "../../src/migrate.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const root = resolve(import.meta.dir, "../..");
 
 test("released historical rule copies remove with backup while one-byte edits overlay", () => {
-	const fixture = mkdtempSync(join(resolve(root, "var/agent-tmp"), "migrate-history-"));
+	const fixture = ownedTmp("migrate-history", { root: resolve(root, "var/agent-tmp") }).path;
 	try {
 		const home = join(fixture, "home");
 		const legacyDir = join(home, ".agents", "rules");

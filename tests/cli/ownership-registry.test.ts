@@ -1,10 +1,12 @@
 // ompkit-774u.12 OWNERREG1: the registry covers every non-NONE row of the 2026-10-18 pid-keyed state inventory,
 // and the lint refuses a pid-keyed writer that no entry accounts for.
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { lintOwnership, persistsPid } from "../../src/ownership-lint.ts";
 import { OWNERSHIP_REGISTRY, entriesForRow, type OwnershipEntry } from "../../src/ownership-registry.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 // Rows of docs/evidence/pid-keyed-state-inventory-20261018.md (omp-kit private repo, 282f630) that are not class NONE.
@@ -43,7 +45,7 @@ test("the checked-in registry is well formed: unique ids, a census or its reason
 });
 
 function fixtureRepo(files: Record<string, string>): string {
-	const root = mkdtempSync(join(repoRoot, "var", "agent-tmp", "ownership-lint-"));
+	const root = ownedTmp("ownership-lint", { root: join(repoRoot, "var", "agent-tmp") }).path;
 	cleanup.push(root);
 	for (const [path, text] of Object.entries(files)) {
 		mkdirSync(join(root, path, ".."), { recursive: true });

@@ -10,8 +10,9 @@ set -u
 
 TRAIN=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/release-train.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/release-train-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$REPO_TMP/../../scripts/kitlib-tmp.sh"
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+kitlib_tmp TMP release-train-test || exit 1
 
 pass=0
 fail=0

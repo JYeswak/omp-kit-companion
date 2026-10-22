@@ -1,12 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { resolveOmpSource } from "../../scripts/rule-class.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // resolveOmpSource follows the launcher symlink to a real path; on macOS tmpdir() sits under the
 // /var -> /private/var symlink, so the fixture root must be real for the paths to compare equal.
-const base = realpathSync(mkdtempSync(join(tmpdir(), "rule-class-source-")));
+const base = realpathSync(ownedTmp("rule-class-source").path);
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 function ompPackage(root: string, version: string): string {

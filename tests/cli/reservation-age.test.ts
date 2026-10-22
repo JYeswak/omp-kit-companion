@@ -1,13 +1,14 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { auditReservationAge, projectSlug } from "../../src/reservation-age.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "reservation-age-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=reservation-age-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratch = ownedTmp("reservation-age-test", { root: scratchRoot }).path;
 
 const NOW = Date.parse("2026-10-05T20:00:00Z");
 const PROJECT = resolve(import.meta.dir, "../..");

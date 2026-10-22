@@ -1,15 +1,16 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { diagnose } from "../../src/diagnostics.ts";
 import { renderOutput, type PresentationResult } from "../../src/output.ts";
 import { record } from "../../src/mcp-sources.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "planning-score-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=planning-score-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratch = ownedTmp("planning-score-test", { root: scratchRoot }).path;
 
 function fixture(label: string): string {
 	const path = join(scratch, label);

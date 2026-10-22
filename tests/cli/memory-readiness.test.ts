@@ -1,10 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const fixtures: string[] = [];
 const EXPLICIT_OMP_SOURCE = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH;
@@ -22,7 +23,7 @@ const OMP_SOURCE_FILES = [
 ] as const;
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture(version: string = INSTALLED_OMP_VERSION) {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-memory-"));
+	const root = ownedTmp("omp-kit-memory").path;
 	fixtures.push(root);
 	const home = join(root, "home"), project = join(root, "project"), agent = join(home, ".omp", "agent");
 	const pkg = join(root, "omp");

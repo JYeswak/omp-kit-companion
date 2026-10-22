@@ -1,9 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { auditMemoryAtRest } from "../../src/memory-audit.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // initBeam is imported only when its exact reviewed schema source bytes match.
 // schema.ts SHA256: 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0.
@@ -53,7 +55,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 function fixture() {
 	const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-	const root = mkdtempSync(join(scratch, "p29-audit-")); roots.push(root);
+	const root = ownedTmp("p29-audit", { root: scratch }).path; roots.push(root);
 	const home = join(root, "home"), project = join(root, "project"), storeRoot = join(home, ".omp", "agent", "memories", "mnemopi");
 	mkdirSync(storeRoot, { recursive: true }); mkdirSync(project);
 	const args = { consent: "AUDIT_PRIVATE_MEMORY" as const, home, project, storeRoot, ompPath: installed };

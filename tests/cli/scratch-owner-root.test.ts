@@ -1,7 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyReap, applyUnowned, inspectOne, type InspectDeps } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const owned: string[] = [];
 const savedState = process.env.XDG_STATE_HOME;
@@ -15,10 +17,9 @@ afterEach(() => {
 });
 
 function fixture(repoKind: "matching" | "foreign" | "relative", runtime = false) {
-	const base = mkdtempSync(resolve(import.meta.dir, "../../var/agent-tmp/owner-root-"));
+	const base = ownedTmp("owner-root", { root: resolve(import.meta.dir, "../../var/agent-tmp") }).path;
 	owned.push(base);
 	process.env.XDG_STATE_HOME = join(base, "state");
-	writeFileSync(join(base, ".owner"), JSON.stringify({ pid: process.pid, label: "owner-root-test", repo: resolve(import.meta.dir, "../.."), created: new Date().toISOString() }));
 	const repo = join(base, "project");
 	const foreign = join(base, "other-project");
 	const root = runtime ? join(base, "private-temp") : join(repo, "var", "agent-tmp");

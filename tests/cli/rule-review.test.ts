@@ -10,8 +10,8 @@ const sharedBindings: Record<string, string> = {
 	omp_package: "/opt/omp/releases/18.4.2",
 	omp_source: "/opt/omp/releases/18.4.2/src",
 	native_package: "/opt/omp/releases/18.4.2/node_modules/@oh-my-pi/pi-natives",
-	kit_root: "/tmp/omp-kit/releases/v1",
-	harness_runtime: "/tmp/omp-kit/bin/omp-kit",
+	kit_root: "/tmp/omp-kit/releases/v1", // tempsafe: fake path value in a fixture record; nothing is created
+	harness_runtime: "/tmp/omp-kit/bin/omp-kit", // tempsafe: fake path value in a fixture record; nothing is created
 	omp_launcher_sha256: HASH_A,
 	omp_package_sha256: HASH_A,
 	matcher_sha256: HASH_A,

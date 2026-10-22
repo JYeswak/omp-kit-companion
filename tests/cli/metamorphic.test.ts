@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -26,7 +28,7 @@ const CASES_HEADER = CASE_HEADER + "\n";
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "omp-kit-metamorphic-"));
+	base = ownedTmp("omp-kit-metamorphic", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");

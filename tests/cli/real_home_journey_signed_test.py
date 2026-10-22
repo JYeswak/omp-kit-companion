@@ -8,12 +8,12 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
 RUNNER = Path(__file__).resolve().parents[1] / "e2e" / "real-home-journey.sh"
@@ -22,9 +22,9 @@ SHA = "a" * 40
 
 class SignedRunnerRefusals(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = owned_tmp("real-home-journey-signed")
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = Path(self._tmp.path).resolve()
         for name, version in (("prev", "0.2.37"), ("cand", "0.2.38")):
             (self.root / f"{name}.tar.gz").write_bytes(b"not-a-real-archive")
             (self.root / f"{name}.json").write_text(

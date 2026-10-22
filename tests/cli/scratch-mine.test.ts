@@ -1,9 +1,11 @@
 // ompkit-774u.15 SCRATCHBIN1 C (library half): the caller's own scratch dirs and where each stands, so a disposal-point
 // guard can tell an owner what it still owes. Other owners' dirs never appear.
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedScratch, releaseScratch, type InspectDeps, type LivenessDeps, type SeatIdentity } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -29,8 +31,8 @@ const deps = (callerSeat: () => SeatIdentity): InspectDeps => ({ liveness: noPid
 const owner = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-18T17:00:00Z\n${extra}`;
 
 test("the caller sees its own dirs by seat or by pid, with their state and bin, and nobody else's", () => {
-	const root = mkdtempSync(join(scratchParent, "mine-"));
-	const home = mkdtempSync(join(scratchParent, "mine-home-"));
+	const root = ownedTmp("mine", { root: scratchParent }).path;
+	const home = ownedTmp("mine-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
@@ -61,8 +63,8 @@ test("the caller sees its own dirs by seat or by pid, with their state and bin, 
 });
 
 test("ancestor and sibling owners are excluded from exact caller disposal accounting", () => {
-	const root = mkdtempSync(join(scratchParent, "mine-"));
-	const home = mkdtempSync(join(scratchParent, "mine-home-"));
+	const root = ownedTmp("mine", { root: scratchParent }).path;
+	const home = ownedTmp("mine-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
@@ -77,8 +79,8 @@ test("ancestor and sibling owners are excluded from exact caller disposal accoun
 });
 
 test("one listing reads the process table and the seat once, however many dirs it walks", () => {
-	const root = mkdtempSync(join(scratchParent, "mine-"));
-	const home = mkdtempSync(join(scratchParent, "mine-home-"));
+	const root = ownedTmp("mine", { root: scratchParent }).path;
+	const home = ownedTmp("mine-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");

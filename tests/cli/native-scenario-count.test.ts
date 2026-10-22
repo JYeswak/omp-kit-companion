@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const root = resolve(import.meta.dir, "../..");
 const script = resolve(root, "scripts/native-candidate.py");
@@ -17,7 +19,7 @@ print(json.dumps(module.live_scenario_ids(Path(sys.argv[1]))))
 `;
 
 function scenarioIds(rows: object[]): string[] {
-	const scratch = mkdtempSync(join(resolve(root, "var/agent-tmp"), "native-scenario-count-"));
+	const scratch = ownedTmp("native-scenario-count", { root: resolve(root, "var/agent-tmp") }).path;
 	try {
 		const scenarios = join(scratch, "tests/live/scenarios.json");
 		mkdirSync(resolve(scenarios, ".."), { recursive: true });
@@ -54,7 +56,7 @@ print(json.dumps(module.full_live_condition_report(test, expected_ids, sys.argv[
 `;
 
 function liveConditionReport(test: object, expectedIds: string[]): { failed: string[] } {
-	const scratch = mkdtempSync(join(resolve(root, "var/agent-tmp"), "native-refusal-report-"));
+	const scratch = ownedTmp("native-refusal-report", { root: resolve(root, "var/agent-tmp") }).path;
 	try {
 		const ladder = join(scratch, "ladder.json");
 		const ids = join(scratch, "ids.json");

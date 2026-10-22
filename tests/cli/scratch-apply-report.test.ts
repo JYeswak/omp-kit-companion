@@ -1,8 +1,10 @@
 // ompkit-774u.15 SCRATCHBIN1 C and D through the real CLI: `scratch mine` lists the caller's own dirs and what each still
 // owes, and `scratch apply` prints the gap report.
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -13,8 +15,8 @@ afterEach(() => { for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: 
 interface Envelope { ok: boolean; data: Record<string, unknown>; errors?: { code: string }[] }
 
 function world(): { root: string; home: string; env: Record<string, string> } {
-	const root = mkdtempSync(join(scratchParent, "cli-bins-"));
-	const home = mkdtempSync(join(scratchParent, "cli-bins-home-"));
+	const root = ownedTmp("cli-bins", { root: scratchParent }).path;
+	const home = ownedTmp("cli-bins-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	mkdirSync(join(home, "state"), { recursive: true });
 	const env = { ...process.env as Record<string, string>, HOME: home, XDG_STATE_HOME: join(home, "state"), XDG_CONFIG_HOME: join(home, "config"),

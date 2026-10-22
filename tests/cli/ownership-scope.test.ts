@@ -1,9 +1,11 @@
 // ompkit-774u.12 OWNERREG1 AC2: `omp-kit doctor --scope ownership --json` is reachable through the real CLI, reports per
 // class records / no-live-owner / untracked / oldest age from disposable state, and changes nothing (planted check).
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const cleanup: string[] = [];
@@ -26,7 +28,7 @@ function treeListing(root: string): string[] {
 }
 
 test("doctor --scope ownership reports untracked state from a disposable home and changes no file", () => {
-	const home = mkdtempSync(join(repo, "var", "agent-tmp", "ownership-cli-"));
+	const home = ownedTmp("ownership-cli", { root: join(repo, "var", "agent-tmp") }).path;
 	cleanup.push(home);
 	const state = join(home, ".local", "state");
 	const leases = join(state, "rch", "job-leases");
@@ -54,7 +56,7 @@ test("doctor --scope ownership reports untracked state from a disposable home an
 }, 120_000);
 
 test("doctor --scope ownership is a known scope: no INVALID_VALUE refusal", () => {
-	const home = mkdtempSync(join(repo, "var", "agent-tmp", "ownership-cli-"));
+	const home = ownedTmp("ownership-cli", { root: join(repo, "var", "agent-tmp") }).path;
 	cleanup.push(home);
 	const env = { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), XDG_CONFIG_HOME: join(home, ".config"), OMP_KIT_OMP_SRC_FETCH: "0" };
 	const child = Bun.spawnSync([process.execPath, "run", join(repo, "src", "cli.ts"), "doctor", "--scope", "ownership", "--json"], { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });

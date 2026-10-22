@@ -1,10 +1,11 @@
 // FLEETUPG1 (ompkit-v66l.22): linked plugin vs latest published, per profile and per seat.
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, lstatSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, symlinkSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { diagnose } from "../../src/diagnostics.ts";
 import { compareVersions, inspectPluginRelease, livePluginReleaseIo, seatProfile, type OmpSeat, type PluginLink } from "../../src/plugin-release.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 
@@ -69,7 +70,7 @@ describe("plugin_release", () => {
 	});
 
 	test("live links read the release version and the relink time from planted symlinks", () => {
-		const root = mkdtempSync(join(tmpdir(), "plugin-release-"));
+		const root = ownedTmp("plugin-release").path;
 		try {
 			const releases = join(root, "releases");
 			for (const version of ["0.2.37", "0.2.51"]) mkdirSync(join(releases, version), { recursive: true });
@@ -92,7 +93,7 @@ describe("plugin_release", () => {
 	});
 
 	test("doctor --scope plugin_release emits the finding from the planted home", async () => {
-		const root = mkdtempSync(join(tmpdir(), "plugin-release-doctor-"));
+		const root = ownedTmp("plugin-release-doctor").path;
 		try {
 			const home = join(root, "home");
 			mkdirSync(join(root, "releases", "0.0.1"), { recursive: true });
@@ -109,7 +110,7 @@ describe("plugin_release", () => {
 });
 
 	test("doctor --scope plugin_release through the CLI accepts the scope (grammar) and reports the finding", () => {
-		const root = mkdtempSync(join(tmpdir(), "plugin-release-cli-"));
+		const root = ownedTmp("plugin-release-cli").path;
 		try {
 			const home = join(root, "home");
 			mkdirSync(join(root, "releases", "0.0.1"), { recursive: true });

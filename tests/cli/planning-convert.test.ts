@@ -1,13 +1,14 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "planning-convert-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=planning-convert-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratch = ownedTmp("planning-convert-test", { root: scratchRoot }).path;
 const cli = join(repoRoot, "src", "cli.ts");
 const validPlan = join(import.meta.dir, "../fixtures/planning-convert/valid.md");
 const negativePlan = join(import.meta.dir, "../fixtures/planning-convert/negative.md");

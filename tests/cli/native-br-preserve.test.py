@@ -18,12 +18,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 KIT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(KIT / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
 GUARD = KIT / "scripts/native-br-preserve.py"
 NATIVE = Path(shutil.which("br") or "/missing-native-br").resolve()
 NATIVE_SHA = hashlib.sha256(NATIVE.read_bytes()).hexdigest() if NATIVE.is_file() else ""
@@ -35,8 +36,7 @@ for key in ("BEADS_DB", "BEADS_JSONL", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FI
     ENV.pop(key, None)
 ENV["PYTHONDONTWRITEBYTECODE"] = "1"
 PARENT = Path(os.environ["TMPDIR"])
-ROOT = Path(tempfile.mkdtemp(prefix="native-preserve." + str(os.getpid()) + ".", dir=PARENT))
-(ROOT / ".owner").write_text(json.dumps({"pid": os.getpid(), "label": "native-preserve", "repo": str(KIT)}))
+ROOT = Path(owned_tmp("native-preserve", root=str(PARENT)).path)
 
 
 def issue(ident: str, creator: str = "FixtureCreator", comment: bool = False, before: bool = False) -> dict:

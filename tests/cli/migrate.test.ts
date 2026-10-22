@@ -1,10 +1,11 @@
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const repoRules = resolve(import.meta.dir, "../../rules");
 const fixtures: string[] = [];
@@ -20,7 +21,7 @@ function certifiedOmpVersion(): string {
 }
 
 beforeAll(() => {
-	const runtimeRoot = join(tmpdir(), `omp-kit-migrate-omp-${process.pid}`);
+	const runtimeRoot = ownedTmp("omp-kit-migrate-omp").path;
 	OMP_SOURCE_CACHE = join(runtimeRoot, "source-cache");
 	const installerHome = join(runtimeRoot, "home");
 	const installerTmp = join(runtimeRoot, "tmp");
@@ -49,7 +50,7 @@ function workspace(): string {
 	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 	// Repo scratch, not tmpdir(): /var is a symlink on macOS and the mutation
 	// guards refuse symlinked path components.
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-"));
+	const root = ownedTmp("migrate", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	fixtures.push(root);
 	return root;
 }
@@ -76,8 +77,8 @@ function childEnv(home: string, ompDir: string): Record<string, string | undefin
 }
 
 test("child PATH selects pinned OMP before Bun and retains Bun for the launcher shim", () => {
-	const path = childEnv("/tmp/fake-home", "/tmp/fake-omp").PATH?.split(":") ?? [];
-	expect(path.slice(0, 2)).toEqual(["/tmp/fake-omp", dirname(process.execPath)]);
+	const path = childEnv("/tmp/fake-home", "/tmp/fake-omp").PATH?.split(":") ?? []; // tempsafe: fake path strings fed to childEnv; nothing is created
+	expect(path.slice(0, 2)).toEqual(["/tmp/fake-omp", dirname(process.execPath)]); // tempsafe: fake path strings fed to childEnv; nothing is created
 });
 
 
@@ -296,7 +297,7 @@ test("without an installed plugin the plan reports absence and apply refuses", (
 });
 
 test("applyMigration refuses without a plugin even when called directly", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "migrate-unit-"));
+	const root = ownedTmp("migrate-unit", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	fixtures.push(root);
 	const home = join(root, "home");
 	mkdirSync(join(home, ".agents", "rules"), { recursive: true });

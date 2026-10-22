@@ -9,8 +9,9 @@ set -u
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/repo-layout-check.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/repo-layout-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$REPO_TMP/../../scripts/kitlib-tmp.sh"
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+kitlib_tmp TMP repo-layout-test || exit 1
 
 pass=0
 fail=0

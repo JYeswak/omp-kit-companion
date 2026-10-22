@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CASE_HEADER, parseCaseCorpus } from "../../src/case-corpus.ts";
 import { referenceAdmission } from "../../scripts/admission-reference.ts";
 import { check as productionAdmission } from "../../src/fleet-guard/durability.ts";
 import { fleetPolicyState } from "../../extensions/fleet-policy.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // fp72.58 ORACLEHERM1: the oracle must not depend on the checkout's location.
 // Rules and cases resolve against a synthetic root unless OMP_KIT_CASE_CWD
@@ -16,9 +18,7 @@ const scratchRoot = join(root, "var/agent-tmp");
 
 function scratchDir(label: string): string {
 	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, label + "."));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=${label}\nrepo=${root}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
-	return dir;
+	return ownedTmp(label, { root: scratchRoot }).path;
 }
 
 function cleanEnv(): Record<string, string> {

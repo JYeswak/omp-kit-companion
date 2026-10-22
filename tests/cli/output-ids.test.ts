@@ -1,12 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { PROFILE_RECIPE_KINDS } from "../../src/profile-recipes.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const cli = resolve(import.meta.dir, "../../src/cli.ts");
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
-const home = mkdtempSync(join(scratch, "output-ids-"));
+const home = ownedTmp("output-ids", { root: scratch }).path;
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 // Internal tracker ids (bead numbers, bead slugs, epic suffixes) mean nothing to an operator.

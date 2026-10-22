@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
@@ -8,14 +8,15 @@ import { previewKitRelease, stageKitRelease, validateReleaseManifest, type Relea
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { packageSourceRevision } from "../../scripts/package-release.ts";
 import { checkPackagedExtensionLoads } from "../../scripts/package-release.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
 const sourceCacheRoot = ompSourceCacheRoot(process.env);
 const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
 const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-const output = mkdtempSync(join(scratch, "p21-release-"));
-writeFileSync(join(output, ".owner"), `pid=${process.pid}\nlabel=p21-release\nrepo=${caseCwd}\ncreated=${new Date().toISOString()}\n`);
+const output = ownedTmp("p21-release", { root: scratch }).path;
 const stubBin = join(output, "stub-bin");
 mkdirSync(stubBin, { recursive: true });
 writeFileSync(join(stubBin, "omp"), "#!/bin/sh\nprintf 'omp stub\\n'\n");
@@ -610,15 +611,15 @@ test("GUARDLOAD1: bundled kit-flywheel-guard carries no ../src/ escape and loads
 	const text = await bundled.outputs[0]!.text();
 	expect(text).not.toContain("../src/");
 	expect(text).toContain("export");
-	const root = mkdtempSync(join(output, "gate-shipped-"));
+	const root = ownedTmp("gate-shipped", { root: output }).path;
 	mkdirSync(join(root, "extensions"), { recursive: true });
 	writeFileSync(join(root, "extensions", "kit-flywheel-guard.ts"), text);
 	expect(checkPackagedExtensionLoads(root)).toEqual([]);
 });
 
 test("GUARDLOAD1: extension load gate fails a ../src/ escape naming file and module, passes a bundled tree", () => {
-	const broken = mkdtempSync(join(output, "gate-broken-"));
-	const fixed = mkdtempSync(join(output, "gate-fixed-"));
+	const broken = ownedTmp("gate-broken", { root: output }).path;
+	const fixed = ownedTmp("gate-fixed", { root: output }).path;
 	for (const root of [broken, fixed]) mkdirSync(join(root, "extensions"), { recursive: true });
 	writeFileSync(join(broken, "extensions", "kit-flywheel-guard.ts"),
 		'import { ccSpool } from "../src/cc-spool.ts";\nexport const guard = ccSpool;\n');

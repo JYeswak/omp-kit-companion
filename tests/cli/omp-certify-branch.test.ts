@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // The prepare job's push step (`id: pr` in .github/workflows/omp-certify.yml), run as written against a local origin.
 // Run 38182628254: force-updating a stale omp-certify/<version> branch was refused because the update carried main's
@@ -9,7 +10,7 @@ import { join } from "node:path";
 // that same rule (an omp-certify/* ref update, or creation off main, that changes .github/workflows is refused), and
 // `gh` is a stub that records calls and keeps the open-PR state.
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-const root = mkdtempSync(join(tmpdir(), "omp-kit-certify-branch-"));
+const root = ownedTmp("omp-kit-certify-branch").path;
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const workflow = Bun.YAML.parse(readFileSync(join(REPO_ROOT, ".github", "workflows", "omp-certify.yml"), "utf8")) as { jobs: { prepare: { steps: { id?: string; run?: string }[] } } };
 const STEP = workflow.jobs.prepare.steps.find(step => step.id === "pr")!.run!;

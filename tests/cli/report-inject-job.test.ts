@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { REPORT_INJECT_DEADLINE_MS, runReportInjectJob, type ReportInjectCommandResult } from "../../src/report-inject-job.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -9,8 +11,7 @@ const observedAt = "2026-10-13T20:00:00.000Z";
 
 function fixture(label: string, stateGeneratedAt: string, pulse: Record<string, unknown> | Record<string, unknown>[] | null) {
 	mkdirSync(scratchRoot, { recursive: true });
-	const root = mkdtempSync(join(scratchRoot, `reportinject-${label}-${process.pid}-`));
-	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=reportinject-${label}\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
+	const root = ownedTmp(`reportinject-${label}`, { root: scratchRoot }).path;
 	const kitRoot = join(root, "kit");
 	const home = join(root, "home");
 	const configPath = join(home, ".config", "omp-kit", "fleet-watch.json");

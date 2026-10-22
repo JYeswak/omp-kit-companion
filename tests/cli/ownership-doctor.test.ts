@@ -1,13 +1,15 @@
 // ompkit-774u.12 OWNERREG1: the ownership census on disposable state with real files. Every class counts records,
 // records with no live owner, and the ones with no tracked outcome; an unobservable class is UNKNOWN, never zero;
 // the doctor changes nothing.
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { censusOwnership, inspectOwnership, liveOwnershipIo, type OwnershipIo, type OwnershipRow } from "../../src/ownership-doctor.ts";
 import { OWNERSHIP_REGISTRY } from "../../src/ownership-registry.ts";
 import { quarantineEntryFor } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const NOW = Date.parse("2026-10-18T20:00:00.000Z");
@@ -28,7 +30,7 @@ afterEach(() => {
 mkdirSync(join(repo, "var", "agent-tmp"), { recursive: true });
 
 function fixtureHome(): string {
-	const home = mkdtempSync(join(repo, "var", "agent-tmp", "ownership-home-"));
+	const home = ownedTmp("ownership-home", { root: join(repo, "var", "agent-tmp") }).path;
 	cleanup.push(home);
 	process.env.XDG_STATE_HOME = join(home, ".local", "state");
 	process.env.XDG_CONFIG_HOME = join(home, ".config");

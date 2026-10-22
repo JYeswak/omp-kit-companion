@@ -1,13 +1,15 @@
-import { afterEach, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { inspectProjectTrust } from "../../src/project-trust.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	const root = mkdtempSync(join(base, "project-trust-"));
+	const root = ownedTmp("project-trust", { root: base }).path;
 	roots.push(root);
 	const project = join(root, "project");
 	const home = join(root, "home");

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, applyMutation, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, inspectPendingMutations, planMutation, reconcileKitUpdateReceipt, recoverMutation } from "../../src/mutations.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 function fixture(run: (root: string, state: string, target: string) => void): void {
-	const isolated = mkdtempSync(join(scratch, "mutation-"));
+	const isolated = ownedTmp("mutation", { root: scratch }).path;
 	const target = join(isolated, "managed");
 	const state = join(isolated, "state");
 	mkdirSync(target);

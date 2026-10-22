@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkOmpDrift, readOmpTestRecord, writeOmpTestRecord } from "../../src/omp-recert.ts";
 import type { OmpTestRecord } from "../../src/omp-recert.ts";
-const state = () => mkdtempSync(join(tmpdir(), "omp-recert-"));
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
+const state = () => ownedTmp("omp-recert").path;
 const rec = (omp_version: string, verdict: "PASS" | "FAIL" = "PASS"): OmpTestRecord => ({ schema_version: 1, omp_version, scope: "fast", verdict, recorded_at: "2026-10-20T00:00:00Z" });
 describe("omp-recert drift decision", () => {
  test("unchanged version short-circuits", () => { const d = checkOmpDrift("18.12.2", rec("18.12.2")); expect(d.status).toBe("OK"); expect(d.trigger_recert).toBe(false); expect(d.log_line).toContain("short-circuit"); });

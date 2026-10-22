@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { validateMissionRecord } from "../../src/mission.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `mission-test.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=mission-test repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const scratch = ownedTmp("mission-test", { root: scratchRoot }).path;
 const CHECK_PATH = "scripts/mission-check.ts";
 const CHECK_COMMAND = "omp-kit heavy -- bun scripts/mission-check.ts --pillar learning";
 

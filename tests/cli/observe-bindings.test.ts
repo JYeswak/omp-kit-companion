@@ -1,17 +1,18 @@
 import { createHash } from "node:crypto";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { dirname, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 let scratch = "";
 
 beforeAll(() => {
-	scratch = mkdtempSync(join(tmpdir(), "observe-bindings-"));
+	scratch = ownedTmp("observe-bindings").path;
 });
 afterAll(() => {
 	rmSync(scratch, { recursive: true, force: true });

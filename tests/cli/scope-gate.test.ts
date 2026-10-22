@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 test("scope gate keeps text rules out of tool streams", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scope-gate-"));
+	const root = ownedTmp("scope-gate", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	try {
 		const rules = join(root, "rules");
 		mkdirSync(rules, { recursive: true });

@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { cpSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
 // expensive pipeline. Its default mode runs only attest-local; every other job needs mode=ci-pipeline.
@@ -78,7 +80,7 @@ test("release-local runs the bundled TTSR selftest after coverage, and its remov
 });
 
 test("release gate refuses a kit rule with its fire fixture removed", () => {
-	const work = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp"), "kitpost-gate-")));
+	const work = realpathSync(ownedTmp("kitpost-gate", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 	const cases = join(ROOT, "cases", "cases.tsv");
 	const mutated = join(work, "cases.tsv");
 	try {

@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cachedOmpPackage, ensureOmpSource } from "../../src/omp-source-cache.ts";
 import { resolveOmpIdentity, verifyTernOmpSource } from "../../src/paths.ts";
 import { resolveOmpSource } from "../../scripts/rule-class.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // Real paths: macOS tmpdir() sits under the /var -> /private/var symlink.
-const base = realpathSync(mkdtempSync(join(tmpdir(), "omp-source-cache-")));
+const base = realpathSync(ownedTmp("omp-source-cache").path);
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 let n = 0;
 const fresh = () => join(base, `cache-${++n}`);

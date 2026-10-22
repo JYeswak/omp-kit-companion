@@ -1,10 +1,12 @@
 // ompkit-774u.15 SCRATCHBIN1 D: a reap or reclaim is an emergency and every one is a gap report. Each reclaimed dir that
 // its owner did not bin is named with its agent, label, role, bin and the guard that should have stopped it; a dir the
 // owner released into a bin is not a gap.
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyScratch, fileGapReports, filedGapDirs, reapLogPath, releaseScratch, scratchGapReport, type ApplyDeps, type LivenessDeps, type ScratchGap, type ScratchGapReport, type ScratchRunner } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -26,8 +28,8 @@ const liveness: LivenessDeps = { signalAlive: () => false, psVisible: () => fals
 const applyDeps = (home: string): ApplyDeps => ({ home, liveness, run: () => ({ code: 1, stdout: "", stderr: "" }) });
 
 function world(): { root: string; home: string; plant: (name: string, owner: string | null) => string } {
-	const root = mkdtempSync(join(scratchParent, "gap-"));
-	const home = mkdtempSync(join(scratchParent, "gap-home-"));
+	const root = ownedTmp("gap", { root: scratchParent }).path;
+	const home = ownedTmp("gap-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
@@ -98,7 +100,7 @@ test("only reaped and quarantined dirs are gaps: live, skipped and held dirs nev
 		{ dir: "/x/skip.2", action: "SKIP" as const, reason: "owner-seat-liveness-unproven", owner: null, sizeBytes: 10 },
 		{ dir: "/x/gone.3", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: null, sizeBytes: 10 },
 	];
-	const home = mkdtempSync(join(scratchParent, "gap-pure-"));
+	const home = ownedTmp("gap-pure", { root: scratchParent }).path;
 	cleanup.push(home);
 	const report = scratchGapReport(verdicts, Date.parse("2026-10-18T00:00:00Z"), home);
 	expect(report.rows.map((row) => row.dir)).toEqual(["/x/gone.3"]);
@@ -114,7 +116,7 @@ test("a reclaimed dir past its declared budget is marked over-budget; unbounded 
 		{ dir: "/x/fit.2", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: ownerOf(1000), sizeBytes: 100 },
 		{ dir: "/x/free.3", action: "REAP" as const, reason: "owner-dead-no-open-fds", owner: ownerOf(null), sizeBytes: 100 },
 	];
-	const home = mkdtempSync(join(scratchParent, "gap-budget-"));
+	const home = ownedTmp("gap-budget", { root: scratchParent }).path;
 	cleanup.push(home);
 	const report = scratchGapReport(verdicts, Date.parse("2026-10-18T00:00:00Z"), home);
 	const byDir = Object.fromEntries(report.rows.map((row) => [row.dir, row]));

@@ -1,16 +1,17 @@
-import { expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { OMP_SRC, loadRuleFile } from "../../scripts/rule-class.ts";
 import { DEFAULT_ENCODINGS, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, lintCondition, literalProbe, medianMs, measureCondition, runGate } from "../../scripts/regex-budget.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
 
 function fixtureRule(name: string, condition: string): { dir: string; name: string; pattern: string } {
 	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, "regex-budget-test-"));
-	writeFileSync(join(dir, ".owner"), "pid=" + process.pid + "\nlabel=regex-budget-test\nrepo=" + root + "\ncreated=" + new Date().toISOString() + "\n");
+	const dir = ownedTmp("regex-budget-test", { root: scratchRoot }).path;
 	const file = join(dir, name + ".md");
 	writeFileSync(file, "---\ncondition: " + JSON.stringify(condition) + "\nscope: tool:bash\ninterruptMode: never\n---\nfixture rule\n");
 	const loaded = loadRuleFile(file);
@@ -20,8 +21,7 @@ function fixtureRule(name: string, condition: string): { dir: string; name: stri
 /** Copy a real repo rule into an owned temp dir so the test replays its own fixture, never the live rules tree. */
 function fixtureRuleCopy(fileName: string, source: string): { dir: string; name: string; pattern: string; scope: readonly string[] } {
 	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, "regex-budget-test-"));
-	writeFileSync(join(dir, ".owner"), "pid=" + process.pid + "\nlabel=regex-budget-test\nrepo=" + root + "\ncreated=" + new Date().toISOString() + "\n");
+	const dir = ownedTmp("regex-budget-test", { root: scratchRoot }).path;
 	copyFileSync(join(root, source), join(dir, fileName + ".md"));
 	const loaded = loadRuleFile(join(dir, fileName + ".md"));
 	return { dir, name: loaded.name, pattern: loaded.rule.condition?.[0] ?? "", scope: loaded.rule.scope ?? [] };

@@ -1,8 +1,10 @@
-import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { calibrateCorpus, calibrateRule, wilsonInterval } from "../../src/rule-calibration.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 test("calibrates a sampled false-fire rate with its Wilson interval", () => {
 	const result = calibrateRule({
@@ -45,7 +47,7 @@ test("Wilson intervals reject invalid counts instead of manufacturing precision"
 
 
 test("doctor rules exposes calibrated noisy and dead rules from explicit reports", () => {
-	const root = mkdtempSync(join(runtimeTempRoot(), "mt2-cli-"));
+	const root = ownedTmp("mt2-cli", { root: runtimeTempRoot() }).path;
 	try {
 		const corpus = join(root, "corpus.json");
 		const labels = join(root, "labels.json");
@@ -85,7 +87,7 @@ test("invalid counts refuse with a named error", () => {
 });
 
 test("doctor rules refuses invalid counts and invalid schema with named errors", () => {
-	const root = mkdtempSync(join(runtimeTempRoot(), "mt2-refuse-"));
+	const root = ownedTmp("mt2-refuse", { root: runtimeTempRoot() }).path;
 	try {
 		const corpus = join(root, "corpus.json");
 		const labels = join(root, "labels.json");

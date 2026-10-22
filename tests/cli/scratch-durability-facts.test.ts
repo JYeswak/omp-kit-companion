@@ -1,7 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/durability.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -9,7 +11,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
-	const repo = mkdtempSync(join(base, "durability-facts-"));
+	const repo = ownedTmp("durability-facts", { root: base }).path;
 	roots.push(repo);
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];

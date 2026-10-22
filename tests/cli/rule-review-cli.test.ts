@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { createHash } from "node:crypto";
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const source = resolve(import.meta.dir, "../..");
 let base = "";
@@ -34,7 +35,7 @@ function snapshot(root: string): string[] {
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-review-cli-")));
+	base = realpathSync(ownedTmp("omp-kit-review-cli").path);
 	release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "operator-home");

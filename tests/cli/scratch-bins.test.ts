@@ -1,12 +1,14 @@
 // ompkit-774u.15 SCRATCHBIN1 A and B: an owner record names the bin a scratch dir goes to when its work ends, a hold is
 // bounded to 14 days and never reaped while it stands, and the owner's release records the bin with the reference that
 // proves where the content went.
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reapLogPath } from "../../src/scratch.ts";
 import { createScratch, diagnoseOwnerFailure, inspectOne, inspectSession, parseOwnerFile, parseOwnerFileEx, releaseScratch, SCRATCH_BINS,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -30,8 +32,8 @@ const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noP
 const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nlabel=work\nrepo=${repo}\ncreated=${created}\n${extra}`;
 
 function fixture(owner: string, label = "work"): { dir: string; root: string; home: string } {
-	const root = mkdtempSync(join(scratchParent, "bins-"));
-	const home = mkdtempSync(join(scratchParent, "bins-home-"));
+	const root = ownedTmp("bins", { root: scratchParent }).path;
+	const home = ownedTmp("bins-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
@@ -78,7 +80,7 @@ test("a hold needs a bead and an expiry no later than 14 days after creation, an
 });
 
 test("a hold outlives its dead owner until it expires, then it is flagged and never reaped; any other dead owner is reaped as before", () => {
-	const root = mkdtempSync(join(scratchParent, "bins-hold-"));
+	const root = ownedTmp("bins-hold", { root: scratchParent }).path;
 	cleanup.push(root);
 	const plant = (name: string, extra: string): string => {
 		const dir = join(root, name);
@@ -96,7 +98,7 @@ test("a hold outlives its dead owner until it expires, then it is flagged and ne
 });
 
 test("createScratch records the bin group and refuses an invalid one before creating anything", () => {
-	const root = mkdtempSync(join(scratchParent, "bins-create-"));
+	const root = ownedTmp("bins-create", { root: scratchParent }).path;
 	cleanup.push(root);
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
 	const ok = createScratch("probe", root, deps({ liveness: live }), { bin: "hold", purpose: "probe", bead: "ompkit-774u.15", expires: "2026-10-25" }, false, join(root, "scratch-budgets.json"));
@@ -108,7 +110,7 @@ test("createScratch records the bin group and refuses an invalid one before crea
 });
 
 test("createScratch records a declared byte budget and refuses zero, negative and non-integer budgets", () => {
-	const root = mkdtempSync(join(scratchParent, "bins-budget-"));
+	const root = ownedTmp("bins-budget", { root: scratchParent }).path;
 	cleanup.push(root);
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
 	const ok = createScratch("probe", root, deps({ liveness: live }), { budgetBytes: 1000 }, false, join(root, "scratch-budgets.json"));
@@ -136,8 +138,8 @@ test("release --bin throwaway records the bin with no reference, and the release
 // proved nothing, yet the release marker (the reaper) and --now retired the dir on it. The destination must carry the
 // content: a bead comment or a committed and pushed file citing scratch-sha256:<digest>, or a pushed byte-identical copy.
 test("release --bin evidence or promote needs a destination that proves the content arrived", () => {
-	const projectDir = mkdtempSync(join(scratchParent, "bins-repo-"));
-	const remoteDir = mkdtempSync(join(scratchParent, "bins-remote-"));
+	const projectDir = ownedTmp("bins-repo", { root: scratchParent }).path;
+	const remoteDir = ownedTmp("bins-remote", { root: scratchParent }).path;
 	cleanup.push(projectDir, remoteDir);
 	const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 	const git = (...args: string[]) => Bun.spawnSync(["git", "-C", projectDir, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], { stdout: "pipe", stderr: "pipe", env: gitEnv });

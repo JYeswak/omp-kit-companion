@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const lib = resolve(import.meta.dir, "../live/lib.mjs");
 const scenarios = JSON.parse(readFileSync(resolve(import.meta.dir, "../live/scenarios.json"), "utf8"));
@@ -11,7 +13,7 @@ let scratch = "";
 function logFile(name: string, lines: unknown[]): string {
   if (!scratch) {
     const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
-    scratch = mkdtempSync(join(scratchRoot, "probe-"));
+    scratch = ownedTmp("probe", { root: scratchRoot }).path;
   }
   const file = join(scratch, name);
   writeFileSync(file, lines.map(l => JSON.stringify(l)).join("\n") + "\n");

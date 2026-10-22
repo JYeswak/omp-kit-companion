@@ -1,13 +1,14 @@
-import { beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratch = join(repo, "var/agent-tmp");
 mkdirSync(scratch, { recursive: true });
-const output = mkdtempSync(join(scratch, `receipt-package.${process.pid}.`));
-writeFileSync(join(output, ".owner"), `pid=${process.pid}\nlabel=receipt-package\nrepo=omp-kit-companion\ncreated=${new Date().toISOString()}\n`);
+const output = ownedTmp("receipt-package", { root: scratch }).path;
 const archiveRoot = join(output, "extracted");
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 

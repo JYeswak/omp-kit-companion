@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // PLUGINCWD1 (ompkit-hc7gs): kit-update runs under launchd with cwd = $HOME. omp started in $HOME moves to /tmp,
 // and omp-trust-guard refuses there when /tmp holds an untrusted project file, so `plugin list` failed and every
@@ -19,7 +20,7 @@ const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 
 function fixture(): { home: string; omp: string } {
-	const home = realpathSync(mkdtempSync(join(tmpdir(), "plugin-invoke-home-")));
+	const home = realpathSync(ownedTmp("plugin-invoke-home").path);
 	roots.push(home);
 	const omp = join(home, "fake-omp");
 	writeFileSync(omp, FAKE_OMP);

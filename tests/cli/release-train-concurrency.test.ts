@@ -1,16 +1,17 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { YAML } from "bun";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 /** Exercise the production publication step; service stubs are not certification proof. */
 const WORKFLOW = process.env.RELEASE_TRAIN_PATH ?? join(import.meta.dir, "../../.github/workflows/release-train.yml");
 
 test("actual publication step blocks incomplete SBOMs and failed repair before stable finalization", () => {
 	const repo = join(import.meta.dir, "../..");
-	const scratch = mkdtempSync(join(process.env.TMPDIR ?? join(repo, "var/agent-tmp"), "publication-sbom."));
+	const scratch = ownedTmp("publication-sbom", { root: process.env.TMPDIR ?? join(repo, "var/agent-tmp") }).path;
 	try {
-		writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=publication-sbom\nrepo=${repo}\n`);
 		const doc = YAML.parse(readFileSync(WORKFLOW, "utf8"));
 		const body = doc.jobs.publish.steps.find((step: { name?: string }) => step.name?.startsWith("Publish the same")).run;
 		mkdirSync(join(scratch, "bin"));
@@ -65,9 +66,8 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 
 test("current-attempt containers normalize without admitting stale snapshots or overwriting collisions", () => {
 	const repo = join(import.meta.dir, "../..");
-	const scratch = mkdtempSync(join(process.env.TMPDIR ?? join(repo, "var/agent-tmp"), "artifact-attempt."));
+	const scratch = ownedTmp("artifact-attempt", { root: process.env.TMPDIR ?? join(repo, "var/agent-tmp") }).path;
 	try {
-		writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=artifact-attempt\nrepo=${repo}\n`);
 		const doc = YAML.parse(readFileSync(join(repo, ".github/workflows/ci.yml"), "utf8"));
 		const body = doc.jobs["candidate-index"].steps.find((step: { name?: string }) => step.name === "Normalize current-attempt artifact containers").run;
 		const current = join(scratch, "candidates/candidate-linux-x64-gnu-attempt-2");

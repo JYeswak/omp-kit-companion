@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
 import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const fixtures: string[] = [];
 
@@ -14,7 +15,7 @@ afterEach(() => {
 });
 
 function fixtureRoot(): string {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-runtime-")));
+	const root = realpathSync(ownedTmp("omp-kit-runtime").path);
 	fixtures.push(root);
 	return root;
 }
@@ -70,13 +71,14 @@ function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_
 	if (!root) {
 		const scratch = join(REPO_ROOT, "var", "agent-tmp");
 		mkdirSync(scratch, { recursive: true, mode: 0o700 });
-		root = mkdtempSync(join(scratch, "runtime-tests."));
+		root = ownedTmp("runtime-tests", { root: scratch }).path;
 		fixtures.push(root);
 		caller = REPO_ROOT;
+		// The adapter admits this root only when its .owner repo= is exactly the caller workspace.
 		writeFileSync(join(root, ".owner"),
 			`pid=${process.pid}\nlabel=runtime-tests\nrepo=${caller}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	}
-	const base = mkdtempSync(join(root, "omp-kit-runtime-"));
+	const base = mkdtempSync(join(root, "omp-kit-runtime-")); // tempsafe: runtime-adapter.sh admits only omp-kit-runtime-* sandbox names; parent root is ownedTmp-owned
 	fixtures.push(base);
 	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
 }

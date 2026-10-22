@@ -1,14 +1,15 @@
 import { afterAll, expect, test } from "bun:test";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // OMP's release notes are part of certification (ompkit-issue-pr-autopilot-w159.1). The changelog step reads every
 // release after `certified` up to the candidate, derives kit surface terms from this checkout's code (--kit-root), and
 // the body step turns a Breaking Changes / Removed entry that hits a surface without a recorded review into agent-fix.
 // Each test drives the real script on offline release notes (--bodies) in a throwaway repo.
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-const root = mkdtempSync(join(tmpdir(), "omp-kit-certify-changelog-"));
+const root = ownedTmp("omp-kit-certify-changelog").path;
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 const breaking = (pkg: string, bullet: string) => `## ${pkg}\n\n### Breaking Changes\n\n- ${bullet}\n`;

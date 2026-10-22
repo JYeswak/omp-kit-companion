@@ -1,8 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { appendFileSync, chmodSync, mkdirSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { ccStateDir, KNOWN_JOBS, plistPath, serviceLabel, type OwnedStatePath } from "../../src/service.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
 const xdgStateHome = process.env.XDG_STATE_HOME;
@@ -23,7 +25,7 @@ function installJob(home: string, name: string): void {
 
 function operatorHome(installed: readonly string[] = []) {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	const home = mkdtempSync(join(scratch, "operator-snapshot-"));
+	const home = ownedTmp("operator-snapshot", { root: scratch }).path;
 	roots.push(home);
 	// The jobs derive their state from XDG_STATE_HOME exactly as their plists pin it.
 	process.env.XDG_STATE_HOME = join(home, ".local", "state");

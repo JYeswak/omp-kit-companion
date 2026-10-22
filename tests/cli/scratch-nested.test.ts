@@ -1,7 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defaultLiveness, planScratch, type InspectDeps } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
@@ -45,10 +47,10 @@ function sparse(path: string, bytes: number): void {
 }
 
 test("REAP2 planted: parent size excludes nested plan rows", () => {
-  const state = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-nested-xdg-"));
+  const state = ownedTmp("scratch-nested-xdg", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
   roots.push(state);
   process.env.XDG_STATE_HOME = state;
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-nested-"));
+  const root = ownedTmp("scratch-nested", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const parent = join(root, `session-omp-test.${process.pid}`);

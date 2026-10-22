@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, lstatSync, symlinkSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, lstatSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { renderRecipe, validateRecipeProfileName } from "../../src/profile-recipes.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const releaseRoot = join(import.meta.dir, "../..");
 const scratch = join(releaseRoot, "var/agent-tmp");
@@ -15,7 +17,7 @@ function snapshot(root: string): string[] {
 }
 
 test("rendering the memory-off recipe never touches an operator profile or project", () => {
-	const isolated = mkdtempSync(join(scratch, "profile-recipes-"));
+	const isolated = ownedTmp("profile-recipes", { root: scratch }).path;
 	try {
 		mkdirSync(join(isolated, "home"));
 		mkdirSync(join(isolated, "project"));
@@ -65,7 +67,7 @@ test("profile name validation refuses default, invalid and already-owned names w
 });
 
 test("rendering a recipe refuses a symlinked asset directory rather than disclosing its target", () => {
-	const isolated = mkdtempSync(join(scratch, "profile-recipes-link-"));
+	const isolated = ownedTmp("profile-recipes-link", { root: scratch }).path;
 	try {
 		const release = join(isolated, "release");
 		const privateDir = join(isolated, "private");

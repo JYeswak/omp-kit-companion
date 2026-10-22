@@ -1,18 +1,19 @@
 // mission anchor (ompkit-fp72.9 ANCHOR1): the live-doc Mission statement is the human
 // source of truth for wording; .omp/mission.toml is the machine record. Planted
 // negatives: every disagreement shape reports DRIFT, never AGREE.
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { missionAnchorStatus, validateMissionRecord } from "../../src/mission.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
-const scratch = mkdtempSync(join(scratchRoot, `mission-anchor-test.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=mission-anchor-test repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const scratch = ownedTmp("mission-anchor-test", { root: scratchRoot }).path;
 
 const CHECK_PATH = "scripts/mission-check.ts";
 const CHECK_COMMAND = "omp-kit heavy -- bun scripts/mission-check.ts --pillar learning";

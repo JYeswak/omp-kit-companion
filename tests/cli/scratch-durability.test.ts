@@ -1,7 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
 afterEach(() => {
@@ -11,7 +13,7 @@ afterEach(() => {
 test("identical owned-scratch input is quiet until its canonical source is actually tracked", async () => {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
-	const repo = mkdtempSync(join(base, "scratch-durability-"));
+	const repo = ownedTmp("scratch-durability", { root: base }).path;
 	roots.push(repo);
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];

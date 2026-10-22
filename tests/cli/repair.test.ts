@@ -1,12 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
 import { auditMutations, undoMutation } from "../../src/mutations.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair } from "../../src/repair.ts";
 import { writeProfileConfig } from "./profile-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 const nativeOmp = resolveOmpIdentity().launcher;
 function nativeConfigValue(home: string, key: string): unknown {
 	const tmp = join(home, "tmp");
@@ -21,7 +23,7 @@ function nativeConfigValue(home: string, key: string): unknown {
 const fixtures: string[] = [];
 function fixture() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	const workspace = mkdtempSync(join(scratch, "p15-repair-"));
+	const workspace = ownedTmp("p15-repair", { root: scratch }).path;
 	fixtures.push(workspace);
 	const root = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state"), project = join(workspace, "project");
 	const rule = "Kit rule\n";

@@ -2,8 +2,8 @@
 // push and session end each refuse while the session holds an undisposed dir. Holds are owed until discharged:
 // a quarantined hold is vetoed while its bead is open or unprovable, flagged but never deleted once expired,
 // and only a closed bead discharges it back to the normal liveness path.
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   applyQuarantineExpiry,
@@ -18,6 +18,8 @@ import {
   type LivenessDeps,
   type SeatIdentity,
 } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -51,8 +53,8 @@ function flagRows(home: string): { event: string; point?: string }[] {
 }
 
 test("disposalGate refuses at every point while an undisposed dir is owed, and passes once it is released", () => {
-  const root = mkdtempSync(join(scratchParent, "gates-"));
-  const home = mkdtempSync(join(scratchParent, "gates-home-"));
+  const root = ownedTmp("gates", { root: scratchParent }).path;
+  const home = ownedTmp("gates-home", { root: scratchParent }).path;
   cleanup.push(root, home);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   process.env.XDG_STATE_HOME = join(home, "state");
@@ -75,8 +77,8 @@ test("disposalGate refuses at every point while an undisposed dir is owed, and p
 });
 
 test("disposalGate charges only exact caller ownership and excludes live owners", () => {
-  const root = mkdtempSync(join(scratchParent, "gates-boundary-"));
-  const home = mkdtempSync(join(scratchParent, "gates-boundary-home-"));
+  const root = ownedTmp("gates-boundary", { root: scratchParent }).path;
+  const home = ownedTmp("gates-boundary-home", { root: scratchParent }).path;
   cleanup.push(root, home);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   process.env.XDG_STATE_HOME = join(home, "state");
@@ -117,8 +119,8 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
 });
 
 test("disposalGate is fail-open when the ownership census cannot be listed: never a block, nothing logged", () => {
-  const root = mkdtempSync(join(scratchParent, "gates-unproven-"));
-  const home = mkdtempSync(join(scratchParent, "gates-unproven-home-"));
+  const root = ownedTmp("gates-unproven", { root: scratchParent }).path;
+  const home = ownedTmp("gates-unproven-home", { root: scratchParent }).path;
   cleanup.push(root, home);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   process.env.XDG_STATE_HOME = join(home, "state");
@@ -135,7 +137,7 @@ test("disposalGate is fail-open when the ownership census cannot be listed: neve
 });
 
 test("quarantine expiry vetoes a hold while its bead is open or unprovable, and never deletes an expired hold", () => {
-  const home = mkdtempSync(join(scratchParent, "gates-qt-home-"));
+  const home = ownedTmp("gates-qt-home", { root: scratchParent }).path;
   cleanup.push(home);
   process.env.XDG_STATE_HOME = join(home, "state");
   mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
@@ -171,7 +173,7 @@ test("quarantine expiry vetoes a hold while its bead is open or unprovable, and 
 });
 
 test("a closed bead discharges the hold back to the normal liveness path", () => {
-  const home = mkdtempSync(join(scratchParent, "gates-discharge-home-"));
+  const home = ownedTmp("gates-discharge-home", { root: scratchParent }).path;
   cleanup.push(home);
   process.env.XDG_STATE_HOME = join(home, "state");
   mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });

@@ -1,16 +1,17 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+afterAll(cleanupAllOwnedTmp);
 
 // OMP certification decides merge vs agent-fix. A pinned-source tuple qualifies when it is already on main, or when
 // two model families both judge every changed file non-semantic and cite changed lines; everything else, a failed
 // suite, or a missing key becomes an agent-fix issue. This drives the real script against synthetic packages,
 // synthetic pin sources, and a local OpenAI-compatible gateway.
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-const root = mkdtempSync(join(tmpdir(), "omp-kit-certify-"));
+const root = ownedTmp("omp-kit-certify").path;
 const CHANGED_LINE = "export const retainTurns = 2;";
 let mode: "agree" | "disagree" | "bad-citation" = "agree";
 let server: Server;
