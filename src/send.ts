@@ -6,7 +6,7 @@ import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
-import { identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
+import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
 import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
@@ -418,18 +418,13 @@ export async function proveSend(input: {
 		return id ?? `${input.session}:${input.pane}`;
 	})();
 	const slashBaseline = isSlash ? runTmux(["capture-pane", "-p", "-S", "-200", "-t", paneTarget]).out : "";
-	const isDispatch = dispatchBeads(input.message).dispatch;
-	const paneDir = isDispatch && !input.knownPrefixes && selection.status === "RESOLVED"
-		? runTmux(["display-message", "-p", "-t", paneTarget, "#{pane_current_path}"]).out.trim()
-		: "";
-	const knownPrefixes = !isDispatch ? new Set<string>()
-		: input.knownPrefixes ?? fleetBeadPrefixes(env, [process.cwd(), paneDir].filter(dir => dir.startsWith("/")));
-	const { dispatch, bead_ids } = dispatchBeads(input.message, knownPrefixes);
-	const no_bead_reason = dispatch && bead_ids.length === 0 ? input.noBeadReason?.trim() || null : null;
+	const beads = beadAdmission(input.message, input.knownPrefixes, env, input.noBeadReason, () => [process.cwd(),
+		selection.status === "RESOLVED" ? runTmux(["display-message", "-p", "-t", paneTarget, "#{pane_current_path}"]).out.trim() : ""]);
+	const { dispatch, bead_ids, no_bead_reason } = beads;
 	const tmux_socket = selection.status === "RESOLVED" ? selection.socket : null;
-	if (dispatch && bead_ids.length === 0 && !no_bead_reason) {
+	if (beads.required) {
 		return { status: "BEAD_REQUIRED", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason, tmux_socket,
-			detail: `work dispatch cites no bead id${knownPrefixes.size ? ` (tracker prefixes: ${[...knownPrefixes].sort().join(", ")})` : ""}; nothing was sent` };
+			detail: beads.detail };
 	}
 	if (selection.status === "AMBIGUOUS") {
 		return { status: "TMUX_AMBIGUOUS", marker: "", sends: 0, drop_path: null, bead_ids, no_bead_reason, tmux_socket: null,
@@ -554,6 +549,80 @@ export async function proveSend(input: {
 	} finally {
 		releaseLock();
 	}
+}
+
+/** One bead-citation admission for every send path: a work dispatch must cite a bead id of a known tracker, or carry
+ * an explicit reason. `dirs` names the sender and target cwds whose trackers supply the prefixes; it runs only for a
+ * dispatch with no caller-supplied prefixes (the tmux path pays for a pane query only then). */
+function beadAdmission(message: string, known: ReadonlySet<string> | undefined, env: NodeJS.ProcessEnv,
+	noBeadReason: string | undefined, dirs: () => string[]): { dispatch: boolean; bead_ids: string[]; no_bead_reason: string | null; required: boolean; detail: string } {
+	const isDispatch = dispatchBeads(message).dispatch;
+	const prefixes = !isDispatch ? new Set<string>() : known ?? fleetBeadPrefixes(env, dirs().filter((dir) => dir.startsWith("/")));
+	const { dispatch, bead_ids } = dispatchBeads(message, prefixes);
+	const no_bead_reason = dispatch && bead_ids.length === 0 ? noBeadReason?.trim() || null : null;
+	return { dispatch, bead_ids, no_bead_reason, required: dispatch && bead_ids.length === 0 && !no_bead_reason,
+		detail: `work dispatch cites no bead id${prefixes.size ? ` (tracker prefixes: ${[...prefixes].sort().join(", ")})` : ""}; nothing was sent` };
+}
+
+/** SEND1 router (rz5.125): `tern:<decimal block id>` is a Tern seat, anything else a tmux pane (bare digits are pane
+ * indexes there). A `tern:` prefix without a decimal id refuses before delivery. */
+export function routeSendTarget(pane: string): { route: "tern" } | { route: "tmux" } | { route: "refused"; code: "TERN_MALFORMED_ADDRESS"; detail: string } {
+	if (!pane.startsWith("tern:")) return { route: "tmux" };
+	return ternPaneId(pane) === null
+		? { route: "refused", code: "TERN_MALFORMED_ADDRESS", detail: `${pane} is not tern:<decimal block id>; zero sends` }
+		: { route: "tern" };
+}
+
+/** The Tern seat behind `omp-kit send SESSION tern:<block>`: --tern-session/--cwd/--window-key, else the fleet-watch.json
+ * entry for SESSION (chief included: `ternSession`, `cwd` or `repo`, `windowKey`), else SESSION itself and the caller
+ * cwd. Tern 0.9 `ctl` only reaches a window opened with `tern --control EP`, so the window key is that endpoint and is
+ * never defaulted: absent, it stays "" and proveTernCliSend refuses TERN_WINDOW_UNBOUND (TERNADDR1, ompkit-fixjo). */
+export function ternSendSeat(config: unknown, session: string, pane: string,
+	flags: { cwd?: string; ternSession?: string; windowKey?: string }, callerCwd: string = process.cwd()): TernSeatBinding {
+	const root = config !== null && typeof config === "object" ? config as Record<string, unknown> : {};
+	const entry = [root.chief, ...(Array.isArray(root.sessions) ? root.sessions : [])]
+		.find((item): item is Record<string, unknown> => item !== null && typeof item === "object" && (item as Record<string, unknown>).session === session);
+	const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
+	return { session: flags.ternSession?.trim() || text(entry?.ternSession) || session, pane,
+		windowKey: flags.windowKey?.trim() || text(entry?.windowKey), cwd: flags.cwd?.trim() || text(entry?.cwd) || text(entry?.repo) || callerCwd };
+}
+
+/** SEND1 Tern route (rz5.125) for the CLI: a malformed address, an uncited dispatch and a missing window endpoint each
+ * refuse with zero io and no drop file; anything else is deliverToTernSeat (observe, identify, one native admission
+ * turn, session-file proof). */
+export async function proveTernCliSend(input: {
+	session: string;
+	pane: string;
+	message: string;
+	dropDir: string;
+	cwd?: string;
+	windowKey?: string;
+	noBeadReason?: string;
+	knownPrefixes?: ReadonlySet<string>;
+	env?: NodeJS.ProcessEnv;
+	untilDeliveredMs?: number;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+	io?: TernObserverIo;
+}): Promise<TernDeliverResult & { bead_ids: string[]; no_bead_reason: string | null }> {
+	const refuse = (code: string, detail: string, bead_ids: string[] = [], no_bead_reason: string | null = null) =>
+		({ status: "REFUSED" as const, code, marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, bead_ids, no_bead_reason });
+	const route = routeSendTarget(input.pane);
+	if (route.route === "refused") return refuse(route.code, route.detail);
+	if (route.route === "tmux") return refuse("TERN_ROUTE_MISMATCH", `${input.pane} is a tmux pane; zero sends`);
+	const cwd = input.cwd ?? process.cwd();
+	const beads = beadAdmission(input.message, input.knownPrefixes, input.env ?? process.env, input.noBeadReason, () => [process.cwd(), cwd]);
+	if (beads.required) return refuse("BEAD_REQUIRED", beads.detail, beads.bead_ids, beads.no_bead_reason);
+	const windowKey = input.windowKey?.trim() ?? "";
+	if (!windowKey) {
+		return refuse("TERN_WINDOW_UNBOUND", `no control endpoint for the Tern window holding ${input.pane}: Tern 0.9 ctl reaches only a window opened with \`tern --control EP\`; pass --window-key EP or set windowKey in fleet-watch.json (ompkit-fixjo); zero sends`,
+			beads.bead_ids, beads.no_bead_reason);
+	}
+	const result = await deliverToTernSeat({ seat: { session: input.session, pane: input.pane, windowKey, cwd }, text: input.message,
+		dropDir: input.dropDir, io: input.io ?? defaultTernIo(), untilDeliveredMs: input.untilDeliveredMs ?? (beads.dispatch ? 300_000 : 0),
+		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait });
+	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
 }
 
 /**

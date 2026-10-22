@@ -63,7 +63,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchLogPath, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
@@ -76,7 +76,7 @@ import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClai
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
-import { proveSend } from "./send.ts";
+import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
@@ -3054,9 +3054,31 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Pass --until-delivered <seconds>; nothing was sent.");
 		untilDeliveredMs = Number(untilFlag) * 1000;
 	}
-	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason: typeof reasonFlag === "string" ? reasonFlag : undefined,
+	const dropDir = typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop");
+	const noBeadReason = typeof reasonFlag === "string" ? reasonFlag : undefined;
+	// SEND1 Tern route (rz5.125) + TERNADDR1 (ompkit-fixjo): a tern:<block> pane is a Tern seat; tmux is never consulted.
+	const route = routeSendTarget(pane);
+	if (route.route === "refused") return refusal(route.code, route.detail, "Address a Tern seat as tern:<decimal block id> from `tern inspect --json`; nothing was sent.");
+	if (route.route === "tern") {
+		let config: unknown = null;
+		try { config = JSON.parse(readFileSync(fleetWatchConfigPath(serviceHome()), "utf8")); } catch { config = null; }
+		const flag = (name: string): string | undefined => { const value = request.flags.get(name); return typeof value === "string" ? value : undefined; };
+		const seat = ternSendSeat(config, session, pane, { cwd: flag("--cwd"), ternSession: flag("--tern-session"), windowKey: flag("--window-key") });
+		const tern = await proveTernCliSend({ session: seat.session, pane, message: messageParts.join(" "), dropDir, cwd: seat.cwd,
+			windowKey: seat.windowKey, noBeadReason, untilDeliveredMs });
+		if (tern.status === "REFUSED") return refusal(tern.code, tern.detail, tern.code === "TERN_WINDOW_UNBOUND"
+			? "Open the fleet Tern window with `tern --control EP` and pass --window-key EP (or set windowKey in fleet-watch.json); nothing was sent."
+			: "Nothing was sent; fix the named cause and resend.");
+		const data = { session, pane, status: tern.status, tern_code: tern.code, marker: tern.marker, sends: tern.sends, drop_path: tern.drop_path,
+			detail: tern.detail, session_file: tern.sessionFile, offset: tern.offset, bead_ids: tern.bead_ids, no_bead_reason: tern.no_bead_reason };
+		if (tern.status === "OK") return { code: 0, data: { overall: "OK", ...data }, verification: "UNVERIFIED" };
+		return { code: 1, data: { overall: tern.status, ...data }, verification: "UNVERIFIED",
+			errors: [{ code: tern.status, message: tern.detail,
+				remediation: tern.drop_path ? `Relay the message manually; the full text is at ${tern.drop_path}.` : "Retry the send; no drop file was written." }] };
+	}
+	const result = await proveSend({ session, pane, message: messageParts.join(" "), noBeadReason,
 		untilDeliveredMs,
-		dropDir: typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop"),
+		dropDir,
 		admission: {
 			launcherBinding: "none",
 			authority: "ACTIVE",

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -979,4 +979,16 @@ test("GOALSEND proveSend: /goal set passes the form gate", async () => {
 	expect(result.detail ?? "").not.toContain("GOAL_REQUIRES_SET_FORM");
 	expect(taken.sends).toBe(1);
 	expect(result.status).toBe("OK");
+});
+
+// ---- TERNADDR1 (ompkit-fixjo): the Tern seat behind `omp-kit send SESSION tern:<block>` ----
+
+test("TERNADDR1: ternSendSeat binds flags first, then the fleet-watch.json entry, then SESSION and the caller cwd; the endpoint is never defaulted", () => {
+	const config = { chief: { session: "omp-chief", cwd: "/Users/x/Developer", repo: "/Users/x/Developer/omp-kit", ternSession: "Default" },
+		sessions: [{ session: "omp-test", repo: "/Users/x/Developer/omp-kit", ternSession: "Default", windowKey: "/run/fleet.sock" }] };
+	expect(ternSendSeat(config, "omp-chief", "tern:9", {}, "/caller")).toEqual({ session: "Default", pane: "tern:9", windowKey: "", cwd: "/Users/x/Developer" });
+	expect(ternSendSeat(config, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "Default", pane: "tern:7", windowKey: "/run/fleet.sock", cwd: "/Users/x/Developer/omp-kit" });
+	expect(ternSendSeat(config, "omp-test", "tern:7", { cwd: "/other", ternSession: "4", windowKey: "/run/w.sock" }, "/caller"))
+		.toEqual({ session: "4", pane: "tern:7", windowKey: "/run/w.sock", cwd: "/other" });
+	expect(ternSendSeat(null, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "omp-test", pane: "tern:7", windowKey: "", cwd: "/caller" });
 });

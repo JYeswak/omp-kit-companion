@@ -1,0 +1,3 @@
+### Fixed
+
+- `omp-kit send` to a Tern seat now needs the control endpoint of the Tern window that holds the seat. Tern 0.9 sends control commands only to a window opened with `tern --control EP`; there is no default window. Pass the endpoint with `--window-key EP`, or set `windowKey` (and optionally `ternSession`) on the session's entry in `~/.config/omp-kit/fleet-watch.json`; the chief's entry works the same way. Without an endpoint the send is refused with `TERN_WINDOW_UNBOUND` and nothing is sent. Before this, every send to a Tern seat failed with "no live tmux server found", and the messages piled up in the drop folder: 3,046 between 2026-10-17 and 2026-10-22.

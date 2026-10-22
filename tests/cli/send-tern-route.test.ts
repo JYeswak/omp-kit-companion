@@ -12,6 +12,8 @@ writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-tern-
 
 const noWait = async (_ms: number) => {};
 const EMPTY_PREFIXES: ReadonlySet<string> = new Set<string>();
+/** The fleet window's control endpoint (`tern --control EP`): Tern 0.9 ctl has no default window (TERNADDR1). */
+const WINDOW = "/run/tern-fixture.sock";
 
 function dropDir(): string {
 	const dir = join(scratch, "drop-" + Math.random().toString(36).slice(2));
@@ -130,7 +132,7 @@ test("SEND1 tern route: delivered message returns OK with the marker proven in t
 	const dir = dropDir();
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
 	expect(got.status).toBe("OK");
 	expect(got.code).toBe("PROVEN");
 	expect(got.sends).toBe(1);
@@ -147,7 +149,7 @@ test("SEND1 tern route planted: session absent from the window refuses with zero
 	const dir = dropDir();
 	const { io, taken } = ternFixture({ listSession: false });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
 	expect(got.status).toBe("REFUSED");
 	expect(got.code).toBe("PLANE_SEAT_UNBOUND");
 	expect(got.sends).toBe(0);
@@ -160,7 +162,7 @@ test("SEND1 tern route planted: busy seat with no until-delivered bound refuses 
 	const dir = dropDir();
 	const { io, taken, repo } = ternFixture({ working: true, journal: busyJournal });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
 	expect(got.status).toBe("REFUSED");
 	expect(got.code).toBe("SEAT_BUSY");
 	expect(got.sends).toBe(0);
@@ -196,9 +198,31 @@ test("SEND1 tern route planted: unresolvable agent identity refuses with zero na
 	const dir = dropDir();
 	const { io, taken, repo } = ternFixture({ resolveAgent: false });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
 	expect(got.status).toBe("REFUSED");
 	expect(got.code).toBe("PLANE_SEAT_UNBOUND");
 	expect(taken.luaDispatches).toBe(0);
 	expect(got.drop_path).toBeNull();
+});
+
+test("TERNADDR1 planted: no window control endpoint refuses TERN_WINDOW_UNBOUND with zero io and no drop file", async () => {
+	const dir = dropDir();
+	const { io, taken, repo } = ternFixture();
+	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
+		dropDir: dir, cwd: repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+	expect(got.status).toBe("REFUSED");
+	expect(got.code).toBe("TERN_WINDOW_UNBOUND");
+	expect(got.detail).toContain("tern --control EP");
+	expect(taken.runs).toEqual([]);
+	expect(got.drop_path).toBeNull();
+	expect(readdirSync(dir)).toEqual([]);
+});
+
+test("TERNADDR1: the native admission turn addresses the configured control endpoint", async () => {
+	const { io, taken, repo } = ternFixture();
+	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
+		dropDir: dropDir(), cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+	expect(got.status).toBe("OK");
+	const turn = taken.runs.find((argv) => argv.includes("carly"))!;
+	expect(turn.slice(turn.indexOf("--window"), turn.indexOf("--window") + 2)).toEqual(["--window", WINDOW]);
 });
