@@ -32,6 +32,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
 	"extensions/kit-flywheel-guard.ts": "FLYWHEEL_GUARD_BUNDLE_FAILED",
+	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
 };
