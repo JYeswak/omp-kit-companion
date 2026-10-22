@@ -5,6 +5,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { existsSync, mkdirSync, lstatSync, renameSync, writeFileSync } from "node:fs";
 import { appendLesson, collectCheckinActivity, lessonDocumentAnchors, lessonIdentity, readLessonsLog, resolveLessonCurrency, type LessonCurrency } from "./lessons.ts";
 import { runPlanningScore } from "./planning-score.ts";
+import { parseUserFleetRepos, readUserFleetFile, userFleetConfigPath } from "./fleet-user-config.ts";
 import { LESSON_CLASS_DESCRIPTIONS, type LessonEntry } from "./lessons.ts";
 import { readCassFreshness, type CassFreshness } from "./cass-freshness.ts";
 
@@ -18,7 +19,8 @@ export interface ClefClassifierConfig {
 	mode: "off" | "shadow";
 	endpoint: string;
 	model: string;
-	guardScript: string;
+	/** Absolute guard script path, or null when no guard is configured (never a ~/Developer default). */
+	guardScript: string | null;
 	maxCpuBusyPct: number;
 	timeoutMs: number;
 }
@@ -26,7 +28,8 @@ export interface ClefClassifierConfig {
 export interface LessonsConfig {
 	checkinIntervalMinutes: number;
 	reportIntervalSeconds: number;
-	intakeTracker: string;
+	/** Absolute intake tracker path, or null when the shipped fleet list is empty (stock runner). */
+	intakeTracker: string | null;
 	repos: FleetRepoConfig[];
 	classifier: ClefClassifierConfig;
 }
@@ -185,19 +188,28 @@ export function parseLessonsConfig(text: string, home: string, kitRoot: string):
 	const checkinFields = checkins as Record<string, unknown>;
 	const fleetFields = fleet as Record<string, unknown>;
 	const classifierFields = classifier as Record<string, unknown>;
-	if (!Array.isArray(fleetFields.repos) || fleetFields.repos.length === 0) throw new Error("LESSONS_CONFIG_REPOS_INVALID");
-	const names = new Set<string>(), paths = new Set<string>();
-	const repos: FleetRepoConfig[] = fleetFields.repos.map((value, index) => {
-		if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`LESSONS_CONFIG_REPO_${index}_INVALID`);
-		const row = value as Record<string, unknown>;
-		if (typeof row.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(row.name)) throw new Error(`LESSONS_CONFIG_REPO_${index}_NAME_INVALID`);
-		if (names.has(row.name)) throw new Error(`LESSONS_CONFIG_REPO_NAME_DUPLICATE:${row.name}`);
-		const path = configuredPath(row.path, home, kitRoot, `repo_${row.name}`);
-		if (paths.has(path)) throw new Error(`LESSONS_CONFIG_REPO_PATH_DUPLICATE:${path}`);
-		names.add(row.name);
-		paths.add(path);
-		return { name: row.name, path, trackerPath: row.tracker === undefined || row.tracker === null ? null : configuredPath(row.tracker, home, kitRoot, `tracker_${row.name}`) };
-	});
+	if (!Array.isArray(fleetFields.repos)) throw new Error("LESSONS_CONFIG_REPOS_INVALID");
+	const repos = parseFleetReposList(fleetFields.repos, home, kitRoot);
+	const intakeRaw = fleetFields.intake_tracker;
+	let intakeTracker: string | null;
+	if (intakeRaw === undefined || intakeRaw === null) {
+		if (repos.length === 0) intakeTracker = null;
+		else intakeTracker = configuredPath(repos.find(repo => repo.name === "omp-kit-companion")?.trackerPath,
+			home, kitRoot, "intake_tracker");
+	} else intakeTracker = configuredPath(intakeRaw, home, kitRoot, "intake_tracker");
+	const parsedClassifier = parseClassifierFields(classifierFields, home, kitRoot);
+	return {
+		checkinIntervalMinutes: positiveInteger(checkinFields.interval_minutes ?? 120, "checkin_interval_minutes"),
+		reportIntervalSeconds: positiveInteger(fleetFields.report_interval_seconds ?? 21_600, "report_interval_seconds"),
+		intakeTracker, repos, classifier: parsedClassifier,
+	};
+}
+
+function parseFleetReposList(reposValue: unknown[], home: string, kitRoot: string): FleetRepoConfig[] {
+	return parseUserFleetRepos(reposValue, home, kitRoot).map(row => ({ name: row.name, path: row.path, trackerPath: row.tracker }));
+}
+
+function parseClassifierFields(classifierFields: Record<string, unknown>, home: string, kitRoot: string): ClefClassifierConfig {
 	const mode = classifierFields.mode;
 	if (mode !== "off" && mode !== "shadow") throw new Error("LESSONS_CONFIG_CLASSIFIER_MODE_INVALID");
 	const endpoint = classifierFields.endpoint === undefined ? "http://127.0.0.1:8010/v1/systemone" : String(classifierFields.endpoint);
@@ -212,24 +224,87 @@ export function parseLessonsConfig(text: string, home: string, kitRoot: string):
 	if (!finiteNumberInRange(maxCpuBusyPct, 0, 100)) throw new Error("LESSONS_CONFIG_CLASSIFIER_LOAD_THRESHOLD_INVALID");
 	const timeoutMs = classifierFields.timeout_ms === undefined ? 10_000 : classifierFields.timeout_ms;
 	if (!finiteNumberInRange(timeoutMs, 1, 30_000)) throw new Error("LESSONS_CONFIG_CLASSIFIER_TIMEOUT_INVALID");
-	const guardScript = configuredPath(classifierFields.guard_script ?? "~/Developer/jev/scripts/local-model-guard.sh", home, kitRoot, "guard_script");
-	const intakeTracker = configuredPath(fleetFields.intake_tracker ?? repos.find(repo => repo.name === "omp-kit-companion")?.trackerPath,
-		home, kitRoot, "intake_tracker");
-	return {
-		checkinIntervalMinutes: positiveInteger(checkinFields.interval_minutes ?? 120, "checkin_interval_minutes"),
-		reportIntervalSeconds: positiveInteger(fleetFields.report_interval_seconds ?? 21_600, "report_interval_seconds"),
-		intakeTracker, repos,
-		classifier: { mode, endpoint, model, guardScript, maxCpuBusyPct, timeoutMs },
-	};
+	const guardRaw = classifierFields.guard_script;
+	const guardScript = guardRaw === undefined || guardRaw === null ? null : configuredPath(guardRaw, home, kitRoot, "guard_script");
+	return { mode, endpoint, model, guardScript, maxCpuBusyPct, timeoutMs };
+}
+
+/** Parse only the classifier keys present in a user overlay; missing keys fall back to the shipped config. */
+function parsePartialClassifierFields(classifierFields: Record<string, unknown>, home: string, kitRoot: string): Partial<ClefClassifierConfig> {
+	const partial: Partial<ClefClassifierConfig> = {};
+	if (classifierFields.mode !== undefined) {
+		if (classifierFields.mode !== "off" && classifierFields.mode !== "shadow") throw new Error("LESSONS_CONFIG_CLASSIFIER_MODE_INVALID");
+		partial.mode = classifierFields.mode;
+	}
+	if (classifierFields.endpoint !== undefined) {
+		const endpoint = String(classifierFields.endpoint);
+		let parsedEndpoint: URL;
+		try { parsedEndpoint = new URL(endpoint); }
+		catch { throw new Error("LESSONS_CONFIG_CLASSIFIER_URL_INVALID"); }
+		if (parsedEndpoint.protocol !== "http:" || !["127.0.0.1", "::1", "localhost"].includes(parsedEndpoint.hostname) || parsedEndpoint.username || parsedEndpoint.password)
+			throw new Error("LESSONS_CONFIG_CLASSIFIER_URL_NOT_LOOPBACK");
+		partial.endpoint = endpoint;
+	}
+	if (classifierFields.model !== undefined) {
+		const model = String(classifierFields.model);
+		if (!model.trim()) throw new Error("LESSONS_CONFIG_CLASSIFIER_MODEL_INVALID");
+		partial.model = model;
+	}
+	if (classifierFields.max_cpu_busy_pct !== undefined) {
+		if (!finiteNumberInRange(classifierFields.max_cpu_busy_pct, 0, 100)) throw new Error("LESSONS_CONFIG_CLASSIFIER_LOAD_THRESHOLD_INVALID");
+		partial.maxCpuBusyPct = classifierFields.max_cpu_busy_pct;
+	}
+	if (classifierFields.timeout_ms !== undefined) {
+		if (!finiteNumberInRange(classifierFields.timeout_ms, 1, 30_000)) throw new Error("LESSONS_CONFIG_CLASSIFIER_TIMEOUT_INVALID");
+		partial.timeoutMs = classifierFields.timeout_ms;
+	}
+	if (classifierFields.guard_script !== undefined) {
+		partial.guardScript = classifierFields.guard_script === null ? null
+			: configuredPath(classifierFields.guard_script, home, kitRoot, "guard_script");
+	}
+	return partial;
+}
+
+export { userFleetConfigPath } from "./fleet-user-config.ts";
+
+export interface UserFleetOverlay {
+	repos: FleetRepoConfig[];
+	intakeTracker: string | null | undefined;
+	classifier: Partial<ClefClassifierConfig> | undefined;
+}
+
+/** Read the operator's fleet overlay, or null when absent. A present-but-invalid overlay fails closed. */
+export function readUserFleetOverlay(home: string, kitRoot: string): UserFleetOverlay | null {
+	const file = readUserFleetFile(home);
+	if (!file) return null;
+	const reposRaw = file.fleet.repos ?? [];
+	if (!Array.isArray(reposRaw)) throw new Error("LESSONS_CONFIG_REPOS_INVALID");
+	const repos = parseFleetReposList(reposRaw, home, kitRoot);
+	const intakeRaw = file.fleet.intake_tracker;
+	const intakeTracker = intakeRaw === undefined || intakeRaw === null ? undefined : configuredPath(intakeRaw, home, kitRoot, "intake_tracker");
+	let classifier: Partial<ClefClassifierConfig> | undefined;
+	if (file.classifier !== undefined) classifier = parsePartialClassifierFields(file.classifier, home, kitRoot);
+	return { repos, intakeTracker, classifier };
 }
 
 function finiteNumberInRange(value: unknown, min: number, max: number): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
 }
 
+/** Thrown when the effective fleet list is empty: stock runners report NOT_CONFIGURED, never a whole-tree default. */
+export const FLEET_LESSONS_NOT_CONFIGURED = "FLEET_LESSONS_NOT_CONFIGURED";
+
 export function readLessonsConfig(kitRoot: string, home: string): LessonsConfig {
 	try {
-		return parseLessonsConfig(readFileSync(join(kitRoot, "config", "lessons.toml"), "utf8"), home, kitRoot);
+		const base = parseLessonsConfig(readFileSync(join(kitRoot, "config", "lessons.toml"), "utf8"), home, kitRoot);
+		const overlay = readUserFleetOverlay(home, kitRoot);
+		if (!overlay) return base;
+		return {
+			...base,
+			repos: [...base.repos, ...overlay.repos],
+			intakeTracker: overlay.intakeTracker ?? base.intakeTracker,
+			classifier: { ...base.classifier, ...overlay.classifier },
+		};
 	} catch (error) {
 		if (error instanceof Error && error.message.startsWith("LESSONS_CONFIG_")) throw error;
 		throw new Error("LESSONS_CONFIG_UNAVAILABLE");
@@ -325,6 +400,7 @@ function unavailableShadow(reason: string): ClefShadowResult {
 	}
 	if (targets.size === 0) return { status: "NOT_RUN", results };
 
+	if (config.guardScript === null) return unavailableShadow("GUARD_UNCONFIGURED");
 	const guard = (dependencies.guard ?? defaultClefGuard)(config.guardScript);
 	if (guard.code !== 0) return unavailableShadow("JEV_GUARD_REFUSED");
 	const load = (dependencies.load ?? defaultCpuLoad)();
@@ -591,7 +667,10 @@ export function runFleetLessonsOnce(options: { kitRoot: string; home: string; st
 	const now = options.now ?? new Date();
 	if (!Number.isFinite(now.getTime()) || !isAbsolute(options.kitRoot) || !isAbsolute(options.home) || !isAbsolute(options.stateRoot)) throw new Error("FLEET_LESSONS_ROOT_INVALID");
 	const config = readLessonsConfig(options.kitRoot, options.home);
-	const intakeDatabase = trackerDatabase(config.intakeTracker);
+	if (config.repos.length === 0) throw new Error(FLEET_LESSONS_NOT_CONFIGURED);
+	const intakeTracker = config.intakeTracker;
+	if (intakeTracker === null) throw new Error("FLEET_LESSONS_INTAKE_NOT_REGISTERED");
+	const intakeDatabase = trackerDatabase(intakeTracker);
 	if (!config.repos.some(repo => repo.trackerPath !== null && trackerDatabase(repo.trackerPath) === intakeDatabase))
 		throw new Error("FLEET_LESSONS_INTAKE_NOT_REGISTERED");
 	const kitStateDirectory = join(options.stateRoot, "omp-kit");
