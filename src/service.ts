@@ -875,8 +875,16 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 	} else {
 		checks.push({ id: "loaded", status: "PASS", message: `Loaded from ${expectedPath}`, remediation: "None." });
 	}
-	if (input.print.lastExit !== null && input.print.lastExit !== 0) {
+	// CC14 (ompkit-fp72.120.16.18.2): a KeepAlive daemon running again after its previous instance died on SIGTERM
+	// (143: launchctl kickstart -k, bootout, or a kill) was restarted, not failed; exiting 0 on SIGTERM instead would stop
+	// KeepAlive {SuccessfulExit: false} from ever restarting it. SIGKILL (137), any other code, or a daemon that is not
+	// running stays a warning.
+	const restartedDaemon = input.job.kind === "daemon" && input.print.lastExit === 143
+		&& input.print.state === "running" && input.print.pid !== null;
+	if (input.print.lastExit !== null && input.print.lastExit !== 0 && !restartedDaemon) {
 		checks.push({ id: "last-exit", status: "WARN", message: `Last exit code ${input.print.lastExit} after ${input.print.runs ?? "?"} run(s)`, remediation: `Run omp-kit service logs ${input.job.name} --errors to inspect the failure.` });
+	} else if (restartedDaemon) {
+		checks.push({ id: "last-exit", status: "PASS", message: `Previous instance ended on SIGTERM (exit 143) and the daemon is running again (pid ${input.print.pid}, run ${input.print.runs ?? "?"})`, remediation: "None." });
 	} else {
 		checks.push({ id: "last-exit", status: "PASS", message: `Last exit code ${input.print.lastExit ?? "unknown (never ran)"}`, remediation: "None." });
 	}

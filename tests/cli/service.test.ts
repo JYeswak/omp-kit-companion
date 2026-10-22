@@ -469,6 +469,19 @@ test("planted: nonzero last exit warns on last-exit", () => {
   expect(found?.status).toBe("WARN");
 });
 
+test("CC14: a running daemon whose previous instance ended on SIGTERM passes last-exit; SIGKILL, not running, or an interval job warns", () => {
+  const { home, launcher, watch } = fixture();
+  const daemon = KNOWN_JOBS["cc"]!;
+  const lastExit = (target: ServiceJobDef, print: { state: string; pid: number | null; lastExit: number }) =>
+    checkService({ home, job: target, launcher, watch, rendered: renderLaunchdPlist(home, target, launcher, watch).text,
+      installed: { path: "x", text: renderLaunchdPlist(home, target, launcher, watch).text },
+      print: { loaded: true, path: "x", runs: 4, ...print } }).find(check => check.id === "last-exit")?.status;
+  expect(lastExit(daemon, { state: "running", pid: 6040, lastExit: 143 })).toBe("PASS");
+  expect(lastExit(daemon, { state: "running", pid: 6040, lastExit: 137 })).toBe("WARN");
+  expect(lastExit(daemon, { state: "spawn scheduled", pid: null, lastExit: 143 })).toBe("WARN");
+  expect(lastExit(job, { state: "running", pid: 1, lastExit: 143 })).toBe("WARN");
+});
+
 test("planted: spawn-scheduled flood fails crash-loop", () => {
   const { home, launcher, watch } = fixture();
   const rendered = renderLaunchdPlist(home, job, launcher, watch).text;
