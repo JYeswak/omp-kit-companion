@@ -550,7 +550,10 @@ export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?:
 	callerSeat?: () => SeatIdentity;
 	/** Removes one path under a released dir for `release --now`; defaults to a forced recursive rm. A test plants a
 	 * remover that does nothing (the old marker-only release) and the physical-absence check must report it held. */
-	removeTree?: (path: string) => void }
+	removeTree?: (path: string) => void;
+	/** The system temp dirs scanned for runtime and kitlib work dirs; defaults to TMPDIR and /tmp. A test pins its own
+	 * stand-in so plan and apply never read the machine's real temp. */
+	systemTempBases?: readonly string[] }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -587,9 +590,77 @@ function readOwner(dir: string): { owner: ScratchOwner | null; malformed: boolea
 	return owner ? { owner, malformed: false } : { owner: null, malformed: true };
 }
 
+/** The system temp dirs work dirs are scanned in: the injected list, else TMPDIR (or /tmp) and /tmp. */
+function systemTempBases(deps: Pick<InspectDeps, "systemTempBases">): string[] {
+	return [...new Set(deps.systemTempBases ?? [process.env.TMPDIR ?? "/tmp", "/tmp"])];
+}
+
+/** Whether a scanned root is one of the system temp dirs, by real path. */
+function isSystemTempRoot(root: string, deps: InspectDeps): boolean {
+	let scanned: string;
+	try { scanned = realpathSync(root); } catch { return false; }
+	return systemTempBases(deps).some(base => {
+		try { return scanned === realpathSync(base); } catch { return false; }
+	});
+}
+
+/** The private-dir shape both system-temp work kinds require: a real dir and a regular `.owner`, both owned by this uid, modes 0700 and 0600. Null when it holds, else the failing rule. */
+function privateWorkDirProblem(dir: string): string | null {
+	const uid = process.getuid?.();
+	let session;
+	try { session = lstatSync(dir); } catch { return "dir-missing"; }
+	if (session.isSymbolicLink()) return "dir-is-symlink";
+	if (!session.isDirectory()) return "not-directory";
+	if (uid === undefined || session.uid !== uid) return "dir-not-owned";
+	if ((session.mode & 0o777) !== 0o700) return "dir-mode-not-0700";
+	let marker;
+	try { marker = lstatSync(join(dir, ".owner")); } catch { return "owner-missing"; }
+	if (marker.isSymbolicLink()) return "owner-is-symlink";
+	if (!marker.isFile()) return "owner-not-file";
+	if (marker.uid !== uid) return "owner-not-owned";
+	if ((marker.mode & 0o777) !== 0o600) return "owner-mode-not-0600";
+	return null;
+}
+
+/**
+ * A kitlib owned-temp dir (`src/kitlib/tmp.ts`, `scripts/kitlib_tmp.py`, `scripts/kitlib-tmp.sh`): `<label>.<pid>.<6 [a-z0-9]>`.
+ * Anchored and bounded; every segment's class excludes the `.` that ends it, so matching is linear.
+ */
+export const KITLIB_TMP_NAME = /^([a-z0-9][a-z0-9-]{0,47})\.([1-9][0-9]{0,9})\.[a-z0-9]{6}$/;
+/** What applyReap's quarantine renames append (quarantineEntryFor, then `.delete-<pid>`); fixed-width fields, linear. */
+const QUARANTINE_ENTRY_SUFFIX = /\.q-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z(?:\.delete-[1-9][0-9]{0,9})?$/;
+
+/**
+ * Why a system-temp entry is not a reapable kitlib leftover, or null when it is (KITLIBREAP1): a kitlib name, the
+ * private-dir shape, and a `.owner` whose label and pid are the name's. `owner` is the record the caller already
+ * read; null reads and parses `.owner` here. `name` defaults to the dir's own name.
+ */
+export function kitlibTmpProblem(dir: string, owner: ScratchOwner | null = null, name: string = basename(dir)): string | null {
+	const match = KITLIB_TMP_NAME.exec(name);
+	if (match === null) return "kitlib-name-mismatch";
+	const shape = privateWorkDirProblem(dir);
+	if (shape !== null) return `kitlib-${shape}`;
+	let record = owner;
+	if (record === null) {
+		const text = readText(join(dir, ".owner"));
+		const parsed = text === null ? null : parseOwnerFileEx(text);
+		if (parsed === null || !("owner" in parsed)) return "kitlib-owner-unparseable";
+		record = parsed.owner;
+	}
+	if (record.label !== match[1]) return "kitlib-owner-label-mismatch";
+	if (String(record.pid) !== match[2]) return "kitlib-owner-pid-mismatch";
+	return null;
+}
+
 /** Bind repository scratch, or private runtime work to the native caller's release identity. */
 function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string, deps: InspectDeps): boolean {
 	if (!isAbsolute(owner.repo)) return false;
+	// A kitlib leftover in system temp binds to its name, uid and modes, never to a repo: the creator's cwd may be gone.
+	// Under quarantine (applyReap's rechecks) the name carries the quarantine suffix; the scanned root stays system temp.
+	if (isSystemTempRoot(root, deps)) {
+		const name = dirname(dir) === root ? basename(dir) : basename(dir).replace(QUARANTINE_ENTRY_SUFFIX, "");
+		if (kitlibTmpProblem(dir, owner, name) === null) return true;
+	}
 	let repo: string;
 	let scanned: string;
 	try {
@@ -606,21 +677,10 @@ function ownerMatchesScratchRoot(owner: ScratchOwner, root: string, dir: string,
 	if (!deps.runtimeRepo || owner.label !== "omp-kit-work" || !basename(dir).startsWith("omp-kit-work.")) return false;
 	try {
 		if (repo !== realpathSync(deps.runtimeRepo)) return false;
-		const uid = process.getuid?.();
-		const session = lstatSync(dir);
-		const marker = lstatSync(join(dir, ".owner"));
-		if (uid === undefined || session.uid !== uid || marker.uid !== uid || !session.isDirectory() ||
-			session.isSymbolicLink() || !marker.isFile() || marker.isSymbolicLink() ||
-			(session.mode & 0o777) !== 0o700 || (marker.mode & 0o777) !== 0o600) return false;
-		let temporary = false;
-		try { temporary = scanned === realpathSync(process.env.TMPDIR ?? "/tmp"); } catch { /* Try the platform fallback. */ }
-		if (!temporary) {
-			try { temporary = scanned === realpathSync("/tmp"); } catch { /* No recognized system work root. */ }
-		}
-		return temporary;
 	} catch {
 		return false;
 	}
+	return privateWorkDirProblem(dir) === null && isSystemTempRoot(root, deps);
 }
 
 const BEAD_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
@@ -940,15 +1000,23 @@ export function quarantineTtlMs(): number {
 	return hours * 3600 * 1000;
 }
 
-export function resolveSystemWorkDirs(): string[] {
-	if (process.env.OMP_KIT_SCRATCH_ROOTS !== undefined && process.env.OMP_KIT_SCRATCH_ROOTS !== "") return [];
+/**
+ * Work dirs in system temp: runtime `omp-kit-work.*` dirs, and kitlib leftovers that pass kitlibTmpProblem
+ * (KITLIBREAP1). Every other temp entry is never visited. An explicit scratch-root override scans none unless the
+ * caller injected its own temp list.
+ */
+export function resolveSystemWorkDirs(deps: Pick<InspectDeps, "systemTempBases"> = {}): string[] {
+	if (deps.systemTempBases === undefined && process.env.OMP_KIT_SCRATCH_ROOTS !== undefined && process.env.OMP_KIT_SCRATCH_ROOTS !== "") return [];
 	const roots: string[] = [];
-	for (const base of new Set([process.env.TMPDIR ?? "/tmp", "/tmp"])) {
+	for (const base of systemTempBases(deps)) {
 		let entries: string[];
 		try { entries = readdirSync(base); } catch { continue; }
 		for (const entry of entries) {
-			if (!entry.startsWith("omp-kit-work.")) continue;
 			const dir = join(base, entry);
+			if (!entry.startsWith("omp-kit-work.")) {
+				if (KITLIB_TMP_NAME.test(entry) && kitlibTmpProblem(dir) === null) roots.push(dir);
+				continue;
+			}
 			try {
 				if (statSync(dir).isDirectory() && !isSymlink(dir)) roots.push(dir);
 			} catch { /* concurrent deletion */ }
@@ -956,6 +1024,15 @@ export function resolveSystemWorkDirs(): string[] {
 	}
 	return [...new Set(roots)];
 }
+
+/** One system-temp work dir through the plan verdict; a kitlib leftover's reason names its rule (`kitlib-owner-dead-...`). A quarantine keeps its reason: apply dispatches on it. */
+function inspectSystemWorkDir(dir: string, deps: InspectDeps): ScratchVerdict | null {
+	const verdict = inspectOne(dir, dirname(dir), deps, false);
+	const name = basename(dir);
+	if (verdict === null || verdict.action === "QUARANTINE" || name.startsWith("omp-kit-work.") || !KITLIB_TMP_NAME.test(name)) return verdict;
+	return { ...verdict, reason: `kitlib-${verdict.reason}` };
+}
+
 /**
  * Fleet-wide suite TMPDIR base (localbench lesson 2026-10-05): suite temp inside a
  * repo tree breaks git-tree guards, and anything under ~ breaks the scratch rule,
@@ -2531,17 +2608,17 @@ export function dedupeNestedSizes(sessions: ScratchVerdict[]): ScratchVerdict[] 
 export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const entries = resolveScratchRootEntries(home);
 	const roots = entries.map(entry => entry.root);
-	const systemWorkDirs = resolveSystemWorkDirs();
+	const systemWorkDirs = resolveSystemWorkDirs(deps);
 	const sessions: ScratchVerdict[] = [];
 	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
-	const visit = (dir: string, root: string, nameRequired = true) => {
-		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
+	const record = (verdict: ScratchVerdict | null) => {
 		if (verdict === null) return;
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
 	};
+	const visit = (dir: string, root: string, nameRequired = true) => record(inspectOne(dir, root, snapDeps, nameRequired));
 	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
-	for (const dir of systemWorkDirs) visit(dir, dirname(dir), false);
+	for (const dir of systemWorkDirs) record(inspectSystemWorkDir(dir, snapDeps));
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
 	const sized = dedupeNestedSizes(sessions);
@@ -2744,7 +2821,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const freePctBefore = measureDiskFreePercent(home, deps.statfs);
 	const entries = resolveScratchRootEntries(home);
 	const roots = entries.map(entry => entry.root);
-	const systemWorkDirs = resolveSystemWorkDirs();
+	const systemWorkDirs = resolveSystemWorkDirs(deps);
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const planned: { verdict: ScratchVerdict; root: string }[] = [];
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
@@ -2754,7 +2831,10 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		if (verdict !== null) planned.push({ verdict, root });
 	};
 	for (const root of roots) eachSessionDir(root, dir => collect(dir, root), dir => collect(dir, root, false));
-	for (const dir of systemWorkDirs) collect(dir, dirname(dir), false);
+	for (const dir of systemWorkDirs) {
+		const verdict = inspectSystemWorkDir(dir, snapDeps);
+		if (verdict !== null) planned.push({ verdict, root: dirname(dir) });
+	}
 	const sessions: ScratchVerdict[] = [];
 	const applied: ScratchVerdict[] = [];
 	for (let index = 0; index < planned.length; index++) {
