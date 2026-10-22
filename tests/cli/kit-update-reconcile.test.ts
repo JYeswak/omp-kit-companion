@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reconcilePendingUpdate } from "../../src/kit-update.ts";
 
@@ -69,6 +69,39 @@ test("[2] planted: differing active bytes refuse and stay pending", () => {
 		expect(existsSync(join(ctx.stateRoot, `kit-reconcile-${ID}.json`))).toBe(false);
 	} finally {
 		rmSync(ctx.root, { recursive: true, force: true });
+	}
+});
+
+test("CLI without --prefix derives the receipt install and refuses tampered postimages", () => {
+	for (const tampered of [false, true]) {
+		const ctx = fixture({
+			liveBytes: Buffer.from("binary-0.2.17"),
+			recordedBytes: Buffer.from(tampered ? "binary-0.2.17-tampered" : "binary-0.2.17"),
+		});
+		try {
+			const stateRoot = join(ctx.root, "omp-kit");
+			renameSync(ctx.stateRoot, stateRoot);
+			const result = Bun.spawnSync([
+				process.execPath, join(repoRoot, "src", "cli.ts"),
+				"update", "--reconcile", ID, "--yes", "--json",
+			], {
+				cwd: repoRoot,
+				env: { ...process.env, HOME: ctx.root, XDG_STATE_HOME: ctx.root },
+				stdout: "pipe", stderr: "pipe",
+			});
+			const output = JSON.parse(result.stdout.toString());
+			expect(result.exitCode).toBe(tampered ? 1 : 0);
+			if (tampered) {
+				expect(output.errors[0].code).toBe("PENDING_RECOVERY");
+				expect(existsSync(join(stateRoot, "kit-update.pending.json"))).toBe(true);
+			} else {
+				expect(output.data.action).toBe("RECONCILED");
+				expect(output.data.verified.binary).toBe(join(ctx.prefix, "releases", "0.2.17", "bin", "omp-kit"));
+				expect(existsSync(join(stateRoot, "kit-update.pending.json"))).toBe(false);
+			}
+		} finally {
+			rmSync(ctx.root, { recursive: true, force: true });
+		}
 	}
 });
 
