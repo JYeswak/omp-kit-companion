@@ -1397,7 +1397,12 @@ ownerText: string, dev: number, ino: number, releasedAt: string): ScratchRelease
 	const current = readText(join(dir, ".owner"));
 	if (current === null || current !== ownerText) return held("now-held-owner-changed");
 	if (!ownerMatchesScratchRoot(owner, root, dir, deps)) return held("now-held-owner-outside-root");
-	const clear = lsofClearDir(deps, dir);
+	// One system-wide open-file snapshot, the evidence apply's final delete gate uses: the legacy per-dir `lsof +D` walk
+	// times out on large or cache-dense dirs and fails closed forever (a 64 GB throwaway held at
+	// now-held-lsof-unavailable, 2026-10-22). A snapshot the caller injected is used as is.
+	const evidence = deps.lsofSnapshot !== undefined ? deps
+		: { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+	const clear = lsofClearDir(evidence, dir);
 	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
 	try {
 		rmSync(dir, { recursive: true, force: true });

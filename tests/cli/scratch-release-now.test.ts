@@ -143,6 +143,21 @@ test("the CLI accepts --now and retires the directory", () => {
 	expect(existsSync(dir)).toBe(false);
 });
 
+test("--now without an injected snapshot takes one system-wide lsof snapshot, never the per-dir walk", () => {
+	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(dir, "residue.bin"), "x");
+	const calls: string[][] = [];
+	const run: ScratchRunner = (args) => {
+		calls.push([...args]);
+		if (args[0] === "lsof" && args[1] === "+D") return { code: null, stdout: "", stderr: "timed out" };
+		if (args[0] === "lsof" && args[1] === "-nP") return { code: 0, stdout: "p1\nn/somewhere/else.txt\n", stderr: "" };
+		return clearRun(args);
+	};
+	expect(releaseScratch(dir, home, deps({ run }), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(dir)).toBe(false);
+	expect(calls.some((a) => a[0] === "lsof" && a[1] === "+D")).toBe(false);
+});
+
 test("now on a free-prose owner is refused: structured ownership first (79c377fe42 still applies)", () => {
 	const { dir, home } = fixture("just-a-label");
 	const released = releaseScratch(dir, home, deps(), { now: true });
