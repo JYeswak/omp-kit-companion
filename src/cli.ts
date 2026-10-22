@@ -3471,7 +3471,11 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			errors: [{ code: "HOME_UNAVAILABLE", message: "Scratch commands need an absolute HOME",
 				remediation: "Run with an absolute HOME; no scratch was changed." }], verification: "UNVERIFIED" };
 	}
+	// Test seam (UNOWNEDGATE1): OMP_KIT_SCRATCH_FREE_PCT pins the free percent the reaper's pressure rules read
+	// (the 12 h RECLAIM idle bound, plan pressure), like OMP_KIT_SCRATCH_ROOTS pins its roots; unset reads statfs.
+	const pinnedFree = Number(process.env.OMP_KIT_SCRATCH_FREE_PCT);
 	const deps = { liveness: defaultLiveness(), run: scratchRunner, runtimeRepo: kitIdentity().release.root,
+		...(process.env.OMP_KIT_SCRATCH_FREE_PCT && Number.isFinite(pinnedFree) ? { statfs: () => ({ bavail: pinnedFree, blocks: 100 }) } : {}),
 		onProgress: (verdict: { dir: string; action: string; reason: string; error?: string }) => {
 			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})${verdict.error ? ` ${verdict.error}` : ""}\n`);
 		} };

@@ -876,15 +876,17 @@ test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)"
 	mkdirSync(mid, { recursive: true });
 	writeFileSync(join(mid, "data"), "mid\n");
 	backdateTree(mid, 60 * 3600 * 1000, Date.now());
-	const planned = cli(["scratch", "plan"], home, {
-		OMP_KIT_SCRATCH_ROOTS: root,
-		XDG_STATE_HOME: state,
-		PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}`,
-	});
+	const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+	const planned = cli(["scratch", "plan"], home, { ...env, OMP_KIT_SCRATCH_FREE_PCT: "40" });
 	const row = planned.envelope.data.sessions.find((value: { dir: string }) => value.dir === mid);
 	expect(row?.action).toBe("LIVE");
 	expect(row?.reason).toBe("unowned-but-active");
 	expect(String(planned.envelope.data.unownedActiveRule)).toContain("72h");
+	// Same dir with the disk at 12% free (RECLAIM): the 12 h bound applies through the real CLI.
+	const pressed = cli(["scratch", "plan"], home, { ...env, OMP_KIT_SCRATCH_FREE_PCT: "12" });
+	const pressedRow = pressed.envelope.data.sessions.find((value: { dir: string }) => value.dir === mid);
+	expect(pressedRow?.action).toBe("QUARANTINE");
+	expect(pressedRow?.reason).toBe("unowned-idle-12h-reclaim-would-quarantine");
 });
 
 test("service run applies scratch reaping and writes a receipt", () => {
@@ -1317,6 +1319,9 @@ test("quarantine report separates young, expired-held, and delete-failed bytes",
   const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-buckets-"));
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  // The buckets assume the default 24 h TTL: read it from an empty config dir, never the operator's.
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  roots.push(process.env.XDG_CONFIG_HOME);
   const now = Date.parse("2026-10-13T07:00:00.000Z");
   const qt = quarantineDir(home);
   mkdirSync(qt, { recursive: true });
@@ -1607,6 +1612,39 @@ test("an invalid owner label still reaches quarantine once its owner is dead and
   writeFileSync(join(liveDir, ".owner"), ownerText(liveFields("also bad")));
   expect(inspectOne(liveDir, root, deps)).toMatchObject({ action: "SKIP", reason: "owner-label-invalid" });
   expect(existsSync(liveDir)).toBe(true);
+});
+
+// UNOWNEDGATE1 (ompkit-qmdtp), J-2026-10-22-03: while its disk is at RECLAIM pressure an unowned dir idle
+// 12 h with no open fds is quarantined; at normal pressure the same dir waits out 72 h, a recently
+// touched dir stays LIVE under pressure, and open fds still stop the move.
+test("an unowned dir idle 12 h is quarantined only while its disk is at RECLAIM pressure", () => {
+  const home = useState();
+  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  roots.push(root);
+  const now = Date.now();
+  const leftover = join(root, "export-leftover");
+  mkdirSync(leftover, { recursive: true });
+  writeFileSync(join(leftover, "data"), "x\n");
+  backdateTree(leftover, 13 * 3600 * 1000, now);
+  const running = join(root, "export-running");
+  mkdirSync(running, { recursive: true });
+  writeFileSync(join(running, "data"), "y\n");
+  backdateTree(running, 3600 * 1000, now);
+  const tight = { ...depsFor({ now, statfs: () => ({ bavail: 12, blocks: 100 }) }), home, now };
+  const roomy = { ...depsFor({ now, statfs: () => ({ bavail: 40, blocks: 100 }) }), home, now };
+  const busy = { ...tight, run: () => ({ code: 0, stdout: `bun 4242 josh cwd DIR ${leftover}\n`, stderr: "" }) };
+
+  expect(inspectOne(leftover, root, roomy)).toMatchObject({ action: "LIVE", reason: "unowned-but-active" });
+  expect(inspectOne(running, root, tight)).toMatchObject({ action: "LIVE", reason: "unowned-but-active" });
+  const planned = inspectOne(leftover, root, tight);
+  expect(planned).toMatchObject({ action: "QUARANTINE", reason: "unowned-idle-12h-reclaim-would-quarantine" });
+  expect(applyUnowned(leftover, root, roomy, planned!)).toMatchObject({ action: "LIVE", reason: "unowned-but-active" });
+  expect(applyUnowned(leftover, root, busy, planned!)).toMatchObject({ action: "SKIP", cause: "open-fd" });
+  expect(existsSync(leftover)).toBe(true);
+  const applied = applyUnowned(leftover, root, tight, planned!);
+  expect(applied).toMatchObject({ action: "QUARANTINE", reason: "unowned-idle-12h-reclaim-quarantined" });
+  expect(existsSync(leftover)).toBe(false);
+  expect(readFileSync(join(applied.dir, "data"), "utf8")).toBe("x\n");
 });
 
 // REAPSKIP1 (ompkit-3tgm): the recorded quarantine reason keeps the plan's class, so a

@@ -1,0 +1,3 @@
+### Fixed
+
+- The scratch reaper no longer waits 72 hours on dead unowned scratch while the disk is short. When the disk holding a scratch dir is at RECLAIM pressure (20% free or less), an unowned dir untouched for 12 hours, with no open files, goes to quarantine. On 2026-10-22, 26 GB of abandoned test exports and probe homes, idle for 17 to 50 hours, held the release disk gate at 12% free. At normal pressure the bound is still 72 hours, and quarantine stays reversible until its TTL. The plan names the bound that decided (`unowned-idle-12h-reclaim-would-quarantine` or `unowned-idle-72h-would-quarantine`).

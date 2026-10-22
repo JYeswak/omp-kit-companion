@@ -44,6 +44,16 @@ const EXPIRES_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})
 const HOLD_MAX_MS = 14 * 86_400_000;
 const RELEASE_FILE = ".omp-kit-release";
 const QUARANTINE_IDLE_MS = 72 * 3600 * 1000;
+/** While the disk is at RECLAIM pressure (free <= 20%), an unowned dir idle this long with no open fds is
+ * quarantined instead of waiting out the 72 h bound (J-2026-10-22-03: 26 GB of dead unowned exports and probe
+ * homes, idle 17-50 h, held the release gate at 12% free). Quarantine stays reversible for its TTL. */
+const RECLAIM_IDLE_MS = 12 * 3600 * 1000;
+
+/** The idle bound for an unowned dir at `dir`: 12 h under RECLAIM pressure, else 72 h. Plan and apply share it. */
+function unownedIdleMs(dir: string, deps: InspectDeps): number {
+	return classifyScratchPressure(measureDiskFreePercent(dir, deps.statfs)) === "RECLAIM" ? RECLAIM_IDLE_MS : QUARANTINE_IDLE_MS;
+}
+
 const DEFAULT_QUARANTINE_TTL_HOURS = 24;
 const MAX_QUARANTINE_TTL_HOURS = 168;
 const ORPHAN_MIN_AGE_S = 3600;
@@ -1979,7 +1989,7 @@ function quarantineTerminalReason(plannedReason: string | undefined, ownerBefore
 		return `${plannedReason.slice(0, -"-would-quarantine".length)}-quarantined`;
 	return "unowned-idle-72h-quarantined";
 }
-/** Unowned entry lifecycle: idle 72h -> quarantine, configured TTL -> delete (with rechecks). */
+/** Unowned entry lifecycle: idle past unownedIdleMs (72h, or 12h at RECLAIM pressure) -> quarantine, configured TTL -> delete (with rechecks). */
 export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned?: ScratchVerdict): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
@@ -1992,7 +2002,7 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned
 	if (isSymlink(dir)) return stop("session-is-symlink");
 	const freshest = idleSince(dir, now);
 	if (freshest === null) return stop("idle-proof-unavailable");
-	if (freshest >= now - QUARANTINE_IDLE_MS) return stop("unowned-but-active", undefined, undefined, { action: "LIVE" });
+	if (freshest >= now - unownedIdleMs(dir, deps)) return stop("unowned-but-active", undefined, undefined, { action: "LIVE" });
 	const ownerBefore = readText(join(dir, ".owner"));
 	const currentOwner = ownerBefore === null ? null : parseOwnerFile(ownerBefore);
 	if (planned && (planned.owner === null ? currentOwner !== null :
@@ -2199,8 +2209,8 @@ export function killOrphan(pid: number, deps: ApplyDeps): boolean {
 
 export interface ScratchTotals { sizeByVerdict: Record<string, number>; countByVerdict: Record<string, number>; sizeByRoot: Record<string, number>; malformedByRoot: Record<string, number> }
 
-/** What makes an unowned dir "active": newest mtime in the tree within 72h. Stated here so plan output and help text share it. */
-export const UNOWNED_ACTIVE_RULE = "unowned dir with newest mtime in tree within 72h is LIVE unowned-but-active; idle past 72h with no open fds goes to quarantine";
+/** What makes an unowned dir "active": newest mtime in the tree within unownedIdleMs. Stated here so plan output and help text share it. */
+export const UNOWNED_ACTIVE_RULE = "unowned dir with newest mtime in tree within 72h (12h while its disk is at RECLAIM pressure, free <= 20%) is LIVE unowned-but-active; idle past that with no open fds goes to quarantine";
 
 export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): ScratchTotals {
 	const totals: ScratchTotals = { sizeByVerdict: {}, countByVerdict: {}, sizeByRoot: {}, malformedByRoot: {} };
@@ -2386,9 +2396,10 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	if (mismatch || (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
 		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete"))) {
 		const freshest = idleSince(dir, deps.now ?? Date.now());
-		if (freshest !== null && freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS) {
+		const idleMs = unownedIdleMs(dir, deps);
+		if (freshest !== null && freshest < (deps.now ?? Date.now()) - idleMs) {
 			return { ...quarantineCandidate, action: "QUARANTINE",
-				reason: mismatch ? "mismatched-owner-idle-72h-would-quarantine" : "unowned-idle-72h-would-quarantine",
+				reason: `${mismatch ? "mismatched-owner" : "unowned"}-${freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS ? "idle-72h" : "idle-12h-reclaim"}-would-quarantine`,
 				sizeBytes: dirSize(dir) };
 		}
 		if (!mismatch) return verdict.reason === "malformed-owner-file"
