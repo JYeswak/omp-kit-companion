@@ -29,12 +29,13 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
 
 KIT_BEAD_LINT_VERSION = "bead-lint.kit/v1"
 DAMPING = 0.85
@@ -361,12 +362,11 @@ def build_pagerank_fixture(
 
 
 def run_pagerank_cert(fixture: dict, probe: str) -> dict:
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".json", delete=False
-    ) as f:
-        json.dump(fixture, f)
-        path = f.name
+    work = kitlib_tmp.owned_tmp("bead-lint-pagerank")
+    path = os.path.join(work.path, "fixture.json")
     try:
+        with open(path, "w") as f:
+            json.dump(fixture, f)
         rc, out, err = run(
             [probe, "pagerank-cert", "--pagerank-graph-fixture", path,
              "--json"],
@@ -384,7 +384,7 @@ def run_pagerank_cert(fixture: dict, probe: str) -> dict:
         receipt["_probe_rc"] = rc
         return receipt
     finally:
-        os.unlink(path)
+        work.cleanup()
 
 
 def mkcheck(
@@ -423,7 +423,7 @@ def mkbead(
         "created_by": "bead-lint-selftest",
         "updated_at": BASE_TS,
         "source_repo": "selftest",
-        "source_repo_path": "/tmp/bead-lint-selftest",
+        "source_repo_path": "/tmp/bead-lint-selftest",  # tempsafe: fake fixture field value, nothing is created there
         "compaction_level": 0,
         "original_size": 0,
         "labels": labels if labels is not None else ["selftest"],
@@ -986,7 +986,8 @@ def backlog_report(beads: list[dict]) -> list[dict]:
 def run_selftest(probe: str) -> tuple[bool, dict]:
     fails: list[str] = []
     log: dict = {"mutation": [], "clean": {}}
-    tmp = tempfile.mkdtemp(prefix="bead-lint-kit-selftest-")
+    work = kitlib_tmp.owned_tmp("bead-lint-kit-selftest")
+    tmp = work.path
     try:
         beads, expected = build_selftest_beads()
         jsonl = os.path.join(tmp, "issues.jsonl")
@@ -1141,7 +1142,7 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
         log["sink_flip"] = {"agree": rp.get("status"),
                             "disagree": rf.get("status")}
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        work.cleanup()
     return (not fails), {"failures": fails, "log": log}
 
 

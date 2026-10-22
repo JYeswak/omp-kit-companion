@@ -12,11 +12,11 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import kitlib_run  # noqa: E402  (bounded runs: process-group deadline, reap, output cap)
+import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
 
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
 # Intel macOS remains a CI-only probe; release candidates ship these three targets.
@@ -468,7 +468,7 @@ def native(args):
                "proofs": {}, "certified": False}
     out = Path(args.out)
     try:
-        with tempfile.TemporaryDirectory(prefix="omp-kit-native-") as temp:
+        with kitlib_tmp.owned_tmp("omp-kit-native") as temp:
             root = Path(temp).resolve()
             home = root / "home"
             home.mkdir()

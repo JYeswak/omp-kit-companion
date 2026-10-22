@@ -36,8 +36,9 @@ LINE="Current release: v$VERSION"
 if ! grep -qF "$START" "$README"; then echo "stamp-release-line: start marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
 if ! grep -qF "$END" "$README"; then echo "stamp-release-line: end marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
 
-tmp=$(mktemp "${TMPDIR:-/tmp}/stamp-release-line.XXXXXX")
-trap 'rm -f "$tmp"' EXIT INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp work stamp-release-line
+tmp=$work/readme
 awk -v start="$START" -v end="$END" -v line="$LINE" '
 	index($0, start) { inblock = 1; print; print line; next }
 	index($0, end) { inblock = 0; print; next }
@@ -49,5 +50,4 @@ else
 	cat "$tmp" > "$README"
 	echo "stamp-release-line: stamped $LINE in $README"
 fi
-trap - EXIT INT TERM
-rm -f "$tmp"
+kitlib_tmp_cleanup "$work"

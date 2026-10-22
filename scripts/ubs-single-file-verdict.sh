@@ -18,10 +18,13 @@ case "$timeout_secs" in ''|*[!0-9]*|0) echo '{"status":"invalid","verdict":"UNKN
 [ -f "$file" ] || { echo '{"status":"invalid","verdict":"UNKNOWN","reason":"input file is absent"}'; exit 2; }
 command -v ubs >/dev/null 2>&1 || { echo '{"status":"environment","verdict":"UNKNOWN","reason":"ubs is absent"}'; exit 2; }
 input_hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
-output=$(mktemp)
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp work ubs-single-file
+output=$work/output
+pid=
 # shellcheck disable=SC2329
-cleanup() { [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -f "$output"; }
-trap cleanup EXIT INT TERM
+cleanup() { [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; }
+kitlib_tmp_atexit cleanup
 (
   cd "$repo"
   UBS_MODULE_TIMEOUT="$timeout_secs" ubs --no-auto-update --only=js --format=json --files="$file" "$repo"

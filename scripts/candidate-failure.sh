@@ -37,8 +37,9 @@ jobs="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate --jq '.jobs[] 
 if [ -z "$jobs" ]; then echo "no issue: no failed jobs in run $RUN_ID"; exit 0; fi
 
 diffstat="$(git diff --stat "$SHA^" "$SHA" 2>/dev/null || echo "diff unavailable")"
-body="$(mktemp)" || exit 2
-trap 'rm -f "$body"' EXIT INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp work candidate-failure || exit 2
+body="$work/body"
 {
 	printf 'Candidate for v%s (bump %s) FAILED after stage 2 certified that SHA green.\n' "$VERSION" "$SHA"
 	printf 'Do not rerun: diagnose, fix forward, mirror to a P0 bead with this evidence.\n\n'

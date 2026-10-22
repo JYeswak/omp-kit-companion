@@ -86,7 +86,10 @@ OWN_WORK_ROOT=1
 OMP_KIT_WORK_DIR="$WORK_ROOT"
 export OMP_KIT_WORK_DIR
 KEEP_WORK=0
-T=$(mktemp -d "$WORK_ROOT/e2e-live.XXXXXX") || { echo "cannot create e2e-live work directory under $WORK_ROOT" >&2; exit 2; }
+# WORK_ROOT is a fresh private dir that runtime-adapter made for this shell (its .owner names our pid) and that
+# cleanup below removes, so T is a plain child of it, not a second temp root.
+T="$WORK_ROOT/e2e-live"
+mkdir -m 0700 "$T" || { echo "cannot create e2e-live work directory under $WORK_ROOT" >&2; exit 2; }
 H="$T/home"
 MP=""
 OP=""

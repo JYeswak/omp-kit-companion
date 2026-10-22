@@ -18,8 +18,10 @@ from pathlib import Path
 COMPANION = Path(__file__).resolve().parents[2]
 OMP_KIT = COMPANION.parent / "omp-kit"
 sys.path.insert(0, str(OMP_KIT / "scripts" / "cc"))
+sys.path.insert(0, str(COMPANION / "scripts"))
 
 from cclib import Registry, Spool, canonical  # noqa: E402
+from kitlib_tmp import owned_tmp  # noqa: E402  (Spool mkdirs its state; the state dir must be owned and removed)
 
 FIXTURES = [
     # nested data, non-ASCII target, integer 0
@@ -45,9 +47,10 @@ OBSERVED_MS = 1_769_000_010_000
 def main() -> None:
     registry = Registry()
     out = COMPANION / "tests" / "fixtures" / "cc-spool-golden.jsonl"
-    with out.open("w", encoding="utf-8") as fh:
+    # The envelope never reads the spool state, but Spool() creates <state>/spool/<producer>.
+    with owned_tmp("cc-spool-golden") as state, out.open("w", encoding="utf-8") as fh:
         for producer, key, type_, time_ms, data in FIXTURES:
-            spool = Spool(producer, state=Path("/tmp/cc-spool-golden-unused"), registry=registry)
+            spool = Spool(producer, state=Path(state).resolve(), registry=registry)
             env = spool.envelope(type_, data, key=key, time_ms=time_ms, observed_ms=OBSERVED_MS)
             fh.write(json.dumps({"producer": producer, "key": key, "type": type_, "time_ms": time_ms,
                                  "observed_ms": OBSERVED_MS, "data": data, "line": canonical(env)},

@@ -47,9 +47,10 @@ source_export=0
 if [ ! -e "$ROOT/.git" ] && [ -d "$ROOT/src" ] && [ ! -x "$ROOT/bin/omp-kit" ]; then
   source_export=1
 fi
+. "$ROOT/scripts/kitlib-tmp.sh"
 if [ "$source_export" = 1 ]; then
   umask 077
-  work_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/omp-kit-manifest.XXXXXXXX") ||
+  kitlib_tmp work_dir omp-kit-manifest ||
     { echo "build-manifest: cannot create private source-export workdir" >&2; exit 2; }
 else
   work_dir=$("$OMP_KIT_BUN" --workdir) ||
@@ -61,7 +62,7 @@ cleanup() {
   rm -f "$tmp" "$tmp.have" "$tmp.want"
   rmdir "$work_dir" 2>/dev/null || true
 }
-trap cleanup EXIT
+kitlib_tmp_atexit cleanup
 
 
 # One process for every rule: name TAB class, from the rule object omp itself builds.

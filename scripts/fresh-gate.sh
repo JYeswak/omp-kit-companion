@@ -695,7 +695,7 @@ make_work() {
 	trap 'on_signal 130' INT
 	trap 'on_signal 143' TERM
 	OWN_WORK=1
-	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.$$.XXXXXX")
+	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.$$.XXXXXX") # tempsafe: own signal-drain handler removes this pid-named owned dir on EXIT/HUP/INT/TERM; kitlib cannot hold signals during the grace
 	start=$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
 	printf 'pid=%s\nprocess_start=%s\nlabel=fresh-gate\nrepo=%s\ncreated=%s\n' "$$" "$start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$WORK/.owner"
 }

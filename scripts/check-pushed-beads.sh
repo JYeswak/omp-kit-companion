@@ -62,9 +62,11 @@ fi
 HOOKDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 HOOK="$HOOKDIR/commit-msg-bead.sh"
 [ -f "$HOOK" ] || { printf 'check-pushed-beads: hook body missing at %s\n' "$HOOK" >&2; exit 2; }
+[ -f "$HOOKDIR/kitlib-tmp.sh" ] || { printf 'check-pushed-beads: kitlib-tmp.sh missing at %s\n' "$HOOKDIR" >&2; exit 2; }
+. "$HOOKDIR/kitlib-tmp.sh"
 COMMITS=$(git -C "$REPO" rev-list --no-merges "$TIP" --not --remotes=origin 2>/dev/null) || { printf 'check-pushed-beads: cannot list commits at tip %s outside origin remotes (base %s)\n' "$TIP" "$BASE" >&2; exit 2; }
-TMPMSG=$(mktemp "${TMPDIR:-/tmp}/pushed-beads-msg.XXXXXX") || exit 2
-trap 'rm -f "$TMPMSG"' EXIT INT TERM
+kitlib_tmp msg_dir pushed-beads-msg || exit 2
+TMPMSG=$msg_dir/msg
 export BEADS_DB="$DB"
 export BR_BIN="$BRBIN"
 checked=0

@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CASE_HEADER } from "../src/case-corpus.ts";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 const repo = join(import.meta.dir, "..");
 const limit = Number(process.argv.includes("--limit") ? process.argv[process.argv.indexOf("--limit") + 1] : 10_000);
 const plant = process.argv.includes("--plant-divergence");
 mkdirSync(join(repo, "var", "agent-tmp"), { recursive: true });
-const root = mkdtempSync(join(repo, "var", "agent-tmp", "l9-fuzz-"));
+const work = ownedTmp("l9-fuzz", { root: join(repo, "var", "agent-tmp") }), root = work.path;
 const rulesDir = join(root, "rules"), caseFile = join(root, "cases.tsv"); mkdirSync(rulesDir, { recursive: true });
 const ruleNames = readdirSync(join(repo, "rules")).filter(name => name.endsWith(".md")).map(name => name.slice(0, -3)).sort();
 for (const name of ruleNames) writeFileSync(join(rulesDir, `${name}.md`), await Bun.file(join(repo, "rules", `${name}.md`)).text());
@@ -28,4 +29,4 @@ const kit = Bun.spawnSync([process.execPath, join(repo, "scripts", "ttsr-harness
 const nativeCounts: Record<string, number> = {}, kitCounts: Record<string, number> = {}; for (const name of ruleNames) { nativeCounts[name] = 0; kitCounts[name] = 0; } for (let i = 0; i < cases.length; i += 1) if (nativeLines[i]?.fired) nativeCounts[cases[i]!.rule] += 1; for (const row of gate.cases ?? []) if (row.g2 === "fire") kitCounts[row.rule] += 1;
 const zeroNative = ruleNames.filter(name => fireSeeds[name] && nativeCounts[name] === 0); const disagreements = gate.failures?.length ?? 0;
 console.log(JSON.stringify({ schema_version: 1, generated: limit, rules: ruleNames.length, native_checked: nativeLines.length, worker_errors: nativeLines.filter(line => line.error).length, native_fire_counts: nativeCounts, kit_fire_counts: kitCounts, zero_native_rules: zeroNative, disagreements, planted_divergence: plant }));
-rmSync(root, { recursive: true, force: true }); process.exit(disagreements === 0 && zeroNative.length === 0 ? 0 : plant && zeroNative.length === 0 ? 0 : 1);
+work.cleanup(); process.exit(disagreements === 0 && zeroNative.length === 0 ? 0 : plant && zeroNative.length === 0 ? 0 : 1);

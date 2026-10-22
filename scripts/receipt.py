@@ -32,7 +32,6 @@ import json
 import math
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 CONFIDENCES = ("observed", "derived", "inferred")
@@ -199,7 +198,11 @@ def _write_receipt(path, **fields) -> None:
 
 def selftest() -> int:
     failures = []
-    with tempfile.TemporaryDirectory() as tmp:
+    # kitlib_tmp ships beside this file; only the selftest needs a temp dir, so sign/verify never import it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from kitlib_tmp import owned_tmp
+
+    with owned_tmp("receipt-selftest") as tmp:
         tmp = Path(tmp)
         good = tmp / "good.receipt.json"
 

@@ -48,8 +48,8 @@ command -v jq >/dev/null || { echo "apply-policy: jq not found" >&2; exit 2; }
 command -v omp >/dev/null || { echo "apply-policy: omp not found" >&2; exit 2; }
 jq -e 'type == "object"' "$POLICY" >/dev/null || { echo "apply-policy: bad $POLICY" >&2; exit 2; }
 
-neutral=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-policy.XXXXXX")
-trap 'rm -rf "$neutral"' EXIT
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp neutral omp-kit-policy || exit 1
 cd "$neutral"
 
 # Targets: "default", "profile:<name>" or "dir:<path>"

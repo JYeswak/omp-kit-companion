@@ -1,6 +1,7 @@
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 // One entrypoint for ordinary stock CI and its explicitly requested negative control.
 const repo = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
@@ -28,8 +29,8 @@ for (const name of ["git", "sh", "bash", "env"]) {
 }
 const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
-const scratch = mkdtempSync(join(scratchParent, `stock-extensions.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=stock-extensions\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
+// Owned: removed when this process exits (after the child test run) or on HUP/INT/TERM.
+const scratch = ownedTmp("stock-extensions", { root: scratchParent }).path;
 const bin = join(scratch, "bin");
 const home = join(scratch, "home");
 const tmp = join(scratch, "tmp");
@@ -62,7 +63,7 @@ for (const name of ["br", "am", "ntm", "tmux"]) {
 	console.log(`stock-extensions: Bun.which(${JSON.stringify(name)}) = ${JSON.stringify(resolved)}`);
 	if (resolved !== null) throw new Error(`Stock PATH unexpectedly exposes ${name}`);
 }
-console.log(`stock-extensions: isolated HOME/TMPDIR/XDG/PATH; retained scratch ${scratch}`);
+console.log(`stock-extensions: isolated HOME/TMPDIR/XDG/PATH; scratch ${scratch} (removed on exit)`);
 if (plantAssertion) {
 	console.log("stock-extensions: NEGATIVE CONTROL changes actual extensions/kit-callback.test.ts bytes; this is NOT ordinary source qualification");
 	appendFileSync(join(repo, "extensions", "kit-callback.test.ts"), '\n\ntest("STOCK_EXTENSION_NEGATIVE_CONTROL intentionally failing callback assertion", () => {\n\texpect("planted callback failure").toBe("ordinary source qualification");\n});\n');

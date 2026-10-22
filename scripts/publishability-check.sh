@@ -13,6 +13,8 @@
 # classes, no nested quantifiers (linear in grep -E / ripgrep default).
 # Usage: publishability-check.sh [ROOT]
 set -u
+# Sourced before the cd below, while $0 still resolves.
+. "$(dirname -- "$0")/kitlib-tmp.sh"
 
 ROOT=${1:-.}
 fail() {
@@ -28,15 +30,14 @@ cd -- "$ROOT" || fail "cannot cd to $ROOT"
 # extracted archive, a scratch copy) would otherwise enumerate nothing and report OK (rz5.106.7).
 top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not inside a git work tree"
 [ "$(cd -P -- "$top" && pwd)" = "$(pwd -P)" ] || fail "UNRUN: $ROOT is not the top of its git work tree ($top is)"
-# Scratch is an owned dir in the scanned repo: var/agent-tmp/publishability.<pid>.XXXXXX with an .owner
+# Scratch is a kitlib-owned dir in the scanned repo: var/agent-tmp/publishability.<pid>.<rand> with an .owner
 # file (AGENTS.md Storing). TMPDIR is ignored on purpose: its macOS default is /var/folders, which the
-# fleet rules forbid. The dir and its files are removed on exit.
+# fleet rules forbid. The dir and its files are removed on exit and on HUP/INT/TERM.
 mkdir -p "$(pwd -P)/var/agent-tmp" || fail "cannot create var/agent-tmp"
-scratch=$(mktemp -d "$(pwd -P)/var/agent-tmp/publishability.$$.XXXXXX") || fail "cannot create scratch dir"
-printf 'pid=%s\nlabel=publishability\nrepo=%s\ncreated=%s\n' "$$" "$(pwd -P)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$scratch/.owner"
+KITLIB_TMP_ROOT="$(pwd -P)/var/agent-tmp"
+kitlib_tmp scratch publishability || fail "cannot create scratch dir"
 TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"; TMP_RCREP="$scratch/greprc"
 : > "$TMP_FINDINGS"
-trap 'rm -f "$TMP_FINDINGS" "$TMP_FILES" "$TMP_RCREP" "$scratch/.owner"; rmdir "$scratch" 2>/dev/null' EXIT INT TERM
 
 # Every producer is checked (rz5.106.7): a failed enumeration or a grep error (rc > 1) is exit 2,
 # never an empty scan that ends in OK. grep rc 1 means no match.

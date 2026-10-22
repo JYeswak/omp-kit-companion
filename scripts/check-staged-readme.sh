@@ -35,13 +35,15 @@ checker="$here/readme-check.ts"
 [ -f "$checker" ] || { printf 'staged-readme: REFUSED: installed readme checker missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$(basename -- "$0")" >&2; exit 1; }
 command -v bun >/dev/null 2>&1 || { printf 'staged-readme: REFUSED: bun is unavailable so readme-check cannot run on the candidate tree\n' >&2; exit 1; }
 tree=$(git write-tree) || { printf 'staged-readme: cannot write the staged tree\n' >&2; exit 1; }
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/staged-readme.XXXXXX") || { printf 'staged-readme: cannot stage the candidate tree\n' >&2; exit 1; }
+[ -f "$here/kitlib-tmp.sh" ] || { printf 'staged-readme: REFUSED: kitlib-tmp.sh missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$(basename -- "$0")" >&2; exit 1; }
+. "$here/kitlib-tmp.sh"
+kitlib_tmp tmp staged-readme || { printf 'staged-readme: cannot stage the candidate tree\n' >&2; exit 1; }
 cleanup() {
 	chmod -R u+w "$tmp" 2>/dev/null || true
 	find "$tmp" ! -type d -delete 2>/dev/null || true
 	find "$tmp" -depth -type d -empty -delete 2>/dev/null || true
 }
-trap cleanup EXIT HUP INT TERM
+kitlib_tmp_atexit cleanup
 git archive "$tree" | tar -xf - -C "$tmp" || { printf 'staged-readme: cannot extract the candidate tree\n' >&2; exit 1; }
 if out=$(CDPATH='' cd -- "$root" && bun run --no-env-file --config=/dev/null "$checker" --root "$tmp" 2>&1); then
 	exit 0

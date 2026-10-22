@@ -102,7 +102,7 @@ new_workdir() {
 	if [ -n "$caller_work_root" ]; then
 		base=$caller_work_root
 	else
-		base="${TMPDIR:-/tmp}"
+		base="${TMPDIR:-/tmp}" # tempsafe: selects the parent-owned --workdir root; the parent removes the dir
 		base_real=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || base_real=""
 		root_real=$(CDPATH='' cd -- "$ROOT" && pwd -P) || die "cannot resolve release root"
 		case "$base_real" in
@@ -111,11 +111,11 @@ new_workdir() {
 			base=/tmp ;;
 		esac
 		if [ -z "$base" ] || [ ! -d "$base" ]; then
-			die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})"
+			die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})" # tempsafe: refusal message, creates nothing
 		fi
 	fi
 	umask 077
-	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base"
+	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base" # tempsafe: --workdir hands this dir to the parent named in its .owner, which removes it; kitlib here would remove it at once
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
 	work=$(CDPATH='' cd -- "$work" && pwd -P) || die "cannot resolve private work directory"
 	owner_pid="${OMP_KIT_WORK_OWNER_PID:-$PPID}"
@@ -179,7 +179,10 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
   fi
   case "${OMP_SRC:-}" in /*) [ -d "$OMP_SRC" ] || die "validated OMP source is unavailable" ;; *) die "validated OMP_SRC must be absolute" ;; esac
   case "${HOME:-}" in */home) sandbox=${HOME%/home} ;; *) die "isolated HOME is required" ;; esac
-  if [ "$HOME" != "$sandbox/home" ] || [ "${TMPDIR:-}" != "$sandbox/tmp" ] || \
+  if [ "${TMPDIR:-}" != "$sandbox/tmp" ]; then # tempsafe: equality check, creates nothing
+    die "child HOME/XDG/TMPDIR/Bun prefix are not one isolated sandbox"
+  fi
+  if [ "$HOME" != "$sandbox/home" ] || \
     [ "${XDG_CONFIG_HOME:-}" != "$sandbox/xdg-config" ] || \
     [ "${XDG_CACHE_HOME:-}" != "$sandbox/xdg-cache" ] || \
     [ "${XDG_DATA_HOME:-}" != "$sandbox/xdg-data" ] || \
@@ -191,8 +194,22 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     die "isolated sandbox root is absent or symlinked"
   fi
   sandbox_real=$(CDPATH='' cd -- "$sandbox" && pwd -P) || die "cannot resolve isolated sandbox"
-# The P01 runtime creates each sandbox with this mkdtemp prefix; caller-shaped XDG trees refuse.
-  case "${sandbox_real##*/}" in omp-kit-runtime-*) ;; *) die "sandbox was not created by embedded runtime" ;; esac
+# The P01 runtime creates each sandbox as a kitlib owned dir, omp-kit-runtime.<pid>.<6 [a-z0-9]>, or (older
+# runtimes) with the mkdtemp prefix omp-kit-runtime-; caller-shaped XDG trees refuse.
+  sandbox_name=${sandbox_real##*/}
+  case "$sandbox_name" in
+    omp-kit-runtime-*) ;;
+    omp-kit-runtime.*)
+      sandbox_pid=${sandbox_name#omp-kit-runtime.}
+      sandbox_rand=${sandbox_pid#*.}
+      sandbox_pid=${sandbox_pid%%.*}
+      # Sets spelled out: bracket ranges follow the locale's collation in some shells.
+      case "$sandbox_pid" in ''|*[!0123456789]*) die "sandbox was not created by embedded runtime" ;; esac
+      case "$sandbox_rand" in ??????) ;; *) die "sandbox was not created by embedded runtime" ;; esac
+      case "$sandbox_rand" in *[!abcdefghijklmnopqrstuvwxyz0123456789]*) die "sandbox was not created by embedded runtime" ;; esac
+      ;;
+    *) die "sandbox was not created by embedded runtime" ;;
+  esac
   private_temp_contains "$sandbox_real" || die "isolated sandbox is outside the permitted temporary root"
   case "$sandbox_real" in "$ROOT"|"$ROOT"/*|"$HOME"|"$HOME"/*) die "isolated sandbox overlaps the release or HOME" ;; esac
   private_owner_mode "$sandbox_real" || die "sandbox must be owned by this user and mode 700"
@@ -238,7 +255,7 @@ if [ -x "$ROOT/bin/omp-kit" ]; then
     PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
     LANG="${LANG:-}" LC_ALL="${LC_ALL:-}" CI="${CI:-}" GITHUB_ACTIONS="${GITHUB_ACTIONS:-}" NO_COLOR="${NO_COLOR:-}" SHELL="${SHELL:-}" \
-    TMPDIR="$TMPDIR" TMP="$TMPDIR" TEMP="$TMPDIR" \
+    TMPDIR="$sandbox/tmp" TMP="$sandbox/tmp" TEMP="$sandbox/tmp" \
     XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
     XDG_DATA_HOME="$XDG_DATA_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
     BUN_INSTALL="$BUN_INSTALL" \

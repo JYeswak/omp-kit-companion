@@ -126,8 +126,9 @@ do_check() {
 }
 
 do_selftest() {
-	root=$(mktemp -d "${TMPDIR:-/tmp}/vlevel-selftest.XXXXXX") || exit 2
-	trap 'rm -rf "$root"' EXIT INT TERM
+	# Sourced here, not at the top: the installed hook (and the fixture copies below) run without kitlib beside them.
+	. "${SELF%/*}/kitlib-tmp.sh"
+	kitlib_tmp root vlevel-selftest || exit 2
 	pass=0 fail=0
 	ok() { printf 'selftest: PASS %s\n' "$1"; pass=$((pass + 1)); }
 	bad() { printf 'selftest: FAIL %s\n' "$1"; fail=$((fail + 1)); }

@@ -68,27 +68,23 @@ while [ "$#" -gt 0 ]; do
 done
 [ -z "$VERSION" ] || [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "release-local: --version must be X.Y.Z" >&2; exit 2; }
 [ -z "$SOURCE" ] || [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "release-local: --source must be a full commit SHA" >&2; exit 2; }
-if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi
+if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
 
 # Cancel safety: every external step runs bounded, with stdin from /dev/null, as a waited background child that
-# the INT/TERM/EXIT trap kills; the keychain re-locks and the build tree is removed on every exit path.
-WORK="$(mktemp -d "$TMPDIR/release-local.XXXXXXXX")"
+# the exit work kills; the keychain re-locks and the build tree is removed on every exit path. kitlib owns the
+# EXIT/HUP/INT/TERM traps: the build tree is its owned dir and cleanup runs first, as kitlib atexit work.
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp WORK release-local
 CHILD=''
 UNLOCKED=0
 STARTED=$(date +%s)
 STAGE_LOG="$WORK/stages"
 : >"$STAGE_LOG"
 cleanup() {
-	local status=$?
-	trap - EXIT INT TERM
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
-	rm -rf "$WORK"
-	exit "$status"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+kitlib_tmp_atexit cleanup
 # bounded SECONDS CMD...: run CMD with a deadline and no terminal stdin, interruptible by the trap.
 bounded() {
 	local seconds=$1; shift
@@ -285,7 +281,7 @@ receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
 	stage ''
 	python3 - "$STAGE_LOG" "$DIST/SHA256SUMS" "$phase" "$VERSION" "$SOURCE" "$BASE_TAG" "$NOTARY_ID" "$url" "$run_id" \
-		"$(( $(date +%s) - STARTED ))" "$TMPDIR/release-local-v$VERSION-$phase.json" <<'PY'
+		"$(( $(date +%s) - STARTED ))" "$TMPDIR/release-local-v$VERSION-$phase.json" <<'PY' # tempsafe: receipt into the caller-owned scratch, kept past exit by contract
 import json, sys
 stages, sums, phase, version, source, base, notary, url, run_id, total, out = sys.argv[1:]
 doc = {"schema_version": 1, "phase": phase, "version": version, "source_sha": source, "base_tag": base,

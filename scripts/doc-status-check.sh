@@ -26,8 +26,10 @@ for arg in "$@"; do
 done
 [ -d "$REPO" ] || fail "not a directory: $REPO"
 
-LIST=$(mktemp) || fail "cannot create work file"
-trap 'rm -f "$LIST"' EXIT INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp work doc-status || fail "cannot create work file"
+LIST=$work/list
+: > "$LIST"
 if [ -d "$REPO/docs" ]; then
 	find "$REPO/docs" -maxdepth 1 -name '*.md' ! -name 'INDEX.md' | sort >> "$LIST"
 fi
@@ -38,10 +40,12 @@ done
 [ -s "$LIST" ] || fail "no docs found under $REPO"
 
 bad=0
-current_list=$(mktemp) || fail "cannot create work file"
-draft_list=$(mktemp) || fail "cannot create work file"
-superseded_list=$(mktemp) || fail "cannot create work file"
-trap 'rm -f "$LIST" "$current_list" "$draft_list" "$superseded_list"' EXIT INT TERM
+current_list=$work/current
+draft_list=$work/draft
+superseded_list=$work/superseded
+: > "$current_list"
+: > "$draft_list"
+: > "$superseded_list"
 
 while IFS= read -r file; do
 	rel=${file#"$REPO"/}

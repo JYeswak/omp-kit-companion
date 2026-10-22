@@ -15,8 +15,10 @@ if [ $# -eq 0 ]; then
 	exit 2
 fi
 
-TMP_FINDINGS=$(mktemp "${TMPDIR:-/tmp}/derived.XXXXXX") || exit 2
-trap 'rm -f "$TMP_FINDINGS"' EXIT INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp findings_dir derived || exit 2
+TMP_FINDINGS=$findings_dir/findings
+: > "$TMP_FINDINGS"
 
 for file in "$@"; do
 	[ -f "$file" ] || continue

@@ -35,10 +35,11 @@ if [ -z "$BASE" ]; then
 fi
 
 
-scratch=$(mktemp -d "$ARCHIVE_DIR/../pushed-notes.XXXXXX") || exit 1
+. "$SCRIPT_DIR/kitlib-tmp.sh"
+KITLIB_TMP_ROOT=$ARCHIVE_DIR/..
+kitlib_tmp scratch pushed-notes || exit 1
 validation="$scratch/validation"
 mkdir -p "$validation/changelog.d"
-trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 cp "$ARCHIVE_DIR/CHANGELOG.md" "$validation/CHANGELOG.md"
 git -C "$validation" init -q
 for frag in "$ARCHIVE_DIR"/changelog.d/*.md; do

@@ -56,8 +56,8 @@ if [ "$mode" = check ]; then
 fi
 
 # --selftest: every denylisted token must trip the scan; a clean copy must pass.
-work=$(mktemp -d "${TMPDIR:-/tmp}/default-pack-neutral.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp work default-pack-neutral || exit 1
 cp "$ROOT"/rules/*.md "$work"/
 plant=0
 for token in 'var/agent-tmp' 'AGENTS.md (Storing)' 'AGENTS.md (Pushing)' 'Agent Mail' 'ntm spawn' 'director-only' 'Josh' 'infisical-secrets'; do

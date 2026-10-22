@@ -33,7 +33,13 @@ while read -r old new ref; do
 		exit 4
 	fi
 	for sha in $commits; do
-		if [ -z "$MSG" ]; then MSG=$(mktemp "${TMPDIR:-/tmp}/ref-txn-bead.XXXXXX") || exit 4; fi
+		if [ -z "$MSG" ]; then
+			# Sourced only when a message must be judged: most ref updates gain no commit.
+			[ -f "$HERE/kitlib-tmp.sh" ] || { printf 'ref-txn-bead: kitlib-tmp.sh missing beside %s; refusing the update\n' "$0" >&2; exit 4; }
+			. "$HERE/kitlib-tmp.sh"
+			kitlib_tmp msg_dir ref-txn-bead || exit 4
+			MSG=$msg_dir/msg
+		fi
 		if ! git log --format=%B -n 1 "$sha" > "$MSG" 2>/dev/null; then
 			printf 'ref-txn-bead: cannot read commit %s; refusing the update\n' "$sha" >&2
 			rc=4
@@ -45,5 +51,5 @@ while read -r old new ref; do
 		fi
 	done
 done
-[ -z "$MSG" ] || rm -f "$MSG"
+[ -z "$MSG" ] || kitlib_tmp_cleanup "$msg_dir"
 exit "$rc"

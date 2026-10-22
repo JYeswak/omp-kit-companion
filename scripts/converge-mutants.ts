@@ -1,7 +1,7 @@
 import { plugin } from "bun";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // .138 qualification: variants exist only in Bun's loader, never in a source copy.
@@ -87,9 +87,13 @@ if (process.env.OMP_KIT_CONVERGE_MUTANT_LOADER === "1") {
 	});
 } else if (import.meta.main) {
 	const sourceSha = sha256(readFileSync(sourcePath));
-	const scratchRoot = join(root, "var", "agent-tmp");
-	mkdirSync(scratchRoot, { recursive: true });
-	const scratch = mkdtempSync(join(scratchRoot, `converge-mutants.${process.pid}.`));
+	// The run keeps its logs as evidence (log_prefix below), so they live in the caller's owned scratch, never
+	// system temp: TMPDIR is required, as scripts/release-local.sh requires it.
+	const scratchRoot = process.env.TMPDIR ?? "";
+	if (scratchRoot === "" || !statSync(scratchRoot, { throwIfNoEntry: false })?.isDirectory()) {
+		throw new Error("converge-mutants: export TMPDIR to an owned scratch directory first");
+	}
+	const scratch = mkdtempSync(join(scratchRoot, `converge-mutants.${process.pid}.`)); // tempsafe: evidence kept in the caller-owned scratch by contract; the caller releases it with --bin evidence
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=converge-mutants\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	const run = (mutation: Mutation, id: string): RunEvidence => {
 		const env = { ...process.env, TMPDIR: scratch, NO_COLOR: "1", FORCE_COLOR: "0",

@@ -23,13 +23,13 @@ import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
+from kitlib_tmp import owned_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
 sys.path.insert(0, str(ROOT / "installer"))
 import install  # noqa: E402  (the installer's own fail-closed archive parser)
 
@@ -241,7 +241,7 @@ def check_signature(binary: Path, path: str, entitlements: Path, *, notarized: b
 
 
 def execute(binary: Path, version: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="devid-exec-") as home:
+    with owned_tmp("devid-exec") as home:
         env = {"HOME": home, "TMPDIR": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "NO_COLOR": "1"}
         result = run_bounded([str(binary), "--version"], env=env, cwd=home, timeout=120)
     if result.outcome != "OK":
@@ -327,7 +327,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     if signed_manifest != derived_manifest(manifest, digests):
         raise Refused("release manifest differs beyond the signed Mach-O digests")
     final_index = derived_index(qualified_index, signed_sha, sha256(signed_manifest))
-    with tempfile.TemporaryDirectory(prefix="devid-verify-") as work:
+    with owned_tmp("devid-verify") as work:
         index_path = Path(work) / "release-index.json"
         index_path.write_bytes(final_index)
         _, signed_view, _ = installer_check(signed_archive, index_path, args.version)

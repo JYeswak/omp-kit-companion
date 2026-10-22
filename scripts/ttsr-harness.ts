@@ -34,6 +34,7 @@ import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { mechanicalVerdicts as admissionVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
 // Archive-based gates extract under var/agent-tmp. Resolve fixture-relative paths against the
@@ -59,7 +60,7 @@ if (process.argv.includes("--observe") && !process.argv.includes("--observe-chil
 	}
 	// Importing OMP initializes its logger. Keep those writes, caches and profiles
 	// inside an owned worker directory, just as the packaged runtime does.
-	const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-kit-observe-"));
+	const privateDir = ownedTmp("omp-kit-observe"), privateRoot = privateDir.path;
 	let exitCode = 1;
 	let timer: NodeJS.Timeout | undefined;
 	try {
@@ -102,7 +103,7 @@ if (process.argv.includes("--observe") && !process.argv.includes("--observe-chil
 		}
 	} finally {
 		clearTimeout(timer);
-		fs.rmSync(privateRoot, { recursive: true, force: true });
+		privateDir.cleanup();
 	}
 	process.exit(exitCode);
 }
@@ -828,7 +829,7 @@ function writePlant(
 }
 
 async function selftest(caseReporter: TestCaseReporter | null = null): Promise<number> {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-selftest-"));
+	const tmpDir = ownedTmp("ttsr-harness-selftest"), tmp = tmpDir.path;
 	const header = `${CASE_HEADER}\n`;
 	interface Plant {
 		id: string;
@@ -986,7 +987,7 @@ async function selftest(caseReporter: TestCaseReporter | null = null): Promise<n
 		}
 	}
 	bad += await admissionSelftest(tmp, caseReporter);
-	fs.rmSync(tmp, { recursive: true, force: true });
+	tmpDir.cleanup();
 	console.log(bad === 0 ? "SELFTEST: all seven plants RED and named; controls GREEN" : `SELFTEST: ${bad} arm(s) failed`);
 	caseReporter?.finish();
 	return bad === 0 ? 0 : 1;
@@ -1085,7 +1086,7 @@ async function cliCrosscheck(jobs: number, caseReporter: TestCaseReporter | null
 	const byName = new Map(rules.map(r => [r.name, r]));
 	const { cases, errors: caseErrors } = loadCases(path.join(KIT, "cases/cases.tsv"));
 	if (caseErrors.length) throw new Error(`CLI cases unreadable: ${caseErrors.join("; ")}`);
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ttsr-harness-cli-"));
+	const tmpDir = ownedTmp("ttsr-harness-cli"), tmp = tmpDir.path;
 	const home = path.join(tmp, "home");
 	fs.mkdirSync(home);
 	// An isolated HOME can make omp-trust-guard refuse before any CLI case is meaningful.
@@ -1102,7 +1103,7 @@ async function cliCrosscheck(jobs: number, caseReporter: TestCaseReporter | null
 	const guardFailure = /omp-trust-guard: FAIL-CLOSED:[^\r\n]*/i.exec(versionOutput)?.[0];
 	if (versionProbe.exitCode === 3 && guardFailure !== undefined) {
 		console.log(`OMP_TRUST_GUARD_FAIL_CLOSED: ${guardFailure}`);
-		fs.rmSync(tmp, { recursive: true, force: true });
+		tmpDir.cleanup();
 		return 3;
 	}
 	const version = versionProbe.stdout.toString().trim();
@@ -1166,7 +1167,7 @@ async function cliCrosscheck(jobs: number, caseReporter: TestCaseReporter | null
 		}
 	}
 	await Promise.all(Array.from({ length: Math.max(1, jobs) }, worker));
-	fs.rmSync(tmp, { recursive: true, force: true });
+	tmpDir.cleanup();
 	for (const r of results) console.log(r);
 	console.log(`== summary: ${version}, cases=${todo.length} agree=${todo.length - disagreements - errors} disagreements=${disagreements} errors=${errors}`);
 	console.log(disagreements === 0 && errors === 0 ? "CROSSCHECK: GREEN" : "CROSSCHECK: RED");

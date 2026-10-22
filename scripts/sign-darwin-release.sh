@@ -50,8 +50,8 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 [ -z "$VERSION" ] || [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die "--version must be X.Y.Z"
-if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi
-WORK="$(mktemp -d "$TMPDIR/sign-darwin-release.XXXXXXXX")"
+if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
+WORK="$(mktemp -d "$TMPDIR/sign-darwin-release.XXXXXXXX")" # tempsafe: evidence kept in the caller-owned scratch by contract; the caller releases it with --bin evidence
 say "work directory (kept as evidence): $WORK"
 
 # 1. Preflight: tools, signing keychain, identity by SHA-1, certificate validity, notary credentials, GitHub auth.

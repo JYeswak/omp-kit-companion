@@ -2,9 +2,9 @@
 /** Verify the exact bytes users download after a release is published. */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { tmpdir } from "node:os";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 export type Asset = { name: string; size: number; sha256: string };
 export type ReleaseSnapshot = { tag: string; tagSha: string; releaseId: number; assets: Asset[] };
@@ -100,7 +100,7 @@ export function verifyFromGithub(repo: string, tag: string, manifestPath: string
   const tagRef = record(gh([`repos/${repo}/git/ref/tags/${tag}`]));
   const tagObject = record(tagRef.object);
   const first: ReleaseSnapshot = { tag, tagSha: String(tagObject.sha), releaseId: Number(release.id), assets: manifest };
-  const root = mkdtempSync(join(tmpdir(), "omp-kit-published-"));
+  const work = ownedTmp("omp-kit-published"), root = work.path;
   try {
     const bytes = new Map<string, Uint8Array>();
     const remote = Array.isArray(release.assets) ? release.assets.map(assetFromRemote) : [];
@@ -119,7 +119,7 @@ export function verifyFromGithub(repo: string, tag: string, manifestPath: string
     const rereadTag = record(gh([`repos/${repo}/git/ref/tags/${tag}`]));
     const second: ReleaseSnapshot = { tag, tagSha: String(record(rereadTag.object).sha), releaseId: Number(rereadRelease.id), assets: manifest };
     verifyPublishedBytes(first, second, bytes, true, () => offlineSmoke(join(root, manifest[0]!.name), root));
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally { work.cleanup(); }
 }
 
 if (import.meta.main) {

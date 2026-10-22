@@ -30,12 +30,14 @@ fi
 if [ ! -d "$DIR" ]; then
 	fail "identity dir missing: $DIR"
 fi
-TMP_FINDINGS=$(mktemp "${TMPDIR:-/tmp}/identity-uniqueness.XXXXXX") || fail "cannot create findings file"
-trap 'rm -f "$TMP_FINDINGS"' EXIT INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp work identity-uniqueness || fail "cannot create findings file"
+TMP_FINDINGS=$work/findings
+: > "$TMP_FINDINGS" || fail "cannot create findings file"
 
 panes=$("$TMUX_BIN" list-panes -a -F '#{session_name} #{window_index} #{pane_index} #{pane_id}' 2>/dev/null) || fail "cannot list tmux panes"
-names_for_panes=$(mktemp "${TMPDIR:-/tmp}/identity-pane-names.XXXXXX") || fail "cannot create scratch file"
-trap 'rm -f "$TMP_FINDINGS" "$names_for_panes"' EXIT INT TERM
+names_for_panes=$work/pane-names
+: > "$names_for_panes" || fail "cannot create scratch file"
 
 printf '%s\n' "$panes" | while IFS= read -r line; do
 	[ -n "$line" ] || continue

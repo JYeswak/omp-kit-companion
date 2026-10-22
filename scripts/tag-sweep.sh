@@ -136,8 +136,8 @@ if ! runs_json=$(printf '%s' "$runs" | jq -ce '
 fi
 
 generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-data_dir=$(mktemp -d "${TMPDIR:-/tmp}/tag-sweep-data.XXXXXX")
-trap 'rm -rf "$data_dir"' EXIT HUP INT TERM
+. "$(dirname -- "$0")/kitlib-tmp.sh"
+kitlib_tmp data_dir tag-sweep-data
 printf '%s\n' "$tags_json" > "$data_dir/tags.json"
 printf '%s\n' "$releases_json" > "$data_dir/releases.json"
 printf '%s\n' "$runs_json" > "$data_dir/runs.json"
