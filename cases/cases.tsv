@@ -419,3 +419,11 @@ kit-rea-runtime-shipped	quiet	tool	bash	-	sudo dtruss -p 1234 -f	constructed qui
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb /usr/local/bin/mytool	planted near-miss: user-managed /usr/local prefix must stay quiet; turns red if the matcher broadens to /usr/local	
 kit-tool-result-is-not-json	fire	tool	bash	-	node -e "console.log(JSON.parse(toolResult).title)"	JSON.parse on tool-result text, the measured 2h loop	
 kit-tool-result-is-not-json	quiet	tool	bash	-	br show <id> --json | jq '.title'	parse inside the command with jq	
+fleet-guard-bypass-env	fire	tool	bash	-	AGENT_MAIL_BYPASS=1 git commit --only -m m -- src/a.ts	BYPASSENV1: inline AGENT_MAIL_BYPASS skips the commit reservation guard	
+fleet-guard-bypass-env	fire	tool	bash	-	export AGENT_MAIL_GUARD_MODE=warn; git commit -m m	BYPASSENV1: exported AGENT_MAIL_GUARD_MODE=warn, the bypass the refusal text advertises	
+fleet-guard-bypass-env	fire	tool	bash	-	env AGENT_MAIL_BYPASS=1 git commit -m m	BYPASSENV1: env wrapper assignment	
+fleet-guard-bypass-env	fire	tool	bash	-	env -u FOO AGENT_MAIL_GUARD_MODE=warn git commit -m m	BYPASSENV1: env -u options before the assignment	
+fleet-guard-bypass-env	quiet	tool	bash	-	git commit --only -m m -- src/a.ts	the reserved commit form itself	
+fleet-guard-bypass-env	quiet	tool	bash	-	grep -rn AGENT_MAIL_BYPASS src	mentioning the variable sets nothing	
+fleet-guard-bypass-env	quiet	tool	bash	-	unset AGENT_MAIL_GUARD_MODE AGENT_MAIL_BYPASS	unsetting turns the bypass off	
+fleet-guard-bypass-env	quiet	tool	bash	-	env -u AGENT_MAIL_BYPASS git status	env -u removes the variable	

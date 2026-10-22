@@ -29,6 +29,7 @@ import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
+import { checkBypassEnvironment } from "../src/fleet-guard/git.ts";
 import { mechanicalVerdicts as admissionVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
@@ -283,9 +284,12 @@ interface AdmissionTarget {
 	evaluate: typeof durabilityCheck;
 }
 const SCRATCH_ADMISSION: AdmissionTarget = { name: "scratch-is-not-a-home", evaluate: durabilityCheck };
+// BYPASSENV1 (ompkit-0daxx): fleet-guard refuses agent calls that set AGENT_MAIL_BYPASS/AGENT_MAIL_GUARD_MODE.
+const BYPASS_ENV_ADMISSION: AdmissionTarget = { name: "fleet-guard-bypass-env", evaluate: async event => checkBypassEnvironment(event) };
+const ADMISSIONS: readonly AdmissionTarget[] = [SCRATCH_ADMISSION, BYPASS_ENV_ADMISSION];
 type PayloadTarget = Rule | AdmissionTarget;
 function isAdmissionTarget(value: PayloadTarget | LoadedRule): value is AdmissionTarget {
-	return value === SCRATCH_ADMISSION;
+	return ADMISSIONS.includes(value as AdmissionTarget);
 }
 
 /** Backend ownership belongs to the selected package, never to an external rule's name. */
@@ -293,7 +297,7 @@ function evaluationTargets(rulesDir: string) {
 	const installedRules = path.join(KIT, "rules");
 	const ownPackage = path.resolve(rulesDir) === installedRules ||
 		(fs.existsSync(installedRules) && fs.realpathSync(rulesDir) === fs.realpathSync(installedRules));
-	const admissions = ownPackage ? [SCRATCH_ADMISSION] : [];
+	const admissions = ownPackage ? [...ADMISSIONS] : [];
 	const rules: LoadedRule[] = [];
 	const byName = new Map<string, LoadedRule | AdmissionTarget>();
 	let legacyStaticPresent = false;
@@ -309,8 +313,8 @@ function evaluationTargets(rulesDir: string) {
 }
 
 async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undefined)[] = [undefined]): Promise<boolean[]> {
-	const evaluator = SCRATCH_ADMISSION.evaluate;
-	if (c.rule !== SCRATCH_ADMISSION.name || typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
+	const evaluator = ADMISSIONS.find(target => target.name === c.rule)?.evaluate;
+	if (typeof evaluator !== "function") throw new Error(`mechanical evaluator missing: ${c.rule}`);
 	// One immutable fixture and two live dispatches per case: production repository
 	// facts are re-read on each dispatch, nothing is cached across cases, and the
 	// verdicts must agree. Each requested chunk partition must reassemble to the
@@ -671,7 +675,8 @@ function admissionVariants(c: Case): { variants: MetamorphicVariant[]; skipped: 
 function variantsFor(c: Case, admission = false): { variants: MetamorphicVariant[]; skipped: { relation: MetamorphicRelation; reason: string }[] } {
 	const variants: MetamorphicVariant[] = [];
 	const skipped: { relation: MetamorphicRelation; reason: string }[] = [];
-	if (admission) return admissionVariants(c);
+	// A bash admission sees a real shell invocation, so the shell relations below apply to it unchanged.
+	if (admission && !(c.source === "tool" && c.tool === "bash")) return admissionVariants(c);
 	const bash = c.source === "tool" && c.tool === "bash";
 	const text = c.source === "text" || c.source === "thinking";
 	if (text) {
@@ -1106,7 +1111,7 @@ async function cliCrosscheck(jobs: number, caseReporter: TestCaseReporter | null
 	// The CLI producer covers SDK/non-always comparisons only: separate mechanical
 	// admission and alwaysApply rows are outside this mode, not fabricated skips.
 	// Any other unknown rule is a missing evaluator, so its inventory is incomplete.
-	const caseReportComplete = cases.every(c => byName.has(c.rule) || c.rule === SCRATCH_ADMISSION.name);
+	const caseReportComplete = cases.every(c => byName.has(c.rule) || ADMISSIONS.some(target => target.name === c.rule));
 	const results: string[] = new Array(todo.length);
 	let next = 0;
 	let completedCases = 0;

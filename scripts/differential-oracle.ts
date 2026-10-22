@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseCaseCorpus } from "../src/case-corpus.ts";
-import { referenceAdmission } from "./admission-reference.ts";
+import { referenceAdmission, referenceBypassEnvironment } from "./admission-reference.ts";
 const repo = join(import.meta.dir, "..");
 const caseFile = process.argv[2] ?? join(repo, "cases", "cases.tsv");
 const { cases: rows, errors: caseErrors } = parseCaseCorpus(readFileSync(caseFile, "utf8"));
@@ -11,10 +11,13 @@ if (caseErrors.length > 0) {
 	process.exit(1);
 }
 
-// The retired reminder is not a TTSR oracle. Its independent reference consumes
-// declared fixture inputs, while the kit lane evaluates actual Git-backed admission.
-const admissionRule = "scratch-is-not-a-home";
-const ttsrRows = rows.filter(row => row.rule !== admissionRule);
+// Tool admissions are not TTSR oracles. Each independent reference consumes declared fixture inputs, while the
+// kit lane evaluates the production admission (Git-backed scratch admission; fleet-guard BYPASSENV1).
+const admissionReferences: Record<string, typeof referenceAdmission> = {
+	"scratch-is-not-a-home": referenceAdmission,
+	"fleet-guard-bypass-env": referenceBypassEnvironment,
+};
+const ttsrRows = rows.filter(row => !Object.hasOwn(admissionReferences, row.rule));
 const worker = Bun.spawn([process.execPath, join(repo, "scripts", "native-ttsr-worker.ts")], {
 	cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe",
 });
@@ -66,12 +69,12 @@ let nativeIndex = 0;
 let admissionChecked = 0;
 let referenceErrors = 0;
 for (const [index, row] of rows.entries()) {
-	const admission = row.rule === admissionRule;
+	const admission = Object.hasOwn(admissionReferences, row.rule);
 	let fired: boolean | undefined;
 	if (admission) {
 		admissionChecked += 1;
 		try {
-			fired = referenceAdmission(row);
+			fired = admissionReferences[row.rule]!(row);
 		} catch {
 			referenceErrors += 1;
 		}

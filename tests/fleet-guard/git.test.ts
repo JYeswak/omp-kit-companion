@@ -418,3 +418,51 @@ describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", ()
 		expect(snapshotTree(repo)).toEqual(before);
 	});
 });
+
+describe("fleet guard BYPASSENV1: agent calls never switch the reservation guard off (ompkit-0daxx)", () => {
+	test("every spelling that sets AGENT_MAIL_BYPASS or AGENT_MAIL_GUARD_MODE is refused, naming the variable", () => {
+		const before = snapshotTree(repo);
+		const gitBefore = gitState();
+		for (const [command, variable] of [
+			["AGENT_MAIL_BYPASS=1 git commit --only -m m -- ownA.txt", "AGENT_MAIL_BYPASS"],
+			["export AGENT_MAIL_GUARD_MODE=warn; git commit -m m", "AGENT_MAIL_GUARD_MODE"],
+			["env AGENT_MAIL_BYPASS=1 git commit -m m", "AGENT_MAIL_BYPASS"],
+			["env -u FOO AGENT_MAIL_GUARD_MODE=warn git commit -m m", "AGENT_MAIL_GUARD_MODE"],
+			["env -i PATH=/usr/bin AGENT_MAIL_BYPASS=1 /usr/bin/git commit -m m", "AGENT_MAIL_BYPASS"],
+			["AGENT_MAIL_BYPASS=1", "AGENT_MAIL_BYPASS"],
+			["AGENT_MAIL_GUARD_MODE=warn && git commit -m m", "AGENT_MAIL_GUARD_MODE"],
+			["export AGENT_MAIL_BYPASS", "AGENT_MAIL_BYPASS"],
+			["declare -x AGENT_MAIL_GUARD_MODE=warn", "AGENT_MAIL_GUARD_MODE"],
+			["typeset -x AGENT_MAIL_BYPASS=1", "AGENT_MAIL_BYPASS"],
+			["bash -c 'AGENT_MAIL_BYPASS=1 git commit -m m'", "AGENT_MAIL_BYPASS"],
+			["sh -c \"export AGENT_MAIL_GUARD_MODE=warn\"", "AGENT_MAIL_GUARD_MODE"],
+			["echo $(AGENT_MAIL_BYPASS=1 git commit -m m)", "AGENT_MAIL_BYPASS"],
+			["nice -n 10 env AGENT_MAIL_BYPASS=1 git commit -m m", "AGENT_MAIL_BYPASS"],
+			["FOO=1 AGENT_MAIL_GUARD_MODE=warn git commit -m m", "AGENT_MAIL_GUARD_MODE"],
+		] as const) {
+			const result = check(event(command), context);
+			expect(result?.block, command).toBe(true);
+			expect(result?.reason, command).toContain(variable);
+			expect(result?.reason, command).toContain("BYPASS_ENV");
+		}
+		expect(snapshotTree(repo)).toEqual(before);
+		expect(gitState()).toBe(gitBefore);
+	});
+
+	test("mentions, reads and unsets stay quiet; the reserved commit is admitted", () => {
+		for (const command of [
+			"grep -rn AGENT_MAIL_BYPASS src",
+			"echo \"AGENT_MAIL_BYPASS=1 git commit -m m\"",
+			"printf '%s\\n' 'export AGENT_MAIL_GUARD_MODE=warn'",
+			"unset AGENT_MAIL_BYPASS AGENT_MAIL_GUARD_MODE",
+			"env -u AGENT_MAIL_BYPASS git status",
+			"printenv AGENT_MAIL_GUARD_MODE",
+			"git commit -m 'AGENT_MAIL_BYPASS=1 is refused now'",
+		]) {
+			expect(check(event(command), context), command).toBeUndefined();
+		}
+		withOnlyFixture(onlyHolds("ownA.txt"), "ok", "FixtureAgent", () => {
+			expect(check(event("git commit --only -m m -- ownA.txt"), context)).toBeUndefined();
+		});
+	});
+});

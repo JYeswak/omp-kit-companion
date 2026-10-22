@@ -40,3 +40,34 @@ export function referenceAdmission(input: {
 	}
 	return false;
 }
+
+const BYPASS_VARIABLES = ["AGENT_MAIL_BYPASS", "AGENT_MAIL_GUARD_MODE"];
+const DECLARATIONS = ["export", "declare", "typeset", "readonly", "local"];
+
+/**
+ * Independent specification for BYPASSENV1 rows: a plain-word bash snippet (commands joined by `;` or `&&`, no
+ * quoting or expansion) fires iff a command assigns or exports AGENT_MAIL_BYPASS or AGENT_MAIL_GUARD_MODE as a
+ * leading NAME=value word, an `env` operand, or a declaration-builtin operand. Other shell syntax is unsupported.
+ */
+export function referenceBypassEnvironment(input: { source: string; tool: string; snippet: string }): boolean {
+	if (input.source !== "tool" || input.tool !== "bash") return false;
+	for (const special of ["'", "\"", "`", "$", "\\", "(", ")", "{", "}", "|", "<", ">", "\n"]) {
+		if (input.snippet.includes(special)) throw new Error("ADMISSION_REFERENCE_UNSUPPORTED_SHELL");
+	}
+	const named = (word: string): boolean => BYPASS_VARIABLES.includes(word.split("=")[0]!);
+	for (const command of input.snippet.split(";").flatMap(part => part.split("&&"))) {
+		const words = command.split(" ").filter(Boolean);
+		let index = 0;
+		while (index < words.length && words[index]!.includes("=")) if (named(words[index++]!)) return true;
+		if (words[index] === "env") {
+			for (index++; index < words.length; index++) {
+				const word = words[index]!;
+				if (word === "-u" || word === "--unset") index++;
+				else if (word.includes("=")) { if (named(word)) return true; }
+				else if (!word.startsWith("-")) break;
+			}
+		}
+		if (DECLARATIONS.includes(words[index] ?? "") && words.slice(index + 1).some(named)) return true;
+	}
+	return false;
+}

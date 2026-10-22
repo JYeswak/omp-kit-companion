@@ -61,7 +61,8 @@ export interface ExecutedCommand {
 	words: readonly string[];
 }
 
-interface LexedCommand { words: ShellWord[]; stdin: string[] }
+// `writes`: targets of output redirections (`>`, `>>`, `>|`, `&>`, `&>>`, `<>` and `>&` naming a file, not a descriptor).
+interface LexedCommand { words: ShellWord[]; stdin: string[]; writes: ShellWord[] }
 type Lexed = { commands: LexedCommand[]; substitutions: string[] } | { error: string };
 
 // Longest operator first. `<(`/`>(` process substitutions are matched before these.
@@ -140,29 +141,33 @@ function lexShell(text: string): Lexed {
 	const commands: LexedCommand[] = [];
 	const substitutions: string[] = [];
 	const heredocs: { into: string[]; delimiter: string; strip: boolean; expands: boolean }[] = [];
-	let current: LexedCommand = { words: [], stdin: [] };
+	let current: LexedCommand = { words: [], stdin: [], writes: [] };
 	let word = "";
 	let inWord = false;
 	let expanded = false;
 	let quoted = false;
-	let redirect: "file" | "herestring" | "heredoc" | "heredoc-strip" | undefined;
+	// The word is a `<(…)`/`>(…)` process substitution: a pipe to inspected command text, never a file.
+	let piped = false;
+	let redirect: "write" | "duplicate" | "read" | "herestring" | "heredoc" | "heredoc-strip" | undefined;
 	let braces = 0;
 	const endWord = (): void => {
 		if (!inWord) return;
 		if (redirect === undefined) current.words.push({ text: word, expanded });
+		else if (!piped && (redirect === "write" || (redirect === "duplicate" && word !== "-" && !FD_NUMBER.test(word)))) current.writes.push({ text: word, expanded });
 		else if (redirect === "herestring") current.stdin.push(word);
-		else if (redirect !== "file") heredocs.push({ into: current.stdin, delimiter: word, strip: redirect === "heredoc-strip", expands: !quoted });
+		else if (redirect === "heredoc" || redirect === "heredoc-strip") heredocs.push({ into: current.stdin, delimiter: word, strip: redirect === "heredoc-strip", expands: !quoted });
 		redirect = undefined;
 		word = "";
 		inWord = false;
 		expanded = false;
 		quoted = false;
+		piped = false;
 	};
 	const endCommand = (): void => {
 		endWord();
 		redirect = undefined;
-		if (current.words.length) commands.push(current);
-		current = { words: [], stdin: [] };
+		if (current.words.length || current.writes.length) commands.push(current);
+		current = { words: [], stdin: [], writes: [] };
 	};
 	const substitution = (open: number): number | undefined => {
 		const close = closingParen(text, open);
@@ -305,6 +310,7 @@ function lexShell(text: string): Lexed {
 		if ((character === "<" || character === ">") && next === "(") {
 			endWord();
 			const resumed = substitution(index + 1);
+			piped = true;
 			if (resumed === undefined) return { error: "unterminated process substitution" };
 			index = resumed;
 			continue;
@@ -314,7 +320,8 @@ function lexShell(text: string): Lexed {
 			// A leading unquoted number is the redirected file descriptor (`2>f`), not a word; `x2>f` keeps `x2`.
 			if (inWord && !quoted && !expanded && FD_NUMBER.test(word)) { word = ""; inWord = false; }
 			else endWord();
-			redirect = operator === "<<<" ? "herestring" : operator === "<<-" ? "heredoc-strip" : operator === "<<" ? "heredoc" : "file";
+			redirect = operator === "<<<" ? "herestring" : operator === "<<-" ? "heredoc-strip" : operator === "<<" ? "heredoc"
+				: operator === ">&" ? "duplicate" : operator === "<" || operator === "<&" ? "read" : "write";
 			index += operator.length;
 			continue;
 		}
@@ -333,7 +340,8 @@ function lexShell(text: string): Lexed {
 	return { commands, substitutions };
 }
 
-function repositoryRoot(start: string): string | undefined {
+/** Nearest directory at or above `start` holding a `.git` entry. */
+export function repositoryRoot(start: string): string | undefined {
 	for (let current = resolve(start); ; current = dirname(current)) {
 		if (existsSync(join(current, ".git"))) return current;
 		const parent = dirname(current);
@@ -415,15 +423,21 @@ function wrappedCommandStart(words: readonly ShellWord[], index: number): number
 }
 
 // The command a simple command actually runs: reserved words, NAME=value prefixes and known wrappers skipped.
-function executedArgv(words: readonly ShellWord[]): readonly ShellWord[] | undefined {
+// Every NAME a prefix or `env` operand assigns is appended to `assigned`, also for assignment-only commands.
+function executedArgv(words: readonly ShellWord[], assigned: string[]): readonly ShellWord[] | undefined {
 	let index = 0;
 	while (index < words.length) {
 		const word = words[index]!;
-		if (RESERVED_PREFIXES.has(word.text) || ENV_ASSIGNMENT.test(word.text)) { index++; continue; }
+		if (RESERVED_PREFIXES.has(word.text)) { index++; continue; }
+		if (ENV_ASSIGNMENT.test(word.text)) { assigned.push(word.text.slice(0, word.text.indexOf("="))); index++; continue; }
 		if (word.expanded) return words.slice(index);
 		const start = wrappedCommandStart(words, index);
 		if (start === null) return undefined;
 		if (start === undefined) return words.slice(index);
+		if (word.text === "env") {
+			for (const operand of words.slice(index + 1, start))
+				if (ENV_ASSIGNMENT.test(operand.text)) assigned.push(operand.text.slice(0, operand.text.indexOf("=")));
+		}
 		index = start;
 	}
 	return undefined;
@@ -451,27 +465,73 @@ const SUBSTITUTION_BUDGET = 32;
 const SUBSTITUTION_REASON =
 	"fleet-guard refusal: nested shell substitution exceeds the bounded inspection budget; no files were changed.";
 
+/** An output redirection's target, opened before `commands[at]` runs (`at === commands.length`: after the last one). */
+export interface ShellWrite { target: ShellWord; at: number }
+
+export interface ShellInspection {
+	commands: ExecutedCommand[];
+	/** Environment names assigned by NAME=value prefixes, assignment-only commands and `env` operands. */
+	assignments: string[];
+	writes: ShellWrite[];
+}
+
 /**
  * Every simple command a shell call would run: top-level commands, executed substitutions, `eval` and nested shell
  * text, each costing one unit of a budget shared across the whole call. Text the lexer cannot delimit, or more units
- * than the budget, is a refusal. The git and scratch guards share this traversal.
+ * than the budget, is a refusal. The git, scratch and write-ownership guards share this traversal.
  */
-export function executedShellCommands(command: string): { commands: ExecutedCommand[] } | { refusal: string } {
+export function executedShellCommands(command: string): ShellInspection | { refusal: string } {
 	const pending = [command];
 	const commands: ExecutedCommand[] = [];
+	const assignments: string[] = [];
+	const writes: ShellWrite[] = [];
 	for (let unit = 0; unit < pending.length; unit++) {
 		if (unit >= SUBSTITUTION_BUDGET) return { refusal: SUBSTITUTION_REASON };
 		const lexed = lexShell(pending[unit]!);
 		if ("error" in lexed) return { refusal: `fleet-guard refusal: shell text could not be inspected (${lexed.error}); no files were changed.` };
 		pending.push(...lexed.substitutions);
-		for (const { words, stdin } of lexed.commands) {
-			const argv = executedArgv(words);
+		for (const { words, stdin, writes: targets } of lexed.commands) {
+			for (const target of targets) writes.push({ target, at: commands.length });
+			const argv = executedArgv(words, assignments);
 			if (!argv) continue;
 			commands.push({ argv, words: argv.map((word) => word.text) });
 			pending.push(...nestedShellTexts(argv, stdin));
 		}
 	}
-	return { commands };
+	return { commands, assignments, writes };
+}
+
+const BYPASS_VARIABLES = new Set(["AGENT_MAIL_BYPASS", "AGENT_MAIL_GUARD_MODE"]);
+const DECLARATION_BUILTINS = new Set(["export", "declare", "typeset", "readonly", "local"]);
+
+// BYPASSENV1 (ompkit-0daxx): the Agent Mail commit guard turns itself off when either variable is set, and its own
+// refusal text says so. An agent tool call that assigns or exports one (prefix, assignment-only, `env` operand,
+// declaration builtin, in any nested shell or substitution) is refused; unsetting and mentioning stay quiet.
+function bypassVariable(inspection: ShellInspection): string | undefined {
+	const assigned = inspection.assignments.find((name) => BYPASS_VARIABLES.has(name));
+	if (assigned) return assigned;
+	for (const { words } of inspection.commands) {
+		if (!DECLARATION_BUILTINS.has(words[0]!)) continue;
+		for (const word of words.slice(1)) {
+			const name = word.includes("=") ? word.slice(0, word.indexOf("=")) : word;
+			if (BYPASS_VARIABLES.has(name)) return name;
+		}
+	}
+	return undefined;
+}
+
+function bypassReason(name: string): string {
+	return `fleet-guard BYPASS_ENV: this call sets ${name}, which switches the Agent Mail reservation guard off; agent tool calls may not set AGENT_MAIL_BYPASS or AGENT_MAIL_GUARD_MODE. Reserve the paths you commit instead (am file_reservations reserve <project> <agent> <path> --exclusive) and land with git commit --only -- <reserved paths>; no files were changed.`;
+}
+
+/** BYPASSENV1 alone, as the conformance corpus dispatches it; `check` applies the same predicate first in its chain. */
+export function checkBypassEnvironment(event: FleetGuardEvent): FleetGuardBlock | undefined {
+	const command = commandFromEvent(event);
+	if (!command) return undefined;
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return { block: true, reason: inspection.refusal };
+	const name = bypassVariable(inspection);
+	return name ? { block: true, reason: bypassReason(name) } : undefined;
 }
 
 interface CommitScope {
@@ -558,13 +618,81 @@ function readReservationHolds(repoRoot: string, agent: string): ReservationHold[
 	return holds;
 }
 
-function holdCovers(pattern: string, path: string): boolean {
+// Index just past the `]` closing a fnmatch class opened at `open`; -1 when `[` is a literal (no closing `]`).
+function classEnd(pattern: string, open: number): number {
+	let index = open + 1;
+	if (pattern[index] === "!") index++;
+	if (pattern[index] === "]") index++;
+	while (index < pattern.length && pattern[index] !== "]") index++;
+	return index < pattern.length ? index + 1 : -1;
+}
+
+function classMatches(pattern: string, open: number, end: number, character: string): boolean {
+	let index = open + 1;
+	const negate = pattern[index] === "!";
+	if (negate) index++;
+	let hit = false;
+	while (index < end - 1) {
+		if (pattern[index + 1] === "-" && index + 2 < end - 1) {
+			if (pattern[index]! <= character && character <= pattern[index + 2]!) hit = true;
+			index += 3;
+		} else {
+			if (pattern[index] === character) hit = true;
+			index++;
+		}
+	}
+	return hit !== negate;
+}
+
+// Agent Mail matches holds with Python fnmatchcase: `*` spans any characters including `/`, `?` one character,
+// `[...]`/`[!...]` a class. Iterative match with single-star backtracking, O(pattern × path); no regex.
+function fnmatch(pattern: string, path: string): boolean {
+	let p = 0;
+	let s = 0;
+	let star = -1;
+	let resume = 0;
+	while (s < path.length) {
+		if (p < pattern.length) {
+			const token = pattern[p]!;
+			if (token === "*") { star = p++; resume = s; continue; }
+			const end = token === "[" ? classEnd(pattern, p) : -1;
+			if (end > 0) {
+				if (classMatches(pattern, p, end, path[s]!)) { p = end; s++; continue; }
+			} else if (token === "?" || token === path[s]) { p++; s++; continue; }
+		}
+		if (star < 0) return false;
+		p = star + 1;
+		s = ++resume;
+	}
+	while (pattern[p] === "*") p++;
+	return p === pattern.length;
+}
+
+/** Whether a held reservation pattern covers a repo-relative path: exact, `dir/*` (the dir and everything under it), or fnmatch. */
+export function holdCovers(pattern: string, path: string): boolean {
 	if (pattern === path) return true;
 	if (pattern.endsWith("/*") && pattern.length > 2) {
 		const dir = pattern.slice(0, -2);
 		if (path === dir || path.startsWith(dir + "/")) return true;
 	}
-	return false;
+	return fnmatch(pattern, path);
+}
+
+export type ReservationGaps =
+	| { kind: "identity" }
+	| { kind: "unavailable"; agent: string }
+	| { kind: "checked"; agent: string; uncovered: string[] };
+
+/**
+ * The one reservation lookup for fleet-guard admissions (`git commit --only`, write ownership): the caller's
+ * AGENT_NAME and its live exclusive holds from an attested-current `am robot reservations` read. A failed or
+ * unattested read is `unavailable`, never an empty hold list.
+ */
+export function reservationGaps(root: string, paths: readonly string[], agent = asString(process.env.AGENT_NAME)): ReservationGaps {
+	if (!agent) return { kind: "identity" };
+	const holds = readReservationHolds(root, agent);
+	if (!holds) return { kind: "unavailable", agent };
+	return { kind: "checked", agent, uncovered: paths.filter((path) => !holds.some((hold) => holdCovers(hold.pattern, path))) };
 }
 
 function relativeRepoPath(root: string, base: string, value: string): string | null {
@@ -575,15 +703,12 @@ function relativeRepoPath(root: string, base: string, value: string): string | n
 
 function checkOnlyCoverage(paths: string[], root: string, base: string): FleetGuardBlock | undefined {
 	if (paths.length === 0) return undefined;
-	const agent = asString(process.env.AGENT_NAME);
-	if (!agent) return { block: true, reason: ONLY_IDENTITY_REASON };
-	const holds = readReservationHolds(root, agent);
-	if (!holds) return { block: true, reason: ONLY_UNAVAILABLE_REASON };
-	for (const value of paths) {
-		const path = relativeRepoPath(root, base, value);
-		if (!path) return { block: true, reason: ONLY_FOREIGN_REASON };
-		if (!holds.some((hold) => holdCovers(hold.pattern, path))) return { block: true, reason: ONLY_UNCOVERED_REASON };
-	}
+	const relativePaths = paths.map((value) => relativeRepoPath(root, base, value));
+	const gaps = reservationGaps(root, relativePaths.filter((path): path is string => path !== null));
+	if (gaps.kind === "identity") return { block: true, reason: ONLY_IDENTITY_REASON };
+	if (gaps.kind === "unavailable") return { block: true, reason: ONLY_UNAVAILABLE_REASON };
+	if (relativePaths.includes(null)) return { block: true, reason: ONLY_FOREIGN_REASON };
+	if (gaps.uncovered.length > 0) return { block: true, reason: ONLY_UNCOVERED_REASON };
 	return undefined;
 }
 
@@ -647,6 +772,8 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 	if (!command) return undefined;
 	const inspection = executedShellCommands(command);
 	if ("refusal" in inspection) return { block: true, reason: inspection.refusal };
+	const bypass = bypassVariable(inspection);
+	if (bypass) return { block: true, reason: bypassReason(bypass) };
 	for (const { words: effective } of inspection.commands) {
 		if (commandName(effective[0]!) !== "git") continue;
 		const commandCwd = optionValue(effective, "-C");

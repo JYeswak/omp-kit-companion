@@ -203,7 +203,8 @@ test("full differential oracle rejects falsified native-admission truth without 
 		expect(report.rows).toBe(parsed.cases.length);
 		expect(report.checked).toBe(parsed.cases.length);
 		expect(report.native_checked + report.admission_reference_checked).toBe(parsed.cases.length);
-		expect(report.admission_reference_checked).toBe(parsed.cases.filter(row => row.rule === "scratch-is-not-a-home").length);
+		// Both tool admissions (scratch-is-not-a-home; fleet-guard-bypass-env, BYPASSENV1) take the independent reference lane.
+		expect(report.admission_reference_checked).toBe(parsed.cases.filter(row => row.rule === "scratch-is-not-a-home" || row.rule === "fleet-guard-bypass-env").length);
 		expect(report.worker_errors).toBe(0);
 		expect(report.reference_errors).toBe(0);
 		expect(report.unexpected_mismatches).toContainEqual(expect.objectContaining({
