@@ -302,3 +302,16 @@ test("failure messages and JSON diagnostics never include private bytes", () => 
 	expect(message).toContain("FRESH_PLAN");
 	expect(message).not.toContain("secret-marker-do-not-echo");
 }));
+test("receipt image digests reject truncated, extended, and uppercase external values", () => fixture((_isolated, state, root) => {
+	const result = applyMutation(plan(state, root, "digest.md", "managed"));
+	const receiptPath = join(state, "receipts", `${result.id}.json`);
+	const original = JSON.parse(readFileSync(receiptPath, "utf8")) as { files: { after: { sha256: string } | null }[] };
+	const valid = original.files[0]?.after?.sha256;
+	expect(valid).toMatch(/^[a-f0-9]{64}$/);
+	for (const invalid of [valid!.slice(0, 63), `${valid}a`, valid!.toUpperCase()]) {
+		const tampered = structuredClone(original);
+		tampered.files[0]!.after!.sha256 = invalid;
+		writeFileSync(receiptPath, JSON.stringify(tampered));
+		expect(() => auditMutations(state)).toThrow(/STATE_UNSAFE/);
+	}
+}));

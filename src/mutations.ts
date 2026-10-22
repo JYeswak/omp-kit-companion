@@ -394,7 +394,7 @@ function receiptsDir(stateRoot: string): string { return join(stateRoot, "receip
 function isImage(value: unknown): value is Image {
 	if (!value || typeof value !== "object") return false;
 	const item = value as Partial<Image>;
-	return typeof item.sha256 === "string" && /^[a-f0-9]{64}$/.test(item.sha256) &&
+	return typeof item.sha256 === "string" && isSha256Hex(item.sha256) &&
 		typeof item.size === "number" && Number.isSafeInteger(item.size) && item.size >= 0 &&
 		typeof item.mode === "number" && Number.isInteger(item.mode) && item.mode >= 0 && item.mode <= 0o7777 &&
 		typeof item.uid === "number" && Number.isSafeInteger(item.uid) && item.uid >= 0 &&
