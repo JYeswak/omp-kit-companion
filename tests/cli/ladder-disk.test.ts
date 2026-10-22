@@ -52,7 +52,9 @@ function diskFixture(sbhCode: number): DiskFixture {
 }
 
 function heavy(fx: DiskFixture, extraEnv: Record<string, string>, args: string[]) {
-	return Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", ...args, "--", "true"], {
+	const preload = join(root, "tests/cli/fixtures/forge-healthy-statfs.ts");
+	return Bun.spawnSync([process.execPath, "--preload", preload, "--no-env-file", "--config=/dev/null",
+		resolve(root, "src/cli.ts"), "heavy", ...args, "--", "true"], {
 		cwd: root, env: { ...process.env, ...fx.env, ...extraEnv }, stdout: "pipe", stderr: "pipe",
 	});
 }
