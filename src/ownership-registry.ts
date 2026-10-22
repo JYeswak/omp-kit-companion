@@ -262,6 +262,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		terminal: { outcome: "self-heals", producer: "extensions/kit-composer-state.ts rewrite at session start and turn boundaries, removal at shutdown" },
 		census: null, noCensus: "one small record per live seat session, rewritten in place every 5 s; nothing accumulates to count", ownerBead: "ompkit-hznvg",
 	},
+	{
+		id: "kitlib-tmp", title: "kitlib owned temp dirs <root>/<label>.<pid>.<rand> with a key=value .owner (pid, label, repo, created, bead)",
+		rows: [], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
+		writers: ["src/kitlib/tmp.ts"],
+		cancel: "the creator calls cleanup(); a per-process registry removes every live dir at exit and on SIGHUP, SIGINT and SIGTERM",
+		crash: "only SIGKILL or power loss leaves the dir; the scratch reaper reaps a kitlib-shaped dir in system temp whose pid is dead (or reused after created) with no open file descriptors",
+		respawn: "the pid names the creating process, never a seat; a finished run is reapable",
+		terminal: { outcome: "reaped", producer: "kitlib cleanup at exit/signal, else the scratch reaper's kitlib branch (ompkit-army3)" },
+		census: null, noCensus: "one dir per live creator, removed by its creator; only SIGKILL leftovers persist and the reaper's plan lists them", ownerBead: "ompkit-41l85",
+	},
 ];
 
 /** Entries that account for an inventory row, for the coverage test and the doctor's row lookup. */
