@@ -17,7 +17,11 @@ const TERMINAL_STOP_REASONS: Record<string, true> = {
 };
 
 
-/** Configured Tern destination. A window key is mandatory; no first-window fallback exists. */
+/** Configured Tern destination. An empty window key resolves to Tern's
+documented default window (ompkit-kdbz.2.16); it is never sent blind.
+Resolution (resolveTernWindow) verifies the key against the addressed
+window's own snapshot before any effect, so every send argv is either
+`--window KEY` for a verified key or the verified default addressing. */
 export interface TernSeatBinding {
 	session: string;
 	pane: string;
@@ -25,6 +29,18 @@ export interface TernSeatBinding {
 	cwd: string;
 	previousBinding?: TernRuntimeBinding | null;
 }
+
+/** Addressable Tern window from resolveTernWindow: a verified explicit key,
+or Tern's documented default (first) window when the seat carries no key.
+Tern 0.9.x sets TERN_WINDOW_KEY on no local window (verified live
+2026-10-20, even in window-attached panes), and any other --window value
+leaves the local daemon (remote dial + hang), so the default is the only
+addressing for the fleet window. daemonSocket pins the daemon connection
+($TERN_DAEMON_SOCKET, else the configured default socket). */
+export type TernWindowResolution =
+	| { ok: true; kind: "key"; windowKey: string; daemonSocket: string | null }
+	| { ok: true; kind: "default"; daemonSocket: string | null }
+	| { ok: false; code: "PLANE_SEAT_UNBOUND"; reason: string };
 
 export interface TernRuntimeBinding {
 	sessionId: number;
@@ -172,6 +188,82 @@ function validateSeat(seat: TernSeatBinding): SeatValidation {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
 	}
 	return { ok: true, paneId };
+}
+
+/** Pin the daemon connection without hardcoding a home directory: explicit
+$TERN_DAEMON_SOCKET wins, else $TERN_CONFIG_DIR/daemon.sock, else the
+default settings-directory socket, each only when it exists. Null leaves
+the tern CLI's own fallback alone. */
+export function resolveDaemonSocket(env: Record<string, string | undefined> = process.env): string | null {
+	const override = env.TERN_DAEMON_SOCKET;
+	if (typeof override === "string" && override.trim() !== "") return override;
+	const candidates: string[] = [];
+	const configDir = env.TERN_CONFIG_DIR;
+	if (typeof configDir === "string" && configDir.trim() !== "") candidates.push(`${configDir}/daemon.sock`);
+	const home = env.HOME;
+	if (typeof home === "string" && home !== "") {
+		candidates.push(`${home}/Library/Application Support/Tern/daemon.sock`);
+	}
+	for (const candidate of candidates) {
+		try {
+			if (statSync(candidate).isSocket()) return candidate;
+		} catch { /* absent or unreadable: not this daemon */ }
+	}
+	return null;
+}
+
+
+/** Resolve the window a seat's effects address (ompkit-kdbz.2.16). Structural
+defects refuse before any command runs. Otherwise the addressed window's own
+`inspect` snapshot must list the configured session: explicit keys verify
+with `--window KEY`, empty keys verify without the flag (Tern's documented
+default/first window). Anything else is PLANE_SEAT_UNBOUND, never a blind
+send: callers build send argv only from an ok resolution. */
+export function resolveTernWindow(
+	seat: TernSeatBinding,
+	io: TernObserverIo,
+	env: Record<string, string | undefined> = process.env,
+): TernWindowResolution {
+	if (typeof seat.session !== "string" || !seat.session.trim() || typeof seat.cwd !== "string" || !isAbsolute(seat.cwd)) {
+		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern seat needs a configured session and absolute repository cwd" };
+	}
+	if (typeof seat.pane !== "string" || paneNumber(seat) === null) {
+		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
+	}
+	const socket = resolveDaemonSocket(env);
+	const runEnv = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };
+	const explicit = typeof seat.windowKey === "string" && seat.windowKey.trim() !== "";
+	let raw: { code: number; out: string };
+	try {
+		raw = io.run(explicit ? ["tern", "--window", seat.windowKey, "inspect", "--json"] : ["tern", "inspect", "--json"], runEnv);
+	} catch {
+		return { ok: false, code: "PLANE_SEAT_UNBOUND",
+			reason: explicit ? "window key did not address a live window" : "default Tern window did not resolve" };
+	}
+	const decoded = parseJson(raw.out);
+	const root = "error" in decoded ? null : objectValue(decoded.value);
+	const sessionListed = !!root && Array.isArray(root.sessions) && root.sessions.some((rawSession) => {
+		const candidate = objectValue(rawSession);
+		return !!candidate && (candidate.name === seat.session || String(candidate.id) === seat.session);
+	});
+	if (raw.code !== 0 || !sessionListed) {
+		return { ok: false, code: "PLANE_SEAT_UNBOUND",
+			reason: explicit ? "window key did not address a window hosting the configured session"
+				: "configured Tern session is absent from the default window" };
+	}
+	return explicit ? { ok: true, kind: "key", windowKey: seat.windowKey, daemonSocket: socket }
+		: { ok: true, kind: "default", daemonSocket: socket };
+}
+
+/** Send-addressing argv for a resolved window: `--window KEY`, or nothing
+(Tern's documented default window). Never invent a flag for a refusal. */
+export function ternWindowArgv(resolution: Extract<TernWindowResolution, { ok: true }>): string[] {
+	return resolution.kind === "key" ? ["--window", resolution.windowKey] : [];
+}
+
+/** Daemon-connection env for a resolved window; undefined leaves the CLI default. */
+export function ternWindowEnv(resolution: Extract<TernWindowResolution, { ok: true }>): Record<string, string> | undefined {
+	return resolution.daemonSocket === null ? undefined : { TERN_DAEMON_SOCKET: resolution.daemonSocket };
 }
 
 
@@ -556,12 +648,15 @@ function addProcessStart(io: TernObserverIo, process: TernProcessResult): TernPr
 }
 
 
-function defaultTernIo(): TernObserverIo {
+export function defaultTernIo(): TernObserverIo {
 	return {
 		run(argv, env) {
 			try {
+				// Merge overrides into the live environment: a bare {env} would
+				// wipe PATH and break binary lookup (ompkit-kdbz.2.16: the
+				// resolved TERN_DAEMON_SOCKET must ride along, not alone).
 				const child = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", timeout: PROCESS_TIMEOUT_MS,
-					maxBuffer: COMMAND_MAX_BUFFER, ...(env ? { env } : {}) });
+					maxBuffer: COMMAND_MAX_BUFFER, ...(env ? { env: { ...process.env, ...env } } : {}) });
 				return { code: child.status ?? 1, out: String(child.stdout ?? "") };
 			} catch {
 				return { code: 1, out: "" };
@@ -582,17 +677,31 @@ function defaultTernIo(): TernObserverIo {
 	};
 }
 
-function observationFromReads(seat: TernSeatBinding, io: TernObserverIo): TernObservation {
-	const firstInspect = runCommand(io, ["tern", "--window", seat.windowKey, "inspect", "--json"], "inspect");
+/** Parse-layer marker for a seat resolved to Tern's documented default
+window (parse-only; send argv comes from the resolution kind, never from
+this string, so it can never reach --window). */
+const RESOLVED_DEFAULT_WINDOW = "tern-default-window";
+
+function observationFromReads(
+	seat: TernSeatBinding,
+	io: TernObserverIo,
+	resolution: Extract<TernWindowResolution, { ok: true }>,
+): TernObservation {
+	const windowFlag = ternWindowArgv(resolution);
+	const windowEnv = ternWindowEnv(resolution);
+	// The pure parser still requires a key; a default-resolved seat proved
+	// its binding in resolution, so it parses under the marker, never argv.
+	const addressed: TernSeatBinding = resolution.kind === "key" ? seat : { ...seat, windowKey: RESOLVED_DEFAULT_WINDOW };
+	const firstInspect = runCommand(io, ["tern", ...windowFlag, "inspect", "--json"], "inspect", windowEnv);
 	if ("error" in firstInspect) return unknownObservation(firstInspect.error);
-	const inspection = parseTernInspection(firstInspect.value, seat);
+	const inspection = parseTernInspection(firstInspect.value, addressed);
 	if (inspection.status === "DEAD") {
 		return { state: "DEAD", working: false, oracleBusy: null, sessionFile: inspection.sessionFile,
 			sessionSha: null, sessionCursorBytes: null, sessionLeafId: null, fg: null, runtimeBinding: null,
 			evidence: ["tern-inspect"], reason: inspection.reason };
 	}
 	if (inspection.status !== "FOUND") return unknownObservation(inspection.status === "REFUSED" ? inspection.code : inspection.reason);
-	const processJson = runCommand(io, ["tern", "--window", seat.windowKey, "process", String(inspection.paneId), "--json"], "process");
+	const processJson = runCommand(io, ["tern", ...windowFlag, "process", String(inspection.paneId), "--json"], "process", windowEnv);
 	if ("error" in processJson) return unknownObservation(processJson.error);
 	const process = addProcessStart(io, parseTernProcess(processJson.value, seat.cwd, inspection.paneId));
 	if (process.status !== "FOUND") return unknownObservation(process.reason);
@@ -604,11 +713,11 @@ function observationFromReads(seat: TernSeatBinding, io: TernObserverIo): TernOb
 	const observation = classifyTernObservation(inspection, process, journal);
 	if (observation.state === "UNKNOWN" && observation.reason === "WORKING_ORACLE_DISAGREEMENT") return observation;
 	if (observation.state !== "IDLE" && observation.state !== "BUSY") return observation;
-	const secondInspect = runCommand(io, ["tern", "--window", seat.windowKey, "inspect", "--json"], "inspect");
+	const secondInspect = runCommand(io, ["tern", ...windowFlag, "inspect", "--json"], "inspect", windowEnv);
 	if ("error" in secondInspect) return unknownObservation(secondInspect.error);
-	const inspectionAfter = parseTernInspection(secondInspect.value, seat);
+	const inspectionAfter = parseTernInspection(secondInspect.value, addressed);
 	if (inspectionAfter.status !== "FOUND") return unknownObservation("OBSERVATION_CHANGED_DURING_READ");
-	const processAfterJson = runCommand(io, ["tern", "--window", seat.windowKey, "process", String(inspectionAfter.paneId), "--json"], "process");
+	const processAfterJson = runCommand(io, ["tern", ...windowFlag, "process", String(inspectionAfter.paneId), "--json"], "process", windowEnv);
 	if ("error" in processAfterJson) return unknownObservation(processAfterJson.error);
 	const processAfter = addProcessStart(io, parseTernProcess(processAfterJson.value, seat.cwd, inspectionAfter.paneId));
 	if (processAfter.status !== "FOUND") return unknownObservation(processAfter.reason);
@@ -634,12 +743,14 @@ function observationFromReads(seat: TernSeatBinding, io: TernObserverIo): TernOb
 	return observation;
 }
 
-/** Observe one explicitly window-scoped Tern seat; missing evidence is never IDLE. */
+/** Observe one window-resolved Tern seat; missing evidence is never IDLE.
+The window resolves (and re-resolves per call) before any read; an
+unresolvable seat is UNKNOWN with its refusal code, never observed blind. */
 export async function observeTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo()): Promise<TernObservation> {
-	const validation = validateSeat(seat);
-	if (!validation.ok) return unknownObservation(validation.code);
+	const window = resolveTernWindow(seat, io);
+	if (!window.ok) return unknownObservation(window.code);
 	for (let retry = 0; retry <= OBSERVE_RETRIES; retry++) {
-		const observation = observationFromReads(seat, io);
+		const observation = observationFromReads(seat, io, window);
 		if (observation.reason !== "WORKING_ORACLE_DISAGREEMENT") return observation;
 		if (retry < OBSERVE_RETRIES) await io.wait(OBSERVE_RETRY_MS);
 		else return { ...observation, reason: "WORKING_ORACLE_DISAGREEMENT_AFTER_RETRIES" };
@@ -649,8 +760,8 @@ export async function observeTernSeat(seat: TernSeatBinding, io: TernObserverIo 
 
 /** Validate the exact Agent Mail recipient and current runtime incarnation for a Tern seat. */
 export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo()): Promise<TernIdentityResult> {
-	const validation = validateSeat(seat);
-	if (!validation.ok) return { status: "REFUSED", code: validation.code, reason: validation.reason, agent: null,
+	const window = resolveTernWindow(seat, io);
+	if (!window.ok) return { status: "REFUSED", code: window.code, reason: window.reason, agent: null,
 		binding: null, cwdOk: false, runtimeBinding: null };
 	const observation = await observeTernSeat(seat, io);
 	if (observation.state === "DEAD") return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Tern pane is dead",
