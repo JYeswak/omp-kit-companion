@@ -5,6 +5,7 @@ import { applyScratchEnv, check as checkScratch, hostAgentName, scratchDirFor, w
 import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
+import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
 
 /**
@@ -12,6 +13,7 @@ import { fleetPolicyState } from "./fleet-policy.ts";
  * Scratch goes to the repo-local var/agent-tmp (never /tmp), work happens on main,
  * every write outside var/agent-tmp in a fleet checkout needs the caller's exclusive
  * Agent Mail reservation, and agent calls never switch the commit guard off.
+ * Always on, opt-in or not: plutil edits must name their output (PLUTIL_IN_PLACE).
  * Shipped in the plugin; installed per profile by the kit.
  */
 
@@ -47,7 +49,11 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	const cwd = deps?.cwd ?? process.cwd();
 	const pid = deps?.pid ?? process.pid;
 	const initial = await fleetPolicyState(cwd);
-	if (initial.kind === "off") return;
+	// PLUTILINPLACE1 (ompkit-ffb85): the plists it protects live outside every repository, so no opt-in scopes it.
+	if (initial.kind === "off") {
+		pi.on("tool_call", async event => checkPlutilInPlace(event));
+		return;
+	}
 	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
 	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
 	// belong to a subagent session).
@@ -74,6 +80,8 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
 			catch { /* the pid-only owner stays valid */ }
 		}
+		const inPlace = checkPlutilInPlace(event);
+		if (inPlace) return inPlace;
 		const callingCwd = context?.cwd ?? cwd;
 		const policy = await fleetPolicyState(callingCwd);
 		if (policy.kind === "off") return undefined;

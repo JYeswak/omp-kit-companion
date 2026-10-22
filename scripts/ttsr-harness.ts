@@ -30,6 +30,7 @@ import type { LoadedRule, Rule } from "./rule-class.ts";
 import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
 import { checkBypassEnvironment } from "../src/fleet-guard/git.ts";
+import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { mechanicalVerdicts as admissionVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
@@ -286,7 +287,9 @@ interface AdmissionTarget {
 const SCRATCH_ADMISSION: AdmissionTarget = { name: "scratch-is-not-a-home", evaluate: durabilityCheck };
 // BYPASSENV1 (ompkit-0daxx): fleet-guard refuses agent calls that set AGENT_MAIL_BYPASS/AGENT_MAIL_GUARD_MODE.
 const BYPASS_ENV_ADMISSION: AdmissionTarget = { name: "fleet-guard-bypass-env", evaluate: async event => checkBypassEnvironment(event) };
-const ADMISSIONS: readonly AdmissionTarget[] = [SCRATCH_ADMISSION, BYPASS_ENV_ADMISSION];
+// PLUTILINPLACE1 (ompkit-ffb85): fleet-guard refuses plutil edits that write over their input (no `-o`), in every session.
+const PLUTIL_IN_PLACE_ADMISSION: AdmissionTarget = { name: "fleet-guard-plutil-in-place", evaluate: async event => checkPlutilInPlace(event) };
+const ADMISSIONS: readonly AdmissionTarget[] = [SCRATCH_ADMISSION, BYPASS_ENV_ADMISSION, PLUTIL_IN_PLACE_ADMISSION];
 type PayloadTarget = Rule | AdmissionTarget;
 function isAdmissionTarget(value: PayloadTarget | LoadedRule): value is AdmissionTarget {
 	return ADMISSIONS.includes(value as AdmissionTarget);

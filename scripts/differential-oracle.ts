@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseCaseCorpus } from "../src/case-corpus.ts";
-import { referenceAdmission, referenceBypassEnvironment } from "./admission-reference.ts";
+import { referenceAdmission, referenceBypassEnvironment, referencePlutilInPlace } from "./admission-reference.ts";
 const repo = join(import.meta.dir, "..");
 const caseFile = process.argv[2] ?? join(repo, "cases", "cases.tsv");
 const { cases: rows, errors: caseErrors } = parseCaseCorpus(readFileSync(caseFile, "utf8"));
@@ -12,10 +12,11 @@ if (caseErrors.length > 0) {
 }
 
 // Tool admissions are not TTSR oracles. Each independent reference consumes declared fixture inputs, while the
-// kit lane evaluates the production admission (Git-backed scratch admission; fleet-guard BYPASSENV1).
+// kit lane evaluates the production admission (Git-backed scratch admission; fleet-guard BYPASSENV1, PLUTILINPLACE1).
 const admissionReferences: Record<string, typeof referenceAdmission> = {
 	"scratch-is-not-a-home": referenceAdmission,
 	"fleet-guard-bypass-env": referenceBypassEnvironment,
+	"fleet-guard-plutil-in-place": referencePlutilInPlace,
 };
 const ttsrRows = rows.filter(row => !Object.hasOwn(admissionReferences, row.rule));
 const worker = Bun.spawn([process.execPath, join(repo, "scripts", "native-ttsr-worker.ts")], {

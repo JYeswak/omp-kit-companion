@@ -427,3 +427,11 @@ fleet-guard-bypass-env	quiet	tool	bash	-	git commit --only -m m -- src/a.ts	the 
 fleet-guard-bypass-env	quiet	tool	bash	-	grep -rn AGENT_MAIL_BYPASS src	mentioning the variable sets nothing	
 fleet-guard-bypass-env	quiet	tool	bash	-	unset AGENT_MAIL_GUARD_MODE AGENT_MAIL_BYPASS	unsetting turns the bypass off	
 fleet-guard-bypass-env	quiet	tool	bash	-	env -u AGENT_MAIL_BYPASS git status	env -u removes the variable	
+fleet-guard-plutil-in-place	fire	tool	bash	-	plutil -extract ProgramArguments json ai.example.agent.plist	PLUTILINPLACE1: the 2026-10-21 form that rewrote 12 LaunchAgent plists as JSON arrays	
+fleet-guard-plutil-in-place	fire	tool	bash	-	plutil -convert xml1 a.plist && cat a.plist	PLUTILINPLACE1: -convert without -o in an && chain	
+fleet-guard-plutil-in-place	fire	tool	bash	-	cd agents; plutil -insert KeepAlive -bool true a.plist	PLUTILINPLACE1: -insert after a ; separator	
+fleet-guard-plutil-in-place	fire	tool	bash	-	plutil -remove Label a.plist	PLUTILINPLACE1: -remove without -o	
+fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -extract ProgramArguments json -o - ai.example.agent.plist	-o - prints the value and leaves the plist alone	
+fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -convert json -o out.json a.plist	-o names a separate output file	
+fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -lint a.plist	lint only reads	
+fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -extract Label raw a.plist	-extract raw prints to stdout	

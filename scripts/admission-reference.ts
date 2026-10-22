@@ -71,3 +71,31 @@ export function referenceBypassEnvironment(input: { source: string; tool: string
 	}
 	return false;
 }
+
+// Operand words before options: `-extract keypath fmt`, `-convert fmt`, `-insert|-replace keypath -type value`, `-remove keypath`.
+const PLUTIL_EDIT_OPERANDS: Record<string, number> = { "-extract": 2, "-convert": 1, "-insert": 3, "-replace": 3, "-remove": 1 };
+
+/**
+ * Independent specification for PLUTILINPLACE1 rows: a plain-word bash snippet (commands joined by `;` or `&&`, no
+ * quoting or expansion) fires iff a command is `plutil` with an editing verb and no `-o <path>` among the words after
+ * the verb's operands and before any `--`. `-extract keypath raw` prints to stdout and does not fire.
+ */
+export function referencePlutilInPlace(input: { source: string; tool: string; snippet: string }): boolean {
+	if (input.source !== "tool" || input.tool !== "bash") return false;
+	for (const special of ["'", "\"", "`", "$", "\\", "(", ")", "{", "}", "|", "<", ">", "\n"]) {
+		if (input.snippet.includes(special)) throw new Error("ADMISSION_REFERENCE_UNSUPPORTED_SHELL");
+	}
+	for (const command of input.snippet.split(";").flatMap(part => part.split("&&"))) {
+		const words = command.split(" ").filter(Boolean);
+		const verb = words[1] ?? "";
+		if (words[0] !== "plutil" || !Object.hasOwn(PLUTIL_EDIT_OPERANDS, verb)) continue;
+		if (verb === "-extract" && words[3] === "raw") continue;
+		const container = (verb === "-insert" || verb === "-replace") && (words[3] === "-dictionary" || words[3] === "-array");
+		const options = words.slice(2 + PLUTIL_EDIT_OPERANDS[verb]! - (container ? 1 : 0));
+		const end = options.indexOf("--");
+		const output = options.indexOf("-o");
+		if (output >= 0 && (end < 0 || output < end) && output + 1 < options.length) continue;
+		return true;
+	}
+	return false;
+}
