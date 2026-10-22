@@ -212,25 +212,40 @@ test("registered handler uses the actual calling context's local mapping", async
 	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: callingCwd })).toBeUndefined();
 });
 
-test("tracked edits honor injected reservation verdicts and fail open", async () => {
+// WRITEOWN1 (ompkit-vf33j) superseded the fail-open tracked-edit path: the decision is the caller's attested
+// `am robot reservations` read, and a failed read refuses. `am` is a PATH test seam; the guard's spawn runs unchanged.
+test("canonical edits follow the caller's attested reservation read; a failed read refuses", async () => {
 	const { cwd: dir } = fixture();
 	const target = join(dir, "tracked.md");
 	writeFileSync(target, "x\n");
-	const context = (covered: boolean | "throw") => ({ cwd: dir, agentName: "tester",
-		isTrackedPath: async () => true,
-		lookupReservations: async () => {
-			if (covered === "throw") throw new Error("mail down");
-			return { covered, conflicts: [] as readonly unknown[] };
-		},
-		warn: () => {} });
-	const event = { toolName: "edit", input: { path: target } };
-	expect(await handleToolCall(event, context(true))).toBeUndefined();
-	clearReservationCache();
-	const denied = await handleToolCall(event, context(false));
-	expect(denied?.block).toBe(true);
-	expect(denied?.reason).toContain("fleet-guard reservations");
-	clearReservationCache();
-	expect(await handleToolCall(event, context("throw"))).toBeUndefined();
+	const bin = join(dir, "bin");
+	mkdirSync(bin);
+	writeFileSync(join(bin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = fail ]; then exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n", { mode: 0o755 });
+	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE };
+	const answer = (mode: "ok" | "fail", ...paths: string[]): void => {
+		process.env.AM_FIXTURE_MODE = mode;
+		process.env.AM_FIXTURE_RESPONSE = JSON.stringify({
+			reservation_read_attestation: { state: "current", database_matches_server: true, storage_root_matches_server: true },
+			my_reservations: paths.map(path => ({ agent: "tester", path, exclusive: true, remaining_seconds: 600 })) });
+	};
+	process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
+	process.env.AGENT_NAME = "tester";
+	try {
+		const event = { toolName: "edit", input: { path: target } };
+		// The later HTTP reservation layer is held neutral (covered) so each verdict below is the write-ownership read's.
+		const context = { cwd: dir, warn: () => {}, lookupReservations: async () => ({ covered: true, conflicts: [] as readonly unknown[] }) };
+		answer("ok", "tracked.md");
+		expect(await handleToolCall(event, context)).toBeUndefined();
+		answer("ok");
+		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		answer("fail", "tracked.md");
+		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 });
 
 

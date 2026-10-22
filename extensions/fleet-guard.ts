@@ -4,13 +4,15 @@ import { check as checkReservations, exportAgentMailStorageRoot } from "../src/f
 import { applyScratchEnv, check as checkScratch, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
+import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
 
 /**
  * fleet-guard: force the fleet rules inside the session instead of asking.
- * Scratch goes to the repo-local var/agent-tmp (never /tmp), writes outside it
- * are blocked, work happens on main, and tracked edits need an Agent Mail
- * reservation. Shipped in the plugin; installed per profile by the kit.
+ * Scratch goes to the repo-local var/agent-tmp (never /tmp), work happens on main,
+ * every write outside var/agent-tmp in a fleet checkout needs the caller's exclusive
+ * Agent Mail reservation, and agent calls never switch the commit guard off.
+ * Shipped in the plugin; installed per profile by the kit.
  */
 
 interface ToolCallContext {
@@ -33,11 +35,12 @@ export interface GuardDeps {
 	seatEnd?: SeatEndDeps;
 }
 
-/** Ordered chain: lexical scratch, Git, repository facts, then reservations. First block wins. */
+/** Ordered chain: lexical scratch, Git, repository facts, write ownership, then reservations. First block wins. */
 export async function handleToolCall(event: FleetGuardEvent, context: FleetGuardContext): Promise<FleetGuardBlock | undefined> {
 	const reservations = { cwd: context.cwd, agentName: context.agentName,
 		isTrackedPath: context.isTrackedPath, lookupReservations: context.lookupReservations, warn: context.warn };
 	return checkScratch(event, context) ?? checkGit(event, context) ?? await checkDurability(event, context) ??
+		await checkWriteOwnership(event, { ...context, fleetPolicy: fleetPolicyState }) ??
 		await checkReservations(event, reservations) ?? undefined;
 }
 export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Promise<void> {
