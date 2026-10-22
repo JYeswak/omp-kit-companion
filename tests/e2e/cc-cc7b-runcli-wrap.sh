@@ -56,38 +56,38 @@ EOF
 
 # 1. ok triple: capabilities exits 0, exactly attempt+result+tick, outcome ok.
 CODE="$(kit capabilities --json)"
-if [ "$CODE" = "0" ] && [ "$(triple kit:capabilities | wc -l | tr -d ' ')" = "3" ] \
-	&& triple kit:capabilities | sed -n '1p' | grep -q "^action.attempt|kit:capabilities||$" \
-	&& triple kit:capabilities | sed -n '2p' | grep -q "^action.result||ok|$" \
-	&& triple kit:capabilities | sed -n '3p' | grep -q "^source.tick|||$"; then
-	pass "ok_triple" "attempt+result+tick kit:capabilities ok" "exit=$CODE"
+if [ "$CODE" = "0" ] && [ "$(triple kit-capabilities | wc -l | tr -d ' ')" = "3" ] \
+	&& triple kit-capabilities | sed -n '1p' | grep -q "^action.attempt|kit-capabilities||$" \
+	&& triple kit-capabilities | sed -n '2p' | grep -q "^action.result||ok|$" \
+	&& triple kit-capabilities | sed -n '3p' | grep -q "^source.tick|||$"; then
+	pass "ok_triple" "attempt+result+tick kit-capabilities ok" "exit=$CODE"
 else
-	fail "ok_triple" "attempt+result+tick kit:capabilities ok" "exit=$CODE lines=$(triple kit:capabilities | tr '\n' ';')"
+	fail "ok_triple" "attempt+result+tick kit-capabilities ok" "exit=$CODE lines=$(triple kit-capabilities | tr '\n' ';')"
 fi
 
-# 2. status surface: exactly one triple for kit:status (outcome recorded, exit varies by host).
+# 2. status surface: exactly one triple for contract-safe kit-status (outcome recorded, exit varies by host).
 CODE="$(kit status --json)"
-if [ "$(triple kit:status | wc -l | tr -d ' ')" = "3" ]; then
-	pass "status_surface" "triple kit:status" "exit=$CODE $(triple kit:status | sed -n '2p')"
+if [ "$(triple kit-status | wc -l | tr -d ' ')" = "3" ]; then
+	pass "status_surface" "triple kit-status" "exit=$CODE $(triple kit-status | sed -n '2p')"
 else
-	fail "status_surface" "triple kit:status" "exit=$CODE lines=$(triple kit:status | tr '\n' ';')"
+	fail "status_surface" "triple kit-status" "exit=$CODE lines=$(triple kit-status | tr '\n' ';')"
 fi
 
 # 3. land refusal without --yes: outcome refused code CONSENT_REQUIRED.
 CODE="$(kit land --paths x --message m --apply --json)"
-if [ "$CODE" = "2" ] && triple kit:land | sed -n '2p' | grep -q "^action.result||refused|CONSENT_REQUIRED$"; then
+if [ "$CODE" = "2" ] && triple kit-land | sed -n '2p' | grep -q "^action.result||refused|CONSENT_REQUIRED$"; then
 	pass "land_refused" "refused CONSENT_REQUIRED" "exit=$CODE"
 else
-	fail "land_refused" "refused CONSENT_REQUIRED" "exit=$CODE $(triple kit:land | sed -n '2p')"
+	fail "land_refused" "refused CONSENT_REQUIRED" "exit=$CODE $(triple kit-land | sed -n '2p')"
 fi
 
 # 4. parse error: unknown verb never reaches dispatch.
 CODE="$(kit nosuchverb --json)"
-if [ "$CODE" = "2" ] && triple kit:parse_error | sed -n '1p' | grep -q "^action.attempt|kit:parse_error||$" \
-	&& triple kit:parse_error | sed -n '2p' | grep -q "refused"; then
-	pass "parse_error" "kit:parse_error refused" "exit=$CODE"
+if [ "$CODE" = "2" ] && triple kit-parse_error | sed -n '1p' | grep -q "^action.attempt|kit-parse_error||$" \
+	&& triple kit-parse_error | sed -n '2p' | grep -q "refused"; then
+	pass "parse_error" "kit-parse_error refused" "exit=$CODE"
 else
-	fail "parse_error" "kit:parse_error refused" "exit=$CODE"
+	fail "parse_error" "kit-parse_error refused" "exit=$CODE"
 fi
 
 # 5. launchd surface (literal form): attempt is pre-effect, so the surface is
@@ -95,18 +95,18 @@ fi
 CODE="$(OMP_KIT_JOB=load-watch timeout -s KILL 100 env CC_STATE="$STATE" AGENT_NAME="E2ERuncliWrap" \
 	HOME="$STATE/home" XDG_STATE_HOME="$STATE/xdg" TMPDIR="$STATE/tmp" NO_COLOR=1 \
 	bun "$REPO/src/cli.ts" service run load-watch --json > "$STATE/stdout.bin" 2> "$STATE/stderr.bin"; printf '%s' "$?")"
-if triple launchd:load-watch | sed -n '1p' | grep -q "^action.attempt|launchd:load-watch||$"; then
-	pass "launchd_surface" "attempt launchd:load-watch" "exit=$CODE"
+if triple launchd-load-watch | sed -n '1p' | grep -q "^action.attempt|launchd-load-watch||$"; then
+	pass "launchd_surface" "attempt launchd-load-watch" "exit=$CODE"
 else
-	fail "launchd_surface" "attempt launchd:load-watch" "exit=$CODE"
+	fail "launchd_surface" "attempt launchd-load-watch" "exit=$CODE"
 fi
 
 # 6. heavy pair on the dispatch-bypassing path.
 CODE="$(kit heavy --no-wait -- true)"
-if { [ "$CODE" = "0" ] || [ "$CODE" = "75" ]; } && [ "$(triple kit:heavy | wc -l | tr -d ' ')" = "3" ]; then
-	pass "heavy_pair" "attempt+result+tick kit:heavy" "exit=$CODE"
+if { [ "$CODE" = "0" ] || [ "$CODE" = "75" ]; } && [ "$(triple kit-heavy | wc -l | tr -d ' ')" = "3" ]; then
+	pass "heavy_pair" "attempt+result+tick kit-heavy" "exit=$CODE"
 else
-	fail "heavy_pair" "attempt+result+tick kit:heavy" "exit=$CODE"
+	fail "heavy_pair" "attempt+result+tick kit-heavy" "exit=$CODE"
 fi
 
 # 7. planted credential: minted token-shaped --message must never reach the disk.
@@ -152,9 +152,9 @@ for (let i = 0; i < 200; i++) {
 	const a = ccSpool("kit", { stateDir: state })!;
 	const t0 = performance.now();
 	const id = i.toString(16).padStart(32, "0");
-	a.append([a.envelope("action.attempt", { action_id: id, surface: "kit:status", target: null, idempotency_key: null }, { key: `kit:${id}:attempt`, timeMs: Date.now() })]);
+	a.append([a.envelope("action.attempt", { action_id: id, surface: "kit-status", target: null, idempotency_key: null }, { key: `kit:${id}:attempt`, timeMs: Date.now() })]);
 	a.append([a.envelope("action.result", { action_id: id, outcome: "ok", code: null, duration_ms: 1 }, { key: `kit:${id}:result`, timeMs: Date.now() })]);
-	a.append([a.envelope("source.tick", { instance: "kit:1-00000000", records_seen: 0, records_emitted: 2, records_ignored: 0, records_quarantined: 0, complete_through_ms: Date.now(), position: 0, error_code: null, skew_ms: null, coverage: [] }, { key: `kit:${id}:tick`, timeMs: Date.now() })]);
+	a.append([a.envelope("source.tick", { instance: "kit-1-00000000", records_seen: 0, records_emitted: 2, records_ignored: 0, records_quarantined: 0, complete_through_ms: Date.now(), position: 0, error_code: null, skew_ms: null, coverage: [] }, { key: `kit:${id}:tick`, timeMs: Date.now() })]);
 	times.push(performance.now() - t0);
 }
 times.sort((x, y) => x - y);

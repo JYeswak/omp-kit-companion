@@ -65,7 +65,7 @@ test("attempt_before_effect", async () => {
 	let probeSawAttempt = false;
 	let probeSawResult = false;
 	registerCommandHandler("status", () => {
-		const mine = spoolLines(state).filter((line) => (line.data as Record<string, unknown>).surface === "kit:status");
+		const mine = spoolLines(state).filter((line) => (line.data as Record<string, unknown>).surface === "kit-status");
 		probeSawAttempt = mine.some((line) => line.type === "action.attempt");
 		probeSawResult = mine.some((line) => line.type === "action.result");
 		return { code: 0 as const, data: { overall: "OK" }, verification: "PERFORMED" as const };
@@ -79,8 +79,8 @@ test("attempt_before_effect", async () => {
 	process.env.CC_STATE = state;
 	process.env.AGENT_NAME = "TestProbe";
 	try {
-		// The probe is registered for "status", so surface is kit:status; the
-		// attempt-line check below keys on the attempt existing at probe time.
+		// The probe is registered for "status", so the contract-safe surface is kit-status;
+		// the attempt-line check below keys on the attempt existing at probe time.
 		const code = await runCli(["status", "--json"]);
 		expect(code).toBe(0);
 		const mine = spoolLines(state);
@@ -124,7 +124,7 @@ test("ok_triple", async () => {
 	const types = lines.map((line) => line.type);
 	expect(types).toEqual(["action.attempt", "action.result", "source.tick"]);
 	const attempt = lines[0].data as Record<string, unknown>;
-	expect(attempt.surface).toBe("kit:capabilities");
+	expect(attempt.surface).toBe("kit-capabilities");
 	expect(attempt.target).toBeNull();
 	expect(attempt.idempotency_key).toBeNull();
 	expect(typeof attempt.action_id).toBe("string");
@@ -141,7 +141,7 @@ test("ok_triple", async () => {
 });
 
 // heavy_bypass_emits: heavy returns before dispatch, so a dispatch-only wrapper
-// would emit nothing here; the pair must still exist with surface kit:heavy.
+// would emit nothing here; the pair must still exist with contract-safe surface kit-heavy.
 test("heavy_bypass_emits", async () => {
 	const state = freshState();
 	const run = await spawnCli(["heavy", "--no-wait", "--", "true"], { STATE: state });
@@ -153,7 +153,7 @@ test("heavy_bypass_emits", async () => {
 	expect(results.length).toBe(1);
 	const attempt = attempts[0].data as Record<string, unknown>;
 	const result = results[0].data as Record<string, unknown>;
-	expect(attempt.surface).toBe("kit:heavy");
+	expect(attempt.surface).toBe("kit-heavy");
 	expect(result.action_id).toBe(attempt.action_id);
 	if (run.exitCode === 0) expect(result.outcome).toBe("ok");
 	else expect(result.outcome).toBe("timeout");
@@ -172,7 +172,7 @@ test("launchd_surface_from_env", async () => {
 	expect(run.exitCode).toBe(2);
 	const lines = spoolLines(state);
 	const attempt = (lines.find((line) => line.type === "action.attempt")!.data) as Record<string, unknown>;
-	expect(attempt.surface).toBe("launchd:no-such-cc-job");
+	expect(attempt.surface).toBe("launchd-no-such-cc-job");
 	const result = (lines.find((line) => line.type === "action.result")!.data) as Record<string, unknown>;
 	expect(result).toMatchObject({ outcome: "refused", code: "UNKNOWN_JOB" });
 });
@@ -185,7 +185,7 @@ test("parse_error_surface", async () => {
 	const lines = spoolLines(state);
 	expect(lines.length).toBe(3);
 	const attempt = lines[0].data as Record<string, unknown>;
-	expect(attempt.surface).toBe("kit:parse_error");
+	expect(attempt.surface).toBe("kit-parse_error");
 	const result = lines[1].data as Record<string, unknown>;
 	expect(result).toMatchObject({ outcome: "refused", code: "UNKNOWN_COMMAND" });
 });

@@ -121,6 +121,7 @@ test("DISKSTAGE-WIRE1 planted STOP/CRITICAL refusal cannot bypass real heavy or 
 			XDG_CONFIG_HOME: state,
 			HOME: state,
 			OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
+			OMP_KIT_DISK_OBSERVER: "",
 			AGENT_NAME: "diskstage-test",
 			PATH: `${state}:${process.env.PATH ?? ""}`,
 		};

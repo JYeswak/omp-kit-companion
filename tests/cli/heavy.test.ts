@@ -24,7 +24,7 @@ function configure(root: string, values: { slots?: number; max_wait_s?: number; 
 // cases below separately exercise the real pressure boundary and its mutant.
 function heavyEnv(root: string, extraEnv: Record<string, string> = {}): Record<string, string | undefined> {
 	const healthy = fakeSbh(root, 0, "healthy-bin");
-	return { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${healthy}:${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv };
+	return { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${healthy}:${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", OMP_KIT_DISK_OBSERVER: "", ...QUIET_LOAD, ...extraEnv };
 }
 
 async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}, options: { cwd?: string; preload?: string | null } = {}) {
