@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DEAD_LEASE_UNREAPABLE_REASON, deadLeases, runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
+import { DEAD_LEASE_UNREAPABLE_REASON, deadLeases, parseRchStatus, runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // A real remote_build_id from replay 3 (ev_30924d59) and its neighbour: both above Number.MAX_SAFE_INTEGER, both parse to the same double.
 const BIG_ID = "30068411341996668", BIG_ID_NEIGHBOUR = "30068411341996667";
@@ -432,4 +432,14 @@ test("a lone worker at 95% memory pressure refuses admission and never submits",
 	expect(result.overall).toBe("REFUSED");
 	expect(result.reason).toBe("rch_capacity_unavailable");
 	expect(fixture.submitted()).toBe(0);
+});
+test("worker disk evidence accepts portable statvfs byte telemetry", () => {
+	const parsed = parseRchStatus({ success: true, data: { daemon: {
+		active_builds: [], queued_builds: [], workers: [{
+			id: "worker-a", total_slots: 2, used_slots: 0, status: "healthy",
+			pressure_telemetry_fresh: true, pressure_confidence: "high", pressure_state: "healthy",
+			pressure_build_disk_free_bytes: 3_000_000_000, pressure_memory_pressure: 40,
+		}],
+	} } });
+	expect(parsed?.workers[0]?.buildDiskFreeGb).toBe(3);
 });
