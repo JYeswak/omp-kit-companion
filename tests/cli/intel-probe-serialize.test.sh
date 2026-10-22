@@ -10,6 +10,7 @@
 set -u
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$HERE/../.." && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp TMP intel-probe-serialize-test || exit 1
 pass=0

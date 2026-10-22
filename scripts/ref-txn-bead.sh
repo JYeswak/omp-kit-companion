@@ -36,7 +36,9 @@ while read -r old new ref; do
 		if [ -z "$MSG" ]; then
 			# Sourced only when a message must be judged: most ref updates gain no commit.
 			[ -f "$HERE/kitlib-tmp.sh" ] || { printf 'ref-txn-bead: kitlib-tmp.sh missing beside %s; refusing the update\n' "$0" >&2; exit 4; }
+			# shellcheck source=scripts/kitlib-tmp.sh
 			. "$HERE/kitlib-tmp.sh"
+			msg_dir='' # assigned by kitlib_tmp via eval
 			kitlib_tmp msg_dir ref-txn-bead || exit 4
 			MSG=$msg_dir/msg
 		fi

@@ -56,7 +56,9 @@ if [ "$mode" = check ]; then
 fi
 
 # --selftest: every denylisted token must trip the scan; a clean copy must pass.
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work default-pack-neutral || exit 1
 cp "$ROOT"/rules/*.md "$work"/
 plant=0

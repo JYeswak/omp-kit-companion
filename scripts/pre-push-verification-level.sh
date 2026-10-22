@@ -127,7 +127,9 @@ do_check() {
 
 do_selftest() {
 	# Sourced here, not at the top: the installed hook (and the fixture copies below) run without kitlib beside them.
+	# shellcheck source=scripts/kitlib-tmp.sh
 	. "${SELF%/*}/kitlib-tmp.sh"
+	root='' # assigned by kitlib_tmp via eval
 	kitlib_tmp root vlevel-selftest || exit 2
 	pass=0 fail=0
 	ok() { printf 'selftest: PASS %s\n' "$1"; pass=$((pass + 1)); }

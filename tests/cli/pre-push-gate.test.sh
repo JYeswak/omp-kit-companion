@@ -12,6 +12,7 @@ set -u
 ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/pre-push-gate.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)/var/agent-tmp
 mkdir -p "$REPO_TMP"
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$REPO_TMP/../../scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP pre-push-gate-test || exit 1

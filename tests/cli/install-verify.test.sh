@@ -6,6 +6,7 @@
 set -eu
 : "${TMPDIR:?set a private test scratch directory}" # tempsafe: guard requires private scratch root, creates nothing
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK omp-kit-install-verify-test
 mkdir -m 700 "$WORK/assets" "$WORK/home"

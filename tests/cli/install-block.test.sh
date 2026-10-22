@@ -10,6 +10,7 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 README="$ROOT/README.md"
 REPO_TMP="$ROOT/var/agent-tmp"
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=${TMPDIR:-$REPO_TMP} # tempsafe: selects the kitlib_tmp root, keeps repo-tmp fallback
 kitlib_tmp TMP install-block-test || exit 1
@@ -36,6 +37,7 @@ else
 fi
 
 # Guard markers present in the documented block.
+# shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
 for marker in 'if \[ -z "\$KIT_VERSION" \]' 'rate-limit' 'gh auth login' 'nothing was downloaded' 'mktemp -d "\${TMPDIR:-/tmp}'; do # tempsafe: grep marker for README install text, not temp creation
   if grep -q "$marker" "$TMP/blocks.txt"; then ok; else bad "marker missing: $marker"; fi
 done
@@ -48,7 +50,9 @@ mkstub() {
   # $1 = dir; $2 = curl behavior script body
   mkdir -p "$1/bin"
   {
+    # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
     printf '#!/bin/sh\nSTUB_LOG="${STUB_LOG:-%s/none}"\n' "$TMP"
+    # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
     printf 'printf "%%s\\n" "$*" >> "$STUB_LOG"\n%s\n' "$2"
   } > "$1/bin/curl"
   chmod +x "$1/bin/curl"
@@ -58,9 +62,11 @@ mkstub() {
 #    naming the rate limit, exactly one curl call (nothing downloaded).
 mkstub "$TMP/planted" 'echo "curl: (22) The requested URL returned error: 403" >&2; exit 22'
 {
+  # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
   printf '#!/bin/sh\nset -u\nPATH="%s/bin:$PATH"\nexport PATH STUB_LOG\n' "$TMP/planted"
   printf 'STUB_LOG="%s/calls.log"\nexport STUB_LOG\n' "$TMP"
   cat "$TMP/guard.sh"
+  # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
   printf 'echo "PROCEEDED:$KIT_VERSION"\n'
 } > "$TMP/run-planted.sh"
 : > "$TMP/calls.log"
@@ -79,9 +85,11 @@ fi
 # 2. control: normal response proceeds past the guard.
 mkstub "$TMP/control" 'printf "%s" "{\"tag_name\": \"v0.2.62\"}"; exit 0'
 {
+  # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
   printf '#!/bin/sh\nset -u\nPATH="%s/bin:$PATH"\nexport PATH STUB_LOG\n' "$TMP/control"
   printf 'STUB_LOG="%s/calls2.log"\nexport STUB_LOG\n' "$TMP"
   cat "$TMP/guard.sh"
+  # shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
   printf 'echo "PROCEEDED:$KIT_VERSION"\n'
 } > "$TMP/run-control.sh"
 : > "$TMP/calls2.log"

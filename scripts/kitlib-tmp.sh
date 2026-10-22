@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # kitlib tmp: the kit's one owned-temp-dir primitive for POSIX sh (ompkit-41l85, KITLIB-TMP v1).
 #
 # J-2026-10-22-06: 77,299 leaked temp dirs (88 GB) came from kit tests and

@@ -12,6 +12,7 @@ SCRIPTS=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)
 HOOK=$SCRIPTS/agent-trailer-hook.sh
 INSTALLER=$SCRIPTS/install-agent-trailer-hook.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$SCRIPTS/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP agent-trailer-test || exit 1

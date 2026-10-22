@@ -7,6 +7,7 @@ set -u
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/doc-status-check.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$CHECK")/kitlib-tmp.sh"
 [ -n "$(printenv TMPDIR)" ] || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP doc-status-test || exit 1

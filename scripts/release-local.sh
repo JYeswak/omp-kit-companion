@@ -73,6 +73,7 @@ if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an own
 # Cancel safety: every external step runs bounded, with stdin from /dev/null, as a waited background child that
 # the exit work kills; the keychain re-locks and the build tree is removed on every exit path. kitlib owns the
 # EXIT/HUP/INT/TERM traps: the build tree is its owned dir and cleanup runs first, as kitlib atexit work.
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-local
 CHILD=''
@@ -296,6 +297,7 @@ PY
 }
 
 if [ "$DRY_RUN" = 1 ]; then
+	# shellcheck disable=SC2012 # display-only listing of dist filenames
 	say "dry run: would tag v$VERSION -> $SOURCE, draft with $(ls "$DIST" | tr '\n' ' '), dispatch release.yml mode=local-attest at v$VERSION"
 	receipt dry-run
 	exit 0
@@ -311,7 +313,7 @@ remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$V
 [ -z "$remote_tags" ] || die "tag v$VERSION appeared during the build; never re-tagged"
 bounded 120 git -C "$ROOT" -c push.followTags=false push --porcelain origin "$SOURCE:refs/tags/v$VERSION" || die "tag push failed"
 bounded 60 gh api "repos/$REPO/git/ref/tags/v$VERSION" >"$WORK/tag.json" || die "tag readback failed"
-[ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ] ||
+{ [ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ]; } ||
 	die "remote v$VERSION does not name $SOURCE"
 say "tagged v$VERSION -> $SOURCE"
 

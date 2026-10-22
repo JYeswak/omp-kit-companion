@@ -14,6 +14,7 @@
 # Usage: publishability-check.sh [ROOT]
 set -u
 # Sourced before the cd below, while $0 still resolves.
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
 
 ROOT=${1:-.}
@@ -35,6 +36,7 @@ top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "UNRUN: $ROOT is not in
 # fleet rules forbid. The dir and its files are removed on exit and on HUP/INT/TERM.
 mkdir -p "$(pwd -P)/var/agent-tmp" || fail "cannot create var/agent-tmp"
 KITLIB_TMP_ROOT="$(pwd -P)/var/agent-tmp"
+scratch='' # assigned by kitlib_tmp via eval
 kitlib_tmp scratch publishability || fail "cannot create scratch dir"
 TMP_FINDINGS="$scratch/findings"; TMP_FILES="$scratch/files"; TMP_RCREP="$scratch/greprc"
 : > "$TMP_FINDINGS"

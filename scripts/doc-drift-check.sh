@@ -29,9 +29,11 @@ fi
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v bun >/dev/null 2>&1 || fail "bun is required"
 
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
 kitlib_tmp WORK doc-drift || fail "cannot create work dir"
 # The worktrees live in WORK: remove it before pruning, as the exit path always has.
+# shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
 kitlib_tmp_atexit 'kitlib_tmp_cleanup "$WORK"; git -C "$REPO" worktree prune 2>/dev/null'
 
 surface() {

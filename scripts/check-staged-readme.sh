@@ -36,8 +36,11 @@ checker="$here/readme-check.ts"
 command -v bun >/dev/null 2>&1 || { printf 'staged-readme: REFUSED: bun is unavailable so readme-check cannot run on the candidate tree\n' >&2; exit 1; }
 tree=$(git write-tree) || { printf 'staged-readme: cannot write the staged tree\n' >&2; exit 1; }
 [ -f "$here/kitlib-tmp.sh" ] || { printf 'staged-readme: REFUSED: kitlib-tmp.sh missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$(basename -- "$0")" >&2; exit 1; }
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$here/kitlib-tmp.sh"
+tmp='' # assigned by kitlib_tmp via eval
 kitlib_tmp tmp staged-readme || { printf 'staged-readme: cannot stage the candidate tree\n' >&2; exit 1; }
+# shellcheck disable=SC2317 # invoked via kitlib_tmp_atexit
 cleanup() {
 	chmod -R u+w "$tmp" 2>/dev/null || true
 	find "$tmp" ! -type d -delete 2>/dev/null || true

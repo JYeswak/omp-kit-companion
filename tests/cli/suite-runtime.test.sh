@@ -8,6 +8,7 @@ set -u
 GUARD=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-suite-runtime.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP suite-runtime-test || exit 1
 

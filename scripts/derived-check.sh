@@ -15,7 +15,9 @@ if [ $# -eq 0 ]; then
 	exit 2
 fi
 
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+findings_dir='' # assigned by kitlib_tmp via eval
 kitlib_tmp findings_dir derived || exit 2
 TMP_FINDINGS=$findings_dir/findings
 : > "$TMP_FINDINGS"

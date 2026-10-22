@@ -19,9 +19,11 @@ probe=$(printf 'staged-fragments probe\n' | GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMA
 	git commit-tree "$tree" -p HEAD) || { printf 'staged-fragments: cannot write the probe commit\n' >&2; exit 1; }
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 [ -f "$here/kitlib-tmp.sh" ] || { printf 'staged-fragments: REFUSED: kitlib-tmp.sh missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$(basename -- "$0")" >&2; exit 1; }
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$here/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=${TMPDIR:-$root/var/agent-tmp} # tempsafe: picks the kitlib root only, kitlib_tmp below owns the dir
 mkdir -p "$KITLIB_TMP_ROOT" || { printf 'staged-fragments: cannot make %s\n' "$KITLIB_TMP_ROOT" >&2; exit 1; }
+scratch='' # assigned by kitlib_tmp via eval
 kitlib_tmp scratch staged-fragments || { printf 'staged-fragments: cannot make a scratch dir\n' >&2; exit 1; }
 validation="$scratch/validation"
 mkdir -p "$validation/changelog.d"

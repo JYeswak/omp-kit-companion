@@ -136,7 +136,9 @@ if ! runs_json=$(printf '%s' "$runs" | jq -ce '
 fi
 
 generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+data_dir='' # assigned by kitlib_tmp via eval
 kitlib_tmp data_dir tag-sweep-data
 printf '%s\n' "$tags_json" > "$data_dir/tags.json"
 printf '%s\n' "$releases_json" > "$data_dir/releases.json"

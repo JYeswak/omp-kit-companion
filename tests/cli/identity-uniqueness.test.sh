@@ -7,6 +7,7 @@ set -u
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/identity-uniqueness-check.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=${TMPDIR:-$REPO_TMP} # tempsafe: selects the kitlib_tmp root, keeps repo-tmp fallback
 kitlib_tmp TMP identity-test || exit 1

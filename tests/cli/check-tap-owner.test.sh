@@ -1,8 +1,8 @@
 #!/bin/sh
 # check-tap-owner.test.sh — RT1 Homebrew slice 4/4 ownership gate contract.
 set -u
-HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-tap-owner.sh
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP check-tap-owner-test || exit 1
 pass=0

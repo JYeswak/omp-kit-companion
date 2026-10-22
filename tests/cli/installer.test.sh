@@ -2,9 +2,11 @@
 set -eu
 : "${TMPDIR:?set a private test scratch directory}" # tempsafe: guard requires private scratch root, creates nothing
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK omp-kit-installer-test
 server=
+# shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
 kitlib_tmp_atexit '[ -z "$server" ] || { kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; }'
 mkdir -m 700 "$WORK/assets" "$WORK/home"
 /usr/bin/env -u HOME "$ROOT/installer/install.sh" --help > "$WORK/help.log"

@@ -37,7 +37,9 @@ jobs="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate --jq '.jobs[] 
 if [ -z "$jobs" ]; then echo "no issue: no failed jobs in run $RUN_ID"; exit 0; fi
 
 diffstat="$(git diff --stat "$SHA^" "$SHA" 2>/dev/null || echo "diff unavailable")"
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work candidate-failure || exit 2
 body="$work/body"
 {

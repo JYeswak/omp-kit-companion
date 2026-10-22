@@ -12,6 +12,7 @@
 set -u
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$HERE/../.." && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP ci-concurrency-test || exit 1
 pass=0

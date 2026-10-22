@@ -48,7 +48,9 @@ command -v jq >/dev/null || { echo "apply-policy: jq not found" >&2; exit 2; }
 command -v omp >/dev/null || { echo "apply-policy: omp not found" >&2; exit 2; }
 jq -e 'type == "object"' "$POLICY" >/dev/null || { echo "apply-policy: bad $POLICY" >&2; exit 2; }
 
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
+neutral='' # assigned by kitlib_tmp via eval
 kitlib_tmp neutral omp-kit-policy || exit 1
 cd "$neutral"
 

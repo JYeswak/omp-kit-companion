@@ -26,7 +26,9 @@ for arg in "$@"; do
 done
 [ -d "$REPO" ] || fail "not a directory: $REPO"
 
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work doc-status || fail "cannot create work file"
 LIST=$work/list
 : > "$LIST"

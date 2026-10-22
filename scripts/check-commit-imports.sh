@@ -504,9 +504,11 @@ check_commit() {
 # Installed as a pre-commit sibling: kitlib-tmp.sh sits beside this file there and in scripts/.
 kitlib_here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 [ -f "$kitlib_here/kitlib-tmp.sh" ] || { printf 'check-commit-imports: kitlib-tmp.sh missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$0" >&2; exit 2; }
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$kitlib_here/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=${TMPDIR:-$REPO/var/agent-tmp} # tempsafe: picks the kitlib root only, kitlib_tmp below owns the dir
 mkdir -p "$KITLIB_TMP_ROOT" || { printf 'check-commit-imports: cannot stage findings\n' >&2; exit 2; }
+findings_dir='' # assigned by kitlib_tmp via eval
 kitlib_tmp findings_dir check-commit-imports || { printf 'check-commit-imports: cannot stage findings\n' >&2; exit 2; }
 OUT=$findings_dir/findings
 : > "$OUT"

@@ -5,6 +5,7 @@
 set -eu
 printenv TMPDIR >/dev/null || { printf 'TMPDIR: set a private test scratch directory\n' >&2; exit 1; }
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK build-manifest-archive-test || exit 1
 

@@ -11,6 +11,7 @@ CHECKER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-commi
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 umask 077
 if ! printenv TMPDIR >/dev/null; then KITLIB_TMP_ROOT=$REPO_TMP; fi
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP commit-imports-test || exit 1
 

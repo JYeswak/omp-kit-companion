@@ -19,7 +19,6 @@ LC_ALL=C
 export LC_ALL
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
-MANIFEST="$ROOT/MANIFEST.tsv"
 
 check=0
 stdout=0
@@ -47,6 +46,7 @@ source_export=0
 if [ ! -e "$ROOT/.git" ] && [ -d "$ROOT/src" ] && [ ! -x "$ROOT/bin/omp-kit" ]; then
   source_export=1
 fi
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 if [ "$source_export" = 1 ]; then
   umask 077

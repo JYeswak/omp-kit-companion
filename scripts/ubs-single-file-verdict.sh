@@ -18,12 +18,14 @@ case "$timeout_secs" in ''|*[!0-9]*|0) echo '{"status":"invalid","verdict":"UNKN
 [ -f "$file" ] || { echo '{"status":"invalid","verdict":"UNKNOWN","reason":"input file is absent"}'; exit 2; }
 command -v ubs >/dev/null 2>&1 || { echo '{"status":"environment","verdict":"UNKNOWN","reason":"ubs is absent"}'; exit 2; }
 input_hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work ubs-single-file
 output=$work/output
 pid=
-# shellcheck disable=SC2329
-cleanup() { [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; }
+# shellcheck disable=SC2317,SC2329 # invoked via kitlib_tmp_atexit
+cleanup() { if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; }
 kitlib_tmp_atexit cleanup
 (
   cd "$repo"

@@ -30,7 +30,9 @@ fi
 if [ ! -d "$DIR" ]; then
 	fail "identity dir missing: $DIR"
 fi
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work identity-uniqueness || fail "cannot create findings file"
 TMP_FINDINGS=$work/findings
 : > "$TMP_FINDINGS" || fail "cannot create findings file"

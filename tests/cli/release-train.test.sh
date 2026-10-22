@@ -10,6 +10,7 @@ set -u
 
 TRAIN=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/release-train.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$REPO_TMP/../../scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP release-train-test || exit 1
@@ -342,6 +343,7 @@ check "attest-index: release-index signed keyless" 0 "$((rc3 + rc4))" ""
 
 # 31b. the tag-qualified authority step gates the tag on package.json stating the version
 authrange=$(sed -n '/Revalidate exact qualified authority/,/Create only the exact qualified tag/p' "$YMLDIR/release-train.yml")
+# shellcheck disable=SC2016 # intentional literal $: expanded later by the evaluated text, not here
 printf '%s' "$authrange" | grep -qF 'release-train.sh version-match --version "$VERSION" --sha "$SHA"'; rc5=$?
 check "tag-qualified: version-match gates tag creation" 0 "$rc5" ""
 # 32. version-match: package.json at the SHA states the tag version

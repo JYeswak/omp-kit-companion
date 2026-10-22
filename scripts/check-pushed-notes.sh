@@ -35,8 +35,10 @@ if [ -z "$BASE" ]; then
 fi
 
 
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$SCRIPT_DIR/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=$ARCHIVE_DIR/..
+scratch='' # assigned by kitlib_tmp via eval
 kitlib_tmp scratch pushed-notes || exit 1
 validation="$scratch/validation"
 mkdir -p "$validation/changelog.d"

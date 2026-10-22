@@ -8,6 +8,7 @@ set -u
 SHIM=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/br-shim.sh
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SHIM")/.." && pwd)
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$REPO_ROOT/scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP br-shim-test || exit 1
@@ -392,7 +393,7 @@ done
 export BEADS_DB="$REPO_ROOT/.beads/beads.db"
 export XDG_STATE_HOME="$TMP/state"
 export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
-# shellcheck source=lib/br-create-guard-tests.sh
+# shellcheck source=tests/cli/lib/br-create-guard-tests.sh
 . "$REPO_ROOT/tests/cli/lib/br-create-guard-tests.sh"
 
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"

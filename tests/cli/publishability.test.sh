@@ -11,6 +11,7 @@ REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 CHECK="$REPO_ROOT/scripts/publishability-check.sh"
 REPO_TMP="$REPO_ROOT/var/agent-tmp"
 mkdir -p "$REPO_TMP"
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$REPO_TMP/../../scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP publishability-test || exit 1

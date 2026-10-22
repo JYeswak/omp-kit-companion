@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
+work='' # assigned by kitlib_tmp via eval
 kitlib_tmp work tag-sweep || exit 1
 
 # Planted missing control: older tags with no published release are detected and
